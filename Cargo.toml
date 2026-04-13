@@ -45,6 +45,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Tokenization
+tokenizers = { version = "0.21", features = ["http"] }
+minijinja = "2"
+
 # Internal crates
 kiln-core = { path = "crates/kiln-core" }
 kiln-model = { path = "crates/kiln-model" }

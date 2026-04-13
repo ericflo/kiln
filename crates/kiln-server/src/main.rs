@@ -6,6 +6,7 @@ mod api;
 mod state;
 
 use kiln_core::config::ModelConfig;
+use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::MockEngine;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::AppState;
@@ -41,7 +42,25 @@ async fn main() -> Result<()> {
     let scheduler = Scheduler::new(scheduler_config, num_blocks);
     let engine = MockEngine::new(model_config.clone());
 
-    let state = AppState::new(model_config, scheduler, Arc::new(engine));
+    // Load tokenizer: try from_pretrained (HF Hub), fall back to local path, then fail gracefully.
+    let model_id =
+        std::env::var("KILN_MODEL_ID").unwrap_or_else(|_| "Qwen/Qwen3.5-4B".to_string());
+    let tokenizer_path = std::env::var("KILN_TOKENIZER_PATH").ok();
+
+    let tokenizer = if let Some(path) = tokenizer_path {
+        tracing::info!("loading tokenizer from {path}");
+        KilnTokenizer::from_file(&path)?
+    } else {
+        tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
+        KilnTokenizer::from_pretrained(&model_id)?
+    };
+
+    tracing::info!(
+        vocab_size = tokenizer.vocab_size(),
+        "tokenizer loaded successfully"
+    );
+
+    let state = AppState::new(model_config, scheduler, Arc::new(engine), tokenizer);
 
     let app = api::router(state);
 
