@@ -1,8 +1,10 @@
-//! Training API types for Kiln.
+//! Training for Kiln — pure Rust, in-process LoRA SFT and GRPO.
 //!
-//! These types define the HTTP request/response shapes for the training endpoints.
-//! The actual training runs in a Python sidecar process — this crate just defines
-//! the protocol.
+//! This crate defines the training API types AND implements the actual training
+//! loop using candle autograd. Training runs in the same process as inference,
+//! operating on the already-loaded model weights. No Python sidecar needed.
+
+pub mod trainer;
 
 use serde::{Deserialize, Serialize};
 

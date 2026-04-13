@@ -13,8 +13,6 @@ use kiln_scheduler::Scheduler;
 use kiln_train::TrainingState;
 use serde::Serialize;
 
-use crate::sidecar::SidecarClient;
-
 /// Type of training job.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,8 +65,6 @@ pub struct AppState {
     pub adapter_dir: PathBuf,
     /// Name of the currently active LoRA adapter (None = base model).
     pub active_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
-    /// Optional training sidecar client. None if no sidecar socket configured.
-    pub sidecar: Option<SidecarClient>,
     /// Tracked training jobs (job_id → info).
     pub training_jobs: TrainingJobs,
 }
@@ -90,7 +86,6 @@ impl AppState {
             tokenizer: Arc::new(tokenizer),
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
-            sidecar: None,
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -142,14 +137,7 @@ impl AppState {
             tokenizer: Arc::new(tokenizer),
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
-            sidecar: None,
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
-    }
-
-    /// Set the training sidecar client.
-    pub fn with_sidecar(mut self, client: SidecarClient) -> Self {
-        self.sidecar = Some(client);
-        self
     }
 }
