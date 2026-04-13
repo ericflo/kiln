@@ -28,7 +28,7 @@ pub struct KilnTokenizer {
 }
 
 impl KilnTokenizer {
-    /// Load a tokenizer from the HuggingFace Hub by model ID (e.g. "Qwen/Qwen3-4B").
+    /// Load a tokenizer from the HuggingFace Hub by model ID (e.g. "Qwen/Qwen3.5-4B").
     pub fn from_pretrained(model_id: &str) -> Result<Self, TokenizerError> {
         let inner = Tokenizer::from_pretrained(model_id, None)
             .map_err(|e| TokenizerError::Load(e.to_string()))?;
@@ -221,14 +221,14 @@ mod tests {
     #[test]
     #[ignore] // Requires network access to HuggingFace Hub
     fn test_from_pretrained() {
-        let tok = KilnTokenizer::from_pretrained("Qwen/Qwen3-4B").unwrap();
+        let tok = KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B").unwrap();
         assert!(tok.vocab_size() > 100_000);
     }
 
     #[test]
     #[ignore] // Requires network access to HuggingFace Hub
     fn test_encode_decode_roundtrip_pretrained() {
-        let tok = KilnTokenizer::from_pretrained("Qwen/Qwen3-4B").unwrap();
+        let tok = KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B").unwrap();
         let text = "Hello, world! This is a test of the tokenizer.";
         let ids = tok.encode(text).unwrap();
         assert!(!ids.is_empty());
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     #[ignore] // Requires network access to HuggingFace Hub
     fn test_eos_token_ids_pretrained() {
-        let tok = KilnTokenizer::from_pretrained("Qwen/Qwen3-4B").unwrap();
+        let tok = KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B").unwrap();
         let eos = tok.eos_token_ids();
         assert!(!eos.is_empty(), "Should find at least one EOS token");
     }

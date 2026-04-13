@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
 
     // Load tokenizer: try from_pretrained (HF Hub), fall back to local path, then fail gracefully.
     let model_id =
-        std::env::var("KILN_MODEL_ID").unwrap_or_else(|_| "Qwen/Qwen3-4B".to_string());
+        std::env::var("KILN_MODEL_ID").unwrap_or_else(|_| "Qwen/Qwen3.5-4B".to_string());
     let tokenizer_path = std::env::var("KILN_TOKENIZER_PATH").ok();
 
     let tokenizer = if let Some(path) = tokenizer_path {
