@@ -81,8 +81,8 @@ pub fn flash_attn_fwd(
     if q.dtype() != DType::BF16 {
         candle_core::bail!("kiln-flash-attn only supports bf16, got {:?}", q.dtype());
     }
-    if head_dim != 128 {
-        candle_core::bail!("kiln-flash-attn only supports head_dim=128, got {head_dim}");
+    if head_dim != 128 && head_dim != 256 {
+        candle_core::bail!("kiln-flash-attn only supports head_dim=128,256, got {head_dim}");
     }
 
     // Ensure contiguous
@@ -196,8 +196,8 @@ pub fn flash_attn_bwd(
     if q.dtype() != DType::BF16 {
         candle_core::bail!("kiln-flash-attn only supports bf16, got {:?}", q.dtype());
     }
-    if head_dim != 128 {
-        candle_core::bail!("kiln-flash-attn only supports head_dim=128, got {head_dim}");
+    if head_dim != 128 && head_dim != 256 {
+        candle_core::bail!("kiln-flash-attn only supports head_dim=128,256, got {head_dim}");
     }
 
     // Ensure contiguous

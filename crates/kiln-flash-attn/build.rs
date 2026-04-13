@@ -59,10 +59,13 @@ fn main() {
     // Source files to compile:
     // 1. Our C-ABI wrapper
     build.file(flash_attn_dir.join("flash_api_c.cu"));
-    // 2. The template instantiation files (bf16, hdim128, causal only)
+    // 2. The template instantiation files (bf16, causal, hdim128 + hdim256)
     build.file(kernel_src_dir.join("flash_fwd_hdim128_bf16_causal_sm80.cu"));
     build.file(kernel_src_dir.join("flash_bwd_hdim128_bf16_causal_sm80.cu"));
     build.file(kernel_src_dir.join("flash_fwd_split_hdim128_bf16_causal_sm80.cu"));
+    build.file(kernel_src_dir.join("flash_fwd_hdim256_bf16_causal_sm80.cu"));
+    build.file(kernel_src_dir.join("flash_bwd_hdim256_bf16_causal_sm80.cu"));
+    build.file(kernel_src_dir.join("flash_fwd_split_hdim256_bf16_causal_sm80.cu"));
 
     // Compile
     build.compile("kiln_flash_attn");
