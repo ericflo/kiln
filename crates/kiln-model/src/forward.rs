@@ -524,9 +524,57 @@ pub fn gqa_attention_paged(
         return Ok(out);
     }
 
-    // GQA head expansion
+    // GQA head expansion and attention
     let gqa_ratio = num_heads / num_kv_heads;
     let batch = k.dim(0)?;
+
+    // Optimized decode path (seq_len == 1): reshape Q instead of expanding K/V.
+    // Q is [batch, num_heads, 1, head_dim] (1 token) while K/V is
+    // [batch, num_kv_heads, kv_len, head_dim] (full history). Expanding K/V
+    // copies kv_len * head_dim * num_kv_heads data gqa_ratio times.
+    // Instead, group Q heads to match KV heads and compute per-group attention.
+    if seq_len == 1 && gqa_ratio > 1 {
+        let scale = (head_dim as f64).sqrt();
+
+        // Reshape Q: [batch, num_heads, 1, head_dim]
+        //          -> [batch, num_kv_heads, gqa_ratio, 1, head_dim]
+        //          -> [batch * num_kv_heads, gqa_ratio, 1, head_dim]
+        // K:         [batch, num_kv_heads, kv_len, head_dim]
+        //          -> [batch * num_kv_heads, kv_len, head_dim]
+        // V:         same as K
+        let q_grouped = q
+            .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
+            .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
+            .contiguous()?;
+        let k_flat = k
+            .reshape((batch * num_kv_heads, kv_len, head_dim))?
+            .contiguous()?;
+        let v_flat = v
+            .reshape((batch * num_kv_heads, kv_len, head_dim))?
+            .contiguous()?;
+
+        // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
+        let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(1, 2)?.contiguous()?)?;
+        let attn_scores = (attn_scores / scale)?;
+        // No causal mask needed for decode (q_len=1 attends to everything)
+        let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+
+        // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
+        let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
+
+        // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
+        //               == [batch, num_heads, 1, head_dim]
+        let attn_output = attn_output
+            .reshape((batch, num_heads, 1, head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((batch, 1, num_heads * head_dim))?;
+
+        let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+        return Ok(out);
+    }
+
+    // Standard path (prefill without flash-attn, or gqa_ratio == 1)
     let (k, v) = if gqa_ratio > 1 {
         let k = k
             .unsqueeze(2)?
