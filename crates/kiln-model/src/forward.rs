@@ -262,15 +262,15 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
-    let rms = (variance + eps)?.sqrt()?;
-    let rms_inv = rms.recip()?;
+    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     let normed = x_f32.broadcast_mul(&rms_inv)?;
-    // Cast back to original dtype, then scale by residual weight (1 + weight).
     // Qwen3.5 RMSNorm stores weights centered around 0 and applies as (1 + w) * x_normed.
-    let normed = normed.to_dtype(x.dtype())?;
-    let w_plus_one = (weight.ones_like()? + weight)?;
+    // Keep everything in F32 for precision (matches HF: `output * (1.0 + self.weight.float())`),
+    // then cast back to input dtype at the end.
+    let w_f32 = weight.to_dtype(DType::F32)?;
+    let w_plus_one = (w_f32.ones_like()? + w_f32)?;
     let out = normed.broadcast_mul(&w_plus_one)?;
-    Ok(out)
+    Ok(out.to_dtype(x.dtype())?)
 }
 
 /// Apply Rotary Position Embeddings (RoPE) to query and key tensors.
@@ -407,13 +407,22 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     Ok(normalized)
 }
 
-/// softplus(x) = ln(1 + exp(x)).
+/// softplus(x) = ln(1 + exp(x)), numerically stable for all x.
+///
+/// Uses the identity: softplus(x) = max(x, 0) + ln(1 + exp(-|x|))
+/// Since exp(-|x|) ∈ (0, 1], no overflow is possible.
+/// This matches PyTorch's F.softplus output (which clamps to linear for x > 20).
 fn softplus(x: &Tensor) -> Result<Tensor> {
-    // Numerically stable: for large x, softplus ≈ x; for small x, ln(1+exp(x)).
-    // Use the naive form here — candle F32 handles the range fine.
-    let exp_x = x.exp()?;
-    let one_plus = (exp_x + 1.0)?;
-    Ok(one_plus.log()?)
+    let zeros = Tensor::zeros_like(x)?;
+    let relu_x = x.maximum(&zeros)?;
+    // |x| = relu(x) + relu(-x)
+    let neg_x = x.neg()?;
+    let relu_neg_x = neg_x.maximum(&zeros)?;
+    let abs_x = (relu_x.clone() + relu_neg_x)?;
+    let neg_abs = abs_x.neg()?;
+    // log(1 + exp(-|x|)) — always stable since exp(-|x|) ∈ (0, 1]
+    let log_term = (neg_abs.exp()? + 1.0)?.log()?;
+    Ok((relu_x + log_term)?)
 }
 
 /// Gated RMSNorm: rms_norm(x, weight) * silu(z).
