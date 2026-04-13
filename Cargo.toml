@@ -53,6 +53,10 @@ minijinja = "2"
 safetensors = "0.5"
 memmap2 = "0.9"
 
+# Tensor compute
+candle-core = "0.10"
+candle-nn = "0.10"
+
 # Testing
 tempfile = "3"
 
