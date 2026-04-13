@@ -8,7 +8,7 @@ description = "Vendored flash-attention-2 CUDA kernels with C-ABI wrapper for fo
 build = "build.rs"
 
 [dependencies]
-candle-core = { workspace = true }
+candle-core = { workspace = true, features = ["cuda"] }
 half = "2"
 
 [build-dependencies]

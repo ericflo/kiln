@@ -14,7 +14,7 @@ use candle_core::{
 use half::bf16;
 
 // FFI declarations matching flash_api_c.h
-extern "C" {
+unsafe extern "C" {
     fn kiln_flash_attn_fwd(
         q: *const core::ffi::c_void,
         k: *const core::ffi::c_void,
