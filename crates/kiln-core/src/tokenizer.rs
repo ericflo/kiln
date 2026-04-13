@@ -38,6 +38,24 @@ impl KilnTokenizer {
         })
     }
 
+    /// Create from a pre-built `Tokenizer` instance.
+    pub fn from_inner(inner: Tokenizer) -> Self {
+        Self {
+            inner,
+            chat_template: None,
+        }
+    }
+
+    /// Create from raw JSON bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, TokenizerError> {
+        let inner =
+            Tokenizer::from_bytes(bytes).map_err(|e| TokenizerError::Load(e.to_string()))?;
+        Ok(Self {
+            inner,
+            chat_template: None,
+        })
+    }
+
     /// Load a tokenizer from a local tokenizer.json file.
     pub fn from_file(path: &str) -> Result<Self, TokenizerError> {
         let inner =
