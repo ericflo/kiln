@@ -965,15 +965,22 @@ pub fn gqa_attention_paged(
             .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
             .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
             .contiguous()?;
+        // Unsqueeze K/V to [batch*num_kv_heads, 1, kv_len, head_dim] so that
+        // broadcast_matmul pairs each Q group with its own KV head (dim 0),
+        // broadcasting over the gqa_ratio dim (dim 1).  Without the unsqueeze
+        // the 3-D K would be padded to [1, batch*num_kv_heads, ...] and the
+        // gqa_ratio dim would incorrectly index into different KV heads.
         let k_flat = k
             .reshape((batch * num_kv_heads, kv_len, head_dim))?
+            .unsqueeze(1)?
             .contiguous()?;
         let v_flat = v
             .reshape((batch * num_kv_heads, kv_len, head_dim))?
+            .unsqueeze(1)?
             .contiguous()?;
 
         // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
-        let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(1, 2)?.contiguous()?)?;
+        let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
         let attn_scores = (attn_scores / scale)?;
         // No causal mask needed for decode (q_len=1 attends to everything)
         let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
