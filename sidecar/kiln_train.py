@@ -18,6 +18,7 @@ Response types (Python -> Rust):
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -29,6 +30,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+import torch
+from peft import LoraConfig, TaskType, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +73,39 @@ class TrainingSidecar:
         self.job_queue: asyncio.Queue[str] = asyncio.Queue()
         self._shutdown = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
+        # Lazy-loaded base model and tokenizer (cached across jobs)
+        self._base_model: Optional[AutoModelForCausalLM] = None
+        self._tokenizer: Optional[AutoTokenizer] = None
+        self._model_path: Optional[str] = None
+
+    def _ensure_model_loaded(self, model_path: Optional[str] = None) -> None:
+        """Lazy-load the base model and tokenizer, reusing across jobs."""
+        path = model_path or os.environ.get("KILN_MODEL_PATH")
+        if path is None:
+            raise RuntimeError(
+                "No model path provided. Set KILN_MODEL_PATH or include "
+                "'model_path' in the training request."
+            )
+
+        # If already loaded with the same path, reuse
+        if self._base_model is not None and self._model_path == path:
+            return
+
+        log.info("loading base model from %s", path)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+        self._tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
+        self._base_model = AutoModelForCausalLM.from_pretrained(
+            path,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+        ).to(device)
+        self._model_path = path
+        log.info("base model loaded on %s (%s)", device, dtype)
 
     async def start(self):
         """Start the unix socket server and training worker."""
@@ -243,44 +281,174 @@ class TrainingSidecar:
                 job.error_message = str(e)
                 log.exception("job %s failed: %s", job_id, e)
 
+    def _tokenize_examples(
+        self, examples: list[dict], max_length: int = 2048
+    ) -> list[dict]:
+        """Tokenize SFT examples into input_ids and labels tensors.
+
+        Each example should have 'messages' (chat format) or 'input'/'output' pairs.
+        Labels are set to -100 for the prompt portion so loss is only on completions.
+        """
+        tokenizer = self._tokenizer
+        tokenized = []
+
+        for ex in examples:
+            if "messages" in ex:
+                # Chat format: [{"role": "user", "content": "..."}, ...]
+                # Tokenize the full conversation, mask everything except assistant turns
+                text = tokenizer.apply_chat_template(
+                    ex["messages"], tokenize=False, add_generation_prompt=False
+                )
+                full_ids = tokenizer.encode(text, add_special_tokens=False)
+
+                # Build labels: find assistant content and unmask only those tokens
+                # Simple approach: tokenize without last assistant turn for prompt length
+                prompt_messages = []
+                for msg in ex["messages"]:
+                    if msg["role"] == "assistant":
+                        # Tokenize everything up to this point as prompt
+                        prompt_text = tokenizer.apply_chat_template(
+                            prompt_messages,
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                        prompt_ids = tokenizer.encode(
+                            prompt_text, add_special_tokens=False
+                        )
+                        break
+                    prompt_messages.append(msg)
+                else:
+                    # No assistant message found, skip
+                    continue
+
+                labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
+            elif "input" in ex and "output" in ex:
+                # Simple input/output pair
+                prompt_ids = tokenizer.encode(ex["input"], add_special_tokens=True)
+                output_ids = tokenizer.encode(ex["output"], add_special_tokens=False)
+                full_ids = prompt_ids + output_ids
+                labels = [-100] * len(prompt_ids) + output_ids
+            else:
+                continue
+
+            # Truncate to max_length
+            full_ids = full_ids[:max_length]
+            labels = labels[:max_length]
+
+            tokenized.append(
+                {
+                    "input_ids": torch.tensor(full_ids, dtype=torch.long),
+                    "labels": torch.tensor(labels, dtype=torch.long),
+                }
+            )
+
+        return tokenized
+
     async def _run_sft(self, job: TrainingJob):
-        """Mock SFT training loop. Will be replaced with real PEFT training."""
+        """Run real SFT training with PEFT LoRA."""
         req = job.request
         epochs = req.get("epochs", 3)
-        num_examples = len(req.get("examples", []))
+        examples = req.get("examples", [])
         adapter_name = req.get("adapter_name", f"sft-{job.job_id[:8]}")
+        lora_rank = req.get("lora_rank", 16)
+        lora_alpha = req.get("lora_alpha", 32.0)
+        learning_rate = req.get("learning_rate", 1e-4)
+        max_length = req.get("max_length", 2048)
+        model_path = req.get("model_path")
 
-        # Simulate training: one step per example per epoch
-        total_steps = max(epochs * max(num_examples, 1), 1)
-        step = 0
-        mock_loss = 2.5
+        if not examples:
+            raise ValueError("SFT job requires at least one example")
 
-        for epoch in range(epochs):
-            job.epoch = epoch + 1
-            for _ex in range(max(num_examples, 1)):
-                step += 1
-                job.progress = step / total_steps
-                mock_loss *= 0.85  # loss decreases over time
-                job.loss = round(mock_loss, 4)
-                await asyncio.sleep(0.1)  # simulate compute time
-
-        # Write a placeholder adapter directory
-        adapter_path = self.adapter_dir / adapter_name
-        adapter_path.mkdir(parents=True, exist_ok=True)
-        (adapter_path / "adapter_config.json").write_text(
-            json.dumps(
-                {
-                    "base_model": "Qwen/Qwen3.5-4B",
-                    "lora_rank": req.get("lora_rank", 16),
-                    "lora_alpha": req.get("lora_alpha", 32.0),
-                    "target_modules": "all-linear",
-                    "task_type": "CAUSAL_LM",
-                },
-                indent=2,
-            )
+        # Load base model (lazy, cached across jobs)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, functools.partial(self._ensure_model_loaded, model_path)
         )
-        job.adapter_path = str(adapter_path)
-        log.info("wrote mock adapter to %s", adapter_path)
+
+        device = next(self._base_model.parameters()).device
+
+        # Tokenize examples
+        tokenized = await loop.run_in_executor(
+            None,
+            functools.partial(self._tokenize_examples, examples, max_length),
+        )
+        if not tokenized:
+            raise ValueError("No valid examples after tokenization")
+
+        log.info(
+            "SFT job %s: %d examples tokenized, %d epochs, rank=%d",
+            job.job_id,
+            len(tokenized),
+            epochs,
+            lora_rank,
+        )
+
+        # Create LoRA config and wrap model
+        lora_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_alpha,
+            target_modules="all-linear",
+            lora_dropout=0.0,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+
+        def _train():
+            peft_model = get_peft_model(self._base_model, lora_config)
+            peft_model.train()
+            trainable = sum(
+                p.numel() for p in peft_model.parameters() if p.requires_grad
+            )
+            log.info("trainable parameters: %d", trainable)
+
+            optimizer = torch.optim.AdamW(
+                peft_model.parameters(), lr=learning_rate
+            )
+
+            total_steps = epochs * len(tokenized)
+            step = 0
+
+            for epoch in range(epochs):
+                job.epoch = epoch + 1
+                epoch_loss = 0.0
+
+                for ex in tokenized:
+                    input_ids = ex["input_ids"].unsqueeze(0).to(device)
+                    labels = ex["labels"].unsqueeze(0).to(device)
+
+                    outputs = peft_model(input_ids=input_ids, labels=labels)
+                    loss = outputs.loss
+
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                    step += 1
+                    loss_val = loss.item()
+                    epoch_loss += loss_val
+                    job.progress = step / total_steps
+                    job.loss = round(loss_val, 4)
+
+                avg_loss = epoch_loss / len(tokenized)
+                log.info(
+                    "job %s epoch %d/%d avg_loss=%.4f",
+                    job.job_id,
+                    epoch + 1,
+                    epochs,
+                    avg_loss,
+                )
+
+            # Save the trained adapter
+            adapter_path = self.adapter_dir / adapter_name
+            adapter_path.mkdir(parents=True, exist_ok=True)
+            peft_model.save_pretrained(str(adapter_path))
+            job.adapter_path = str(adapter_path)
+            log.info("saved LoRA adapter to %s", adapter_path)
+
+            # Clean up: remove LoRA from the base model so it's reusable
+            peft_model.unload()
+
+        await loop.run_in_executor(None, _train)
 
     async def _run_grpo(self, job: TrainingJob):
         """Mock GRPO training loop. Will be replaced with real GRPO training."""
