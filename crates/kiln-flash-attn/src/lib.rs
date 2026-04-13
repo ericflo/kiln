@@ -339,3 +339,180 @@ pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, softmax_scale: f32, causal
     let (out, _lse) = flash_attn_fwd(q, k, v, softmax_scale, causal)?;
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    #[test]
+    fn test_flash_attn_forward_basic() {
+        let device = Device::new_cuda(0).expect("CUDA device required");
+        let b = 1;
+        let seqlen = 64;
+        let num_heads = 4;
+        let head_dim = 128;
+        let shape = (b, seqlen, num_heads, head_dim);
+
+        let q = Tensor::randn(0f32, 1.0, shape, &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::randn(0f32, 1.0, shape, &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let v = Tensor::randn(0f32, 1.0, shape, &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+        let (out, lse) = flash_attn_fwd(&q, &k, &v, softmax_scale, true).unwrap();
+
+        assert_eq!(out.dims(), &[b, seqlen, num_heads, head_dim]);
+        assert_eq!(out.dtype(), DType::BF16);
+        assert_eq!(lse.dims(), &[b, num_heads, seqlen]);
+        assert_eq!(lse.dtype(), DType::F32);
+
+        // Check output is finite and non-zero
+        let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
+        let out_data: Vec<f32> = out_f32.to_vec1().unwrap();
+        assert!(out_data.iter().all(|x| x.is_finite()), "output contains non-finite values");
+        let sum: f32 = out_data.iter().map(|x| x.abs()).sum();
+        assert!(sum > 0.0, "output is all zeros");
+    }
+
+    #[test]
+    fn test_flash_attn_backward_gradients() {
+        let device = Device::new_cuda(0).expect("CUDA device required");
+        let b = 1;
+        let seqlen = 64;
+        let num_heads = 4;
+        let num_heads_k = 4; // MHA (not GQA) for simplicity
+        let head_dim = 128;
+
+        let q = Tensor::randn(0f32, 1.0, (b, seqlen, num_heads, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::randn(0f32, 1.0, (b, seqlen, num_heads_k, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let v = Tensor::randn(0f32, 1.0, (b, seqlen, num_heads_k, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+
+        // Forward pass
+        let (out, softmax_lse) = flash_attn_fwd(&q, &k, &v, softmax_scale, true).unwrap();
+
+        // Simulate gradient: dout = ones (uniform gradient signal)
+        let dout = Tensor::ones((b, seqlen, num_heads, head_dim), DType::BF16, &device).unwrap();
+
+        // Backward pass
+        let (dq, dk, dv) = flash_attn_bwd(&dout, &q, &k, &v, &out, &softmax_lse, softmax_scale, true).unwrap();
+
+        // Check shapes
+        assert_eq!(dq.dims(), &[b, seqlen, num_heads, head_dim]);
+        assert_eq!(dk.dims(), &[b, seqlen, num_heads_k, head_dim]);
+        assert_eq!(dv.dims(), &[b, seqlen, num_heads_k, head_dim]);
+
+        // Check all gradients are finite
+        for (name, grad) in [("dq", &dq), ("dk", &dk), ("dv", &dv)] {
+            let data: Vec<f32> = grad
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert!(
+                data.iter().all(|x| x.is_finite()),
+                "{name} contains non-finite values"
+            );
+            let abs_sum: f32 = data.iter().map(|x| x.abs()).sum();
+            assert!(abs_sum > 0.0, "{name} is all zeros");
+        }
+    }
+
+    #[test]
+    fn test_flash_attn_backward_gqa() {
+        let device = Device::new_cuda(0).expect("CUDA device required");
+        let b = 1;
+        let seqlen = 32;
+        let num_heads = 8;
+        let num_heads_k = 2; // GQA: 4 groups
+        let head_dim = 128;
+
+        let q = Tensor::randn(0f32, 1.0, (b, seqlen, num_heads, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::randn(0f32, 1.0, (b, seqlen, num_heads_k, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let v = Tensor::randn(0f32, 1.0, (b, seqlen, num_heads_k, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+
+        // Forward: expand K/V to num_heads for the kernel
+        let groups = num_heads / num_heads_k;
+        let k_exp = k
+            .unsqueeze(3)
+            .unwrap()
+            .expand((b, seqlen, num_heads_k, groups, head_dim))
+            .unwrap()
+            .reshape((b, seqlen, num_heads, head_dim))
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let v_exp = v
+            .unsqueeze(3)
+            .unwrap()
+            .expand((b, seqlen, num_heads_k, groups, head_dim))
+            .unwrap()
+            .reshape((b, seqlen, num_heads, head_dim))
+            .unwrap()
+            .contiguous()
+            .unwrap();
+
+        let (out, softmax_lse) =
+            flash_attn_fwd(&q, &k_exp, &v_exp, softmax_scale, true).unwrap();
+
+        let dout = Tensor::ones((b, seqlen, num_heads, head_dim), DType::BF16, &device).unwrap();
+
+        // Backward with GQA dimensions
+        let (dq, dk, dv) =
+            flash_attn_bwd(&dout, &q, &k_exp, &v_exp, &out, &softmax_lse, softmax_scale, true)
+                .unwrap();
+
+        // dk/dv should be summed down to num_heads_k
+        assert_eq!(dq.dims(), &[b, seqlen, num_heads, head_dim]);
+        assert_eq!(dk.dims(), &[b, seqlen, num_heads_k, head_dim]);
+        assert_eq!(dv.dims(), &[b, seqlen, num_heads_k, head_dim]);
+
+        for (name, grad) in [("dq", &dq), ("dk", &dk), ("dv", &dv)] {
+            let data: Vec<f32> = grad
+                .to_dtype(DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert!(
+                data.iter().all(|x| x.is_finite()),
+                "{name} contains non-finite values"
+            );
+            let abs_sum: f32 = data.iter().map(|x| x.abs()).sum();
+            assert!(abs_sum > 0.0, "{name} is all zeros");
+        }
+    }
+}

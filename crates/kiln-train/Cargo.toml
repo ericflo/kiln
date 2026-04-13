@@ -20,7 +20,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [features]
-cuda = ["kiln-model/cuda"]
+cuda = ["kiln-model/cuda", "flash-attn"]
 flash-attn = ["kiln-model/flash-attn"]
 
 [dev-dependencies]
