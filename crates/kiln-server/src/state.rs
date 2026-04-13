@@ -33,6 +33,8 @@ pub struct AppState {
     pub tokenizer: Arc<KilnTokenizer>,
     /// Directory where LoRA adapter weights are stored on disk.
     pub adapter_dir: PathBuf,
+    /// Name of the currently active LoRA adapter (None = base model).
+    pub active_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -51,6 +53,7 @@ impl AppState {
             }),
             tokenizer: Arc::new(tokenizer),
             adapter_dir: PathBuf::from("adapters"),
+            active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -100,6 +103,7 @@ impl AppState {
             }),
             tokenizer: Arc::new(tokenizer),
             adapter_dir,
+            active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
