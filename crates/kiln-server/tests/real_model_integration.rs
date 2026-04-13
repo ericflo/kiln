@@ -155,7 +155,7 @@ async fn test_real_model_chat_completion() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone());
+    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"));
 
     let app = api::router(state);
 
@@ -220,7 +220,7 @@ async fn test_real_model_streaming_chat_completion() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone());
+    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"));
 
     let app = api::router(state);
 
@@ -326,7 +326,7 @@ async fn test_health_with_real_backend() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone());
+    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"));
 
     let app = api::router(state);
 
