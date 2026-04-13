@@ -9,7 +9,7 @@
 use candle_core::{
     backend::BackendStorage,
     cuda_backend::cudarc::driver::DevicePtr,
-    DType, Device, Result, Tensor,
+    DType, Result, Tensor,
 };
 use half::bf16;
 
@@ -347,7 +347,7 @@ pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, softmax_scale: f32, causal
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device, Tensor};
+    use candle_core::{Device, DType, Tensor};
 
     #[test]
     fn test_flash_attn_forward_basic() {
@@ -493,15 +493,16 @@ mod tests {
 
         let dout = Tensor::ones((b, seqlen, num_heads, head_dim), DType::BF16, &device).unwrap();
 
-        // Backward with GQA dimensions
+        // Backward with expanded K/V (same as how model code calls it)
+        // Since k_exp/v_exp have num_heads heads, bwd sees num_heads_k == num_heads
+        // and outputs dk/dv with num_heads (caller is responsible for summing to GQA groups)
         let (dq, dk, dv) =
             flash_attn_bwd(&dout, &q, &k_exp, &v_exp, &out, &softmax_lse, softmax_scale, true)
                 .unwrap();
 
-        // dk/dv should be summed down to num_heads_k
         assert_eq!(dq.dims(), &[b, seqlen, num_heads, head_dim]);
-        assert_eq!(dk.dims(), &[b, seqlen, num_heads_k, head_dim]);
-        assert_eq!(dv.dims(), &[b, seqlen, num_heads_k, head_dim]);
+        assert_eq!(dk.dims(), &[b, seqlen, num_heads, head_dim]);
+        assert_eq!(dv.dims(), &[b, seqlen, num_heads, head_dim]);
 
         for (name, grad) in [("dq", &dq), ("dk", &dk), ("dv", &dv)] {
             let data: Vec<f32> = grad
