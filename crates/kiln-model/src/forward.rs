@@ -84,7 +84,7 @@ fn flash_attention_forward(
     };
 
     // flash_attn expects [batch, seq_len, num_heads, head_dim]
-    let attn_output = candle_flash_attn::flash_attn(q, &k, &v, softmax_scale, causal)
+    let attn_output = kiln_flash_attn::flash_attn(q, &k, &v, softmax_scale, causal)
         .context("flash_attn kernel failed")?;
 
     // Reshape to [batch, seq_len, hidden]
