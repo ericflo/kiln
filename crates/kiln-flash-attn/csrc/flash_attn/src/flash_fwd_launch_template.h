@@ -286,7 +286,8 @@ void run_mha_fwd_hdim256(Flash_fwd_params &params, cudaStream_t stream) {
     status_ = cudaDeviceGetAttribute(
         &max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
     if (status_ != cudaSuccess) {
-      C10_CUDA_CHECK(status_);
+      fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, cudaGetErrorString(status_));
+      exit(1);
     }
     // printf("max_smem_per_sm = %d, max_smem_per_block = %d\n", max_smem_per_sm, max_smem_per_block);
     DROPOUT_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
