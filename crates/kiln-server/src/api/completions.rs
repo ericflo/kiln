@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
+use kiln_core::tokenizer::ChatMessage;
 
 use crate::state::AppState;
 
@@ -69,15 +70,26 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
-    // TODO: real tokenization. For now, rough estimate: 1 token per 4 chars.
-    let prompt_text: String = req
+    // Convert request messages to ChatMessage for template formatting
+    let chat_messages: Vec<ChatMessage> = req
         .messages
         .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let estimated_tokens = prompt_text.len() / 4;
-    let prompt_tokens: Vec<u32> = (0..estimated_tokens as u32).collect();
+        .map(|m| ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+
+    // Apply chat template and tokenize
+    let prompt_text = state
+        .tokenizer
+        .apply_chat_template(&chat_messages)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let prompt_tokens = state
+        .tokenizer
+        .encode(&prompt_text)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(1.0),
@@ -88,7 +100,8 @@ async fn chat_completions(
         ..Default::default()
     };
 
-    let request = Request::new(prompt_tokens.clone(), sampling, req.adapter);
+    let prompt_token_count = prompt_tokens.len();
+    let request = Request::new(prompt_tokens, sampling, req.adapter);
     let request_id = request.id;
 
     // Add to scheduler
@@ -169,8 +182,12 @@ async fn chat_completions(
         }
     }
 
-    // Mock: generate some text from the output tokens
-    let completion_text = format!("[mock response with {} tokens]", output_tokens.len());
+    // Decode output tokens back to text (mock engine produces token ID 42 repeatedly,
+    // which won't decode to meaningful text, but the pipeline is real)
+    let completion_text = state
+        .tokenizer
+        .decode(&output_tokens)
+        .unwrap_or_else(|_| format!("[{} tokens, decode failed]", output_tokens.len()));
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -191,9 +208,9 @@ async fn chat_completions(
             finish_reason: "stop".to_string(),
         }],
         usage: Usage {
-            prompt_tokens: prompt_tokens.len(),
+            prompt_tokens: prompt_token_count,
             completion_tokens: output_tokens.len(),
-            total_tokens: prompt_tokens.len() + output_tokens.len(),
+            total_tokens: prompt_token_count + output_tokens.len(),
         },
     }))
 }

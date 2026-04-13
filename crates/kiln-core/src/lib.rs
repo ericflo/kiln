@@ -3,6 +3,7 @@ pub mod config;
 pub mod request;
 pub mod sampling;
 pub mod token;
+pub mod tokenizer;
 
 pub use block::{BlockManager, BlockTable};
 pub use config::ModelConfig;
