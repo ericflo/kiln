@@ -1,0 +1,11 @@
+[package]
+name = "kiln-scheduler"
+description = "Iteration-level continuous batching scheduler with chunked prefill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kiln-core = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
