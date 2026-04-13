@@ -779,11 +779,11 @@ mod tests {
         let head_dim = config.head_dim;
 
         let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
-        let final_norm = Tensor::ones((h,), candle_core::DType::F32, device).unwrap();
+        let final_norm = Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
 
         let layer = crate::forward::GpuLayerWeights {
-            input_layernorm: Tensor::ones((h,), candle_core::DType::F32, device).unwrap(),
-            post_attention_layernorm: Tensor::ones((h,), candle_core::DType::F32, device).unwrap(),
+            input_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
+            post_attention_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
             attention: crate::forward::GpuAttentionWeights::Full(
                 crate::forward::GpuFullAttentionWeights {
                     q_proj: Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device)
@@ -794,8 +794,8 @@ mod tests {
                         .unwrap(),
                     o_proj: Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device)
                         .unwrap(),
-                    q_norm: Tensor::ones((head_dim,), candle_core::DType::F32, device).unwrap(),
-                    k_norm: Tensor::ones((head_dim,), candle_core::DType::F32, device).unwrap(),
+                    q_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+                    k_norm: Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
                 },
             ),
             mlp: crate::forward::GpuFfnWeights {

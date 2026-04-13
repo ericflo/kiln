@@ -54,18 +54,18 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
     let head_dim = config.head_dim;
 
     let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
-    let final_norm = Tensor::ones((h,), DType::F32, device).unwrap();
+    let final_norm = Tensor::zeros((h,), DType::F32, device).unwrap();
 
     let layer = GpuLayerWeights {
-        input_layernorm: Tensor::ones((h,), DType::F32, device).unwrap(),
-        post_attention_layernorm: Tensor::ones((h,), DType::F32, device).unwrap(),
+        input_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
+        post_attention_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
         attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
             q_proj: Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap(),
             k_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap(),
             v_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap(),
             o_proj: Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap(),
-            q_norm: Tensor::ones((head_dim,), DType::F32, device).unwrap(),
-            k_norm: Tensor::ones((head_dim,), DType::F32, device).unwrap(),
+            q_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
+            k_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
         }),
         mlp: GpuFfnWeights {
             gate_proj: Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap(),

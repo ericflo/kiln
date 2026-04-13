@@ -265,9 +265,11 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let rms = (variance + eps)?.sqrt()?;
     let rms_inv = rms.recip()?;
     let normed = x_f32.broadcast_mul(&rms_inv)?;
-    // Cast back to original dtype, then scale by weight
+    // Cast back to original dtype, then scale by residual weight (1 + weight).
+    // Qwen3.5 RMSNorm stores weights centered around 0 and applies as (1 + w) * x_normed.
     let normed = normed.to_dtype(x.dtype())?;
-    let out = normed.broadcast_mul(weight)?;
+    let w_plus_one = (weight.ones_like()? + weight)?;
+    let out = normed.broadcast_mul(&w_plus_one)?;
     Ok(out)
 }
 
@@ -1462,11 +1464,12 @@ mod tests {
     #[test]
     fn test_rms_norm_known_values() -> Result<()> {
         let device = Device::Cpu;
-        // x = [1, 2, 3], weight = [1, 1, 1], eps = 0
+        // x = [1, 2, 3], weight = [0, 0, 0], eps = 0
+        // Effective weight = 1 + w = [1, 1, 1]
         // RMS = sqrt(mean([1,4,9])) = sqrt(14/3) ≈ 2.1602
         // normed = [1/2.1602, 2/2.1602, 3/2.1602] ≈ [0.4629, 0.9258, 1.3887]
         let x = Tensor::new(&[1.0_f32, 2.0, 3.0], &device)?.unsqueeze(0)?; // [1, 3]
-        let w = Tensor::new(&[1.0_f32, 1.0, 1.0], &device)?;
+        let w = Tensor::new(&[0.0_f32, 0.0, 0.0], &device)?;
 
         let result = rms_norm(&x, &w, 1e-8)?;
         let vals = result.to_vec2::<f32>()?;
@@ -1489,10 +1492,11 @@ mod tests {
         let vals = result.to_vec2::<f32>()?;
 
         // RMS of [2,2,2] = 2.0, so normed = [1,1,1]
-        // After weight: [0.5, 1.0, 2.0]
-        assert!((vals[0][0] - 0.5).abs() < 1e-4);
-        assert!((vals[0][1] - 1.0).abs() < 1e-4);
-        assert!((vals[0][2] - 2.0).abs() < 1e-4);
+        // Effective weight = 1 + w = [1.5, 2.0, 3.0]
+        // After weight: [1.5, 2.0, 3.0]
+        assert!((vals[0][0] - 1.5).abs() < 1e-4);
+        assert!((vals[0][1] - 2.0).abs() < 1e-4);
+        assert!((vals[0][2] - 3.0).abs() < 1e-4);
 
         Ok(())
     }
@@ -1704,8 +1708,8 @@ mod tests {
             k_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?,
             v_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?,
             o_proj: Tensor::randn(0.0_f32, 0.02, (hidden, num_heads * head_dim), device)?,
-            q_norm: Tensor::ones(head_dim, DType::F32, device)?,
-            k_norm: Tensor::ones(head_dim, DType::F32, device)?,
+            q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+            k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
         })
     }
 
@@ -1812,8 +1816,8 @@ mod tests {
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
         let layer = GpuLayerWeights {
-            input_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
-            post_attention_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             attention: GpuAttentionWeights::Full(
                 make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
             ),
@@ -1846,8 +1850,8 @@ mod tests {
         let positions = vec![0u32, 1];
 
         let layer = GpuLayerWeights {
-            input_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
-            post_attention_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             attention: GpuAttentionWeights::Full(
                 make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
             ),
@@ -1876,8 +1880,8 @@ mod tests {
         let hidden = 8;
 
         let layer = GpuLayerWeights {
-            input_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
-            post_attention_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                 in_proj_qkv: Tensor::zeros((1, 1), DType::F32, &device)?,
                 in_proj_z: Tensor::zeros((1, 1), DType::F32, &device)?,
@@ -1945,20 +1949,20 @@ mod tests {
         };
 
         let embed_tokens = randn(&[vocab_size, hidden_size])?;
-        let final_norm = Tensor::ones(hidden_size, DType::F32, device)?;
+        let final_norm = Tensor::zeros(hidden_size, DType::F32, device)?;
 
         let mut layers = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
             layers.push(GpuLayerWeights {
-                input_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
-                post_attention_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
+                input_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
+                post_attention_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
                 attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
                     q_proj: randn(&[num_heads * head_dim, hidden_size])?,
                     k_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
                     v_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
                     o_proj: randn(&[hidden_size, num_heads * head_dim])?,
-                    q_norm: Tensor::ones(head_dim, DType::F32, device)?,
-                    k_norm: Tensor::ones(head_dim, DType::F32, device)?,
+                    q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+                    k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
                 }),
                 mlp: GpuFfnWeights {
                     gate_proj: randn(&[intermediate_size, hidden_size])?,
@@ -2265,7 +2269,7 @@ mod tests {
         };
 
         let embed_tokens = randn(&[vocab_size, hidden_size])?;
-        let final_norm = Tensor::ones(hidden_size, DType::F32, device)?;
+        let final_norm = Tensor::zeros(hidden_size, DType::F32, device)?;
 
         // For linear attention: nk heads with key_head_dim, nv heads with value_head_dim
         // Use same dims as full attention for simplicity
@@ -2285,8 +2289,8 @@ mod tests {
                     k_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
                     v_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
                     o_proj: randn(&[hidden_size, num_heads * head_dim])?,
-                    q_norm: Tensor::ones(head_dim, DType::F32, device)?,
-                    k_norm: Tensor::ones(head_dim, DType::F32, device)?,
+                    q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+                    k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
                 })
             } else {
                 GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
@@ -2303,8 +2307,8 @@ mod tests {
             };
 
             layers.push(GpuLayerWeights {
-                input_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
-                post_attention_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
+                input_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
+                post_attention_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
                 attention,
                 mlp: GpuFfnWeights {
                     gate_proj: randn(&[intermediate_size, hidden_size])?,
