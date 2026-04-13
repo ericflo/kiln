@@ -1,6 +1,13 @@
-# Kiln
+<p align="center">
+  <img src="assets/logo.png" alt="Kiln" width="200">
+</p>
 
-A single-model LLM inference server with live online learning. Train while you serve.
+<h1 align="center">Kiln</h1>
+
+<p align="center">
+  A single-model LLM inference server with live online learning.<br>
+  <strong>Train while you serve.</strong>
+</p>
 
 ## What is this?
 
