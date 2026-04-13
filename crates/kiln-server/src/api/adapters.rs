@@ -6,6 +6,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use kiln_model::lora_loader::LoraWeights;
+
 use crate::state::{AppState, ModelBackend};
 
 /// Response for GET /v1/adapters.
@@ -53,7 +55,7 @@ async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> 
     // Check active adapter from ModelRunner
     let active = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => {
-            let guard = runner.lock().unwrap();
+            let guard = runner.read().unwrap();
             guard.active_lora().map(|lora| {
                 format!("rank={}, alpha={}", lora.rank, lora.alpha)
             })
@@ -96,21 +98,32 @@ async fn load_adapter(
         ));
     }
 
-    // Load adapter (this does I/O + tensor allocation, so run on blocking thread)
+    // Two-phase load: read device/num_layers under a brief read lock, then load
+    // weights outside any lock so inference is not blocked during I/O.
+    let (device, num_layers) = {
+        let guard = runner.read().unwrap();
+        (guard.weights.embed_tokens.device().clone(), guard.config.num_layers)
+    };
+
     let runner = runner.clone();
     let path = adapter_path.clone();
     let name = req.name.clone();
 
     tokio::task::spawn_blocking(move || {
-        let mut guard = runner.lock().unwrap();
-        guard.load_adapter(&path)
+        // Load weights outside any lock (I/O + tensor allocation).
+        let lora = LoraWeights::load(&path, num_layers, &device)
+            .map_err(|e| format!("failed to load adapter: {e}"))?;
+        // Brief write lock to swap the adapter in.
+        let mut guard = runner.write().unwrap();
+        guard.swap_lora(Some(lora));
+        Ok::<(), String>(())
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to load adapter: {e}"),
+            e,
         )
     })?;
 
@@ -138,7 +151,7 @@ async fn unload_adapter(
 
     let runner = runner.clone();
     tokio::task::spawn_blocking(move || {
-        let mut guard = runner.lock().unwrap();
+        let mut guard = runner.write().unwrap();
         guard.unload_adapter();
     })
     .await
