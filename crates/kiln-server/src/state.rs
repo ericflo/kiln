@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -9,8 +10,37 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{ModelRunner, PagedKvCache};
 use kiln_scheduler::Scheduler;
+use kiln_train::TrainingState;
+use serde::Serialize;
 
 use crate::sidecar::SidecarClient;
+
+/// Type of training job.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingJobType {
+    Sft,
+    Grpo,
+}
+
+/// Tracked training job info stored in AppState.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingJobInfo {
+    pub job_id: String,
+    pub adapter_name: String,
+    pub job_type: TrainingJobType,
+    pub state: TrainingState,
+    pub progress: f32,
+    pub loss: Option<f64>,
+    pub epoch: Option<u32>,
+    pub adapter_path: Option<String>,
+    #[serde(skip)]
+    pub submitted_at: std::time::Instant,
+    pub auto_load: bool,
+}
+
+/// Thread-safe map of tracked training jobs.
+pub type TrainingJobs = Arc<std::sync::RwLock<HashMap<String, TrainingJobInfo>>>;
 
 /// Which inference backend the server is using.
 pub enum ModelBackend {
@@ -39,6 +69,8 @@ pub struct AppState {
     pub active_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
     /// Optional training sidecar client. None if no sidecar socket configured.
     pub sidecar: Option<SidecarClient>,
+    /// Tracked training jobs (job_id → info).
+    pub training_jobs: TrainingJobs,
 }
 
 impl AppState {
@@ -59,6 +91,7 @@ impl AppState {
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             sidecar: None,
+            training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -110,6 +143,7 @@ impl AppState {
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             sidecar: None,
+            training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 

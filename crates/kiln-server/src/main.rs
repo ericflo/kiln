@@ -121,6 +121,12 @@ async fn main() -> Result<()> {
         state
     };
 
+    // Spawn training watcher if sidecar is configured.
+    if state.sidecar.is_some() {
+        tracing::info!("spawning training completion watcher");
+        kiln_server::sidecar::spawn_training_watcher(state.clone());
+    }
+
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");
