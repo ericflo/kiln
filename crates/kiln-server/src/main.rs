@@ -32,7 +32,11 @@ async fn main() -> Result<()> {
 
     // Calculate number of KV cache blocks based on available memory.
     // For now, use a fixed number. Real implementation will query GPU memory.
-    let num_blocks = 2048; // ~32K tokens of KV cache with block_size=16
+    // Target: 131072 tokens (full 128K context) = 8192 blocks at block_size=16.
+    // Qwen3-4B KV cache at 128K BF16: ~18 GB (147 KB/token * 131072 tokens).
+    // On a 24GB GPU with 8GB model weights, we have ~14GB for KV — enough for
+    // one full 128K sequence or several shorter ones.
+    let num_blocks = 8192; // 131072 tokens of KV cache with block_size=16
 
     let scheduler = Scheduler::new(scheduler_config, num_blocks);
     let engine = MockEngine::new(model_config.clone());

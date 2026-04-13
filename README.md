@@ -67,15 +67,17 @@ answer = client.chat("What is 2+2?")
 
 ## Memory Budget (24GB GPU)
 
-| Component | BF16 |
-|---|---|
-| Base model weights (4B) | 8 GB |
-| KV cache (32K ctx, 4 sequences) | ~4 GB |
-| Active LoRA (rank 32) | 0.2 GB |
-| Training LoRA + optimizer | ~1.5 GB |
-| Training activations | ~3 GB |
-| CUDA overhead | ~1.5 GB |
-| **Total** | **~18 GB** |
+Kiln targets **128K context** (131,072 tokens) as the default. Qwen3-4B uses GQA with 8 KV heads, so KV cache is ~144 KB/token in BF16.
+
+| Scenario | Weights | KV Cache | LoRA + Training | Total |
+|---|---|---|---|---|
+| **128K ctx, 1 seq, inference only** | 8 GB | ~18 GB | — | ~26 GB ⚠️ |
+| **128K ctx, 1 seq, inference + FP8 KV** | 8 GB | ~9 GB | — | ~17 GB ✓ |
+| **64K ctx, 2 seq, inference only** | 8 GB | ~18 GB | — | ~26 GB ⚠️ |
+| **32K ctx, 4 seq, inference + training** | 8 GB | ~4.5 GB | ~5 GB | ~18 GB ✓ |
+| **32K ctx, 4 seq, INT4 weights + training** | 2.5 GB | ~4.5 GB | ~5 GB | ~12 GB ✓ |
+
+Full 128K on a 24GB GPU requires FP8 KV cache quantization (Phase 6) or INT4 model weights. Until then, 32K-64K context with multiple concurrent sequences is the sweet spot. The scheduler and block manager are designed for the full 131,072 from day one — the only constraint is VRAM.
 
 ## Project Structure
 
