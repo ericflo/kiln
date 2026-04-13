@@ -41,8 +41,12 @@ pub struct SftConfig {
     pub base_adapter: Option<String>,
     /// Name for the output adapter. Auto-generated if not set.
     pub output_name: Option<String>,
+    /// Automatically load the resulting adapter when training completes (default true).
+    #[serde(default = "default_auto_load")]
+    pub auto_load: bool,
 }
 
+fn default_auto_load() -> bool { true }
 fn default_epochs() -> usize { 3 }
 fn default_sft_lr() -> f64 { 1e-4 }
 fn default_rank() -> usize { 16 }
@@ -57,6 +61,7 @@ impl Default for SftConfig {
             lora_alpha: default_alpha(),
             base_adapter: None,
             output_name: None,
+            auto_load: default_auto_load(),
         }
     }
 }
@@ -99,6 +104,9 @@ pub struct GrpoConfig {
     pub lora_alpha: f32,
     pub base_adapter: Option<String>,
     pub output_name: Option<String>,
+    /// Automatically load the resulting adapter when training completes (default true).
+    #[serde(default = "default_auto_load")]
+    pub auto_load: bool,
 }
 
 fn default_grpo_lr() -> f64 { 1e-5 }
@@ -115,6 +123,7 @@ impl Default for GrpoConfig {
             lora_alpha: default_alpha(),
             base_adapter: None,
             output_name: None,
+            auto_load: default_auto_load(),
         }
     }
 }
