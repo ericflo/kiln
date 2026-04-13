@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::DType;
+use std::path::Path;
 use std::sync::mpsc;
 
 use kiln_core::config::ModelConfig;
@@ -14,6 +15,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::forward::{model_forward, model_forward_paged, GpuWeights};
 use crate::kv_cache::KvCache;
+use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
 
@@ -26,6 +28,8 @@ pub struct ModelRunner {
     pub config: ModelConfig,
     /// EOS token IDs cached from the tokenizer.
     eos_token_ids: Vec<TokenId>,
+    /// Currently active LoRA adapter weights (None = base model only).
+    active_lora: Option<LoraWeights>,
 }
 
 /// Output from a generation call.
@@ -86,7 +90,31 @@ impl ModelRunner {
             tokenizer,
             config,
             eos_token_ids,
+            active_lora: None,
         }
+    }
+
+    /// Load a LoRA adapter from a PEFT-compatible directory.
+    ///
+    /// The directory must contain `adapter_config.json` and `adapter_model.safetensors`.
+    /// Replaces any previously loaded adapter.
+    pub fn load_adapter(&mut self, path: &Path) -> Result<()> {
+        let device = self.weights.embed_tokens.device().clone();
+        let num_layers = self.config.num_layers;
+        let lora = LoraWeights::load(path, num_layers, &device)
+            .context("failed to load LoRA adapter")?;
+        self.active_lora = Some(lora);
+        Ok(())
+    }
+
+    /// Unload the currently active LoRA adapter, reverting to base model.
+    pub fn unload_adapter(&mut self) {
+        self.active_lora = None;
+    }
+
+    /// Returns a reference to the active LoRA weights, if any.
+    pub fn active_lora(&self) -> Option<&LoraWeights> {
+        self.active_lora.as_ref()
     }
 
     /// Generate text from a prompt string.
@@ -157,7 +185,7 @@ impl ModelRunner {
         let mut kv_cache = self.new_kv_cache(max_total)?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(&prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache))
+        let logits = model_forward(&prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
             .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
@@ -231,7 +259,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token
-            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache))
+            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
                 .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
@@ -272,7 +300,7 @@ impl ModelRunner {
         let mut kv_cache = self.new_kv_cache(max_total)?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache))
+        let logits = model_forward(prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
             .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
@@ -330,7 +358,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
-            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache))
+            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
                 .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
@@ -445,6 +473,7 @@ impl ModelRunner {
             paged_cache,
             block_table,
             0,
+            self.active_lora.as_ref(),
         )
         .context("prefill forward pass (paged) failed")?;
 
@@ -509,6 +538,7 @@ impl ModelRunner {
                 paged_cache,
                 block_table,
                 seq_len,
+                self.active_lora.as_ref(),
             )
             .context("decode forward pass (paged) failed")?;
             seq_len += 1;
@@ -575,6 +605,7 @@ impl ModelRunner {
             paged_cache,
             &block_table,
             0,
+            self.active_lora.as_ref(),
         ) {
             Ok(l) => l,
             Err(e) => {
@@ -658,6 +689,7 @@ impl ModelRunner {
                 paged_cache,
                 &block_table,
                 seq_len,
+                self.active_lora.as_ref(),
             ) {
                 Ok(l) => l,
                 Err(e) => {

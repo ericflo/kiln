@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
 use crate::kv_cache::KvCache;
+use crate::lora_loader::{linear_with_lora, LoraLayerWeights, LoraWeights};
 use crate::paged_kv_cache::PagedKvCache;
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
@@ -314,17 +315,22 @@ pub fn swiglu_ffn(
     gate_proj: &Tensor,
     up_proj: &Tensor,
     down_proj: &Tensor,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
     // x @ gate_proj^T -> [batch, seq_len, intermediate_size]
-    let gate = x.broadcast_matmul(&gate_proj.t()?)?;
+    let gate = linear_with_lora(x, gate_proj, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?;
     // SiLU activation: x * sigmoid(x)
     let gate = candle_nn::ops::silu(&gate)?;
     // x @ up_proj^T -> [batch, seq_len, intermediate_size]
-    let up = x.broadcast_matmul(&up_proj.t()?)?;
+    let up = linear_with_lora(x, up_proj, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?;
     // Element-wise multiply
     let hidden = (gate * up)?;
     // hidden @ down_proj^T -> [batch, seq_len, hidden_size]
-    let out = hidden.broadcast_matmul(&down_proj.t()?)?;
+    let out = linear_with_lora(&hidden, down_proj, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?;
     Ok(out)
 }
 
@@ -356,14 +362,18 @@ pub fn gqa_attention(
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
     full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
 
-    // Project to Q, K, V
-    // q_proj: [num_heads * head_dim, hidden_size], so x @ q_proj^T -> [batch, seq_len, num_heads * head_dim]
-    let q = x.broadcast_matmul(&attn_weights.q_proj.t()?)?;
-    let k = x.broadcast_matmul(&attn_weights.k_proj.t()?)?;
-    let v = x.broadcast_matmul(&attn_weights.v_proj.t()?)?;
+    // Project to Q, K, V (with optional LoRA delta)
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let q = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+    let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
+    let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
 
     // Reshape to [batch, seq_len, num_heads, head_dim]
     let q = q.reshape(((), seq_len, num_heads, head_dim))?;
@@ -388,7 +398,7 @@ pub fn gqa_attention(
         let k = k.contiguous()?;
         let v = v.contiguous()?;
         let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
-        let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+        let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
         return Ok(out);
     }
 
@@ -450,7 +460,7 @@ pub fn gqa_attention(
         .reshape(((), seq_len, num_heads * head_dim))?;
 
     // Output projection
-    let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+    let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
     Ok(out)
 }
 
@@ -474,14 +484,19 @@ pub fn gqa_attention_paged(
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let start_pos = positions[0] as usize;
 
-    // Project to Q, K, V
-    let q = x.broadcast_matmul(&attn_weights.q_proj.t()?)?;
-    let k = x.broadcast_matmul(&attn_weights.k_proj.t()?)?;
-    let v = x.broadcast_matmul(&attn_weights.v_proj.t()?)?;
+    // Project to Q, K, V (with optional LoRA delta)
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let q = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+    let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
+    let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
 
     let q = q.reshape(((), seq_len, num_heads, head_dim))?;
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
@@ -520,7 +535,7 @@ pub fn gqa_attention_paged(
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
-        let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+        let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
         return Ok(out);
     }
 
@@ -570,7 +585,7 @@ pub fn gqa_attention_paged(
             .contiguous()?
             .reshape((batch, 1, num_heads * head_dim))?;
 
-        let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+        let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
         return Ok(out);
     }
 
@@ -608,7 +623,7 @@ pub fn gqa_attention_paged(
         .contiguous()?
         .reshape(((), seq_len, num_heads * head_dim))?;
 
-    let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+    let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
     Ok(out)
 }
 
@@ -683,6 +698,7 @@ pub fn transformer_block(
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
     full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -706,6 +722,7 @@ pub fn transformer_block(
         rms_norm_eps,
         kv_cache,
         full_attn_layer_idx,
+        lora,
     )?;
 
     // Residual connection
@@ -720,6 +737,7 @@ pub fn transformer_block(
         &layer.mlp.gate_proj,
         &layer.mlp.up_proj,
         &layer.mlp.down_proj,
+        lora,
     )?;
 
     // Residual connection
@@ -743,6 +761,7 @@ pub fn transformer_block_paged(
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -767,6 +786,7 @@ pub fn transformer_block_paged(
         paged_cache,
         block_table,
         full_attn_layer_idx,
+        lora,
     )?;
 
     // Residual connection
@@ -781,6 +801,7 @@ pub fn transformer_block_paged(
         &layer.mlp.gate_proj,
         &layer.mlp.up_proj,
         &layer.mlp.down_proj,
+        lora,
     )?;
 
     // Residual connection
@@ -810,6 +831,7 @@ pub fn model_forward(
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     mut kv_cache: Option<&mut KvCache>,
+    lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
 
@@ -827,6 +849,10 @@ pub fn model_forward(
     // Track full-attention layer index (0-based counter of only full-attn layers)
     let mut full_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
+        // Get LoRA weights for this layer, if available
+        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
+            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
                 // Reborrow the cache for each layer call
@@ -842,6 +868,7 @@ pub fn model_forward(
                     config.rms_norm_eps,
                     cache_ref,
                     full_attn_idx,
+                    layer_lora,
                 )
                 .with_context(|| format!("transformer block {i} (full attention)"))?;
                 full_attn_idx += 1;
@@ -859,6 +886,7 @@ pub fn model_forward(
                     &layer.mlp.gate_proj,
                     &layer.mlp.up_proj,
                     &layer.mlp.down_proj,
+                    layer_lora,
                 )?;
                 hidden = (hidden + ffn_out)?;
                 // Suppress unused variable warning
@@ -892,6 +920,7 @@ pub fn model_forward_paged(
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
     start_pos: usize,
+    lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
 
@@ -907,6 +936,10 @@ pub fn model_forward_paged(
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
+        // Get LoRA weights for this layer, if available
+        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
+            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
                 hidden = transformer_block_paged(
@@ -921,6 +954,7 @@ pub fn model_forward_paged(
                     paged_cache,
                     block_table,
                     full_attn_idx,
+                    layer_lora,
                 )
                 .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
@@ -934,6 +968,7 @@ pub fn model_forward_paged(
                     &layer.mlp.gate_proj,
                     &layer.mlp.up_proj,
                     &layer.mlp.down_proj,
+                    layer_lora,
                 )?;
                 hidden = (hidden + ffn_out)?;
                 let _ = normed;
@@ -1106,7 +1141,7 @@ mod tests {
         let up = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
         let down = Tensor::randn(0.0_f32, 0.1, (hidden, intermediate), &device)?;
 
-        let result = swiglu_ffn(&x, &gate, &up, &down)?;
+        let result = swiglu_ffn(&x, &gate, &up, &down, None)?;
         assert_eq!(result.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1124,7 +1159,7 @@ mod tests {
         let up = Tensor::ones((intermediate, hidden), DType::F32, &device)?;
         let down = Tensor::ones((hidden, intermediate), DType::F32, &device)?;
 
-        let result = swiglu_ffn(&x, &gate, &up, &down)?;
+        let result = swiglu_ffn(&x, &gate, &up, &down, None)?;
         let vals = result.to_vec3::<f32>()?;
 
         for v in &vals[0][0] {
@@ -1168,7 +1203,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1189,7 +1224,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
@@ -1213,7 +1248,7 @@ mod tests {
         let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
-        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
+        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -1269,7 +1304,7 @@ mod tests {
             },
         };
 
-        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
+        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1302,7 +1337,7 @@ mod tests {
             },
         };
 
-        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
+        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
@@ -1340,7 +1375,7 @@ mod tests {
         };
 
         let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
-        let result = transformer_block(&x, &layer, &[0], 2, 1, 4, 10_000.0, 1e-6, None, 0);
+        let result = transformer_block(&x, &layer, &[0], 2, 1, 4, 10_000.0, 1e-6, None, 0, None);
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -1456,7 +1491,7 @@ mod tests {
         };
 
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
-        let logits = model_forward(&token_ids, &weights, &config, None)?;
+        let logits = model_forward(&token_ids, &weights, &config, None, None)?;
 
         // Expected shape: [1, seq_len, vocab_size]
         assert_eq!(logits.dims(), &[1, 4, vocab_size]);
@@ -1501,7 +1536,7 @@ mod tests {
             full_attention_interval: 1,
         };
 
-        let logits = model_forward(&[7], &weights, &config, None)?;
+        let logits = model_forward(&[7], &weights, &config, None, None)?;
         assert_eq!(logits.dims(), &[1, 1, vocab_size]);
 
         // Logits should be finite
@@ -1557,7 +1592,7 @@ mod tests {
         let tokens: Vec<u32> = vec![1, 5, 3, 10, 7];
 
         // Reference: full forward pass without KV cache
-        let logits_ref = model_forward(&tokens, &weights, &config, None)?;
+        let logits_ref = model_forward(&tokens, &weights, &config, None, None)?;
         // Extract last position logits: [1, 5, vocab] -> last position
         let last_ref = logits_ref.narrow(1, tokens.len() - 1, 1)?; // [1, 1, vocab]
         let last_ref_vals = last_ref.flatten_all()?.to_vec1::<f32>()?;
@@ -1568,12 +1603,12 @@ mod tests {
         )?;
 
         // Prefill
-        let _prefill_logits = model_forward(&tokens[..4], &weights, &config, Some(&mut kv_cache))?;
+        let _prefill_logits = model_forward(&tokens[..4], &weights, &config, Some(&mut kv_cache), None)?;
         kv_cache.advance(4);
         assert_eq!(kv_cache.seq_len(), 4);
 
         // Decode the 5th token
-        let decode_logits = model_forward(&tokens[4..], &weights, &config, Some(&mut kv_cache))?;
+        let decode_logits = model_forward(&tokens[4..], &weights, &config, Some(&mut kv_cache), None)?;
         kv_cache.advance(1);
         assert_eq!(kv_cache.seq_len(), 5);
 
@@ -1630,22 +1665,22 @@ mod tests {
         let tokens: Vec<u32> = vec![3, 7, 1];
 
         // Reference
-        let logits_ref = model_forward(&tokens, &weights, &config, None)?;
+        let logits_ref = model_forward(&tokens, &weights, &config, None, None)?;
         let last_ref = logits_ref.narrow(1, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
 
         // KV cache: process token by token
         let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 16, DType::F32, &device)?;
 
         // Token 0
-        let _ = model_forward(&[3], &weights, &config, Some(&mut kv_cache))?;
+        let _ = model_forward(&[3], &weights, &config, Some(&mut kv_cache), None)?;
         kv_cache.advance(1);
 
         // Token 1
-        let _ = model_forward(&[7], &weights, &config, Some(&mut kv_cache))?;
+        let _ = model_forward(&[7], &weights, &config, Some(&mut kv_cache), None)?;
         kv_cache.advance(1);
 
         // Token 2
-        let logits_cached = model_forward(&[1], &weights, &config, Some(&mut kv_cache))?;
+        let logits_cached = model_forward(&[1], &weights, &config, Some(&mut kv_cache), None)?;
         kv_cache.advance(1);
 
         let last_cached = logits_cached.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
