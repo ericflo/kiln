@@ -234,11 +234,12 @@ fn load_full_attention(
     let attn = format!("{prefix}self_attn.");
     let ctx = |name: &str| format!("layer {layer_idx} self_attn.{name}");
 
-    let q_dim = config.num_attention_heads * config.head_dim;
+    let q_proj_dim = config.full_attn_q_proj_dim();
+    let q_out_dim = config.num_attention_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
 
     let q_proj = extract_tensor(tensor_map, &format!("{attn}q_proj.weight"))?;
-    validate_shape(&q_proj, &[q_dim, config.hidden_size], &ctx("q_proj"))?;
+    validate_shape(&q_proj, &[q_proj_dim, config.hidden_size], &ctx("q_proj"))?;
 
     let k_proj = extract_tensor(tensor_map, &format!("{attn}k_proj.weight"))?;
     validate_shape(&k_proj, &[kv_dim, config.hidden_size], &ctx("k_proj"))?;
@@ -247,7 +248,7 @@ fn load_full_attention(
     validate_shape(&v_proj, &[kv_dim, config.hidden_size], &ctx("v_proj"))?;
 
     let o_proj = extract_tensor(tensor_map, &format!("{attn}o_proj.weight"))?;
-    validate_shape(&o_proj, &[config.hidden_size, q_dim], &ctx("o_proj"))?;
+    validate_shape(&o_proj, &[config.hidden_size, q_out_dim], &ctx("o_proj"))?;
 
     let q_norm = extract_tensor(tensor_map, &format!("{attn}q_norm.weight"))?;
     validate_shape(&q_norm, &[config.head_dim], &ctx("q_norm"))?;
@@ -275,44 +276,44 @@ fn load_linear_attention(
     let attn = format!("{prefix}linear_attn.");
     let ctx = |name: &str| format!("layer {layer_idx} linear_attn.{name}");
 
-    let qkv_dim = config.num_attention_heads * config.head_dim;
+    // Linear attention uses asymmetric Q/K/V dimensions from config.
+    let fused_qkv_dim = config.linear_qkv_dim(); // Q + K + V total
+    let v_dim = config.linear_v_dim();
+    let num_heads = config.linear_num_value_heads;
 
     let in_proj_qkv = extract_tensor(tensor_map, &format!("{attn}in_proj_qkv.weight"))?;
-    // Fused QKV: [3 * qkv_dim, hidden_size]
-    validate_shape(&in_proj_qkv, &[3 * qkv_dim, config.hidden_size], &ctx("in_proj_qkv"))?;
+    validate_shape(&in_proj_qkv, &[fused_qkv_dim, config.hidden_size], &ctx("in_proj_qkv"))?;
 
     let in_proj_z = extract_tensor(tensor_map, &format!("{attn}in_proj_z.weight"))?;
-    validate_shape(&in_proj_z, &[qkv_dim, config.hidden_size], &ctx("in_proj_z"))?;
+    validate_shape(&in_proj_z, &[v_dim, config.hidden_size], &ctx("in_proj_z"))?;
 
     let out_proj = extract_tensor(tensor_map, &format!("{attn}out_proj.weight"))?;
-    validate_shape(&out_proj, &[config.hidden_size, qkv_dim], &ctx("out_proj"))?;
+    validate_shape(&out_proj, &[config.hidden_size, v_dim], &ctx("out_proj"))?;
 
     let in_proj_a = extract_tensor(tensor_map, &format!("{attn}in_proj_a.weight"))?;
-    validate_shape(&in_proj_a, &[qkv_dim, config.hidden_size], &ctx("in_proj_a"))?;
+    validate_shape(&in_proj_a, &[num_heads, config.hidden_size], &ctx("in_proj_a"))?;
 
     let in_proj_b = extract_tensor(tensor_map, &format!("{attn}in_proj_b.weight"))?;
-    validate_shape(&in_proj_b, &[qkv_dim, config.hidden_size], &ctx("in_proj_b"))?;
+    validate_shape(&in_proj_b, &[num_heads, config.hidden_size], &ctx("in_proj_b"))?;
 
-    // conv1d shape is [channels, 1, kernel_size] — we validate channels but
-    // allow any kernel size since it's architecture-specific.
+    // conv1d shape is [channels, 1, kernel_size] — channels = fused QKV dim.
     let conv1d = extract_tensor(tensor_map, &format!("{attn}conv1d.weight"))?;
-    if conv1d.shape.len() != 3 || conv1d.shape[0] != qkv_dim || conv1d.shape[1] != 1 {
+    if conv1d.shape.len() != 3 || conv1d.shape[0] != fused_qkv_dim || conv1d.shape[1] != 1 {
         bail!(
-            "Shape mismatch for {}: expected [{qkv_dim}, 1, *], got {:?}",
+            "Shape mismatch for {}: expected [{fused_qkv_dim}, 1, *], got {:?}",
             ctx("conv1d"),
             conv1d.shape
         );
     }
 
     let norm = extract_tensor(tensor_map, &format!("{attn}norm.weight"))?;
-    // Group norm — may be [qkv_dim] or [num_heads * head_dim], same thing.
-    validate_shape(&norm, &[qkv_dim], &ctx("norm"))?;
+    // Group norm weight — per-head normalization.
+    validate_shape(&norm, &[config.linear_key_head_dim], &ctx("norm"))?;
 
     let a_log = extract_tensor(tensor_map, &format!("{attn}A_log"))?;
-    // A_log may be [qkv_dim] or [num_heads, head_dim] — validate total elements.
-    if a_log.numel() != qkv_dim {
+    if a_log.numel() != num_heads {
         bail!(
-            "Element count mismatch for {}: expected {qkv_dim}, got {} (shape {:?})",
+            "Element count mismatch for {}: expected {num_heads}, got {} (shape {:?})",
             ctx("A_log"),
             a_log.numel(),
             a_log.shape
@@ -320,9 +321,9 @@ fn load_linear_attention(
     }
 
     let dt_bias = extract_tensor(tensor_map, &format!("{attn}dt_bias"))?;
-    if dt_bias.numel() != qkv_dim {
+    if dt_bias.numel() != num_heads {
         bail!(
-            "Element count mismatch for {}: expected {qkv_dim}, got {} (shape {:?})",
+            "Element count mismatch for {}: expected {num_heads}, got {} (shape {:?})",
             ctx("dt_bias"),
             dt_bias.numel(),
             dt_bias.shape
@@ -453,15 +454,21 @@ mod tests {
 
     /// Build a list of tensor specs for a tiny test model.
     fn tiny_model_tensors(prefix: &str) -> Vec<(String, Vec<usize>, StDtype)> {
-        let hidden = 64;
-        let heads = 4;
-        let kv_heads = 2;
-        let head_dim = 16;
-        let intermediate = 128;
-        let vocab = 256;
-        let qkv_dim = heads * head_dim;
-        let kv_dim = kv_heads * head_dim;
-        let conv_size = 4;
+        let config = tiny_model_config();
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+        let vocab = config.vocab_size;
+
+        // Full attention dims
+        let q_proj_dim = config.full_attn_q_proj_dim();
+        let q_out_dim = config.num_attention_heads * config.head_dim;
+        let kv_dim = config.num_kv_heads * config.head_dim;
+
+        // Linear attention dims
+        let fused_qkv_dim = config.linear_qkv_dim();
+        let v_dim = config.linear_v_dim();
+        let num_linear_heads = config.linear_num_value_heads;
+        let conv_size = config.linear_conv_kernel_dim;
 
         let mut tensors: Vec<(String, Vec<usize>, StDtype)> = Vec::new();
         let bf16 = StDtype::BF16;
@@ -471,7 +478,7 @@ mod tests {
         tensors.push((format!("{prefix}norm.weight"), vec![hidden], bf16));
 
         // 4 layers: layers 0,1,2 are linear, layer 3 is full attention
-        for i in 0..4 {
+        for i in 0..config.num_layers {
             let lp = format!("{prefix}layers.{i}.");
             tensors.push((format!("{lp}input_layernorm.weight"), vec![hidden], bf16));
             tensors.push((format!("{lp}post_attention_layernorm.weight"), vec![hidden], bf16));
@@ -479,25 +486,25 @@ mod tests {
             tensors.push((format!("{lp}mlp.up_proj.weight"), vec![intermediate, hidden], bf16));
             tensors.push((format!("{lp}mlp.down_proj.weight"), vec![hidden, intermediate], bf16));
 
-            if (i + 1) % 4 == 0 {
+            if config.is_full_attention_layer(i) {
                 // Full attention layer
-                tensors.push((format!("{lp}self_attn.q_proj.weight"), vec![qkv_dim, hidden], bf16));
+                tensors.push((format!("{lp}self_attn.q_proj.weight"), vec![q_proj_dim, hidden], bf16));
                 tensors.push((format!("{lp}self_attn.k_proj.weight"), vec![kv_dim, hidden], bf16));
                 tensors.push((format!("{lp}self_attn.v_proj.weight"), vec![kv_dim, hidden], bf16));
-                tensors.push((format!("{lp}self_attn.o_proj.weight"), vec![hidden, qkv_dim], bf16));
-                tensors.push((format!("{lp}self_attn.q_norm.weight"), vec![head_dim], bf16));
-                tensors.push((format!("{lp}self_attn.k_norm.weight"), vec![head_dim], bf16));
+                tensors.push((format!("{lp}self_attn.o_proj.weight"), vec![hidden, q_out_dim], bf16));
+                tensors.push((format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim], bf16));
+                tensors.push((format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim], bf16));
             } else {
                 // Linear attention layer
-                tensors.push((format!("{lp}linear_attn.in_proj_qkv.weight"), vec![3 * qkv_dim, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.in_proj_z.weight"), vec![qkv_dim, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.out_proj.weight"), vec![hidden, qkv_dim], bf16));
-                tensors.push((format!("{lp}linear_attn.in_proj_a.weight"), vec![qkv_dim, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.in_proj_b.weight"), vec![qkv_dim, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.conv1d.weight"), vec![qkv_dim, 1, conv_size], bf16));
-                tensors.push((format!("{lp}linear_attn.norm.weight"), vec![qkv_dim], bf16));
-                tensors.push((format!("{lp}linear_attn.A_log"), vec![qkv_dim], bf16));
-                tensors.push((format!("{lp}linear_attn.dt_bias"), vec![qkv_dim], bf16));
+                tensors.push((format!("{lp}linear_attn.in_proj_qkv.weight"), vec![fused_qkv_dim, hidden], bf16));
+                tensors.push((format!("{lp}linear_attn.in_proj_z.weight"), vec![v_dim, hidden], bf16));
+                tensors.push((format!("{lp}linear_attn.out_proj.weight"), vec![hidden, v_dim], bf16));
+                tensors.push((format!("{lp}linear_attn.in_proj_a.weight"), vec![num_linear_heads, hidden], bf16));
+                tensors.push((format!("{lp}linear_attn.in_proj_b.weight"), vec![num_linear_heads, hidden], bf16));
+                tensors.push((format!("{lp}linear_attn.conv1d.weight"), vec![fused_qkv_dim, 1, conv_size], bf16));
+                tensors.push((format!("{lp}linear_attn.norm.weight"), vec![config.linear_key_head_dim], bf16));
+                tensors.push((format!("{lp}linear_attn.A_log"), vec![num_linear_heads], bf16));
+                tensors.push((format!("{lp}linear_attn.dt_bias"), vec![num_linear_heads], bf16));
             }
         }
 
@@ -519,6 +526,12 @@ mod tests {
             dtype: kiln_core::config::DType::BF16,
             num_full_attention_layers: 1,
             full_attention_interval: 4,
+            attn_output_gate: true,
+            linear_num_key_heads: 4,
+            linear_key_head_dim: 8,
+            linear_num_value_heads: 8,
+            linear_value_head_dim: 8,
+            linear_conv_kernel_dim: 4,
         }
     }
 

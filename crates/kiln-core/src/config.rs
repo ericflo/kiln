@@ -25,6 +25,35 @@ pub struct ModelConfig {
     /// Full attention is applied every N layers (the rest are linear attention).
     /// For Qwen3.5-4B: every 4th layer (layers 3, 7, 11, 15, 19, 23, 27, 31).
     pub full_attention_interval: usize,
+
+    /// Whether full-attention layers use an output gate on Q projections.
+    /// When true, q_proj output is 2x normal (Q + gate), and the output is
+    /// multiplied by sigmoid(gate) before the o_proj.
+    /// For Qwen3.5-4B: true.
+    pub attn_output_gate: bool,
+
+    // --- Linear attention (Gated DeltaNet) dimensions ---
+    // These differ from full attention heads/dims in the hybrid architecture.
+
+    /// Number of key heads in linear attention layers.
+    /// For Qwen3.5-4B: 16.
+    pub linear_num_key_heads: usize,
+
+    /// Dimension per key head in linear attention layers.
+    /// For Qwen3.5-4B: 128.
+    pub linear_key_head_dim: usize,
+
+    /// Number of value heads in linear attention layers.
+    /// For Qwen3.5-4B: 32.
+    pub linear_num_value_heads: usize,
+
+    /// Dimension per value head in linear attention layers.
+    /// For Qwen3.5-4B: 128.
+    pub linear_value_head_dim: usize,
+
+    /// Conv1d kernel size for linear attention layers.
+    /// For Qwen3.5-4B: 4.
+    pub linear_conv_kernel_dim: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +87,12 @@ impl ModelConfig {
             dtype: DType::BF16,
             num_full_attention_layers: 8,
             full_attention_interval: 4,
+            attn_output_gate: true,
+            linear_num_key_heads: 16,
+            linear_key_head_dim: 128,
+            linear_num_value_heads: 32,
+            linear_value_head_dim: 128,
+            linear_conv_kernel_dim: 4,
         }
     }
 
@@ -87,6 +122,27 @@ impl ModelConfig {
     pub fn is_full_attention_layer(&self, layer_idx: usize) -> bool {
         (layer_idx + 1) % self.full_attention_interval == 0
     }
+
+    /// Full attention Q projection output dim (includes gate when attn_output_gate is true).
+    pub fn full_attn_q_proj_dim(&self) -> usize {
+        let base = self.num_attention_heads * self.head_dim;
+        if self.attn_output_gate { base * 2 } else { base }
+    }
+
+    /// Total Q+K dimension for linear attention (Q and K share the same head count/dim).
+    pub fn linear_qk_dim(&self) -> usize {
+        self.linear_num_key_heads * self.linear_key_head_dim
+    }
+
+    /// Total V dimension for linear attention.
+    pub fn linear_v_dim(&self) -> usize {
+        self.linear_num_value_heads * self.linear_value_head_dim
+    }
+
+    /// Total fused QKV dimension for linear attention: Q + K + V.
+    pub fn linear_qkv_dim(&self) -> usize {
+        self.linear_qk_dim() + self.linear_qk_dim() + self.linear_v_dim()
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +158,19 @@ mod tests {
         // Compare: a pure 32-layer transformer would be 4096 * 32 = 131072 (~128 KB)
         assert_eq!(config.kv_cache_bytes_per_token(), 32768);
         assert_eq!(config.gqa_group_size(), 4);
+    }
+
+    #[test]
+    fn qwen3_5_4b_linear_attention_dims() {
+        let config = ModelConfig::qwen3_5_4b();
+        // Q and K: 16 heads * 128 dim = 2048 each
+        assert_eq!(config.linear_qk_dim(), 2048);
+        // V: 32 heads * 128 dim = 4096
+        assert_eq!(config.linear_v_dim(), 4096);
+        // Fused QKV: 2048 + 2048 + 4096 = 8192
+        assert_eq!(config.linear_qkv_dim(), 8192);
+        // Full attention Q proj with gate: 16 * 256 * 2 = 8192
+        assert_eq!(config.full_attn_q_proj_dim(), 8192);
     }
 
     #[test]

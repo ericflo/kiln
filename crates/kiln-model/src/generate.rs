@@ -744,6 +744,12 @@ mod tests {
             dtype: kiln_core::config::DType::FP32,
             num_full_attention_layers: 1,
             full_attention_interval: 1, // every layer is full attention
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
         }
     }
 

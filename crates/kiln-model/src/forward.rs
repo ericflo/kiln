@@ -362,21 +362,39 @@ pub fn gqa_attention(
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
     full_attn_layer_idx: usize,
+    attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
 
     // Project to Q, K, V (with optional LoRA delta)
+    // When attn_output_gate is true, q_proj outputs [Q, gate] fused:
+    //   q_proj: [num_heads * head_dim * 2, hidden_size]
+    //   Split into Q [num_heads, head_dim] and gate [num_heads, head_dim]
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let q = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+    let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
     let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
     let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
 
-    // Reshape to [batch, seq_len, num_heads, head_dim]
-    let q = q.reshape(((), seq_len, num_heads, head_dim))?;
+    // Split Q and gate if output gate is enabled
+    let (q, gate) = if attn_output_gate {
+        // q_raw: [batch, seq_len, num_heads * head_dim * 2]
+        // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
+        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q = q_raw.narrow(3, 0, head_dim)?;
+        let gate = q_raw.narrow(3, head_dim, head_dim)?;
+        // gate needs to be [batch, seq_len, num_heads * head_dim] for later
+        let gate = gate.contiguous()?.reshape(((), seq_len, num_heads * head_dim))?;
+        (q.contiguous()?, Some(gate))
+    } else {
+        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+        (q, None)
+    };
+
+    // Reshape K, V to [batch, seq_len, num_heads, head_dim]
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
     let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
 
@@ -398,6 +416,13 @@ pub fn gqa_attention(
         let k = k.contiguous()?;
         let v = v.contiguous()?;
         let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
+        // Apply output gate: attn_output * sigmoid(gate)
+        let attn_output = if let Some(ref gate) = gate {
+            let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+            (attn_output * sigmoid_gate)?
+        } else {
+            attn_output
+        };
         let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
         return Ok(out);
     }
@@ -459,6 +484,14 @@ pub fn gqa_attention(
         .contiguous()?
         .reshape(((), seq_len, num_heads * head_dim))?;
 
+    // Apply output gate: attn_output * sigmoid(gate)
+    let attn_output = if let Some(ref gate) = gate {
+        let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+        (attn_output * sigmoid_gate)?
+    } else {
+        attn_output
+    };
+
     // Output projection
     let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
     Ok(out)
@@ -484,21 +517,32 @@ pub fn gqa_attention_paged(
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
+    attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let start_pos = positions[0] as usize;
 
-    // Project to Q, K, V (with optional LoRA delta)
+    // Project to Q, K, V (with optional LoRA delta and output gate split)
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let q = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+    let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
     let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
     let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
 
-    let q = q.reshape(((), seq_len, num_heads, head_dim))?;
+    let (q, gate) = if attn_output_gate {
+        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q = q_raw.narrow(3, 0, head_dim)?;
+        let gate = q_raw.narrow(3, head_dim, head_dim)?;
+        let gate = gate.contiguous()?.reshape(((), seq_len, num_heads * head_dim))?;
+        (q.contiguous()?, Some(gate))
+    } else {
+        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+        (q, None)
+    };
+
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
     let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
 
@@ -535,6 +579,13 @@ pub fn gqa_attention_paged(
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
+        // Apply output gate: attn_output * sigmoid(gate)
+        let attn_output = if let Some(ref gate) = gate {
+            let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+            (attn_output * sigmoid_gate)?
+        } else {
+            attn_output
+        };
         let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
         return Ok(out);
     }
@@ -585,6 +636,12 @@ pub fn gqa_attention_paged(
             .contiguous()?
             .reshape((batch, 1, num_heads * head_dim))?;
 
+        let attn_output = if let Some(ref gate) = gate {
+            let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+            (attn_output * sigmoid_gate)?
+        } else {
+            attn_output
+        };
         let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
         return Ok(out);
     }
@@ -622,6 +679,13 @@ pub fn gqa_attention_paged(
         .transpose(1, 2)?
         .contiguous()?
         .reshape(((), seq_len, num_heads * head_dim))?;
+
+    let attn_output = if let Some(ref gate) = gate {
+        let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+        (attn_output * sigmoid_gate)?
+    } else {
+        attn_output
+    };
 
     let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
     Ok(out)
@@ -690,6 +754,7 @@ fn apply_causal_mask_with_offset(
 pub fn transformer_block(
     x: &Tensor,
     layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
     positions: &[u32],
     num_heads: usize,
     num_kv_heads: usize,
@@ -722,6 +787,7 @@ pub fn transformer_block(
         rms_norm_eps,
         kv_cache,
         full_attn_layer_idx,
+        config.attn_output_gate,
         lora,
     )?;
 
@@ -752,6 +818,7 @@ pub fn transformer_block(
 pub fn transformer_block_paged(
     x: &Tensor,
     layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
     positions: &[u32],
     num_heads: usize,
     num_kv_heads: usize,
@@ -786,6 +853,7 @@ pub fn transformer_block_paged(
         paged_cache,
         block_table,
         full_attn_layer_idx,
+        config.attn_output_gate,
         lora,
     )?;
 
@@ -860,6 +928,7 @@ pub fn model_forward(
                 hidden = transformer_block(
                     &hidden,
                     layer,
+                    config,
                     &positions,
                     config.num_attention_heads,
                     config.num_kv_heads,
@@ -945,6 +1014,7 @@ pub fn model_forward_paged(
                 hidden = transformer_block_paged(
                     &hidden,
                     layer,
+                    config,
                     &positions,
                     config.num_attention_heads,
                     config.num_kv_heads,
@@ -1172,6 +1242,31 @@ mod tests {
         Ok(())
     }
 
+    /// Create a minimal config for tests (no output gate, simple dims).
+    fn make_test_config(num_heads: usize, num_kv_heads: usize, head_dim: usize, hidden: usize) -> kiln_core::config::ModelConfig {
+        kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 4,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: hidden * 2,
+            vocab_size: 256,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: false,
+            linear_num_key_heads: num_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+        }
+    }
+
     fn make_test_attn_weights(
         num_heads: usize,
         num_kv_heads: usize,
@@ -1203,7 +1298,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1224,7 +1319,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
@@ -1248,7 +1343,7 @@ mod tests {
         let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
-        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -1304,7 +1399,8 @@ mod tests {
             },
         };
 
-        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
+        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1337,7 +1433,8 @@ mod tests {
             },
         };
 
-        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
+        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
@@ -1375,7 +1472,8 @@ mod tests {
         };
 
         let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
-        let result = transformer_block(&x, &layer, &[0], 2, 1, 4, 10_000.0, 1e-6, None, 0, None);
+        let cfg = make_test_config(2, 1, 4, 8);
+        let result = transformer_block(&x, &layer, &cfg, &[0], 2, 1, 4, 10_000.0, 1e-6, None, 0, None);
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -1488,6 +1586,12 @@ mod tests {
             dtype: kiln_core::config::DType::FP32,
             num_full_attention_layers: num_layers,
             full_attention_interval: 1, // every layer is full attention
+            attn_output_gate: false,
+            linear_num_key_heads: num_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
         };
 
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
@@ -1534,6 +1638,12 @@ mod tests {
             dtype: kiln_core::config::DType::FP32,
             num_full_attention_layers: 1,
             full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
         };
 
         let logits = model_forward(&[7], &weights, &config, None, None)?;
@@ -1587,6 +1697,12 @@ mod tests {
             dtype: kiln_core::config::DType::FP32,
             num_full_attention_layers: num_layers,
             full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
         };
 
         let tokens: Vec<u32> = vec![1, 5, 3, 10, 7];
@@ -1660,6 +1776,12 @@ mod tests {
             dtype: kiln_core::config::DType::FP32,
             num_full_attention_layers: 1,
             full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
         };
 
         let tokens: Vec<u32> = vec![3, 7, 1];

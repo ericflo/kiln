@@ -52,8 +52,8 @@ impl AppState {
 
     /// Create an AppState with a real ModelRunner backend and paged KV cache.
     ///
-    /// Uses `block_size=16` by default. The number of blocks is derived from
-    /// `max_position_embeddings / block_size` with a minimum of 256.
+    /// Uses `block_size=16` by default. The number of blocks can be overridden
+    /// with `KILN_NUM_BLOCKS`. Otherwise derived from `max_position_embeddings / block_size`.
     pub fn new_real(
         model_config: ModelConfig,
         runner: ModelRunner,
@@ -61,7 +61,18 @@ impl AppState {
         device: candle_core::Device,
     ) -> Self {
         let block_size = 16;
-        let num_blocks = (model_config.max_position_embeddings / block_size).max(256);
+        let num_blocks = std::env::var("KILN_NUM_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| (model_config.max_position_embeddings / block_size).max(256));
+
+        let kv_dtype = if candle_core::utils::cuda_is_available() {
+            DType::BF16
+        } else {
+            DType::F32
+        };
+
+        tracing::info!(num_blocks, block_size, ?kv_dtype, "allocating paged KV cache");
 
         let block_manager = BlockManager::new(num_blocks, block_size);
         let paged_cache = PagedKvCache::new(
@@ -70,7 +81,7 @@ impl AppState {
             block_size,
             model_config.num_kv_heads,
             model_config.head_dim,
-            DType::F32,
+            kv_dtype,
             &device,
         )
         .expect("failed to create PagedKvCache");
