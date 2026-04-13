@@ -13,7 +13,7 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
-use crate::forward::{model_forward, model_forward_paged, GpuWeights};
+use crate::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
@@ -161,6 +161,12 @@ impl ModelRunner {
         )
     }
 
+    /// Create a new linear attention state for GDN layers.
+    fn new_linear_state(&self) -> Result<LinearAttentionState> {
+        let device = self.weights.embed_tokens.device();
+        LinearAttentionState::new(&self.config, device)
+    }
+
     /// Generate text token-by-token, sending each token to a channel as it is produced.
     ///
     /// Returns an `mpsc::Receiver<StreamEvent>` that yields `Token` events
@@ -183,9 +189,10 @@ impl ModelRunner {
 
         let max_total = prompt_tokens.len() + params.max_tokens;
         let mut kv_cache = self.new_kv_cache(max_total)?;
+        let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(&prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
+        let logits = model_forward(&prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
             .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
@@ -259,7 +266,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token
-            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
+            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
                 .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
@@ -298,9 +305,10 @@ impl ModelRunner {
 
         let max_total = prompt_tokens.len() + params.max_tokens;
         let mut kv_cache = self.new_kv_cache(max_total)?;
+        let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
+        let logits = model_forward(prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
             .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
@@ -358,7 +366,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
-            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), self.active_lora.as_ref())
+            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
                 .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
@@ -465,6 +473,8 @@ impl ModelRunner {
         paged_cache: &mut PagedKvCache,
         block_table: &BlockTable,
     ) -> Result<GenerationOutput> {
+        let mut linear_state = self.new_linear_state()?;
+
         // Prefill: forward pass on all prompt tokens
         let logits = model_forward_paged(
             prompt_tokens,
@@ -473,6 +483,7 @@ impl ModelRunner {
             paged_cache,
             block_table,
             0,
+            Some(&mut linear_state),
             self.active_lora.as_ref(),
         )
         .context("prefill forward pass (paged) failed")?;
@@ -538,6 +549,7 @@ impl ModelRunner {
                 paged_cache,
                 block_table,
                 seq_len,
+                Some(&mut linear_state),
                 self.active_lora.as_ref(),
             )
             .context("decode forward pass (paged) failed")?;
@@ -596,6 +608,7 @@ impl ModelRunner {
         }
 
         let (tx, rx) = mpsc::channel();
+        let mut linear_state = self.new_linear_state()?;
 
         // Prefill
         let logits = match model_forward_paged(
@@ -605,6 +618,7 @@ impl ModelRunner {
             paged_cache,
             &block_table,
             0,
+            Some(&mut linear_state),
             self.active_lora.as_ref(),
         ) {
             Ok(l) => l,
@@ -689,6 +703,7 @@ impl ModelRunner {
                 paged_cache,
                 &block_table,
                 seq_len,
+                Some(&mut linear_state),
                 self.active_lora.as_ref(),
             ) {
                 Ok(l) => l,

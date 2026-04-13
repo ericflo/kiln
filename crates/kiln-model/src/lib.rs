@@ -10,6 +10,7 @@ pub mod sampling;
 pub mod weights;
 
 pub use engine::Engine;
+pub use forward::LinearAttentionState;
 pub use generate::{FinishReason, GenerationOutput, ModelRunner, StreamDone, StreamEvent, StreamToken};
 pub use kv_cache::KvCache;
 pub use loader::load_model;

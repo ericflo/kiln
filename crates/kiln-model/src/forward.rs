@@ -116,6 +116,45 @@ pub struct GpuFfnWeights {
     pub down_proj: Tensor,
 }
 
+/// State for Gated DeltaNet linear attention layers.
+///
+/// Each linear attention layer maintains:
+/// - A recurrent state matrix S of shape `[batch, num_value_heads, key_head_dim, value_head_dim]`
+/// - A conv1d sliding window buffer of shape `[batch, conv_dim, kernel_size - 1]`
+///
+/// This state is O(1) in sequence length — it does not grow with the number of tokens processed.
+pub struct LinearAttentionState {
+    /// Per-layer recurrent state S. Length = number of linear attention layers.
+    pub recurrent_states: Vec<Tensor>,
+    /// Per-layer conv1d sliding window buffers. Length = number of linear attention layers.
+    pub conv_states: Vec<Tensor>,
+}
+
+impl LinearAttentionState {
+    /// Create fresh zero-initialized state for all linear attention layers.
+    pub fn new(config: &kiln_core::config::ModelConfig, device: &Device) -> Result<Self> {
+        let num_linear_layers = config.num_layers - config.num_full_attention_layers;
+        let nv = config.linear_num_value_heads;
+        let dk = config.linear_key_head_dim;
+        let dv = config.linear_value_head_dim;
+        let conv_dim = config.linear_qkv_dim();
+        let k_minus_1 = config.linear_conv_kernel_dim.saturating_sub(1);
+
+        let mut recurrent_states = Vec::with_capacity(num_linear_layers);
+        let mut conv_states = Vec::with_capacity(num_linear_layers);
+
+        for _ in 0..num_linear_layers {
+            recurrent_states.push(Tensor::zeros((1, nv, dk, dv), DType::F32, device)?);
+            conv_states.push(Tensor::zeros((1, conv_dim, k_minus_1), DType::F32, device)?);
+        }
+
+        Ok(Self {
+            recurrent_states,
+            conv_states,
+        })
+    }
+}
+
 /// Convert a `WeightTensor` (raw bytes + shape + dtype) to a candle `Tensor` on `device`.
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let dtype = match w.dtype {
@@ -331,6 +370,288 @@ pub fn swiglu_ffn(
     let hidden = (gate * up)?;
     // hidden @ down_proj^T -> [batch, seq_len, hidden_size]
     let out = linear_with_lora(&hidden, down_proj, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Gated DeltaNet (GDN) linear attention primitives
+// ---------------------------------------------------------------------------
+
+/// L2 normalize the last dimension: x / sqrt(sum(x^2) + eps).
+/// Returns result in F32 regardless of input dtype.
+fn l2_normalize(x: &Tensor) -> Result<Tensor> {
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let sq_sum = x_f32.sqr()?.sum_keepdim(candle_core::D::Minus1)?;
+    let norm = (sq_sum + 1e-6)?.sqrt()?;
+    let normalized = x_f32.broadcast_div(&norm)?;
+    Ok(normalized)
+}
+
+/// softplus(x) = ln(1 + exp(x)).
+fn softplus(x: &Tensor) -> Result<Tensor> {
+    // Numerically stable: for large x, softplus ≈ x; for small x, ln(1+exp(x)).
+    // Use the naive form here — candle F32 handles the range fine.
+    let exp_x = x.exp()?;
+    let one_plus = (exp_x + 1.0)?;
+    Ok(one_plus.log()?)
+}
+
+/// Gated RMSNorm: rms_norm(x, weight) * silu(z).
+///
+/// Applied per-group on the last dimension. Returns F32.
+///
+/// `x`: [..., dim] — attention output
+/// `z`: [..., dim] — output gate (from in_proj_z)
+/// `weight`: [dim] — learnable scale
+fn gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let z_f32 = z.to_dtype(DType::F32)?;
+    let w_f32 = weight.to_dtype(DType::F32)?;
+
+    // RMS norm on last dimension
+    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+    let normed = x_f32.broadcast_mul(&rms_inv)?;
+    let normed = normed.broadcast_mul(&w_f32)?;
+
+    // Output gate: silu(z) = z * sigmoid(z)
+    let gate = candle_nn::ops::silu(&z_f32)?;
+    let out = (normed * gate)?;
+    Ok(out)
+}
+
+/// Causal depthwise conv1d for prefill (seq_len > 1).
+///
+/// `x`: [batch, channels, seq_len]
+/// `weight`: [channels, 1, kernel_size]
+/// `conv_state`: [batch, channels, kernel_size - 1] — updated to last K-1 inputs
+fn causal_conv1d_prefill(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &mut Tensor,
+    kernel_size: usize,
+) -> Result<Tensor> {
+    let (_batch, channels, seq_len) = x.dims3()?;
+    let _device = x.device();
+    let x_f32 = x.to_dtype(DType::F32)?;
+    // Squeeze [channels, 1, kernel_size] -> [channels, kernel_size]
+    let w_f32 = weight.to_dtype(DType::F32)?.reshape((channels, kernel_size))?;
+    let k_minus_1 = kernel_size - 1;
+
+    // Left-pad with conv_state (previous K-1 inputs, or zeros for fresh state)
+    let x_padded = Tensor::cat(&[&conv_state.to_dtype(DType::F32)?, &x_f32], 2)?;
+
+    // Depthwise conv: output[t] = sum_{j=0}^{K-1} weight[j] * x_padded[t+j]
+    let mut output = Tensor::zeros_like(&x_f32)?;
+    for j in 0..kernel_size {
+        let x_slice = x_padded.narrow(2, j, seq_len)?;
+        let w_j = w_f32.narrow(1, j, 1)?.unsqueeze(0)?; // [1, channels, 1]
+        output = (output + x_slice.broadcast_mul(&w_j)?)?;
+    }
+
+    // Update conv_state to the last K-1 input positions
+    if seq_len >= k_minus_1 {
+        *conv_state = x_f32
+            .narrow(2, seq_len - k_minus_1, k_minus_1)?
+            .contiguous()?;
+    } else {
+        // Fewer new tokens than buffer size: shift old state and append new
+        let keep = k_minus_1 - seq_len;
+        let old_part = conv_state
+            .to_dtype(DType::F32)?
+            .narrow(2, seq_len, keep)?;
+        *conv_state = Tensor::cat(&[&old_part, &x_f32], 2)?.contiguous()?;
+    }
+
+    Ok(output)
+}
+
+/// Causal depthwise conv1d for decode (seq_len == 1).
+///
+/// `x`: [batch, channels, 1]
+/// `weight`: [channels, 1, kernel_size]
+/// `conv_state`: [batch, channels, kernel_size - 1] — updated
+fn causal_conv1d_decode(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &mut Tensor,
+    kernel_size: usize,
+) -> Result<Tensor> {
+    let (_batch, channels, _one) = x.dims3()?;
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let w_f32 = weight.to_dtype(DType::F32)?.reshape((channels, kernel_size))?;
+
+    // Full window = [conv_state | x] -> [batch, channels, kernel_size]
+    let window = Tensor::cat(&[&conv_state.to_dtype(DType::F32)?, &x_f32], 2)?;
+
+    // Dot product per channel: sum over kernel dimension
+    let w_expanded = w_f32.unsqueeze(0)?; // [1, channels, kernel_size]
+    let output = window.broadcast_mul(&w_expanded)?.sum(2)?; // [batch, channels]
+    let output = output.unsqueeze(2)?; // [batch, channels, 1]
+
+    // Update conv_state: drop oldest, append newest
+    *conv_state = window.narrow(2, 1, kernel_size - 1)?.contiguous()?;
+
+    Ok(output)
+}
+
+/// Gated DeltaNet (GDN) linear attention forward pass.
+///
+/// Implements the recurrent linear attention mechanism used by 24/32 layers in Qwen3.5-4B.
+/// Uses data-dependent gating (alpha/beta) and a delta rule update for the recurrent state.
+///
+/// `x`: [batch, seq_len, hidden_size]
+/// `weights`: linear attention projection weights
+/// `config`: model configuration
+/// `recurrent_state`: [batch, nv, dk, dv] — mutable recurrent state, updated in place
+/// `conv_state`: [batch, conv_dim, kernel_size-1] — mutable conv buffer, updated in place
+///
+/// Returns: [batch, seq_len, hidden_size]
+pub fn gated_deltanet_forward(
+    x: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    config: &kiln_core::config::ModelConfig,
+    recurrent_state: &mut Tensor,
+    conv_state: &mut Tensor,
+) -> Result<Tensor> {
+    let (batch, seq_len, _hidden) = x.dims3()?;
+    let input_dtype = x.dtype();
+    let nk = config.linear_num_key_heads;
+    let dk = config.linear_key_head_dim;
+    let nv = config.linear_num_value_heads;
+    let dv = config.linear_value_head_dim;
+    let qk_dim = config.linear_qk_dim();
+    let v_dim = config.linear_v_dim();
+    let kernel_size = config.linear_conv_kernel_dim;
+    let gqa_ratio = nv / nk;
+
+    // --- Step 1: Input projections ---
+    let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv.t()?)?; // [B, T, qkv_dim]
+    let z = x.broadcast_matmul(&weights.in_proj_z.t()?)?;           // [B, T, v_dim]
+    let a = x.broadcast_matmul(&weights.in_proj_a.t()?)?;           // [B, T, nv]
+    let b = x.broadcast_matmul(&weights.in_proj_b.t()?)?;           // [B, T, nv]
+
+    // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
+    // Transpose to [B, channels, T] for conv
+    let mixed_qkv = mixed_qkv.transpose(1, 2)?.contiguous()?;
+    let mixed_qkv = if seq_len > 1 {
+        causal_conv1d_prefill(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+    } else {
+        causal_conv1d_decode(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+    };
+    // SiLU activation (work in F32 for stability)
+    let mixed_qkv = candle_nn::ops::silu(&mixed_qkv.to_dtype(DType::F32)?)?;
+    // Transpose back to [B, T, qkv_dim]
+    let mixed_qkv = mixed_qkv.transpose(1, 2)?;
+
+    // --- Step 3: Split into Q, K, V and reshape to heads ---
+    let q = mixed_qkv
+        .narrow(2, 0, qk_dim)?
+        .reshape((batch, seq_len, nk, dk))?;
+    let k = mixed_qkv
+        .narrow(2, qk_dim, qk_dim)?
+        .reshape((batch, seq_len, nk, dk))?;
+    let v = mixed_qkv
+        .narrow(2, 2 * qk_dim, v_dim)?
+        .reshape((batch, seq_len, nv, dv))?;
+    let z = z.reshape((batch, seq_len, nv, dv))?;
+
+    // --- Step 4: GQA head repeat (nk → nv) ---
+    let (q, k) = if gqa_ratio > 1 {
+        let q = q
+            .unsqueeze(3)?
+            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+            .contiguous()?
+            .reshape((batch, seq_len, nv, dk))?;
+        let k = k
+            .unsqueeze(3)?
+            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+            .contiguous()?
+            .reshape((batch, seq_len, nv, dk))?;
+        (q, k)
+    } else {
+        (q.contiguous()?, k.contiguous()?)
+    };
+
+    // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
+    let q = l2_normalize(&q)?; // F32
+    let k = l2_normalize(&k)?; // F32
+    let scale = 1.0 / (dk as f64).sqrt();
+    let q = (q * scale)?;
+
+    // --- Step 6: Compute gates ---
+    // beta = sigmoid(b) — write gate, in (0, 1)
+    let beta = candle_nn::ops::sigmoid(&b)?.to_dtype(DType::F32)?; // [B, T, nv]
+
+    // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space)
+    let a_f32 = a.to_dtype(DType::F32)?;
+    let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
+    let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
+    let g = {
+        let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
+        let sp = softplus(&a_biased)?;
+        let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
+        sp.broadcast_mul(&neg_decay)?
+    }; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
+
+    // --- Step 7: Sequential recurrence (all F32) ---
+    let v = v.to_dtype(DType::F32)?;
+
+    // Transpose to [B, nv, T, dim] for per-head processing
+    let q = q.transpose(1, 2)?; // [B, nv, T, dk]
+    let k = k.transpose(1, 2)?; // [B, nv, T, dk]
+    let v = v.transpose(1, 2)?; // [B, nv, T, dv]
+    let beta = beta.transpose(1, 2)?; // [B, nv, T]
+    let g = g.transpose(1, 2)?; // [B, nv, T]
+
+    let mut outputs: Vec<Tensor> = Vec::with_capacity(seq_len);
+
+    for t in 0..seq_len {
+        let q_t = q.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dk]
+        let k_t = k.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dk]
+        let v_t = v.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dv]
+        let beta_t = beta.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
+        let g_t = g.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
+
+        // 1. Decay: S *= exp(g_t)
+        let g_exp = g_t.exp()?.unsqueeze(2)?.unsqueeze(3)?; // [B, nv, 1, 1]
+        *recurrent_state = recurrent_state.broadcast_mul(&g_exp)?;
+
+        // 2. Read from memory: kv_mem = einsum('bhkv,bhk->bhv', S, k_t)
+        let k_expanded = k_t.unsqueeze(3)?; // [B, nv, dk, 1]
+        let kv_mem = recurrent_state.broadcast_mul(&k_expanded)?.sum(2)?; // [B, nv, dv]
+
+        // 3. Delta rule: delta = (v_t - kv_mem) * beta_t
+        let delta: Tensor = (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
+
+        // 4. Update: S += outer(k_t, delta)
+        let outer = k_t
+            .unsqueeze(3)?
+            .broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
+        *recurrent_state = (recurrent_state.clone() + outer)?;
+
+        // 5. Output: out_t = einsum('bhkv,bhk->bhv', S, q_t)
+        let q_expanded = q_t.unsqueeze(3)?; // [B, nv, dk, 1]
+        let out_t = recurrent_state.broadcast_mul(&q_expanded)?.sum(2)?; // [B, nv, dv]
+        outputs.push(out_t.unsqueeze(2)?); // [B, nv, 1, dv]
+    }
+
+    // Collect: [B, nv, T, dv]
+    let attn_out = Tensor::cat(&outputs, 2)?;
+    // Transpose to [B, T, nv, dv]
+    let attn_out = attn_out.transpose(1, 2)?;
+
+    // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
+    let attn_out = gated_rms_norm(&attn_out, &z, &weights.norm, config.rms_norm_eps)?;
+    // Reshape to [B, T, v_dim] and cast back to input dtype
+    let attn_out = attn_out
+        .reshape((batch, seq_len, v_dim))?
+        .to_dtype(input_dtype)?;
+
+    // --- Step 9: Output projection ---
+    // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
+    // it should be added to GpuLinearAttentionWeights and applied after conv1d.
+    let out = attn_out.broadcast_matmul(&weights.out_proj.t()?)?;
     Ok(out)
 }
 
@@ -899,6 +1220,7 @@ pub fn model_forward(
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     mut kv_cache: Option<&mut KvCache>,
+    mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
@@ -916,6 +1238,7 @@ pub fn model_forward(
     // 2. Loop through all transformer layers
     // Track full-attention layer index (0-based counter of only full-attn layers)
     let mut full_attn_idx: usize = 0;
+    let mut linear_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
@@ -942,13 +1265,22 @@ pub fn model_forward(
                 .with_context(|| format!("transformer block {i} (full attention)"))?;
                 full_attn_idx += 1;
             }
-            GpuAttentionWeights::Linear(_) => {
-                // TODO: Implement Gated DeltaNet linear attention forward pass.
-                // For now, skip with identity (pass-through) — the layer's FFN still runs
-                // so we at least apply the MLP transformation.
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
+                // Pre-attention RMSNorm
                 let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
-                // Skip attention (identity), just add zero residual
-                // Then apply FFN
+                // Gated DeltaNet linear attention
+                let attn_out = gated_deltanet_forward(
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                )
+                .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
+                hidden = (hidden + attn_out)?;
+                // Post-attention RMSNorm + FFN
                 let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
                 let ffn_out = swiglu_ffn(
                     &normed_post,
@@ -958,8 +1290,7 @@ pub fn model_forward(
                     layer_lora,
                 )?;
                 hidden = (hidden + ffn_out)?;
-                // Suppress unused variable warning
-                let _ = normed;
+                linear_attn_idx += 1;
             }
         }
     }
@@ -989,6 +1320,7 @@ pub fn model_forward_paged(
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
     start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
@@ -1004,6 +1336,7 @@ pub fn model_forward_paged(
 
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
+    let mut linear_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
@@ -1029,9 +1362,19 @@ pub fn model_forward_paged(
                 .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
             }
-            GpuAttentionWeights::Linear(_) => {
-                // TODO: Implement Gated DeltaNet linear attention forward pass.
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
                 let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                let attn_out = gated_deltanet_forward(
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                )
+                .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
+                hidden = (hidden + attn_out)?;
                 let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
                 let ffn_out = swiglu_ffn(
                     &normed_post,
@@ -1041,7 +1384,7 @@ pub fn model_forward_paged(
                     layer_lora,
                 )?;
                 hidden = (hidden + ffn_out)?;
-                let _ = normed;
+                linear_attn_idx += 1;
             }
         }
     }
@@ -1595,7 +1938,7 @@ mod tests {
         };
 
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
-        let logits = model_forward(&token_ids, &weights, &config, None, None)?;
+        let logits = model_forward(&token_ids, &weights, &config, None, None, None)?;
 
         // Expected shape: [1, seq_len, vocab_size]
         assert_eq!(logits.dims(), &[1, 4, vocab_size]);
@@ -1646,7 +1989,7 @@ mod tests {
             linear_conv_kernel_dim: 4,
         };
 
-        let logits = model_forward(&[7], &weights, &config, None, None)?;
+        let logits = model_forward(&[7], &weights, &config, None, None, None)?;
         assert_eq!(logits.dims(), &[1, 1, vocab_size]);
 
         // Logits should be finite
@@ -1708,7 +2051,7 @@ mod tests {
         let tokens: Vec<u32> = vec![1, 5, 3, 10, 7];
 
         // Reference: full forward pass without KV cache
-        let logits_ref = model_forward(&tokens, &weights, &config, None, None)?;
+        let logits_ref = model_forward(&tokens, &weights, &config, None, None, None)?;
         // Extract last position logits: [1, 5, vocab] -> last position
         let last_ref = logits_ref.narrow(1, tokens.len() - 1, 1)?; // [1, 1, vocab]
         let last_ref_vals = last_ref.flatten_all()?.to_vec1::<f32>()?;
@@ -1719,12 +2062,12 @@ mod tests {
         )?;
 
         // Prefill
-        let _prefill_logits = model_forward(&tokens[..4], &weights, &config, Some(&mut kv_cache), None)?;
+        let _prefill_logits = model_forward(&tokens[..4], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(4);
         assert_eq!(kv_cache.seq_len(), 4);
 
         // Decode the 5th token
-        let decode_logits = model_forward(&tokens[4..], &weights, &config, Some(&mut kv_cache), None)?;
+        let decode_logits = model_forward(&tokens[4..], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
         assert_eq!(kv_cache.seq_len(), 5);
 
@@ -1787,22 +2130,22 @@ mod tests {
         let tokens: Vec<u32> = vec![3, 7, 1];
 
         // Reference
-        let logits_ref = model_forward(&tokens, &weights, &config, None, None)?;
+        let logits_ref = model_forward(&tokens, &weights, &config, None, None, None)?;
         let last_ref = logits_ref.narrow(1, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
 
         // KV cache: process token by token
         let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 16, DType::F32, &device)?;
 
         // Token 0
-        let _ = model_forward(&[3], &weights, &config, Some(&mut kv_cache), None)?;
+        let _ = model_forward(&[3], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
 
         // Token 1
-        let _ = model_forward(&[7], &weights, &config, Some(&mut kv_cache), None)?;
+        let _ = model_forward(&[7], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
 
         // Token 2
-        let logits_cached = model_forward(&[1], &weights, &config, Some(&mut kv_cache), None)?;
+        let logits_cached = model_forward(&[1], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
 
         let last_cached = logits_cached.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
@@ -1813,6 +2156,233 @@ mod tests {
                 "logit {i} differs: ref={r}, cached={c}",
             );
         }
+
+        Ok(())
+    }
+
+    /// Helper: build tiny GpuWeights with a mix of full and linear attention layers.
+    fn make_hybrid_gpu_weights(
+        device: &Device,
+        vocab_size: usize,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_size: usize,
+        num_layers: usize,
+        full_attention_interval: usize,
+    ) -> Result<GpuWeights> {
+        let randn = |shape: &[usize]| -> Result<Tensor> {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.01).sin()) * 0.1).collect();
+            Ok(Tensor::new(data, device)?.reshape(shape)?)
+        };
+
+        let embed_tokens = randn(&[vocab_size, hidden_size])?;
+        let final_norm = Tensor::ones(hidden_size, DType::F32, device)?;
+
+        // For linear attention: nk heads with key_head_dim, nv heads with value_head_dim
+        // Use same dims as full attention for simplicity
+        let nk = num_kv_heads;
+        let nv = num_heads;
+        let dk = head_dim;
+        let dv = head_dim;
+        let qkv_dim = nk * dk + nk * dk + nv * dv; // Q + K + V fused
+        let conv_kernel = 4;
+
+        let mut layers = Vec::with_capacity(num_layers);
+        for i in 0..num_layers {
+            let is_full = (i + 1) % full_attention_interval == 0;
+            let attention = if is_full {
+                GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj: randn(&[num_heads * head_dim, hidden_size])?,
+                    k_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
+                    v_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
+                    o_proj: randn(&[hidden_size, num_heads * head_dim])?,
+                    q_norm: Tensor::ones(head_dim, DType::F32, device)?,
+                    k_norm: Tensor::ones(head_dim, DType::F32, device)?,
+                })
+            } else {
+                GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                    in_proj_qkv: randn(&[qkv_dim, hidden_size])?,
+                    in_proj_z: randn(&[nv * dv, hidden_size])?,
+                    out_proj: randn(&[hidden_size, nv * dv])?,
+                    in_proj_a: randn(&[nv, hidden_size])?,
+                    in_proj_b: randn(&[nv, hidden_size])?,
+                    conv1d: randn(&[qkv_dim, 1, conv_kernel])?,
+                    norm: Tensor::ones(dk, DType::F32, device)?,
+                    a_log: Tensor::zeros(nv, DType::F32, device)?,
+                    dt_bias: Tensor::zeros(nv, DType::F32, device)?,
+                })
+            };
+
+            layers.push(GpuLayerWeights {
+                input_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
+                post_attention_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
+                attention,
+                mlp: GpuFfnWeights {
+                    gate_proj: randn(&[intermediate_size, hidden_size])?,
+                    up_proj: randn(&[intermediate_size, hidden_size])?,
+                    down_proj: randn(&[hidden_size, intermediate_size])?,
+                },
+            });
+        }
+
+        Ok(GpuWeights {
+            embed_tokens,
+            layers,
+            final_norm,
+        })
+    }
+
+    #[test]
+    fn test_model_forward_hybrid_layers() -> Result<()> {
+        // Test model_forward with a mix of full and linear (GDN) attention layers
+        let device = Device::Cpu;
+        let vocab_size = 32;
+        let hidden_size = 16;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 4;
+        let intermediate_size = 32;
+        let num_layers = 4;
+        let full_attention_interval = 4; // layer 3 is full, layers 0,1,2 are linear
+
+        let weights = make_hybrid_gpu_weights(
+            &device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, num_layers, full_attention_interval,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+        };
+
+        let mut linear_state = LinearAttentionState::new(&config, &device)?;
+
+        // Prefill with multiple tokens
+        let token_ids: Vec<u32> = vec![1, 5, 3, 10];
+        let logits = model_forward(&token_ids, &weights, &config, None, Some(&mut linear_state), None)?;
+        assert_eq!(logits.dims(), &[1, 4, vocab_size]);
+
+        // All values should be finite (no NaN/Inf)
+        let flat = logits.flatten_all()?.to_vec1::<f32>()?;
+        assert!(flat.iter().all(|v| v.is_finite()), "logits contain non-finite values");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_forward_hybrid_decode() -> Result<()> {
+        // Test prefill + decode with linear attention state persistence
+        let device = Device::Cpu;
+        let vocab_size = 32;
+        let hidden_size = 16;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 4;
+        let intermediate_size = 32;
+        let num_layers = 4;
+        let full_attention_interval = 4;
+
+        let weights = make_hybrid_gpu_weights(
+            &device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, num_layers, full_attention_interval,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+        };
+
+        let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 32, DType::F32, &device)?;
+        let mut linear_state = LinearAttentionState::new(&config, &device)?;
+
+        // Prefill
+        let prefill_logits = model_forward(&[1, 5, 3], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
+        kv_cache.advance(3);
+        assert_eq!(prefill_logits.dims(), &[1, 3, vocab_size]);
+
+        // Decode: single token should work with persisted linear state
+        let decode_logits = model_forward(&[10], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
+        kv_cache.advance(1);
+        assert_eq!(decode_logits.dims(), &[1, 1, vocab_size]);
+
+        // Both should produce finite values
+        let flat = decode_logits.flatten_all()?.to_vec1::<f32>()?;
+        assert!(flat.iter().all(|v| v.is_finite()), "decode logits contain non-finite values");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_attention_state_new() -> Result<()> {
+        let device = Device::Cpu;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: 16,
+            num_layers: 4,
+            num_attention_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: false,
+            linear_num_key_heads: 2,
+            linear_key_head_dim: 4,
+            linear_num_value_heads: 4,
+            linear_value_head_dim: 4,
+            linear_conv_kernel_dim: 4,
+        };
+
+        let state = LinearAttentionState::new(&config, &device)?;
+        // 3 linear layers (layers 0,1,2; layer 3 is full)
+        assert_eq!(state.recurrent_states.len(), 3);
+        assert_eq!(state.conv_states.len(), 3);
+        // Recurrent state shape: [1, nv, dk, dv]
+        assert_eq!(state.recurrent_states[0].dims(), &[1, 4, 4, 4]);
+        // Conv state shape: [1, qkv_dim, kernel_size-1] where qkv_dim = 2*(nk*dk) + nv*dv = 2*8+16=32
+        let qkv_dim = 2 * (2 * 4) + 4 * 4; // 32
+        assert_eq!(state.conv_states[0].dims(), &[1, qkv_dim, 3]);
 
         Ok(())
     }
