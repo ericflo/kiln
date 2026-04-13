@@ -1,0 +1,15 @@
+[package]
+name = "kiln-flash-attn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vendored flash-attention-2 CUDA kernels with C-ABI wrapper for forward AND backward pass"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"
