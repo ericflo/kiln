@@ -5,6 +5,7 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 use kiln_server::api;
+use kiln_server::sidecar::SidecarClient;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
@@ -108,6 +109,16 @@ async fn main() -> Result<()> {
         let scheduler = Scheduler::new(scheduler_config, num_blocks);
         let engine = MockEngine::new(model_config.clone());
         AppState::new_mock(model_config, scheduler, Arc::new(engine), tokenizer)
+    };
+
+    // Optional training sidecar
+    let sidecar_socket = std::env::var("KILN_SIDECAR_SOCKET").ok();
+    let state = if let Some(ref socket_path) = sidecar_socket {
+        tracing::info!(socket = %socket_path, "training sidecar configured");
+        state.with_sidecar(SidecarClient::new(socket_path))
+    } else {
+        tracing::info!("no KILN_SIDECAR_SOCKET set — training endpoints will return 503");
+        state
     };
 
     let app = api::router(state);
