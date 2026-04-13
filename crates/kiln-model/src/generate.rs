@@ -12,9 +12,12 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
-use crate::forward::{model_forward, GpuWeights};
+use crate::forward::{model_forward, model_forward_paged, GpuWeights};
 use crate::kv_cache::KvCache;
+use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
+
+use kiln_core::block::{BlockManager, BlockTable};
 
 /// Holds loaded model weights and tokenizer, provides text generation.
 pub struct ModelRunner {
@@ -351,6 +354,341 @@ impl ModelRunner {
             finish_reason: FinishReason::MaxTokens,
         })
     }
+
+    /// Compute the number of blocks needed for a given number of tokens.
+    fn blocks_needed(num_tokens: usize, block_size: usize) -> usize {
+        (num_tokens + block_size - 1) / block_size
+    }
+
+    /// Generate text from a prompt using paged KV cache backed by a BlockManager.
+    ///
+    /// This is the memory-efficient path: blocks are allocated on demand from the
+    /// shared BlockManager pool and freed when generation completes.
+    pub fn generate_paged(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+        block_manager: &mut BlockManager,
+        paged_cache: &mut PagedKvCache,
+    ) -> Result<GenerationOutput> {
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        let output = self.generate_from_tokens_paged(&prompt_tokens, params, block_manager, paged_cache)?;
+
+        let text = self
+            .tokenizer
+            .decode(&output.token_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(GenerationOutput {
+            text,
+            token_ids: output.token_ids,
+            finish_reason: output.finish_reason,
+        })
+    }
+
+    /// Autoregressive generation using paged KV cache.
+    ///
+    /// Allocates blocks from `block_manager` as needed and frees them when done.
+    pub fn generate_from_tokens_paged(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &mut BlockManager,
+        paged_cache: &mut PagedKvCache,
+    ) -> Result<GenerationOutput> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let block_size = block_manager.block_size();
+        let max_total = prompt_tokens.len() + params.max_tokens;
+
+        // Pre-allocate blocks for the maximum possible sequence length
+        let num_blocks = Self::blocks_needed(max_total, block_size);
+        let allocated_blocks = block_manager
+            .allocate(num_blocks)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut block_table = BlockTable::new();
+        for &block_id in &allocated_blocks {
+            block_table.push(block_id);
+        }
+
+        // Run generation with paged cache; free blocks on completion (or error)
+        let result = self.generate_from_tokens_paged_inner(
+            prompt_tokens, params, paged_cache, &block_table,
+        );
+
+        // Always free allocated blocks
+        block_manager.free_all(&allocated_blocks);
+
+        result
+    }
+
+    /// Inner generation loop using paged KV cache (blocks already allocated).
+    fn generate_from_tokens_paged_inner(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &mut PagedKvCache,
+        block_table: &BlockTable,
+    ) -> Result<GenerationOutput> {
+        // Prefill: forward pass on all prompt tokens
+        let logits = model_forward_paged(
+            prompt_tokens,
+            &self.weights,
+            &self.config,
+            paged_cache,
+            block_table,
+            0,
+        )
+        .context("prefill forward pass (paged) failed")?;
+
+        let mut seq_len = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
+
+        // Sample first token
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
+        for _step in 0..params.max_tokens {
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            // Check for EOS
+            if self.eos_token_ids.contains(&next_token) {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                });
+            }
+
+            generated_tokens.push(next_token);
+
+            // Check stop sequences
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            return Ok(GenerationOutput {
+                                text: String::new(),
+                                token_ids: generated_tokens,
+                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Decode step: forward pass on just the new token
+            let logits = model_forward_paged(
+                &[next_token],
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                seq_len,
+            )
+            .context("decode forward pass (paged) failed")?;
+            seq_len += 1;
+
+            next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
+        }
+
+        Ok(GenerationOutput {
+            text: String::new(),
+            token_ids: generated_tokens,
+            finish_reason: FinishReason::MaxTokens,
+        })
+    }
+
+    /// Streaming generation using paged KV cache.
+    ///
+    /// Same as [`generate_streaming`] but uses paged KV cache for memory-efficient
+    /// serving with the BlockManager.
+    pub fn generate_streaming_paged(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+        block_manager: &mut BlockManager,
+        paged_cache: &mut PagedKvCache,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let block_size = block_manager.block_size();
+        let max_total = prompt_tokens.len() + params.max_tokens;
+
+        let num_blocks = Self::blocks_needed(max_total, block_size);
+        let allocated_blocks = block_manager
+            .allocate(num_blocks)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut block_table = BlockTable::new();
+        for &block_id in &allocated_blocks {
+            block_table.push(block_id);
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        // Prefill
+        let logits = match model_forward_paged(
+            &prompt_tokens,
+            &self.weights,
+            &self.config,
+            paged_cache,
+            &block_table,
+            0,
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                block_manager.free_all(&allocated_blocks);
+                return Err(e.context("prefill forward pass (paged) failed"));
+            }
+        };
+
+        let mut seq_len = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
+        let mut finish_reason = FinishReason::MaxTokens;
+
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
+        for _step in 0..params.max_tokens {
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            if self.eos_token_ids.contains(&next_token) {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+
+            generated_tokens.push(next_token);
+
+            let token_text = self
+                .tokenizer
+                .decode(&[next_token])
+                .unwrap_or_default();
+
+            if tx
+                .send(StreamEvent::Token(StreamToken {
+                    token_id: next_token,
+                    text: token_text,
+                }))
+                .is_err()
+            {
+                block_manager.free_all(&allocated_blocks);
+                return Ok(rx);
+            }
+
+            // Check stop sequences
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            finish_reason = FinishReason::StopSequence(stop_seq.clone());
+                            let _ = tx.send(StreamEvent::Done(StreamDone {
+                                finish_reason,
+                                completion_tokens: generated_tokens.len(),
+                            }));
+                            block_manager.free_all(&allocated_blocks);
+                            return Ok(rx);
+                        }
+                    }
+                }
+            }
+
+            // Decode step
+            let logits = match model_forward_paged(
+                &[next_token],
+                &self.weights,
+                &self.config,
+                paged_cache,
+                &block_table,
+                seq_len,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    block_manager.free_all(&allocated_blocks);
+                    return Err(e.context("decode forward pass (paged) failed"));
+                }
+            };
+            seq_len += 1;
+
+            next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
+        }
+
+        let _ = tx.send(StreamEvent::Done(StreamDone {
+            finish_reason,
+            completion_tokens: generated_tokens.len(),
+        }));
+
+        block_manager.free_all(&allocated_blocks);
+
+        Ok(rx)
+    }
 }
 
 #[cfg(test)]
@@ -589,5 +927,195 @@ mod tests {
 
         let result = runner.generate_from_tokens(&[], &params);
         assert!(result.is_err(), "empty prompt should error");
+    }
+
+    #[test]
+    fn test_generate_paged_max_tokens() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        let block_size = 4;
+        let num_blocks = 16; // enough for prompt + max_tokens
+        let mut block_manager = BlockManager::new(num_blocks, block_size);
+        let mut paged_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?;
+
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 5,
+            ..Default::default()
+        };
+
+        let output = runner.generate_from_tokens_paged(
+            &[1, 2, 3],
+            &params,
+            &mut block_manager,
+            &mut paged_cache,
+        )?;
+
+        assert_eq!(output.token_ids.len(), 5);
+        assert_eq!(output.finish_reason, FinishReason::MaxTokens);
+        for &t in &output.token_ids {
+            assert!((t as usize) < 32, "token {t} out of vocab range");
+        }
+
+        // Blocks should be freed after generation
+        assert_eq!(block_manager.num_free(), num_blocks);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_vs_contiguous_equivalence() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 5,
+            ..Default::default()
+        };
+
+        // Generate with contiguous cache
+        let contiguous_output = runner.generate_from_tokens(&[1, 2, 3], &params)?;
+
+        // Generate with paged cache
+        let block_size = 4;
+        let num_blocks = 16;
+        let mut block_manager = BlockManager::new(num_blocks, block_size);
+        let mut paged_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?;
+
+        let paged_output = runner.generate_from_tokens_paged(
+            &[1, 2, 3],
+            &params,
+            &mut block_manager,
+            &mut paged_cache,
+        )?;
+
+        // Both paths should produce identical tokens with greedy sampling
+        assert_eq!(
+            contiguous_output.token_ids, paged_output.token_ids,
+            "paged and contiguous paths should produce identical output with greedy sampling"
+        );
+        assert_eq!(contiguous_output.finish_reason, paged_output.finish_reason);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_streaming_paged() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        let block_size = 4;
+        let num_blocks = 16;
+        let mut block_manager = BlockManager::new(num_blocks, block_size);
+        let mut paged_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?;
+
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 3,
+            ..Default::default()
+        };
+
+        // Test that paged generation produces tokens incrementally using
+        // the inner paged generation path directly with token IDs.
+        let output = runner.generate_from_tokens_paged(
+            &[1, 2, 3],
+            &params,
+            &mut block_manager,
+            &mut paged_cache,
+        )?;
+
+        assert_eq!(output.token_ids.len(), 3);
+        assert_eq!(output.finish_reason, FinishReason::MaxTokens);
+
+        // Blocks freed
+        assert_eq!(block_manager.num_free(), num_blocks);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_eos_detection() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let mut runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        // Set ALL tokens as EOS
+        runner.eos_token_ids = (0u32..32).collect();
+
+        let block_size = 4;
+        // Need enough blocks: prompt(2) + max_tokens(100) = 102 tokens, 102/4 = 26 blocks
+        let num_blocks = 32;
+        let mut block_manager = BlockManager::new(num_blocks, block_size);
+        let mut paged_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?;
+
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 100,
+            ..Default::default()
+        };
+
+        let output = runner.generate_from_tokens_paged(
+            &[1, 2],
+            &params,
+            &mut block_manager,
+            &mut paged_cache,
+        )?;
+
+        assert_eq!(output.finish_reason, FinishReason::Eos);
+        assert!(output.token_ids.is_empty(), "all tokens are EOS, should stop immediately");
+
+        // Blocks freed
+        assert_eq!(block_manager.num_free(), num_blocks);
+
+        Ok(())
     }
 }

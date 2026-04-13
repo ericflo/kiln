@@ -601,6 +601,67 @@ pub fn transformer_block(
     Ok(out)
 }
 
+/// Transformer block using paged KV cache.
+///
+/// Same as [`transformer_block`] but reads/writes K/V through a [`PagedKvCache`]
+/// and [`BlockTable`] instead of a contiguous [`KvCache`].
+pub fn transformer_block_paged(
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    full_attn_layer_idx: usize,
+) -> Result<Tensor> {
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(w) => w,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!("transformer_block_paged only supports full attention layers (not linear/GDN)")
+        }
+    };
+
+    // Pre-attention norm
+    let normed = rms_norm(x, &layer.input_layernorm, rms_norm_eps)?;
+
+    // Self-attention with paged cache
+    let attn_out = gqa_attention_paged(
+        &normed,
+        attn_weights,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rope_theta,
+        rms_norm_eps,
+        paged_cache,
+        block_table,
+        full_attn_layer_idx,
+    )?;
+
+    // Residual connection
+    let x = (x + attn_out)?;
+
+    // Post-attention norm
+    let normed = rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?;
+
+    // Feed-forward network
+    let ffn_out = swiglu_ffn(
+        &normed,
+        &layer.mlp.gate_proj,
+        &layer.mlp.up_proj,
+        &layer.mlp.down_proj,
+    )?;
+
+    // Residual connection
+    let out = (x + ffn_out)?;
+    Ok(out)
+}
+
 /// Full model forward pass: embedding → N transformer blocks → final norm → LM head → logits.
 ///
 /// `token_ids`: 1-D slice of token IDs for the input sequence.
@@ -686,6 +747,78 @@ pub fn model_forward(
     // 4. LM head projection (weight-tied: reuse embed_tokens transposed)
     // hidden: [1, seq_len, hidden_size], embed_tokens: [vocab_size, hidden_size]
     // logits = hidden @ embed_tokens^T -> [1, seq_len, vocab_size]
+    let logits = hidden.broadcast_matmul(&weights.embed_tokens.t()?)?;
+
+    Ok(logits)
+}
+
+/// Full model forward pass using paged KV cache.
+///
+/// Same as [`model_forward`] but uses a [`PagedKvCache`] and [`BlockTable`]
+/// for KV storage. The caller provides `start_pos` (the absolute position of
+/// the first token in `token_ids`) instead of relying on `kv_cache.seq_len()`.
+///
+/// Returns logits tensor with shape [1, seq_len, vocab_size].
+pub fn model_forward_paged(
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+) -> Result<Tensor> {
+    let seq_len = token_ids.len();
+
+    // 1. Embedding lookup: [seq_len, hidden_size]
+    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+
+    // Add batch dimension: [1, seq_len, hidden_size]
+    hidden = hidden.unsqueeze(0)?;
+
+    // Position indices for RoPE — absolute positions
+    let positions: Vec<u32> = (start_pos..start_pos + seq_len).map(|p| p as u32).collect();
+
+    // 2. Loop through all transformer layers
+    let mut full_attn_idx: usize = 0;
+    for (i, layer) in weights.layers.iter().enumerate() {
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                hidden = transformer_block_paged(
+                    &hidden,
+                    layer,
+                    &positions,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.rope_theta,
+                    config.rms_norm_eps,
+                    paged_cache,
+                    block_table,
+                    full_attn_idx,
+                )
+                .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
+                full_attn_idx += 1;
+            }
+            GpuAttentionWeights::Linear(_) => {
+                // TODO: Implement Gated DeltaNet linear attention forward pass.
+                let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
+                let ffn_out = swiglu_ffn(
+                    &normed_post,
+                    &layer.mlp.gate_proj,
+                    &layer.mlp.up_proj,
+                    &layer.mlp.down_proj,
+                )?;
+                hidden = (hidden + ffn_out)?;
+                let _ = normed;
+            }
+        }
+    }
+
+    // 3. Final RMSNorm
+    hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+
+    // 4. LM head projection (weight-tied)
     let logits = hidden.broadcast_matmul(&weights.embed_tokens.t()?)?;
 
     Ok(logits)
