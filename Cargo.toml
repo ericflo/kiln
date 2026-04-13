@@ -57,6 +57,9 @@ memmap2 = "0.9"
 candle-core = "0.10"
 candle-nn = "0.10"
 
+# Random number generation
+rand = "0.8"
+
 # Testing
 tempfile = "3"
 
