@@ -62,7 +62,13 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
         let model_weights = kiln_model::load_model(Path::new(mp), &model_config)?;
-        let device = candle_core::Device::Cpu; // TODO: CUDA when available
+        let device = if candle_core::utils::cuda_is_available() {
+            tracing::info!("CUDA available — using GPU device 0");
+            candle_core::Device::new_cuda(0)?
+        } else {
+            tracing::info!("CUDA not available — using CPU");
+            candle_core::Device::Cpu
+        };
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &device)?;
 
         // ModelRunner takes ownership of a tokenizer, so load a second instance.
@@ -79,7 +85,7 @@ async fn main() -> Result<()> {
 
         let runner = ModelRunner::new(gpu_weights, runner_tokenizer, model_config.clone());
         tracing::info!("model loaded — real inference mode");
-        AppState::new_real(model_config, runner, tokenizer)
+        AppState::new_real(model_config, runner, tokenizer, device)
     } else {
         // Mock mode: use scheduler + mock engine.
         tracing::info!("no KILN_MODEL_PATH set — running in mock mode");

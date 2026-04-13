@@ -58,10 +58,10 @@ impl AppState {
         model_config: ModelConfig,
         runner: ModelRunner,
         tokenizer: KilnTokenizer,
+        device: candle_core::Device,
     ) -> Self {
         let block_size = 16;
         let num_blocks = (model_config.max_position_embeddings / block_size).max(256);
-        let device = candle_core::Device::Cpu;
 
         let block_manager = BlockManager::new(num_blocks, block_size);
         let paged_cache = PagedKvCache::new(
