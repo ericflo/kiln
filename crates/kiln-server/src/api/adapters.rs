@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use axum::extract::State;
+use axum::extract::{State, Path as AxumPath};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,12 @@ struct AdapterDiskEntry {
     has_config: bool,
     /// Whether this adapter has adapter_model.safetensors.
     has_weights: bool,
+    /// Total size of all files in the adapter directory in bytes.
+    size_bytes: u64,
+    /// ISO 8601 timestamp of the most recently modified file.
+    modified_at: Option<String>,
+    /// List of filenames in the adapter directory.
+    files: Vec<String>,
 }
 
 /// Request body for POST /v1/adapters/load.
@@ -48,6 +54,13 @@ struct LoadAdapterResponse {
 #[derive(Serialize)]
 struct UnloadAdapterResponse {
     status: &'static str,
+}
+
+/// Response for DELETE /v1/adapters/:name.
+#[derive(Serialize)]
+struct DeleteAdapterResponse {
+    status: &'static str,
+    name: String,
 }
 
 /// List loaded and available adapters.
@@ -162,6 +175,44 @@ async fn unload_adapter(
     }))
 }
 
+/// Delete an adapter from disk.
+async fn delete_adapter(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<DeleteAdapterResponse>, (StatusCode, String)> {
+    let adapter_path = state.adapter_dir.join(&name);
+
+    if !adapter_path.exists() || !adapter_path.is_dir() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("adapter not found: {name}"),
+        ));
+    }
+
+    // Check if this adapter is currently active.
+    let active = state.active_adapter_name.read().unwrap().clone();
+    if active.as_deref() == Some(&name) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("adapter '{name}' is currently active — unload it first"),
+        ));
+    }
+
+    std::fs::remove_dir_all(&adapter_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to delete adapter directory: {e}"),
+        )
+    })?;
+
+    tracing::info!(adapter = %name, "deleted adapter from disk");
+
+    Ok(Json(DeleteAdapterResponse {
+        status: "deleted",
+        name,
+    }))
+}
+
 /// Scan a directory for adapter subdirectories.
 fn scan_adapter_dir(dir: &Path) -> Vec<AdapterDiskEntry> {
     let mut entries = Vec::new();
@@ -176,10 +227,49 @@ fn scan_adapter_dir(dir: &Path) -> Vec<AdapterDiskEntry> {
             let has_config = path.join("adapter_config.json").exists();
             let has_weights = path.join("adapter_model.safetensors").exists();
             if has_config || has_weights {
+                let mut size_bytes: u64 = 0;
+                let mut latest_modified: Option<std::time::SystemTime> = None;
+                let mut files = Vec::new();
+
+                if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                    for sub in sub_entries.flatten() {
+                        if let Ok(meta) = sub.metadata() {
+                            if meta.is_file() {
+                                files.push(sub.file_name().to_string_lossy().to_string());
+                                size_bytes += meta.len();
+                                if let Ok(modified) = meta.modified() {
+                                    latest_modified = Some(match latest_modified {
+                                        Some(prev) if prev >= modified => prev,
+                                        _ => modified,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                files.sort();
+
+                let modified_at = latest_modified.map(|t| {
+                    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                    let secs = d.as_secs();
+                    // Format as ISO 8601 UTC manually (no chrono dependency needed).
+                    let days_since_epoch = secs / 86400;
+                    let time_of_day = secs % 86400;
+                    let hours = time_of_day / 3600;
+                    let minutes = (time_of_day % 3600) / 60;
+                    let seconds = time_of_day % 60;
+                    // Compute year/month/day from days since 1970-01-01.
+                    let (year, month, day) = days_to_ymd(days_since_epoch);
+                    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+                });
+
                 entries.push(AdapterDiskEntry {
                     name,
                     has_config,
                     has_weights,
+                    size_bytes,
+                    modified_at,
+                    files,
                 });
             }
         }
@@ -188,9 +278,26 @@ fn scan_adapter_dir(dir: &Path) -> Vec<AdapterDiskEntry> {
     entries
 }
 
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Civil calendar algorithm from Howard Hinnant.
+    days += 719_468;
+    let era = days / 146_097;
+    let doe = days % 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/adapters", get(list_adapters))
         .route("/v1/adapters/load", post(load_adapter))
         .route("/v1/adapters/unload", post(unload_adapter))
+        .route("/v1/adapters/{name}", delete(delete_adapter))
 }
