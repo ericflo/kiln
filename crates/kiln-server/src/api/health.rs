@@ -37,7 +37,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
                 }),
             )
         }
-        ModelBackend::Real(_) => ("model", None),
+        ModelBackend::Real { .. } => ("model", None),
     };
 
     Json(HealthResponse {

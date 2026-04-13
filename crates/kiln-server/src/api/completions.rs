@@ -134,8 +134,21 @@ async fn chat_completions(
 
     if req.stream {
         match state.backend.as_ref() {
-            ModelBackend::Real(runner) => {
-                generate_real_streaming(&state, runner, &prompt_text, &sampling, &req).await
+            ModelBackend::Real {
+                runner,
+                block_manager,
+                paged_cache,
+            } => {
+                generate_real_streaming(
+                    &state,
+                    runner,
+                    block_manager,
+                    paged_cache,
+                    &prompt_text,
+                    &sampling,
+                    &req,
+                )
+                .await
             }
             ModelBackend::Mock { .. } => Err((
                 StatusCode::NOT_IMPLEMENTED,
@@ -144,10 +157,22 @@ async fn chat_completions(
         }
     } else {
         match state.backend.as_ref() {
-            ModelBackend::Real(runner) => {
-                generate_real(&state, runner, &prompt_text, &sampling, &req)
-                    .await
-                    .map(|json| json.into_response())
+            ModelBackend::Real {
+                runner,
+                block_manager,
+                paged_cache,
+            } => {
+                generate_real(
+                    &state,
+                    runner,
+                    block_manager,
+                    paged_cache,
+                    &prompt_text,
+                    &sampling,
+                    &req,
+                )
+                .await
+                .map(|json| json.into_response())
             }
             ModelBackend::Mock { scheduler, engine } => {
                 generate_mock(&state, scheduler, engine, &prompt_text, &sampling, &req)
@@ -158,10 +183,12 @@ async fn chat_completions(
     }
 }
 
-/// Generate using the real ModelRunner (direct forward pass).
+/// Generate using the real ModelRunner with paged KV cache.
 async fn generate_real(
     state: &AppState,
     runner: &std::sync::Arc<kiln_model::ModelRunner>,
+    block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
+    paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
@@ -173,16 +200,22 @@ async fn generate_real(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .len();
 
-    // ModelRunner.generate() is CPU-bound; run on a blocking thread to
+    // ModelRunner.generate_paged() is CPU-bound; run on a blocking thread to
     // avoid starving the tokio runtime.
     let runner = runner.clone();
+    let bm = block_manager.clone();
+    let pc = paged_cache.clone();
     let prompt = prompt_text.to_owned();
     let params = sampling.clone();
 
-    let output = tokio::task::spawn_blocking(move || runner.generate(&prompt, &params))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let output = tokio::task::spawn_blocking(move || {
+        let mut bm_guard = bm.lock().unwrap();
+        let mut pc_guard = pc.lock().unwrap();
+        runner.generate_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let finish_reason = match output.finish_reason {
         kiln_model::FinishReason::Eos => "stop",
@@ -213,15 +246,19 @@ async fn generate_real(
     }))
 }
 
-/// Generate using the real ModelRunner with SSE streaming.
+/// Generate using the real ModelRunner with SSE streaming and paged KV cache.
 async fn generate_real_streaming(
     _state: &AppState,
     runner: &std::sync::Arc<kiln_model::ModelRunner>,
+    block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
+    paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
 ) -> Result<Response, (StatusCode, String)> {
     let runner = runner.clone();
+    let bm = block_manager.clone();
+    let pc = paged_cache.clone();
     let prompt = prompt_text.to_owned();
     let params = sampling.clone();
     let model = req.model.clone();
@@ -259,9 +296,11 @@ async fn generate_real_streaming(
                 return;
             }
 
-            // Run blocking generation
+            // Run blocking generation with paged KV cache
             let sync_rx = match tokio::task::spawn_blocking(move || {
-                runner.generate_streaming(&prompt, &params)
+                let mut bm_guard = bm.lock().unwrap();
+                let mut pc_guard = pc.lock().unwrap();
+                runner.generate_streaming_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
             })
             .await
             {
