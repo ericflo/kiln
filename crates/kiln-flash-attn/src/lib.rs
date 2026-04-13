@@ -123,6 +123,7 @@ pub fn flash_attn_fwd(
     };
 
     let stream = q_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let q_slice = q_cuda.as_cuda_slice::<bf16>()?;
     let k_slice = k_cuda.as_cuda_slice::<bf16>()?;
@@ -157,7 +158,7 @@ pub fn flash_attn_fwd(
             head_dim as i32,
             softmax_scale,
             if causal { 1 } else { 0 },
-            *stream as *mut _,
+            raw_stream,
         );
 
         if status != 0 {
@@ -260,6 +261,7 @@ pub fn flash_attn_bwd(
     let da_cuda = cuda!(da_s);
 
     let stream = q_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let dout_sl = dout_cuda.as_cuda_slice::<bf16>()?.slice(dout_l.start_offset()..);
     let q_sl = q_cuda.as_cuda_slice::<bf16>()?.slice(q_l.start_offset()..);
@@ -307,7 +309,7 @@ pub fn flash_attn_bwd(
             softmax_scale,
             if causal { 1 } else { 0 },
             0, // non-deterministic
-            *stream as *mut _,
+            raw_stream,
         );
 
         if status != 0 {
