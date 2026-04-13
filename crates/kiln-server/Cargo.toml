@@ -32,6 +32,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
+thiserror = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda"]

@@ -10,6 +10,8 @@ use kiln_model::engine::Engine;
 use kiln_model::{ModelRunner, PagedKvCache};
 use kiln_scheduler::Scheduler;
 
+use crate::sidecar::SidecarClient;
+
 /// Which inference backend the server is using.
 pub enum ModelBackend {
     /// Mock engine + scheduler for testing without real weights.
@@ -35,6 +37,8 @@ pub struct AppState {
     pub adapter_dir: PathBuf,
     /// Name of the currently active LoRA adapter (None = base model).
     pub active_adapter_name: Arc<std::sync::RwLock<Option<String>>>,
+    /// Optional training sidecar client. None if no sidecar socket configured.
+    pub sidecar: Option<SidecarClient>,
 }
 
 impl AppState {
@@ -54,6 +58,7 @@ impl AppState {
             tokenizer: Arc::new(tokenizer),
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            sidecar: None,
         }
     }
 
@@ -104,6 +109,13 @@ impl AppState {
             tokenizer: Arc::new(tokenizer),
             adapter_dir,
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
+            sidecar: None,
         }
+    }
+
+    /// Set the training sidecar client.
+    pub fn with_sidecar(mut self, client: SidecarClient) -> Self {
+        self.sidecar = Some(client);
+        self
     }
 }
