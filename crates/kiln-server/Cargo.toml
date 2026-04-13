@@ -33,6 +33,10 @@ chrono = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
 
+[features]
+cuda = ["kiln-model/cuda"]
+flash-attn = ["kiln-model/flash-attn"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 safetensors = { workspace = true }
