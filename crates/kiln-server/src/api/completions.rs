@@ -1,10 +1,18 @@
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::ChatMessage;
+use kiln_model::StreamEvent;
 
 use crate::state::{AppState, ModelBackend};
 
@@ -68,10 +76,36 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
+/// OpenAI-compatible streaming chunk.
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: &'static str,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<ChunkChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChunkChoice {
+    pub index: usize,
+    pub delta: Delta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Delta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
 async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     // Convert request messages to ChatMessage for template formatting
     let chat_messages: Vec<ChatMessage> = req
         .messages
@@ -98,12 +132,28 @@ async fn chat_completions(
         ..Default::default()
     };
 
-    match state.backend.as_ref() {
-        ModelBackend::Real(runner) => {
-            generate_real(&state, runner, &prompt_text, &sampling, &req).await
+    if req.stream {
+        match state.backend.as_ref() {
+            ModelBackend::Real(runner) => {
+                generate_real_streaming(&state, runner, &prompt_text, &sampling, &req).await
+            }
+            ModelBackend::Mock { .. } => Err((
+                StatusCode::NOT_IMPLEMENTED,
+                "streaming not supported with mock backend".to_string(),
+            )),
         }
-        ModelBackend::Mock { scheduler, engine } => {
-            generate_mock(&state, scheduler, engine, &prompt_text, &sampling, &req).await
+    } else {
+        match state.backend.as_ref() {
+            ModelBackend::Real(runner) => {
+                generate_real(&state, runner, &prompt_text, &sampling, &req)
+                    .await
+                    .map(|json| json.into_response())
+            }
+            ModelBackend::Mock { scheduler, engine } => {
+                generate_mock(&state, scheduler, engine, &prompt_text, &sampling, &req)
+                    .await
+                    .map(|json| json.into_response())
+            }
         }
     }
 }
@@ -161,6 +211,140 @@ async fn generate_real(
             total_tokens: prompt_token_count + output.token_ids.len(),
         },
     }))
+}
+
+/// Generate using the real ModelRunner with SSE streaming.
+async fn generate_real_streaming(
+    _state: &AppState,
+    runner: &std::sync::Arc<kiln_model::ModelRunner>,
+    prompt_text: &str,
+    sampling: &SamplingParams,
+    req: &ChatCompletionRequest,
+) -> Result<Response, (StatusCode, String)> {
+    let runner = runner.clone();
+    let prompt = prompt_text.to_owned();
+    let params = sampling.clone();
+    let model = req.model.clone();
+    let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let created = now_epoch();
+
+    // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+
+    // Spawn a task that runs the blocking generation and converts to SSE events.
+    tokio::task::spawn({
+        let id = completion_id.clone();
+        let model = model.clone();
+        async move {
+            // Send initial role chunk
+            let role_chunk = ChatCompletionChunk {
+                id: id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: Delta {
+                        role: Some("assistant".to_string()),
+                        content: None,
+                    },
+                    finish_reason: None,
+                }],
+            };
+            if tx
+                .send(Event::default().data(serde_json::to_string(&role_chunk).unwrap()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            // Run blocking generation
+            let sync_rx = match tokio::task::spawn_blocking(move || {
+                runner.generate_streaming(&prompt, &params)
+            })
+            .await
+            {
+                Ok(Ok(rx)) => rx,
+                _ => {
+                    let _ = tx.send(Event::default().data("[DONE]")).await;
+                    return;
+                }
+            };
+
+            // Forward token events as SSE
+            loop {
+                match sync_rx.recv() {
+                    Ok(StreamEvent::Token(token)) => {
+                        let chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model.clone(),
+                            choices: vec![ChunkChoice {
+                                index: 0,
+                                delta: Delta {
+                                    role: None,
+                                    content: Some(token.text),
+                                },
+                                finish_reason: None,
+                            }],
+                        };
+                        if tx
+                            .send(
+                                Event::default()
+                                    .data(serde_json::to_string(&chunk).unwrap()),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(StreamEvent::Done(done)) => {
+                        let finish = match done.finish_reason {
+                            kiln_model::FinishReason::Eos => "stop",
+                            kiln_model::FinishReason::MaxTokens => "length",
+                            kiln_model::FinishReason::StopSequence(_) => "stop",
+                        };
+                        let chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk",
+                            created,
+                            model: model.clone(),
+                            choices: vec![ChunkChoice {
+                                index: 0,
+                                delta: Delta {
+                                    role: None,
+                                    content: None,
+                                },
+                                finish_reason: Some(finish.to_string()),
+                            }],
+                        };
+                        let _ = tx
+                            .send(
+                                Event::default()
+                                    .data(serde_json::to_string(&chunk).unwrap()),
+                            )
+                            .await;
+                        let _ = tx.send(Event::default().data("[DONE]")).await;
+                        return;
+                    }
+                    Err(_) => {
+                        // Channel closed without Done — send [DONE] anyway
+                        let _ = tx.send(Event::default().data("[DONE]")).await;
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 /// Generate using the mock engine + scheduler loop (existing behavior).

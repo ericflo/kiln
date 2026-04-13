@@ -4,6 +4,7 @@
 //! a `ModelRunner` that accepts text prompts and produces text output.
 
 use anyhow::{Context, Result};
+use std::sync::mpsc;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -31,6 +32,33 @@ pub struct GenerationOutput {
     pub token_ids: Vec<TokenId>,
     /// Why generation stopped.
     pub finish_reason: FinishReason,
+}
+
+/// A single token emitted during streaming generation.
+#[derive(Debug, Clone)]
+pub struct StreamToken {
+    /// The generated token ID.
+    pub token_id: TokenId,
+    /// The decoded text for this token.
+    pub text: String,
+}
+
+/// Final event sent when streaming generation completes.
+#[derive(Debug, Clone)]
+pub struct StreamDone {
+    /// Why generation stopped.
+    pub finish_reason: FinishReason,
+    /// Total number of generated tokens.
+    pub completion_tokens: usize,
+}
+
+/// Events emitted during streaming generation.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// A new token was generated.
+    Token(StreamToken),
+    /// Generation is complete.
+    Done(StreamDone),
 }
 
 /// Why generation stopped.
@@ -80,6 +108,110 @@ impl ModelRunner {
             token_ids: output.token_ids,
             finish_reason: output.finish_reason,
         })
+    }
+
+    /// Generate text token-by-token, sending each token to a channel as it is produced.
+    ///
+    /// Returns an `mpsc::Receiver<StreamEvent>` that yields `Token` events
+    /// followed by a final `Done` event.  The generation runs synchronously
+    /// on the calling thread (caller should use `spawn_blocking`).
+    pub fn generate_streaming(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let (tx, rx) = mpsc::channel();
+
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut all_tokens: Vec<TokenId> = prompt_tokens.to_vec();
+        let mut step_seed = params.seed;
+
+        let mut finish_reason = FinishReason::MaxTokens;
+
+        for _step in 0..params.max_tokens {
+            let logits = model_forward(&all_tokens, &self.weights, &self.config)
+                .context("forward pass failed")?;
+
+            let next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
+
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            // Check for EOS
+            if self.eos_token_ids.contains(&next_token) {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+
+            generated_tokens.push(next_token);
+            all_tokens.push(next_token);
+
+            // Decode this token's text
+            let token_text = self
+                .tokenizer
+                .decode(&[next_token])
+                .unwrap_or_default();
+
+            // Send token event; if receiver dropped, stop early
+            if tx
+                .send(StreamEvent::Token(StreamToken {
+                    token_id: next_token,
+                    text: token_text,
+                }))
+                .is_err()
+            {
+                return Ok(rx);
+            }
+
+            // Check stop sequences
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            finish_reason =
+                                FinishReason::StopSequence(stop_seq.clone());
+                            // Send done and return
+                            let _ = tx.send(StreamEvent::Done(StreamDone {
+                                finish_reason,
+                                completion_tokens: generated_tokens.len(),
+                            }));
+                            return Ok(rx);
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = tx.send(StreamEvent::Done(StreamDone {
+            finish_reason,
+            completion_tokens: generated_tokens.len(),
+        }));
+
+        Ok(rx)
     }
 
     /// Autoregressive generation loop operating on token IDs.
