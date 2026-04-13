@@ -13,6 +13,57 @@ use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
 
+/// Compute attention using FlashAttention-2 CUDA kernels.
+///
+/// Takes Q, K, V in `[batch, seq_len, num_heads, head_dim]` layout (pre-transpose).
+/// K/V may have fewer heads than Q (GQA); they are expanded to match Q's head count
+/// before calling the flash kernel, which requires uniform head counts.
+///
+/// Returns `[batch, seq_len, num_heads * head_dim]` (already reshaped for output projection).
+#[cfg(feature = "flash-attn")]
+fn flash_attention_forward(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+    let causal = true;
+
+    // GQA: expand K/V heads to match Q head count for flash_attn
+    let (k, v) = if num_heads != num_kv_heads {
+        let gqa_ratio = num_heads / num_kv_heads;
+        let (batch, kv_len, _kv_heads, hd) = k.dims4()?;
+        // [batch, kv_len, num_kv_heads, head_dim] -> [batch, kv_len, num_heads, head_dim]
+        let k = k
+            .unsqueeze(3)?
+            .expand(&[batch, kv_len, num_kv_heads, gqa_ratio, hd])?
+            .contiguous()?
+            .reshape((batch, kv_len, num_heads, hd))?;
+        let v = v
+            .unsqueeze(3)?
+            .expand(&[batch, kv_len, num_kv_heads, gqa_ratio, hd])?
+            .contiguous()?
+            .reshape((batch, kv_len, num_heads, hd))?;
+        (k, v)
+    } else {
+        (k.contiguous()?, v.contiguous()?)
+    };
+
+    // flash_attn expects [batch, seq_len, num_heads, head_dim]
+    let attn_output = candle_flash_attn::flash_attn(q, &k, &v, softmax_scale, causal)
+        .context("flash_attn kernel failed")?;
+
+    // Reshape to [batch, seq_len, hidden]
+    let (batch, seq_len, _heads, _hd) = attn_output.dims4()?;
+    let attn_output = attn_output
+        .contiguous()?
+        .reshape((batch, seq_len, num_heads * head_dim))?;
+    Ok(attn_output)
+}
+
 /// GPU-ready tensors organized by layer, converted from raw `ModelWeights` bytes.
 pub struct GpuWeights {
     /// Token embedding table: [vocab_size, hidden_size]
@@ -327,7 +378,21 @@ pub fn gqa_attention(
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rope_theta)?;
 
-    // Transpose to [batch, heads, seq_len, head_dim] for attention
+    // FlashAttention-2 path for prefill (seq_len > 1, no KV cache).
+    // Flash-attn takes [batch, seq_len, num_heads, head_dim] — the layout we already have.
+    // When a KV cache is present, we fall through to the naive path which handles
+    // the cache update and Q_len != KV_len masking correctly.
+    #[cfg(feature = "flash-attn")]
+    if seq_len > 1 && kv_cache.is_none() {
+        let q = q.contiguous()?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
+        let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
+        let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+        return Ok(out);
+    }
+
+    // Transpose to [batch, heads, seq_len, head_dim] for naive attention
     let q = q.transpose(1, 2)?.contiguous()?; // [batch, num_heads, seq_len, head_dim]
     let k = k.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
     let v = v.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
@@ -445,6 +510,19 @@ pub fn gqa_attention_paged(
         .read(full_attn_layer_idx, block_table, total_seq_len)
         .context("paged KV cache read failed")?;
     let kv_len = total_seq_len;
+
+    // FlashAttention-2 path for prefill (seq_len > 1).
+    // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
+    // [batch, kv_len, heads, head_dim] for flash_attn.
+    #[cfg(feature = "flash-attn")]
+    if seq_len > 1 {
+        let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
+        let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
+        let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
+        let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
+        let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+        return Ok(out);
+    }
 
     // GQA head expansion
     let gqa_ratio = num_heads / num_kv_heads;

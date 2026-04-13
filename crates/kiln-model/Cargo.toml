@@ -16,7 +16,11 @@ safetensors = { workspace = true }
 memmap2 = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
+candle-flash-attn = { workspace = true, optional = true }
 rand = { workspace = true }
+
+[features]
+flash-attn = ["dep:candle-flash-attn"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
