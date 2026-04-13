@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "kiln_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "kiln"
 path = "src/main.rs"
@@ -14,6 +18,7 @@ kiln-core = { workspace = true }
 kiln-model = { workspace = true }
 kiln-scheduler = { workspace = true }
 kiln-train = { workspace = true }
+candle-core = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -27,3 +32,9 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+safetensors = { workspace = true }
+candle-core = { workspace = true }
+tower = { workspace = true, features = ["util"] }

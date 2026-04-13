@@ -1,14 +1,15 @@
 use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
 
-use crate::state::AppState;
+use crate::state::{AppState, ModelBackend};
 
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
     version: &'static str,
     model: String,
-    scheduler: SchedulerStats,
+    backend: &'static str,
+    scheduler: Option<SchedulerStats>,
 }
 
 #[derive(Serialize)]
@@ -21,8 +22,24 @@ struct SchedulerStats {
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let sched = state.scheduler.lock().await;
-    let bm = sched.block_manager();
+    let (backend_name, scheduler_stats) = match state.backend.as_ref() {
+        ModelBackend::Mock { scheduler, .. } => {
+            let sched = scheduler.lock().await;
+            let bm = sched.block_manager();
+            (
+                "mock",
+                Some(SchedulerStats {
+                    waiting: sched.num_waiting(),
+                    running: sched.num_running(),
+                    blocks_used: bm.num_used(),
+                    blocks_free: bm.num_free(),
+                    blocks_total: bm.num_blocks(),
+                }),
+            )
+        }
+        ModelBackend::Real(_) => ("model", None),
+    };
+
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -32,13 +49,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
             state.model_config.num_attention_heads,
             state.model_config.num_kv_heads,
         ),
-        scheduler: SchedulerStats {
-            waiting: sched.num_waiting(),
-            running: sched.num_running(),
-            blocks_used: bm.num_used(),
-            blocks_free: bm.num_free(),
-            blocks_total: bm.num_blocks(),
-        },
+        backend: backend_name,
+        scheduler: scheduler_stats,
     })
 }
 

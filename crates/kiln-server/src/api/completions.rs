@@ -6,7 +6,7 @@ use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::ChatMessage;
 
-use crate::state::AppState;
+use crate::state::{AppState, ModelBackend};
 
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
@@ -18,6 +18,8 @@ pub struct ChatCompletionRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(default)]
@@ -86,45 +88,118 @@ async fn chat_completions(
         .apply_chat_template(&chat_messages)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let prompt_tokens = state
-        .tokenizer
-        .encode(&prompt_text)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(1.0),
         top_p: req.top_p.unwrap_or(1.0),
+        top_k: req.top_k.unwrap_or(0),
         max_tokens: req.max_tokens.unwrap_or(2048),
-        stop: req.stop.unwrap_or_default(),
+        stop: req.stop.clone().unwrap_or_default(),
         seed: req.seed,
         ..Default::default()
     };
 
+    match state.backend.as_ref() {
+        ModelBackend::Real(runner) => {
+            generate_real(&state, runner, &prompt_text, &sampling, &req).await
+        }
+        ModelBackend::Mock { scheduler, engine } => {
+            generate_mock(&state, scheduler, engine, &prompt_text, &sampling, &req).await
+        }
+    }
+}
+
+/// Generate using the real ModelRunner (direct forward pass).
+async fn generate_real(
+    state: &AppState,
+    runner: &std::sync::Arc<kiln_model::ModelRunner>,
+    prompt_text: &str,
+    sampling: &SamplingParams,
+    req: &ChatCompletionRequest,
+) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+    // Count prompt tokens for usage stats.
+    let prompt_token_count = state
+        .tokenizer
+        .encode(prompt_text)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .len();
+
+    // ModelRunner.generate() is CPU-bound; run on a blocking thread to
+    // avoid starving the tokio runtime.
+    let runner = runner.clone();
+    let prompt = prompt_text.to_owned();
+    let params = sampling.clone();
+
+    let output = tokio::task::spawn_blocking(move || runner.generate(&prompt, &params))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let finish_reason = match output.finish_reason {
+        kiln_model::FinishReason::Eos => "stop",
+        kiln_model::FinishReason::MaxTokens => "length",
+        kiln_model::FinishReason::StopSequence(_) => "stop",
+    };
+
+    let now = now_epoch();
+
+    Ok(Json(ChatCompletionResponse {
+        id: format!("chatcmpl-{}", Uuid::new_v4()),
+        object: "chat.completion",
+        created: now,
+        model: req.model.clone(),
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: "assistant".to_string(),
+                content: output.text,
+            },
+            finish_reason: finish_reason.to_string(),
+        }],
+        usage: Usage {
+            prompt_tokens: prompt_token_count,
+            completion_tokens: output.token_ids.len(),
+            total_tokens: prompt_token_count + output.token_ids.len(),
+        },
+    }))
+}
+
+/// Generate using the mock engine + scheduler loop (existing behavior).
+async fn generate_mock(
+    state: &AppState,
+    scheduler: &tokio::sync::Mutex<kiln_scheduler::Scheduler>,
+    engine: &std::sync::Arc<dyn kiln_model::engine::Engine>,
+    prompt_text: &str,
+    sampling: &SamplingParams,
+    req: &ChatCompletionRequest,
+) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+    let prompt_tokens = state
+        .tokenizer
+        .encode(prompt_text)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     let prompt_token_count = prompt_tokens.len();
-    let request = Request::new(prompt_tokens, sampling, req.adapter);
+    let request = Request::new(prompt_tokens, sampling.clone(), req.adapter.clone());
     let request_id = request.id;
 
     // Add to scheduler
     {
-        let mut sched = state.scheduler.lock().await;
+        let mut sched = scheduler.lock().await;
         sched.add_request(request);
     }
 
     // Run scheduler steps until this request completes.
-    // In the real implementation this will be an async loop driven by the engine.
-    // For now with MockEngine, we just step until done.
     let max_steps = 100;
     let mut output_tokens = Vec::new();
 
     for _ in 0..max_steps {
-        let mut sched = state.scheduler.lock().await;
+        let mut sched = scheduler.lock().await;
         let step_output = sched.step();
 
         if step_output.scheduled.is_empty() {
             break;
         }
 
-        // Build batch input (simplified — real impl builds proper ragged batch)
+        // Build batch input
         let batch = kiln_model::engine::BatchInput {
             token_ids: vec![0; step_output.total_tokens],
             seqlens: step_output
@@ -146,8 +221,7 @@ async fn chat_completions(
                 .collect(),
         };
 
-        let engine_output = state
-            .engine
+        let engine_output = engine
             .step(&batch)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -182,23 +256,19 @@ async fn chat_completions(
         }
     }
 
-    // Decode output tokens back to text (mock engine produces token ID 42 repeatedly,
-    // which won't decode to meaningful text, but the pipeline is real)
+    // Decode output tokens
     let completion_text = state
         .tokenizer
         .decode(&output_tokens)
         .unwrap_or_else(|_| format!("[{} tokens, decode failed]", output_tokens.len()));
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_epoch();
 
     Ok(Json(ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         created: now,
-        model: req.model,
+        model: req.model.clone(),
         choices: vec![Choice {
             index: 0,
             message: Message {
@@ -213,6 +283,13 @@ async fn chat_completions(
             total_tokens: prompt_token_count + output_tokens.len(),
         },
     }))
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 pub fn routes() -> Router<AppState> {
