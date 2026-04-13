@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
+use crate::kv_cache::KvCache;
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
 /// GPU-ready tensors organized by layer, converted from raw `ModelWeights` bytes.
@@ -280,12 +281,14 @@ pub fn swiglu_ffn(
 ///
 /// `x`: [batch, seq_len, hidden_size]
 /// `attn_weights`: Q/K/V/O projection weights plus per-head RMSNorm weights
-/// `positions`: position indices for RoPE (length = seq_len)
+/// `positions`: position indices for RoPE (length = seq_len, absolute positions)
 /// `num_heads`: number of query attention heads
 /// `num_kv_heads`: number of key/value attention heads
 /// `head_dim`: dimension per head
 /// `rope_theta`: RoPE base frequency
 /// `rms_norm_eps`: epsilon for Q/K head norms
+/// `kv_cache`: optional KV cache for incremental decoding
+/// `full_attn_layer_idx`: index into the KV cache's layer array (only full-attn layers)
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn gqa_attention(
@@ -297,6 +300,8 @@ pub fn gqa_attention(
     head_dim: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
+    kv_cache: Option<&mut KvCache>,
+    full_attn_layer_idx: usize,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
 
@@ -316,7 +321,7 @@ pub fn gqa_attention(
     let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
 
-    // Apply RoPE
+    // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rope_theta)?;
 
     // Transpose to [batch, heads, seq_len, head_dim] for attention
@@ -324,37 +329,51 @@ pub fn gqa_attention(
     let k = k.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
     let v = v.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
 
+    // If KV cache is provided, update it and use full cached K/V
+    let (k, v, kv_len) = if let Some(cache) = kv_cache {
+        let (full_k, full_v) = cache
+            .update(full_attn_layer_idx, &k, &v)
+            .context("KV cache update failed")?;
+        let kv_len = full_k.dim(2)?;
+        (full_k, full_v, kv_len)
+    } else {
+        (k, v, seq_len)
+    };
+
     // GQA head expansion: repeat K/V to match Q head count
     let gqa_ratio = num_heads / num_kv_heads;
     let batch = k.dim(0)?;
     let (k, v) = if gqa_ratio > 1 {
-        // Expand [batch, num_kv_heads, seq, head_dim] -> [batch, num_heads, seq, head_dim]
-        // by repeating each KV head `gqa_ratio` times
+        // Expand [batch, num_kv_heads, kv_len, head_dim] -> [batch, num_heads, kv_len, head_dim]
         let k = k
-            .unsqueeze(2)? // [batch, num_kv_heads, 1, seq, head_dim]
-            .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])? // broadcast
+            .unsqueeze(2)?
+            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
-            .reshape((batch, num_heads, seq_len, head_dim))?;
+            .reshape((batch, num_heads, kv_len, head_dim))?;
         let v = v
             .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
+            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
-            .reshape((batch, num_heads, seq_len, head_dim))?;
+            .reshape((batch, num_heads, kv_len, head_dim))?;
         (k, v)
     } else {
         (k.contiguous()?, v.contiguous()?)
     };
 
     // Scaled dot-product attention: softmax(Q @ K^T / sqrt(head_dim)) @ V
+    // Q: [batch, num_heads, seq_len, head_dim]
+    // K: [batch, num_heads, kv_len, head_dim]
+    // scores: [batch, num_heads, seq_len, kv_len]
     let scale = (head_dim as f64).sqrt();
-    let attn_scores = q.broadcast_matmul(&k.t()?)?; // [batch, num_heads, seq, seq]
+    let attn_scores = q.broadcast_matmul(&k.t()?)?;
     let attn_scores = (attn_scores / scale)?;
 
-    // Apply causal mask: mask out future positions
-    let attn_scores = apply_causal_mask(&attn_scores, seq_len)?;
+    // Apply causal mask (handles Q_len != KV_len for cached decoding)
+    let past_len = kv_len - seq_len;
+    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
 
     let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
-    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq, head_dim]
+    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
     let attn_output = attn_output
@@ -370,17 +389,44 @@ pub fn gqa_attention(
 /// Apply a causal (lower-triangular) mask to attention scores.
 /// Sets future positions to -inf so softmax zeroes them out.
 fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
-    if seq_len <= 1 {
+    apply_causal_mask_with_offset(scores, seq_len, seq_len, 0)
+}
+
+/// Apply a causal mask with support for KV cache offset.
+///
+/// When using a KV cache, Q has `q_len` new positions and K/V has `kv_len` total
+/// positions (past_len cached + q_len new). Each query position `i` (representing
+/// absolute position `past_len + i`) can attend to all KV positions up to and
+/// including itself: positions `0..past_len + i + 1`.
+///
+/// `scores`: [batch, heads, q_len, kv_len]
+/// `q_len`: number of new query positions
+/// `kv_len`: total KV length (past_len + q_len)
+/// `past_len`: number of cached positions before the new tokens
+fn apply_causal_mask_with_offset(
+    scores: &Tensor,
+    q_len: usize,
+    kv_len: usize,
+    past_len: usize,
+) -> Result<Tensor> {
+    if q_len <= 1 && kv_len <= 1 {
+        return Ok(scores.clone());
+    }
+    // During decode (q_len=1), the single new token can attend to all kv_len
+    // positions (all past + itself), so no masking needed.
+    if q_len == 1 {
         return Ok(scores.clone());
     }
     let device = scores.device();
-    // Build a [seq_len, seq_len] mask: 0 for allowed, -inf for masked
-    let mask: Vec<f32> = (0..seq_len)
+    // Build a [q_len, kv_len] mask: 0 for allowed, -inf for masked
+    // Query position i (absolute: past_len + i) can attend to KV positions 0..past_len+i+1
+    let mask: Vec<f32> = (0..q_len)
         .flat_map(|i| {
-            (0..seq_len).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY })
+            let max_kv = past_len + i + 1; // last allowed KV position (exclusive)
+            (0..kv_len).map(move |j| if j < max_kv { 0.0 } else { f32::NEG_INFINITY })
         })
         .collect();
-    let mask = Tensor::new(mask, device)?.reshape((1, 1, seq_len, seq_len))?;
+    let mask = Tensor::new(mask, device)?.reshape((1, 1, q_len, kv_len))?;
     let mask = mask.to_dtype(scores.dtype())?;
     let out = scores.broadcast_add(&mask)?;
     Ok(out)
@@ -390,12 +436,14 @@ fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
 ///
 /// `x`: [batch, seq_len, hidden_size]
 /// `layer`: weights for this transformer layer
-/// `positions`: position indices for RoPE
+/// `positions`: position indices for RoPE (absolute positions)
 /// `num_heads`: number of query attention heads
 /// `num_kv_heads`: number of key/value attention heads
 /// `head_dim`: dimension per head
 /// `rope_theta`: RoPE base frequency
 /// `rms_norm_eps`: epsilon for RMSNorm
+/// `kv_cache`: optional KV cache for incremental decoding
+/// `full_attn_layer_idx`: index into the KV cache's layer array
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn transformer_block(
@@ -407,6 +455,8 @@ pub fn transformer_block(
     head_dim: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
+    kv_cache: Option<&mut KvCache>,
+    full_attn_layer_idx: usize,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -428,6 +478,8 @@ pub fn transformer_block(
         head_dim,
         rope_theta,
         rms_norm_eps,
+        kv_cache,
+        full_attn_layer_idx,
     )?;
 
     // Residual connection
@@ -454,6 +506,9 @@ pub fn transformer_block(
 /// `token_ids`: 1-D slice of token IDs for the input sequence.
 /// `weights`: pre-loaded GPU tensors for all model parameters.
 /// `config`: model architecture configuration.
+/// `kv_cache`: optional KV cache for incremental decoding. When provided, `token_ids`
+///   should contain only the new (not yet cached) tokens, and positions are computed
+///   starting from `kv_cache.seq_len()`.
 ///
 /// Returns logits tensor with shape [1, seq_len, vocab_size].
 ///
@@ -461,10 +516,13 @@ pub fn transformer_block(
 /// - Qwen3.5-4B uses weight tying: the LM head reuses `embed_tokens` transposed.
 /// - Linear attention (Gated DeltaNet) layers are not yet implemented and will
 ///   be skipped with an identity pass-through.
+/// - After this function returns, the caller must call `kv_cache.advance(token_ids.len())`
+///   to update the cached sequence length.
 pub fn model_forward(
     token_ids: &[u32],
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
+    mut kv_cache: Option<&mut KvCache>,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
 
@@ -474,13 +532,18 @@ pub fn model_forward(
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
 
-    // Position indices for RoPE
-    let positions: Vec<u32> = (0..seq_len as u32).collect();
+    // Position indices for RoPE — absolute positions accounting for cached tokens
+    let offset = kv_cache.as_ref().map_or(0, |c| c.seq_len());
+    let positions: Vec<u32> = (offset..offset + seq_len).map(|p| p as u32).collect();
 
     // 2. Loop through all transformer layers
+    // Track full-attention layer index (0-based counter of only full-attn layers)
+    let mut full_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
+                // Reborrow the cache for each layer call
+                let cache_ref = kv_cache.as_mut().map(|c| &mut **c);
                 hidden = transformer_block(
                     &hidden,
                     layer,
@@ -490,8 +553,11 @@ pub fn model_forward(
                     config.head_dim,
                     config.rope_theta,
                     config.rms_norm_eps,
+                    cache_ref,
+                    full_attn_idx,
                 )
                 .with_context(|| format!("transformer block {i} (full attention)"))?;
+                full_attn_idx += 1;
             }
             GpuAttentionWeights::Linear(_) => {
                 // TODO: Implement Gated DeltaNet linear attention forward pass.
@@ -743,7 +809,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -764,7 +830,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
@@ -788,7 +854,7 @@ mod tests {
         let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
-        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -844,7 +910,7 @@ mod tests {
             },
         };
 
-        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -877,7 +943,7 @@ mod tests {
             },
         };
 
-        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0)?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
@@ -915,7 +981,7 @@ mod tests {
         };
 
         let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
-        let result = transformer_block(&x, &layer, &[0], 2, 1, 4, 10_000.0, 1e-6);
+        let result = transformer_block(&x, &layer, &[0], 2, 1, 4, 10_000.0, 1e-6, None, 0);
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -1031,7 +1097,7 @@ mod tests {
         };
 
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
-        let logits = model_forward(&token_ids, &weights, &config)?;
+        let logits = model_forward(&token_ids, &weights, &config, None)?;
 
         // Expected shape: [1, seq_len, vocab_size]
         assert_eq!(logits.dims(), &[1, 4, vocab_size]);
@@ -1076,12 +1142,188 @@ mod tests {
             full_attention_interval: 1,
         };
 
-        let logits = model_forward(&[7], &weights, &config)?;
+        let logits = model_forward(&[7], &weights, &config, None)?;
         assert_eq!(logits.dims(), &[1, 1, vocab_size]);
 
         // Logits should be finite
         let vals = logits.flatten_all()?.to_vec1::<f32>()?;
         assert!(vals.iter().all(|v| v.is_finite()), "all logits should be finite");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_forward_kv_cache_equivalence() -> Result<()> {
+        // Verify that model_forward with KV cache produces the same last-position
+        // logits as without KV cache, for a multi-token sequence processed
+        // incrementally (prefill + decode steps).
+        use crate::kv_cache::KvCache;
+
+        let device = Device::Cpu;
+        let vocab_size = 16;
+        let hidden_size = 8;
+        let num_heads = 2;
+        let num_kv_heads = 1;
+        let head_dim = 4;
+        let intermediate_size = 16;
+        let num_layers = 2;
+
+        let weights = make_tiny_gpu_weights(
+            &device,
+            vocab_size,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            num_layers,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: num_layers,
+            full_attention_interval: 1,
+        };
+
+        let tokens: Vec<u32> = vec![1, 5, 3, 10, 7];
+
+        // Reference: full forward pass without KV cache
+        let logits_ref = model_forward(&tokens, &weights, &config, None)?;
+        // Extract last position logits: [1, 5, vocab] -> last position
+        let last_ref = logits_ref.narrow(1, tokens.len() - 1, 1)?; // [1, 1, vocab]
+        let last_ref_vals = last_ref.flatten_all()?.to_vec1::<f32>()?;
+
+        // With KV cache: prefill first 4 tokens, then decode the 5th
+        let mut kv_cache = KvCache::new(
+            num_layers, num_kv_heads, head_dim, 32, DType::F32, &device,
+        )?;
+
+        // Prefill
+        let _prefill_logits = model_forward(&tokens[..4], &weights, &config, Some(&mut kv_cache))?;
+        kv_cache.advance(4);
+        assert_eq!(kv_cache.seq_len(), 4);
+
+        // Decode the 5th token
+        let decode_logits = model_forward(&tokens[4..], &weights, &config, Some(&mut kv_cache))?;
+        kv_cache.advance(1);
+        assert_eq!(kv_cache.seq_len(), 5);
+
+        let last_cached_vals = decode_logits.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
+
+        // Compare: should be identical (within floating point tolerance)
+        assert_eq!(last_ref_vals.len(), last_cached_vals.len());
+        for (i, (r, c)) in last_ref_vals.iter().zip(&last_cached_vals).enumerate() {
+            assert!(
+                (r - c).abs() < 1e-4,
+                "logit {i} differs: ref={r}, cached={c}, diff={}",
+                (r - c).abs()
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_forward_kv_cache_token_by_token() -> Result<()> {
+        // Verify that processing tokens one-by-one with KV cache matches
+        // processing all at once without cache.
+        use crate::kv_cache::KvCache;
+
+        let device = Device::Cpu;
+        let vocab_size = 16;
+        let hidden_size = 8;
+        let num_heads = 2;
+        let num_kv_heads = 1;
+        let head_dim = 4;
+        let intermediate_size = 16;
+
+        let weights = make_tiny_gpu_weights(
+            &device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, 1,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+        };
+
+        let tokens: Vec<u32> = vec![3, 7, 1];
+
+        // Reference
+        let logits_ref = model_forward(&tokens, &weights, &config, None)?;
+        let last_ref = logits_ref.narrow(1, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
+
+        // KV cache: process token by token
+        let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 16, DType::F32, &device)?;
+
+        // Token 0
+        let _ = model_forward(&[3], &weights, &config, Some(&mut kv_cache))?;
+        kv_cache.advance(1);
+
+        // Token 1
+        let _ = model_forward(&[7], &weights, &config, Some(&mut kv_cache))?;
+        kv_cache.advance(1);
+
+        // Token 2
+        let logits_cached = model_forward(&[1], &weights, &config, Some(&mut kv_cache))?;
+        kv_cache.advance(1);
+
+        let last_cached = logits_cached.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
+
+        for (i, (r, c)) in last_ref.iter().zip(&last_cached).enumerate() {
+            assert!(
+                (r - c).abs() < 1e-4,
+                "logit {i} differs: ref={r}, cached={c}",
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_causal_mask_with_offset() -> Result<()> {
+        let device = Device::Cpu;
+        // Simulate decode: 1 new query, 4 total KV (3 cached + 1 new)
+        let scores = Tensor::ones((1, 1, 1, 4), DType::F32, &device)?;
+        let masked = apply_causal_mask_with_offset(&scores, 1, 4, 3)?;
+        // Single query should attend to all 4 positions (no masking for q_len=1)
+        let vals = masked.flatten_all()?.to_vec1::<f32>()?;
+        assert!(vals.iter().all(|v| (*v - 1.0).abs() < 1e-6),
+            "single query token should attend to all KV positions");
+
+        // Simulate prefill with offset: 2 new queries, 5 total KV (3 cached + 2 new)
+        let scores = Tensor::ones((1, 1, 2, 5), DType::F32, &device)?;
+        let masked = apply_causal_mask_with_offset(&scores, 2, 5, 3)?;
+        let vals = masked.flatten_all()?.to_vec1::<f32>()?;
+        // Row 0 (abs pos 3): can attend to positions 0..4 (first 4), mask position 4
+        assert!((vals[0] - 1.0).abs() < 1e-6); // pos 0: ok
+        assert!((vals[1] - 1.0).abs() < 1e-6); // pos 1: ok
+        assert!((vals[2] - 1.0).abs() < 1e-6); // pos 2: ok
+        assert!((vals[3] - 1.0).abs() < 1e-6); // pos 3 (self): ok
+        assert!(vals[4].is_infinite() && vals[4] < 0.0); // pos 4: masked
+        // Row 1 (abs pos 4): can attend to all 5 positions
+        assert!(vals[5..10].iter().all(|v| (*v - 1.0).abs() < 1e-6));
 
         Ok(())
     }
