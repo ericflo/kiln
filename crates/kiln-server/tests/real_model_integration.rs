@@ -40,6 +40,7 @@ fn tiny_config() -> ModelConfig {
         linear_num_value_heads: 0,
         linear_value_head_dim: 0,
         linear_conv_kernel_dim: 0,
+        partial_rotary_factor: 1.0,
     }
 }
 
