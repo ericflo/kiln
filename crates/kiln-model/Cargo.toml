@@ -16,6 +16,7 @@ safetensors = { workspace = true }
 memmap2 = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

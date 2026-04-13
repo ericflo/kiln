@@ -449,6 +449,82 @@ pub fn transformer_block(
     Ok(out)
 }
 
+/// Full model forward pass: embedding → N transformer blocks → final norm → LM head → logits.
+///
+/// `token_ids`: 1-D slice of token IDs for the input sequence.
+/// `weights`: pre-loaded GPU tensors for all model parameters.
+/// `config`: model architecture configuration.
+///
+/// Returns logits tensor with shape [1, seq_len, vocab_size].
+///
+/// Notes:
+/// - Qwen3.5-4B uses weight tying: the LM head reuses `embed_tokens` transposed.
+/// - Linear attention (Gated DeltaNet) layers are not yet implemented and will
+///   be skipped with an identity pass-through.
+pub fn model_forward(
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    let seq_len = token_ids.len();
+
+    // 1. Embedding lookup: [seq_len, hidden_size]
+    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+
+    // Add batch dimension: [1, seq_len, hidden_size]
+    hidden = hidden.unsqueeze(0)?;
+
+    // Position indices for RoPE
+    let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+    // 2. Loop through all transformer layers
+    for (i, layer) in weights.layers.iter().enumerate() {
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                hidden = transformer_block(
+                    &hidden,
+                    layer,
+                    &positions,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.rope_theta,
+                    config.rms_norm_eps,
+                )
+                .with_context(|| format!("transformer block {i} (full attention)"))?;
+            }
+            GpuAttentionWeights::Linear(_) => {
+                // TODO: Implement Gated DeltaNet linear attention forward pass.
+                // For now, skip with identity (pass-through) — the layer's FFN still runs
+                // so we at least apply the MLP transformation.
+                let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                // Skip attention (identity), just add zero residual
+                // Then apply FFN
+                let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
+                let ffn_out = swiglu_ffn(
+                    &normed_post,
+                    &layer.mlp.gate_proj,
+                    &layer.mlp.up_proj,
+                    &layer.mlp.down_proj,
+                )?;
+                hidden = (hidden + ffn_out)?;
+                // Suppress unused variable warning
+                let _ = normed;
+            }
+        }
+    }
+
+    // 3. Final RMSNorm
+    hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+
+    // 4. LM head projection (weight-tied: reuse embed_tokens transposed)
+    // hidden: [1, seq_len, hidden_size], embed_tokens: [vocab_size, hidden_size]
+    // logits = hidden @ embed_tokens^T -> [1, seq_len, vocab_size]
+    let logits = hidden.broadcast_matmul(&weights.embed_tokens.t()?)?;
+
+    Ok(logits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +939,149 @@ mod tests {
         let vals = t.to_vec2::<f32>()?;
         assert!((vals[0][0] - 1.0).abs() < 1e-6);
         assert!((vals[1][2] - 6.0).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    /// Helper: build tiny GpuWeights for testing model_forward shape propagation.
+    /// Uses full-attention layers only (no linear attention) with small dimensions.
+    fn make_tiny_gpu_weights(
+        device: &Device,
+        vocab_size: usize,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_size: usize,
+        num_layers: usize,
+    ) -> Result<GpuWeights> {
+        let randn = |shape: &[usize]| -> Result<Tensor> {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.01).sin()) * 0.1).collect();
+            Ok(Tensor::new(data, device)?.reshape(shape)?)
+        };
+
+        let embed_tokens = randn(&[vocab_size, hidden_size])?;
+        let final_norm = Tensor::ones(hidden_size, DType::F32, device)?;
+
+        let mut layers = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            layers.push(GpuLayerWeights {
+                input_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
+                post_attention_layernorm: Tensor::ones(hidden_size, DType::F32, device)?,
+                attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj: randn(&[num_heads * head_dim, hidden_size])?,
+                    k_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
+                    v_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
+                    o_proj: randn(&[hidden_size, num_heads * head_dim])?,
+                    q_norm: Tensor::ones(head_dim, DType::F32, device)?,
+                    k_norm: Tensor::ones(head_dim, DType::F32, device)?,
+                }),
+                mlp: GpuFfnWeights {
+                    gate_proj: randn(&[intermediate_size, hidden_size])?,
+                    up_proj: randn(&[intermediate_size, hidden_size])?,
+                    down_proj: randn(&[hidden_size, intermediate_size])?,
+                },
+            });
+        }
+
+        Ok(GpuWeights {
+            embed_tokens,
+            layers,
+            final_norm,
+        })
+    }
+
+    #[test]
+    fn test_model_forward_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let vocab_size = 32;
+        let hidden_size = 16;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 4;
+        let intermediate_size = 32;
+        let num_layers = 2;
+
+        let weights = make_tiny_gpu_weights(
+            &device,
+            vocab_size,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            num_layers,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: num_layers,
+            full_attention_interval: 1, // every layer is full attention
+        };
+
+        let token_ids: Vec<u32> = vec![1, 5, 3, 10];
+        let logits = model_forward(&token_ids, &weights, &config)?;
+
+        // Expected shape: [1, seq_len, vocab_size]
+        assert_eq!(logits.dims(), &[1, 4, vocab_size]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_forward_single_token() -> Result<()> {
+        let device = Device::Cpu;
+        let vocab_size = 16;
+        let hidden_size = 8;
+        let num_heads = 2;
+        let num_kv_heads = 1;
+        let head_dim = 4;
+        let intermediate_size = 16;
+
+        let weights = make_tiny_gpu_weights(
+            &device,
+            vocab_size,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            1, // single layer
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+        };
+
+        let logits = model_forward(&[7], &weights, &config)?;
+        assert_eq!(logits.dims(), &[1, 1, vocab_size]);
+
+        // Logits should be finite
+        let vals = logits.flatten_all()?.to_vec1::<f32>()?;
+        assert!(vals.iter().all(|v| v.is_finite()), "all logits should be finite");
 
         Ok(())
     }

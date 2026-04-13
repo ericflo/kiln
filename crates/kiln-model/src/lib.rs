@@ -2,6 +2,7 @@ pub mod engine;
 pub mod forward;
 pub mod loader;
 pub mod lora;
+pub mod sampling;
 pub mod weights;
 
 pub use engine::Engine;
