@@ -14,6 +14,36 @@ use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
 
+/// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
+///
+/// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
+/// basic tensor operations that all have CUDA support.
+fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
+    let neg_x = x.neg()?;
+    let exp_neg_x = neg_x.exp()?;
+    let one_plus = (exp_neg_x + 1.0)?;
+    let result = one_plus.recip()?;
+    Ok(result)
+}
+
+/// CUDA-compatible SiLU (Swish): `x * sigmoid(x)`.
+fn cuda_silu(x: &Tensor) -> Result<Tensor> {
+    let sig = cuda_sigmoid(x)?;
+    Ok((x * sig)?)
+}
+
+/// CUDA-compatible softmax on last dimension.
+///
+/// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
+/// manually: `softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))`.
+fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
+    let max_val = x.max_keepdim(candle_core::D::Minus1)?;
+    let shifted = x.broadcast_sub(&max_val)?;
+    let exp_shifted = shifted.exp()?;
+    let sum_exp = exp_shifted.sum_keepdim(candle_core::D::Minus1)?;
+    Ok(exp_shifted.broadcast_div(&sum_exp)?)
+}
+
 /// Compute attention using FlashAttention-2 CUDA kernels.
 ///
 /// Takes Q, K, V in `[batch, seq_len, num_heads, head_dim]` layout (pre-transpose).
@@ -383,7 +413,7 @@ pub fn swiglu_ffn(
     // x @ gate_proj^T -> [batch, seq_len, intermediate_size]
     let gate = linear_with_lora(x, gate_proj, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?;
     // SiLU activation: x * sigmoid(x)
-    let gate = candle_nn::ops::silu(&gate)?;
+    let gate = cuda_silu(&gate)?;
     // x @ up_proj^T -> [batch, seq_len, intermediate_size]
     let up = linear_with_lora(x, up_proj, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?;
     // Element-wise multiply
@@ -444,7 +474,7 @@ fn gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<T
     let normed = normed.broadcast_mul(&w_f32)?;
 
     // Output gate: silu(z) = z * sigmoid(z)
-    let gate = candle_nn::ops::silu(&z_f32)?;
+    let gate = cuda_silu(&z_f32)?;
     let out = (normed * gate)?;
     Ok(out)
 }
@@ -569,7 +599,7 @@ pub fn gated_deltanet_forward(
         causal_conv1d_decode(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
     };
     // SiLU activation (work in F32 for stability)
-    let mixed_qkv = candle_nn::ops::silu(&mixed_qkv.to_dtype(DType::F32)?)?;
+    let mixed_qkv = cuda_silu(&mixed_qkv.to_dtype(DType::F32)?)?;
     // Transpose back to [B, T, qkv_dim]
     let mixed_qkv = mixed_qkv.transpose(1, 2)?;
 
@@ -610,7 +640,7 @@ pub fn gated_deltanet_forward(
 
     // --- Step 6: Compute gates ---
     // beta = sigmoid(b) — write gate, in (0, 1)
-    let beta = candle_nn::ops::sigmoid(&b)?.to_dtype(DType::F32)?; // [B, T, nv]
+    let beta = cuda_sigmoid(&b)?.to_dtype(DType::F32)?; // [B, T, nv]
 
     // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space)
     let a_f32 = a.to_dtype(DType::F32)?;
@@ -770,7 +800,7 @@ pub fn gqa_attention(
         let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
         // Apply output gate: attn_output * sigmoid(gate)
         let attn_output = if let Some(ref gate) = gate {
-            let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+            let sigmoid_gate = cuda_sigmoid(gate)?;
             (attn_output * sigmoid_gate)?
         } else {
             attn_output
@@ -827,7 +857,7 @@ pub fn gqa_attention(
     let past_len = kv_len - seq_len;
     let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
 
-    let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
     let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
@@ -838,7 +868,7 @@ pub fn gqa_attention(
 
     // Apply output gate: attn_output * sigmoid(gate)
     let attn_output = if let Some(ref gate) = gate {
-        let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+        let sigmoid_gate = cuda_sigmoid(gate)?;
         (attn_output * sigmoid_gate)?
     } else {
         attn_output
@@ -934,7 +964,7 @@ pub fn gqa_attention_paged(
         let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
         // Apply output gate: attn_output * sigmoid(gate)
         let attn_output = if let Some(ref gate) = gate {
-            let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+            let sigmoid_gate = cuda_sigmoid(gate)?;
             (attn_output * sigmoid_gate)?
         } else {
             attn_output
@@ -983,7 +1013,7 @@ pub fn gqa_attention_paged(
         let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
         let attn_scores = (attn_scores / scale)?;
         // No causal mask needed for decode (q_len=1 attends to everything)
-        let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+        let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
         let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
@@ -997,7 +1027,7 @@ pub fn gqa_attention_paged(
             .reshape((batch, 1, num_heads * head_dim))?;
 
         let attn_output = if let Some(ref gate) = gate {
-            let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+            let sigmoid_gate = cuda_sigmoid(gate)?;
             (attn_output * sigmoid_gate)?
         } else {
             attn_output
@@ -1031,7 +1061,7 @@ pub fn gqa_attention_paged(
     let past_len = kv_len - seq_len;
     let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
 
-    let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
     let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
 
     // Transpose back and output projection
@@ -1041,7 +1071,7 @@ pub fn gqa_attention_paged(
         .reshape(((), seq_len, num_heads * head_dim))?;
 
     let attn_output = if let Some(ref gate) = gate {
-        let sigmoid_gate = candle_nn::ops::sigmoid(gate)?;
+        let sigmoid_gate = cuda_sigmoid(gate)?;
         (attn_output * sigmoid_gate)?
     } else {
         attn_output
