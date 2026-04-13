@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -84,8 +84,18 @@ async fn main() -> Result<()> {
         };
 
         let runner = ModelRunner::new(gpu_weights, runner_tokenizer, model_config.clone());
-        tracing::info!("model loaded — real inference mode");
-        AppState::new_real(model_config, runner, tokenizer, device)
+
+        let adapter_dir = std::env::var("KILN_ADAPTER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(mp).join("adapters"));
+
+        if !adapter_dir.exists() {
+            tracing::info!(path = %adapter_dir.display(), "creating adapter directory");
+            std::fs::create_dir_all(&adapter_dir)?;
+        }
+
+        tracing::info!(adapter_dir = %adapter_dir.display(), "model loaded — real inference mode");
+        AppState::new_real(model_config, runner, tokenizer, device, adapter_dir)
     } else {
         // Mock mode: use scheduler + mock engine.
         tracing::info!("no KILN_MODEL_PATH set — running in mock mode");

@@ -186,7 +186,7 @@ async fn chat_completions(
 /// Generate using the real ModelRunner with paged KV cache.
 async fn generate_real(
     state: &AppState,
-    runner: &std::sync::Arc<kiln_model::ModelRunner>,
+    runner: &std::sync::Arc<std::sync::Mutex<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prompt_text: &str,
@@ -209,9 +209,10 @@ async fn generate_real(
     let params = sampling.clone();
 
     let output = tokio::task::spawn_blocking(move || {
+        let runner_guard = runner.lock().unwrap();
         let mut bm_guard = bm.lock().unwrap();
         let mut pc_guard = pc.lock().unwrap();
-        runner.generate_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
+        runner_guard.generate_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
@@ -249,7 +250,7 @@ async fn generate_real(
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
 async fn generate_real_streaming(
     _state: &AppState,
-    runner: &std::sync::Arc<kiln_model::ModelRunner>,
+    runner: &std::sync::Arc<std::sync::Mutex<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prompt_text: &str,
@@ -298,9 +299,10 @@ async fn generate_real_streaming(
 
             // Run blocking generation with paged KV cache
             let sync_rx = match tokio::task::spawn_blocking(move || {
+                let runner_guard = runner.lock().unwrap();
                 let mut bm_guard = bm.lock().unwrap();
                 let mut pc_guard = pc.lock().unwrap();
-                runner.generate_streaming_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
+                runner_guard.generate_streaming_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
             })
             .await
             {

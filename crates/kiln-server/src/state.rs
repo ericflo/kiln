@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -18,7 +19,7 @@ pub enum ModelBackend {
     },
     /// Real model weights loaded via ModelRunner with paged KV cache.
     Real {
-        runner: Arc<ModelRunner>,
+        runner: Arc<std::sync::Mutex<ModelRunner>>,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
         paged_cache: Arc<std::sync::Mutex<PagedKvCache>>,
     },
@@ -30,6 +31,8 @@ pub struct AppState {
     pub model_config: ModelConfig,
     pub backend: Arc<ModelBackend>,
     pub tokenizer: Arc<KilnTokenizer>,
+    /// Directory where LoRA adapter weights are stored on disk.
+    pub adapter_dir: PathBuf,
 }
 
 impl AppState {
@@ -47,6 +50,7 @@ impl AppState {
                 engine,
             }),
             tokenizer: Arc::new(tokenizer),
+            adapter_dir: PathBuf::from("adapters"),
         }
     }
 
@@ -59,6 +63,7 @@ impl AppState {
         runner: ModelRunner,
         tokenizer: KilnTokenizer,
         device: candle_core::Device,
+        adapter_dir: PathBuf,
     ) -> Self {
         let block_size = 16;
         let num_blocks = std::env::var("KILN_NUM_BLOCKS")
@@ -89,11 +94,12 @@ impl AppState {
         Self {
             model_config,
             backend: Arc::new(ModelBackend::Real {
-                runner: Arc::new(runner),
+                runner: Arc::new(std::sync::Mutex::new(runner)),
                 block_manager: Arc::new(std::sync::Mutex::new(block_manager)),
                 paged_cache: Arc::new(std::sync::Mutex::new(paged_cache)),
             }),
             tokenizer: Arc::new(tokenizer),
+            adapter_dir,
         }
     }
 }
