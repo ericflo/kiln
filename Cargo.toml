@@ -49,6 +49,13 @@ chrono = { version = "0.4", features = ["serde"] }
 tokenizers = { version = "0.21", features = ["http"] }
 minijinja = "2"
 
+# Model loading
+safetensors = "0.5"
+memmap2 = "0.9"
+
+# Testing
+tempfile = "3"
+
 # Internal crates
 kiln-core = { path = "crates/kiln-core" }
 kiln-model = { path = "crates/kiln-model" }
