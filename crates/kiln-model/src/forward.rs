@@ -273,6 +273,182 @@ pub fn swiglu_ffn(
     Ok(out)
 }
 
+/// Grouped-Query Attention (GQA).
+///
+/// Computes scaled dot-product attention with fewer KV heads than Q heads.
+/// Each group of `num_heads / num_kv_heads` query heads shares one KV head.
+///
+/// `x`: [batch, seq_len, hidden_size]
+/// `attn_weights`: Q/K/V/O projection weights plus per-head RMSNorm weights
+/// `positions`: position indices for RoPE (length = seq_len)
+/// `num_heads`: number of query attention heads
+/// `num_kv_heads`: number of key/value attention heads
+/// `head_dim`: dimension per head
+/// `rope_theta`: RoPE base frequency
+/// `rms_norm_eps`: epsilon for Q/K head norms
+///
+/// Returns: [batch, seq_len, hidden_size]
+pub fn gqa_attention(
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> Result<Tensor> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+
+    // Project to Q, K, V
+    // q_proj: [num_heads * head_dim, hidden_size], so x @ q_proj^T -> [batch, seq_len, num_heads * head_dim]
+    let q = x.broadcast_matmul(&attn_weights.q_proj.t()?)?;
+    let k = x.broadcast_matmul(&attn_weights.k_proj.t()?)?;
+    let v = x.broadcast_matmul(&attn_weights.v_proj.t()?)?;
+
+    // Reshape to [batch, seq_len, num_heads, head_dim]
+    let q = q.reshape(((), seq_len, num_heads, head_dim))?;
+    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+    // Apply per-head RMSNorm to Q and K (Qwen3.5 uses QK-norm)
+    // q_norm/k_norm are [head_dim] — broadcast over [batch, seq_len, num_heads, head_dim]
+    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+
+    // Apply RoPE
+    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rope_theta)?;
+
+    // Transpose to [batch, heads, seq_len, head_dim] for attention
+    let q = q.transpose(1, 2)?.contiguous()?; // [batch, num_heads, seq_len, head_dim]
+    let k = k.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
+    let v = v.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
+
+    // GQA head expansion: repeat K/V to match Q head count
+    let gqa_ratio = num_heads / num_kv_heads;
+    let batch = k.dim(0)?;
+    let (k, v) = if gqa_ratio > 1 {
+        // Expand [batch, num_kv_heads, seq, head_dim] -> [batch, num_heads, seq, head_dim]
+        // by repeating each KV head `gqa_ratio` times
+        let k = k
+            .unsqueeze(2)? // [batch, num_kv_heads, 1, seq, head_dim]
+            .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])? // broadcast
+            .contiguous()?
+            .reshape((batch, num_heads, seq_len, head_dim))?;
+        let v = v
+            .unsqueeze(2)?
+            .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
+            .contiguous()?
+            .reshape((batch, num_heads, seq_len, head_dim))?;
+        (k, v)
+    } else {
+        (k.contiguous()?, v.contiguous()?)
+    };
+
+    // Scaled dot-product attention: softmax(Q @ K^T / sqrt(head_dim)) @ V
+    let scale = (head_dim as f64).sqrt();
+    let attn_scores = q.broadcast_matmul(&k.t()?)?; // [batch, num_heads, seq, seq]
+    let attn_scores = (attn_scores / scale)?;
+
+    // Apply causal mask: mask out future positions
+    let attn_scores = apply_causal_mask(&attn_scores, seq_len)?;
+
+    let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq, head_dim]
+
+    // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
+    let attn_output = attn_output
+        .transpose(1, 2)?
+        .contiguous()?
+        .reshape(((), seq_len, num_heads * head_dim))?;
+
+    // Output projection
+    let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+    Ok(out)
+}
+
+/// Apply a causal (lower-triangular) mask to attention scores.
+/// Sets future positions to -inf so softmax zeroes them out.
+fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+    if seq_len <= 1 {
+        return Ok(scores.clone());
+    }
+    let device = scores.device();
+    // Build a [seq_len, seq_len] mask: 0 for allowed, -inf for masked
+    let mask: Vec<f32> = (0..seq_len)
+        .flat_map(|i| {
+            (0..seq_len).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY })
+        })
+        .collect();
+    let mask = Tensor::new(mask, device)?.reshape((1, 1, seq_len, seq_len))?;
+    let mask = mask.to_dtype(scores.dtype())?;
+    let out = scores.broadcast_add(&mask)?;
+    Ok(out)
+}
+
+/// Single transformer block: norm -> attention -> residual -> norm -> FFN -> residual.
+///
+/// `x`: [batch, seq_len, hidden_size]
+/// `layer`: weights for this transformer layer
+/// `positions`: position indices for RoPE
+/// `num_heads`: number of query attention heads
+/// `num_kv_heads`: number of key/value attention heads
+/// `head_dim`: dimension per head
+/// `rope_theta`: RoPE base frequency
+/// `rms_norm_eps`: epsilon for RMSNorm
+///
+/// Returns: [batch, seq_len, hidden_size]
+pub fn transformer_block(
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+) -> Result<Tensor> {
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(w) => w,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!("transformer_block only supports full attention layers (not linear/GDN)")
+        }
+    };
+
+    // Pre-attention norm
+    let normed = rms_norm(x, &layer.input_layernorm, rms_norm_eps)?;
+
+    // Self-attention
+    let attn_out = gqa_attention(
+        &normed,
+        attn_weights,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rope_theta,
+        rms_norm_eps,
+    )?;
+
+    // Residual connection
+    let x = (x + attn_out)?;
+
+    // Post-attention norm
+    let normed = rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?;
+
+    // Feed-forward network
+    let ffn_out = swiglu_ffn(
+        &normed,
+        &layer.mlp.gate_proj,
+        &layer.mlp.up_proj,
+        &layer.mlp.down_proj,
+    )?;
+
+    // Residual connection
+    let out = (x + ffn_out)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +632,215 @@ mod tests {
                 "SwiGLU with zero gate should produce zero, got {v}"
             );
         }
+
+        Ok(())
+    }
+
+    fn make_test_attn_weights(
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        hidden: usize,
+        device: &Device,
+    ) -> Result<GpuFullAttentionWeights> {
+        Ok(GpuFullAttentionWeights {
+            q_proj: Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, hidden), device)?,
+            k_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?,
+            v_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?,
+            o_proj: Tensor::randn(0.0_f32, 0.02, (hidden, num_heads * head_dim), device)?,
+            q_norm: Tensor::ones(head_dim, DType::F32, device)?,
+            k_norm: Tensor::ones(head_dim, DType::F32, device)?,
+        })
+    }
+
+    #[test]
+    fn test_gqa_attention_output_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 1;
+        let seq_len = 4;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 8;
+        let hidden = num_heads * head_dim; // 32
+
+        let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
+        let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
+        let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        assert_eq!(out.dims(), &[batch, seq_len, hidden]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gqa_head_expansion() -> Result<()> {
+        // Verify GQA works: 4 Q heads, 2 KV heads (ratio=2)
+        let device = Device::Cpu;
+        let batch = 2;
+        let seq_len = 3;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 8;
+        let hidden = num_heads * head_dim;
+
+        let x = Tensor::randn(0.0_f32, 0.5, (batch, seq_len, hidden), &device)?;
+        let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
+        let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        assert_eq!(out.dims(), &[batch, seq_len, hidden]);
+
+        // Output should be finite and not all zeros
+        let vals = out.flatten_all()?.to_vec1::<f32>()?;
+        assert!(vals.iter().all(|v| v.is_finite()), "output should be finite");
+        let sum: f32 = vals.iter().map(|v| v.abs()).sum();
+        assert!(sum > 1e-6, "output should not be all zeros");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gqa_single_token() -> Result<()> {
+        // Single token should work (no causal masking needed)
+        let device = Device::Cpu;
+        let num_heads = 2;
+        let num_kv_heads = 1;
+        let head_dim = 4;
+        let hidden = num_heads * head_dim;
+
+        let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
+        let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
+
+        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        assert_eq!(out.dims(), &[1, 1, hidden]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_causal_mask() -> Result<()> {
+        let device = Device::Cpu;
+        // A 3x3 score matrix
+        let scores = Tensor::ones((1, 1, 3, 3), DType::F32, &device)?;
+        let masked = apply_causal_mask(&scores, 3)?;
+        let vals = masked.flatten_all()?.to_vec1::<f32>()?;
+        // Row 0: [1, -inf, -inf]
+        assert!((vals[0] - 1.0).abs() < 1e-6);
+        assert!(vals[1].is_infinite() && vals[1] < 0.0);
+        assert!(vals[2].is_infinite() && vals[2] < 0.0);
+        // Row 1: [1, 1, -inf]
+        assert!((vals[3] - 1.0).abs() < 1e-6);
+        assert!((vals[4] - 1.0).abs() < 1e-6);
+        assert!(vals[5].is_infinite() && vals[5] < 0.0);
+        // Row 2: [1, 1, 1]
+        assert!((vals[6] - 1.0).abs() < 1e-6);
+        assert!((vals[7] - 1.0).abs() < 1e-6);
+        assert!((vals[8] - 1.0).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transformer_block_output_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 1;
+        let seq_len = 4;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 8;
+        let hidden = num_heads * head_dim;
+        let intermediate = hidden * 2;
+
+        let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
+        let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+        let layer = GpuLayerWeights {
+            input_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            attention: GpuAttentionWeights::Full(
+                make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
+            ),
+            mlp: GpuFfnWeights {
+                gate_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
+                up_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
+                down_proj: Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?,
+            },
+        };
+
+        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+        assert_eq!(out.dims(), &[batch, seq_len, hidden]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transformer_block_residual_connections() -> Result<()> {
+        // With residual connections, output should differ from zero even with small weights
+        let device = Device::Cpu;
+        let num_heads = 2;
+        let num_kv_heads = 1;
+        let head_dim = 4;
+        let hidden = num_heads * head_dim;
+        let intermediate = hidden * 2;
+
+        // Input with known non-zero values
+        let x = Tensor::ones((1, 2, hidden), DType::F32, &device)?;
+        let positions = vec![0u32, 1];
+
+        let layer = GpuLayerWeights {
+            input_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            attention: GpuAttentionWeights::Full(
+                make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
+            ),
+            mlp: GpuFfnWeights {
+                gate_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
+                up_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
+                down_proj: Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?,
+            },
+        };
+
+        let out = transformer_block(&x, &layer, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6)?;
+
+        // Output should not be zero (residual adds input through)
+        let vals = out.flatten_all()?.to_vec1::<f32>()?;
+        let sum: f32 = vals.iter().map(|v| v.abs()).sum();
+        assert!(sum > 0.1, "residual connections should keep output non-zero, got sum={sum}");
+        assert!(vals.iter().all(|v| v.is_finite()), "output should be finite");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transformer_block_rejects_linear_attention() -> Result<()> {
+        let device = Device::Cpu;
+        let hidden = 8;
+
+        let layer = GpuLayerWeights {
+            input_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::ones(hidden, DType::F32, &device)?,
+            attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                in_proj_qkv: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_z: Tensor::zeros((1, 1), DType::F32, &device)?,
+                out_proj: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_a: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_b: Tensor::zeros((1, 1), DType::F32, &device)?,
+                conv1d: Tensor::zeros((1, 1), DType::F32, &device)?,
+                norm: Tensor::zeros((1,), DType::F32, &device)?,
+                a_log: Tensor::zeros((1,), DType::F32, &device)?,
+                dt_bias: Tensor::zeros((1,), DType::F32, &device)?,
+            }),
+            mlp: GpuFfnWeights {
+                gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
+                up_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
+                down_proj: Tensor::zeros((hidden, 1), DType::F32, &device)?,
+            },
+        };
+
+        let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
+        let result = transformer_block(&x, &layer, &[0], 2, 1, 4, 10_000.0, 1e-6);
+        assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
     }
