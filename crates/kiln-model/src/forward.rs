@@ -1381,6 +1381,120 @@ pub fn model_forward(
     Ok(logits)
 }
 
+/// Run a subset of transformer layers on an existing hidden state.
+///
+/// Processes layers `[start_layer..end_layer)` without embedding or LM head.
+/// Used by gradient checkpointing to recompute individual segments.
+///
+/// `hidden`: [1, seq_len, hidden_size] — input hidden state.
+/// `positions`: absolute position indices for RoPE.
+/// `linear_state`: mutable linear attention state (only entries for layers in range are touched).
+///
+/// Returns: [1, seq_len, hidden_size] — output hidden state.
+pub fn model_forward_segment(
+    mut hidden: Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &[u32],
+    start_layer: usize,
+    end_layer: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    // Count full-attention and linear-attention layers before start_layer
+    // so we index into the right KV cache / linear state slots.
+    let mut full_attn_idx: usize = (0..start_layer)
+        .filter(|&i| matches!(&weights.layers[i].attention, GpuAttentionWeights::Full(_)))
+        .count();
+    let mut linear_attn_idx: usize = (0..start_layer)
+        .filter(|&i| matches!(&weights.layers[i].attention, GpuAttentionWeights::Linear(_)))
+        .count();
+
+    for i in start_layer..end_layer {
+        let layer = &weights.layers[i];
+        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
+            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                // Training doesn't use KV cache
+                hidden = transformer_block(
+                    &hidden,
+                    layer,
+                    config,
+                    positions,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.rotary_dim(),
+                    config.rope_theta,
+                    config.rms_norm_eps,
+                    None, // no KV cache for training
+                    full_attn_idx,
+                    layer_lora,
+                )
+                .with_context(|| format!("segment transformer block {i} (full attention)"))?;
+                full_attn_idx += 1;
+            }
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
+                let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                let attn_out = gated_deltanet_forward(
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                )
+                .with_context(|| format!("segment gated deltanet layer {i}"))?;
+                hidden = (hidden + attn_out)?;
+                let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
+                let ffn_out = swiglu_ffn(
+                    &normed_post,
+                    &layer.mlp.gate_proj,
+                    &layer.mlp.up_proj,
+                    &layer.mlp.down_proj,
+                    layer_lora,
+                )?;
+                hidden = (hidden + ffn_out)?;
+                linear_attn_idx += 1;
+            }
+        }
+    }
+
+    Ok(hidden)
+}
+
+/// Compute embedding lookup and add batch dimension.
+///
+/// Returns `([1, seq_len, hidden_size], positions)` — the initial hidden state
+/// and position indices for RoPE (starting from position 0, no KV cache offset).
+pub fn model_forward_embed(
+    token_ids: &[u32],
+    weights: &GpuWeights,
+) -> Result<(Tensor, Vec<u32>)> {
+    let seq_len = token_ids.len();
+    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+    hidden = hidden.unsqueeze(0)?;
+    let positions: Vec<u32> = (0..seq_len).map(|p| p as u32).collect();
+    Ok((hidden, positions))
+}
+
+/// Apply final RMSNorm and LM head projection.
+///
+/// `hidden`: [1, seq_len, hidden_size]
+/// Returns: [1, seq_len, vocab_size] logits.
+pub fn model_forward_head(
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+    let logits = normed.broadcast_matmul(&weights.embed_tokens.t()?)?;
+    Ok(logits)
+}
+
 /// Full model forward pass using paged KV cache.
 ///
 /// Same as [`model_forward`] but uses a [`PagedKvCache`] and [`BlockTable`]
