@@ -204,6 +204,112 @@ async fn test_real_model_chat_completion() {
 }
 
 #[tokio::test]
+async fn test_real_model_streaming_chat_completion() {
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+
+    let runner_tokenizer = test_tokenizer();
+    let state_tokenizer = test_tokenizer();
+
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    let state = AppState::new_real(config, runner, state_tokenizer);
+
+    let app = api::router(state);
+
+    let body = json!({
+        "messages": [{"role": "user", "content": "t1 t2 t3"}],
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "stream": true
+    });
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "expected 200 for streaming request");
+
+    // Verify content-type is text/event-stream
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        content_type.contains("text/event-stream"),
+        "expected text/event-stream, got {content_type}"
+    );
+
+    // Read the full SSE body
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_str = String::from_utf8_lossy(&body_bytes);
+
+    // Parse SSE events: lines starting with "data: "
+    let data_lines: Vec<&str> = body_str
+        .lines()
+        .filter(|line| line.starts_with("data: ") || line.starts_with("data:"))
+        .map(|line| line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")).unwrap_or(line))
+        .collect();
+
+    assert!(
+        data_lines.len() >= 3,
+        "expected at least 3 data lines (role + tokens + [DONE]), got {}: {:?}",
+        data_lines.len(),
+        data_lines
+    );
+
+    // First chunk should have role: "assistant"
+    let first: Value = serde_json::from_str(data_lines[0])
+        .unwrap_or_else(|e| panic!("failed to parse first chunk: {e}\nraw: {}", data_lines[0]));
+    assert_eq!(first["object"], "chat.completion.chunk");
+    assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+    assert!(first["choices"][0]["finish_reason"].is_null());
+
+    // Middle chunks should have content
+    let mut saw_content = false;
+    for line in &data_lines[1..data_lines.len() - 1] {
+        if *line == "[DONE]" {
+            continue;
+        }
+        let chunk: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("failed to parse chunk: {e}\nraw: {line}"));
+        if chunk["choices"][0]["delta"]["content"].is_string() {
+            saw_content = true;
+        }
+    }
+    assert!(saw_content, "expected at least one content chunk");
+
+    // Last line should be [DONE]
+    assert_eq!(
+        *data_lines.last().unwrap(),
+        "[DONE]",
+        "stream should end with [DONE]"
+    );
+
+    // Second-to-last data line (before [DONE]) should have finish_reason
+    let second_to_last = data_lines[data_lines.len() - 2];
+    let finish_chunk: Value = serde_json::from_str(second_to_last)
+        .unwrap_or_else(|e| panic!("failed to parse finish chunk: {e}\nraw: {second_to_last}"));
+    let finish_reason = finish_chunk["choices"][0]["finish_reason"]
+        .as_str()
+        .expect("finish_reason should be a string");
+    assert!(
+        finish_reason == "stop" || finish_reason == "length",
+        "unexpected finish_reason: {finish_reason}"
+    );
+}
+
+#[tokio::test]
 async fn test_health_with_real_backend() {
     let config = tiny_config();
     let device = Device::Cpu;
