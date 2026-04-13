@@ -52,16 +52,8 @@ struct UnloadAdapterResponse {
 
 /// List loaded and available adapters.
 async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> {
-    // Check active adapter from ModelRunner
-    let active = match state.backend.as_ref() {
-        ModelBackend::Real { runner, .. } => {
-            let guard = runner.read().unwrap();
-            guard.active_lora().map(|lora| {
-                format!("rank={}, alpha={}", lora.rank, lora.alpha)
-            })
-        }
-        ModelBackend::Mock { .. } => None,
-    };
+    // Read the active adapter name from shared state.
+    let active = state.active_adapter_name.read().unwrap().clone();
 
     // Scan adapter directory for available adapters
     let available = scan_adapter_dir(&state.adapter_dir);
@@ -127,6 +119,9 @@ async fn load_adapter(
         )
     })?;
 
+    // Update the shared active adapter name.
+    *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
+
     tracing::info!(adapter = %req.name, path = %adapter_path.display(), "loaded LoRA adapter");
 
     Ok(Json(LoadAdapterResponse {
@@ -156,6 +151,9 @@ async fn unload_adapter(
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?;
+
+    // Clear the shared active adapter name.
+    *state.active_adapter_name.write().unwrap() = None;
 
     tracing::info!("unloaded LoRA adapter — reverted to base model");
 

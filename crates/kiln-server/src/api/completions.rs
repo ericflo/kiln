@@ -9,10 +9,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
+use std::path::Path;
+
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::ChatMessage;
-use kiln_model::StreamEvent;
+use kiln_model::lora_loader::LoraWeights;
+use kiln_model::{ModelRunner, StreamEvent};
 
 use crate::state::{AppState, ModelBackend};
 
@@ -132,6 +135,11 @@ async fn chat_completions(
         ..Default::default()
     };
 
+    // Ensure the correct LoRA adapter is active for this request.
+    if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
+        ensure_adapter(&state, runner, &req.adapter).await?;
+    }
+
     if req.stream {
         match state.backend.as_ref() {
             ModelBackend::Real {
@@ -181,6 +189,76 @@ async fn chat_completions(
             }
         }
     }
+}
+
+/// Ensure the correct LoRA adapter is active for the given request.
+///
+/// Compares `req_adapter` against the currently active adapter name. If they
+/// differ, loads/unloads the adapter using the two-phase RwLock pattern
+/// (read config, load weights outside lock, write-lock to swap).
+async fn ensure_adapter(
+    state: &AppState,
+    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    req_adapter: &Option<String>,
+) -> Result<(), (StatusCode, String)> {
+    let current = state.active_adapter_name.read().unwrap().clone();
+    if *req_adapter == current {
+        return Ok(());
+    }
+
+    match req_adapter {
+        Some(name) => {
+            // Resolve adapter path
+            let adapter_path = if Path::new(name).is_absolute() {
+                std::path::PathBuf::from(name)
+            } else {
+                state.adapter_dir.join(name)
+            };
+            if !adapter_path.exists() {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("adapter not found: {}", adapter_path.display()),
+                ));
+            }
+
+            // Two-phase load: read device/num_layers, load weights, then swap.
+            let (device, num_layers) = {
+                let guard = runner.read().unwrap();
+                (guard.weights.embed_tokens.device().clone(), guard.config.num_layers)
+            };
+
+            let runner = runner.clone();
+            let adapter_name = name.clone();
+            let active_name = state.active_adapter_name.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let lora = LoraWeights::load(&adapter_path, num_layers, &device)
+                    .map_err(|e| format!("failed to load adapter: {e}"))?;
+                let mut guard = runner.write().unwrap();
+                guard.swap_lora(Some(lora));
+                *active_name.write().unwrap() = Some(adapter_name);
+                Ok::<(), String>(())
+            })
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
+        None => {
+            // Revert to base model.
+            let runner = runner.clone();
+            let active_name = state.active_adapter_name.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let mut guard = runner.write().unwrap();
+                guard.swap_lora(None);
+                *active_name.write().unwrap() = None;
+            })
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Generate using the real ModelRunner with paged KV cache.
