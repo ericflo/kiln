@@ -21,7 +21,7 @@ rand = { workspace = true }
 
 [features]
 flash-attn = ["dep:kiln-flash-attn"]
-cuda = ["candle-core/cuda", "candle-nn/cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "flash-attn"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

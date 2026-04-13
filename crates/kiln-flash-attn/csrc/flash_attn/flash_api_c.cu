@@ -22,15 +22,19 @@
 #include "src/flash.h"
 #include "src/static_switch.h"
 
-// We only need bf16 / hdim128 / causal=true, so pull in just those
-// template specialisations (compiled from the vendored .cu files).
+// We compile bf16 / causal=true for hdim128 and hdim256 (Qwen3.5-4B uses hdim256).
 #include <cutlass/numeric_types.h>
 
 namespace FLASH_NAMESPACE {
     // Forward declarations matching the .cu instantiation files.
+    // hdim128
     template<> void run_mha_fwd_<cutlass::bfloat16_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream);
     template<> void run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 128, true>(Flash_fwd_params &params, cudaStream_t stream);
     template<> void run_mha_bwd_<cutlass::bfloat16_t, 128, true>(Flash_bwd_params &params, cudaStream_t stream);
+    // hdim256
+    template<> void run_mha_fwd_<cutlass::bfloat16_t, 256, true>(Flash_fwd_params &params, cudaStream_t stream);
+    template<> void run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 256, true>(Flash_fwd_params &params, cudaStream_t stream);
+    template<> void run_mha_bwd_<cutlass::bfloat16_t, 256, true>(Flash_bwd_params &params, cudaStream_t stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +148,8 @@ extern "C" kiln_flash_status_t kiln_flash_attn_fwd(
     float softmax_scale, int is_causal,
     void *stream)
 {
-    if (head_dim != 128) {
-        fprintf(stderr, "kiln_flash_attn_fwd: only head_dim=128 supported, got %d\n", head_dim);
+    if (head_dim != 128 && head_dim != 256) {
+        fprintf(stderr, "kiln_flash_attn_fwd: only head_dim=128,256 supported, got %d\n", head_dim);
         return -1;
     }
     if (num_heads % num_heads_k != 0) {
@@ -162,7 +166,11 @@ extern "C" kiln_flash_status_t kiln_flash_attn_fwd(
                    softmax_scale, is_causal != 0);
 
     cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
-    FLASH_NAMESPACE::run_mha_fwd_<cutlass::bfloat16_t, 128, true>(params, cuda_stream);
+    if (head_dim == 128) {
+        FLASH_NAMESPACE::run_mha_fwd_<cutlass::bfloat16_t, 128, true>(params, cuda_stream);
+    } else {
+        FLASH_NAMESPACE::run_mha_fwd_<cutlass::bfloat16_t, 256, true>(params, cuda_stream);
+    }
 
     return 0;
 }
@@ -178,8 +186,8 @@ extern "C" kiln_flash_status_t kiln_flash_attn_bwd(
     float softmax_scale, int is_causal, int deterministic,
     void *stream)
 {
-    if (head_dim != 128) {
-        fprintf(stderr, "kiln_flash_attn_bwd: only head_dim=128 supported, got %d\n", head_dim);
+    if (head_dim != 128 && head_dim != 256) {
+        fprintf(stderr, "kiln_flash_attn_bwd: only head_dim=128,256 supported, got %d\n", head_dim);
         return -1;
     }
     if (num_heads % num_heads_k != 0) {
@@ -237,7 +245,11 @@ extern "C" kiln_flash_status_t kiln_flash_attn_bwd(
     params.dq_accum_split_stride = seqlen_q_rounded * num_heads * head_dim_rounded;
 
     cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
-    FLASH_NAMESPACE::run_mha_bwd_<cutlass::bfloat16_t, 128, true>(params, cuda_stream);
+    if (head_dim == 128) {
+        FLASH_NAMESPACE::run_mha_bwd_<cutlass::bfloat16_t, 128, true>(params, cuda_stream);
+    } else {
+        FLASH_NAMESPACE::run_mha_bwd_<cutlass::bfloat16_t, 256, true>(params, cuda_stream);
+    }
 
     return 0;
 }
