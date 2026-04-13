@@ -532,6 +532,7 @@ mod tests {
             linear_num_value_heads: 8,
             linear_value_head_dim: 8,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 0.25,
         }
     }
 

@@ -54,6 +54,10 @@ pub struct ModelConfig {
     /// Conv1d kernel size for linear attention layers.
     /// For Qwen3.5-4B: 4.
     pub linear_conv_kernel_dim: usize,
+
+    /// Fraction of head dimensions to apply rotary embeddings to.
+    /// For Qwen3.5-4B: 0.25 (64 of 256 dims rotated, 192 pass through unchanged).
+    pub partial_rotary_factor: f64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +97,7 @@ impl ModelConfig {
             linear_num_value_heads: 32,
             linear_value_head_dim: 128,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 0.25,
         }
     }
 
@@ -111,6 +116,12 @@ impl ModelConfig {
     /// maintain a fixed-size recurrent state independent of sequence length.
     pub fn kv_cache_bytes_per_token(&self) -> usize {
         self.kv_cache_bytes_per_token_per_layer() * self.num_full_attention_layers
+    }
+
+    /// Number of head dimensions that get rotary embeddings applied.
+    /// For Qwen3.5-4B: 0.25 * 256 = 64.
+    pub fn rotary_dim(&self) -> usize {
+        (self.head_dim as f64 * self.partial_rotary_factor) as usize
     }
 
     /// GQA group size (how many Q heads share one KV head).
@@ -158,6 +169,14 @@ mod tests {
         // Compare: a pure 32-layer transformer would be 4096 * 32 = 131072 (~128 KB)
         assert_eq!(config.kv_cache_bytes_per_token(), 32768);
         assert_eq!(config.gqa_group_size(), 4);
+    }
+
+    #[test]
+    fn qwen3_5_4b_rotary_dim() {
+        let config = ModelConfig::qwen3_5_4b();
+        // partial_rotary_factor = 0.25, head_dim = 256 → rotary_dim = 64
+        assert_eq!(config.partial_rotary_factor, 0.25);
+        assert_eq!(config.rotary_dim(), 64);
     }
 
     #[test]

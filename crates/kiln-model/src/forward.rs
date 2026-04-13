@@ -277,6 +277,8 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 /// `k`: [batch, seq_len, num_kv_heads, head_dim]
 /// `positions`: position index for each token in the sequence (length = seq_len)
 /// `head_dim`: dimension of each attention head
+/// `rotary_dim`: number of head dimensions to apply rotation to (the rest pass through unchanged).
+///   For Qwen3.5-4B: 64 (partial_rotary_factor=0.25, so 0.25 * 256 = 64).
 /// `rope_theta`: base frequency (10_000_000.0 for Qwen3.5-4B)
 ///
 /// Returns: (rotated_q, rotated_k) with same shapes.
@@ -285,49 +287,61 @@ pub fn rotary_embedding(
     k: &Tensor,
     positions: &[u32],
     head_dim: usize,
+    rotary_dim: usize,
     rope_theta: f64,
 ) -> Result<(Tensor, Tensor)> {
     let device = q.device();
-    let half_dim = head_dim / 2;
+    let half_rotary = rotary_dim / 2;
 
-    // Compute frequency table: freq_i = 1.0 / (theta ^ (2i / head_dim)) for i in 0..half_dim
-    let inv_freq: Vec<f32> = (0..half_dim)
-        .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / head_dim as f64) as f32)
+    // Compute frequency table: freq_i = 1.0 / (theta ^ (2i / rotary_dim)) for i in 0..half_rotary
+    let inv_freq: Vec<f32> = (0..half_rotary)
+        .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
         .collect();
-    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?; // [half_dim]
+    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?; // [half_rotary]
 
     // Position tensor
     let pos_f32: Vec<f32> = positions.iter().map(|&p| p as f32).collect();
     let pos = Tensor::new(pos_f32.as_slice(), device)?.unsqueeze(1)?; // [seq_len, 1]
 
-    // Outer product: [seq_len, half_dim]
+    // Outer product: [seq_len, half_rotary]
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
 
-    let cos = freqs.cos()?; // [seq_len, half_dim]
-    let sin = freqs.sin()?; // [seq_len, half_dim]
+    let cos = freqs.cos()?; // [seq_len, half_rotary]
+    let sin = freqs.sin()?; // [seq_len, half_rotary]
 
-    let rotated_q = apply_rope(q, &cos, &sin, head_dim)?;
-    let rotated_k = apply_rope(k, &cos, &sin, head_dim)?;
+    let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
+    let rotated_k = apply_rope(k, &cos, &sin, head_dim, rotary_dim)?;
 
     Ok((rotated_q, rotated_k))
 }
 
-/// Apply the rotation to a single tensor.
+/// Apply the rotation to a single tensor, supporting partial rotary embeddings.
 /// `x`: [batch, seq_len, num_heads, head_dim]
-/// `cos`, `sin`: [seq_len, half_dim]
-fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, head_dim: usize) -> Result<Tensor> {
-    let half = head_dim / 2;
+/// `cos`, `sin`: [seq_len, half_rotary]
+/// `head_dim`: total dimension per head
+/// `rotary_dim`: number of dimensions to rotate (must be even). The first `rotary_dim` dims
+///   are rotated; the remaining `head_dim - rotary_dim` dims pass through unchanged.
+fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, head_dim: usize, rotary_dim: usize) -> Result<Tensor> {
+    let half_rotary = rotary_dim / 2;
     let x_dtype = x.dtype();
 
     // Work in f32 for precision
     let x = x.to_dtype(DType::F32)?;
 
-    // Split head_dim into two halves along the last dimension
-    let x1 = x.narrow(candle_core::D::Minus1, 0, half)?; // [..., :half]
-    let x2 = x.narrow(candle_core::D::Minus1, half, half)?; // [..., half:]
+    // Split into rotary portion and passthrough portion
+    let x_rot = x.narrow(candle_core::D::Minus1, 0, rotary_dim)?; // [..., :rotary_dim]
+    let x_pass = if rotary_dim < head_dim {
+        Some(x.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?) // [..., rotary_dim:]
+    } else {
+        None
+    };
 
-    // cos/sin are [seq_len, half_dim], need to broadcast to [batch, seq_len, num_heads, half_dim]
-    // Reshape to [1, seq_len, 1, half_dim]
+    // Split rotary portion into two halves
+    let x1 = x_rot.narrow(candle_core::D::Minus1, 0, half_rotary)?; // [..., :half_rotary]
+    let x2 = x_rot.narrow(candle_core::D::Minus1, half_rotary, half_rotary)?; // [..., half_rotary:rotary_dim]
+
+    // cos/sin are [seq_len, half_rotary], need to broadcast to [batch, seq_len, num_heads, half_rotary]
+    // Reshape to [1, seq_len, 1, half_rotary]
     let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
     let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
 
@@ -335,7 +349,11 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, head_dim: usize) -> Result
     let r1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
     let r2 = (x1.broadcast_mul(&sin)? + x2.broadcast_mul(&cos)?)?;
 
-    let out = Tensor::cat(&[&r1, &r2], candle_core::D::Minus1)?;
+    // Concatenate rotated dims + passthrough dims
+    let out = match x_pass {
+        Some(pass) => Tensor::cat(&[&r1, &r2, &pass], candle_core::D::Minus1)?,
+        None => Tensor::cat(&[&r1, &r2], candle_core::D::Minus1)?,
+    };
     Ok(out.to_dtype(x_dtype)?)
 }
 
@@ -679,6 +697,7 @@ pub fn gqa_attention(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    rotary_dim: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
@@ -725,7 +744,8 @@ pub fn gqa_attention(
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
 
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
-    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rope_theta)?;
+    // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
+    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, rope_theta)?;
 
     // FlashAttention-2 path for prefill (seq_len > 1, no KV cache).
     // Flash-attn takes [batch, seq_len, num_heads, head_dim] — the layout we already have.
@@ -833,6 +853,7 @@ pub fn gqa_attention_paged(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    rotary_dim: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
     paged_cache: &mut PagedKvCache,
@@ -871,8 +892,8 @@ pub fn gqa_attention_paged(
     let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
 
-    // RoPE
-    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rope_theta)?;
+    // RoPE — only rotate first rotary_dim dimensions
+    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, rope_theta)?;
 
     // Transpose to [batch, heads, seq_len, head_dim]
     let q = q.transpose(1, 2)?.contiguous()?;
@@ -1066,6 +1087,7 @@ fn apply_causal_mask_with_offset(
 /// `num_heads`: number of query attention heads
 /// `num_kv_heads`: number of key/value attention heads
 /// `head_dim`: dimension per head
+/// `rotary_dim`: number of head dims to rotate (partial RoPE)
 /// `rope_theta`: RoPE base frequency
 /// `rms_norm_eps`: epsilon for RMSNorm
 /// `kv_cache`: optional KV cache for incremental decoding
@@ -1080,6 +1102,7 @@ pub fn transformer_block(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    rotary_dim: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
@@ -1104,6 +1127,7 @@ pub fn transformer_block(
         num_heads,
         num_kv_heads,
         head_dim,
+        rotary_dim,
         rope_theta,
         rms_norm_eps,
         kv_cache,
@@ -1144,6 +1168,7 @@ pub fn transformer_block_paged(
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    rotary_dim: usize,
     rope_theta: f64,
     rms_norm_eps: f64,
     paged_cache: &mut PagedKvCache,
@@ -1169,6 +1194,7 @@ pub fn transformer_block_paged(
         num_heads,
         num_kv_heads,
         head_dim,
+        rotary_dim,
         rope_theta,
         rms_norm_eps,
         paged_cache,
@@ -1256,6 +1282,7 @@ pub fn model_forward(
                     config.num_attention_heads,
                     config.num_kv_heads,
                     config.head_dim,
+                    config.rotary_dim(),
                     config.rope_theta,
                     config.rms_norm_eps,
                     cache_ref,
@@ -1352,6 +1379,7 @@ pub fn model_forward_paged(
                     config.num_attention_heads,
                     config.num_kv_heads,
                     config.head_dim,
+                    config.rotary_dim(),
                     config.rope_theta,
                     config.rms_norm_eps,
                     paged_cache,
@@ -1487,7 +1515,7 @@ mod tests {
         )?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, 10_000.0)?;
+        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, head_dim, 10_000.0)?;
 
         assert_eq!(rq.dims(), &[batch, seq_len, num_heads, head_dim]);
         assert_eq!(rk.dims(), &[batch, seq_len, num_kv_heads, head_dim]);
@@ -1504,7 +1532,7 @@ mod tests {
         let q = Tensor::new(q_data.as_slice(), &device)?.reshape((1, 1, 1, head_dim))?;
         let k = q.clone();
 
-        let (rq, _rk) = rotary_embedding(&q, &k, &[0], head_dim, 10_000.0)?;
+        let (rq, _rk) = rotary_embedding(&q, &k, &[0], head_dim, head_dim, 10_000.0)?;
         let orig = q.flatten_all()?.to_vec1::<f32>()?;
         let rotated = rq.flatten_all()?.to_vec1::<f32>()?;
 
@@ -1527,7 +1555,7 @@ mod tests {
         let q = Tensor::ones((1, 2, 1, head_dim), DType::F32, &device)?;
         let k = q.clone();
 
-        let (rq, _) = rotary_embedding(&q, &k, &[0, 100], head_dim, 10_000.0)?;
+        let (rq, _) = rotary_embedding(&q, &k, &[0, 100], head_dim, head_dim, 10_000.0)?;
         // rq shape: [1, 2, 1, 8] — extract pos 0 and pos 100
         let pos0 = rq.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
         let pos100 = rq.narrow(1, 1, 1)?.flatten_all()?.to_vec1::<f32>()?;
@@ -1537,6 +1565,59 @@ mod tests {
             diff > 0.01,
             "Different positions should produce different embeddings"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_rope_passthrough_dims_unchanged() -> Result<()> {
+        let device = Device::Cpu;
+        let head_dim = 8;
+        let rotary_dim = 4; // only rotate first 4 dims, last 4 pass through
+        let q_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let q = Tensor::new(q_data.as_slice(), &device)?.reshape((1, 1, 1, head_dim))?;
+        let k = q.clone();
+
+        // Position 100 — the rotary dims should change, passthrough dims should not
+        let (rq, _) = rotary_embedding(&q, &k, &[100], head_dim, rotary_dim, 10_000.0)?;
+        let orig = q.flatten_all()?.to_vec1::<f32>()?;
+        let rotated = rq.flatten_all()?.to_vec1::<f32>()?;
+
+        // First rotary_dim dims should be different at non-zero position
+        let rotary_diff: f32 = (0..rotary_dim).map(|i| (orig[i] - rotated[i]).abs()).sum();
+        assert!(rotary_diff > 0.01, "Rotary dims should change at position 100");
+
+        // Passthrough dims (rotary_dim..head_dim) must be identical
+        for i in rotary_dim..head_dim {
+            assert!(
+                (orig[i] - rotated[i]).abs() < 1e-6,
+                "Passthrough dim {i} should be unchanged: orig={} rotated={}",
+                orig[i],
+                rotated[i]
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_rope_preserves_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 1;
+        let seq_len = 4;
+        let num_heads = 2;
+        let num_kv_heads = 1;
+        let head_dim = 16;
+        let rotary_dim = 4; // partial rotation
+
+        let q = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
+        let k = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_kv_heads, head_dim), &device)?;
+        let positions: Vec<u32> = (0..seq_len as u32).collect();
+
+        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, rotary_dim, 10_000.0)?;
+
+        assert_eq!(rq.dims(), &[batch, seq_len, num_heads, head_dim]);
+        assert_eq!(rk.dims(), &[batch, seq_len, num_kv_heads, head_dim]);
 
         Ok(())
     }
@@ -1607,6 +1688,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0, // tests use full rotation by default
         }
     }
 
@@ -1641,7 +1723,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1662,7 +1744,7 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
@@ -1686,7 +1768,7 @@ mod tests {
         let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
-        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
+        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -1743,7 +1825,7 @@ mod tests {
         };
 
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
-        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1777,7 +1859,7 @@ mod tests {
         };
 
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
-        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, None)?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
@@ -1816,7 +1898,7 @@ mod tests {
 
         let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
         let cfg = make_test_config(2, 1, 4, 8);
-        let result = transformer_block(&x, &layer, &cfg, &[0], 2, 1, 4, 10_000.0, 1e-6, None, 0, None);
+        let result = transformer_block(&x, &layer, &cfg, &[0], 2, 1, 4, 4, 10_000.0, 1e-6, None, 0, None);
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -1935,6 +2017,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
@@ -1987,6 +2070,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let logits = model_forward(&[7], &weights, &config, None, None, None)?;
@@ -2046,6 +2130,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let tokens: Vec<u32> = vec![1, 5, 3, 10, 7];
@@ -2125,6 +2210,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let tokens: Vec<u32> = vec![3, 7, 1];
@@ -2273,6 +2359,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let mut linear_state = LinearAttentionState::new(&config, &device)?;
@@ -2327,6 +2414,7 @@ mod tests {
             linear_num_value_heads: num_heads,
             linear_value_head_dim: head_dim,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 32, DType::F32, &device)?;
@@ -2372,6 +2460,7 @@ mod tests {
             linear_num_value_heads: 4,
             linear_value_head_dim: 4,
             linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
         };
 
         let state = LinearAttentionState::new(&config, &device)?;
