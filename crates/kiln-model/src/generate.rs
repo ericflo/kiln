@@ -117,6 +117,15 @@ impl ModelRunner {
         self.active_lora.as_ref()
     }
 
+    /// Atomically swap the active LoRA adapter.
+    ///
+    /// Pass `Some(lora)` to activate pre-loaded weights, or `None` to revert to
+    /// the base model. Designed for use with `RwLock`: load weights outside the
+    /// lock, then take a brief write lock to call this method.
+    pub fn swap_lora(&mut self, lora: Option<LoraWeights>) {
+        self.active_lora = lora;
+    }
+
     /// Generate text from a prompt string.
     ///
     /// Tokenizes the prompt, runs the autoregressive generation loop,

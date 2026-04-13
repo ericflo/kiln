@@ -19,7 +19,7 @@ pub enum ModelBackend {
     },
     /// Real model weights loaded via ModelRunner with paged KV cache.
     Real {
-        runner: Arc<std::sync::Mutex<ModelRunner>>,
+        runner: Arc<std::sync::RwLock<ModelRunner>>,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
         paged_cache: Arc<std::sync::Mutex<PagedKvCache>>,
     },
@@ -94,7 +94,7 @@ impl AppState {
         Self {
             model_config,
             backend: Arc::new(ModelBackend::Real {
-                runner: Arc::new(std::sync::Mutex::new(runner)),
+                runner: Arc::new(std::sync::RwLock::new(runner)),
                 block_manager: Arc::new(std::sync::Mutex::new(block_manager)),
                 paged_cache: Arc::new(std::sync::Mutex::new(paged_cache)),
             }),
