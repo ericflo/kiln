@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
 use crate::kv_cache::KvCache;
+use crate::paged_kv_cache::PagedKvCache;
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
+
+use kiln_core::block::BlockTable;
 
 /// GPU-ready tensors organized by layer, converted from raw `ModelWeights` bytes.
 pub struct GpuWeights {
@@ -382,6 +385,103 @@ pub fn gqa_attention(
         .reshape(((), seq_len, num_heads * head_dim))?;
 
     // Output projection
+    let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
+    Ok(out)
+}
+
+/// Grouped-query attention using a paged KV cache.
+///
+/// Same computation as [`gqa_attention`] but reads/writes K/V through a
+/// [`PagedKvCache`] and [`BlockTable`] instead of a contiguous [`KvCache`].
+/// This enables multiple concurrent sequences to share a fixed KV cache pool.
+///
+/// The caller must ensure the block table has enough blocks allocated for all
+/// positions up to `positions.last() + 1`.
+pub fn gqa_attention_paged(
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rope_theta: f64,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    full_attn_layer_idx: usize,
+) -> Result<Tensor> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let start_pos = positions[0] as usize;
+
+    // Project to Q, K, V
+    let q = x.broadcast_matmul(&attn_weights.q_proj.t()?)?;
+    let k = x.broadcast_matmul(&attn_weights.k_proj.t()?)?;
+    let v = x.broadcast_matmul(&attn_weights.v_proj.t()?)?;
+
+    let q = q.reshape(((), seq_len, num_heads, head_dim))?;
+    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+    // QK-norm
+    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+
+    // RoPE
+    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rope_theta)?;
+
+    // Transpose to [batch, heads, seq_len, head_dim]
+    let q = q.transpose(1, 2)?.contiguous()?;
+    let k = k.transpose(1, 2)?.contiguous()?;
+    let v = v.transpose(1, 2)?.contiguous()?;
+
+    // Write new K/V into paged cache
+    paged_cache
+        .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+        .context("paged KV cache write failed")?;
+
+    // Read full K/V from paged cache (all positions 0..start_pos+seq_len)
+    let total_seq_len = start_pos + seq_len;
+    let (k, v) = paged_cache
+        .read(full_attn_layer_idx, block_table, total_seq_len)
+        .context("paged KV cache read failed")?;
+    let kv_len = total_seq_len;
+
+    // GQA head expansion
+    let gqa_ratio = num_heads / num_kv_heads;
+    let batch = k.dim(0)?;
+    let (k, v) = if gqa_ratio > 1 {
+        let k = k
+            .unsqueeze(2)?
+            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+            .contiguous()?
+            .reshape((batch, num_heads, kv_len, head_dim))?;
+        let v = v
+            .unsqueeze(2)?
+            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+            .contiguous()?
+            .reshape((batch, num_heads, kv_len, head_dim))?;
+        (k, v)
+    } else {
+        (k.contiguous()?, v.contiguous()?)
+    };
+
+    // Scaled dot-product attention
+    let scale = (head_dim as f64).sqrt();
+    let attn_scores = q.broadcast_matmul(&k.t()?)?;
+    let attn_scores = (attn_scores / scale)?;
+
+    let past_len = kv_len - seq_len;
+    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
+
+    let attn_weights_softmax = candle_nn::ops::softmax_last_dim(&attn_scores)?;
+    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
+
+    // Transpose back and output projection
+    let attn_output = attn_output
+        .transpose(1, 2)?
+        .contiguous()?
+        .reshape(((), seq_len, num_heads * head_dim))?;
+
     let out = attn_output.broadcast_matmul(&attn_weights.o_proj.t()?)?;
     Ok(out)
 }

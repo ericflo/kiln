@@ -3,6 +3,7 @@ pub mod forward;
 pub mod generate;
 pub mod kv_cache;
 pub mod loader;
+pub mod paged_kv_cache;
 pub mod lora;
 pub mod sampling;
 pub mod weights;
