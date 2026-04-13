@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+// Re-export weight types from lora_loader for convenience.
+pub use crate::lora_loader::{LoraLayerWeights, LoraWeights};
+
 /// Metadata for a LoRA adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterInfo {
