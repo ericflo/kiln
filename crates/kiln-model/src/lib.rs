@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod forward;
 pub mod loader;
 pub mod lora;
 pub mod weights;
