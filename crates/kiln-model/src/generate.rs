@@ -4,6 +4,7 @@
 //! a `ModelRunner` that accepts text prompts and produces text output.
 
 use anyhow::{Context, Result};
+use candle_core::DType;
 use std::sync::mpsc;
 
 use kiln_core::config::ModelConfig;
@@ -12,6 +13,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::forward::{model_forward, GpuWeights};
+use crate::kv_cache::KvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
 
 /// Holds loaded model weights and tokenizer, provides text generation.
@@ -110,6 +112,24 @@ impl ModelRunner {
         })
     }
 
+    /// Create a new KV cache sized for this model.
+    fn new_kv_cache(&self, max_seq_len: usize) -> Result<KvCache> {
+        let dtype = match self.config.dtype {
+            kiln_core::config::DType::BF16 => DType::BF16,
+            kiln_core::config::DType::FP16 => DType::F16,
+            kiln_core::config::DType::FP32 => DType::F32,
+        };
+        let device = self.weights.embed_tokens.device();
+        KvCache::new(
+            self.config.num_full_attention_layers,
+            self.config.num_kv_heads,
+            self.config.head_dim,
+            max_seq_len,
+            dtype,
+            device,
+        )
+    }
+
     /// Generate text token-by-token, sending each token to a channel as it is produced.
     ///
     /// Returns an `mpsc::Receiver<StreamEvent>` that yields `Token` events
@@ -130,28 +150,32 @@ impl ModelRunner {
 
         let (tx, rx) = mpsc::channel();
 
-        let mut generated_tokens: Vec<TokenId> = Vec::new();
-        let mut all_tokens: Vec<TokenId> = prompt_tokens.to_vec();
-        let mut step_seed = params.seed;
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let mut kv_cache = self.new_kv_cache(max_total)?;
 
+        // Prefill: run forward pass on all prompt tokens at once
+        let logits = model_forward(&prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache))
+            .context("prefill forward pass failed")?;
+        kv_cache.advance(prompt_tokens.len());
+
+        // Sample first token from the last position's logits
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
 
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
         for _step in 0..params.max_tokens {
-            let logits = model_forward(&all_tokens, &self.weights, &self.config)
-                .context("forward pass failed")?;
-
-            let next_token = if params.temperature == 0.0 {
-                greedy_sample(&logits)?
-            } else {
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
-            };
-
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
             }
@@ -163,7 +187,6 @@ impl ModelRunner {
             }
 
             generated_tokens.push(next_token);
-            all_tokens.push(next_token);
 
             // Decode this token's text
             let token_text = self
@@ -194,7 +217,6 @@ impl ModelRunner {
                         if text.contains(stop_seq.as_str()) {
                             finish_reason =
                                 FinishReason::StopSequence(stop_seq.clone());
-                            // Send done and return
                             let _ = tx.send(StreamEvent::Done(StreamDone {
                                 finish_reason,
                                 completion_tokens: generated_tokens.len(),
@@ -204,6 +226,23 @@ impl ModelRunner {
                     }
                 }
             }
+
+            // Decode step: forward pass on just the new token
+            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache))
+                .context("decode forward pass failed")?;
+            kv_cache.advance(1);
+
+            next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
         }
 
         let _ = tx.send(StreamEvent::Done(StreamDone {
@@ -217,7 +256,7 @@ impl ModelRunner {
     /// Autoregressive generation loop operating on token IDs.
     ///
     /// 1. Prefill: run forward pass on the full prompt to get first next-token logits.
-    /// 2. Decode: repeatedly sample a token, append it, run forward on just the new token.
+    /// 2. Decode: repeatedly sample a token, run forward on just the new token.
     /// 3. Stop on EOS, max_tokens, or stop sequence.
     pub fn generate_from_tokens(
         &self,
@@ -226,35 +265,31 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
-        let mut generated_tokens: Vec<TokenId> = Vec::new();
-        let mut all_tokens: Vec<TokenId> = prompt_tokens.to_vec();
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let mut kv_cache = self.new_kv_cache(max_total)?;
 
-        // Track the RNG seed: for deterministic generation with temperature > 0,
-        // we increment the seed for each step so the sequence is reproducible
-        // but each step samples differently.
+        // Prefill: run forward pass on all prompt tokens at once
+        let logits = model_forward(prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache))
+            .context("prefill forward pass failed")?;
+        kv_cache.advance(prompt_tokens.len());
+
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
 
+        // Sample first token from the last position's logits
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
         for _step in 0..params.max_tokens {
-            // Run forward pass on all tokens so far.
-            // In a production system this would use KV cache to only compute
-            // the new token's attention, but for correctness-first we recompute
-            // the full sequence each step.
-            let logits = model_forward(&all_tokens, &self.weights, &self.config)
-                .context("forward pass failed")?;
-
-            // Sample next token from the last position's logits
-            let next_token = if params.temperature == 0.0 {
-                greedy_sample(&logits)?
-            } else {
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
-            };
-
             // Advance seed for next step
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
@@ -263,14 +298,13 @@ impl ModelRunner {
             // Check for EOS
             if self.eos_token_ids.contains(&next_token) {
                 return Ok(GenerationOutput {
-                    text: String::new(), // caller fills this in
+                    text: String::new(),
                     token_ids: generated_tokens,
                     finish_reason: FinishReason::Eos,
                 });
             }
 
             generated_tokens.push(next_token);
-            all_tokens.push(next_token);
 
             // Check stop sequences against decoded text so far
             if !params.stop.is_empty() {
@@ -291,6 +325,24 @@ impl ModelRunner {
                     }
                 }
             }
+
+            // Decode step: forward pass on just the new token (KV cache has all previous)
+            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache))
+                .context("decode forward pass failed")?;
+            kv_cache.advance(1);
+
+            // Sample next token from the new logits
+            next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
         }
 
         Ok(GenerationOutput {
