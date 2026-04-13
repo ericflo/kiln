@@ -27,7 +27,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         model: format!(
-            "qwen3-4b ({}L, {}H, {}KV)",
+            "qwen3.5-4b ({}L, {}H, {}KV)",
             state.model_config.num_layers,
             state.model_config.num_attention_heads,
             state.model_config.num_kv_heads,

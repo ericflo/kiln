@@ -21,7 +21,7 @@ async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
     Json(ModelsResponse {
         object: "list",
         data: vec![ModelInfo {
-            id: "qwen3-4b".to_string(),
+            id: "qwen3.5-4b".to_string(),
             object: "model",
             owned_by: "kiln",
         }],

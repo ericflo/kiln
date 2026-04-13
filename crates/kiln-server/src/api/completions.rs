@@ -31,7 +31,7 @@ pub struct ChatCompletionRequest {
 }
 
 fn default_model() -> String {
-    "qwen3-4b".to_string()
+    "qwen3.5-4b".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]

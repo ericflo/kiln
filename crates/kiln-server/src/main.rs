@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8420);
 
-    let model_config = ModelConfig::qwen3_4b();
+    let model_config = ModelConfig::qwen3_5_4b();
 
     let scheduler_config = SchedulerConfig {
         max_batch_tokens: 8192,
@@ -33,9 +33,9 @@ async fn main() -> Result<()> {
     // Calculate number of KV cache blocks based on available memory.
     // For now, use a fixed number. Real implementation will query GPU memory.
     // Target: 131072 tokens (full 128K context) = 8192 blocks at block_size=16.
-    // Qwen3-4B KV cache at 128K BF16: ~18 GB (147 KB/token * 131072 tokens).
-    // On a 24GB GPU with 8GB model weights, we have ~14GB for KV — enough for
-    // one full 128K sequence or several shorter ones.
+    // Qwen3.5-4B only needs KV cache for 8 full-attention layers (out of 32 total).
+    // KV at 128K BF16: ~4 GB (32 KB/token * 131072 tokens). This is the hybrid
+    // architecture payoff — 128K context fits comfortably on a 24GB GPU.
     let num_blocks = 8192; // 131072 tokens of KV cache with block_size=16
 
     let scheduler = Scheduler::new(scheduler_config, num_blocks);

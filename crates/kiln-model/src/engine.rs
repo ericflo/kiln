@@ -16,7 +16,7 @@ pub struct StepOutput {
 /// sampling tokens. The scheduler decides WHAT to run; the engine decides HOW.
 ///
 /// Phase 1: mock engine that returns random tokens (for testing the scheduler + server).
-/// Phase 2: real Qwen3 inference via candle or CUDA kernels.
+/// Phase 2: real Qwen3.5 inference via candle or CUDA kernels.
 pub trait Engine: Send + Sync {
     /// Run one forward pass for the given batch.
     ///

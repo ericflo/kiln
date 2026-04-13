@@ -10,7 +10,23 @@ The idea: you run this on your home server, collect examples of failures, submit
 
 ## Target Model
 
-**Qwen3-4B** (pure transformer, GQA, 128K extended context) for Phase 1. Qwen3.5-4B (hybrid linear attention, 262K native context) planned for Phase 2 once framework support matures.
+**Qwen3.5-4B** — a hybrid architecture combining Gated DeltaNet linear attention with standard GQA attention. This is the ideal model for Kiln because:
+
+- **262K native context** — long-context is a first-class capability, not an afterthought
+- **Hybrid attention** — 24 of 32 layers use linear attention (O(1) state), only 8 use full GQA attention. KV cache is ~32 KB/token instead of ~128 KB/token. This is what makes 128K+ context practical on a single 24GB GPU.
+- **4B parameters** — large enough to be genuinely capable, small enough for consumer hardware. LoRA training completes in seconds, not hours.
+- **248K vocabulary** — 202+ language support out of the box
+- **Built-in vision encoder** — future path to multimodal fine-tuning
+
+| Spec | Value |
+|---|---|
+| Layers | 32 (24 linear + 8 full attention) |
+| Hidden size | 2560 |
+| Attention heads | 16 Q / 4 KV (GQA, 4:1 ratio) |
+| Head dim | 256 |
+| FFN intermediate | 9216 |
+| Context length | 262,144 tokens (native) |
+| KV cache / token | ~32 KB (BF16, 8 full-attn layers only) |
 
 ## Architecture
 
@@ -29,6 +45,8 @@ The idea: you run this on your home server, collect examples of failures, submit
 │    └── Block Manager (paged KV cache)            │
 │                                                  │
 │  Engine (model forward pass + LoRA application)  │
+│    ├── 24× Gated DeltaNet layers (linear attn)  │
+│    └──  8× GQA layers (full attention + KV)     │
 │                                                  │
 │  Training Sidecar (Python, shared GPU memory)    │
 │    ├── SFT (cross-entropy on LoRA)              │
@@ -42,7 +60,8 @@ The idea: you run this on your home server, collect examples of failures, submit
 
 ## Key Design Decisions
 
-- **Single model, fully tuned.** No runtime model switching. The scheduler, memory management, and kernels are all optimized for one architecture.
+- **Single model, fully tuned.** No runtime model switching. The scheduler, memory management, and kernels are all optimized for Qwen3.5-4B's hybrid architecture.
+- **Hybrid attention aware.** The engine knows which layers are linear (Gated DeltaNet) and which are full attention (GQA). KV cache is only allocated for the 8 full-attention layers. Linear layers maintain fixed-size recurrent state.
 - **Continuous batching with chunked prefill.** Sarathi-style: decode requests are never stalled by long prefills. The prefill is chunked across iterations.
 - **Paged KV cache.** Virtual memory-style block allocation eliminates fragmentation. Each request gets a block table mapping logical positions to physical blocks.
 - **LoRA-only training.** All learning happens through LoRA adapters. The base model weights are never modified. This means changes are reversible, composable, and cheap.
@@ -67,17 +86,18 @@ answer = client.chat("What is 2+2?")
 
 ## Memory Budget (24GB GPU)
 
-Kiln targets **128K context** (131,072 tokens) as the default. Qwen3-4B uses GQA with 8 KV heads, so KV cache is ~144 KB/token in BF16.
+Qwen3.5-4B's hybrid architecture is the key enabler. Because only 8 of 32 layers need KV cache, the memory footprint at long context is ~4× lower than a pure transformer.
 
 | Scenario | Weights | KV Cache | LoRA + Training | Total |
 |---|---|---|---|---|
-| **128K ctx, 1 seq, inference only** | 8 GB | ~18 GB | — | ~26 GB ⚠️ |
-| **128K ctx, 1 seq, inference + FP8 KV** | 8 GB | ~9 GB | — | ~17 GB ✓ |
-| **64K ctx, 2 seq, inference only** | 8 GB | ~18 GB | — | ~26 GB ⚠️ |
-| **32K ctx, 4 seq, inference + training** | 8 GB | ~4.5 GB | ~5 GB | ~18 GB ✓ |
-| **32K ctx, 4 seq, INT4 weights + training** | 2.5 GB | ~4.5 GB | ~5 GB | ~12 GB ✓ |
+| **128K ctx, 1 seq, inference only** | 8 GB | ~4 GB | — | ~13 GB ✓ |
+| **128K ctx, 1 seq, inference + training** | 8 GB | ~4 GB | ~5 GB | ~18 GB ✓ |
+| **128K ctx, 4 seq, inference only** | 8 GB | ~16 GB | — | ~25 GB ⚠️ |
+| **64K ctx, 4 seq, inference + training** | 8 GB | ~8 GB | ~5 GB | ~22 GB ✓ |
+| **32K ctx, 8 seq, inference + training** | 8 GB | ~8 GB | ~5 GB | ~22 GB ✓ |
+| **128K ctx, 4 seq, INT4 weights** | 2.5 GB | ~16 GB | — | ~19 GB ✓ |
 
-Full 128K on a 24GB GPU requires FP8 KV cache quantization (Phase 6) or INT4 model weights. Until then, 32K-64K context with multiple concurrent sequences is the sweet spot. The scheduler and block manager are designed for the full 131,072 from day one — the only constraint is VRAM.
+**128K context with a single sequence fits on a 24GB GPU with room to spare for training.** This is the hybrid architecture payoff — what would require 26+ GB on a pure transformer needs only 13 GB here.
 
 ## Project Structure
 
@@ -100,8 +120,8 @@ crates/
 - [x] OpenAI-compatible chat completions API
 - [x] Training API types (SFT + GRPO)
 - [x] LoRA adapter management API
-- [ ] Real model loading (safetensors, Qwen3 architecture)
-- [ ] Real inference engine (candle or CUDA)
+- [ ] Real model loading (safetensors, Qwen3.5 architecture)
+- [ ] Real inference engine (hybrid linear + full attention)
 - [ ] Tokenizer integration
 - [ ] SSE streaming
 
