@@ -94,75 +94,77 @@ pub fn flash_attn_fwd(
     let out = Tensor::zeros((b, seqlen_q, num_heads, head_dim), DType::BF16, device)?;
     let softmax_lse = Tensor::zeros((b, num_heads, seqlen_q), DType::F32, device)?;
 
-    // Get CUDA storage and raw pointers
-    let (q_storage, q_layout) = q.storage_and_layout();
-    let (k_storage, k_layout) = k.storage_and_layout();
-    let (v_storage, v_layout) = v.storage_and_layout();
-    let (out_storage, out_layout) = out.storage_and_layout();
-    let (lse_storage, lse_layout) = softmax_lse.storage_and_layout();
+    // Scope the storage borrows so they're dropped before we return the tensors
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+        let (lse_storage, lse_layout) = softmax_lse.storage_and_layout();
 
-    let q_cuda = match &*q_storage {
-        candle_core::Storage::Cuda(c) => c,
-        _ => candle_core::bail!("q must be a CUDA tensor"),
-    };
-    let k_cuda = match &*k_storage {
-        candle_core::Storage::Cuda(c) => c,
-        _ => candle_core::bail!("k must be a CUDA tensor"),
-    };
-    let v_cuda = match &*v_storage {
-        candle_core::Storage::Cuda(c) => c,
-        _ => candle_core::bail!("v must be a CUDA tensor"),
-    };
-    let out_cuda = match &*out_storage {
-        candle_core::Storage::Cuda(c) => c,
-        _ => candle_core::bail!("out must be a CUDA tensor"),
-    };
-    let lse_cuda = match &*lse_storage {
-        candle_core::Storage::Cuda(c) => c,
-        _ => candle_core::bail!("softmax_lse must be a CUDA tensor"),
-    };
+        let q_cuda = match &*q_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("q must be a CUDA tensor"),
+        };
+        let k_cuda = match &*k_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("k must be a CUDA tensor"),
+        };
+        let v_cuda = match &*v_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("v must be a CUDA tensor"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("out must be a CUDA tensor"),
+        };
+        let lse_cuda = match &*lse_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("softmax_lse must be a CUDA tensor"),
+        };
 
-    let stream = q_cuda.device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-    let q_slice = q_cuda.as_cuda_slice::<bf16>()?;
-    let k_slice = k_cuda.as_cuda_slice::<bf16>()?;
-    let v_slice = v_cuda.as_cuda_slice::<bf16>()?;
-    let out_slice = out_cuda.as_cuda_slice::<bf16>()?;
-    let lse_slice = lse_cuda.as_cuda_slice::<f32>()?;
+        let q_slice = q_cuda.as_cuda_slice::<bf16>()?;
+        let k_slice = k_cuda.as_cuda_slice::<bf16>()?;
+        let v_slice = v_cuda.as_cuda_slice::<bf16>()?;
+        let out_slice = out_cuda.as_cuda_slice::<bf16>()?;
+        let lse_slice = lse_cuda.as_cuda_slice::<f32>()?;
 
-    let q_slice = q_slice.slice(q_layout.start_offset()..);
-    let k_slice = k_slice.slice(k_layout.start_offset()..);
-    let v_slice = v_slice.slice(v_layout.start_offset()..);
-    let out_slice = out_slice.slice(out_layout.start_offset()..);
-    let lse_slice = lse_slice.slice(lse_layout.start_offset()..);
+        let q_slice = q_slice.slice(q_layout.start_offset()..);
+        let k_slice = k_slice.slice(k_layout.start_offset()..);
+        let v_slice = v_slice.slice(v_layout.start_offset()..);
+        let out_slice = out_slice.slice(out_layout.start_offset()..);
+        let lse_slice = lse_slice.slice(lse_layout.start_offset()..);
 
-    unsafe {
-        let (q_ptr, _g1) = q_slice.device_ptr(&stream);
-        let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-        let (v_ptr, _g3) = v_slice.device_ptr(&stream);
-        let (out_ptr, _g4) = out_slice.device_ptr(&stream);
-        let (lse_ptr, _g5) = lse_slice.device_ptr(&stream);
+        unsafe {
+            let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+            let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+            let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+            let (out_ptr, _g4) = out_slice.device_ptr(&stream);
+            let (lse_ptr, _g5) = lse_slice.device_ptr(&stream);
 
-        let status = kiln_flash_attn_fwd(
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            out_ptr as *mut _,
-            lse_ptr as *mut _,
-            b as i32,
-            seqlen_q as i32,
-            seqlen_k as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            raw_stream,
-        );
+            let status = kiln_flash_attn_fwd(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                out_ptr as *mut _,
+                lse_ptr as *mut _,
+                b as i32,
+                seqlen_q as i32,
+                seqlen_k as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                raw_stream,
+            );
 
-        if status != 0 {
-            candle_core::bail!("kiln_flash_attn_fwd failed with status {status}");
+            if status != 0 {
+                candle_core::bail!("kiln_flash_attn_fwd failed with status {status}");
+            }
         }
     }
 
@@ -226,94 +228,96 @@ pub fn flash_attn_bwd(
         device,
     )?;
 
-    // Extract CUDA pointers
-    let (dout_s, dout_l) = dout.storage_and_layout();
-    let (q_s, q_l) = q.storage_and_layout();
-    let (k_s, k_l) = k.storage_and_layout();
-    let (v_s, v_l) = v.storage_and_layout();
-    let (out_s, out_l) = out.storage_and_layout();
-    let (lse_s, lse_l) = softmax_lse.storage_and_layout();
-    let (dq_s, dq_l) = dq.storage_and_layout();
-    let (dk_s, dk_l) = dk.storage_and_layout();
-    let (dv_s, dv_l) = dv.storage_and_layout();
-    let (sd_s, sd_l) = softmax_d.storage_and_layout();
-    let (da_s, da_l) = dq_accum.storage_and_layout();
+    // Scope the storage borrows so they're dropped before we return/reshape the tensors
+    {
+        let (dout_s, dout_l) = dout.storage_and_layout();
+        let (q_s, q_l) = q.storage_and_layout();
+        let (k_s, k_l) = k.storage_and_layout();
+        let (v_s, v_l) = v.storage_and_layout();
+        let (out_s, out_l) = out.storage_and_layout();
+        let (lse_s, lse_l) = softmax_lse.storage_and_layout();
+        let (dq_s, dq_l) = dq.storage_and_layout();
+        let (dk_s, dk_l) = dk.storage_and_layout();
+        let (dv_s, dv_l) = dv.storage_and_layout();
+        let (sd_s, sd_l) = softmax_d.storage_and_layout();
+        let (da_s, da_l) = dq_accum.storage_and_layout();
 
-    macro_rules! cuda {
-        ($s:expr) => {
-            match &*$s {
-                candle_core::Storage::Cuda(c) => c,
-                _ => candle_core::bail!("tensor must be on CUDA"),
+        macro_rules! cuda {
+            ($s:expr) => {
+                match &*$s {
+                    candle_core::Storage::Cuda(c) => c,
+                    _ => candle_core::bail!("tensor must be on CUDA"),
+                }
+            };
+        }
+
+        let dout_cuda = cuda!(dout_s);
+        let q_cuda = cuda!(q_s);
+        let k_cuda = cuda!(k_s);
+        let v_cuda = cuda!(v_s);
+        let out_cuda = cuda!(out_s);
+        let lse_cuda = cuda!(lse_s);
+        let dq_cuda = cuda!(dq_s);
+        let dk_cuda = cuda!(dk_s);
+        let dv_cuda = cuda!(dv_s);
+        let sd_cuda = cuda!(sd_s);
+        let da_cuda = cuda!(da_s);
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let dout_sl = dout_cuda.as_cuda_slice::<bf16>()?.slice(dout_l.start_offset()..);
+        let q_sl = q_cuda.as_cuda_slice::<bf16>()?.slice(q_l.start_offset()..);
+        let k_sl = k_cuda.as_cuda_slice::<bf16>()?.slice(k_l.start_offset()..);
+        let v_sl = v_cuda.as_cuda_slice::<bf16>()?.slice(v_l.start_offset()..);
+        let out_sl = out_cuda.as_cuda_slice::<bf16>()?.slice(out_l.start_offset()..);
+        let lse_sl = lse_cuda.as_cuda_slice::<f32>()?.slice(lse_l.start_offset()..);
+        let dq_sl = dq_cuda.as_cuda_slice::<bf16>()?.slice(dq_l.start_offset()..);
+        let dk_sl = dk_cuda.as_cuda_slice::<bf16>()?.slice(dk_l.start_offset()..);
+        let dv_sl = dv_cuda.as_cuda_slice::<bf16>()?.slice(dv_l.start_offset()..);
+        let sd_sl = sd_cuda.as_cuda_slice::<f32>()?.slice(sd_l.start_offset()..);
+        let da_sl = da_cuda.as_cuda_slice::<f32>()?.slice(da_l.start_offset()..);
+
+        unsafe {
+            let (dout_ptr, _g1) = dout_sl.device_ptr(&stream);
+            let (q_ptr, _g2) = q_sl.device_ptr(&stream);
+            let (k_ptr, _g3) = k_sl.device_ptr(&stream);
+            let (v_ptr, _g4) = v_sl.device_ptr(&stream);
+            let (out_ptr, _g5) = out_sl.device_ptr(&stream);
+            let (lse_ptr, _g6) = lse_sl.device_ptr(&stream);
+            let (dq_ptr, _g7) = dq_sl.device_ptr(&stream);
+            let (dk_ptr, _g8) = dk_sl.device_ptr(&stream);
+            let (dv_ptr, _g9) = dv_sl.device_ptr(&stream);
+            let (sd_ptr, _g10) = sd_sl.device_ptr(&stream);
+            let (da_ptr, _g11) = da_sl.device_ptr(&stream);
+
+            let status = kiln_flash_attn_bwd(
+                dout_ptr as *const _,
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                out_ptr as *const _,
+                lse_ptr as *const _,
+                dq_ptr as *mut _,
+                dk_ptr as *mut _,
+                dv_ptr as *mut _,
+                sd_ptr as *mut _,
+                da_ptr as *mut _,
+                b as i32,
+                seqlen_q as i32,
+                seqlen_k as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                0, // non-deterministic
+                raw_stream,
+            );
+
+            if status != 0 {
+                candle_core::bail!("kiln_flash_attn_bwd failed with status {status}");
             }
-        };
-    }
-
-    let dout_cuda = cuda!(dout_s);
-    let q_cuda = cuda!(q_s);
-    let k_cuda = cuda!(k_s);
-    let v_cuda = cuda!(v_s);
-    let out_cuda = cuda!(out_s);
-    let lse_cuda = cuda!(lse_s);
-    let dq_cuda = cuda!(dq_s);
-    let dk_cuda = cuda!(dk_s);
-    let dv_cuda = cuda!(dv_s);
-    let sd_cuda = cuda!(sd_s);
-    let da_cuda = cuda!(da_s);
-
-    let stream = q_cuda.device().cuda_stream();
-    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-
-    let dout_sl = dout_cuda.as_cuda_slice::<bf16>()?.slice(dout_l.start_offset()..);
-    let q_sl = q_cuda.as_cuda_slice::<bf16>()?.slice(q_l.start_offset()..);
-    let k_sl = k_cuda.as_cuda_slice::<bf16>()?.slice(k_l.start_offset()..);
-    let v_sl = v_cuda.as_cuda_slice::<bf16>()?.slice(v_l.start_offset()..);
-    let out_sl = out_cuda.as_cuda_slice::<bf16>()?.slice(out_l.start_offset()..);
-    let lse_sl = lse_cuda.as_cuda_slice::<f32>()?.slice(lse_l.start_offset()..);
-    let dq_sl = dq_cuda.as_cuda_slice::<bf16>()?.slice(dq_l.start_offset()..);
-    let dk_sl = dk_cuda.as_cuda_slice::<bf16>()?.slice(dk_l.start_offset()..);
-    let dv_sl = dv_cuda.as_cuda_slice::<bf16>()?.slice(dv_l.start_offset()..);
-    let sd_sl = sd_cuda.as_cuda_slice::<f32>()?.slice(sd_l.start_offset()..);
-    let da_sl = da_cuda.as_cuda_slice::<f32>()?.slice(da_l.start_offset()..);
-
-    unsafe {
-        let (dout_ptr, _g1) = dout_sl.device_ptr(&stream);
-        let (q_ptr, _g2) = q_sl.device_ptr(&stream);
-        let (k_ptr, _g3) = k_sl.device_ptr(&stream);
-        let (v_ptr, _g4) = v_sl.device_ptr(&stream);
-        let (out_ptr, _g5) = out_sl.device_ptr(&stream);
-        let (lse_ptr, _g6) = lse_sl.device_ptr(&stream);
-        let (dq_ptr, _g7) = dq_sl.device_ptr(&stream);
-        let (dk_ptr, _g8) = dk_sl.device_ptr(&stream);
-        let (dv_ptr, _g9) = dv_sl.device_ptr(&stream);
-        let (sd_ptr, _g10) = sd_sl.device_ptr(&stream);
-        let (da_ptr, _g11) = da_sl.device_ptr(&stream);
-
-        let status = kiln_flash_attn_bwd(
-            dout_ptr as *const _,
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            out_ptr as *const _,
-            lse_ptr as *const _,
-            dq_ptr as *mut _,
-            dk_ptr as *mut _,
-            dv_ptr as *mut _,
-            sd_ptr as *mut _,
-            da_ptr as *mut _,
-            b as i32,
-            seqlen_q as i32,
-            seqlen_k as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            0, // non-deterministic
-            raw_stream,
-        );
-
-        if status != 0 {
-            candle_core::bail!("kiln_flash_attn_bwd failed with status {status}");
         }
     }
 
