@@ -24,6 +24,8 @@ model_id = "Qwen/Qwen3.5-4B"
 # gpu_memory_gb = 24.0               # Override detected VRAM (for testing)
 inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for training)
 # training_memory_gb = 4.0           # Override auto-calculated training budget
+# kv_cache_fp8 = true                # FP8 (E4M3) KV cache quantization — halves memory, ~2x longer context
+                                      # Also settable via KILN_KV_CACHE_FP8=1 env var
 
 [training]
 # grad_checkpoint_segments = 4       # Segments for gradient checkpointing

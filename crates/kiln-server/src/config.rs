@@ -55,6 +55,10 @@ pub struct MemoryConfig {
     pub gpu_memory_gb: Option<f64>,
     pub inference_memory_fraction: f64,
     pub training_memory_gb: Option<f64>,
+    /// Enable FP8 (E4M3FN) quantization for KV cache, halving memory usage.
+    /// When enabled, K/V values are stored as 8-bit floats with per-tensor scaling.
+    /// Default: false
+    pub kv_cache_fp8: bool,
 }
 
 /// Training-specific settings.
@@ -119,6 +123,7 @@ impl Default for MemoryConfig {
             gpu_memory_gb: None,
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
+            kv_cache_fp8: false,
         }
     }
 }
@@ -232,6 +237,9 @@ impl KilnConfig {
                 self.memory.training_memory_gb = Some(g);
             }
         }
+        if let Ok(v) = std::env::var("KILN_KV_CACHE_FP8") {
+            self.memory.kv_cache_fp8 = v == "1" || v.eq_ignore_ascii_case("true");
+        }
 
         // Training
         if let Ok(v) = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS") {
@@ -307,6 +315,7 @@ mod tests {
         assert!(config.model.adapter_dir.is_none());
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
+        assert!(!config.memory.kv_cache_fp8);
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert_eq!(config.logging.level, "info");
@@ -333,6 +342,7 @@ num_blocks = 128
 gpu_memory_gb = 24.0
 inference_memory_fraction = 0.5
 training_memory_gb = 6.0
+kv_cache_fp8 = true
 
 [training]
 grad_checkpoint_segments = 8
@@ -353,6 +363,7 @@ format = "pretty"
         assert_eq!(config.memory.gpu_memory_gb, Some(24.0));
         assert_eq!(config.memory.inference_memory_fraction, 0.5);
         assert_eq!(config.memory.training_memory_gb, Some(6.0));
+        assert!(config.memory.kv_cache_fp8);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
         assert_eq!(config.training.checkpoint_interval, Some(50));
         assert_eq!(config.logging.level, "debug");
@@ -432,6 +443,7 @@ port = 3000
             std::env::set_var("KILN_LOG_LEVEL", "debug");
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
             std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
+            std::env::set_var("KILN_KV_CACHE_FP8", "1");
         }
 
         let mut config = KilnConfig::default();
@@ -444,6 +456,7 @@ port = 3000
         assert_eq!(config.logging.level, "debug");
         assert!(config.training.no_grad_checkpoint);
         assert_eq!(config.training.checkpoint_interval, Some(25));
+        assert!(config.memory.kv_cache_fp8);
 
         // Clean up
         unsafe {
@@ -454,6 +467,7 @@ port = 3000
             std::env::remove_var("KILN_LOG_LEVEL");
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
             std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
+            std::env::remove_var("KILN_KV_CACHE_FP8");
         }
     }
 

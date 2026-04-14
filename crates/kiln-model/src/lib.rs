@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod forward;
+pub mod fp8;
 pub mod generate;
 pub mod kv_cache;
 pub mod loader;
