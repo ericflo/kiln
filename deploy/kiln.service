@@ -1,0 +1,33 @@
+[Unit]
+Description=Kiln inference server with live LoRA training
+Documentation=https://github.com/ericflo/kiln
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=kiln
+Group=kiln
+
+EnvironmentFile=/etc/kiln/env
+ExecStart=/usr/local/bin/kiln --config /etc/kiln/kiln.toml
+
+Restart=on-failure
+RestartSec=5s
+
+# GPU memory pinning
+LimitMEMLOCK=infinity
+
+# Allow enough file descriptors for model mmapping + connections
+LimitNOFILE=65536
+
+# Protect system directories
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kiln
+
+# Working directory for adapter storage
+WorkingDirectory=/var/lib/kiln
+
+[Install]
+WantedBy=multi-user.target
