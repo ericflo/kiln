@@ -173,6 +173,8 @@ pub struct AppState {
     /// FIFO training queue — jobs are enqueued here and executed sequentially
     /// by a background worker.
     pub training_queue: SharedTrainingQueue,
+    /// Detected VRAM info for config/debug reporting.
+    pub vram_info: kiln_core::vram::GpuVramInfo,
 }
 
 impl AppState {
@@ -196,6 +198,10 @@ impl AppState {
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 1.0)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
+            vram_info: kiln_core::vram::GpuVramInfo {
+                total_bytes: 0,
+                source: kiln_core::vram::VramSource::None,
+            },
         }
     }
 
@@ -246,6 +252,9 @@ impl AppState {
             * model_config.head_dim
             * block_size
             * kv_dtype_bytes) as u64;
+
+        // Detect VRAM for auto-configuration
+        let vram_info = kiln_core::vram::detect_vram();
 
         // Determine num_blocks — either from env, or memory-aware auto-calculation
         let num_blocks = if let Some(explicit) = std::env::var("KILN_NUM_BLOCKS")
@@ -322,6 +331,7 @@ impl AppState {
             memory_budget: Arc::new(memory_budget),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
+            vram_info,
         }
     }
 }
@@ -351,32 +361,27 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
 
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.
 ///
-/// On CUDA devices, uses candle's CUDA bindings to query device memory.
+/// Uses the shared VRAM detection from kiln-core (nvidia-smi + env override).
+/// For CPU devices, still checks KILN_GPU_MEMORY_GB for testing purposes.
 fn query_gpu_total_memory(device: &candle_core::Device) -> u64 {
+    let vram = kiln_core::vram::detect_vram();
     match device {
         #[cfg(feature = "cuda")]
-        candle_core::Device::Cuda(cuda_dev) => {
-            // Use cuMemGetInfo via candle's CUDA device
-            // candle_core doesn't expose total memory directly, so we use
-            // the CUDA ordinal to query via cudarc if available.
-            // For now, fall back to KILN_GPU_MEMORY_GB env var.
-            if let Ok(val) = std::env::var("KILN_GPU_MEMORY_GB") {
-                if let Ok(gb) = val.parse::<f64>() {
-                    return (gb * 1024.0 * 1024.0 * 1024.0) as u64;
-                }
+        candle_core::Device::Cuda(_) => {
+            if vram.total_bytes > 0 {
+                tracing::info!(
+                    total_gb = vram.total_bytes as f64 / 1e9,
+                    source = %vram.source,
+                    "GPU VRAM detected"
+                );
+                vram.total_bytes
+            } else {
+                // CUDA device exists but detection failed — assume 24GB
+                tracing::warn!("CUDA device present but VRAM detection failed; assuming 24GB");
+                24 * 1024 * 1024 * 1024
             }
-            // Default: assume 24GB (common consumer GPU)
-            24 * 1024 * 1024 * 1024
         }
-        _ => {
-            // CPU or Metal — check if KILN_GPU_MEMORY_GB is set for testing
-            if let Ok(val) = std::env::var("KILN_GPU_MEMORY_GB") {
-                if let Ok(gb) = val.parse::<f64>() {
-                    return (gb * 1024.0 * 1024.0 * 1024.0) as u64;
-                }
-            }
-            0
-        }
+        _ => vram.total_bytes, // 0 if no GPU, or env override for testing
     }
 }
 

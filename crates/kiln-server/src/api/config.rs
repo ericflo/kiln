@@ -1,0 +1,101 @@
+use axum::{extract::State, routing::get, Json, Router};
+use serde::Serialize;
+
+use crate::state::AppState;
+
+#[derive(Serialize)]
+struct ConfigResponse {
+    vram: VramConfig,
+    kv_cache: KvCacheConfig,
+    training: TrainingConfig,
+    memory_budget: MemoryBudgetConfig,
+}
+
+#[derive(Serialize)]
+struct VramConfig {
+    detected_gb: f64,
+    source: String,
+}
+
+#[derive(Serialize)]
+struct KvCacheConfig {
+    num_blocks: Option<usize>,
+    num_blocks_source: &'static str,
+}
+
+#[derive(Serialize)]
+struct TrainingConfig {
+    checkpoint_segments: usize,
+    checkpoint_segments_source: &'static str,
+    checkpointing_enabled: bool,
+}
+
+#[derive(Serialize)]
+struct MemoryBudgetConfig {
+    total_vram_gb: f64,
+    model_gb: f64,
+    kv_cache_gb: f64,
+    training_budget_gb: f64,
+    inference_memory_fraction: f64,
+}
+
+async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
+    let vram = &state.vram_info;
+
+    // Determine num_blocks source
+    let (num_blocks, num_blocks_source) = {
+        let explicit = std::env::var("KILN_NUM_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        match explicit {
+            Some(n) => (Some(n), "KILN_NUM_BLOCKS"),
+            None => {
+                let recommended = kiln_core::vram::recommended_num_blocks(vram);
+                (recommended, "auto")
+            }
+        }
+    };
+
+    // Determine checkpoint segments
+    let ckpt = kiln_train::CheckpointConfig::from_env(state.model_config.num_layers);
+    let segments_source = if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some()
+    {
+        "KILN_GRAD_CHECKPOINT_SEGMENTS"
+    } else if ckpt.auto_configured {
+        "auto"
+    } else {
+        "default"
+    };
+
+    let b = &state.memory_budget;
+
+    Json(ConfigResponse {
+        vram: VramConfig {
+            detected_gb: vram.total_bytes as f64 / 1e9,
+            source: vram.source.to_string(),
+        },
+        kv_cache: KvCacheConfig {
+            num_blocks,
+            num_blocks_source,
+        },
+        training: TrainingConfig {
+            checkpoint_segments: ckpt.num_segments,
+            checkpoint_segments_source: segments_source,
+            checkpointing_enabled: ckpt.enabled,
+        },
+        memory_budget: MemoryBudgetConfig {
+            total_vram_gb: b.total_vram_bytes as f64 / 1e9,
+            model_gb: b.model_memory_bytes as f64 / 1e9,
+            kv_cache_gb: b.kv_cache_bytes as f64 / 1e9,
+            training_budget_gb: b.training_budget_bytes as f64 / 1e9,
+            inference_memory_fraction: b.inference_memory_fraction,
+        },
+    })
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/v1/config", get(get_config))
+}
