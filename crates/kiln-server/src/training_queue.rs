@@ -12,7 +12,8 @@ use kiln_model::lora_loader::LoraWeights;
 use kiln_train::{GrpoRequest, SftRequest, TrainingState};
 use kiln_train::trainer;
 
-use crate::state::{AppState, ModelBackend};
+use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
+use crate::state::{AppState, ModelBackend, TrainingJobType};
 
 /// A pending training job in the queue.
 pub enum QueuedJob {
@@ -154,11 +155,16 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         (runner_arc.clone(), guard.config.num_layers)
     };
 
-    // Get auto_load and adapter_name from the job info
-    let (auto_load, adapter_name) = {
+    // Get auto_load, adapter_name, and job_type from the job info
+    let (auto_load, adapter_name, job_type) = {
         let jobs = state.training_jobs.read().unwrap();
         let job = jobs.get(&job_id).unwrap();
-        (job.auto_load, job.adapter_name.clone())
+        (job.auto_load, job.adapter_name.clone(), job.job_type)
+    };
+
+    let metric_type = match job_type {
+        TrainingJobType::Sft => TrainingMetricType::Sft,
+        TrainingJobType::Grpo => TrainingMetricType::Grpo,
     };
 
     // Set up progress callback
@@ -220,6 +226,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     job.adapter_path = Some(path_str);
                 }
             }
+            state.metrics.inc_training(metric_type, TrainingMetricStatus::Completed);
 
             if auto_load {
                 if let Err(e) = auto_load_adapter(
@@ -241,6 +248,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.state = TrainingState::Failed;
             }
+            state.metrics.inc_training(metric_type, TrainingMetricStatus::Failed);
         }
     }
 }

@@ -5,6 +5,7 @@ use tower_http::trace::TraceLayer;
 use crate::state::AppState;
 
 mod health;
+mod metrics;
 mod models;
 mod completions;
 mod adapters;
@@ -14,6 +15,7 @@ mod config;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(health::routes())
+        .merge(metrics::routes())
         .merge(models::routes())
         .merge(completions::routes())
         .merge(adapters::routes())

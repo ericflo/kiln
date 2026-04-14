@@ -15,6 +15,7 @@ use kiln_train::{GrpoRequest, SftRequest, TrainingResponse, TrainingState, Train
 
 use std::sync::atomic::Ordering;
 
+use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -305,9 +306,20 @@ async fn cancel_queued_job(
 
     if removed {
         // Mark as failed (cancelled) in the tracking map
-        let mut jobs = state.training_jobs.write().unwrap();
-        if let Some(job) = jobs.get_mut(&job_id) {
-            job.state = TrainingState::Failed;
+        let metric_type = {
+            let mut jobs = state.training_jobs.write().unwrap();
+            let jt = jobs.get(&job_id).map(|j| j.job_type);
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.state = TrainingState::Failed;
+            }
+            jt
+        };
+        if let Some(jt) = metric_type {
+            let mt = match jt {
+                TrainingJobType::Sft => TrainingMetricType::Sft,
+                TrainingJobType::Grpo => TrainingMetricType::Grpo,
+            };
+            state.metrics.inc_training(mt, TrainingMetricStatus::Cancelled);
         }
         Ok(Json(serde_json::json!({
             "job_id": job_id,

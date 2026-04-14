@@ -17,6 +17,7 @@ use kiln_core::tokenizer::ChatMessage;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{ModelRunner, StreamEvent};
 
+use crate::metrics::RequestStatus;
 use crate::state::{AppState, ModelBackend};
 
 /// OpenAI-compatible chat completion request.
@@ -109,6 +110,33 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, String)> {
+    let start = std::time::Instant::now();
+    state.metrics.inc_active();
+
+    let result = chat_completions_inner(&state, req).await;
+
+    state.metrics.dec_active();
+    let elapsed = start.elapsed().as_secs_f64();
+    state.metrics.observe_duration(elapsed);
+
+    match &result {
+        Ok(_) => state.metrics.inc_request(RequestStatus::Ok),
+        Err((code, _)) => {
+            if *code == StatusCode::REQUEST_TIMEOUT {
+                state.metrics.inc_request(RequestStatus::Timeout);
+            } else {
+                state.metrics.inc_request(RequestStatus::Error);
+            }
+        }
+    }
+
+    result
+}
+
+async fn chat_completions_inner(
+    state: &AppState,
+    req: ChatCompletionRequest,
+) -> Result<Response, (StatusCode, String)> {
     // Convert request messages to ChatMessage for template formatting
     let chat_messages: Vec<ChatMessage> = req
         .messages
@@ -137,7 +165,7 @@ async fn chat_completions(
 
     // Ensure the correct LoRA adapter is active for this request.
     if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        ensure_adapter(&state, runner, &req.adapter).await?;
+        ensure_adapter(state, runner, &req.adapter).await?;
     }
 
     if req.stream {
@@ -148,7 +176,7 @@ async fn chat_completions(
                 paged_cache,
             } => {
                 generate_real_streaming(
-                    &state,
+                    state,
                     runner,
                     block_manager,
                     paged_cache,
@@ -170,8 +198,8 @@ async fn chat_completions(
                 block_manager,
                 paged_cache,
             } => {
-                generate_real(
-                    &state,
+                let resp = generate_real(
+                    state,
                     runner,
                     block_manager,
                     paged_cache,
@@ -179,13 +207,20 @@ async fn chat_completions(
                     &sampling,
                     &req,
                 )
-                .await
-                .map(|json| json.into_response())
+                .await?;
+                // Count generated tokens for metrics.
+                state
+                    .metrics
+                    .add_tokens(resp.usage.completion_tokens as u64);
+                Ok(Json(resp).into_response())
             }
             ModelBackend::Mock { scheduler, engine } => {
-                generate_mock(&state, scheduler, engine, &prompt_text, &sampling, &req)
-                    .await
-                    .map(|json| json.into_response())
+                let resp =
+                    generate_mock(state, scheduler, engine, &prompt_text, &sampling, &req).await?;
+                state
+                    .metrics
+                    .add_tokens(resp.usage.completion_tokens as u64);
+                Ok(Json(resp).into_response())
             }
         }
     }
@@ -270,7 +305,7 @@ async fn generate_real(
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
-) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+) -> Result<ChatCompletionResponse, (StatusCode, String)> {
     // Count prompt tokens for usage stats.
     let prompt_token_count = state
         .tokenizer
@@ -321,7 +356,7 @@ async fn generate_real(
 
     let now = now_epoch();
 
-    Ok(Json(ChatCompletionResponse {
+    Ok(ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         created: now,
@@ -339,7 +374,7 @@ async fn generate_real(
             completion_tokens: output.token_ids.len(),
             total_tokens: prompt_token_count + output.token_ids.len(),
         },
-    }))
+    })
 }
 
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
@@ -562,7 +597,7 @@ async fn generate_mock(
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
-) -> Result<Json<ChatCompletionResponse>, (StatusCode, String)> {
+) -> Result<ChatCompletionResponse, (StatusCode, String)> {
     let prompt_tokens = state
         .tokenizer
         .encode(prompt_text)
@@ -655,7 +690,7 @@ async fn generate_mock(
 
     let now = now_epoch();
 
-    Ok(Json(ChatCompletionResponse {
+    Ok(ChatCompletionResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         created: now,
@@ -673,7 +708,7 @@ async fn generate_mock(
             completion_tokens: output_tokens.len(),
             total_tokens: prompt_token_count + output_tokens.len(),
         },
-    }))
+    })
 }
 
 fn now_epoch() -> u64 {

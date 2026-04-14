@@ -13,6 +13,7 @@ use kiln_scheduler::Scheduler;
 use kiln_train::TrainingState;
 use serde::Serialize;
 
+use crate::metrics::Metrics;
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
 /// GPU memory budget tracking for coordinating inference and training.
@@ -179,6 +180,8 @@ pub struct AppState {
     pub shutdown: ShutdownFlag,
     /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 300).
     pub request_timeout: std::time::Duration,
+    /// Prometheus metrics counters.
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -208,6 +211,7 @@ impl AppState {
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: parse_request_timeout(),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -340,6 +344,7 @@ impl AppState {
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: parse_request_timeout(),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 }

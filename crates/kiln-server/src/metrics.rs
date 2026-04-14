@@ -1,0 +1,309 @@
+//! Prometheus metrics collection for kiln.
+//!
+//! Uses atomic counters and gauges — no external dependencies.
+//! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Atomically tracked metrics for the kiln server.
+pub struct Metrics {
+    // Inference counters
+    pub requests_ok: AtomicU64,
+    pub requests_error: AtomicU64,
+    pub requests_timeout: AtomicU64,
+    pub requests_rejected: AtomicU64,
+
+    /// Total tokens generated across all requests.
+    pub tokens_generated: AtomicU64,
+
+    /// Currently in-flight inference requests.
+    pub active_requests: AtomicU64,
+
+    /// Request duration tracking (simple: count + sum in microseconds).
+    pub request_duration_count: AtomicU64,
+    pub request_duration_sum_us: AtomicU64,
+
+    // Training counters
+    pub training_sft_completed: AtomicU64,
+    pub training_sft_failed: AtomicU64,
+    pub training_sft_cancelled: AtomicU64,
+    pub training_grpo_completed: AtomicU64,
+    pub training_grpo_failed: AtomicU64,
+    pub training_grpo_cancelled: AtomicU64,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            requests_ok: AtomicU64::new(0),
+            requests_error: AtomicU64::new(0),
+            requests_timeout: AtomicU64::new(0),
+            requests_rejected: AtomicU64::new(0),
+            tokens_generated: AtomicU64::new(0),
+            active_requests: AtomicU64::new(0),
+            request_duration_count: AtomicU64::new(0),
+            request_duration_sum_us: AtomicU64::new(0),
+            training_sft_completed: AtomicU64::new(0),
+            training_sft_failed: AtomicU64::new(0),
+            training_sft_cancelled: AtomicU64::new(0),
+            training_grpo_completed: AtomicU64::new(0),
+            training_grpo_failed: AtomicU64::new(0),
+            training_grpo_cancelled: AtomicU64::new(0),
+        }
+    }
+
+    /// Increment the request counter for the given status.
+    pub fn inc_request(&self, status: RequestStatus) {
+        match status {
+            RequestStatus::Ok => self.requests_ok.fetch_add(1, Ordering::Relaxed),
+            RequestStatus::Error => self.requests_error.fetch_add(1, Ordering::Relaxed),
+            RequestStatus::Timeout => self.requests_timeout.fetch_add(1, Ordering::Relaxed),
+            RequestStatus::Rejected => self.requests_rejected.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+
+    /// Record a completed request duration in seconds.
+    pub fn observe_duration(&self, secs: f64) {
+        self.request_duration_count.fetch_add(1, Ordering::Relaxed);
+        let us = (secs * 1_000_000.0) as u64;
+        self.request_duration_sum_us.fetch_add(us, Ordering::Relaxed);
+    }
+
+    /// Add generated token count.
+    pub fn add_tokens(&self, n: u64) {
+        self.tokens_generated.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Increment active requests (call on request entry).
+    pub fn inc_active(&self) {
+        self.active_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Decrement active requests (call on request exit).
+    pub fn dec_active(&self) {
+        self.active_requests.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Record a training job completion.
+    pub fn inc_training(&self, job_type: TrainingMetricType, status: TrainingMetricStatus) {
+        match (job_type, status) {
+            (TrainingMetricType::Sft, TrainingMetricStatus::Completed) => {
+                self.training_sft_completed.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Sft, TrainingMetricStatus::Failed) => {
+                self.training_sft_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Sft, TrainingMetricStatus::Cancelled) => {
+                self.training_sft_cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Grpo, TrainingMetricStatus::Completed) => {
+                self.training_grpo_completed.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Grpo, TrainingMetricStatus::Failed) => {
+                self.training_grpo_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Grpo, TrainingMetricStatus::Cancelled) => {
+                self.training_grpo_cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+        };
+    }
+
+    /// Render all metrics in Prometheus text exposition format.
+    ///
+    /// Dynamic gauges (scheduler state, GPU memory, training active, adapter) are
+    /// passed in as `SnapshotGauges` because they come from shared state that the
+    /// metrics struct itself doesn't own.
+    pub fn render(&self, gauges: &SnapshotGauges) -> String {
+        let mut out = String::with_capacity(2048);
+
+        // --- Inference ---
+        out.push_str("# HELP kiln_requests_total Total inference requests.\n");
+        out.push_str("# TYPE kiln_requests_total counter\n");
+        prom_counter(&mut out, "kiln_requests_total", "status", "ok", self.requests_ok.load(Ordering::Relaxed));
+        prom_counter(&mut out, "kiln_requests_total", "status", "error", self.requests_error.load(Ordering::Relaxed));
+        prom_counter(&mut out, "kiln_requests_total", "status", "timeout", self.requests_timeout.load(Ordering::Relaxed));
+        prom_counter(&mut out, "kiln_requests_total", "status", "rejected", self.requests_rejected.load(Ordering::Relaxed));
+
+        out.push_str("# HELP kiln_request_duration_seconds Request latency.\n");
+        out.push_str("# TYPE kiln_request_duration_seconds summary\n");
+        let count = self.request_duration_count.load(Ordering::Relaxed);
+        let sum_us = self.request_duration_sum_us.load(Ordering::Relaxed);
+        push_line(&mut out, &format!("kiln_request_duration_seconds_count {count}"));
+        push_line(&mut out, &format!("kiln_request_duration_seconds_sum {:.6}", sum_us as f64 / 1_000_000.0));
+
+        out.push_str("# HELP kiln_tokens_generated_total Total tokens generated.\n");
+        out.push_str("# TYPE kiln_tokens_generated_total counter\n");
+        push_line(&mut out, &format!("kiln_tokens_generated_total {}", self.tokens_generated.load(Ordering::Relaxed)));
+
+        out.push_str("# HELP kiln_active_requests Currently in-flight requests.\n");
+        out.push_str("# TYPE kiln_active_requests gauge\n");
+        push_line(&mut out, &format!("kiln_active_requests {}", self.active_requests.load(Ordering::Relaxed)));
+
+        // --- Scheduler ---
+        out.push_str("# HELP kiln_scheduler_waiting Requests waiting to be scheduled.\n");
+        out.push_str("# TYPE kiln_scheduler_waiting gauge\n");
+        push_line(&mut out, &format!("kiln_scheduler_waiting {}", gauges.scheduler_waiting));
+
+        out.push_str("# HELP kiln_scheduler_running Requests currently generating.\n");
+        out.push_str("# TYPE kiln_scheduler_running gauge\n");
+        push_line(&mut out, &format!("kiln_scheduler_running {}", gauges.scheduler_running));
+
+        out.push_str("# HELP kiln_blocks_used KV cache blocks in use.\n");
+        out.push_str("# TYPE kiln_blocks_used gauge\n");
+        push_line(&mut out, &format!("kiln_blocks_used {}", gauges.blocks_used));
+
+        out.push_str("# HELP kiln_blocks_total Total KV cache blocks.\n");
+        out.push_str("# TYPE kiln_blocks_total gauge\n");
+        push_line(&mut out, &format!("kiln_blocks_total {}", gauges.blocks_total));
+
+        // --- GPU Memory ---
+        out.push_str("# HELP kiln_vram_total_bytes Total GPU VRAM.\n");
+        out.push_str("# TYPE kiln_vram_total_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_total_bytes {}", gauges.vram_total));
+
+        out.push_str("# HELP kiln_vram_model_bytes Model weight memory.\n");
+        out.push_str("# TYPE kiln_vram_model_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_model_bytes {}", gauges.vram_model));
+
+        out.push_str("# HELP kiln_vram_kv_cache_bytes KV cache memory.\n");
+        out.push_str("# TYPE kiln_vram_kv_cache_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_kv_cache_bytes {}", gauges.vram_kv_cache));
+
+        out.push_str("# HELP kiln_vram_training_budget_bytes Training memory budget.\n");
+        out.push_str("# TYPE kiln_vram_training_budget_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_training_budget_bytes {}", gauges.vram_training_budget));
+
+        // --- Training ---
+        out.push_str("# HELP kiln_training_jobs_total Total training jobs.\n");
+        out.push_str("# TYPE kiln_training_jobs_total counter\n");
+        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "sft", "status", "completed", self.training_sft_completed.load(Ordering::Relaxed));
+        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "sft", "status", "failed", self.training_sft_failed.load(Ordering::Relaxed));
+        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "sft", "status", "cancelled", self.training_sft_cancelled.load(Ordering::Relaxed));
+        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "grpo", "status", "completed", self.training_grpo_completed.load(Ordering::Relaxed));
+        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "grpo", "status", "failed", self.training_grpo_failed.load(Ordering::Relaxed));
+        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "grpo", "status", "cancelled", self.training_grpo_cancelled.load(Ordering::Relaxed));
+
+        out.push_str("# HELP kiln_training_active Currently running training job.\n");
+        out.push_str("# TYPE kiln_training_active gauge\n");
+        push_line(&mut out, &format!("kiln_training_active {}", gauges.training_active));
+
+        // --- Adapter ---
+        out.push_str("# HELP kiln_active_adapter Currently loaded adapter.\n");
+        out.push_str("# TYPE kiln_active_adapter gauge\n");
+        if let Some(ref name) = gauges.active_adapter {
+            push_line(&mut out, &format!("kiln_active_adapter{{name=\"{name}\"}} 1"));
+        } else {
+            push_line(&mut out, "kiln_active_adapter{name=\"base\"} 1");
+        }
+
+        out
+    }
+}
+
+/// Dynamic gauge values snapshotted at render time.
+pub struct SnapshotGauges {
+    pub scheduler_waiting: usize,
+    pub scheduler_running: usize,
+    pub blocks_used: usize,
+    pub blocks_total: usize,
+    pub vram_total: u64,
+    pub vram_model: u64,
+    pub vram_kv_cache: u64,
+    pub vram_training_budget: u64,
+    pub training_active: u8,
+    pub active_adapter: Option<String>,
+}
+
+pub enum RequestStatus {
+    Ok,
+    Error,
+    Timeout,
+    Rejected,
+}
+
+#[derive(Clone, Copy)]
+pub enum TrainingMetricType {
+    Sft,
+    Grpo,
+}
+
+#[derive(Clone, Copy)]
+pub enum TrainingMetricStatus {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+fn push_line(out: &mut String, line: &str) {
+    out.push_str(line);
+    out.push('\n');
+}
+
+fn prom_counter(out: &mut String, name: &str, label: &str, value: &str, count: u64) {
+    out.push_str(&format!("{name}{{{label}=\"{value}\"}} {count}\n"));
+}
+
+fn prom_counter2(out: &mut String, name: &str, l1: &str, v1: &str, l2: &str, v2: &str, count: u64) {
+    out.push_str(&format!("{name}{{{l1}=\"{v1}\",{l2}=\"{v2}\"}} {count}\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_render() {
+        let m = Metrics::new();
+        m.inc_request(RequestStatus::Ok);
+        m.inc_request(RequestStatus::Ok);
+        m.inc_request(RequestStatus::Error);
+        m.observe_duration(0.5);
+        m.add_tokens(100);
+        m.inc_active();
+
+        let gauges = SnapshotGauges {
+            scheduler_waiting: 3,
+            scheduler_running: 1,
+            blocks_used: 10,
+            blocks_total: 256,
+            vram_total: 24_000_000_000,
+            vram_model: 8_000_000_000,
+            vram_kv_cache: 2_000_000_000,
+            vram_training_budget: 14_000_000_000,
+            training_active: 0,
+            active_adapter: Some("my-adapter".to_string()),
+        };
+
+        let output = m.render(&gauges);
+
+        assert!(output.contains("kiln_requests_total{status=\"ok\"} 2"));
+        assert!(output.contains("kiln_requests_total{status=\"error\"} 1"));
+        assert!(output.contains("kiln_tokens_generated_total 100"));
+        assert!(output.contains("kiln_active_requests 1"));
+        assert!(output.contains("kiln_scheduler_waiting 3"));
+        assert!(output.contains("kiln_blocks_total 256"));
+        assert!(output.contains("kiln_vram_total_bytes 24000000000"));
+        assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
+        assert!(output.contains("kiln_request_duration_seconds_count 1"));
+        assert!(output.contains("kiln_request_duration_seconds_sum 0.5"));
+    }
+
+    #[test]
+    fn test_base_adapter_rendering() {
+        let m = Metrics::new();
+        let gauges = SnapshotGauges {
+            scheduler_waiting: 0,
+            scheduler_running: 0,
+            blocks_used: 0,
+            blocks_total: 0,
+            vram_total: 0,
+            vram_model: 0,
+            vram_kv_cache: 0,
+            vram_training_budget: 0,
+            training_active: 0,
+            active_adapter: None,
+        };
+        let output = m.render(&gauges);
+        assert!(output.contains("kiln_active_adapter{name=\"base\"} 1"));
+    }
+}
