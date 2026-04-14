@@ -1,0 +1,34 @@
+# Kiln configuration — all values shown are defaults.
+# Environment variables (KILN_*) override any value set here.
+#
+# Config file resolution order:
+#   1. --config <path> CLI argument
+#   2. KILN_CONFIG environment variable
+#   3. ./kiln.toml in the current working directory
+#   4. No file — built-in defaults
+
+[server]
+host = "0.0.0.0"
+port = 8420
+request_timeout_secs = 300
+shutdown_timeout_secs = 30
+
+[model]
+# path = "/path/to/model"            # Required for real inference (omit for mock mode)
+model_id = "Qwen/Qwen3.5-4B"
+# tokenizer_path = "/path/to/tokenizer.json"
+# adapter_dir = "/path/to/adapters"  # Default: <model_path>/adapters
+
+[memory]
+# num_blocks = 256                   # KV cache blocks (auto-sized from VRAM if omitted)
+# gpu_memory_gb = 24.0               # Override detected VRAM (for testing)
+inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for training)
+# training_memory_gb = 4.0           # Override auto-calculated training budget
+
+[training]
+# grad_checkpoint_segments = 4       # Segments for gradient checkpointing
+no_grad_checkpoint = false
+
+[logging]
+level = "info"                        # trace, debug, info, warn, error, or a filter directive
+format = "json"                       # json, pretty, text, human

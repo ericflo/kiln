@@ -1,6 +1,6 @@
 //! Structured logging initialization.
 //!
-//! Configurable via environment variables:
+//! Configurable via the `[logging]` section of `kiln.toml` or environment variables:
 //! - `KILN_LOG_LEVEL`: verbosity level (`trace`, `debug`, `info`, `warn`, `error`)
 //!   or a full `tracing_subscriber::EnvFilter` directive. Default: `info`.
 //! - `KILN_LOG_FORMAT`: output format — `json` (default) for structured JSON,
@@ -9,12 +9,10 @@
 
 use tracing_subscriber::EnvFilter;
 
-/// Build an `EnvFilter` from `RUST_LOG` (if set) or `KILN_LOG_LEVEL`.
-pub fn build_filter() -> EnvFilter {
-    let level = std::env::var("KILN_LOG_LEVEL").unwrap_or_else(|_| "info".into());
-
+/// Build an `EnvFilter` from `RUST_LOG` (if set) or the provided level string.
+pub fn build_filter(level: &str) -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        match level.as_str() {
+        match level {
             "trace" | "debug" | "info" | "warn" | "error" => {
                 format!("kiln={level},kiln_server={level},tower_http={level}")
                     .parse()
@@ -31,13 +29,15 @@ pub fn build_filter() -> EnvFilter {
 
 /// Initialize the global tracing subscriber.
 ///
+/// `level`: log level or tracing filter directive (e.g. `"info"`, `"kiln=trace,tower_http=warn"`).
+/// `format`: output format — `"json"` (default), `"pretty"`, `"text"`, or `"human"`.
+///
 /// Call once at startup. Panics if called twice (tracing's global subscriber
 /// can only be set once per process).
-pub fn init() -> anyhow::Result<()> {
-    let format = std::env::var("KILN_LOG_FORMAT").unwrap_or_else(|_| "json".into());
-    let filter = build_filter();
+pub fn init(level: &str, format: &str) -> anyhow::Result<()> {
+    let filter = build_filter(level);
 
-    match format.as_str() {
+    match format {
         "pretty" | "text" | "human" => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
@@ -68,9 +68,8 @@ mod tests {
         // Ensure RUST_LOG is not set for this test
         unsafe {
             std::env::remove_var("RUST_LOG");
-            std::env::remove_var("KILN_LOG_LEVEL");
         }
-        let filter = build_filter();
+        let filter = build_filter("info");
         let s = format!("{filter}");
         assert!(s.contains("info"), "default filter should contain info: {s}");
     }
@@ -79,30 +78,26 @@ mod tests {
     fn test_build_filter_custom_level() {
         unsafe {
             std::env::remove_var("RUST_LOG");
-            std::env::set_var("KILN_LOG_LEVEL", "debug");
         }
-        let filter = build_filter();
+        let filter = build_filter("debug");
         let s = format!("{filter}");
         assert!(
             s.contains("debug"),
             "filter should contain debug: {s}"
         );
-        unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
     }
 
     #[test]
     fn test_build_filter_custom_directive() {
         unsafe {
             std::env::remove_var("RUST_LOG");
-            std::env::set_var("KILN_LOG_LEVEL", "kiln=trace,tower_http=warn");
         }
-        let filter = build_filter();
+        let filter = build_filter("kiln=trace,tower_http=warn");
         let s = format!("{filter}");
         // Custom directive is parsed as-is (not expanded to the standard triple)
         assert!(
             s.contains("kiln=trace") || s.contains("tower_http=warn"),
             "filter should parse custom directive: {s}"
         );
-        unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
     }
 }

@@ -42,28 +42,28 @@ impl GpuMemoryBudget {
     /// `total_vram_bytes`: Total GPU VRAM (0 for CPU).
     /// `model_memory_bytes`: Estimated model weight size.
     /// `kv_cache_bytes`: Actual KV cache allocation size.
-    /// `inference_fraction`: Fraction of VRAM for inference (from env).
+    /// `inference_fraction`: Fraction of VRAM for inference.
+    /// `training_memory_gb`: Optional explicit training memory budget in GB.
     pub fn compute(
         total_vram_bytes: u64,
         model_memory_bytes: u64,
         kv_cache_bytes: u64,
         inference_fraction: f64,
+        training_memory_gb: Option<f64>,
     ) -> Self {
         let training_budget_bytes = if total_vram_bytes == 0 {
             // CPU mode — no GPU memory budget applies
             0
         } else {
-            // Override via KILN_TRAINING_MEMORY_GB if set
-            if let Ok(val) = std::env::var("KILN_TRAINING_MEMORY_GB") {
-                if let Ok(gb) = val.parse::<f64>() {
-                    return Self {
-                        total_vram_bytes,
-                        model_memory_bytes,
-                        kv_cache_bytes,
-                        training_budget_bytes: (gb * 1024.0 * 1024.0 * 1024.0) as u64,
-                        inference_memory_fraction: inference_fraction,
-                    };
-                }
+            // Explicit override takes precedence
+            if let Some(gb) = training_memory_gb {
+                return Self {
+                    total_vram_bytes,
+                    model_memory_bytes,
+                    kv_cache_bytes,
+                    training_budget_bytes: (gb * 1024.0 * 1024.0 * 1024.0) as u64,
+                    inference_memory_fraction: inference_fraction,
+                };
             }
             // Auto-detect: total - model - kv_cache
             total_vram_bytes
@@ -193,6 +193,7 @@ impl AppState {
         scheduler: Scheduler,
         engine: Arc<dyn Engine>,
         tokenizer: KilnTokenizer,
+        request_timeout_secs: u64,
     ) -> Self {
         Self {
             model_config,
@@ -204,7 +205,7 @@ impl AppState {
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 1.0)),
+            memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 1.0, None)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             vram_info: kiln_core::vram::GpuVramInfo {
@@ -212,7 +213,7 @@ impl AppState {
                 source: kiln_core::vram::VramSource::None,
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
-            request_timeout: parse_request_timeout(),
+            request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
         }
@@ -221,17 +222,20 @@ impl AppState {
     /// Create an AppState with a real ModelRunner backend and paged KV cache.
     ///
     /// Uses `block_size=16` by default. The number of blocks can be overridden
-    /// with `KILN_NUM_BLOCKS`. Otherwise derived from `max_position_embeddings / block_size`.
+    /// via `memory_cfg.num_blocks`. Otherwise derived from available VRAM or
+    /// `max_position_embeddings / block_size`.
     ///
-    /// GPU memory sharing: When `KILN_INFERENCE_MEMORY_FRACTION` is set (default 0.7),
-    /// KV cache allocation is limited to that fraction of remaining VRAM (after model weights),
-    /// reserving the rest for training. Set to 1.0 to use all available VRAM for inference.
+    /// GPU memory sharing: `memory_cfg.inference_memory_fraction` (default 0.7)
+    /// controls what fraction of remaining VRAM (after model weights) is allocated
+    /// to KV cache, reserving the rest for training. Set to 1.0 for inference-only.
     pub fn new_real(
         model_config: ModelConfig,
         runner: ModelRunner,
         tokenizer: KilnTokenizer,
         device: candle_core::Device,
         adapter_dir: PathBuf,
+        memory_cfg: &crate::config::MemoryConfig,
+        request_timeout_secs: u64,
     ) -> Self {
         let block_size = 16;
 
@@ -246,12 +250,7 @@ impl AppState {
             _ => 4,
         };
 
-        // Read inference memory fraction (default 0.7 = reserve 30% for training)
-        let inference_fraction: f64 = std::env::var("KILN_INFERENCE_MEMORY_FRACTION")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(0.7)
-            .clamp(0.1, 1.0);
+        let inference_fraction = memory_cfg.inference_memory_fraction.clamp(0.1, 1.0);
 
         // Estimate model weight memory (approximate: params * dtype_bytes)
         // Qwen3.5-4B ≈ 4B params * 2 bytes (bf16) ≈ 8GB
@@ -269,11 +268,8 @@ impl AppState {
         // Detect VRAM for auto-configuration
         let vram_info = kiln_core::vram::detect_vram();
 
-        // Determine num_blocks — either from env, or memory-aware auto-calculation
-        let num_blocks = if let Some(explicit) = std::env::var("KILN_NUM_BLOCKS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-        {
+        // Determine num_blocks — either from config, or memory-aware auto-calculation
+        let num_blocks = if let Some(explicit) = memory_cfg.num_blocks {
             explicit
         } else {
             // Try to compute from available VRAM and inference fraction
@@ -319,6 +315,7 @@ impl AppState {
             estimated_model_bytes,
             kv_cache_bytes,
             inference_fraction,
+            memory_cfg.training_memory_gb,
         );
 
         tracing::info!(
@@ -346,20 +343,11 @@ impl AppState {
             training_queue: crate::training_queue::new_shared_queue(),
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
-            request_timeout: parse_request_timeout(),
+            request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
         }
     }
-}
-
-/// Parse KILN_REQUEST_TIMEOUT_SECS from environment (default: 300 seconds).
-fn parse_request_timeout() -> std::time::Duration {
-    let secs: u64 = std::env::var("KILN_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
-    std::time::Duration::from_secs(secs)
 }
 
 /// Estimate model weight memory in bytes from config.
@@ -417,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_memory_budget_cpu_mode() {
-        let budget = GpuMemoryBudget::compute(0, 0, 0, 0.7);
+        let budget = GpuMemoryBudget::compute(0, 0, 0, 0.7, None);
         assert_eq!(budget.total_vram_bytes, 0);
         assert_eq!(budget.training_budget_bytes, 0);
         // CPU mode: training feasibility check always passes
@@ -429,7 +417,7 @@ mod tests {
         let total: u64 = 24 * 1024 * 1024 * 1024; // 24 GB
         let model: u64 = 8 * 1024 * 1024 * 1024; // 8 GB model
         let kv: u64 = 2 * 1024 * 1024 * 1024; // 2 GB KV cache
-        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7);
+        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7, None);
         assert_eq!(budget.total_vram_bytes, total);
         assert_eq!(budget.model_memory_bytes, model);
         assert_eq!(budget.kv_cache_bytes, kv);
@@ -442,7 +430,7 @@ mod tests {
         let total: u64 = 24 * 1024 * 1024 * 1024;
         let model: u64 = 8 * 1024 * 1024 * 1024;
         let kv: u64 = 12 * 1024 * 1024 * 1024;
-        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7);
+        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7, None);
         // Only 4GB available for training
         assert_eq!(budget.training_budget_bytes, 4 * 1024 * 1024 * 1024);
         // Requesting 8GB should fail
@@ -461,7 +449,7 @@ mod tests {
         let total: u64 = 24 * 1024 * 1024 * 1024;
         let model: u64 = 20 * 1024 * 1024 * 1024;
         let kv: u64 = 10 * 1024 * 1024 * 1024;
-        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7);
+        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7, None);
         // Should not underflow — saturating_sub handles it
         assert_eq!(budget.training_budget_bytes, 0);
     }
@@ -483,11 +471,11 @@ mod tests {
         let kv: u64 = 2 * 1024 * 1024 * 1024;
 
         // fraction = 1.0 means all VRAM for inference, but training budget is still calculated
-        let budget_full = GpuMemoryBudget::compute(total, model, kv, 1.0);
+        let budget_full = GpuMemoryBudget::compute(total, model, kv, 1.0, None);
         assert_eq!(budget_full.training_budget_bytes, 14 * 1024 * 1024 * 1024);
 
         // fraction = 0.5
-        let budget_half = GpuMemoryBudget::compute(total, model, kv, 0.5);
+        let budget_half = GpuMemoryBudget::compute(total, model, kv, 0.5, None);
         assert_eq!(budget_half.training_budget_bytes, 14 * 1024 * 1024 * 1024);
     }
 }

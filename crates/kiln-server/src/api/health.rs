@@ -215,7 +215,7 @@ mod tests {
         let engine = MockEngine::new(config.clone());
         let tokenizer =
             kiln_core::tokenizer::KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B").unwrap();
-        AppState::new_mock(config, scheduler, Arc::new(engine), tokenizer)
+        AppState::new_mock(config, scheduler, Arc::new(engine), tokenizer, 300)
     }
 
     #[tokio::test]
