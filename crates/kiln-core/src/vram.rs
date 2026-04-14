@@ -95,13 +95,15 @@ pub fn recommended_num_blocks(vram: &GpuVramInfo) -> Option<usize> {
         return None; // user override — don't second-guess
     }
 
+    // Use slightly lower thresholds since GPUs report slightly less than marketed
+    // e.g. RTX A5000 "24GB" reports 24564 MiB ≈ 23.99 GiB
     let gb = vram.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-    Some(if gb >= 48.0 {
+    Some(if gb >= 45.0 {
         512
-    } else if gb >= 24.0 {
+    } else if gb >= 22.0 {
         64 // proven safe for training on 24GB (18.3GB peak with 8 segments)
-    } else if gb >= 16.0 {
+    } else if gb >= 14.0 {
         32
     } else {
         64 // conservative default for unknown VRAM
@@ -121,13 +123,15 @@ pub fn recommended_checkpoint_segments(vram: &GpuVramInfo) -> Option<usize> {
         return None; // user override
     }
 
+    // Use slightly lower thresholds since GPUs report slightly less than marketed
+    // e.g. RTX A5000 "24GB" reports 24564 MiB ≈ 23.99 GiB
     let gb = vram.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-    Some(if gb >= 48.0 {
+    Some(if gb >= 45.0 {
         4 // fewer segments = faster training, more VRAM headroom
-    } else if gb >= 24.0 {
+    } else if gb >= 22.0 {
         8 // proven safe on 24GB (18.3GB peak)
-    } else if gb >= 16.0 {
+    } else if gb >= 14.0 {
         12 // aggressive checkpointing for tight VRAM
     } else {
         8 // conservative default
@@ -159,6 +163,13 @@ mod tests {
         };
         assert_eq!(recommended_num_blocks(&vram_24gb), Some(64));
 
+        // Test with real A5000 value (24564 MiB = slightly under 24 GiB)
+        let vram_a5000 = GpuVramInfo {
+            total_bytes: 24564 * 1024 * 1024,
+            source: VramSource::NvidiaSmi,
+        };
+        assert_eq!(recommended_num_blocks(&vram_a5000), Some(64));
+
         let vram_16gb = GpuVramInfo {
             total_bytes: 16 * 1024 * 1024 * 1024,
             source: VramSource::NvidiaSmi,
@@ -185,6 +196,13 @@ mod tests {
             source: VramSource::NvidiaSmi,
         };
         assert_eq!(recommended_checkpoint_segments(&vram_24gb), Some(8));
+
+        // Test with real A5000 value (24564 MiB = slightly under 24 GiB)
+        let vram_a5000 = GpuVramInfo {
+            total_bytes: 24564 * 1024 * 1024,
+            source: VramSource::NvidiaSmi,
+        };
+        assert_eq!(recommended_checkpoint_segments(&vram_a5000), Some(8));
 
         let vram_16gb = GpuVramInfo {
             total_bytes: 16 * 1024 * 1024 * 1024,
