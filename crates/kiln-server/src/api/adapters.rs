@@ -135,7 +135,7 @@ async fn load_adapter(
     // Update the shared active adapter name.
     *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
 
-    tracing::info!(adapter = %req.name, path = %adapter_path.display(), "loaded LoRA adapter");
+    tracing::info!(adapter = %req.name, path = %adapter_path.display(), operation = "load", "loaded LoRA adapter");
 
     Ok(Json(LoadAdapterResponse {
         status: "loaded",
@@ -168,7 +168,7 @@ async fn unload_adapter(
     // Clear the shared active adapter name.
     *state.active_adapter_name.write().unwrap() = None;
 
-    tracing::info!("unloaded LoRA adapter — reverted to base model");
+    tracing::info!(operation = "unload", "unloaded LoRA adapter — reverted to base model");
 
     Ok(Json(UnloadAdapterResponse {
         status: "unloaded",
@@ -205,7 +205,7 @@ async fn delete_adapter(
         )
     })?;
 
-    tracing::info!(adapter = %name, "deleted adapter from disk");
+    tracing::info!(adapter = %name, operation = "delete", "deleted adapter from disk");
 
     Ok(Json(DeleteAdapterResponse {
         status: "deleted",
