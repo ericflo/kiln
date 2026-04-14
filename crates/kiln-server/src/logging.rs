@@ -58,11 +58,18 @@ pub fn init() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    // NOTE: env var manipulation is unsafe in Rust 1.78+ because it is not
+    // thread-safe. We wrap each call in an unsafe block. These tests are
+    // serialized by cargo test's default single-threaded test runner for
+    // the lib target, so this is safe in practice.
+
     #[test]
     fn test_build_filter_default() {
         // Ensure RUST_LOG is not set for this test
-        std::env::remove_var("RUST_LOG");
-        std::env::remove_var("KILN_LOG_LEVEL");
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+            std::env::remove_var("KILN_LOG_LEVEL");
+        }
         let filter = build_filter();
         let s = format!("{filter}");
         assert!(s.contains("info"), "default filter should contain info: {s}");
@@ -70,39 +77,44 @@ mod tests {
 
     #[test]
     fn test_build_filter_custom_level() {
-        std::env::remove_var("RUST_LOG");
-        std::env::set_var("KILN_LOG_LEVEL", "debug");
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+            std::env::set_var("KILN_LOG_LEVEL", "debug");
+        }
         let filter = build_filter();
         let s = format!("{filter}");
         assert!(
             s.contains("debug"),
             "filter should contain debug: {s}"
         );
-        // Clean up
-        std::env::remove_var("KILN_LOG_LEVEL");
+        unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
     }
 
     #[test]
     fn test_build_filter_custom_directive() {
-        std::env::remove_var("RUST_LOG");
-        std::env::set_var("KILN_LOG_LEVEL", "kiln=trace,tower_http=warn");
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+            std::env::set_var("KILN_LOG_LEVEL", "kiln=trace,tower_http=warn");
+        }
         let filter = build_filter();
         let s = format!("{filter}");
         assert!(
             s.contains("trace") || s.contains("warn"),
             "filter should parse custom directive: {s}"
         );
-        std::env::remove_var("KILN_LOG_LEVEL");
+        unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
     }
 
     #[test]
     fn test_build_filter_invalid_fallback() {
-        std::env::remove_var("RUST_LOG");
-        std::env::set_var("KILN_LOG_LEVEL", "not_a_valid_level!!!!");
+        unsafe {
+            std::env::remove_var("RUST_LOG");
+            std::env::set_var("KILN_LOG_LEVEL", "not_a_valid_level!!!!");
+        }
         let filter = build_filter();
         let s = format!("{filter}");
         // Should fall back to info
         assert!(s.contains("info"), "invalid level should fall back to info: {s}");
-        std::env::remove_var("KILN_LOG_LEVEL");
+        unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
     }
 }
