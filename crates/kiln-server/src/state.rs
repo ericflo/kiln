@@ -13,7 +13,7 @@ use kiln_scheduler::Scheduler;
 use kiln_train::TrainingState;
 use serde::Serialize;
 
-use crate::training_queue::SharedTrainingQueue;
+use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
 /// GPU memory budget tracking for coordinating inference and training.
 ///
@@ -175,6 +175,8 @@ pub struct AppState {
     pub training_queue: SharedTrainingQueue,
     /// Detected VRAM info for config/debug reporting.
     pub vram_info: kiln_core::vram::GpuVramInfo,
+    /// Shutdown flag — set to true when the server is shutting down.
+    pub shutdown: ShutdownFlag,
 }
 
 impl AppState {
@@ -202,6 +204,7 @@ impl AppState {
                 total_bytes: 0,
                 source: kiln_core::vram::VramSource::None,
             },
+            shutdown: crate::training_queue::new_shutdown_flag(),
         }
     }
 
@@ -332,6 +335,7 @@ impl AppState {
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             vram_info,
+            shutdown: crate::training_queue::new_shutdown_flag(),
         }
     }
 }

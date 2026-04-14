@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use kiln_model::lora_loader::LoraWeights;
@@ -62,6 +63,15 @@ impl TrainingQueue {
 
 pub type SharedTrainingQueue = Arc<std::sync::Mutex<TrainingQueue>>;
 
+/// Shared shutdown flag — set to true when the server is shutting down.
+/// Training queue rejects new jobs and the worker exits after the current job.
+pub type ShutdownFlag = Arc<AtomicBool>;
+
+/// Create a new shutdown flag (initially false).
+pub fn new_shutdown_flag() -> ShutdownFlag {
+    Arc::new(AtomicBool::new(false))
+}
+
 /// Create a new shared training queue.
 pub fn new_shared_queue() -> SharedTrainingQueue {
     Arc::new(std::sync::Mutex::new(TrainingQueue::new()))
@@ -71,9 +81,17 @@ pub fn new_shared_queue() -> SharedTrainingQueue {
 ///
 /// This runs as a tokio task that polls the queue every 500ms. When a job is
 /// found, it executes it on a blocking thread (training is CPU/GPU-bound).
-pub fn spawn_training_worker(state: AppState) {
+/// The worker exits cleanly when the shutdown flag is set, after finishing
+/// any currently running job.
+pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
     tokio::spawn(async move {
         loop {
+            // Check shutdown flag before pulling the next job
+            if shutdown.load(Ordering::Relaxed) {
+                tracing::info!("training worker shutting down");
+                break;
+            }
+
             // Check for next job
             let entry = {
                 let mut q = state.training_queue.lock().unwrap();

@@ -13,6 +13,8 @@ use axum::{
 
 use kiln_train::{GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus};
 
+use std::sync::atomic::Ordering;
+
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -39,6 +41,14 @@ async fn submit_sft(
     State(state): State<AppState>,
     Json(req): Json<SftRequest>,
 ) -> Result<Json<TrainingResponse>, (StatusCode, String)> {
+    // Reject new jobs during shutdown
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server is shutting down — not accepting new training jobs".to_string(),
+        ));
+    }
+
     let num_examples = req.examples.len();
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
@@ -100,6 +110,14 @@ async fn submit_grpo(
     State(state): State<AppState>,
     Json(req): Json<GrpoRequest>,
 ) -> Result<Json<TrainingResponse>, (StatusCode, String)> {
+    // Reject new jobs during shutdown
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server is shutting down — not accepting new training jobs".to_string(),
+        ));
+    }
+
     let num_groups = req.groups.len();
     let total_completions: usize = req.groups.iter().map(|g| g.completions.len()).sum();
     let job_id = uuid::Uuid::new_v4().to_string();

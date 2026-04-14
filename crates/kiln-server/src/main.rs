@@ -113,14 +113,62 @@ async fn main() -> Result<()> {
     };
 
     // Spawn the background training queue worker
-    kiln_server::training_queue::spawn_training_worker(state.clone());
+    let shutdown_flag = state.shutdown.clone();
+    kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
 
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("kiln listening on {addr}");
-    axum::serve(listener, app).await?;
+
+    // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
+    // then force-exit after a timeout.
+    let shutdown_timeout_secs: u64 = std::env::var("KILN_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown_flag))
+        .await?;
+
+    tracing::info!(
+        timeout_secs = shutdown_timeout_secs,
+        "server stopped accepting connections — waiting for in-flight requests to drain"
+    );
+
+    // Give in-flight requests time to complete, then force exit
+    tokio::time::sleep(std::time::Duration::from_secs(shutdown_timeout_secs)).await;
+    tracing::warn!("shutdown timeout reached — exiting");
 
     Ok(())
+}
+
+/// Wait for SIGTERM or SIGINT, then signal shutdown.
+async fn shutdown_signal(shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received SIGINT — initiating graceful shutdown"),
+        _ = terminate => tracing::info!("received SIGTERM — initiating graceful shutdown"),
+    }
+
+    // Signal the training worker to stop accepting new jobs
+    shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
 }
