@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "kiln"
 path = "src/main.rs"
 
+[[bin]]
+name = "kiln-bench"
+path = "src/bench.rs"
+
 [dependencies]
 kiln-core = { workspace = true }
 kiln-model = { workspace = true }
