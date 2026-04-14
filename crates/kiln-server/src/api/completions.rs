@@ -17,6 +17,7 @@ use kiln_core::tokenizer::ChatMessage;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{ModelRunner, StreamEvent};
 
+use crate::error::ApiError;
 use crate::metrics::RequestStatus;
 use crate::state::{AppState, ModelBackend};
 
@@ -109,7 +110,7 @@ pub struct Delta {
 async fn chat_completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     let start = std::time::Instant::now();
     state.metrics.inc_active();
 
@@ -121,8 +122,8 @@ async fn chat_completions(
 
     match &result {
         Ok(_) => state.metrics.inc_request(RequestStatus::Ok),
-        Err((code, _)) => {
-            if *code == StatusCode::REQUEST_TIMEOUT {
+        Err(e) => {
+            if e.status == StatusCode::REQUEST_TIMEOUT {
                 state.metrics.inc_request(RequestStatus::Timeout);
             } else {
                 state.metrics.inc_request(RequestStatus::Error);
@@ -136,7 +137,7 @@ async fn chat_completions(
 async fn chat_completions_inner(
     state: &AppState,
     req: ChatCompletionRequest,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     // Convert request messages to ChatMessage for template formatting
     let chat_messages: Vec<ChatMessage> = req
         .messages
@@ -151,7 +152,7 @@ async fn chat_completions_inner(
     let prompt_text = state
         .tokenizer
         .apply_chat_template(&chat_messages)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        .map_err(ApiError::chat_template_failed)?;
 
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(1.0),
@@ -186,10 +187,7 @@ async fn chat_completions_inner(
                 )
                 .await
             }
-            ModelBackend::Mock { .. } => Err((
-                StatusCode::NOT_IMPLEMENTED,
-                "streaming not supported with mock backend".to_string(),
-            )),
+            ModelBackend::Mock { .. } => Err(ApiError::streaming_not_supported_mock()),
         }
     } else {
         match state.backend.as_ref() {
@@ -235,7 +233,7 @@ async fn ensure_adapter(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
     req_adapter: &Option<String>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     let current = state.active_adapter_name.read().unwrap().clone();
     if *req_adapter == current {
         return Ok(());
@@ -250,10 +248,7 @@ async fn ensure_adapter(
                 state.adapter_dir.join(name)
             };
             if !adapter_path.exists() {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    format!("adapter not found: {}", adapter_path.display()),
-                ));
+                return Err(ApiError::adapter_not_found(name));
             }
 
             // Two-phase load: read device/num_layers, load weights, then swap.
@@ -268,15 +263,15 @@ async fn ensure_adapter(
 
             tokio::task::spawn_blocking(move || {
                 let lora = LoraWeights::load(&adapter_path, num_layers, &device)
-                    .map_err(|e| format!("failed to load adapter: {e}"))?;
+                    .map_err(|e| format!("{e}"))?;
                 let mut guard = runner.write().unwrap();
                 guard.swap_lora(Some(lora));
                 *active_name.write().unwrap() = Some(adapter_name);
                 Ok::<(), String>(())
             })
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|e| ApiError::internal(format!("join error: {e}")))?
+            .map_err(ApiError::adapter_load_failed)?;
         }
         None => {
             // Revert to base model.
@@ -289,7 +284,7 @@ async fn ensure_adapter(
                 *active_name.write().unwrap() = None;
             })
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?;
+            .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
         }
     }
 
@@ -305,12 +300,12 @@ async fn generate_real(
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
-) -> Result<ChatCompletionResponse, (StatusCode, String)> {
+) -> Result<ChatCompletionResponse, ApiError> {
     // Count prompt tokens for usage stats.
     let prompt_token_count = state
         .tokenizer
         .encode(prompt_text)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(ApiError::tokenization_failed)?
         .len();
 
     // ModelRunner.generate_paged() is CPU-bound; run on a blocking thread to
@@ -335,16 +330,10 @@ async fn generate_real(
 
     let output = match tokio::time::timeout(timeout, generation).await {
         Ok(join_result) => join_result
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+            .map_err(|e| ApiError::internal(format!("join error: {e}")))?
+            .map_err(ApiError::generation_failed)?,
         Err(_) => {
-            return Err((
-                StatusCode::REQUEST_TIMEOUT,
-                format!(
-                    "request timed out after {} seconds",
-                    timeout.as_secs()
-                ),
-            ));
+            return Err(ApiError::request_timeout(timeout.as_secs()));
         }
     };
 
@@ -394,7 +383,7 @@ async fn generate_real_streaming(
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, ApiError> {
     let runner = runner.clone();
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
@@ -597,11 +586,11 @@ async fn generate_mock(
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
-) -> Result<ChatCompletionResponse, (StatusCode, String)> {
+) -> Result<ChatCompletionResponse, ApiError> {
     let prompt_tokens = state
         .tokenizer
         .encode(prompt_text)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(ApiError::tokenization_failed)?;
 
     let prompt_token_count = prompt_tokens.len();
     let request = Request::new(prompt_tokens, sampling.clone(), req.adapter.clone());
@@ -649,7 +638,7 @@ async fn generate_mock(
 
         let engine_output = engine
             .step(&batch)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(ApiError::generation_failed)?;
 
         for (rid, token, finished) in &engine_output.results {
             if *rid == request_id {

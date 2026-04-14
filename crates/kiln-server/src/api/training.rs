@@ -6,7 +6,6 @@
 
 use axum::{
     extract::{Path as AxumPath, State},
-    http::StatusCode,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -15,6 +14,7 @@ use kiln_train::{GrpoRequest, SftRequest, TrainingResponse, TrainingState, Train
 
 use std::sync::atomic::Ordering;
 
+use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_queue::{QueueEntry, QueuedJob};
@@ -41,13 +41,10 @@ struct QueueStatusEntry {
 async fn submit_sft(
     State(state): State<AppState>,
     Json(req): Json<SftRequest>,
-) -> Result<Json<TrainingResponse>, (StatusCode, String)> {
+) -> Result<Json<TrainingResponse>, ApiError> {
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server is shutting down — not accepting new training jobs".to_string(),
-        ));
+        return Err(ApiError::shutting_down());
     }
 
     let num_examples = req.examples.len();
@@ -63,10 +60,7 @@ async fn submit_sft(
 
     // Verify we have real model weights
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "training requires real model weights (not available in mock mode)".to_string(),
-        ));
+        return Err(ApiError::mock_mode_no_training());
     }
 
     // Register the job in the tracking map
@@ -110,13 +104,10 @@ async fn submit_sft(
 async fn submit_grpo(
     State(state): State<AppState>,
     Json(req): Json<GrpoRequest>,
-) -> Result<Json<TrainingResponse>, (StatusCode, String)> {
+) -> Result<Json<TrainingResponse>, ApiError> {
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server is shutting down — not accepting new training jobs".to_string(),
-        ));
+        return Err(ApiError::shutting_down());
     }
 
     let num_groups = req.groups.len();
@@ -133,10 +124,7 @@ async fn submit_grpo(
 
     // Verify we have real model weights
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "training requires real model weights (not available in mock mode)".to_string(),
-        ));
+        return Err(ApiError::mock_mode_no_training());
     }
 
     // Register the job in the tracking map
@@ -199,14 +187,11 @@ async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStat
 async fn job_status(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<TrainingStatus>, (StatusCode, String)> {
+) -> Result<Json<TrainingStatus>, ApiError> {
     let jobs = state.training_jobs.read().unwrap();
-    let job = jobs.get(&job_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("training job not found: {job_id}"),
-        )
-    })?;
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
 
     Ok(Json(TrainingStatus {
         job_id: job.job_id.clone(),
@@ -277,23 +262,17 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
 async fn cancel_queued_job(
     State(state): State<AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     // Check if the job exists and is in Queued state
     {
         let jobs = state.training_jobs.read().unwrap();
-        let job = jobs.get(&job_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("training job not found: {job_id}"),
-            )
-        })?;
+        let job = jobs
+            .get(&job_id)
+            .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
         if job.state != TrainingState::Queued {
-            return Err((
-                StatusCode::CONFLICT,
-                format!(
-                    "cannot cancel job {job_id}: state is {:?} (only queued jobs can be cancelled)",
-                    job.state
-                ),
+            return Err(ApiError::training_job_not_cancellable(
+                &job_id,
+                format!("{:?}", job.state),
             ));
         }
     }
@@ -326,10 +305,7 @@ async fn cancel_queued_job(
             "status": "cancelled"
         })))
     } else {
-        Err((
-            StatusCode::CONFLICT,
-            format!("job {job_id} was not found in queue (may have already started)"),
-        ))
+        Err(ApiError::training_job_already_started(&job_id))
     }
 }
 
