@@ -383,8 +383,19 @@ mod tests {
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
         let out_data: Vec<f32> = out_f32.to_vec1().unwrap();
         assert!(out_data.iter().all(|x| x.is_finite()), "output contains non-finite values");
-        let sum: f32 = out_data.iter().map(|x| x.abs()).sum();
-        assert!(sum > 0.0, "output is all zeros");
+        let abs_sum: f32 = out_data.iter().map(|x| x.abs()).sum();
+        assert!(abs_sum > 0.0, "output is all zeros");
+        let mean_abs = abs_sum / out_data.len() as f32;
+        let max_abs = out_data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        eprintln!("fwd output: mean_abs={mean_abs:.6}, max_abs={max_abs:.6}, numel={}", out_data.len());
+
+        // Check LSE is finite
+        let lse_f32 = lse.flatten_all().unwrap();
+        let lse_data: Vec<f32> = lse_f32.to_vec1().unwrap();
+        assert!(lse_data.iter().all(|x| x.is_finite()), "softmax_lse contains non-finite values");
+        eprintln!("fwd softmax_lse: min={:.4}, max={:.4}",
+            lse_data.iter().cloned().fold(f32::INFINITY, f32::min),
+            lse_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
     }
 
     #[test]
@@ -425,7 +436,7 @@ mod tests {
         assert_eq!(dk.dims(), &[b, seqlen, num_heads_k, head_dim]);
         assert_eq!(dv.dims(), &[b, seqlen, num_heads_k, head_dim]);
 
-        // Check all gradients are finite
+        // Check all gradients are finite, non-zero, and reasonable magnitude
         for (name, grad) in [("dq", &dq), ("dk", &dk), ("dv", &dv)] {
             let data: Vec<f32> = grad
                 .to_dtype(DType::F32)
@@ -440,6 +451,10 @@ mod tests {
             );
             let abs_sum: f32 = data.iter().map(|x| x.abs()).sum();
             assert!(abs_sum > 0.0, "{name} is all zeros");
+            let mean_abs = abs_sum / data.len() as f32;
+            let max_abs = data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+            eprintln!("{name}: mean_abs={mean_abs:.6}, max_abs={max_abs:.6}, numel={}", data.len());
+            assert!(max_abs < 100.0, "{name} has unreasonably large gradient: max_abs={max_abs}");
         }
     }
 

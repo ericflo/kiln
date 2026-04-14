@@ -51,7 +51,7 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
 /// before calling the flash kernel, which requires uniform head counts.
 ///
 /// Returns `[batch, seq_len, num_heads * head_dim]` (already reshaped for output projection).
-#[cfg(feature = "flash-attn")]
+#[cfg(feature = "cuda")]
 fn flash_attention_forward(
     q: &Tensor,
     k: &Tensor,
@@ -792,7 +792,7 @@ pub fn gqa_attention(
     // Flash-attn takes [batch, seq_len, num_heads, head_dim] — the layout we already have.
     // When a KV cache is present, we fall through to the naive path which handles
     // the cache update and Q_len != KV_len masking correctly.
-    #[cfg(feature = "flash-attn")]
+    #[cfg(feature = "cuda")]
     if seq_len > 1 && kv_cache.is_none() {
         let q = q.contiguous()?;
         let k = k.contiguous()?;
@@ -956,7 +956,7 @@ pub fn gqa_attention_paged(
     // FlashAttention-2 path for prefill (seq_len > 1).
     // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
     // [batch, kv_len, heads, head_dim] for flash_attn.
-    #[cfg(feature = "flash-attn")]
+    #[cfg(feature = "cuda")]
     if seq_len > 1 {
         let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]

@@ -170,7 +170,7 @@ echo "  export AWS_ACCESS_KEY_ID=${B2_APPLICATION_KEY_ID}"
 echo "  export AWS_SECRET_ACCESS_KEY=${B2_APPLICATION_KEY}"
 echo "  export RUSTC_WRAPPER=sccache"
 echo ""
-echo "Then run: cargo build --release --features flash-attn"
+echo "Then run: cargo build --release --features cuda"
 
 # Write env to a sourceable file
 ENV_FILE="${KILN_REPO_DIR}/.build-cache-env"

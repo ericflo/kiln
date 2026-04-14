@@ -20,8 +20,7 @@ kiln-flash-attn = { workspace = true, optional = true }
 rand = { workspace = true }
 
 [features]
-flash-attn = ["dep:kiln-flash-attn"]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "flash-attn"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-flash-attn"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
