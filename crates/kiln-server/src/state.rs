@@ -13,6 +13,8 @@ use kiln_scheduler::Scheduler;
 use kiln_train::TrainingState;
 use serde::Serialize;
 
+use crate::training_queue::SharedTrainingQueue;
+
 /// GPU memory budget tracking for coordinating inference and training.
 ///
 /// On startup, we compute how much VRAM is available and partition it:
@@ -168,6 +170,9 @@ pub struct AppState {
     /// Coordination lock: inference takes read lock, training takes write lock.
     /// This prevents simultaneous GPU-heavy operations from OOMing.
     pub gpu_lock: GpuCoordinationLock,
+    /// FIFO training queue — jobs are enqueued here and executed sequentially
+    /// by a background worker.
+    pub training_queue: SharedTrainingQueue,
 }
 
 impl AppState {
@@ -190,6 +195,7 @@ impl AppState {
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 1.0)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
+            training_queue: crate::training_queue::new_shared_queue(),
         }
     }
 
@@ -315,6 +321,7 @@ impl AppState {
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
             memory_budget: Arc::new(memory_budget),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
+            training_queue: crate::training_queue::new_shared_queue(),
         }
     }
 }

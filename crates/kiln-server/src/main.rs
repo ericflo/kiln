@@ -112,6 +112,9 @@ async fn main() -> Result<()> {
         AppState::new_mock(model_config, scheduler, Arc::new(engine), tokenizer)
     };
 
+    // Spawn the background training queue worker
+    kiln_server::training_queue::spawn_training_worker(state.clone());
+
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");

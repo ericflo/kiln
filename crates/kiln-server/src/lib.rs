@@ -2,3 +2,4 @@
 
 pub mod api;
 pub mod state;
+pub mod training_queue;
