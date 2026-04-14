@@ -997,28 +997,60 @@ fn sgd_step_from_map(
 
 /// Gradient checkpointing configuration.
 pub struct CheckpointConfig {
-    /// Number of segments to split layers into (default 4 for 32 layers → 8 layers/segment).
+    /// Number of segments to split layers into.
     pub num_segments: usize,
     /// Whether checkpointing is enabled.
     pub enabled: bool,
+    /// Whether num_segments was auto-configured from VRAM detection.
+    pub auto_configured: bool,
 }
 
 impl CheckpointConfig {
-    /// Create config from environment, defaulting to enabled with 4 segments.
+    /// Create config from environment with VRAM-aware defaults.
+    ///
+    /// Priority for num_segments:
+    /// 1. `KILN_GRAD_CHECKPOINT_SEGMENTS` env var (user override)
+    /// 2. Auto-detect from GPU VRAM via `kiln_core::vram`
+    /// 3. Fallback to 4 segments
     pub fn from_env(num_layers: usize) -> Self {
         let enabled = std::env::var("KILN_NO_GRAD_CHECKPOINT")
             .map(|v| v != "1" && v.to_lowercase() != "true")
             .unwrap_or(true);
-        // Default: 4 segments, or fewer if model has very few layers
-        let num_segments = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+
+        // Check for explicit env override first
+        if let Some(explicit) = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4)
+        {
+            return Self {
+                num_segments: explicit.min(num_layers).max(1),
+                enabled,
+                auto_configured: false,
+            };
+        }
+
+        // VRAM-aware auto-configuration
+        let vram = kiln_core::vram::detect_vram();
+        let num_segments = kiln_core::vram::recommended_checkpoint_segments(&vram)
+            .unwrap_or(4) // fallback if env var was set (shouldn't happen here)
             .min(num_layers)
             .max(1);
+
+        let auto_configured = vram.source != kiln_core::vram::VramSource::None;
+
+        if auto_configured {
+            tracing::info!(
+                num_segments,
+                vram_gb = vram.total_bytes as f64 / 1e9,
+                source = %vram.source,
+                "auto-configured gradient checkpoint segments for detected VRAM"
+            );
+        }
+
         Self {
             num_segments,
             enabled,
+            auto_configured,
         }
     }
 }
@@ -1655,13 +1687,15 @@ mod tests {
 
     #[test]
     fn test_checkpoint_config_from_env() {
-        // Default: enabled, 4 segments
+        // Without KILN_GPU_MEMORY_GB or nvidia-smi, falls back to default (4 segments)
+        // or VRAM-aware value if GPU is detected
         let cfg = CheckpointConfig::from_env(32);
         assert!(cfg.enabled);
-        assert_eq!(cfg.num_segments, 4);
+        // num_segments depends on whether GPU is detected; just verify it's reasonable
+        assert!(cfg.num_segments >= 1 && cfg.num_segments <= 32);
 
-        // With very few layers, segments clamped
+        // With very few layers, segments clamped to num_layers
         let cfg = CheckpointConfig::from_env(2);
-        assert_eq!(cfg.num_segments, 2);
+        assert!(cfg.num_segments <= 2);
     }
 }

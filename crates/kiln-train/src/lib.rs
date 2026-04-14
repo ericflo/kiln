@@ -6,6 +6,8 @@
 
 pub mod trainer;
 
+pub use trainer::CheckpointConfig;
+
 use serde::{Deserialize, Serialize};
 
 /// A chat message in a training example.
