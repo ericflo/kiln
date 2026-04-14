@@ -793,7 +793,7 @@ pub fn gqa_attention(
     // When a KV cache is present, we fall through to the naive path which handles
     // the cache update and Q_len != KV_len masking correctly.
     #[cfg(feature = "cuda")]
-    if seq_len > 1 && kv_cache.is_none() {
+    if seq_len > 1 && kv_cache.is_none() && q.dtype() == candle_core::DType::BF16 {
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let v = v.contiguous()?;
@@ -957,7 +957,7 @@ pub fn gqa_attention_paged(
     // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
     // [batch, kv_len, heads, head_dim] for flash_attn.
     #[cfg(feature = "cuda")]
-    if seq_len > 1 {
+    if seq_len > 1 && q.dtype() == candle_core::DType::BF16 {
         let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
