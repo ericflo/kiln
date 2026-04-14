@@ -1,6 +1,6 @@
 //! Kiln benchmark suite — measures inference throughput, latency, VRAM, and training speed.
 //!
-//! Run with: `cargo run --release --features flash-attn --bin kiln-bench -- --model-path /path/to/weights`
+//! Run with: `cargo run --release --features cuda --bin kiln-bench -- --model-path /path/to/weights`
 //!
 //! Requires a GPU with the Qwen3.5-4B model weights downloaded.
 
