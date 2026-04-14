@@ -182,6 +182,8 @@ pub struct AppState {
     pub request_timeout: std::time::Duration,
     /// Prometheus metrics counters.
     pub metrics: Arc<Metrics>,
+    /// Server startup time — used to compute uptime in health checks.
+    pub started_at: std::time::Instant,
 }
 
 impl AppState {
@@ -212,6 +214,7 @@ impl AppState {
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: parse_request_timeout(),
             metrics: Arc::new(Metrics::new()),
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -345,6 +348,7 @@ impl AppState {
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: parse_request_timeout(),
             metrics: Arc::new(Metrics::new()),
+            started_at: std::time::Instant::now(),
         }
     }
 }
