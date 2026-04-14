@@ -4,11 +4,15 @@
 //! [`BlockTable`] that maps logical token positions to physical block slots.
 //! This enables multiple concurrent sequences to share a fixed KV cache memory
 //! pool — the foundation for continuous batching.
+//!
+//! Supports optional FP8 (E4M3FN) quantization for ~2x memory savings.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
 use kiln_core::block::BlockTable;
+
+use crate::fp8;
 
 /// Paged KV cache that stores K/V in block-organized pool tensors.
 ///
@@ -20,21 +24,21 @@ pub struct PagedKvCache {
     /// Per full-attention layer: (k_pool, v_pool).
     /// Each pool has shape `[total_slots, num_kv_heads, head_dim]`
     /// where `total_slots = num_blocks * block_size`.
+    /// When `fp8` is true, dtype is U8. Otherwise matches `compute_dtype`.
     layers: Vec<(Tensor, Tensor)>,
     block_size: usize,
     num_blocks: usize,
+    /// Whether FP8 quantization is enabled.
+    fp8: bool,
+    /// Per-layer FP8 scale factors: (k_scale, v_scale).
+    /// Global scale across the entire pool. Updated on writes.
+    fp8_scales: Vec<(f32, f32)>,
+    /// The original compute dtype for dequantization.
+    compute_dtype: DType,
 }
 
 impl PagedKvCache {
     /// Create a new paged KV cache with pre-allocated pool tensors.
-    ///
-    /// - `num_full_attn_layers`: number of full-attention layers
-    /// - `num_blocks`: total physical blocks in the pool
-    /// - `block_size`: tokens per block
-    /// - `num_kv_heads`: KV heads per layer
-    /// - `head_dim`: dimension per head
-    /// - `dtype`: tensor data type
-    /// - `device`: device to allocate on
     pub fn new(
         num_full_attn_layers: usize,
         num_blocks: usize,
@@ -44,19 +48,38 @@ impl PagedKvCache {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
+        Self::new_with_fp8(num_full_attn_layers, num_blocks, block_size, num_kv_heads, head_dim, dtype, device, false)
+    }
+
+    /// Create a new paged KV cache with optional FP8 quantization.
+    pub fn new_with_fp8(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &Device,
+        fp8: bool,
+    ) -> Result<Self> {
+        let storage_dtype = if fp8 { DType::U8 } else { dtype };
         let total_slots = num_blocks * block_size;
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
-            let k = Tensor::zeros((total_slots, num_kv_heads, head_dim), dtype, device)
+            let k = Tensor::zeros((total_slots, num_kv_heads, head_dim), storage_dtype, device)
                 .with_context(|| format!("allocating k_pool for layer {i}"))?;
-            let v = Tensor::zeros((total_slots, num_kv_heads, head_dim), dtype, device)
+            let v = Tensor::zeros((total_slots, num_kv_heads, head_dim), storage_dtype, device)
                 .with_context(|| format!("allocating v_pool for layer {i}"))?;
             layers.push((k, v));
         }
+        let fp8_scales = vec![(1.0_f32, 1.0_f32); num_full_attn_layers];
         Ok(Self {
             layers,
             block_size,
             num_blocks,
+            fp8,
+            fp8_scales,
+            compute_dtype: dtype,
         })
     }
 
@@ -68,6 +91,21 @@ impl PagedKvCache {
     /// - `k`: `[1, num_kv_heads, new_len, head_dim]`
     /// - `v`: `[1, num_kv_heads, new_len, head_dim]`
     pub fn write(
+        &mut self,
+        layer_idx: usize,
+        block_table: &BlockTable,
+        start_pos: usize,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> Result<()> {
+        if self.fp8 {
+            self.write_fp8(layer_idx, block_table, start_pos, k, v)
+        } else {
+            self.write_native(layer_idx, block_table, start_pos, k, v)
+        }
+    }
+
+    fn write_native(
         &mut self,
         layer_idx: usize,
         block_table: &BlockTable,
@@ -97,13 +135,51 @@ impl PagedKvCache {
         Ok(())
     }
 
+    fn write_fp8(
+        &mut self,
+        layer_idx: usize,
+        block_table: &BlockTable,
+        start_pos: usize,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> Result<()> {
+        let new_len = k.dim(2)?;
+
+        // Reshape from [1, num_kv_heads, new_len, head_dim] to [new_len, num_kv_heads, head_dim]
+        let k_flat = k.squeeze(0)?.transpose(0, 1)?.contiguous()?;
+        let v_flat = v.squeeze(0)?.transpose(0, 1)?.contiguous()?;
+
+        // Quantize each row individually and write to pool
+        // For the paged cache, we use per-row quantization since different sequences
+        // may have very different value ranges. The scale is stored per-layer (global).
+        // A simpler approach: quantize the entire batch at once, then scatter.
+        let (k_q, k_scale) = fp8::quantize_to_fp8(&k_flat)?;
+        let (v_q, v_scale) = fp8::quantize_to_fp8(&v_flat)?;
+
+        // Update scales (running max to avoid requantizing entire pool)
+        let (old_k_scale, old_v_scale) = self.fp8_scales[layer_idx];
+        self.fp8_scales[layer_idx] = (old_k_scale.max(k_scale), old_v_scale.max(v_scale));
+
+        let (k_pool, v_pool) = &mut self.layers[layer_idx];
+
+        for i in 0..new_len {
+            let pos = start_pos + i;
+            let slot = block_table
+                .slot_for(pos, self.block_size)
+                .ok_or_else(|| anyhow::anyhow!("no slot for position {pos} in block table"))?;
+
+            let k_row = k_q.narrow(0, i, 1)?;
+            let v_row = v_q.narrow(0, i, 1)?;
+            k_pool.slice_set(&k_row, 0, slot)?;
+            v_pool.slice_set(&v_row, 0, slot)?;
+        }
+
+        Ok(())
+    }
+
     /// Read K/V values from the paged cache for positions `0..seq_len`.
     ///
-    /// - `layer_idx`: 0-based full-attention layer index
-    /// - `block_table`: per-sequence page table
-    /// - `seq_len`: total number of positions to read
-    ///
-    /// Returns `(k, v)` each shaped `[1, num_kv_heads, seq_len, head_dim]`.
+    /// Returns `(k, v)` each shaped `[1, num_kv_heads, seq_len, head_dim]` in compute dtype.
     pub fn read(
         &self,
         layer_idx: usize,
@@ -129,6 +205,16 @@ impl PagedKvCache {
         let k = k_pool.index_select(&indices, 0)?;
         let v = v_pool.index_select(&indices, 0)?;
 
+        // Dequantize if FP8
+        let (k, v) = if self.fp8 {
+            let (k_scale, v_scale) = self.fp8_scales[layer_idx];
+            let k = fp8::dequantize_from_fp8(&k, k_scale, self.compute_dtype, device)?;
+            let v = fp8::dequantize_from_fp8(&v, v_scale, self.compute_dtype, device)?;
+            (k, v)
+        } else {
+            (k, v)
+        };
+
         // Reshape to [1, num_kv_heads, seq_len, head_dim]
         let k = k.transpose(0, 1)?.contiguous()?.unsqueeze(0)?;
         let v = v.transpose(0, 1)?.contiguous()?.unsqueeze(0)?;
@@ -146,6 +232,10 @@ impl PagedKvCache {
 
     pub fn num_layers(&self) -> usize {
         self.layers.len()
+    }
+
+    pub fn is_fp8(&self) -> bool {
+        self.fp8
     }
 }
 
@@ -406,6 +496,71 @@ mod tests {
             let v_vals = v_out.flatten_all()?.to_vec1::<f32>()?;
             assert_eq!(v_vals, vec![val * 100.0, val * 1000.0], "Layer {layer} V mismatch");
         }
+
+        Ok(())
+    }
+
+    // --- FP8 paged cache tests ---
+
+    #[test]
+    fn test_fp8_paged_write_read_roundtrip() -> Result<()> {
+        let device = Device::Cpu;
+        let num_kv_heads = 2;
+        let head_dim = 4;
+        let block_size = 4;
+        let num_blocks = 4;
+
+        let mut cache = PagedKvCache::new_with_fp8(
+            1, num_blocks, block_size, num_kv_heads, head_dim,
+            DType::F32, &device, true,
+        )?;
+        assert!(cache.is_fp8());
+
+        let mut bt = BlockTable::new();
+        bt.push(1);
+        bt.push(3);
+
+        let k = Tensor::new(
+            &[[[[1.0_f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+              [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]]],
+            &device,
+        )?;
+        let v = Tensor::new(
+            &[[[[101.0_f32, 102.0, 103.0, 104.0], [105.0, 106.0, 107.0, 108.0], [109.0, 110.0, 111.0, 112.0]],
+              [[113.0, 114.0, 115.0, 116.0], [117.0, 118.0, 119.0, 120.0], [121.0, 122.0, 123.0, 124.0]]]],
+            &device,
+        )?;
+
+        cache.write(0, &bt, 0, &k, &v)?;
+        let (k_out, v_out) = cache.read(0, &bt, 3)?;
+
+        assert_eq!(k_out.dims(), &[1, 2, 3, 4]);
+        assert_eq!(k_out.dtype(), DType::F32);
+
+        // Check approximate values (FP8 has limited precision)
+        let k_orig = k.flatten_all()?.to_vec1::<f32>()?;
+        let k_read = k_out.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (o, r)) in k_orig.iter().zip(k_read.iter()).enumerate() {
+            let rel_err = (o - r).abs() / o.abs().max(0.01);
+            assert!(rel_err < 0.15, "K index {i}: orig={o}, read={r}, rel_err={rel_err}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_paged_memory_savings() -> Result<()> {
+        let device = Device::Cpu;
+        let fp8_cache = PagedKvCache::new_with_fp8(1, 256, 16, 4, 256, DType::F32, &device, true)?;
+        let native_cache = PagedKvCache::new(1, 256, 16, 4, 256, DType::F32, &device)?;
+
+        assert_eq!(fp8_cache.layers[0].0.dtype(), DType::U8);
+        assert_eq!(native_cache.layers[0].0.dtype(), DType::F32);
+
+        // FP8 uses 1 byte per element vs 4 bytes for F32
+        let fp8_bytes = fp8_cache.layers[0].0.elem_count(); // * 1 byte
+        let native_bytes = native_cache.layers[0].0.elem_count() * 4; // * 4 bytes
+        assert_eq!(fp8_bytes * 4, native_bytes);
 
         Ok(())
     }

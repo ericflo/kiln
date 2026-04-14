@@ -249,9 +249,13 @@ impl AppState {
             DType::F32
         };
 
-        let kv_dtype_bytes: usize = match kv_dtype {
-            DType::BF16 => 2,
-            _ => 4,
+        let kv_dtype_bytes: usize = if memory_cfg.kv_cache_fp8 {
+            1 // FP8: 1 byte per element
+        } else {
+            match kv_dtype {
+                DType::BF16 => 2,
+                _ => 4,
+            }
         };
 
         let inference_fraction = memory_cfg.inference_memory_fraction.clamp(0.1, 1.0);
@@ -298,10 +302,11 @@ impl AppState {
             }
         };
 
-        tracing::info!(num_blocks, block_size, ?kv_dtype, "allocating paged KV cache");
+        let fp8_enabled = memory_cfg.kv_cache_fp8;
+        tracing::info!(num_blocks, block_size, ?kv_dtype, fp8_enabled, "allocating paged KV cache");
 
         let block_manager = BlockManager::new(num_blocks, block_size);
-        let paged_cache = PagedKvCache::new(
+        let paged_cache = PagedKvCache::new_with_fp8(
             model_config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -309,6 +314,7 @@ impl AppState {
             model_config.head_dim,
             kv_dtype,
             &device,
+            fp8_enabled,
         )
         .expect("failed to create PagedKvCache");
 

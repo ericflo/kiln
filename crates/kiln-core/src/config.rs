@@ -111,11 +111,30 @@ impl ModelConfig {
         2 * self.num_kv_heads * self.head_dim * dtype_bytes
     }
 
+    /// Bytes per KV cache token for one full-attention layer with optional FP8.
+    /// When `fp8` is true, uses 1 byte per element instead of the compute dtype size.
+    pub fn kv_cache_bytes_per_token_per_layer_fp8(&self, fp8: bool) -> usize {
+        let dtype_bytes = if fp8 {
+            1
+        } else {
+            match self.dtype {
+                DType::BF16 | DType::FP16 => 2,
+                DType::FP32 => 4,
+            }
+        };
+        2 * self.num_kv_heads * self.head_dim * dtype_bytes
+    }
+
     /// Total KV cache bytes per token across all full-attention layers.
     /// Only full-attention layers need KV cache; linear attention layers
     /// maintain a fixed-size recurrent state independent of sequence length.
     pub fn kv_cache_bytes_per_token(&self) -> usize {
         self.kv_cache_bytes_per_token_per_layer() * self.num_full_attention_layers
+    }
+
+    /// Total KV cache bytes per token with optional FP8 quantization.
+    pub fn kv_cache_bytes_per_token_fp8(&self, fp8: bool) -> usize {
+        self.kv_cache_bytes_per_token_per_layer_fp8(fp8) * self.num_full_attention_layers
     }
 
     /// Number of head dimensions that get rotary embeddings applied.
@@ -217,5 +236,30 @@ mod tests {
         // ~32 KB/token * 131072 tokens = ~4 GB
         // This is the magic: 128K context in only ~4 GB of KV cache!
         assert!(kv_gb > 3.5 && kv_gb < 4.5, "KV at 128K should be ~4 GB, got {kv_gb:.2} GB");
+    }
+
+    #[test]
+    fn qwen3_5_4b_fp8_kv_cache_halves_memory() {
+        let config = ModelConfig::qwen3_5_4b();
+        let bf16_bytes = config.kv_cache_bytes_per_token();
+        let fp8_bytes = config.kv_cache_bytes_per_token_fp8(true);
+        // FP8 (1 byte) vs BF16 (2 bytes) = exactly half
+        assert_eq!(fp8_bytes * 2, bf16_bytes);
+        // FP8: 2 * 4 * 256 * 1 = 2048 per layer * 8 layers = 16384 bytes per token
+        assert_eq!(fp8_bytes, 16384);
+
+        let ctx_len = 131072; // 128K tokens
+        let fp8_gb = (fp8_bytes * ctx_len) as f64 / (1024.0 * 1024.0 * 1024.0);
+        // ~16 KB/token * 131072 tokens = ~2 GB (half of 4 GB with BF16)
+        assert!(fp8_gb > 1.8 && fp8_gb < 2.2, "FP8 KV at 128K should be ~2 GB, got {fp8_gb:.2} GB");
+    }
+
+    #[test]
+    fn fp8_disabled_matches_default() {
+        let config = ModelConfig::qwen3_5_4b();
+        assert_eq!(
+            config.kv_cache_bytes_per_token(),
+            config.kv_cache_bytes_per_token_fp8(false)
+        );
     }
 }

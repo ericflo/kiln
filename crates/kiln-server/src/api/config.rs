@@ -21,6 +21,7 @@ struct VramConfig {
 struct KvCacheConfig {
     num_blocks: usize,
     num_blocks_source: &'static str,
+    fp8_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -90,6 +91,10 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         kv_cache: KvCacheConfig {
             num_blocks,
             num_blocks_source,
+            fp8_enabled: match state.backend.as_ref() {
+                ModelBackend::Real { paged_cache, .. } => paged_cache.lock().unwrap().is_fp8(),
+                ModelBackend::Mock { .. } => false,
+            },
         },
         training: TrainingConfig {
             checkpoint_segments: ckpt.num_segments,
