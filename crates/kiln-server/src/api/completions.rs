@@ -287,7 +287,8 @@ async fn generate_real(
     let params = sampling.clone();
 
     let gpu_lock = state.gpu_lock.clone();
-    let output = tokio::task::spawn_blocking(move || {
+    let timeout = state.request_timeout;
+    let generation = tokio::task::spawn_blocking(move || {
         // Acquire GPU coordination read lock — allows concurrent inference,
         // but blocks while training holds the write lock.
         let _gpu_guard = gpu_lock.read().unwrap();
@@ -295,10 +296,22 @@ async fn generate_real(
         let mut bm_guard = bm.lock().unwrap();
         let mut pc_guard = pc.lock().unwrap();
         runner_guard.generate_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    });
+
+    let output = match tokio::time::timeout(timeout, generation).await {
+        Ok(join_result) => join_result
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        Err(_) => {
+            return Err((
+                StatusCode::REQUEST_TIMEOUT,
+                format!(
+                    "request timed out after {} seconds",
+                    timeout.as_secs()
+                ),
+            ));
+        }
+    };
 
     let finish_reason = match output.finish_reason {
         kiln_model::FinishReason::Eos => "stop",
@@ -330,6 +343,14 @@ async fn generate_real(
 }
 
 /// Generate using the real ModelRunner with SSE streaming and paged KV cache.
+///
+/// Handles two cancellation paths:
+/// 1. **Client disconnect**: When the SSE client drops the connection, the async
+///    mpsc `tx.send()` fails. The forwarding task then drops `sync_rx`, which
+///    causes `tx.send()` in the generation loop to fail, stopping generation.
+/// 2. **Request timeout**: A `tokio::time::sleep` future races against the
+///    forwarding loop. On timeout, the task drops `sync_rx`, stopping generation,
+///    and sends an error event to the client.
 async fn generate_real_streaming(
     _state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
@@ -348,6 +369,7 @@ async fn generate_real_streaming(
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = now_epoch();
     let gpu_lock = _state.gpu_lock.clone();
+    let timeout = _state.request_timeout;
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -398,70 +420,129 @@ async fn generate_real_streaming(
                 }
             };
 
-            // Forward token events as SSE
+            // Forward token events as SSE, racing against a timeout.
+            // When the timeout fires or client disconnects, we drop `sync_rx`,
+            // which causes `tx.send()` in the generation loop to fail, stopping
+            // generation and freeing KV cache blocks.
+            //
+            // We wrap `sync_rx.recv()` in `spawn_blocking` so it doesn't block
+            // the async runtime. The receiver is moved into each spawn_blocking
+            // call and returned along with the result so we can reuse it.
+            let mut maybe_rx = Some(sync_rx);
+            let mut timed_out = false;
+            let deadline = tokio::time::Instant::now() + timeout;
+
             loop {
-                match sync_rx.recv() {
-                    Ok(StreamEvent::Token(token)) => {
-                        let chunk = ChatCompletionChunk {
-                            id: id.clone(),
-                            object: "chat.completion.chunk",
-                            created,
-                            model: model.clone(),
-                            choices: vec![ChunkChoice {
-                                index: 0,
-                                delta: Delta {
-                                    role: None,
-                                    content: Some(token.text),
-                                },
-                                finish_reason: None,
-                            }],
-                        };
-                        if tx
-                            .send(
-                                Event::default()
-                                    .data(serde_json::to_string(&chunk).unwrap()),
-                            )
-                            .await
-                            .is_err()
-                        {
-                            return;
+                let rx_inner = match maybe_rx.take() {
+                    Some(r) => r,
+                    None => break,
+                };
+
+                // Race: recv the next token vs. request timeout
+                let recv_handle = tokio::task::spawn_blocking(move || {
+                    let result = rx_inner.recv();
+                    (rx_inner, result)
+                });
+
+                tokio::select! {
+                    join_result = recv_handle => {
+                        match join_result {
+                            Ok((rx_back, Ok(StreamEvent::Token(token)))) => {
+                                maybe_rx = Some(rx_back);
+                                let chunk = ChatCompletionChunk {
+                                    id: id.clone(),
+                                    object: "chat.completion.chunk",
+                                    created,
+                                    model: model.clone(),
+                                    choices: vec![ChunkChoice {
+                                        index: 0,
+                                        delta: Delta {
+                                            role: None,
+                                            content: Some(token.text),
+                                        },
+                                        finish_reason: None,
+                                    }],
+                                };
+                                if tx
+                                    .send(
+                                        Event::default()
+                                            .data(serde_json::to_string(&chunk).unwrap()),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    // Client disconnected — drop rx to stop generation
+                                    return;
+                                }
+                            }
+                            Ok((_, Ok(StreamEvent::Done(done)))) => {
+                                let finish = match done.finish_reason {
+                                    kiln_model::FinishReason::Eos => "stop",
+                                    kiln_model::FinishReason::MaxTokens => "length",
+                                    kiln_model::FinishReason::StopSequence(_) => "stop",
+                                };
+                                let chunk = ChatCompletionChunk {
+                                    id: id.clone(),
+                                    object: "chat.completion.chunk",
+                                    created,
+                                    model: model.clone(),
+                                    choices: vec![ChunkChoice {
+                                        index: 0,
+                                        delta: Delta {
+                                            role: None,
+                                            content: None,
+                                        },
+                                        finish_reason: Some(finish.to_string()),
+                                    }],
+                                };
+                                let _ = tx
+                                    .send(
+                                        Event::default()
+                                            .data(serde_json::to_string(&chunk).unwrap()),
+                                    )
+                                    .await;
+                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                return;
+                            }
+                            _ => {
+                                // Channel closed or join error
+                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                return;
+                            }
                         }
                     }
-                    Ok(StreamEvent::Done(done)) => {
-                        let finish = match done.finish_reason {
-                            kiln_model::FinishReason::Eos => "stop",
-                            kiln_model::FinishReason::MaxTokens => "length",
-                            kiln_model::FinishReason::StopSequence(_) => "stop",
-                        };
-                        let chunk = ChatCompletionChunk {
-                            id: id.clone(),
-                            object: "chat.completion.chunk",
-                            created,
-                            model: model.clone(),
-                            choices: vec![ChunkChoice {
-                                index: 0,
-                                delta: Delta {
-                                    role: None,
-                                    content: None,
-                                },
-                                finish_reason: Some(finish.to_string()),
-                            }],
-                        };
-                        let _ = tx
-                            .send(
-                                Event::default()
-                                    .data(serde_json::to_string(&chunk).unwrap()),
-                            )
-                            .await;
-                        let _ = tx.send(Event::default().data("[DONE]")).await;
-                        return;
-                    }
-                    Err(_) => {
-                        // Channel closed without Done — send [DONE] anyway
-                        let _ = tx.send(Event::default().data("[DONE]")).await;
-                        return;
+                    _ = tokio::time::sleep_until(deadline) => {
+                        timed_out = true;
+                        // recv_handle is dropped, which will abort the
+                        // spawn_blocking task. The sync_rx inside it will
+                        // be dropped, causing the generation loop to stop.
+                        break;
                     }
                 }
+            }
+
+            if timed_out {
+                let error_chunk = ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: None,
+                            content: None,
+                        },
+                        finish_reason: Some("timeout".to_string()),
+                    }],
+                };
+                let _ = tx
+                    .send(
+                        Event::default()
+                            .data(serde_json::to_string(&error_chunk).unwrap()),
+                    )
+                    .await;
+                let _ = tx.send(Event::default().data("[DONE]")).await;
             }
         }
     });

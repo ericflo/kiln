@@ -177,6 +177,8 @@ pub struct AppState {
     pub vram_info: kiln_core::vram::GpuVramInfo,
     /// Shutdown flag — set to true when the server is shutting down.
     pub shutdown: ShutdownFlag,
+    /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 300).
+    pub request_timeout: std::time::Duration,
 }
 
 impl AppState {
@@ -205,6 +207,7 @@ impl AppState {
                 source: kiln_core::vram::VramSource::None,
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
+            request_timeout: parse_request_timeout(),
         }
     }
 
@@ -336,8 +339,18 @@ impl AppState {
             training_queue: crate::training_queue::new_shared_queue(),
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
+            request_timeout: parse_request_timeout(),
         }
     }
+}
+
+/// Parse KILN_REQUEST_TIMEOUT_SECS from environment (default: 300 seconds).
+fn parse_request_timeout() -> std::time::Duration {
+    let secs: u64 = std::env::var("KILN_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    std::time::Duration::from_secs(secs)
 }
 
 /// Estimate model weight memory in bytes from config.
