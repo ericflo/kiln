@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         "tokenizer loaded successfully"
     );
 
-    let state = if let Some(mp) = model_path {
+    let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
         let model_weights = kiln_model::load_model(Path::new(mp), &model_config)?;
@@ -126,6 +126,9 @@ async fn main() -> Result<()> {
             config.server.request_timeout_secs,
         )
     };
+
+    // Apply server-level checkpoint_interval from config
+    state.checkpoint_interval = config.training.checkpoint_interval;
 
     // Spawn the background training queue worker
     let shutdown_flag = state.shutdown.clone();

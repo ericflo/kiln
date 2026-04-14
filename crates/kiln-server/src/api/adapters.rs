@@ -180,6 +180,21 @@ async fn delete_adapter(
 
     std::fs::remove_dir_all(&adapter_path).map_err(|e| ApiError::adapter_delete_failed(e))?;
 
+    // Clean up any checkpoint directories (e.g. "my-adapter-checkpoint-50")
+    let checkpoint_prefix = format!("{name}-checkpoint-");
+    if let Ok(entries) = std::fs::read_dir(&state.adapter_dir) {
+        for entry in entries.flatten() {
+            let entry_name = entry.file_name().to_string_lossy().to_string();
+            if entry_name.starts_with(&checkpoint_prefix) && entry.path().is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                    tracing::warn!(checkpoint = %entry_name, error = %e, "failed to delete checkpoint directory");
+                } else {
+                    tracing::info!(checkpoint = %entry_name, "deleted checkpoint directory");
+                }
+            }
+        }
+    }
+
     tracing::info!(adapter = %name, operation = "delete", "deleted adapter from disk");
 
     Ok(Json(DeleteAdapterResponse {
