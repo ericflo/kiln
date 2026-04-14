@@ -519,6 +519,24 @@ pub fn grpo_train(
         anyhow::bail!("no valid GRPO groups after tokenization");
     }
 
+    // Configure gradient checkpointing (same as SFT)
+    let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+    let segments = if ckpt_config.enabled {
+        Some(compute_segment_boundaries(model_config.num_layers, ckpt_config.num_segments))
+    } else {
+        None
+    };
+
+    if let Some(ref segs) = segments {
+        tracing::info!(
+            num_segments = segs.len(),
+            boundaries = ?segs,
+            "GRPO gradient checkpointing enabled"
+        );
+    } else {
+        tracing::info!("GRPO gradient checkpointing disabled");
+    }
+
     let total_steps = tokenized_groups.len();
     let mut global_step = 0;
     let mut last_loss = 0.0;
@@ -532,77 +550,69 @@ pub fn grpo_train(
         let num_completions = tgroup.completions.len();
 
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
-            // Policy forward pass (with LoRA)
-            let lora_weights = params.as_lora_weights();
-            let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-            let policy_logits = model_forward(
-                &comp.input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-            ).context("GRPO policy forward pass")?;
+            // Step 1: Reference forward pass (NO LoRA, NO gradient tracking)
+            // This is cheap memory-wise since nothing is tracked.
+            let ref_log_probs = {
+                let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
+                let ref_logits = model_forward(
+                    &comp.input_ids,
+                    weights,
+                    model_config,
+                    None,
+                    Some(&mut ref_linear_state),
+                    None, // no LoRA = reference model
+                ).context("GRPO reference forward pass")?;
+                token_log_probs(
+                    &ref_logits, &comp.input_ids, &comp.completion_mask, &device,
+                )?.detach()
+            };
 
-            // Reference forward pass (NO LoRA — base model only)
-            let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
-            let ref_logits = model_forward(
-                &comp.input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut ref_linear_state),
-                None, // no LoRA = reference model
-            ).context("GRPO reference forward pass")?;
-
-            // Compute per-token log-probs for the completion tokens
-            let policy_log_probs = token_log_probs(
-                &policy_logits, &comp.input_ids, &comp.completion_mask, &device,
-            )?;
-            let ref_log_probs = token_log_probs(
-                &ref_logits, &comp.input_ids, &comp.completion_mask, &device,
-            )?.detach(); // detach ref so gradients don't flow through it
-
-            // GRPO loss for this completion:
-            // ratio = exp(policy_logprob - ref_logprob)  [per token]
-            // clipped_ratio = clamp(ratio, 1-eps, 1+eps)
-            // surrogate = -min(ratio * advantage, clipped_ratio * advantage)
-            // kl = policy_logprob - ref_logprob
-            // loss = mean(surrogate) + kl_coeff * mean(kl)
+            // Step 2: Policy forward pass + GRPO loss + backward
             let advantage = advantages[comp_idx];
-            let log_ratio = (&policy_log_probs - &ref_log_probs)?;
-            let ratio = log_ratio.exp()?;
-            let ratio_shape = ratio.shape().clone();
+            let loss_val;
 
-            // Broadcast scalars to match ratio shape so minimum/clamp work
-            let lo = Tensor::new(1.0 - config.clip_epsilon, &device)?
-                .to_dtype(DType::F32)?
-                .broadcast_as(&ratio_shape)?;
-            let hi = Tensor::new(1.0 + config.clip_epsilon, &device)?
-                .to_dtype(DType::F32)?
-                .broadcast_as(&ratio_shape)?;
-            let clipped_ratio = ratio.clamp(&lo, &hi)?;
+            if let Some(ref segs) = segments {
+                // Gradient-checkpointed GRPO step
+                let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
+                    &comp.input_ids,
+                    weights,
+                    model_config,
+                    &params,
+                    &comp.completion_mask,
+                    &ref_log_probs,
+                    advantage,
+                    config.clip_epsilon,
+                    config.kl_coeff,
+                    segs,
+                    &device,
+                )?;
+                loss_val = lv;
+                sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
+            } else {
+                // Standard (non-checkpointed) GRPO step
+                let lora_weights = params.as_lora_weights();
+                let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+                let policy_logits = model_forward(
+                    &comp.input_ids,
+                    weights,
+                    model_config,
+                    None,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                ).context("GRPO policy forward pass")?;
 
-            let adv_tensor = Tensor::new(advantage as f32, &device)?
-                .broadcast_as(&ratio_shape)?;
-            let surr1 = (&ratio * &adv_tensor)?;
-            let surr2 = (&clipped_ratio * &adv_tensor)?;
-            let surrogate = surr1.minimum(&surr2)?;
-            let neg_surrogate = surrogate.neg()?;
+                let policy_log_probs = token_log_probs(
+                    &policy_logits, &comp.input_ids, &comp.completion_mask, &device,
+                )?;
 
-            // KL divergence per token (policy - reference)
-            let kl = &log_ratio;
-            let kl_penalty = kl.affine(config.kl_coeff, 0.0)?;
+                let loss = grpo_loss(&policy_log_probs, &ref_log_probs, advantage, config.clip_epsilon, config.kl_coeff, &device)?;
+                loss_val = loss.to_scalar::<f32>()? as f64;
 
-            // Total loss = mean(-surrogate + kl_penalty)
-            let per_token_loss = (&neg_surrogate + &kl_penalty)?;
-            let loss = per_token_loss.mean_all()?;
-            let loss_val = loss.to_scalar::<f32>()? as f64;
+                let grads = loss.backward().context("GRPO backward pass")?;
+                sgd_step(&params, &grads, config.learning_rate)?;
+            }
+
             group_loss_sum += loss_val;
-
-            // Backward and SGD step per completion
-            let grads = loss.backward().context("GRPO backward pass")?;
-            sgd_step(&params, &grads, config.learning_rate)?;
         }
 
         let avg_group_loss = if num_completions > 0 {
@@ -1168,6 +1178,151 @@ fn standard_forward_backward(
     let grads = loss.backward().context("backward pass")?;
 
     Ok((loss_val, grads))
+}
+
+/// Compute the GRPO loss from policy and reference log-probs.
+///
+/// Returns a scalar loss tensor suitable for backward().
+fn grpo_loss(
+    policy_log_probs: &Tensor,
+    ref_log_probs: &Tensor,
+    advantage: f64,
+    clip_epsilon: f64,
+    kl_coeff: f64,
+    device: &Device,
+) -> Result<Tensor> {
+    let log_ratio = (policy_log_probs - ref_log_probs)?;
+    let ratio = log_ratio.exp()?;
+    let ratio_shape = ratio.shape().clone();
+
+    // Broadcast scalars to match ratio shape for minimum/clamp
+    let lo = Tensor::new(1.0 - clip_epsilon, device)?
+        .to_dtype(DType::F32)?
+        .broadcast_as(&ratio_shape)?;
+    let hi = Tensor::new(1.0 + clip_epsilon, device)?
+        .to_dtype(DType::F32)?
+        .broadcast_as(&ratio_shape)?;
+    let clipped_ratio = ratio.clamp(&lo, &hi)?;
+
+    let adv_tensor = Tensor::new(advantage as f32, device)?
+        .broadcast_as(&ratio_shape)?;
+    let surr1 = (&ratio * &adv_tensor)?;
+    let surr2 = (&clipped_ratio * &adv_tensor)?;
+    let surrogate = surr1.minimum(&surr2)?;
+    let neg_surrogate = surrogate.neg()?;
+
+    // KL divergence per token
+    let kl_penalty = log_ratio.affine(kl_coeff, 0.0)?;
+
+    // Total loss = mean(-surrogate + kl_penalty)
+    let per_token_loss = (&neg_surrogate + &kl_penalty)?;
+    per_token_loss.mean_all().map_err(Into::into)
+}
+
+/// Run one GRPO training step with gradient checkpointing.
+///
+/// Similar to `checkpointed_forward_backward` but computes GRPO loss
+/// (policy vs reference) instead of cross-entropy. The reference log-probs
+/// are pre-computed and passed in (they don't need gradient tracking).
+fn checkpointed_grpo_forward_backward(
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    completion_mask: &[bool],
+    ref_log_probs: &Tensor,
+    advantage: f64,
+    clip_epsilon: f64,
+    kl_coeff: f64,
+    segments: &[(usize, usize)],
+    device: &Device,
+) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
+    let num_segments = segments.len();
+
+    // Step 1: Run full forward pass with detached boundaries to get boundary hidden states.
+    let (embed_hidden, positions) = model_forward_embed(input_ids, weights)?;
+    let lora_weights = params.as_lora_weights();
+
+    let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
+    boundary_states.push(embed_hidden.detach());
+
+    {
+        let mut current = boundary_states[0].clone();
+        for &(start, end) in segments.iter() {
+            let mut linear_state = LinearAttentionState::new(model_config, device)?;
+            current = model_forward_segment(
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )?;
+            boundary_states.push(current.detach());
+            current = boundary_states.last().unwrap().clone();
+        }
+    }
+
+    // Step 2: For each segment, recompute with grad tracking and backprop with GRPO loss.
+    let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+    let all_vars = params.all_vars();
+    let mut total_loss = 0.0;
+
+    for seg_idx in 0..num_segments {
+        let (seg_start, seg_end) = segments[seg_idx];
+
+        // Start from the detached boundary state for this segment
+        let seg_input = boundary_states[seg_idx].clone();
+
+        // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
+        let lora_weights_for_seg = params.as_lora_weights();
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut hidden = model_forward_segment(
+            seg_input,
+            weights,
+            model_config,
+            &positions,
+            seg_start,
+            seg_end,
+            Some(&mut linear_state),
+            Some(&lora_weights_for_seg),
+        )?;
+
+        // Run remaining segments DETACHED
+        for &(later_start, later_end) in &segments[seg_idx + 1..] {
+            hidden = hidden.detach();
+            let mut later_linear_state = LinearAttentionState::new(model_config, device)?;
+            let lora_for_later = params.as_lora_weights();
+            hidden = model_forward_segment(
+                hidden,
+                weights,
+                model_config,
+                &positions,
+                later_start,
+                later_end,
+                Some(&mut later_linear_state),
+                Some(&lora_for_later),
+            )?;
+        }
+
+        // LM head
+        let logits = model_forward_head(&hidden, weights, model_config)?;
+
+        // Compute policy log-probs and GRPO loss
+        let policy_log_probs = token_log_probs(&logits, input_ids, completion_mask, device)?;
+        let loss = grpo_loss(&policy_log_probs, ref_log_probs, advantage, clip_epsilon, kl_coeff, device)?;
+        let loss_val = loss.to_scalar::<f32>()? as f64;
+        total_loss += loss_val;
+
+        // Backward — only the current segment's LoRA Vars contribute gradients
+        let grads = loss.backward().context("GRPO checkpointed backward pass")?;
+        accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
+    }
+
+    let avg_loss = total_loss / num_segments as f64;
+    Ok((avg_loss, accumulated_grads))
 }
 
 #[cfg(test)]
