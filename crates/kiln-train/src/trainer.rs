@@ -409,6 +409,18 @@ pub fn sft_train(
 
             global_step += 1;
 
+            // Periodic adapter checkpoint
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0 && global_step % interval == 0 && global_step < total_steps {
+                    let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
+                        tracing::warn!(step = global_step, error = %e, "failed to save training checkpoint");
+                    } else {
+                        tracing::info!(step = global_step, "saved training checkpoint");
+                    }
+                }
+            }
+
             if let Some(ref cb) = progress_cb {
                 cb(TrainingProgress {
                     epoch: epoch + 1,
@@ -622,6 +634,18 @@ pub fn grpo_train(
         };
         last_loss = avg_group_loss;
         global_step += 1;
+
+        // Periodic adapter checkpoint
+        if let Some(interval) = config.checkpoint_interval {
+            if interval > 0 && global_step % interval == 0 && global_step < total_steps {
+                let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
+                    tracing::warn!(step = global_step, error = %e, "failed to save GRPO training checkpoint");
+                } else {
+                    tracing::info!(step = global_step, "saved GRPO training checkpoint");
+                }
+            }
+        }
 
         if let Some(ref cb) = progress_cb {
             cb(TrainingProgress {

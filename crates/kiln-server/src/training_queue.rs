@@ -179,9 +179,15 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         }
     });
 
+    // Apply server-level checkpoint_interval default if not set per-job
+    let server_checkpoint_interval = state.checkpoint_interval;
+
     // Run the actual training under GPU write lock
     let result: Result<PathBuf, String> = match entry.job {
-        QueuedJob::Sft(req) => {
+        QueuedJob::Sft(mut req) => {
+            if req.config.checkpoint_interval.is_none() {
+                req.config.checkpoint_interval = server_checkpoint_interval;
+            }
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             trainer::sft_train(
@@ -196,7 +202,10 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             )
             .map_err(|e| format!("{e:#}"))
         }
-        QueuedJob::Grpo(req) => {
+        QueuedJob::Grpo(mut req) => {
+            if req.config.checkpoint_interval.is_none() {
+                req.config.checkpoint_interval = server_checkpoint_interval;
+            }
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             trainer::grpo_train(

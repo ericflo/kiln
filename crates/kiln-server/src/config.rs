@@ -63,6 +63,9 @@ pub struct MemoryConfig {
 pub struct TrainingConfig {
     pub grad_checkpoint_segments: Option<usize>,
     pub no_grad_checkpoint: bool,
+    /// Save adapter weights every N training steps during a job.
+    /// Per-job config overrides this. None = only save at the end.
+    pub checkpoint_interval: Option<usize>,
 }
 
 /// Logging settings.
@@ -125,6 +128,7 @@ impl Default for TrainingConfig {
         Self {
             grad_checkpoint_segments: None,
             no_grad_checkpoint: false,
+            checkpoint_interval: None,
         }
     }
 }
@@ -238,6 +242,11 @@ impl KilnConfig {
         if let Ok(v) = std::env::var("KILN_NO_GRAD_CHECKPOINT") {
             self.training.no_grad_checkpoint = v == "1" || v.eq_ignore_ascii_case("true");
         }
+        if let Ok(v) = std::env::var("KILN_CHECKPOINT_INTERVAL") {
+            if let Ok(n) = v.parse() {
+                self.training.checkpoint_interval = Some(n);
+            }
+        }
 
         // Logging
         if let Ok(v) = std::env::var("KILN_LOG_LEVEL") {
@@ -299,6 +308,7 @@ mod tests {
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
         assert!(!config.training.no_grad_checkpoint);
+        assert!(config.training.checkpoint_interval.is_none());
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "json");
     }
@@ -327,6 +337,7 @@ training_memory_gb = 6.0
 [training]
 grad_checkpoint_segments = 8
 no_grad_checkpoint = false
+checkpoint_interval = 50
 
 [logging]
 level = "debug"
@@ -343,6 +354,7 @@ format = "pretty"
         assert_eq!(config.memory.inference_memory_fraction, 0.5);
         assert_eq!(config.memory.training_memory_gb, Some(6.0));
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
+        assert_eq!(config.training.checkpoint_interval, Some(50));
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "pretty");
     }
@@ -419,6 +431,7 @@ port = 3000
             std::env::set_var("KILN_INFERENCE_MEMORY_FRACTION", "0.9");
             std::env::set_var("KILN_LOG_LEVEL", "debug");
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
+            std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
         }
 
         let mut config = KilnConfig::default();
@@ -430,6 +443,7 @@ port = 3000
         assert_eq!(config.memory.inference_memory_fraction, 0.9);
         assert_eq!(config.logging.level, "debug");
         assert!(config.training.no_grad_checkpoint);
+        assert_eq!(config.training.checkpoint_interval, Some(25));
 
         // Clean up
         unsafe {
@@ -439,6 +453,7 @@ port = 3000
             std::env::remove_var("KILN_INFERENCE_MEMORY_FRACTION");
             std::env::remove_var("KILN_LOG_LEVEL");
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+            std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
         }
     }
 

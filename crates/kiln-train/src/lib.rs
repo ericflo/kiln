@@ -48,6 +48,9 @@ pub struct SftConfig {
     /// Automatically load the resulting adapter when training completes (default true).
     #[serde(default = "default_auto_load")]
     pub auto_load: bool,
+    /// Save adapter weights every N training steps. None = only save at the end.
+    #[serde(default)]
+    pub checkpoint_interval: Option<usize>,
 }
 
 fn default_auto_load() -> bool { true }
@@ -66,6 +69,7 @@ impl Default for SftConfig {
             base_adapter: None,
             output_name: None,
             auto_load: default_auto_load(),
+            checkpoint_interval: None,
         }
     }
 }
@@ -111,6 +115,9 @@ pub struct GrpoConfig {
     /// Automatically load the resulting adapter when training completes (default true).
     #[serde(default = "default_auto_load")]
     pub auto_load: bool,
+    /// Save adapter weights every N training steps. None = only save at the end.
+    #[serde(default)]
+    pub checkpoint_interval: Option<usize>,
 }
 
 fn default_grpo_lr() -> f64 { 1e-5 }
@@ -128,6 +135,7 @@ impl Default for GrpoConfig {
             base_adapter: None,
             output_name: None,
             auto_load: default_auto_load(),
+            checkpoint_interval: None,
         }
     }
 }
@@ -159,4 +167,45 @@ pub struct TrainingResponse {
     pub job_id: String,
     pub state: TrainingState,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sft_config_default_checkpoint_interval_is_none() {
+        let config = SftConfig::default();
+        assert!(config.checkpoint_interval.is_none());
+    }
+
+    #[test]
+    fn test_grpo_config_default_checkpoint_interval_is_none() {
+        let config = GrpoConfig::default();
+        assert!(config.checkpoint_interval.is_none());
+    }
+
+    #[test]
+    fn test_sft_config_deserialize_with_checkpoint_interval() {
+        let json = r#"{"checkpoint_interval": 25}"#;
+        let config: SftConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.checkpoint_interval, Some(25));
+        assert_eq!(config.epochs, 3); // default preserved
+    }
+
+    #[test]
+    fn test_sft_config_deserialize_without_checkpoint_interval() {
+        let json = r#"{"epochs": 5}"#;
+        let config: SftConfig = serde_json::from_str(json).unwrap();
+        assert!(config.checkpoint_interval.is_none());
+        assert_eq!(config.epochs, 5);
+    }
+
+    #[test]
+    fn test_grpo_config_deserialize_with_checkpoint_interval() {
+        let json = r#"{"checkpoint_interval": 10}"#;
+        let config: GrpoConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.checkpoint_interval, Some(10));
+        assert_eq!(config.kl_coeff, 0.1); // default preserved
+    }
 }
