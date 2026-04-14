@@ -149,16 +149,13 @@ impl PagedKvCache {
         let k_flat = k.squeeze(0)?.transpose(0, 1)?.contiguous()?;
         let v_flat = v.squeeze(0)?.transpose(0, 1)?.contiguous()?;
 
-        // Quantize each row individually and write to pool
-        // For the paged cache, we use per-row quantization since different sequences
-        // may have very different value ranges. The scale is stored per-layer (global).
-        // A simpler approach: quantize the entire batch at once, then scatter.
-        let (k_q, k_scale) = fp8::quantize_to_fp8(&k_flat)?;
-        let (v_q, v_scale) = fp8::quantize_to_fp8(&v_flat)?;
-
-        // Update scales (running max to avoid requantizing entire pool)
-        let (old_k_scale, old_v_scale) = self.fp8_scales[layer_idx];
-        self.fp8_scales[layer_idx] = (old_k_scale.max(k_scale), old_v_scale.max(v_scale));
+        // For the paged cache, we use direct FP8 conversion without per-tensor scaling.
+        // This avoids the inconsistency of per-write scaling in a shared pool where
+        // different writes would have different scales but read dequantizes uniformly.
+        // E4M3FN can represent ±448, which is more than enough for normalized attention
+        // K/V values (typically in the ±10 range).
+        let k_q = fp8::quantize_to_fp8_direct(&k_flat)?;
+        let v_q = fp8::quantize_to_fp8_direct(&v_flat)?;
 
         let (k_pool, v_pool) = &mut self.layers[layer_idx];
 
@@ -205,11 +202,10 @@ impl PagedKvCache {
         let k = k_pool.index_select(&indices, 0)?;
         let v = v_pool.index_select(&indices, 0)?;
 
-        // Dequantize if FP8
+        // Dequantize if FP8 (direct, no scaling — values are stored as raw E4M3)
         let (k, v) = if self.fp8 {
-            let (k_scale, v_scale) = self.fp8_scales[layer_idx];
-            let k = fp8::dequantize_from_fp8(&k, k_scale, self.compute_dtype, device)?;
-            let v = fp8::dequantize_from_fp8(&v, v_scale, self.compute_dtype, device)?;
+            let k = fp8::dequantize_from_fp8_direct(&k, self.compute_dtype, device)?;
+            let v = fp8::dequantize_from_fp8_direct(&v, self.compute_dtype, device)?;
             (k, v)
         } else {
             (k, v)

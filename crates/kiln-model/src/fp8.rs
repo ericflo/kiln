@@ -15,6 +15,28 @@ use candle_core::{DType, Device, Tensor};
 /// Maximum representable value in E4M3FN format.
 const E4M3_MAX: f32 = 448.0;
 
+/// Convert a tensor to FP8 storage without scaling (scale = 1.0).
+///
+/// Values are directly converted to E4M3FN representation. Values outside [-448, 448]
+/// are clamped. This is suitable for the paged KV cache where different writes may
+/// have different value ranges and per-tensor scaling is not practical.
+///
+/// For typical attention K/V values (which are normalized and usually in ±10 range),
+/// this provides good precision without scaling.
+pub fn quantize_to_fp8_direct(tensor: &Tensor) -> Result<Tensor> {
+    let tensor_f32 = tensor.to_dtype(DType::F32)?;
+    let data = tensor_f32.flatten_all()?.to_vec1::<f32>()?;
+    let fp8_bytes: Vec<u8> = data.iter().map(|&v| f32_to_e4m3(v)).collect();
+    let shape = tensor.shape().clone();
+    let quantized = Tensor::from_vec(fp8_bytes, shape, tensor.device())?;
+    Ok(quantized)
+}
+
+/// Convert FP8 storage back to target dtype without scaling (scale = 1.0).
+pub fn dequantize_from_fp8_direct(quantized: &Tensor, target_dtype: DType, device: &Device) -> Result<Tensor> {
+    dequantize_from_fp8(quantized, 1.0, target_dtype, device)
+}
+
 /// Convert a BF16/FP16/F32 tensor to FP8 storage (U8 tensor + scale).
 ///
 /// Returns `(quantized_u8, scale)` where:
