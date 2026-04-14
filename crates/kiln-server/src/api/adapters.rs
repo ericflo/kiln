@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use axum::extract::{State, Path as AxumPath};
-use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use kiln_model::lora_loader::LoraWeights;
 
+use crate::error::ApiError;
 use crate::state::{AppState, ModelBackend};
 
 /// Response for GET /v1/adapters.
@@ -78,14 +78,11 @@ async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> 
 async fn load_adapter(
     State(state): State<AppState>,
     Json(req): Json<LoadAdapterRequest>,
-) -> Result<Json<LoadAdapterResponse>, (StatusCode, String)> {
+) -> Result<Json<LoadAdapterResponse>, ApiError> {
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "adapter loading not supported in mock mode".to_string(),
-            ));
+            return Err(ApiError::mock_mode_no_adapters());
         }
     };
 
@@ -97,10 +94,7 @@ async fn load_adapter(
     };
 
     if !adapter_path.exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("adapter directory not found: {}", adapter_path.display()),
-        ));
+        return Err(ApiError::adapter_not_found(&req.name));
     }
 
     // Two-phase load: read device/num_layers under a brief read lock, then load
@@ -117,20 +111,15 @@ async fn load_adapter(
     tokio::task::spawn_blocking(move || {
         // Load weights outside any lock (I/O + tensor allocation).
         let lora = LoraWeights::load(&path, num_layers, &device)
-            .map_err(|e| format!("failed to load adapter: {e}"))?;
+            .map_err(|e| format!("{e}"))?;
         // Brief write lock to swap the adapter in.
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            e,
-        )
-    })?;
+    .map_err(|e| ApiError::internal(format!("join error: {e}")))?
+    .map_err(ApiError::adapter_load_failed)?;
 
     // Update the shared active adapter name.
     *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
@@ -146,14 +135,11 @@ async fn load_adapter(
 /// Unload the active LoRA adapter, reverting to base model.
 async fn unload_adapter(
     State(state): State<AppState>,
-) -> Result<Json<UnloadAdapterResponse>, (StatusCode, String)> {
+) -> Result<Json<UnloadAdapterResponse>, ApiError> {
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "adapter management not supported in mock mode".to_string(),
-            ));
+            return Err(ApiError::mock_mode_no_adapters());
         }
     };
 
@@ -163,7 +149,7 @@ async fn unload_adapter(
         guard.unload_adapter();
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?;
+    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
 
     // Clear the shared active adapter name.
     *state.active_adapter_name.write().unwrap() = None;
@@ -179,31 +165,20 @@ async fn unload_adapter(
 async fn delete_adapter(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<DeleteAdapterResponse>, (StatusCode, String)> {
+) -> Result<Json<DeleteAdapterResponse>, ApiError> {
     let adapter_path = state.adapter_dir.join(&name);
 
     if !adapter_path.exists() || !adapter_path.is_dir() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("adapter not found: {name}"),
-        ));
+        return Err(ApiError::adapter_not_found(&name));
     }
 
     // Check if this adapter is currently active.
     let active = state.active_adapter_name.read().unwrap().clone();
     if active.as_deref() == Some(&name) {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("adapter '{name}' is currently active — unload it first"),
-        ));
+        return Err(ApiError::adapter_active(&name));
     }
 
-    std::fs::remove_dir_all(&adapter_path).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to delete adapter directory: {e}"),
-        )
-    })?;
+    std::fs::remove_dir_all(&adapter_path).map_err(|e| ApiError::adapter_delete_failed(e))?;
 
     tracing::info!(adapter = %name, operation = "delete", "deleted adapter from disk");
 
