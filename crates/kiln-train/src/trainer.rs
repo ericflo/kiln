@@ -592,8 +592,7 @@ pub fn grpo_train(
 
             // KL divergence per token (policy - reference)
             let kl = &log_ratio;
-            let kl_coeff_t = Tensor::new(config.kl_coeff as f32, &device)?;
-            let kl_penalty = (kl * &kl_coeff_t)?;
+            let kl_penalty = kl.affine(config.kl_coeff, 0.0)?;
 
             // Total loss = mean(-surrogate + kl_penalty)
             let per_token_loss = (&neg_surrogate + &kl_penalty)?;
