@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use kiln_server::api;
+use kiln_server::config::KilnConfig;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
@@ -16,26 +17,26 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    kiln_server::logging::init()?;
+    // Parse optional --config <path> argument
+    let config_path = parse_config_arg();
+    let config = KilnConfig::load(config_path.as_deref())?;
 
-    let host = std::env::var("KILN_HOST").unwrap_or_else(|_| "0.0.0.0".into());
-    let port: u16 = std::env::var("KILN_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8420);
+    kiln_server::logging::init(&config.logging.level, &config.logging.format)?;
+
+    let host = &config.server.host;
+    let port = config.server.port;
 
     let model_config = ModelConfig::qwen3_5_4b();
-    let model_path = std::env::var("KILN_MODEL_PATH").ok();
+    let model_path = config.model.path.as_deref();
 
     // Load tokenizer: try from_pretrained (HF Hub), fall back to local path, then fail gracefully.
-    let model_id =
-        std::env::var("KILN_MODEL_ID").unwrap_or_else(|_| "Qwen/Qwen3.5-4B".to_string());
-    let tokenizer_path = std::env::var("KILN_TOKENIZER_PATH").ok();
+    let model_id = &config.model.model_id;
+    let tokenizer_path = config.model.tokenizer_path.as_deref();
 
-    let tokenizer = if let Some(path) = &tokenizer_path {
+    let tokenizer = if let Some(path) = tokenizer_path {
         tracing::info!("loading tokenizer from {path}");
         KilnTokenizer::from_file(path)?
-    } else if let Some(ref mp) = model_path {
+    } else if let Some(mp) = model_path {
         // Try loading tokenizer from the model directory first
         let tok_file = Path::new(mp).join("tokenizer.json");
         if tok_file.exists() {
@@ -43,11 +44,11 @@ async fn main() -> Result<()> {
             KilnTokenizer::from_file(tok_file.to_str().unwrap())?
         } else {
             tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
-            KilnTokenizer::from_pretrained(&model_id)?
+            KilnTokenizer::from_pretrained(model_id)?
         }
     } else {
         tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
-        KilnTokenizer::from_pretrained(&model_id)?
+        KilnTokenizer::from_pretrained(model_id)?
     };
 
     tracing::info!(
@@ -55,7 +56,7 @@ async fn main() -> Result<()> {
         "tokenizer loaded successfully"
     );
 
-    let state = if let Some(ref mp) = model_path {
+    let state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
         let model_weights = kiln_model::load_model(Path::new(mp), &model_config)?;
@@ -69,22 +70,25 @@ async fn main() -> Result<()> {
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &device)?;
 
         // ModelRunner takes ownership of a tokenizer, so load a second instance.
-        let runner_tokenizer = if let Some(ref path) = tokenizer_path {
+        let runner_tokenizer = if let Some(path) = tokenizer_path {
             KilnTokenizer::from_file(path)?
         } else {
             let tok_file = Path::new(mp).join("tokenizer.json");
             if tok_file.exists() {
                 KilnTokenizer::from_file(tok_file.to_str().unwrap())?
             } else {
-                KilnTokenizer::from_pretrained(&model_id)?
+                KilnTokenizer::from_pretrained(model_id)?
             }
         };
 
         let runner = ModelRunner::new(gpu_weights, runner_tokenizer, model_config.clone());
 
-        let adapter_dir = std::env::var("KILN_ADAPTER_DIR")
+        let adapter_dir = config
+            .model
+            .adapter_dir
+            .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(mp).join("adapters"));
+            .unwrap_or_else(|| PathBuf::from(mp).join("adapters"));
 
         if !adapter_dir.exists() {
             tracing::info!(path = %adapter_dir.display(), "creating adapter directory");
@@ -93,10 +97,18 @@ async fn main() -> Result<()> {
 
         tracing::info!(adapter_dir = %adapter_dir.display(), "model loaded — real inference mode");
         tracing::info!("training endpoints available — in-process LoRA training (no sidecar needed)");
-        AppState::new_real(model_config, runner, tokenizer, device, adapter_dir)
+        AppState::new_real(
+            model_config,
+            runner,
+            tokenizer,
+            device,
+            adapter_dir,
+            &config.memory,
+            config.server.request_timeout_secs,
+        )
     } else {
         // Mock mode: use scheduler + mock engine.
-        tracing::info!("no KILN_MODEL_PATH set — running in mock mode");
+        tracing::info!("no model path set — running in mock mode");
         tracing::info!("training endpoints will return 503 in mock mode (no real weights)");
         let scheduler_config = SchedulerConfig {
             max_batch_tokens: 8192,
@@ -106,7 +118,13 @@ async fn main() -> Result<()> {
         let num_blocks = 8192;
         let scheduler = Scheduler::new(scheduler_config, num_blocks);
         let engine = MockEngine::new(model_config.clone());
-        AppState::new_mock(model_config, scheduler, Arc::new(engine), tokenizer)
+        AppState::new_mock(
+            model_config,
+            scheduler,
+            Arc::new(engine),
+            tokenizer,
+            config.server.request_timeout_secs,
+        )
     };
 
     // Spawn the background training queue worker
@@ -120,16 +138,13 @@ async fn main() -> Result<()> {
     tracing::info!(
         host = %host,
         port = port,
-        model_path = model_path.as_deref().unwrap_or("none (mock mode)"),
+        model_path = model_path.unwrap_or("none (mock mode)"),
         "kiln listening"
     );
 
     // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
     // then force-exit after a timeout.
-    let shutdown_timeout_secs: u64 = std::env::var("KILN_SHUTDOWN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
+    let shutdown_timeout_secs = config.server.shutdown_timeout_secs;
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_flag))
@@ -145,6 +160,17 @@ async fn main() -> Result<()> {
     tracing::warn!("shutdown timeout reached — exiting");
 
     Ok(())
+}
+
+/// Parse an optional `--config <path>` argument from argv.
+fn parse_config_arg() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if args[i] == "--config" {
+            return args.get(i + 1).cloned();
+        }
+    }
+    None
 }
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown.
