@@ -10,6 +10,7 @@ struct HealthResponse {
     model: String,
     backend: &'static str,
     scheduler: Option<SchedulerStats>,
+    gpu_memory: Option<GpuMemoryInfo>,
 }
 
 #[derive(Serialize)]
@@ -19,6 +20,15 @@ struct SchedulerStats {
     blocks_used: usize,
     blocks_free: usize,
     blocks_total: usize,
+}
+
+#[derive(Serialize)]
+struct GpuMemoryInfo {
+    total_vram_gb: f64,
+    model_gb: f64,
+    kv_cache_gb: f64,
+    training_budget_gb: f64,
+    inference_memory_fraction: f64,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -40,6 +50,19 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         ModelBackend::Real { .. } => ("model", None),
     };
 
+    let gpu_memory = if state.memory_budget.total_vram_bytes > 0 {
+        let b = &state.memory_budget;
+        Some(GpuMemoryInfo {
+            total_vram_gb: b.total_vram_bytes as f64 / 1e9,
+            model_gb: b.model_memory_bytes as f64 / 1e9,
+            kv_cache_gb: b.kv_cache_bytes as f64 / 1e9,
+            training_budget_gb: b.training_budget_bytes as f64 / 1e9,
+            inference_memory_fraction: b.inference_memory_fraction,
+        })
+    } else {
+        None
+    };
+
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -51,6 +74,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         ),
         backend: backend_name,
         scheduler: scheduler_stats,
+        gpu_memory,
     })
 }
 

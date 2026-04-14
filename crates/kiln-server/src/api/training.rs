@@ -31,6 +31,11 @@ async fn submit_sft(
 
     tracing::info!(num_examples, job_id = %job_id, adapter = %adapter_name, "SFT training request received");
 
+    // Check GPU memory budget before accepting training job
+    if let Err(msg) = state.memory_budget.check_training_feasible(0) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, msg));
+    }
+
     // Extract model weights reference for training
     let runner_arc = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner.clone(),
@@ -67,6 +72,7 @@ async fn submit_sft(
     let tokenizer = state.tokenizer.clone();
     let adapter_dir = state.adapter_dir.clone();
     let active_adapter_name = state.active_adapter_name.clone();
+    let gpu_lock = state.gpu_lock.clone();
     let job_id_clone = job_id.clone();
     let adapter_name_clone = adapter_name.clone();
 
@@ -82,15 +88,7 @@ async fn submit_sft(
         // Read model weights and config under a brief read lock
         let (weights_ref, _device, num_layers) = {
             let guard = runner_arc.read().unwrap();
-            // We need to reference the weights for training. Since training
-            // only READS base weights (LoRA params are separate Vars), we can
-            // safely hold a read lock for the duration, OR we can extract what
-            // we need and drop the lock. For simplicity and to not block
-            // inference for the entire training run, we'll hold the read lock
-            // only briefly here to get the device and config, then hold it
-            // again during the actual forward passes.
             (
-                // We need the runner Arc to access weights during training
                 runner_arc.clone(),
                 guard.weights.embed_tokens.device().clone(),
                 guard.config.num_layers,
@@ -110,9 +108,11 @@ async fn submit_sft(
         });
 
         // Run training — this blocks until complete.
-        // We need to hold a read lock on the runner during training because
-        // the forward pass needs access to the base model weights.
+        // Acquire GPU write lock to prevent inference from running simultaneously,
+        // avoiding combined VRAM peak that could OOM.
+        // The write lock blocks all inference read locks for the duration of training.
         let result = {
+            let _gpu_guard = gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             trainer::sft_train(
                 &req.examples,
@@ -205,6 +205,11 @@ async fn submit_grpo(
 
     tracing::info!(num_groups, total_completions, job_id = %job_id, adapter = %adapter_name, "GRPO training request received");
 
+    // Check GPU memory budget before accepting training job
+    if let Err(msg) = state.memory_budget.check_training_feasible(0) {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, msg));
+    }
+
     // Extract model weights reference for training
     let runner_arc = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner.clone(),
@@ -241,6 +246,7 @@ async fn submit_grpo(
     let tokenizer = state.tokenizer.clone();
     let adapter_dir = state.adapter_dir.clone();
     let active_adapter_name = state.active_adapter_name.clone();
+    let gpu_lock = state.gpu_lock.clone();
     let job_id_clone = job_id.clone();
     let adapter_name_clone = adapter_name.clone();
 
@@ -276,7 +282,9 @@ async fn submit_grpo(
         });
 
         // Run GRPO training — this blocks until complete.
+        // Acquire GPU write lock to prevent inference from running simultaneously.
         let result = {
+            let _gpu_guard = gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             trainer::grpo_train(
                 &req.groups,

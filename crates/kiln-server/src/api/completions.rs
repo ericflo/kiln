@@ -286,7 +286,11 @@ async fn generate_real(
     let prompt = prompt_text.to_owned();
     let params = sampling.clone();
 
+    let gpu_lock = state.gpu_lock.clone();
     let output = tokio::task::spawn_blocking(move || {
+        // Acquire GPU coordination read lock — allows concurrent inference,
+        // but blocks while training holds the write lock.
+        let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
         let mut bm_guard = bm.lock().unwrap();
         let mut pc_guard = pc.lock().unwrap();
@@ -343,6 +347,7 @@ async fn generate_real_streaming(
     let model = req.model.clone();
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = now_epoch();
+    let gpu_lock = _state.gpu_lock.clone();
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -377,6 +382,8 @@ async fn generate_real_streaming(
 
             // Run blocking generation with paged KV cache
             let sync_rx = match tokio::task::spawn_blocking(move || {
+                // Acquire GPU coordination read lock
+                let _gpu_guard = gpu_lock.read().unwrap();
                 let runner_guard = runner.read().unwrap();
                 let mut bm_guard = bm.lock().unwrap();
                 let mut pc_guard = pc.lock().unwrap();
