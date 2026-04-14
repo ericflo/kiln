@@ -190,23 +190,167 @@ async fn submit_sft(
 }
 
 async fn submit_grpo(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<GrpoRequest>,
 ) -> Result<Json<TrainingResponse>, (StatusCode, String)> {
     let num_groups = req.groups.len();
     let total_completions: usize = req.groups.iter().map(|g| g.completions.len()).sum();
     let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req
+        .config
+        .output_name
+        .clone()
+        .unwrap_or_else(|| format!("grpo-{}", &job_id[..8]));
+    let auto_load = req.config.auto_load;
 
-    tracing::info!(num_groups, total_completions, job_id = %job_id, "GRPO training request received");
+    tracing::info!(num_groups, total_completions, job_id = %job_id, adapter = %adapter_name, "GRPO training request received");
 
-    // GRPO training is not yet implemented in the pure Rust trainer.
-    // The types are defined and the endpoint accepts requests, but the
-    // actual GRPO training loop (advantage normalization, clipped IS, KL penalty)
-    // is Phase 4 work.
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "GRPO training is not yet implemented — SFT training is available via /v1/train/sft".to_string(),
-    ))
+    // Extract model weights reference for training
+    let runner_arc = match state.backend.as_ref() {
+        ModelBackend::Real { runner, .. } => runner.clone(),
+        ModelBackend::Mock { .. } => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "training requires real model weights (not available in mock mode)".to_string(),
+            ));
+        }
+    };
+
+    // Register the job
+    let info = TrainingJobInfo {
+        job_id: job_id.clone(),
+        adapter_name: adapter_name.clone(),
+        job_type: TrainingJobType::Grpo,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        auto_load,
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.clone(), info);
+
+    // Spawn training on a background thread
+    let training_jobs = state.training_jobs.clone();
+    let model_config = state.model_config.clone();
+    let tokenizer = state.tokenizer.clone();
+    let adapter_dir = state.adapter_dir.clone();
+    let active_adapter_name = state.active_adapter_name.clone();
+    let job_id_clone = job_id.clone();
+    let adapter_name_clone = adapter_name.clone();
+
+    std::thread::spawn(move || {
+        // Mark as running
+        {
+            let mut jobs = training_jobs.write().unwrap();
+            if let Some(job) = jobs.get_mut(&job_id_clone) {
+                job.state = TrainingState::Running;
+            }
+        }
+
+        // Read model config under brief read lock
+        let (weights_ref, _device, num_layers) = {
+            let guard = runner_arc.read().unwrap();
+            (
+                runner_arc.clone(),
+                guard.weights.embed_tokens.device().clone(),
+                guard.config.num_layers,
+            )
+        };
+
+        // Set up progress callback
+        let training_jobs_cb = training_jobs.clone();
+        let job_id_cb = job_id_clone.clone();
+        let progress_cb = Box::new(move |progress: trainer::TrainingProgress| {
+            let mut jobs = training_jobs_cb.write().unwrap();
+            if let Some(job) = jobs.get_mut(&job_id_cb) {
+                job.progress = progress.progress;
+                job.loss = Some(progress.loss);
+                job.epoch = Some(progress.epoch as u32);
+            }
+        });
+
+        // Run GRPO training — this blocks until complete.
+        let result = {
+            let guard = runner_arc.read().unwrap();
+            trainer::grpo_train(
+                &req.groups,
+                &req.config,
+                &model_config,
+                &guard.weights,
+                &tokenizer,
+                &adapter_dir,
+                &adapter_name_clone,
+                Some(progress_cb),
+            )
+        };
+
+        match result {
+            Ok(adapter_path) => {
+                let path_str = adapter_path.display().to_string();
+                tracing::info!(
+                    job_id = %job_id_clone,
+                    adapter = %adapter_name_clone,
+                    path = %path_str,
+                    "GRPO training completed"
+                );
+
+                // Update job state
+                {
+                    let mut jobs = training_jobs.write().unwrap();
+                    if let Some(job) = jobs.get_mut(&job_id_clone) {
+                        job.state = TrainingState::Completed;
+                        job.progress = 1.0;
+                        job.adapter_path = Some(path_str.clone());
+                    }
+                }
+
+                // Auto-load the adapter if requested
+                if auto_load {
+                    if let Err(e) = auto_load_adapter(
+                        &weights_ref,
+                        &active_adapter_name,
+                        &adapter_path,
+                        &adapter_name_clone,
+                        num_layers,
+                    ) {
+                        tracing::error!(
+                            job_id = %job_id_clone,
+                            adapter = %adapter_name_clone,
+                            "auto-load failed: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            job_id = %job_id_clone,
+                            adapter = %adapter_name_clone,
+                            "auto-loaded trained adapter"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    job_id = %job_id_clone,
+                    "GRPO training failed: {e:#}"
+                );
+                let mut jobs = training_jobs.write().unwrap();
+                if let Some(job) = jobs.get_mut(&job_id_clone) {
+                    job.state = TrainingState::Failed;
+                }
+            }
+        }
+    });
+
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: format!("Queued GRPO training with {num_groups} groups ({total_completions} completions)"),
+    }))
 }
 
 /// GET /v1/train/status — overall training status (list all tracked jobs).

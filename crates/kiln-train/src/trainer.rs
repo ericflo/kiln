@@ -1,4 +1,4 @@
-//! In-process LoRA SFT training using candle autograd.
+//! In-process LoRA SFT and GRPO training using candle autograd.
 //!
 //! Trains LoRA adapter weights directly on the already-loaded model's GPU
 //! tensors. No Python sidecar, no second model copy, single process.
@@ -19,7 +19,7 @@ use kiln_model::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights,
 };
 
-use crate::{ChatMessage, SftConfig, SftExample};
+use crate::{ChatMessage, GrpoConfig, GrpoGroup, SftConfig, SftExample};
 
 /// Convert our ChatMessage to the core tokenizer's ChatMessage.
 fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessage> {
@@ -451,6 +451,342 @@ pub fn sft_train(
     );
 
     Ok(output_dir)
+}
+
+/// Run GRPO training on the provided groups using the already-loaded model.
+///
+/// GRPO (Group Relative Policy Optimization) trains LoRA adapters by:
+/// 1. Computing log-probs under the current policy (base + LoRA) for each completion
+/// 2. Computing reference log-probs under the base model (no LoRA) — KL anchor
+/// 3. Computing advantages from rewards normalized within each group
+/// 4. Optimizing a clipped importance-sampling objective with KL penalty
+///
+/// Returns the path to the saved adapter directory.
+pub fn grpo_train(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    let device = weights.embed_tokens.device().clone();
+
+    let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
+    tracing::info!(
+        num_groups = groups.len(),
+        total_completions,
+        lr = config.learning_rate,
+        kl_coeff = config.kl_coeff,
+        clip_epsilon = config.clip_epsilon,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting GRPO training"
+    );
+
+    // Initialize trainable LoRA parameters
+    let params = TrainableLoraParams::initialize(
+        model_config,
+        weights,
+        config.lora_rank,
+        config.lora_alpha,
+        &device,
+    )?;
+
+    tracing::info!(
+        num_vars = params.all_vars().len(),
+        "initialized trainable LoRA parameters"
+    );
+
+    // Tokenize all completions: for each group, tokenize prompt + each completion
+    let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
+        .iter()
+        .filter_map(|group| {
+            match tokenize_grpo_group(group, tokenizer) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!("skipping GRPO group: {e}");
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if tokenized_groups.is_empty() {
+        anyhow::bail!("no valid GRPO groups after tokenization");
+    }
+
+    let total_steps = tokenized_groups.len();
+    let mut global_step = 0;
+    let mut last_loss = 0.0;
+
+    for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
+        // Compute advantages from rewards (normalize within group)
+        let advantages = compute_advantages(&tgroup.rewards);
+
+        // For each completion: compute policy log-probs and reference log-probs
+        let mut group_loss_sum = 0.0;
+        let num_completions = tgroup.completions.len();
+
+        for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+            // Policy forward pass (with LoRA)
+            let lora_weights = params.as_lora_weights();
+            let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+            let policy_logits = model_forward(
+                &comp.input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            ).context("GRPO policy forward pass")?;
+
+            // Reference forward pass (NO LoRA — base model only)
+            let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
+            let ref_logits = model_forward(
+                &comp.input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut ref_linear_state),
+                None, // no LoRA = reference model
+            ).context("GRPO reference forward pass")?;
+
+            // Compute per-token log-probs for the completion tokens
+            let policy_log_probs = token_log_probs(
+                &policy_logits, &comp.input_ids, &comp.completion_mask, &device,
+            )?;
+            let ref_log_probs = token_log_probs(
+                &ref_logits, &comp.input_ids, &comp.completion_mask, &device,
+            )?.detach(); // detach ref so gradients don't flow through it
+
+            // GRPO loss for this completion:
+            // ratio = exp(policy_logprob - ref_logprob)  [per token]
+            // clipped_ratio = clamp(ratio, 1-eps, 1+eps)
+            // surrogate = -min(ratio * advantage, clipped_ratio * advantage)
+            // kl = policy_logprob - ref_logprob
+            // loss = mean(surrogate) + kl_coeff * mean(kl)
+            let advantage = advantages[comp_idx];
+            let log_ratio = (&policy_log_probs - &ref_log_probs)?;
+            let ratio = log_ratio.exp()?;
+
+            let lo = Tensor::new(1.0 - config.clip_epsilon, &device)?.to_dtype(DType::F32)?;
+            let hi = Tensor::new(1.0 + config.clip_epsilon, &device)?.to_dtype(DType::F32)?;
+            let clipped_ratio = ratio.clamp(&lo, &hi)?;
+
+            let adv_tensor = Tensor::new(advantage as f32, &device)?;
+            let surr1 = (&ratio * &adv_tensor)?;
+            let surr2 = (&clipped_ratio * &adv_tensor)?;
+            let surrogate = surr1.minimum(&surr2)?;
+            let neg_surrogate = surrogate.neg()?;
+
+            // KL divergence per token (policy - reference)
+            let kl = &log_ratio;
+            let kl_coeff_t = Tensor::new(config.kl_coeff as f32, &device)?;
+            let kl_penalty = (kl * &kl_coeff_t)?;
+
+            // Total loss = mean(-surrogate + kl_penalty)
+            let per_token_loss = (&neg_surrogate + &kl_penalty)?;
+            let loss = per_token_loss.mean_all()?;
+            let loss_val = loss.to_scalar::<f32>()? as f64;
+            group_loss_sum += loss_val;
+
+            // Backward and SGD step per completion
+            let grads = loss.backward().context("GRPO backward pass")?;
+            sgd_step(&params, &grads, config.learning_rate)?;
+        }
+
+        let avg_group_loss = if num_completions > 0 {
+            group_loss_sum / num_completions as f64
+        } else {
+            0.0
+        };
+        last_loss = avg_group_loss;
+        global_step += 1;
+
+        if let Some(ref cb) = progress_cb {
+            cb(TrainingProgress {
+                epoch: 1,
+                total_epochs: 1,
+                step: global_step,
+                total_steps,
+                loss: avg_group_loss,
+                progress: global_step as f32 / total_steps as f32,
+            });
+        }
+
+        tracing::info!(
+            group = group_idx + 1,
+            total_groups = total_steps,
+            num_completions,
+            loss = format!("{avg_group_loss:.6}"),
+            "GRPO group step"
+        );
+    }
+
+    // Save the trained adapter
+    let output_dir = adapter_dir.join(adapter_name);
+    params.save_peft(&output_dir, model_config.num_layers)?;
+
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        "GRPO training complete"
+    );
+
+    Ok(output_dir)
+}
+
+/// Tokenized data for a single completion within a GRPO group.
+struct TokenizedGrpoCompletion {
+    /// Full input_ids: prompt + completion tokens.
+    input_ids: Vec<u32>,
+    /// Mask indicating which tokens are completion (true = completion token).
+    completion_mask: Vec<bool>,
+}
+
+/// A tokenized GRPO group ready for training.
+struct TokenizedGrpoGroup {
+    completions: Vec<TokenizedGrpoCompletion>,
+    rewards: Vec<f64>,
+}
+
+/// Tokenize a GRPO group: prompt messages + each completion text.
+fn tokenize_grpo_group(
+    group: &GrpoGroup,
+    tokenizer: &KilnTokenizer,
+) -> Result<TokenizedGrpoGroup> {
+    if group.completions.is_empty() {
+        anyhow::bail!("GRPO group has no completions");
+    }
+
+    let prompt_messages = to_core_messages(&group.messages);
+
+    // Tokenize the prompt (without any assistant response)
+    let prompt_text = tokenizer.apply_chat_template(&prompt_messages)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let prompt_ids = tokenizer
+        .encode(&prompt_text)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mut completions = Vec::with_capacity(group.completions.len());
+    let mut rewards = Vec::with_capacity(group.completions.len());
+
+    for scored in &group.completions {
+        // Build full conversation: prompt + assistant completion
+        let mut full_messages = prompt_messages.clone();
+        full_messages.push(kiln_core::tokenizer::ChatMessage {
+            role: "assistant".to_string(),
+            content: scored.text.clone(),
+        });
+
+        let full_text = tokenizer.apply_chat_template(&full_messages)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let full_ids = tokenizer
+            .encode(&full_text)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        if full_ids.len() < 2 {
+            tracing::warn!("skipping completion: too short ({} tokens)", full_ids.len());
+            continue;
+        }
+
+        // Completion mask: tokens after the prompt are completion tokens
+        let mut mask = vec![false; full_ids.len()];
+        for i in prompt_ids.len()..full_ids.len() {
+            mask[i] = true;
+        }
+
+        completions.push(TokenizedGrpoCompletion {
+            input_ids: full_ids,
+            completion_mask: mask,
+        });
+        rewards.push(scored.reward);
+    }
+
+    if completions.is_empty() {
+        anyhow::bail!("no valid completions in GRPO group after tokenization");
+    }
+
+    Ok(TokenizedGrpoGroup {
+        completions,
+        rewards,
+    })
+}
+
+/// Compute group-normalized advantages from rewards.
+///
+/// advantage_i = (reward_i - mean(rewards)) / (std(rewards) + 1e-8)
+fn compute_advantages(rewards: &[f64]) -> Vec<f64> {
+    let n = rewards.len() as f64;
+    if n <= 1.0 {
+        return vec![0.0; rewards.len()];
+    }
+    let mean = rewards.iter().sum::<f64>() / n;
+    let var = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    let std = var.sqrt();
+    rewards.iter().map(|r| (r - mean) / (std + 1e-8)).collect()
+}
+
+/// Compute per-token log-probabilities for the tokens indicated by the mask.
+///
+/// Returns a 1-D tensor of log-probs for only the masked (completion) positions.
+/// Uses the next-token prediction convention: logits[i] predicts token[i+1].
+fn token_log_probs(
+    logits: &Tensor,
+    input_ids: &[u32],
+    mask: &[bool],
+    device: &Device,
+) -> Result<Tensor> {
+    let seq_len = input_ids.len();
+    let logits = logits.squeeze(0)?; // [seq_len, vocab_size]
+
+    // Next-token prediction: logits[i] predicts input_ids[i+1]
+    // So for completion token at position j, use logits[j-1]
+    let shift_logits = logits.narrow(0, 0, seq_len - 1)?; // [seq_len-1, vocab_size]
+    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
+    let shift_mask: Vec<bool> = mask[1..].to_vec();
+
+    // Find active positions (completion tokens)
+    let active_positions: Vec<usize> = shift_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i) } else { None })
+        .collect();
+
+    if active_positions.is_empty() {
+        // Return a zero tensor if no completion tokens
+        return Tensor::zeros(1, DType::F32, device).map_err(Into::into);
+    }
+
+    // Gather active logits
+    let indices = Tensor::new(
+        active_positions.iter().map(|&i| i as u32).collect::<Vec<_>>().as_slice(),
+        device,
+    )?;
+    let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
+
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| shift_labels[i])
+        .collect();
+
+    // log_softmax then gather
+    let active_logits_f32 = active_logits.to_dtype(DType::F32)?;
+    let log_sum_exp = active_logits_f32.log_sum_exp(candle_core::D::Minus1)?; // [num_active]
+    let labels_2d = Tensor::new(active_labels.as_slice(), device)?
+        .to_dtype(DType::U32)?
+        .unsqueeze(1)?;
+    let correct_logits = active_logits_f32.gather(&labels_2d, 1)?.squeeze(1)?; // [num_active]
+
+    // log_prob = logit - log_sum_exp
+    let log_probs = (correct_logits - log_sum_exp)?;
+
+    Ok(log_probs)
 }
 
 /// Tokenize a training example into (input_ids, label_mask).
