@@ -572,12 +572,19 @@ pub fn grpo_train(
             let advantage = advantages[comp_idx];
             let log_ratio = (&policy_log_probs - &ref_log_probs)?;
             let ratio = log_ratio.exp()?;
+            let ratio_shape = ratio.shape().clone();
 
-            let lo = Tensor::new(1.0 - config.clip_epsilon, &device)?.to_dtype(DType::F32)?;
-            let hi = Tensor::new(1.0 + config.clip_epsilon, &device)?.to_dtype(DType::F32)?;
+            // Broadcast scalars to match ratio shape so minimum/clamp work
+            let lo = Tensor::new(1.0 - config.clip_epsilon, &device)?
+                .to_dtype(DType::F32)?
+                .broadcast_as(&ratio_shape)?;
+            let hi = Tensor::new(1.0 + config.clip_epsilon, &device)?
+                .to_dtype(DType::F32)?
+                .broadcast_as(&ratio_shape)?;
             let clipped_ratio = ratio.clamp(&lo, &hi)?;
 
-            let adv_tensor = Tensor::new(advantage as f32, &device)?;
+            let adv_tensor = Tensor::new(advantage as f32, &device)?
+                .broadcast_as(&ratio_shape)?;
             let surr1 = (&ratio * &adv_tensor)?;
             let surr2 = (&clipped_ratio * &adv_tensor)?;
             let surrogate = surr1.minimum(&surr2)?;
