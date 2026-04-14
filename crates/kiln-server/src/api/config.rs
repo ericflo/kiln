@@ -1,7 +1,7 @@
 use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
 
-use crate::state::AppState;
+use crate::state::{AppState, ModelBackend};
 
 #[derive(Serialize)]
 struct ConfigResponse {
@@ -19,7 +19,7 @@ struct VramConfig {
 
 #[derive(Serialize)]
 struct KvCacheConfig {
-    num_blocks: Option<usize>,
+    num_blocks: usize,
     num_blocks_source: &'static str,
 }
 
@@ -42,16 +42,26 @@ struct MemoryBudgetConfig {
 async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
     let vram = &state.vram_info;
 
-    // Determine num_blocks source
-    let (num_blocks, num_blocks_source) = {
-        let explicit = std::env::var("KILN_NUM_BLOCKS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok());
-        match explicit {
-            Some(n) => (Some(n), "KILN_NUM_BLOCKS"),
-            None => {
-                let recommended = kiln_core::vram::recommended_num_blocks(vram);
-                (recommended, "auto")
+    // Get actual num_blocks from the running backend
+    let (num_blocks, num_blocks_source) = match state.backend.as_ref() {
+        ModelBackend::Real { block_manager, .. } => {
+            let bm = block_manager.lock().unwrap();
+            let source = if std::env::var("KILN_NUM_BLOCKS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .is_some()
+            {
+                "KILN_NUM_BLOCKS"
+            } else {
+                "auto"
+            };
+            (bm.num_blocks(), source)
+        }
+        ModelBackend::Mock { scheduler, .. } => {
+            let sched = scheduler.try_lock();
+            match sched {
+                Ok(s) => (s.block_manager().num_blocks(), "mock"),
+                Err(_) => (0, "unknown"),
             }
         }
     };
