@@ -1,6 +1,7 @@
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 use crate::state::AppState;
 
@@ -13,6 +14,30 @@ mod training;
 mod config;
 
 pub fn router(state: AppState) -> Router {
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(|request: &axum::http::Request<_>| {
+            tracing::info_span!(
+                "http_request",
+                method = %request.method(),
+                path = %request.uri().path(),
+                status = tracing::field::Empty,
+                duration_ms = tracing::field::Empty,
+            )
+        })
+        .on_response(
+            |response: &axum::http::Response<_>,
+             latency: std::time::Duration,
+             span: &Span| {
+                span.record("status", response.status().as_u16());
+                span.record("duration_ms", latency.as_secs_f64() * 1000.0);
+                tracing::info!(
+                    status = response.status().as_u16(),
+                    duration_ms = latency.as_secs_f64() * 1000.0,
+                    "response"
+                );
+            },
+        );
+
     Router::new()
         .merge(health::routes())
         .merge(metrics::routes())
@@ -23,5 +48,5 @@ pub fn router(state: AppState) -> Router {
         .merge(config::routes())
         .with_state(state)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(trace_layer)
 }

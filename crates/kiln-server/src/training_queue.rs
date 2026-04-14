@@ -216,7 +216,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     match result {
         Ok(adapter_path) => {
             let path_str = adapter_path.display().to_string();
-            tracing::info!(job_id = %job_id, adapter = %adapter_name, path = %path_str, "training completed");
+            tracing::info!(job_id = %job_id, job_type = ?job_type, adapter = %adapter_name, path = %path_str, "training completed");
 
             {
                 let mut jobs = state.training_jobs.write().unwrap();
@@ -243,7 +243,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             }
         }
         Err(e) => {
-            tracing::error!(job_id = %job_id, "training failed: {e}");
+            tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
             let mut jobs = state.training_jobs.write().unwrap();
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.state = TrainingState::Failed;

@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
 
 use kiln_server::api;
 use kiln_server::state;
@@ -17,9 +16,7 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("kiln=info".parse()?))
-        .init();
+    kiln_server::logging::init()?;
 
     let host = std::env::var("KILN_HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = std::env::var("KILN_PORT")
@@ -120,7 +117,12 @@ async fn main() -> Result<()> {
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("kiln listening on {addr}");
+    tracing::info!(
+        host = %host,
+        port = port,
+        model_path = model_path.as_deref().unwrap_or("none (mock mode)"),
+        "kiln listening"
+    );
 
     // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
     // then force-exit after a timeout.
