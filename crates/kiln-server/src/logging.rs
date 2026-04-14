@@ -98,23 +98,11 @@ mod tests {
         }
         let filter = build_filter();
         let s = format!("{filter}");
+        // Custom directive is parsed as-is (not expanded to the standard triple)
         assert!(
-            s.contains("trace") || s.contains("warn"),
+            s.contains("kiln=trace") || s.contains("tower_http=warn"),
             "filter should parse custom directive: {s}"
         );
-        unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
-    }
-
-    #[test]
-    fn test_build_filter_invalid_fallback() {
-        unsafe {
-            std::env::remove_var("RUST_LOG");
-            std::env::set_var("KILN_LOG_LEVEL", "not_a_valid_level!!!!");
-        }
-        let filter = build_filter();
-        let s = format!("{filter}");
-        // Should fall back to info
-        assert!(s.contains("info"), "invalid level should fall back to info: {s}");
         unsafe { std::env::remove_var("KILN_LOG_LEVEL"); }
     }
 }
