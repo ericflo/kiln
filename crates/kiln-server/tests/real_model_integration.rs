@@ -316,6 +316,65 @@ async fn test_real_model_streaming_chat_completion() {
     );
 }
 
+/// Test that request timeout is configurable via environment variable.
+#[tokio::test]
+async fn test_request_timeout_configurable() {
+    // SAFETY: This test runs in isolation; no concurrent threads depend on
+    // KILN_REQUEST_TIMEOUT_SECS at this point.
+    unsafe {
+        std::env::set_var("KILN_REQUEST_TIMEOUT_SECS", "42");
+    }
+
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+
+    let runner_tokenizer = test_tokenizer();
+    let state_tokenizer = test_tokenizer();
+
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device.clone(),
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+    );
+
+    assert_eq!(state.request_timeout.as_secs(), 42);
+
+    unsafe {
+        std::env::remove_var("KILN_REQUEST_TIMEOUT_SECS");
+    }
+}
+
+/// Test that default request timeout is 300 seconds when env var is unset.
+#[tokio::test]
+async fn test_default_request_timeout() {
+    // SAFETY: same as above — isolated test environment.
+    unsafe {
+        std::env::remove_var("KILN_REQUEST_TIMEOUT_SECS");
+    }
+
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+
+    let runner_tokenizer = test_tokenizer();
+    let state_tokenizer = test_tokenizer();
+
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device.clone(),
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+    );
+
+    assert_eq!(state.request_timeout.as_secs(), 300);
+}
+
 #[tokio::test]
 async fn test_health_with_real_backend() {
     let config = tiny_config();
