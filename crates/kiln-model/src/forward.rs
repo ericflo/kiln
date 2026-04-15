@@ -347,6 +347,42 @@ pub fn rotary_embedding(
     Ok((rotated_q, rotated_k))
 }
 
+/// Same as [`rotary_embedding`] but accepts positions as a pre-allocated GPU tensor
+/// instead of a CPU slice. This is critical for CUDA graph compatibility: the tensor's
+/// GPU address stays stable across graph replays, and its contents can be updated via
+/// `cudaMemcpyAsync` outside the captured graph.
+///
+/// `positions_tensor`: f32 tensor on device, shape [seq_len]
+pub fn rotary_embedding_from_tensor(
+    q: &Tensor,
+    k: &Tensor,
+    positions_tensor: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+    rope_theta: f64,
+) -> Result<(Tensor, Tensor)> {
+    let device = q.device();
+    let half_rotary = rotary_dim / 2;
+
+    let inv_freq: Vec<f32> = (0..half_rotary)
+        .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
+        .collect();
+    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?;
+
+    // positions_tensor is [seq_len], unsqueeze to [seq_len, 1]
+    let pos = positions_tensor.unsqueeze(1)?;
+
+    let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
+
+    let cos = freqs.cos()?;
+    let sin = freqs.sin()?;
+
+    let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
+    let rotated_k = apply_rope(k, &cos, &sin, head_dim, rotary_dim)?;
+
+    Ok((rotated_q, rotated_k))
+}
+
 /// Apply the rotation to a single tensor, supporting partial rotary embeddings.
 /// `x`: [batch, seq_len, num_heads, head_dim]
 /// `cos`, `sin`: [seq_len, half_rotary]
@@ -890,7 +926,8 @@ pub fn gqa_attention(
 pub fn gqa_attention_paged(
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
-    positions: &[u32],
+    positions: &Tensor,
+    start_pos: usize,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -904,7 +941,6 @@ pub fn gqa_attention_paged(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    let start_pos = positions[0] as usize;
 
     // Project to Q, K, V (with optional LoRA delta and output gate split)
     let (lora_layer, lora_scale) = match lora {
@@ -934,7 +970,9 @@ pub fn gqa_attention_paged(
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
 
     // RoPE — only rotate first rotary_dim dimensions
-    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, rope_theta)?;
+    // Use the GPU tensor variant so positions remain at a stable GPU address
+    // (critical for CUDA graph replay correctness)
+    let (q, k) = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, rope_theta)?;
 
     // Transpose to [batch, heads, seq_len, head_dim]
     let q = q.transpose(1, 2)?.contiguous()?;
@@ -1212,7 +1250,8 @@ pub fn transformer_block_paged(
     x: &Tensor,
     layer: &GpuLayerWeights,
     config: &kiln_core::config::ModelConfig,
-    positions: &[u32],
+    positions: &Tensor,
+    start_pos: usize,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -1239,6 +1278,7 @@ pub fn transformer_block_paged(
         &normed,
         attn_weights,
         positions,
+        start_pos,
         num_heads,
         num_kv_heads,
         head_dim,
@@ -1501,6 +1541,11 @@ pub fn model_forward_head(
 /// for KV storage. The caller provides `start_pos` (the absolute position of
 /// the first token in `token_ids`) instead of relying on `kv_cache.seq_len()`.
 ///
+/// `positions_gpu`: optional pre-allocated f32 tensor on device with shape [seq_len].
+/// When provided, this tensor is used for RoPE instead of creating a new one.
+/// This is required for CUDA graph replay: the tensor's GPU address must remain
+/// stable so the captured graph reads updated position values on replay.
+///
 /// Returns logits tensor with shape [1, seq_len, vocab_size].
 pub fn model_forward_paged(
     token_ids: &[u32],
@@ -1511,8 +1556,10 @@ pub fn model_forward_paged(
     start_pos: usize,
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
     let seq_len = token_ids.len();
+    let device = weights.embed_tokens.device();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
     let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
@@ -1520,8 +1567,20 @@ pub fn model_forward_paged(
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
 
-    // Position indices for RoPE — absolute positions
-    let positions: Vec<u32> = (start_pos..start_pos + seq_len).map(|p| p as u32).collect();
+    // Position tensor for RoPE — use pre-allocated GPU tensor if provided,
+    // otherwise create one from scratch. The pre-allocated path is essential
+    // for CUDA graph replay where the tensor pointer must be stable.
+    let positions_owned;
+    let positions: &Tensor = match positions_gpu {
+        Some(t) => t,
+        None => {
+            let pos_f32: Vec<f32> = (start_pos..start_pos + seq_len)
+                .map(|p| p as f32)
+                .collect();
+            positions_owned = Tensor::new(pos_f32.as_slice(), device)?;
+            &positions_owned
+        }
+    };
 
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
@@ -1537,7 +1596,8 @@ pub fn model_forward_paged(
                     &hidden,
                     layer,
                     config,
-                    &positions,
+                    positions,
+                    start_pos,
                     config.num_attention_heads,
                     config.num_kv_heads,
                     config.head_dim,

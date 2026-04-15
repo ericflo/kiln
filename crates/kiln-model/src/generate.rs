@@ -526,6 +526,7 @@ impl ModelRunner {
             0,
             Some(&mut linear_state),
             self.active_lora.as_ref(),
+            None,
         )
         .context("prefill forward pass (paged) failed")?;
 
@@ -664,6 +665,7 @@ impl ModelRunner {
             0,
             Some(&mut linear_state),
             self.active_lora.as_ref(),
+            None,
         ) {
             Ok(l) => l,
             Err(e) => {
