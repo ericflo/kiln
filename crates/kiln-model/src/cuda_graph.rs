@@ -390,3 +390,11 @@ mod tests {
         assert_eq!(runner.adapter_generation, 3);
     }
 }
+
+// SAFETY: CudaGraphRunner is protected by a Mutex in ModelRunner. The inner
+// CudaGraph/CudaGraphExec are GPU-side recorded command sequences. Launching a
+// graph is thread-safe — the CUDA driver serialises access on the stream.
+// The raw pointers (*mut CUgraph_st, *mut CUgraphExec_st) are opaque handles
+// to driver-managed objects and are not dereferenced on the CPU side.
+unsafe impl Send for CudaGraphRunner {}
+unsafe impl Sync for CudaGraphRunner {}
