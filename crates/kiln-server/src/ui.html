@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln Dashboard</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #1c2129;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --accent: #58a6ff;
+  --accent2: #388bfd;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+  --purple: #bc8cff;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --radius: 8px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+a { color: var(--accent); text-decoration: none; }
+
+/* Layout */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.header h1 {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.header-stats {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-left: auto;
+  font-size: 13px;
+}
+.stat { display: flex; align-items: center; gap: 4px; }
+.stat-label { color: var(--text2); }
+.stat-val { font-family: var(--mono); font-weight: 500; }
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-dot.ok { background: var(--green); }
+.status-dot.degraded { background: var(--orange); }
+.status-dot.offline { background: var(--red); }
+
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 16px 20px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+@media (max-width: 900px) {
+  .main { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.panel-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--surface2);
+}
+.panel-head h2 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text2);
+}
+.panel-body { padding: 14px; }
+
+/* VRAM Bar */
+.vram-bar-wrap { margin: 8px 0; }
+.vram-bar {
+  height: 20px;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  background: #21262d;
+}
+.vram-seg {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--bg);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.vram-legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text2);
+}
+.vram-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.vram-legend .model::before { background: var(--accent); }
+.vram-legend .kv::before { background: var(--purple); }
+.vram-legend .train::before { background: var(--orange); }
+.vram-legend .free::before { background: #21262d; }
+
+/* Scheduler stats */
+.sched-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.sched-stat {
+  background: var(--surface2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  text-align: center;
+}
+.sched-stat .num {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+}
+.sched-stat .lbl {
+  font-size: 11px;
+  color: var(--text2);
+  margin-top: 2px;
+}
+
+/* Adapter list */
+.adapter-list { list-style: none; }
+.adapter-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.adapter-item:last-child { border-bottom: none; }
+.adapter-name {
+  font-family: var(--mono);
+  font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adapter-active {
+  background: rgba(63, 185, 80, 0.15);
+  border-radius: 4px;
+}
+.badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.badge-active { background: rgba(63, 185, 80, 0.2); color: var(--green); }
+.adapter-size {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text2);
+}
+.adapter-actions { display: flex; gap: 4px; }
+
+/* Buttons */
+.btn {
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--border); }
+.btn-sm { font-size: 11px; padding: 2px 8px; }
+.btn-primary { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+.btn-primary:hover { background: var(--accent); }
+.btn-danger { color: var(--red); }
+.btn-danger:hover { background: rgba(248, 81, 73, 0.15); }
+
+/* Training queue */
+.job-card {
+  background: var(--surface2);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.job-card:last-child { margin-bottom: 0; }
+.job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.job-id {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+.job-state {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.job-state.Running { background: rgba(56, 139, 253, 0.2); color: var(--accent); }
+.job-state.Queued { background: rgba(210, 153, 34, 0.2); color: var(--orange); }
+.job-state.Completed { background: rgba(63, 185, 80, 0.2); color: var(--green); }
+.job-state.Failed { background: rgba(248, 81, 73, 0.2); color: var(--red); }
+.progress-bar {
+  height: 4px;
+  background: #21262d;
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s;
+}
+.job-meta {
+  font-size: 11px;
+  color: var(--text2);
+  display: flex;
+  gap: 12px;
+}
+
+/* Forms */
+.form-group { margin-bottom: 10px; }
+.form-group label {
+  display: block;
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+input[type="text"], input[type="number"], textarea, select {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+}
+textarea { resize: vertical; min-height: 80px; }
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* Chat */
+.chat-messages {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  min-height: 120px;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.chat-msg { margin-bottom: 8px; }
+.chat-msg .role {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.chat-msg.user .role { color: var(--green); }
+.chat-msg.assistant .role { color: var(--accent); }
+.chat-msg pre {
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-input-row {
+  display: flex;
+  gap: 8px;
+}
+.chat-input-row input {
+  flex: 1;
+}
+.chat-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.chat-controls select { width: auto; }
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  color: var(--text2);
+  background: none;
+  border-top: none; border-left: none; border-right: none;
+  font-family: var(--sans);
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Empty state */
+.empty {
+  text-align: center;
+  padding: 20px;
+  color: var(--text2);
+  font-size: 13px;
+}
+
+/* Toast */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.toast {
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  animation: fadeIn 0.2s;
+  max-width: 360px;
+}
+.toast.ok { background: rgba(63, 185, 80, 0.9); color: #fff; }
+.toast.err { background: rgba(248, 81, 73, 0.9); color: #fff; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>kiln</h1>
+  <div class="header-stats" id="header-stats">
+    <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting...</span></span>
+  </div>
+</div>
+
+<div class="main">
+  <!-- Server Status -->
+  <div class="panel">
+    <div class="panel-head"><h2>Server Status</h2></div>
+    <div class="panel-body" id="server-status">
+      <div class="empty">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Adapters -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Adapters</h2>
+    </div>
+    <div class="panel-body" id="adapters-panel">
+      <div class="empty">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Training -->
+  <div class="panel" style="grid-column: 1 / -1;">
+    <div class="panel-head"><h2>Training</h2></div>
+    <div class="tabs">
+      <button class="tab active" data-tab="queue">Queue</button>
+      <button class="tab" data-tab="sft">Submit SFT</button>
+      <button class="tab" data-tab="grpo">Submit GRPO</button>
+    </div>
+    <div class="panel-body">
+      <div class="tab-content active" id="tab-queue">
+        <div class="empty">Loading...</div>
+      </div>
+      <div class="tab-content" id="tab-sft">
+        <form id="sft-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label>Adapter Name</label>
+              <input type="text" name="output_name" value="sft-adapter" required>
+            </div>
+            <div class="form-group">
+              <label>Epochs</label>
+              <input type="number" name="num_epochs" value="3" min="1" max="100">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Learning Rate</label>
+              <input type="text" name="learning_rate" value="0.0002">
+            </div>
+            <div class="form-group">
+              <label>LoRA Rank</label>
+              <input type="number" name="rank" value="8" min="1" max="128">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Training Examples (JSON array)</label>
+            <textarea name="examples" rows="6" placeholder='[{"instruction":"Translate to French","input":"Hello","output":"Bonjour"}]'></textarea>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
+              <input type="checkbox" name="auto_load" checked> Auto-load after training
+            </label>
+            <button type="submit" class="btn btn-primary" style="margin-left:auto">Submit SFT Job</button>
+          </div>
+        </form>
+      </div>
+      <div class="tab-content" id="tab-grpo">
+        <form id="grpo-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label>Adapter Name</label>
+              <input type="text" name="output_name" value="grpo-adapter" required>
+            </div>
+            <div class="form-group">
+              <label>Epochs</label>
+              <input type="number" name="num_epochs" value="1" min="1" max="100">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Learning Rate</label>
+              <input type="text" name="learning_rate" value="0.00005">
+            </div>
+            <div class="form-group">
+              <label>LoRA Rank</label>
+              <input type="number" name="rank" value="8" min="1" max="128">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>GRPO Groups (JSON array)</label>
+            <textarea name="groups" rows="6" placeholder='[{"prompt":"Write a haiku","completions":[{"text":"Silent moonlit night...","reward":0.9},{"text":"The cat sat...","reward":0.2}]}]'></textarea>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
+              <input type="checkbox" name="auto_load" checked> Auto-load after training
+            </label>
+            <button type="submit" class="btn btn-primary" style="margin-left:auto">Submit GRPO Job</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Inference -->
+  <div class="panel" style="grid-column: 1 / -1;">
+    <div class="panel-head"><h2>Quick Inference</h2></div>
+    <div class="panel-body">
+      <div class="chat-controls">
+        <label style="font-size:12px;color:var(--text2)">Adapter:</label>
+        <select id="chat-adapter" style="width:180px;">
+          <option value="">Base Model</option>
+        </select>
+        <label style="font-size:12px;color:var(--text2);margin-left:8px;">Temp:</label>
+        <input type="number" id="chat-temp" value="0.7" min="0" max="2" step="0.1" style="width:70px;">
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-input-row">
+        <input type="text" id="chat-input" placeholder="Type a message...">
+        <button class="btn btn-primary" id="chat-send">Send</button>
+        <button class="btn" id="chat-clear">Clear</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+(function() {
+'use strict';
+
+// --- Toast Notifications ---
+function toast(msg, type) {
+  const c = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || 'ok');
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// --- API Helpers ---
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || body.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// --- Tabs ---
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const target = tab.dataset.tab;
+    tab.closest('.panel').querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+    tab.closest('.panel').querySelectorAll('.tab-content').forEach(tc => tc.classList.toggle('active', tc.id === 'tab-' + target));
+  });
+});
+
+// --- Formatting ---
+function fmtBytes(b) {
+  if (b == null) return '-';
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(2) + ' GB';
+}
+function fmtGb(gb) {
+  if (gb == null) return '-';
+  return gb.toFixed(1) + ' GB';
+}
+function fmtDuration(secs) {
+  if (secs == null) return '-';
+  secs = Math.floor(secs);
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+// --- Health Polling ---
+let lastHealth = null;
+
+async function pollHealth() {
+  try {
+    const h = await api('/health');
+    lastHealth = h;
+    renderHeader(h);
+    renderServerStatus(h);
+  } catch (e) {
+    document.getElementById('status-dot').className = 'status-dot offline';
+    document.getElementById('status-text').textContent = 'offline';
+  }
+}
+
+function renderHeader(h) {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  dot.className = 'status-dot ' + (h.status === 'ok' ? 'ok' : 'degraded');
+  txt.textContent = h.status;
+
+  const stats = document.getElementById('header-stats');
+  stats.innerHTML = `
+    <span class="stat"><span class="status-dot ${h.status === 'ok' ? 'ok' : 'degraded'}"></span><span class="stat-val">${h.status}</span></span>
+    <span class="stat"><span class="stat-label">Model</span><span class="stat-val">${h.model || '-'}</span></span>
+    <span class="stat"><span class="stat-label">Backend</span><span class="stat-val">${h.backend || '-'}</span></span>
+    <span class="stat"><span class="stat-label">Uptime</span><span class="stat-val">${fmtDuration(h.uptime_seconds)}</span></span>
+    <span class="stat"><span class="stat-label">Adapter</span><span class="stat-val">${h.active_adapter || 'base'}</span></span>
+  `;
+}
+
+function renderServerStatus(h) {
+  const el = document.getElementById('server-status');
+  const gpu = h.gpu_memory;
+  const sched = h.scheduler;
+
+  let vramHtml = '';
+  if (gpu && gpu.total_vram_gb > 0) {
+    const total = gpu.total_vram_gb;
+    const model = gpu.model_gb || 0;
+    const kv = gpu.kv_cache_gb || 0;
+    const train = gpu.training_budget_gb || 0;
+    const free = Math.max(0, total - model - kv - train);
+    const pct = v => ((v / total) * 100).toFixed(1);
+    vramHtml = `
+      <div class="vram-bar-wrap">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:4px;">GPU VRAM: ${fmtGb(total)}</div>
+        <div class="vram-bar">
+          <div class="vram-seg" style="width:${pct(model)}%;background:var(--accent)">${model > 0.5 ? fmtGb(model) : ''}</div>
+          <div class="vram-seg" style="width:${pct(kv)}%;background:var(--purple)">${kv > 0.5 ? fmtGb(kv) : ''}</div>
+          <div class="vram-seg" style="width:${pct(train)}%;background:var(--orange)">${train > 0.5 ? fmtGb(train) : ''}</div>
+          <div class="vram-seg" style="width:${pct(free)}%;background:#21262d"></div>
+        </div>
+        <div class="vram-legend">
+          <span class="model">Model ${fmtGb(model)}</span>
+          <span class="kv">KV Cache ${fmtGb(kv)}</span>
+          <span class="train">Training ${fmtGb(train)}</span>
+          <span class="free">Free ${fmtGb(free)}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  let schedHtml = '';
+  if (sched) {
+    schedHtml = `
+      <div class="sched-stats">
+        <div class="sched-stat"><div class="num">${sched.waiting}</div><div class="lbl">Waiting</div></div>
+        <div class="sched-stat"><div class="num">${sched.running}</div><div class="lbl">Running</div></div>
+        <div class="sched-stat"><div class="num">${sched.blocks_used}</div><div class="lbl">Blocks Used</div></div>
+        <div class="sched-stat"><div class="num">${sched.blocks_free}</div><div class="lbl">Blocks Free</div></div>
+      </div>
+    `;
+  }
+
+  let checksHtml = '';
+  if (h.checks && h.checks.length > 0) {
+    checksHtml = `<div style="margin-top:10px;font-size:12px;color:var(--text2)">
+      ${h.checks.map(c => `<span style="margin-right:10px">${c.pass ? '\u2705' : '\u274c'} ${c.name}</span>`).join('')}
+    </div>`;
+  }
+
+  el.innerHTML = vramHtml + schedHtml + checksHtml || '<div class="empty">No data</div>';
+}
+
+// --- Adapters ---
+async function pollAdapters() {
+  try {
+    const data = await api('/v1/adapters');
+    renderAdapters(data);
+    updateAdapterSelect(data);
+  } catch (e) {
+    document.getElementById('adapters-panel').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderAdapters(data) {
+  const el = document.getElementById('adapters-panel');
+  if (!data.available || data.available.length === 0) {
+    el.innerHTML = '<div class="empty">No adapters found</div>';
+    return;
+  }
+  const items = data.available.map(a => {
+    const isActive = data.active === a.name;
+    return `
+      <li class="adapter-item ${isActive ? 'adapter-active' : ''}">
+        <span class="adapter-name">${a.name}</span>
+        ${isActive ? '<span class="badge badge-active">active</span>' : ''}
+        <span class="adapter-size">${fmtBytes(a.size_bytes)}</span>
+        <div class="adapter-actions">
+          ${isActive
+            ? `<button class="btn btn-sm" onclick="unloadAdapter()">Unload</button>`
+            : `<button class="btn btn-sm" onclick="loadAdapter('${a.name.replace(/'/g, "\\'")}')">Load</button>`}
+          <button class="btn btn-sm btn-danger" onclick="deleteAdapter('${a.name.replace(/'/g, "\\'")}')">Delete</button>
+        </div>
+      </li>
+    `;
+  }).join('');
+  el.innerHTML = `<ul class="adapter-list">${items}</ul>`;
+}
+
+function updateAdapterSelect(data) {
+  const sel = document.getElementById('chat-adapter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Base Model</option>';
+  if (data.available) {
+    data.available.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a.name;
+      opt.textContent = a.name + (data.active === a.name ? ' (active)' : '');
+      sel.appendChild(opt);
+    });
+  }
+  sel.value = current;
+}
+
+window.loadAdapter = async function(name) {
+  try {
+    await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name}) });
+    toast('Loaded adapter: ' + name);
+    pollAdapters();
+    pollHealth();
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+window.unloadAdapter = async function() {
+  try {
+    await api('/v1/adapters/unload', { method: 'POST' });
+    toast('Unloaded adapter');
+    pollAdapters();
+    pollHealth();
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+window.deleteAdapter = async function(name) {
+  if (!confirm('Delete adapter "' + name + '"? This cannot be undone.')) return;
+  try {
+    await api('/v1/adapters/' + encodeURIComponent(name), { method: 'DELETE' });
+    toast('Deleted adapter: ' + name);
+    pollAdapters();
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+// --- Training Queue ---
+async function pollTraining() {
+  try {
+    const data = await api('/v1/train/queue');
+    renderTrainingQueue(data);
+  } catch (e) {
+    document.getElementById('tab-queue').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderTrainingQueue(data) {
+  const el = document.getElementById('tab-queue');
+  let html = '';
+
+  if (data.running) {
+    const j = data.running;
+    html += renderJobCard(j, true);
+  }
+
+  if (data.queued && data.queued.length > 0) {
+    html += `<div style="font-size:11px;color:var(--text2);margin:10px 0 6px;text-transform:uppercase;font-weight:600;">Queued</div>`;
+    data.queued.forEach(q => {
+      html += `<div class="job-card">
+        <div class="job-header">
+          <span class="job-id">${q.job_id.slice(0, 8)}</span>
+          <span class="job-state Queued">Queued</span>
+        </div>
+        <div class="job-meta">
+          <span>Type: ${q.job_type}</span>
+          <span>Adapter: ${q.adapter_name}</span>
+          <span>Position: #${q.position}</span>
+        </div>
+        <div style="margin-top:6px"><button class="btn btn-sm btn-danger" onclick="cancelJob('${q.job_id}')">Cancel</button></div>
+      </div>`;
+    });
+  }
+
+  if (data.completed && data.completed.length > 0) {
+    html += `<div style="font-size:11px;color:var(--text2);margin:10px 0 6px;text-transform:uppercase;font-weight:600;">Recent</div>`;
+    data.completed.slice(0, 5).forEach(j => {
+      html += renderJobCard(j, false);
+    });
+  }
+
+  if (!html) {
+    html = '<div class="empty">No training jobs</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+function renderJobCard(j, isRunning) {
+  const pct = ((j.progress || 0) * 100).toFixed(0);
+  return `<div class="job-card">
+    <div class="job-header">
+      <span class="job-id">${j.job_id.slice(0, 8)}</span>
+      <span class="job-state ${j.state}">${j.state}</span>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+    <div class="job-meta">
+      <span>Progress: ${pct}%</span>
+      ${j.current_loss != null ? `<span>Loss: ${j.current_loss.toFixed(4)}</span>` : ''}
+      ${j.adapter_name ? `<span>Adapter: ${j.adapter_name}</span>` : ''}
+      <span>Elapsed: ${fmtDuration(j.elapsed_secs)}</span>
+    </div>
+    ${isRunning ? `<div style="margin-top:6px"><button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')">Cancel</button></div>` : ''}
+  </div>`;
+}
+
+window.cancelJob = async function(jobId) {
+  try {
+    await api('/v1/train/queue/' + jobId, { method: 'DELETE' });
+    toast('Cancelled job ' + jobId.slice(0, 8));
+    pollTraining();
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+// --- SFT Form ---
+document.getElementById('sft-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const examples = JSON.parse(form.examples.value);
+    const body = {
+      examples,
+      config: {
+        output_name: form.output_name.value,
+        auto_load: form.auto_load.checked,
+        learning_rate: parseFloat(form.learning_rate.value),
+        num_epochs: parseInt(form.num_epochs.value),
+      }
+    };
+    const res = await api('/v1/train/sft', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'SFT job submitted');
+    // Switch to queue tab
+    document.querySelector('[data-tab="queue"]').click();
+    pollTraining();
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+// --- GRPO Form ---
+document.getElementById('grpo-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const groups = JSON.parse(form.groups.value);
+    const body = {
+      groups,
+      config: {
+        output_name: form.output_name.value,
+        auto_load: form.auto_load.checked,
+        learning_rate: parseFloat(form.learning_rate.value),
+        num_epochs: parseInt(form.num_epochs.value),
+      }
+    };
+    const res = await api('/v1/train/grpo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'GRPO job submitted');
+    document.querySelector('[data-tab="queue"]').click();
+    pollTraining();
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+// --- Chat ---
+const chatMessages = [];
+let chatAbort = null;
+
+function renderChat() {
+  const el = document.getElementById('chat-messages');
+  if (chatMessages.length === 0) {
+    el.innerHTML = '<div class="empty" style="padding:30px">Send a message to test inference</div>';
+    return;
+  }
+  el.innerHTML = chatMessages.map(m => `
+    <div class="chat-msg ${m.role}">
+      <div class="role">${m.role}</div>
+      <pre>${escapeHtml(m.content)}</pre>
+    </div>
+  `).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  chatMessages.push({ role: 'user', content: msg });
+  chatMessages.push({ role: 'assistant', content: '' });
+  renderChat();
+
+  const adapter = document.getElementById('chat-adapter').value || undefined;
+  const temp = parseFloat(document.getElementById('chat-temp').value) || 0.7;
+
+  const body = {
+    model: 'qwen3.5-4b',
+    messages: chatMessages.filter(m => m.content).map(m => ({ role: m.role, content: m.content })),
+    stream: true,
+    temperature: temp,
+    max_tokens: 1024,
+  };
+  if (adapter) body.adapter = adapter;
+
+  try {
+    if (chatAbort) chatAbort.abort();
+    chatAbort = new AbortController();
+
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: chatAbort.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') break;
+        try {
+          const chunk = JSON.parse(payload);
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta?.content) {
+            chatMessages[chatMessages.length - 1].content += delta.content;
+            renderChat();
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      chatMessages[chatMessages.length - 1].content += '\n[Error: ' + e.message + ']';
+      renderChat();
+    }
+  }
+  chatAbort = null;
+}
+
+document.getElementById('chat-send').addEventListener('click', sendChat);
+document.getElementById('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+document.getElementById('chat-clear').addEventListener('click', () => {
+  if (chatAbort) { chatAbort.abort(); chatAbort = null; }
+  chatMessages.length = 0;
+  renderChat();
+});
+
+// --- Init ---
+renderChat();
+pollHealth();
+pollAdapters();
+pollTraining();
+
+setInterval(pollHealth, 2000);
+setInterval(pollAdapters, 5000);
+setInterval(pollTraining, 3000);
+
+})();
+</script>
+</body>
+</html>
