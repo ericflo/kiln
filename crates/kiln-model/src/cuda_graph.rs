@@ -208,6 +208,8 @@ impl CudaGraphRunner {
     /// replayed RoPE kernels read the correct position.
     #[cfg(feature = "cuda")]
     fn update_position_buffer(position_buffer: &Tensor, position: usize) -> Result<()> {
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
         let pos_f32 = [position as f32];
 
         let (storage, _layout) = position_buffer.storage_and_layout();
@@ -225,9 +227,9 @@ impl CudaGraphRunner {
         // (the stream is serialized). The device pointer and allocation size
         // are valid because the position_buffer tensor is alive.
         unsafe {
-            let (dev_ptr, _guard) = slice.device_ptr(&stream);
+            let (dev_ptr, _guard) = slice.device_ptr(stream);
             candle_core::cuda_backend::cudarc::driver::result::memcpy_htod_async(
-                dev_ptr as u64,
+                dev_ptr,
                 &pos_f32,
                 raw_stream,
             )
@@ -297,7 +299,9 @@ impl CudaGraphRunner {
         );
 
         // End capture — instantiates the graph
-        let graph_result = stream.end_capture(0);
+        let graph_result = stream.end_capture(
+            candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        );
 
         // Check forward pass success first
         let logits = logits_result.context("forward pass failed during graph capture")?;
