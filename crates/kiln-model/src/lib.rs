@@ -8,6 +8,7 @@ pub mod loader;
 pub mod lora;
 pub mod lora_loader;
 pub mod paged_kv_cache;
+pub mod quantized;
 pub mod sampling;
 pub mod weights;
 
