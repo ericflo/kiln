@@ -329,9 +329,20 @@ impl Scheduler {
                 // Prefill complete, transition to decode
                 req.state = RequestState::Decoding;
 
-                // Register this prefix in the cache
+                // Register this prefix in the cache.
+                // Mark the prefix blocks as "cached" so they won't be freed
+                // when this request completes — the prefix cache now owns them.
                 if let Some(ref mut pc) = self.prefix_cache {
-                    pc.register(&req.prompt_tokens, &req.block_ids);
+                    let num_prefix_blocks = req.prompt_tokens.len() / self.config.block_size;
+                    if num_prefix_blocks > 0 && req.block_ids.len() >= num_prefix_blocks {
+                        pc.register(&req.prompt_tokens, &req.block_ids);
+                        // Record that these blocks are cache-owned, so free()
+                        // skips them on request completion. Only update if not
+                        // already tracked (from a cache hit).
+                        self.cached_block_counts
+                            .entry(req.id)
+                            .or_insert(num_prefix_blocks);
+                    }
                 }
             } else {
                 req.state = RequestState::Prefilling {
