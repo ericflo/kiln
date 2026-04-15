@@ -1234,18 +1234,18 @@ mod tests {
 
         let mut tensors: Vec<(String, Vec<usize>, StDtype, Vec<u8>)> = Vec::new();
 
-        // Helper to add a BF16 zero tensor.
-        let mut add_bf16 = |name: String, shape: Vec<usize>| {
+        // Helper functions (free functions to avoid closure borrow conflicts).
+        fn make_bf16_tensor(name: String, shape: Vec<usize>, bf16: StDtype) -> (String, Vec<usize>, StDtype, Vec<u8>) {
             let numel: usize = shape.iter().product();
-            tensors.push((name, shape, bf16, vec![0u8; numel * 2]));
-        };
+            (name, shape, bf16, vec![0u8; numel * 2])
+        }
 
-        // Helper to add GPTQ-quantized linear layer tensors.
-        let mut add_gptq_linear = |name: &str, out: usize, inp: usize| {
+        fn make_gptq_tensors(name: &str, out: usize, inp: usize, group_size: usize) -> Vec<(String, Vec<usize>, StDtype, Vec<u8>)> {
             let pack_factor = 8usize;
             let in_packed = inp / pack_factor;
             let num_groups = inp / group_size;
-            let out_packed = if out >= pack_factor { out / pack_factor } else { 1 };
+
+            let mut result = Vec::new();
 
             // qweight: [in/8, out], all 5s
             let mut qweight_words = Vec::new();
@@ -1256,11 +1256,11 @@ mod tests {
                 }
             }
             let qweight_bytes: Vec<u8> = qweight_words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            tensors.push((format!("{name}.qweight"), vec![in_packed, out], StDtype::I32, qweight_bytes));
+            result.push((format!("{name}.qweight"), vec![in_packed, out], StDtype::I32, qweight_bytes));
 
             // scales: [num_groups, out], all F16 1.0
             let scales_bytes: Vec<u8> = vec![0x00, 0x3C].repeat(num_groups * out);
-            tensors.push((format!("{name}.scales"), vec![num_groups, out], StDtype::F16, scales_bytes));
+            result.push((format!("{name}.scales"), vec![num_groups, out], StDtype::F16, scales_bytes));
 
             // qzeros: [num_groups, out/8], all 8s
             let out_packed_actual = (out + pack_factor - 1) / pack_factor;
@@ -1270,8 +1270,21 @@ mod tests {
                 qzeros_words.push(packed);
             }
             let qzeros_bytes: Vec<u8> = qzeros_words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            tensors.push((format!("{name}.qzeros"), vec![num_groups, out_packed_actual], StDtype::I32, qzeros_bytes));
-        };
+            result.push((format!("{name}.qzeros"), vec![num_groups, out_packed_actual], StDtype::I32, qzeros_bytes));
+
+            result
+        }
+
+        macro_rules! add_bf16 {
+            ($name:expr, $shape:expr) => {
+                tensors.push(make_bf16_tensor($name, $shape, bf16));
+            };
+        }
+        macro_rules! add_gptq_linear {
+            ($name:expr, $out:expr, $inp:expr) => {
+                tensors.extend(make_gptq_tensors($name, $out, $inp, group_size));
+            };
+        }
 
         // Full attention dims
         let q_proj_dim = config.full_attn_q_proj_dim();
@@ -1285,43 +1298,43 @@ mod tests {
         let conv_size = config.linear_conv_kernel_dim;
 
         // Embedding + final norm (not quantized)
-        add_bf16(format!("{prefix}embed_tokens.weight"), vec![vocab, hidden]);
-        add_bf16(format!("{prefix}norm.weight"), vec![hidden]);
+        add_bf16!(format!("{prefix}embed_tokens.weight"), vec![vocab, hidden]);
+        add_bf16!(format!("{prefix}norm.weight"), vec![hidden]);
 
         for i in 0..config.num_layers {
             let lp = format!("{prefix}layers.{i}.");
 
             // Norms (not quantized)
-            add_bf16(format!("{lp}input_layernorm.weight"), vec![hidden]);
-            add_bf16(format!("{lp}post_attention_layernorm.weight"), vec![hidden]);
+            add_bf16!(format!("{lp}input_layernorm.weight"), vec![hidden]);
+            add_bf16!(format!("{lp}post_attention_layernorm.weight"), vec![hidden]);
 
             // MLP (quantized)
-            add_gptq_linear(&format!("{lp}mlp.gate_proj"), intermediate, hidden);
-            add_gptq_linear(&format!("{lp}mlp.up_proj"), intermediate, hidden);
-            add_gptq_linear(&format!("{lp}mlp.down_proj"), hidden, intermediate);
+            add_gptq_linear!(&format!("{lp}mlp.gate_proj"), intermediate, hidden);
+            add_gptq_linear!(&format!("{lp}mlp.up_proj"), intermediate, hidden);
+            add_gptq_linear!(&format!("{lp}mlp.down_proj"), hidden, intermediate);
 
             if config.is_full_attention_layer(i) {
                 // Full attention projections (quantized)
-                add_gptq_linear(&format!("{lp}self_attn.q_proj"), q_proj_dim, hidden);
-                add_gptq_linear(&format!("{lp}self_attn.k_proj"), kv_dim, hidden);
-                add_gptq_linear(&format!("{lp}self_attn.v_proj"), kv_dim, hidden);
-                add_gptq_linear(&format!("{lp}self_attn.o_proj"), hidden, q_out_dim);
+                add_gptq_linear!(&format!("{lp}self_attn.q_proj"), q_proj_dim, hidden);
+                add_gptq_linear!(&format!("{lp}self_attn.k_proj"), kv_dim, hidden);
+                add_gptq_linear!(&format!("{lp}self_attn.v_proj"), kv_dim, hidden);
+                add_gptq_linear!(&format!("{lp}self_attn.o_proj"), hidden, q_out_dim);
                 // QK norms (not quantized)
-                add_bf16(format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim]);
-                add_bf16(format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim]);
+                add_bf16!(format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim]);
+                add_bf16!(format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim]);
             } else {
                 // Linear attention: large projections quantized
-                add_gptq_linear(&format!("{lp}linear_attn.in_proj_qkv"), fused_qkv_dim, hidden);
-                add_gptq_linear(&format!("{lp}linear_attn.in_proj_z"), v_dim, hidden);
-                add_gptq_linear(&format!("{lp}linear_attn.out_proj"), hidden, v_dim);
+                add_gptq_linear!(&format!("{lp}linear_attn.in_proj_qkv"), fused_qkv_dim, hidden);
+                add_gptq_linear!(&format!("{lp}linear_attn.in_proj_z"), v_dim, hidden);
+                add_gptq_linear!(&format!("{lp}linear_attn.out_proj"), hidden, v_dim);
                 // Small projections as dense (a, b have small out dim)
-                add_bf16(format!("{lp}linear_attn.in_proj_a.weight"), vec![num_linear_heads, hidden]);
-                add_bf16(format!("{lp}linear_attn.in_proj_b.weight"), vec![num_linear_heads, hidden]);
+                add_bf16!(format!("{lp}linear_attn.in_proj_a.weight"), vec![num_linear_heads, hidden]);
+                add_bf16!(format!("{lp}linear_attn.in_proj_b.weight"), vec![num_linear_heads, hidden]);
                 // Non-linear weights (not quantized)
-                add_bf16(format!("{lp}linear_attn.conv1d.weight"), vec![fused_qkv_dim, 1, conv_size]);
-                add_bf16(format!("{lp}linear_attn.norm.weight"), vec![config.linear_key_head_dim]);
-                add_bf16(format!("{lp}linear_attn.A_log"), vec![num_linear_heads]);
-                add_bf16(format!("{lp}linear_attn.dt_bias"), vec![num_linear_heads]);
+                add_bf16!(format!("{lp}linear_attn.conv1d.weight"), vec![fused_qkv_dim, 1, conv_size]);
+                add_bf16!(format!("{lp}linear_attn.norm.weight"), vec![config.linear_key_head_dim]);
+                add_bf16!(format!("{lp}linear_attn.A_log"), vec![num_linear_heads]);
+                add_bf16!(format!("{lp}linear_attn.dt_bias"), vec![num_linear_heads]);
             }
         }
 
