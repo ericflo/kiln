@@ -26,6 +26,7 @@ pub struct KilnConfig {
     pub training: TrainingConfig,
     pub logging: LoggingConfig,
     pub prefix_cache: PrefixCacheConfig,
+    pub speculative: SpeculativeDecodingConfig,
 }
 
 /// HTTP server settings.
@@ -98,6 +99,21 @@ pub struct PrefixCacheConfig {
     pub max_blocks: Option<usize>,
 }
 
+/// Speculative decoding settings.
+/// Uses self-speculative (skip-layer) approach: the first N layers of the main
+/// model act as a lightweight draft, avoiding the need to load a second model.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct SpeculativeDecodingConfig {
+    /// Enable speculative decoding (default: false).
+    pub enabled: bool,
+    /// Number of tokens the draft proposes per step (default: 4).
+    pub num_speculative_tokens: usize,
+    /// Number of layers to use for the draft model (default: 8).
+    /// Uses the first N layers of the main model as the draft.
+    pub draft_layers: usize,
+}
+
 // --- Defaults ---
 
 impl Default for KilnConfig {
@@ -109,6 +125,7 @@ impl Default for KilnConfig {
             training: TrainingConfig::default(),
             logging: LoggingConfig::default(),
             prefix_cache: PrefixCacheConfig::default(),
+            speculative: SpeculativeDecodingConfig::default(),
         }
     }
 }
@@ -172,6 +189,16 @@ impl Default for PrefixCacheConfig {
         Self {
             enabled: true,
             max_blocks: None,
+        }
+    }
+}
+
+impl Default for SpeculativeDecodingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            num_speculative_tokens: 4,
+            draft_layers: 8,
         }
     }
 }
@@ -305,6 +332,21 @@ impl KilnConfig {
                 self.prefix_cache.max_blocks = Some(n);
             }
         }
+
+        // Speculative decoding
+        if let Ok(v) = std::env::var("KILN_SPEC_ENABLED") {
+            self.speculative.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("KILN_SPEC_NUM_TOKENS") {
+            if let Ok(n) = v.parse() {
+                self.speculative.num_speculative_tokens = n;
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_SPEC_DRAFT_LAYERS") {
+            if let Ok(n) = v.parse() {
+                self.speculative.draft_layers = n;
+            }
+        }
     }
 
     /// Validate configuration values. Returns an error describing the first invalid value.
@@ -336,6 +378,15 @@ impl KilnConfig {
             );
         }
 
+        if self.speculative.enabled {
+            if self.speculative.num_speculative_tokens == 0 {
+                anyhow::bail!("speculative.num_speculative_tokens must be > 0");
+            }
+            if self.speculative.draft_layers == 0 {
+                anyhow::bail!("speculative.draft_layers must be > 0");
+            }
+        }
+
         Ok(())
     }
 }
@@ -365,6 +416,9 @@ mod tests {
         assert_eq!(config.logging.format, "json");
         assert!(config.prefix_cache.enabled);
         assert!(config.prefix_cache.max_blocks.is_none());
+        assert!(!config.speculative.enabled);
+        assert_eq!(config.speculative.num_speculative_tokens, 4);
+        assert_eq!(config.speculative.draft_layers, 8);
     }
 
     #[test]
@@ -402,6 +456,11 @@ format = "pretty"
 [prefix_cache]
 enabled = false
 max_blocks = 32
+
+[speculative]
+enabled = true
+num_speculative_tokens = 6
+draft_layers = 10
 "#;
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
@@ -421,6 +480,9 @@ max_blocks = 32
         assert_eq!(config.logging.format, "pretty");
         assert!(!config.prefix_cache.enabled);
         assert_eq!(config.prefix_cache.max_blocks, Some(32));
+        assert!(config.speculative.enabled);
+        assert_eq!(config.speculative.num_speculative_tokens, 6);
+        assert_eq!(config.speculative.draft_layers, 10);
     }
 
     #[test]
@@ -500,6 +562,9 @@ port = 3000
             std::env::set_var("KILN_CUDA_GRAPHS", "false");
             std::env::set_var("KILN_PREFIX_CACHE_ENABLED", "false");
             std::env::set_var("KILN_PREFIX_CACHE_MAX_BLOCKS", "128");
+            std::env::set_var("KILN_SPEC_ENABLED", "1");
+            std::env::set_var("KILN_SPEC_NUM_TOKENS", "6");
+            std::env::set_var("KILN_SPEC_DRAFT_LAYERS", "10");
         }
 
         let mut config = KilnConfig::default();
@@ -516,6 +581,9 @@ port = 3000
         assert!(!config.memory.cuda_graphs);
         assert!(!config.prefix_cache.enabled);
         assert_eq!(config.prefix_cache.max_blocks, Some(128));
+        assert!(config.speculative.enabled);
+        assert_eq!(config.speculative.num_speculative_tokens, 6);
+        assert_eq!(config.speculative.draft_layers, 10);
 
         // Clean up
         unsafe {
@@ -530,6 +598,9 @@ port = 3000
             std::env::remove_var("KILN_CUDA_GRAPHS");
             std::env::remove_var("KILN_PREFIX_CACHE_ENABLED");
             std::env::remove_var("KILN_PREFIX_CACHE_MAX_BLOCKS");
+            std::env::remove_var("KILN_SPEC_ENABLED");
+            std::env::remove_var("KILN_SPEC_NUM_TOKENS");
+            std::env::remove_var("KILN_SPEC_DRAFT_LAYERS");
         }
     }
 
@@ -545,6 +616,11 @@ port = 3000
             std::env::remove_var("KILN_LOG_LEVEL");
             std::env::remove_var("KILN_LOG_FORMAT");
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+        }
+        unsafe {
+            std::env::remove_var("KILN_SPEC_ENABLED");
+            std::env::remove_var("KILN_SPEC_NUM_TOKENS");
+            std::env::remove_var("KILN_SPEC_DRAFT_LAYERS");
         }
         // Load from a path that doesn't exist via the CWD fallback (kiln.toml won't exist in test dir)
         let config = KilnConfig::load(None).unwrap();
@@ -576,6 +652,9 @@ level = "warn"
             std::env::remove_var("KILN_HOST");
             std::env::remove_var("KILN_MODEL_PATH");
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
+            std::env::remove_var("KILN_SPEC_ENABLED");
+            std::env::remove_var("KILN_SPEC_NUM_TOKENS");
+            std::env::remove_var("KILN_SPEC_DRAFT_LAYERS");
         }
 
         let config = KilnConfig::load(Some(path.to_str().unwrap())).unwrap();
