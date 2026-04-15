@@ -1,4 +1,5 @@
 use kiln_core::block::BlockManager;
+use kiln_core::prefix_cache::PrefixCache;
 use kiln_core::request::{Request, RequestId, RequestState};
 use kiln_core::token::TokenId;
 use std::collections::VecDeque;
@@ -16,6 +17,12 @@ pub struct SchedulerConfig {
 
     /// KV cache block size (tokens per block).
     pub block_size: usize,
+
+    /// Enable prefix caching for shared prompt prefixes.
+    pub prefix_cache_enabled: bool,
+
+    /// Maximum blocks the prefix cache may retain (0 = unlimited up to num_blocks / 4).
+    pub prefix_cache_max_blocks: Option<usize>,
 }
 
 impl Default for SchedulerConfig {
@@ -24,6 +31,8 @@ impl Default for SchedulerConfig {
             max_batch_tokens: 8192,
             max_batch_size: 64,
             block_size: 16,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: None,
         }
     }
 }
@@ -58,21 +67,38 @@ pub struct SchedulerOutput {
 /// 3. Start new prefills with any remaining budget
 ///
 /// This ensures decode requests are never stalled by long prefills.
+///
+/// When prefix caching is enabled, new requests check the prefix cache before
+/// allocating blocks. If a prefix is found, the cached KV blocks are reused and
+/// only the non-cached suffix is scheduled for prefill.
 pub struct Scheduler {
     config: SchedulerConfig,
     waiting: VecDeque<Request>,
     running: Vec<Request>,
     block_manager: BlockManager,
+    prefix_cache: Option<PrefixCache>,
+    /// Tracks which blocks per request came from prefix cache (should not be freed).
+    cached_block_counts: std::collections::HashMap<RequestId, usize>,
 }
 
 impl Scheduler {
     pub fn new(config: SchedulerConfig, num_blocks: usize) -> Self {
         let block_manager = BlockManager::new(num_blocks, config.block_size);
+        let prefix_cache = if config.prefix_cache_enabled {
+            let max_blocks = config
+                .prefix_cache_max_blocks
+                .unwrap_or(num_blocks / 4);
+            Some(PrefixCache::new(config.block_size, max_blocks))
+        } else {
+            None
+        };
         Self {
             config,
             waiting: VecDeque::new(),
             running: Vec::new(),
             block_manager,
+            prefix_cache,
+            cached_block_counts: std::collections::HashMap::new(),
         }
     }
 
@@ -110,9 +136,25 @@ impl Scheduler {
                 RequestState::Complete | RequestState::Cancelled
             );
             if should_remove {
-                self.block_manager.free_all(&req.block_ids);
+                let cached_count = self.cached_block_counts.remove(&req.id).unwrap_or(0);
+                // Free only the non-cached blocks (suffix blocks allocated by us)
+                if cached_count < req.block_ids.len() {
+                    self.block_manager.free_all(&req.block_ids[cached_count..]);
+                }
+                // Release the cached blocks back to the prefix cache
+                if cached_count > 0 {
+                    if let Some(ref mut pc) = self.prefix_cache {
+                        pc.release_blocks(&req.block_ids[..cached_count]);
+                    }
+                }
                 completed_ids.push(req.id);
-                tracing::debug!(id = %req.id, "freed {} blocks", req.block_ids.len());
+                tracing::debug!(
+                    id = %req.id,
+                    total_blocks = req.block_ids.len(),
+                    cached = cached_count,
+                    freed = req.block_ids.len() - cached_count,
+                    "freed blocks"
+                );
             }
             !should_remove
         });
@@ -171,33 +213,85 @@ impl Scheduler {
                 break;
             };
 
-            // Allocate blocks for the full prompt
-            let blocks_needed = req.blocks_needed(self.config.block_size);
-            if !self.block_manager.can_allocate(blocks_needed) {
-                // Can't fit this request — put it back and stop promoting
-                self.waiting.push_front(req);
-                break;
+            // Check prefix cache first
+            let mut cached_blocks = 0usize;
+            let mut tokens_already_cached = 0usize;
+
+            if let Some(ref mut pc) = self.prefix_cache {
+                if let Some((cached_tokens, cached_block_ids)) = pc.lookup(&req.prompt_tokens) {
+                    cached_blocks = cached_block_ids.len();
+                    tokens_already_cached = cached_tokens;
+                    req.block_ids = cached_block_ids;
+                    tracing::debug!(
+                        id = %req.id,
+                        cached_tokens,
+                        cached_blocks,
+                        "prefix cache hit"
+                    );
+                }
             }
 
-            let blocks = self.block_manager.allocate(blocks_needed).unwrap();
-            req.block_ids = blocks;
+            // Allocate remaining blocks for the non-cached suffix
+            let total_blocks_needed = req.blocks_needed(self.config.block_size);
+            let extra_blocks_needed = total_blocks_needed.saturating_sub(cached_blocks);
+
+            if extra_blocks_needed > 0 {
+                if !self.block_manager.can_allocate(extra_blocks_needed) {
+                    // Can't fit this request — release cached blocks and put back
+                    if cached_blocks > 0 {
+                        if let Some(ref mut pc) = self.prefix_cache {
+                            pc.release_blocks(&req.block_ids[..cached_blocks]);
+                        }
+                        req.block_ids.clear();
+                    }
+                    self.waiting.push_front(req);
+                    break;
+                }
+                let new_blocks = self.block_manager.allocate(extra_blocks_needed).unwrap();
+                req.block_ids.extend(new_blocks);
+            }
+
+            // Track cached block count for this request
+            if cached_blocks > 0 {
+                self.cached_block_counts.insert(req.id, cached_blocks);
+            }
+
+            // Start prefill from the non-cached position
             req.state = RequestState::Prefilling {
-                tokens_processed: 0,
+                tokens_processed: tokens_already_cached,
             };
 
-            let chunk = req.prompt_tokens.len().min(budget);
-            scheduled.push(ScheduledRequest {
-                request_id: req.id,
-                num_tokens: chunk,
-                is_prefill: true,
-            });
-            budget -= chunk;
-            num_prefill_tokens += chunk;
+            let remaining_prefill = req.prompt_tokens.len() - tokens_already_cached;
+            let chunk = remaining_prefill.min(budget);
+
+            if chunk > 0 {
+                scheduled.push(ScheduledRequest {
+                    request_id: req.id,
+                    num_tokens: chunk,
+                    is_prefill: true,
+                });
+                budget -= chunk;
+                num_prefill_tokens += chunk;
+            } else {
+                // Entire prompt was cached — go straight to decode
+                req.state = RequestState::Decoding;
+                // Schedule a decode token if budget allows
+                if budget > 0 {
+                    scheduled.push(ScheduledRequest {
+                        request_id: req.id,
+                        num_tokens: 1,
+                        is_prefill: false,
+                    });
+                    budget -= 1;
+                    num_decode_tokens += 1;
+                }
+            }
 
             tracing::debug!(
                 id = %req.id,
                 prompt_len = req.prompt_tokens.len(),
-                chunk_size = chunk,
+                cached_tokens = tokens_already_cached,
+                chunk_size = if chunk > 0 { chunk } else { 1 },
                 blocks = req.block_ids.len(),
                 "promoted request"
             );
@@ -234,6 +328,11 @@ impl Scheduler {
             if processed >= req.prompt_tokens.len() {
                 // Prefill complete, transition to decode
                 req.state = RequestState::Decoding;
+
+                // Register this prefix in the cache
+                if let Some(ref mut pc) = self.prefix_cache {
+                    pc.register(&req.prompt_tokens, &req.block_ids);
+                }
             } else {
                 req.state = RequestState::Prefilling {
                     tokens_processed: processed,
@@ -277,6 +376,10 @@ impl Scheduler {
     pub fn block_manager(&self) -> &BlockManager {
         &self.block_manager
     }
+
+    pub fn prefix_cache(&self) -> Option<&PrefixCache> {
+        self.prefix_cache.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -288,12 +391,18 @@ mod tests {
         Request::new(vec![1; prompt_len], SamplingParams::greedy(), None)
     }
 
+    fn make_request_with_tokens(tokens: Vec<TokenId>) -> Request {
+        Request::new(tokens, SamplingParams::greedy(), None)
+    }
+
     #[test]
     fn basic_scheduling() {
         let config = SchedulerConfig {
             max_batch_tokens: 100,
             max_batch_size: 8,
             block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
         };
         let mut sched = Scheduler::new(config, 100);
 
@@ -325,6 +434,8 @@ mod tests {
             max_batch_tokens: 30,
             max_batch_size: 8,
             block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
         };
         let mut sched = Scheduler::new(config, 100);
 
@@ -351,6 +462,8 @@ mod tests {
             max_batch_tokens: 10,
             max_batch_size: 8,
             block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
         };
         let mut sched = Scheduler::new(config, 100);
 
@@ -376,7 +489,10 @@ mod tests {
 
     #[test]
     fn request_completion() {
-        let config = SchedulerConfig::default();
+        let config = SchedulerConfig {
+            prefix_cache_enabled: false,
+            ..Default::default()
+        };
         let mut sched = Scheduler::new(config, 100);
 
         let req = make_request(5);
@@ -391,5 +507,200 @@ mod tests {
         let output = sched.step();
         assert!(output.completed_ids.contains(&id));
         assert_eq!(sched.num_running(), 0);
+    }
+
+    // --- Prefix caching tests ---
+
+    #[test]
+    fn prefix_cache_hit_skips_prefill() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: Some(100),
+        };
+        let mut sched = Scheduler::new(config, 200);
+
+        // First request: system prompt (16 tokens = 4 blocks)
+        let system_prompt: Vec<TokenId> = (0..16).collect();
+        let mut tokens1 = system_prompt.clone();
+        tokens1.extend_from_slice(&[100, 101, 102, 103]); // user message
+        let req1 = make_request_with_tokens(tokens1.clone());
+        let id1 = req1.id;
+        sched.add_request(req1);
+
+        // Schedule and complete prefill for req1
+        let output = sched.step();
+        assert_eq!(output.scheduled.len(), 1);
+        assert_eq!(output.scheduled[0].num_tokens, 20); // full 20 tokens
+        assert!(output.scheduled[0].is_prefill);
+
+        // Complete prefill — this registers the prefix in the cache
+        sched.update_request(&id1, None, false, Some(20));
+        sched.update_request(&id1, Some(42), true, None);
+        sched.step(); // clear completed
+
+        // Verify prefix cache has an entry
+        assert!(sched.prefix_cache().is_some());
+        let pc = sched.prefix_cache().unwrap();
+        assert!(pc.num_cached_entries() > 0);
+
+        // Second request: same system prompt, different user message
+        let mut tokens2 = system_prompt;
+        tokens2.extend_from_slice(&[200, 201, 202, 203]); // different user message
+        let req2 = make_request_with_tokens(tokens2);
+        let id2 = req2.id;
+        sched.add_request(req2);
+
+        // Schedule req2 — should skip the cached prefix (16 tokens) and only prefill 4
+        let output = sched.step();
+        assert_eq!(output.scheduled.len(), 1);
+        assert_eq!(output.scheduled[0].request_id, id2);
+        assert!(output.scheduled[0].is_prefill);
+        assert_eq!(output.scheduled[0].num_tokens, 4); // only the suffix!
+        assert_eq!(output.num_prefill_tokens, 4);
+    }
+
+    #[test]
+    fn prefix_cache_full_hit_goes_to_decode() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: Some(100),
+        };
+        let mut sched = Scheduler::new(config, 200);
+
+        // Prompt exactly block-aligned (8 tokens = 2 blocks)
+        let tokens: Vec<TokenId> = (0..8).collect();
+        let req1 = make_request_with_tokens(tokens.clone());
+        let id1 = req1.id;
+        sched.add_request(req1);
+
+        sched.step();
+        sched.update_request(&id1, None, false, Some(8));
+        sched.update_request(&id1, Some(42), true, None);
+        sched.step(); // clear
+
+        // Same exact prompt — entire prompt is cached
+        let req2 = make_request_with_tokens(tokens);
+        let id2 = req2.id;
+        sched.add_request(req2);
+
+        let output = sched.step();
+        assert_eq!(output.scheduled.len(), 1);
+        assert_eq!(output.scheduled[0].request_id, id2);
+        // Should go straight to decode since all tokens are cached
+        assert!(!output.scheduled[0].is_prefill);
+        assert_eq!(output.scheduled[0].num_tokens, 1);
+        assert_eq!(output.num_decode_tokens, 1);
+        assert_eq!(output.num_prefill_tokens, 0);
+    }
+
+    #[test]
+    fn prefix_cache_no_hit_different_tokens() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: Some(100),
+        };
+        let mut sched = Scheduler::new(config, 200);
+
+        // First request
+        let tokens1: Vec<TokenId> = (0..8).collect();
+        let req1 = make_request_with_tokens(tokens1);
+        let id1 = req1.id;
+        sched.add_request(req1);
+        sched.step();
+        sched.update_request(&id1, None, false, Some(8));
+        sched.update_request(&id1, Some(42), true, None);
+        sched.step();
+
+        // Second request — completely different tokens, no cache hit
+        let tokens2: Vec<TokenId> = (100..108).collect();
+        let req2 = make_request_with_tokens(tokens2);
+        sched.add_request(req2);
+
+        let output = sched.step();
+        assert_eq!(output.scheduled.len(), 1);
+        assert!(output.scheduled[0].is_prefill);
+        assert_eq!(output.scheduled[0].num_tokens, 8); // full prefill
+    }
+
+    #[test]
+    fn prefix_cache_blocks_freed_correctly() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: Some(100),
+        };
+        let num_blocks = 50;
+        let mut sched = Scheduler::new(config, num_blocks);
+
+        let initial_free = sched.block_manager().num_free();
+
+        // First request: 8 tokens = 2 blocks
+        let tokens: Vec<TokenId> = (0..8).collect();
+        let req1 = make_request_with_tokens(tokens.clone());
+        let id1 = req1.id;
+        sched.add_request(req1);
+        sched.step();
+        sched.update_request(&id1, None, false, Some(8));
+        sched.update_request(&id1, Some(42), true, None);
+        sched.step(); // completes req1, prefix cached
+
+        // After first request completes: the 2 cached blocks are still held
+        // by the prefix cache, so free blocks = initial - 2
+        let free_after_cache = sched.block_manager().num_free();
+        assert_eq!(free_after_cache, initial_free - 2);
+
+        // Second request with same prefix — reuses cached blocks
+        let req2 = make_request_with_tokens(tokens);
+        let id2 = req2.id;
+        sched.add_request(req2);
+        sched.step();
+        // req2 goes straight to decode, no extra blocks allocated (prompt was 8 = 2 blocks, all cached)
+        sched.update_request(&id2, Some(99), true, None);
+        sched.step(); // completes req2
+
+        // After second request: cached blocks still held by cache
+        let free_after_second = sched.block_manager().num_free();
+        assert_eq!(free_after_second, initial_free - 2);
+    }
+
+    #[test]
+    fn prefix_cache_disabled() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: false,
+            ..Default::default()
+        };
+        let mut sched = Scheduler::new(config, 200);
+        assert!(sched.prefix_cache().is_none());
+
+        // First request
+        let tokens: Vec<TokenId> = (0..8).collect();
+        let req1 = make_request_with_tokens(tokens.clone());
+        let id1 = req1.id;
+        sched.add_request(req1);
+        sched.step();
+        sched.update_request(&id1, None, false, Some(8));
+        sched.update_request(&id1, Some(42), true, None);
+        sched.step();
+
+        // Second request with same tokens — no cache, full prefill
+        let req2 = make_request_with_tokens(tokens);
+        sched.add_request(req2);
+        let output = sched.step();
+        assert_eq!(output.scheduled[0].num_tokens, 8);
+        assert!(output.scheduled[0].is_prefill);
     }
 }

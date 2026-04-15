@@ -119,6 +119,8 @@ async fn main() -> Result<()> {
             max_batch_tokens: 8192,
             max_batch_size: 64,
             block_size: 16,
+            prefix_cache_enabled: config.prefix_cache.enabled,
+            prefix_cache_max_blocks: config.prefix_cache.max_blocks,
         };
         let num_blocks = 8192;
         let scheduler = Scheduler::new(scheduler_config, num_blocks);

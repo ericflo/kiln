@@ -210,6 +210,8 @@ mod tests {
             max_batch_tokens: 8192,
             max_batch_size: 64,
             block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
         };
         let scheduler = Scheduler::new(sched_config, 256);
         let engine = MockEngine::new(config.clone());

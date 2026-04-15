@@ -25,6 +25,7 @@ pub struct KilnConfig {
     pub memory: MemoryConfig,
     pub training: TrainingConfig,
     pub logging: LoggingConfig,
+    pub prefix_cache: PrefixCacheConfig,
 }
 
 /// HTTP server settings.
@@ -85,6 +86,18 @@ pub struct LoggingConfig {
     pub format: String,
 }
 
+/// Prefix caching settings.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PrefixCacheConfig {
+    /// Enable prefix caching for shared prompt prefixes (default: true).
+    /// When enabled, KV cache blocks for shared prefixes are reused across requests.
+    pub enabled: bool,
+    /// Maximum number of KV cache blocks the prefix cache may retain.
+    /// Default: 25% of total blocks. Set to 0 to use the default.
+    pub max_blocks: Option<usize>,
+}
+
 // --- Defaults ---
 
 impl Default for KilnConfig {
@@ -95,6 +108,7 @@ impl Default for KilnConfig {
             memory: MemoryConfig::default(),
             training: TrainingConfig::default(),
             logging: LoggingConfig::default(),
+            prefix_cache: PrefixCacheConfig::default(),
         }
     }
 }
@@ -149,6 +163,15 @@ impl Default for LoggingConfig {
         Self {
             level: "info".into(),
             format: "json".into(),
+        }
+    }
+}
+
+impl Default for PrefixCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_blocks: None,
         }
     }
 }
@@ -272,6 +295,16 @@ impl KilnConfig {
         if let Ok(v) = std::env::var("KILN_LOG_FORMAT") {
             self.logging.format = v;
         }
+
+        // Prefix cache
+        if let Ok(v) = std::env::var("KILN_PREFIX_CACHE_ENABLED") {
+            self.prefix_cache.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("KILN_PREFIX_CACHE_MAX_BLOCKS") {
+            if let Ok(n) = v.parse() {
+                self.prefix_cache.max_blocks = Some(n);
+            }
+        }
     }
 
     /// Validate configuration values. Returns an error describing the first invalid value.
@@ -330,6 +363,8 @@ mod tests {
         assert!(config.training.checkpoint_interval.is_none());
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "json");
+        assert!(config.prefix_cache.enabled);
+        assert!(config.prefix_cache.max_blocks.is_none());
     }
 
     #[test]
@@ -363,6 +398,10 @@ checkpoint_interval = 50
 [logging]
 level = "debug"
 format = "pretty"
+
+[prefix_cache]
+enabled = false
+max_blocks = 32
 "#;
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
@@ -380,6 +419,8 @@ format = "pretty"
         assert_eq!(config.training.checkpoint_interval, Some(50));
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "pretty");
+        assert!(!config.prefix_cache.enabled);
+        assert_eq!(config.prefix_cache.max_blocks, Some(32));
     }
 
     #[test]
@@ -457,6 +498,8 @@ port = 3000
             std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
             std::env::set_var("KILN_KV_CACHE_FP8", "1");
             std::env::set_var("KILN_CUDA_GRAPHS", "false");
+            std::env::set_var("KILN_PREFIX_CACHE_ENABLED", "false");
+            std::env::set_var("KILN_PREFIX_CACHE_MAX_BLOCKS", "128");
         }
 
         let mut config = KilnConfig::default();
@@ -471,6 +514,8 @@ port = 3000
         assert_eq!(config.training.checkpoint_interval, Some(25));
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
+        assert!(!config.prefix_cache.enabled);
+        assert_eq!(config.prefix_cache.max_blocks, Some(128));
 
         // Clean up
         unsafe {
@@ -483,6 +528,8 @@ port = 3000
             std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
             std::env::remove_var("KILN_KV_CACHE_FP8");
             std::env::remove_var("KILN_CUDA_GRAPHS");
+            std::env::remove_var("KILN_PREFIX_CACHE_ENABLED");
+            std::env::remove_var("KILN_PREFIX_CACHE_MAX_BLOCKS");
         }
     }
 
