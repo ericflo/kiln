@@ -2,8 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use clap::Parser;
 
 use kiln_server::api;
+use kiln_server::cli::{
+    self, AdapterCommands, Cli, Commands, TrainCommands,
+};
 use kiln_server::config::KilnConfig;
 use kiln_server::state;
 
@@ -17,9 +21,50 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse optional --config <path> argument
-    let config_path = parse_config_arg();
-    let config = KilnConfig::load(config_path.as_deref())?;
+    let args = Cli::parse();
+
+    match args.command {
+        // Client-side commands (talk to a running server)
+        Some(Commands::Health { ref url }) => {
+            return cli::run_health(url).await;
+        }
+        Some(Commands::ConfigCheck { ref file }) => {
+            return cli::run_config_check(file.as_deref().or(args.config.as_deref()));
+        }
+        Some(Commands::Train(ref train)) => match train {
+            TrainCommands::Sft {
+                file,
+                adapter,
+                lr,
+                epochs,
+                url,
+            } => {
+                return cli::run_train_sft(url, file, adapter, *lr, *epochs).await;
+            }
+            TrainCommands::Grpo { file, adapter, url } => {
+                return cli::run_train_grpo(url, file, adapter).await;
+            }
+        },
+        Some(Commands::Adapters(ref adapter_cmd)) => match adapter_cmd {
+            AdapterCommands::List { url } => {
+                return cli::run_adapters_list(url).await;
+            }
+            AdapterCommands::Load { name, url } => {
+                return cli::run_adapters_load(url, name).await;
+            }
+            AdapterCommands::Unload { name, url } => {
+                return cli::run_adapters_unload(url, name).await;
+            }
+            AdapterCommands::Delete { name, url } => {
+                return cli::run_adapters_delete(url, name).await;
+            }
+        },
+        // Serve mode (default)
+        Some(Commands::Serve) | None => {}
+    }
+
+    // --- Server startup ---
+    let config = KilnConfig::load(args.config.as_deref())?;
 
     kiln_server::logging::init(&config.logging.level, &config.logging.format)?;
 
@@ -28,6 +73,9 @@ async fn main() -> Result<()> {
 
     let model_config = ModelConfig::qwen3_5_4b();
     let model_path = config.model.path.as_deref();
+
+    // Print startup banner to stderr (doesn't interfere with structured logs)
+    cli::print_banner(host, port, model_path, args.config.as_deref());
 
     // Load tokenizer: try from_pretrained (HF Hub), fall back to local path, then fail gracefully.
     let model_id = &config.model.model_id;
@@ -170,17 +218,6 @@ async fn main() -> Result<()> {
     tracing::warn!("shutdown timeout reached — exiting");
 
     Ok(())
-}
-
-/// Parse an optional `--config <path>` argument from argv.
-fn parse_config_arg() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    for i in 1..args.len() {
-        if args[i] == "--config" {
-            return args.get(i + 1).cloned();
-        }
-    }
-    None
 }
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown.
