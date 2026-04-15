@@ -55,14 +55,14 @@ The idea: you run this on your home server, collect examples of failures, submit
 │    ├── 24× Gated DeltaNet layers (linear attn)  │
 │    └──  8× GQA layers (full attention + KV)     │
 │                                                  │
-│  Training Sidecar (Python, shared GPU memory)    │
+│  In-Process Training (pure Rust, candle)          │
 │    ├── SFT (cross-entropy on LoRA)              │
 │    └── GRPO (group relative policy optimization) │
 └─────────────────────────────────────────────────┘
 ```
 
 - **Inference**: Rust (axum HTTP server, iteration-level scheduler, paged KV cache)
-- **Training**: Python sidecar (PyTorch/PEFT, communicates via unix socket)
+- **Training**: In-process LoRA training (pure Rust via candle, no Python dependency)
 - **LoRA hot-swap**: New adapter weights are swapped atomically at iteration boundaries
 
 ## Key Design Decisions
@@ -114,7 +114,7 @@ crates/
   kiln-model/      Engine trait, model loading, LoRA management
   kiln-scheduler/  Continuous batching scheduler with chunked prefill
   kiln-server/     HTTP server (axum), OpenAI-compatible API
-  kiln-train/      Training API types and sidecar coordination
+  kiln-train/      In-process LoRA training (pure Rust, candle)
 ```
 
 ## Status
@@ -133,7 +133,7 @@ crates/
 - [ ] SSE streaming
 
 **Phase 2:** LoRA serving and hot-swap  
-**Phase 3:** Python training sidecar (SFT)  
+**Phase 3:** In-process LoRA training (SFT)  
 **Phase 4:** GRPO training  
 **Phase 5:** Polish (quantization, adapter merging, web UI, client libraries)
 
