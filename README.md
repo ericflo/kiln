@@ -117,25 +117,34 @@ crates/
   kiln-train/      In-process LoRA training (pure Rust, candle)
 ```
 
+## Quickstart
+
+See [QUICKSTART.md](QUICKSTART.md) for the full guide. The short version:
+
+{"timestamp":"2026-04-15T15:59:27.528152Z","level":"INFO","fields":{"message":"loading tokenizer from HuggingFace Hub: Qwen/Qwen3.5-4B"},"target":"kiln"}
+{"timestamp":"2026-04-15T15:59:28.560485Z","level":"INFO","fields":{"message":"tokenizer loaded successfully","vocab_size":248070},"target":"kiln"}
+{"timestamp":"2026-04-15T15:59:28.560527Z","level":"INFO","fields":{"message":"loading model weights from ./Qwen3.5-4B"},"target":"kiln"}
+
+## Features
+
+- **GPU inference** with continuous batching, chunked prefill, and paged KV cache
+- **128K+ context** on a single 24GB GPU (hybrid GDN + GQA architecture)
+- **OpenAI-compatible API** — drop-in replacement for local inference
+- **SSE streaming** for chat completions
+- **SFT training** via HTTP API or CLI — submit examples, model updates in seconds
+- **GRPO training** — reinforcement learning from scored completions
+- **LoRA hot-swap** — new adapter weights activate at iteration boundaries, zero downtime
+- **Adapter management** — load, unload, delete, compose multiple LoRAs
+- **Prefix caching** — reuse KV cache for shared prompt prefixes
+- **FP8 KV cache** — optional quantization doubles context length
+- **Gradient checkpointing** — training fits on 24GB GPUs
+- **Prometheus metrics** at /metrics
+- **Beautiful CLI** with progress bars and colored output
+- **Docker and systemd** deployment support
+
 ## Status
 
-**Phase 1 (in progress):** Scaffold, scheduler, HTTP API with mock engine.
-
-- [x] Cargo workspace with 5 crates
-- [x] Block manager with paged KV cache
-- [x] Iteration-level scheduler with chunked prefill
-- [x] OpenAI-compatible chat completions API
-- [x] Training API types (SFT + GRPO)
-- [x] LoRA adapter management API
-- [ ] Real model loading (safetensors, Qwen3.5 architecture)
-- [ ] Real inference engine (hybrid linear + full attention)
-- [ ] Tokenizer integration
-- [ ] SSE streaming
-
-**Phase 2:** LoRA serving and hot-swap  
-**Phase 3:** In-process LoRA training (SFT)  
-**Phase 4:** GRPO training  
-**Phase 5:** Polish (quantization, adapter merging, web UI, client libraries)
+Kiln is in active development. Phases 1-5 (core inference, LoRA serving, SFT training, GRPO training, production hardening) are complete. Current work: performance optimization and developer experience.
 
 ## Building
 
