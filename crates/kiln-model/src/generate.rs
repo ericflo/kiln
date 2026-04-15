@@ -6,13 +6,14 @@
 use anyhow::{Context, Result};
 use candle_core::DType;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
+use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -30,6 +31,9 @@ pub struct ModelRunner {
     eos_token_ids: Vec<TokenId>,
     /// Currently active LoRA adapter weights (None = base model only).
     active_lora: Option<LoraWeights>,
+    /// CUDA graph runner for accelerated decode steps.
+    /// Uses Mutex for interior mutability (graph state changes during &self generation).
+    cuda_graph: Mutex<CudaGraphRunner>,
 }
 
 /// Output from a generation call.
@@ -83,14 +87,30 @@ pub enum FinishReason {
 
 impl ModelRunner {
     /// Create a new ModelRunner from pre-loaded weights, tokenizer, and config.
+    ///
+    /// CUDA graphs for decode are enabled by default on CUDA devices.
+    /// Pass `cuda_graphs: false` to disable.
     pub fn new(weights: GpuWeights, tokenizer: KilnTokenizer, config: ModelConfig) -> Self {
+        Self::new_with_options(weights, tokenizer, config, true)
+    }
+
+    /// Create a new ModelRunner with explicit CUDA graph control.
+    pub fn new_with_options(
+        weights: GpuWeights,
+        tokenizer: KilnTokenizer,
+        config: ModelConfig,
+        cuda_graphs: bool,
+    ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
+        let device = weights.embed_tokens.device().clone();
+        let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
         Self {
             weights,
             tokenizer,
             config,
             eos_token_ids,
             active_lora: None,
+            cuda_graph: Mutex::new(cuda_graph),
         }
     }
 
@@ -104,12 +124,18 @@ impl ModelRunner {
         let lora = LoraWeights::load(path, num_layers, &device)
             .context("failed to load LoRA adapter")?;
         self.active_lora = Some(lora);
+        if let Ok(mut graph) = self.cuda_graph.lock() {
+            graph.invalidate();
+        }
         Ok(())
     }
 
     /// Unload the currently active LoRA adapter, reverting to base model.
     pub fn unload_adapter(&mut self) {
         self.active_lora = None;
+        if let Ok(mut graph) = self.cuda_graph.lock() {
+            graph.invalidate();
+        }
     }
 
     /// Returns a reference to the active LoRA weights, if any.
@@ -122,8 +148,14 @@ impl ModelRunner {
     /// Pass `Some(lora)` to activate pre-loaded weights, or `None` to revert to
     /// the base model. Designed for use with `RwLock`: load weights outside the
     /// lock, then take a brief write lock to call this method.
+    ///
+    /// Invalidates any captured CUDA graph since the adapter change alters
+    /// weight tensor pointers embedded in the graph.
     pub fn swap_lora(&mut self, lora: Option<LoraWeights>) {
         self.active_lora = lora;
+        if let Ok(mut graph) = self.cuda_graph.lock() {
+            graph.invalidate();
+        }
     }
 
     /// Generate text from a prompt string.
@@ -484,7 +516,7 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         let mut linear_state = self.new_linear_state()?;
 
-        // Prefill: forward pass on all prompt tokens
+        // Prefill: forward pass on all prompt tokens (never uses CUDA graphs)
         let logits = model_forward_paged(
             prompt_tokens,
             &self.weights,
@@ -500,6 +532,10 @@ impl ModelRunner {
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
+
+        // Acquire the CUDA graph runner for decode steps
+        let mut graph_runner = self.cuda_graph.lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
 
         // Sample first token
         let mut next_token = if params.temperature == 0.0 {
@@ -550,18 +586,17 @@ impl ModelRunner {
                 }
             }
 
-            // Decode step: forward pass on just the new token
-            let logits = model_forward_paged(
-                &[next_token],
+            // Decode step: use CUDA graph runner (captures/replays when enabled)
+            let logits = graph_runner.decode_step_paged(
+                next_token,
                 &self.weights,
                 &self.config,
                 paged_cache,
                 block_table,
                 seq_len,
-                Some(&mut linear_state),
+                &mut linear_state,
                 self.active_lora.as_ref(),
-            )
-            .context("decode forward pass (paged) failed")?;
+            )?;
             seq_len += 1;
 
             next_token = if params.temperature == 0.0 {
@@ -642,6 +677,10 @@ impl ModelRunner {
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
 
+        // Acquire CUDA graph runner for decode steps
+        let mut graph_runner = self.cuda_graph.lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
+
         let mut next_token = if params.temperature == 0.0 {
             greedy_sample(&logits)?
         } else {
@@ -704,15 +743,15 @@ impl ModelRunner {
                 }
             }
 
-            // Decode step
-            let logits = match model_forward_paged(
-                &[next_token],
+            // Decode step: use CUDA graph runner
+            let logits = match graph_runner.decode_step_paged(
+                next_token,
                 &self.weights,
                 &self.config,
                 paged_cache,
                 &block_table,
                 seq_len,
-                Some(&mut linear_state),
+                &mut linear_state,
                 self.active_lora.as_ref(),
             ) {
                 Ok(l) => l,

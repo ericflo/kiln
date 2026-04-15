@@ -59,6 +59,11 @@ pub struct MemoryConfig {
     /// When enabled, K/V values are stored as 8-bit floats with per-tensor scaling.
     /// Default: false
     pub kv_cache_fp8: bool,
+    /// Enable CUDA graph capture/replay for decode steps.
+    /// Eliminates per-step kernel launch overhead for ~10-15% decode speedup.
+    /// Automatically disabled on non-CUDA devices.
+    /// Default: true
+    pub cuda_graphs: bool,
 }
 
 /// Training-specific settings.
@@ -124,6 +129,7 @@ impl Default for MemoryConfig {
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
             kv_cache_fp8: false,
+            cuda_graphs: true,
         }
     }
 }
@@ -240,6 +246,9 @@ impl KilnConfig {
         if let Ok(v) = std::env::var("KILN_KV_CACHE_FP8") {
             self.memory.kv_cache_fp8 = v == "1" || v.eq_ignore_ascii_case("true");
         }
+        if let Ok(v) = std::env::var("KILN_CUDA_GRAPHS") {
+            self.memory.cuda_graphs = v == "1" || v.eq_ignore_ascii_case("true");
+        }
 
         // Training
         if let Ok(v) = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS") {
@@ -316,6 +325,7 @@ mod tests {
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
         assert!(!config.memory.kv_cache_fp8);
+        assert!(config.memory.cuda_graphs);
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert_eq!(config.logging.level, "info");
@@ -343,6 +353,7 @@ gpu_memory_gb = 24.0
 inference_memory_fraction = 0.5
 training_memory_gb = 6.0
 kv_cache_fp8 = true
+cuda_graphs = false
 
 [training]
 grad_checkpoint_segments = 8
@@ -364,6 +375,7 @@ format = "pretty"
         assert_eq!(config.memory.inference_memory_fraction, 0.5);
         assert_eq!(config.memory.training_memory_gb, Some(6.0));
         assert!(config.memory.kv_cache_fp8);
+        assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
         assert_eq!(config.training.checkpoint_interval, Some(50));
         assert_eq!(config.logging.level, "debug");
@@ -444,6 +456,7 @@ port = 3000
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
             std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
             std::env::set_var("KILN_KV_CACHE_FP8", "1");
+            std::env::set_var("KILN_CUDA_GRAPHS", "false");
         }
 
         let mut config = KilnConfig::default();
@@ -457,6 +470,7 @@ port = 3000
         assert!(config.training.no_grad_checkpoint);
         assert_eq!(config.training.checkpoint_interval, Some(25));
         assert!(config.memory.kv_cache_fp8);
+        assert!(!config.memory.cuda_graphs);
 
         // Clean up
         unsafe {
@@ -468,6 +482,7 @@ port = 3000
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
             std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
             std::env::remove_var("KILN_KV_CACHE_FP8");
+            std::env::remove_var("KILN_CUDA_GRAPHS");
         }
     }
 

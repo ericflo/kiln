@@ -81,7 +81,12 @@ async fn main() -> Result<()> {
             }
         };
 
-        let runner = ModelRunner::new(gpu_weights, runner_tokenizer, model_config.clone());
+        let runner = ModelRunner::new_with_options(
+            gpu_weights,
+            runner_tokenizer,
+            model_config.clone(),
+            config.memory.cuda_graphs,
+        );
 
         let adapter_dir = config
             .model
