@@ -218,7 +218,7 @@ impl CudaGraphRunner {
             _ => anyhow::bail!("position buffer must be CUDA storage"),
         };
 
-        let stream = cuda_storage.device().cuda_stream();
+        let stream = cuda_storage.device.cuda_stream();
         let raw_stream = stream.cu_stream();
         let slice = cuda_storage.as_cuda_slice::<f32>()?;
 
