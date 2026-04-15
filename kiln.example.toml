@@ -18,6 +18,10 @@ shutdown_timeout_secs = 30
 model_id = "Qwen/Qwen3.5-4B"
 # tokenizer_path = "/path/to/tokenizer.json"
 # adapter_dir = "/path/to/adapters"  # Default: <model_path>/adapters
+                                      #
+                                      # GPTQ INT4 quantization: point `path` at a GPTQ model directory
+                                      # containing quantize_config.json. Kiln auto-detects GPTQ and
+                                      # dequantizes INT4 weights to BF16 during loading.
 
 [memory]
 # num_blocks = 256                   # KV cache blocks (auto-sized from VRAM if omitted)
