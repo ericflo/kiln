@@ -10,6 +10,7 @@ pub mod lora_loader;
 pub mod paged_kv_cache;
 pub mod quantized;
 pub mod sampling;
+pub mod speculative;
 pub mod weights;
 
 pub use engine::Engine;
@@ -19,4 +20,5 @@ pub use kv_cache::KvCache;
 pub use loader::load_model;
 pub use lora_loader::LoraWeights;
 pub use paged_kv_cache::PagedKvCache;
+pub use speculative::SpeculativeConfig;
 pub use weights::ModelWeights;

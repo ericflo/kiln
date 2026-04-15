@@ -42,3 +42,10 @@ format = "json"                       # json, pretty, text, human
 [prefix_cache]
 enabled = true                        # Reuse KV cache blocks for shared prompt prefixes
 # max_blocks = 64                     # Max blocks for prefix cache (default: 25% of total)
+
+[speculative]
+enabled = false                       # Self-speculative decoding (skip-layer draft)
+num_speculative_tokens = 4            # Tokens to draft per step (3-8 typical)
+draft_layers = 8                      # First N layers used as draft model
+                                      # Also settable via KILN_SPEC_ENABLED, KILN_SPEC_NUM_TOKENS,
+                                      # KILN_SPEC_DRAFT_LAYERS env vars
