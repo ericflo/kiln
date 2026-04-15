@@ -8,6 +8,11 @@ use crate::token::TokenId;
 /// the second request can reuse the already-computed KV cache blocks instead of
 /// recomputing them. Blocks are reference-counted so they aren't freed while
 /// still in use, and evicted via LRU when memory pressure requires it.
+///
+/// Uses hash chaining: each block's key is derived from the tokens in that block
+/// AND the previous block's hash. This means any prefix that matches block-by-block
+/// from the start will find the longest cached run, even if different suffixes
+/// were registered from different prompts.
 #[derive(Debug)]
 pub struct PrefixCache {
     /// Maximum number of physical blocks the prefix cache may hold.
@@ -18,19 +23,20 @@ pub struct PrefixCache {
     clock: u64,
     /// Block size in tokens — must match the block manager's block_size.
     block_size: usize,
-    /// Hash of a block-aligned token prefix → cache entry.
-    entries: HashMap<u64, CacheEntry>,
+    /// Hash chain key → cached block entry.
+    /// Each entry represents one block at a specific position in a specific prefix.
+    entries: HashMap<u64, BlockCacheEntry>,
     /// Reference counts for individual physical block IDs.
     /// A block with refcount > 0 must not be evicted.
     refcounts: HashMap<u32, usize>,
 }
 
 #[derive(Debug, Clone)]
-struct CacheEntry {
-    /// Physical block IDs for this prefix, in order.
-    block_ids: Vec<u32>,
-    /// Number of token-blocks (prefix length in block-aligned chunks).
-    num_blocks: usize,
+struct BlockCacheEntry {
+    /// Physical block ID for this cached block.
+    block_id: u32,
+    /// The hash chain value at this position (used as the key).
+    chain_hash: u64,
     /// Last-access timestamp for LRU eviction.
     last_used: u64,
 }
@@ -69,96 +75,108 @@ impl PrefixCache {
             return None;
         }
 
-        // We hash progressively longer block-aligned prefixes and find the
-        // longest one that exists in the cache. This is O(num_blocks) hash
-        // lookups per request which is fine — prefixes are typically < 100 blocks.
         let num_full_blocks = tokens.len() / self.block_size;
         if num_full_blocks == 0 {
             return None;
         }
 
-        let mut best: Option<(usize, &CacheEntry)> = None;
+        let mut cached_blocks = Vec::new();
+        let mut prev_hash: u64 = 0;
 
-        for n in (1..=num_full_blocks).rev() {
-            let hash = self.compute_hash(tokens, n);
-            if let Some(entry) = self.entries.get(&hash) {
-                // Verify block count matches (collision guard)
-                if entry.num_blocks == n {
-                    best = Some((n, entry));
-                    break; // longest match (we iterate from longest to shortest)
-                }
+        for block_idx in 0..num_full_blocks {
+            let start = block_idx * self.block_size;
+            let end = start + self.block_size;
+            let block_tokens = &tokens[start..end];
+            let chain_hash = Self::chain_hash(prev_hash, block_tokens);
+
+            if let Some(entry) = self.entries.get(&chain_hash) {
+                cached_blocks.push(entry.block_id);
+                prev_hash = chain_hash;
+            } else {
+                break; // Chain broken — no more cached blocks
             }
         }
 
-        let (num_blocks, entry) = best?;
-        let block_ids = entry.block_ids.clone();
-        let cached_tokens = num_blocks * self.block_size;
+        if cached_blocks.is_empty() {
+            return None;
+        }
 
-        // Bump LRU timestamp
+        let cached_tokens = cached_blocks.len() * self.block_size;
+
+        // Bump LRU timestamps for all matched entries
         self.clock += 1;
         let ts = self.clock;
-        // Re-borrow mutably
-        let hash = self.compute_hash(tokens, num_blocks);
-        if let Some(entry) = self.entries.get_mut(&hash) {
-            entry.last_used = ts;
+        let mut ph: u64 = 0;
+        for block_idx in 0..cached_blocks.len() {
+            let start = block_idx * self.block_size;
+            let end = start + self.block_size;
+            let block_tokens = &tokens[start..end];
+            let ch = Self::chain_hash(ph, block_tokens);
+            if let Some(entry) = self.entries.get_mut(&ch) {
+                entry.last_used = ts;
+            }
+            ph = ch;
         }
 
         // Increment refcounts
-        for &bid in &block_ids {
+        for &bid in &cached_blocks {
             *self.refcounts.entry(bid).or_insert(0) += 1;
         }
 
-        Some((cached_tokens, block_ids))
+        Some((cached_tokens, cached_blocks))
     }
 
     /// Register a completed prefix so future requests can reuse it.
     ///
     /// `tokens` is the full prompt, `block_ids` are the physical blocks that
-    /// hold its KV cache. Only the block-aligned prefix is cached.
+    /// hold its KV cache. Registers each block-aligned block in the hash chain.
     pub fn register(&mut self, tokens: &[TokenId], block_ids: &[u32]) {
         let num_full_blocks = tokens.len() / self.block_size;
         if num_full_blocks == 0 || block_ids.len() < num_full_blocks {
             return;
         }
 
-        let hash = self.compute_hash(tokens, num_full_blocks);
-        if self.entries.contains_key(&hash) {
-            // Already cached — just bump LRU
-            self.clock += 1;
-            let ts = self.clock;
-            if let Some(entry) = self.entries.get_mut(&hash) {
-                entry.last_used = ts;
-            }
-            return;
-        }
-
-        let prefix_blocks: Vec<u32> = block_ids[..num_full_blocks].to_vec();
-
-        // Evict if needed to make room
-        while self.total_cached_blocks + prefix_blocks.len() > self.max_blocks {
-            if !self.evict_one() {
-                // Can't evict anything (all cached blocks are referenced) — don't cache
-                return;
-            }
-        }
-
         self.clock += 1;
         let ts = self.clock;
+        let mut prev_hash: u64 = 0;
 
-        // Increment refcounts for the cached blocks
-        for &bid in &prefix_blocks {
-            *self.refcounts.entry(bid).or_insert(0) += 1;
+        for block_idx in 0..num_full_blocks {
+            let start = block_idx * self.block_size;
+            let end = start + self.block_size;
+            let block_tokens = &tokens[start..end];
+            let chain_hash = Self::chain_hash(prev_hash, block_tokens);
+
+            if self.entries.contains_key(&chain_hash) {
+                // Already cached — just bump LRU
+                if let Some(entry) = self.entries.get_mut(&chain_hash) {
+                    entry.last_used = ts;
+                }
+            } else {
+                // Evict if needed to make room for one block
+                while self.total_cached_blocks >= self.max_blocks {
+                    if !self.evict_one() {
+                        // Can't evict anything — stop caching
+                        prev_hash = chain_hash;
+                        continue;
+                    }
+                }
+
+                // Increment refcount for this block
+                *self.refcounts.entry(block_ids[block_idx]).or_insert(0) += 1;
+                self.total_cached_blocks += 1;
+
+                self.entries.insert(
+                    chain_hash,
+                    BlockCacheEntry {
+                        block_id: block_ids[block_idx],
+                        chain_hash,
+                        last_used: ts,
+                    },
+                );
+            }
+
+            prev_hash = chain_hash;
         }
-
-        self.total_cached_blocks += prefix_blocks.len();
-        self.entries.insert(
-            hash,
-            CacheEntry {
-                num_blocks: num_full_blocks,
-                block_ids: prefix_blocks,
-                last_used: ts,
-            },
-        );
     }
 
     /// Decrement refcounts for blocks that were obtained via `lookup`.
@@ -174,10 +192,7 @@ impl PrefixCache {
     /// Returns the set of physical block IDs that are held by the prefix cache.
     /// The block manager must not free these blocks.
     pub fn held_block_ids(&self) -> Vec<u32> {
-        let mut ids = Vec::new();
-        for entry in self.entries.values() {
-            ids.extend_from_slice(&entry.block_ids);
-        }
+        let mut ids: Vec<u32> = self.entries.values().map(|e| e.block_id).collect();
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -189,22 +204,17 @@ impl PrefixCache {
         self.refcounts.get(&block_id).copied().unwrap_or(0) > 0
     }
 
-    /// Evict the least-recently-used entry whose blocks all have refcount ≤ 1
-    /// (i.e. only the cache itself holds them, no active requests).
+    /// Evict the least-recently-used block entry whose block has refcount ≤ 1
+    /// (i.e. only the cache itself holds it, no active requests).
     /// Returns true if an entry was evicted.
     fn evict_one(&mut self) -> bool {
-        // Find the LRU entry that can be evicted
         let mut best_hash: Option<u64> = None;
         let mut best_ts = u64::MAX;
 
         for (&hash, entry) in &self.entries {
             if entry.last_used < best_ts {
-                // Check all blocks have refcount == 1 (only the cache holds them)
-                let can_evict = entry
-                    .block_ids
-                    .iter()
-                    .all(|&bid| self.refcounts.get(&bid).copied().unwrap_or(0) <= 1);
-                if can_evict {
+                let rc = self.refcounts.get(&entry.block_id).copied().unwrap_or(0);
+                if rc <= 1 {
                     best_hash = Some(hash);
                     best_ts = entry.last_used;
                 }
@@ -213,13 +223,11 @@ impl PrefixCache {
 
         if let Some(hash) = best_hash {
             if let Some(entry) = self.entries.remove(&hash) {
-                self.total_cached_blocks -= entry.block_ids.len();
-                for &bid in &entry.block_ids {
-                    if let Some(rc) = self.refcounts.get_mut(&bid) {
-                        *rc = rc.saturating_sub(1);
-                        if *rc == 0 {
-                            self.refcounts.remove(&bid);
-                        }
+                self.total_cached_blocks -= 1;
+                if let Some(rc) = self.refcounts.get_mut(&entry.block_id) {
+                    *rc = rc.saturating_sub(1);
+                    if *rc == 0 {
+                        self.refcounts.remove(&entry.block_id);
                     }
                 }
                 return true;
@@ -228,16 +236,14 @@ impl PrefixCache {
         false
     }
 
-    /// Compute a hash for the first `num_blocks` block-aligned token chunks.
-    fn compute_hash(&self, tokens: &[TokenId], num_blocks: usize) -> u64 {
+    /// Compute a chained hash for a block of tokens, incorporating the previous block's hash.
+    /// This ensures that the same token block at different positions (after different prefixes)
+    /// gets different hashes.
+    fn chain_hash(prev_hash: u64, block_tokens: &[TokenId]) -> u64 {
         use std::hash::{Hash, Hasher};
-        let end = num_blocks * self.block_size;
-        let slice = &tokens[..end.min(tokens.len())];
-
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        slice.hash(&mut hasher);
-        // Include num_blocks in hash to differentiate prefix lengths
-        num_blocks.hash(&mut hasher);
+        prev_hash.hash(&mut hasher);
+        block_tokens.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -256,7 +262,7 @@ mod tests {
         let block_ids = vec![10, 20, 30];
         cache.register(&tokens, &block_ids);
 
-        assert_eq!(cache.num_cached_entries(), 1);
+        assert_eq!(cache.num_cached_entries(), 3); // one per block
         assert_eq!(cache.total_cached_blocks(), 3);
 
         // Look up the same tokens — should find all 3 blocks
@@ -276,14 +282,36 @@ mod tests {
         let prefix: Vec<TokenId> = (0..12).collect();
         cache.register(&prefix, &[10, 20, 30]);
 
-        // Look up a longer sequence that shares the same prefix
-        let mut longer: Vec<TokenId> = (0..20).collect();
+        // Look up a longer sequence that shares the same 12-token prefix
+        // but has different suffix tokens
+        let mut longer: Vec<TokenId> = (0..12).collect();
         longer.extend_from_slice(&[99, 98, 97, 96, 95, 94, 93, 92]);
         let result = cache.lookup(&longer);
         assert!(result.is_some());
         let (cached_tokens, found_blocks) = result.unwrap();
         assert_eq!(cached_tokens, 12);
         assert_eq!(found_blocks, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_shared_prefix_different_suffix() {
+        let block_size = 4;
+        let mut cache = PrefixCache::new(block_size, 100);
+
+        // Register a 20-token prompt (5 blocks)
+        let tokens1: Vec<TokenId> = (0..20).collect();
+        cache.register(&tokens1, &[10, 20, 30, 40, 50]);
+
+        // Look up a prompt that shares the first 16 tokens but differs in the last block
+        let mut tokens2: Vec<TokenId> = (0..16).collect();
+        tokens2.extend_from_slice(&[200, 201, 202, 203]);
+
+        let result = cache.lookup(&tokens2);
+        assert!(result.is_some());
+        let (cached_tokens, found_blocks) = result.unwrap();
+        // Should match first 4 blocks (16 tokens), not 5
+        assert_eq!(cached_tokens, 16);
+        assert_eq!(found_blocks, vec![10, 20, 30, 40]);
     }
 
     #[test]
@@ -317,7 +345,7 @@ mod tests {
     #[test]
     fn test_lru_eviction() {
         let block_size = 4;
-        // max_blocks = 4, so can hold 4 blocks total
+        // max_blocks = 4, so can hold 4 block entries total
         let mut cache = PrefixCache::new(block_size, 4);
 
         // Register prefix A (2 blocks)
@@ -330,13 +358,12 @@ mod tests {
         cache.register(&tokens_b, &[30, 40]);
         assert_eq!(cache.total_cached_blocks(), 4);
 
-        // Register prefix C (2 blocks) — should evict A (oldest)
+        // Register prefix C (2 blocks) — should evict A's blocks (oldest)
         let tokens_c: Vec<TokenId> = (200..208).collect();
         cache.register(&tokens_c, &[50, 60]);
         assert_eq!(cache.total_cached_blocks(), 4);
-        assert_eq!(cache.num_cached_entries(), 2);
 
-        // A should be gone
+        // A should be gone (its blocks were evicted)
         assert!(cache.lookup(&tokens_a).is_none());
         // B and C should still be there
         assert!(cache.lookup(&tokens_b).is_some());
@@ -348,7 +375,7 @@ mod tests {
         let block_size = 4;
         let mut cache = PrefixCache::new(block_size, 4);
 
-        // Register prefix A and keep a reference
+        // Register prefix A and keep a reference via lookup
         let tokens_a: Vec<TokenId> = (0..8).collect();
         cache.register(&tokens_a, &[10, 20]);
         let _lookup_a = cache.lookup(&tokens_a); // refcount now 2 (cache + lookup)
@@ -372,7 +399,7 @@ mod tests {
     #[test]
     fn test_release_blocks() {
         let block_size = 4;
-        let mut cache = PrefixCache::new(block_size, 4);
+        let mut cache = PrefixCache::new(block_size, 100);
 
         let tokens: Vec<TokenId> = (0..8).collect();
         cache.register(&tokens, &[10, 20]);
@@ -397,11 +424,11 @@ mod tests {
 
         let tokens: Vec<TokenId> = (0..8).collect();
         cache.register(&tokens, &[10, 20]);
-        assert_eq!(cache.num_cached_entries(), 1);
+        assert_eq!(cache.num_cached_entries(), 2); // 2 block entries
 
-        // Register again — should not create duplicate
+        // Register again — should not create duplicates
         cache.register(&tokens, &[10, 20]);
-        assert_eq!(cache.num_cached_entries(), 1);
+        assert_eq!(cache.num_cached_entries(), 2);
         assert_eq!(cache.total_cached_blocks(), 2);
     }
 
