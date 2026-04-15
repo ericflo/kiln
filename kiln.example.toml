@@ -38,3 +38,7 @@ no_grad_checkpoint = false
 [logging]
 level = "info"                        # trace, debug, info, warn, error, or a filter directive
 format = "json"                       # json, pretty, text, human
+
+[prefix_cache]
+enabled = true                        # Reuse KV cache blocks for shared prompt prefixes
+# max_blocks = 64                     # Max blocks for prefix cache (default: 25% of total)
