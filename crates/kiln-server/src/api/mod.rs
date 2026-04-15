@@ -12,6 +12,7 @@ mod completions;
 mod adapters;
 mod training;
 mod config;
+mod ui;
 
 pub fn router(state: AppState) -> Router {
     let trace_layer = TraceLayer::new_for_http()
@@ -46,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .merge(adapters::routes())
         .merge(training::routes())
         .merge(config::routes())
+        .merge(ui::routes())
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(trace_layer)
