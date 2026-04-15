@@ -1,3 +1,4 @@
+pub mod cuda_graph;
 pub mod engine;
 pub mod forward;
 pub mod fp8;
