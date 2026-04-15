@@ -63,6 +63,14 @@ kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 # Random number generation
 rand = "0.8"
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+console = "0.15"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
 # Testing
 tempfile = "3"
 
