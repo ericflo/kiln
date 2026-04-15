@@ -227,7 +227,7 @@ impl CudaGraphRunner {
         // (the stream is serialized). The device pointer and allocation size
         // are valid because the position_buffer tensor is alive.
         unsafe {
-            let (dev_ptr, _guard) = slice.device_ptr(stream);
+            let (dev_ptr, _guard) = slice.device_ptr(&stream);
             candle_core::cuda_backend::cudarc::driver::result::memcpy_htod_async(
                 dev_ptr,
                 &pos_f32,
