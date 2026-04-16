@@ -590,7 +590,7 @@ fn main() -> Result<()> {
         anyhow::bail!("CUDA not available — benchmarks require a GPU");
     };
 
-    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &device)
+    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
         .context("failed to transfer weights to GPU")?;
     drop(model_weights); // Free CPU memory
 

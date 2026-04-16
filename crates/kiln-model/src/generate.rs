@@ -1083,10 +1083,18 @@ mod tests {
             },
         };
 
+        let rotary_inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            device,
+        )
+        .unwrap();
+
         GpuWeights {
             embed_tokens: embed,
             layers: vec![layer],
             final_norm,
+            rotary_inv_freq,
         }
     }
 

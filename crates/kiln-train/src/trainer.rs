@@ -1471,10 +1471,17 @@ mod tests {
             });
         }
 
+        let rotary_inv_freq = kiln_model::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            device,
+        )?;
+
         Ok(GpuWeights {
             embed_tokens,
             layers,
             final_norm,
+            rotary_inv_freq,
         })
     }
 
