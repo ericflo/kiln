@@ -74,10 +74,18 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
         },
     };
 
+    let rotary_inv_freq = kiln_model::forward::compute_rotary_inv_freq(
+        config.rotary_dim(),
+        config.rope_theta,
+        device,
+    )
+    .unwrap();
+
     GpuWeights {
         embed_tokens: embed,
         layers: vec![layer],
         final_norm,
+        rotary_inv_freq,
     }
 }
 

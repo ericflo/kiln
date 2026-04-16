@@ -63,7 +63,13 @@ fn flash_attention_forward(
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
     let causal = true;
 
-    // GQA: expand K/V heads to match Q head count for flash_attn
+    // GQA: expand K/V heads to match Q head count for flash_attn.
+    // The `expand(..).contiguous()` path is required because `expand` produces a
+    // strided view (stride=0 along the broadcast dim) that the flash kernel cannot
+    // consume directly. For the non-GQA branch, callers already pass contiguous
+    // K/V (the KV-cache concat produces contiguous tensors), so no extra copy is
+    // needed. Similarly, the flash kernel returns a freshly-allocated contiguous
+    // tensor, so the post-flash reshape does not need a `.contiguous()` call.
     let (k, v) = if num_heads != num_kv_heads {
         let gqa_ratio = num_heads / num_kv_heads;
         let (batch, kv_len, _kv_heads, hd) = k.dims4()?;
@@ -80,7 +86,7 @@ fn flash_attention_forward(
             .reshape((batch, kv_len, num_heads, hd))?;
         (k, v)
     } else {
-        (k.contiguous()?, v.contiguous()?)
+        (k.clone(), v.clone())
     };
 
     // flash_attn expects [batch, seq_len, num_heads, head_dim]
@@ -89,9 +95,7 @@ fn flash_attention_forward(
 
     // Reshape to [batch, seq_len, hidden]
     let (batch, seq_len, _heads, _hd) = attn_output.dims4()?;
-    let attn_output = attn_output
-        .contiguous()?
-        .reshape((batch, seq_len, num_heads * head_dim))?;
+    let attn_output = attn_output.reshape((batch, seq_len, num_heads * head_dim))?;
     Ok(attn_output)
 }
 
@@ -103,6 +107,29 @@ pub struct GpuWeights {
     pub layers: Vec<GpuLayerWeights>,
     /// Final RMSNorm weight: [hidden_size]
     pub final_norm: Tensor,
+    /// Cached rotary inv_freq tensor, shape `[half_rotary]`, F32 on device.
+    /// Computed once at load time from `config.rotary_dim()` and `config.rope_theta`
+    /// so the RoPE hot path can reuse it instead of rebuilding a fresh `Vec<f32>` +
+    /// HtoD upload on every layer's attention call (~8 × per token in prefill).
+    pub rotary_inv_freq: Tensor,
+}
+
+/// Compute the rotary-embedding `inv_freq` tensor once and upload it to `device`.
+///
+/// `inv_freq_i = 1.0 / (rope_theta ^ (2i / rotary_dim))` for `i` in `0..rotary_dim/2`.
+/// The result is an F32 tensor of shape `[rotary_dim / 2]`.
+pub fn compute_rotary_inv_freq(
+    rotary_dim: usize,
+    rope_theta: f64,
+    device: &Device,
+) -> Result<Tensor> {
+    let half_rotary = rotary_dim / 2;
+    let inv_freq: Vec<f32> = (0..half_rotary)
+        .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
+        .collect();
+    let t = Tensor::new(inv_freq.as_slice(), device)
+        .context("failed to build rotary inv_freq tensor")?;
+    Ok(t)
 }
 
 /// One transformer layer's tensors on device.
@@ -199,10 +226,20 @@ fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
 
 impl GpuWeights {
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
-    pub fn from_model_weights(weights: &ModelWeights, device: &Device) -> Result<Self> {
+    ///
+    /// `config` is used to precompute the rotary `inv_freq` tensor once so the RoPE
+    /// hot path does not re-upload it on every call.
+    pub fn from_model_weights(
+        weights: &ModelWeights,
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+    ) -> Result<Self> {
         let embed_tokens =
             weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
+        let rotary_inv_freq =
+            compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
+                .context("rotary_inv_freq")?;
 
         let mut layers = Vec::with_capacity(weights.layers.len());
         for (i, lw) in weights.layers.iter().enumerate() {
@@ -262,6 +299,7 @@ impl GpuWeights {
             embed_tokens,
             layers,
             final_norm,
+            rotary_inv_freq,
         })
     }
 }
@@ -311,7 +349,8 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 /// `head_dim`: dimension of each attention head
 /// `rotary_dim`: number of head dimensions to apply rotation to (the rest pass through unchanged).
 ///   For Qwen3.5-4B: 64 (partial_rotary_factor=0.25, so 0.25 * 256 = 64).
-/// `rope_theta`: base frequency (10_000_000.0 for Qwen3.5-4B)
+/// `inv_freq`: cached frequency table of shape `[rotary_dim / 2]` (F32 on same device as `q`/`k`).
+///   Build once via [`compute_rotary_inv_freq`] and reuse across calls.
 ///
 /// Returns: (rotated_q, rotated_k) with same shapes.
 pub fn rotary_embedding(
@@ -320,16 +359,9 @@ pub fn rotary_embedding(
     positions: &[u32],
     head_dim: usize,
     rotary_dim: usize,
-    rope_theta: f64,
+    inv_freq: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
     let device = q.device();
-    let half_rotary = rotary_dim / 2;
-
-    // Compute frequency table: freq_i = 1.0 / (theta ^ (2i / rotary_dim)) for i in 0..half_rotary
-    let inv_freq: Vec<f32> = (0..half_rotary)
-        .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
-        .collect();
-    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?; // [half_rotary]
 
     // Position tensor
     let pos_f32: Vec<f32> = positions.iter().map(|&p| p as f32).collect();
@@ -353,22 +385,15 @@ pub fn rotary_embedding(
 /// `cudaMemcpyAsync` outside the captured graph.
 ///
 /// `positions_tensor`: f32 tensor on device, shape [seq_len]
+/// `inv_freq`: cached frequency table, shape `[rotary_dim / 2]`, F32 on device.
 pub fn rotary_embedding_from_tensor(
     q: &Tensor,
     k: &Tensor,
     positions_tensor: &Tensor,
     head_dim: usize,
     rotary_dim: usize,
-    rope_theta: f64,
+    inv_freq: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
-    let device = q.device();
-    let half_rotary = rotary_dim / 2;
-
-    let inv_freq: Vec<f32> = (0..half_rotary)
-        .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
-        .collect();
-    let inv_freq = Tensor::new(inv_freq.as_slice(), device)?;
-
     // positions_tensor is [seq_len], unsqueeze to [seq_len, 1]
     let pos = positions_tensor.unsqueeze(1)?;
 
@@ -790,7 +815,7 @@ pub fn gated_deltanet_forward(
 /// `num_heads`: number of query attention heads
 /// `num_kv_heads`: number of key/value attention heads
 /// `head_dim`: dimension per head
-/// `rope_theta`: RoPE base frequency
+/// `inv_freq`: cached RoPE frequency table (built once via [`compute_rotary_inv_freq`])
 /// `rms_norm_eps`: epsilon for Q/K head norms
 /// `kv_cache`: optional KV cache for incremental decoding
 /// `full_attn_layer_idx`: index into the KV cache's layer array (only full-attn layers)
@@ -804,7 +829,7 @@ pub fn gqa_attention(
     num_kv_heads: usize,
     head_dim: usize,
     rotary_dim: usize,
-    rope_theta: f64,
+    inv_freq: &Tensor,
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
     full_attn_layer_idx: usize,
@@ -851,7 +876,7 @@ pub fn gqa_attention(
 
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
-    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, rope_theta)?;
+    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
 
     // FlashAttention-2 path for prefill (seq_len > 1, no KV cache).
     // Flash-attn takes [batch, seq_len, num_heads, head_dim] — the layout we already have.
@@ -961,7 +986,7 @@ pub fn gqa_attention_paged(
     num_kv_heads: usize,
     head_dim: usize,
     rotary_dim: usize,
-    rope_theta: f64,
+    inv_freq: &Tensor,
     rms_norm_eps: f64,
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
@@ -1001,7 +1026,7 @@ pub fn gqa_attention_paged(
     // RoPE — only rotate first rotary_dim dimensions
     // Use the GPU tensor variant so positions remain at a stable GPU address
     // (critical for CUDA graph replay correctness)
-    let (q, k) = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, rope_theta)?;
+    let (q, k) = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
 
     // Transpose to [batch, heads, seq_len, head_dim]
     let q = q.transpose(1, 2)?.contiguous()?;
@@ -1203,7 +1228,7 @@ fn apply_causal_mask_with_offset(
 /// `num_kv_heads`: number of key/value attention heads
 /// `head_dim`: dimension per head
 /// `rotary_dim`: number of head dims to rotate (partial RoPE)
-/// `rope_theta`: RoPE base frequency
+/// `inv_freq`: cached RoPE frequency table (built once via [`compute_rotary_inv_freq`])
 /// `rms_norm_eps`: epsilon for RMSNorm
 /// `kv_cache`: optional KV cache for incremental decoding
 /// `full_attn_layer_idx`: index into the KV cache's layer array
@@ -1218,7 +1243,7 @@ pub fn transformer_block(
     num_kv_heads: usize,
     head_dim: usize,
     rotary_dim: usize,
-    rope_theta: f64,
+    inv_freq: &Tensor,
     rms_norm_eps: f64,
     kv_cache: Option<&mut KvCache>,
     full_attn_layer_idx: usize,
@@ -1243,7 +1268,7 @@ pub fn transformer_block(
         num_kv_heads,
         head_dim,
         rotary_dim,
-        rope_theta,
+        inv_freq,
         rms_norm_eps,
         kv_cache,
         full_attn_layer_idx,
@@ -1285,7 +1310,7 @@ pub fn transformer_block_paged(
     num_kv_heads: usize,
     head_dim: usize,
     rotary_dim: usize,
-    rope_theta: f64,
+    inv_freq: &Tensor,
     rms_norm_eps: f64,
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
@@ -1312,7 +1337,7 @@ pub fn transformer_block_paged(
         num_kv_heads,
         head_dim,
         rotary_dim,
-        rope_theta,
+        inv_freq,
         rms_norm_eps,
         paged_cache,
         block_table,
@@ -1400,7 +1425,7 @@ pub fn model_forward(
                     config.num_kv_heads,
                     config.head_dim,
                     config.rotary_dim(),
-                    config.rope_theta,
+                    &weights.rotary_inv_freq,
                     config.rms_norm_eps,
                     cache_ref,
                     full_attn_idx,
@@ -1496,7 +1521,7 @@ pub fn model_forward_segment(
                     config.num_kv_heads,
                     config.head_dim,
                     config.rotary_dim(),
-                    config.rope_theta,
+                    &weights.rotary_inv_freq,
                     config.rms_norm_eps,
                     None, // no KV cache for training
                     full_attn_idx,
@@ -1631,7 +1656,7 @@ pub fn model_forward_paged(
                     config.num_kv_heads,
                     config.head_dim,
                     config.rotary_dim(),
-                    config.rope_theta,
+                    &weights.rotary_inv_freq,
                     config.rms_norm_eps,
                     paged_cache,
                     block_table,
@@ -1768,7 +1793,8 @@ mod tests {
         )?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, head_dim, 10_000.0)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, head_dim, &inv_freq)?;
 
         assert_eq!(rq.dims(), &[batch, seq_len, num_heads, head_dim]);
         assert_eq!(rk.dims(), &[batch, seq_len, num_kv_heads, head_dim]);
@@ -1785,7 +1811,8 @@ mod tests {
         let q = Tensor::new(q_data.as_slice(), &device)?.reshape((1, 1, 1, head_dim))?;
         let k = q.clone();
 
-        let (rq, _rk) = rotary_embedding(&q, &k, &[0], head_dim, head_dim, 10_000.0)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let (rq, _rk) = rotary_embedding(&q, &k, &[0], head_dim, head_dim, &inv_freq)?;
         let orig = q.flatten_all()?.to_vec1::<f32>()?;
         let rotated = rq.flatten_all()?.to_vec1::<f32>()?;
 
@@ -1808,7 +1835,8 @@ mod tests {
         let q = Tensor::ones((1, 2, 1, head_dim), DType::F32, &device)?;
         let k = q.clone();
 
-        let (rq, _) = rotary_embedding(&q, &k, &[0, 100], head_dim, head_dim, 10_000.0)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let (rq, _) = rotary_embedding(&q, &k, &[0, 100], head_dim, head_dim, &inv_freq)?;
         // rq shape: [1, 2, 1, 8] — extract pos 0 and pos 100
         let pos0 = rq.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
         let pos100 = rq.narrow(1, 1, 1)?.flatten_all()?.to_vec1::<f32>()?;
@@ -1832,7 +1860,8 @@ mod tests {
         let k = q.clone();
 
         // Position 100 — the rotary dims should change, passthrough dims should not
-        let (rq, _) = rotary_embedding(&q, &k, &[100], head_dim, rotary_dim, 10_000.0)?;
+        let inv_freq = compute_rotary_inv_freq(rotary_dim, 10_000.0, &device)?;
+        let (rq, _) = rotary_embedding(&q, &k, &[100], head_dim, rotary_dim, &inv_freq)?;
         let orig = q.flatten_all()?.to_vec1::<f32>()?;
         let rotated = rq.flatten_all()?.to_vec1::<f32>()?;
 
@@ -1867,7 +1896,8 @@ mod tests {
         let k = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_kv_heads, head_dim), &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, rotary_dim, 10_000.0)?;
+        let inv_freq = compute_rotary_inv_freq(rotary_dim, 10_000.0, &device)?;
+        let (rq, rk) = rotary_embedding(&q, &k, &positions, head_dim, rotary_dim, &inv_freq)?;
 
         assert_eq!(rq.dims(), &[batch, seq_len, num_heads, head_dim]);
         assert_eq!(rk.dims(), &[batch, seq_len, num_kv_heads, head_dim]);
@@ -1976,7 +2006,8 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -1997,7 +2028,8 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
@@ -2021,7 +2053,8 @@ mod tests {
         let x = Tensor::randn(0.0_f32, 1.0, (1, 1, hidden), &device)?;
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
-        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, false, None)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -2078,7 +2111,8 @@ mod tests {
         };
 
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
-        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -2112,7 +2146,8 @@ mod tests {
         };
 
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
-        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, 10_000.0, 1e-6, None, 0, None)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
@@ -2151,7 +2186,8 @@ mod tests {
 
         let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
         let cfg = make_test_config(2, 1, 4, 8);
-        let result = transformer_block(&x, &layer, &cfg, &[0], 2, 1, 4, 4, 10_000.0, 1e-6, None, 0, None);
+        let inv_freq = compute_rotary_inv_freq(4, 10_000.0, &device)?;
+        let result = transformer_block(&x, &layer, &cfg, &[0], 2, 1, 4, 4, &inv_freq, 1e-6, None, 0, None);
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -2221,10 +2257,15 @@ mod tests {
             });
         }
 
+        // Tests using this helper all set `partial_rotary_factor = 1.0` and
+        // `rope_theta = 10000.0`, so rotate every head_dim with base 10k.
+        let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10000.0, device)?;
+
         Ok(GpuWeights {
             embed_tokens,
             layers,
             final_norm,
+            rotary_inv_freq,
         })
     }
 
@@ -2567,10 +2608,15 @@ mod tests {
             });
         }
 
+        // Tests using this helper set `partial_rotary_factor = 1.0` and
+        // `rope_theta = 10000.0`, so rotary_dim = head_dim with base 10k.
+        let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10000.0, device)?;
+
         Ok(GpuWeights {
             embed_tokens,
             layers,
             final_norm,
+            rotary_inv_freq,
         })
     }
 

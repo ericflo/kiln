@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
             tracing::info!("CUDA not available — using CPU");
             candle_core::Device::Cpu
         };
-        let gpu_weights = GpuWeights::from_model_weights(&model_weights, &device)?;
+        let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
 
         // ModelRunner takes ownership of a tokenizer, so load a second instance.
         let runner_tokenizer = if let Some(path) = tokenizer_path {
