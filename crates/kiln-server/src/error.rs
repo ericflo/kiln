@@ -125,6 +125,42 @@ impl ApiError {
         }
     }
 
+    pub fn adapter_merge_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "adapter_merge_invalid",
+            message: format!("Cannot merge adapters: {detail}"),
+            hint: "All sources must share the same rank, target_modules, base_model, and tensor shapes. Linear interpolation requires identical adapter layouts.",
+        }
+    }
+
+    pub fn adapter_merge_failed(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "adapter_merge_failed",
+            message: format!("Adapter merge failed: {detail}"),
+            hint: "Check server logs for the underlying I/O or serialization error.",
+        }
+    }
+
+    pub fn adapter_merge_output_exists(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "adapter_merge_output_exists",
+            message: format!("Output adapter '{name}' already exists"),
+            hint: "Choose a different output_name, or delete the existing adapter first with DELETE /v1/adapters/{name}.",
+        }
+    }
+
+    pub fn adapter_merge_bad_name(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "adapter_merge_bad_name",
+            message: format!("Invalid output_name '{name}'"),
+            hint: "output_name must be non-empty, contain no path separators, and not be '.' or '..'.",
+        }
+    }
+
     pub fn mock_mode_no_adapters() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
