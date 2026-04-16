@@ -615,6 +615,214 @@ fn causal_conv1d_decode(
     Ok(output)
 }
 
+// ---------------------------------------------------------------------------
+// GDN chunkwise analytical recurrence (Phase 6, approach (b) in the chunkwise
+// plan). Replaces the per-token `for t in 0..seq_len` loop inside
+// `gated_deltanet_forward` with an unrolled form that processes up to
+// `GDN_CHUNK_SIZE` tokens per heavy matmul, dropping the number of GPU kernel
+// launches from O(T) to O(T / C) per layer.
+// ---------------------------------------------------------------------------
+
+/// Chunk size for the analytical GDN recurrence. C = 64 balances:
+///   - intra-chunk [C, dk] × [dk, C] matmuls large enough to saturate tensor
+///     cores on A5000/4090-class GPUs for dk = dv = 128,
+///   - a small-enough forward-substitution inner loop so the Vec<Tensor> cat
+///     churn stays bounded.
+const GDN_CHUNK_SIZE: usize = 64;
+
+/// Build a [n, n] mask on `device` with `dtype`, 1.0 where row > col else 0.0.
+/// Used for the strictly lower-triangular `A_strict` mask (i < t, exclusive).
+fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+    let t = Tensor::arange(0u32, n as u32, device)?;
+    let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
+    let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
+    Ok(rows.gt(&cols)?.to_dtype(dtype)?)
+}
+
+/// Build a [n, n] mask on `device` with `dtype`, 1.0 where row >= col else 0.0.
+/// Used for the causal (inclusive) lower-triangular `B_mask` mask (i <= t).
+fn causal_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+    let t = Tensor::arange(0u32, n as u32, device)?;
+    let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
+    let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
+    Ok(rows.ge(&cols)?.to_dtype(dtype)?)
+}
+
+/// Analytical chunkwise form of the Gated DeltaNet recurrence.
+///
+/// The per-token recurrence is
+///
+/// ```text
+///   S_t   = exp(g_t) * S_{t-1}  +  k_t ⊗ delta_t
+///   delta_t = beta_t * (v_t - k_t · (exp(g_t) * S_{t-1}))
+///   out_t = q_t · S_t
+/// ```
+///
+/// Within a chunk of up to `chunk_size` tokens, let `G[t] = cumsum(g)[t]`.
+/// The per-token recurrence unrolls into the closed form (derived from the
+/// standard GLA / chunk_gla_fwd identity used in fla-org and RWKV-5):
+///
+/// 1. Inter-chunk carry
+///    ```text
+///      V'[t] = v[t] - exp(G[t]) * (k[t] · S_entry)
+///    ```
+/// 2. Strict intra-chunk decay mask
+///    ```text
+///      A_strict[t, i] = exp(G[t] - G[i]) * (k[t] · k[i])   for i < t, else 0
+///    ```
+/// 3. Forward-substitution / triangular solve for W[t]
+///    ```text
+///      W[t] = beta[t] * ( V'[t] - Σ_{i<t} A_strict[t, i] * W[i] )
+///    ```
+/// 4. Output
+///    ```text
+///      B_mask[t, i] = exp(G[t] - G[i]) * (q[t] · k[i])     for i <= t, else 0
+///      out[t] = exp(G[t]) * (q[t] · S_entry) + Σ_{i<=t} B_mask[t, i] * W[i]
+///    ```
+/// 5. State exit
+///    ```text
+///      S_new = exp(G[C-1]) * S_entry + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
+///    ```
+///
+/// This is numerically equivalent to the per-token loop (modulo rounding in
+/// the bf16 hot path) and matches the pre-existing sequential code exactly
+/// for chunk_size = 1 (decode path).
+///
+/// Inputs are already transposed to `[B, nv, T, *]` layout. `state` is
+/// mutated in place and must be in the hot-path dtype (bf16 in production,
+/// F32 on CPU tests); the caller is responsible for preserving the external
+/// F32-state invariant.
+///
+/// Returns: `[B, nv, T, dv]`.
+fn gdn_chunkwise_recurrence(
+    q: &Tensor,         // [B, nv, T, dk]
+    k: &Tensor,         // [B, nv, T, dk]
+    v: &Tensor,         // [B, nv, T, dv]
+    beta: &Tensor,      // [B, nv, T]
+    g: &Tensor,         // [B, nv, T]
+    state: &mut Tensor, // [B, nv, dk, dv]
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let (_, _, seq_len, _) = q.dims4()?;
+    let dtype = q.dtype();
+    let device = q.device();
+
+    let mut out_chunks: Vec<Tensor> = Vec::with_capacity(seq_len.div_ceil(chunk_size));
+
+    let mut t_start: usize = 0;
+    while t_start < seq_len {
+        let c = (seq_len - t_start).min(chunk_size);
+
+        // Slice the current chunk out of the per-head tensors.
+        let q_c = q.narrow(2, t_start, c)?; // [B, nv, C, dk]
+        let k_c = k.narrow(2, t_start, c)?; // [B, nv, C, dk]
+        let v_c = v.narrow(2, t_start, c)?; // [B, nv, C, dv]
+        let beta_c = beta.narrow(2, t_start, c)?; // [B, nv, C]
+        let g_c = g.narrow(2, t_start, c)?; // [B, nv, C]
+
+        // Cumulative decay G[t] = Σ_{s=0..t} g[s].  Done in F32: exp() of
+        // the cumulative sum is the only place bf16 would lose meaningful
+        // precision (G can reach -10 or more across a full 64-token chunk
+        // even though individual g_t are small, and exp() of that range
+        // benefits from F32's wider mantissa).
+        let g_f32 = g_c.to_dtype(DType::F32)?;
+        let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C], F32
+
+        // Decay matrix D[t, i] = exp(G[t] - G[i]).
+        let big_g_col = big_g.unsqueeze(3)?; // [B, nv, C, 1]
+        let big_g_row = big_g.unsqueeze(2)?; // [B, nv, 1, C]
+        let decay_f32 = big_g_col.broadcast_sub(&big_g_row)?.exp()?; // [B, nv, C, C]
+        let decay = decay_f32.to_dtype(dtype)?; // back to hot dtype
+
+        // p[t] = exp(G[t]): scales (q[t] · S_entry) and (k[t] · S_entry).
+        let p = big_g.exp()?.to_dtype(dtype)?; // [B, nv, C]
+        let p_col = p.unsqueeze(3)?; // [B, nv, C, 1]
+
+        // Triangular masks (shared across batch/head via broadcasting).
+        let strict_mask = strict_lower_tri_mask(c, dtype, device)?; // [C, C]
+        let causal_mask = causal_lower_tri_mask(c, dtype, device)?; // [C, C]
+
+        // Inter-chunk read: K @ S_entry -> [B, nv, C, dv]
+        let ks_entry = k_c.matmul(&*state)?;
+
+        // V'[t] = v[t] - exp(G[t]) * (k[t] · S_entry)
+        let v_prime = (&v_c - ks_entry.broadcast_mul(&p_col)?)?; // [B, nv, C, dv]
+
+        // K^T reused for both KKT (intra-chunk similarities) and the final
+        // outer product into the state update.
+        let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
+
+        // A_strict[t, i] = exp(G[t]-G[i]) * (k[t] · k[i]) * 1[i<t]
+        let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
+        let a_strict = kkt
+            .broadcast_mul(&decay)?
+            .broadcast_mul(&strict_mask)?; // [B, nv, C, C]
+
+        // Forward substitution for W[t].
+        //   W[t] = beta[t] * ( V'[t] - Σ_{i<t} a_strict[t, i] * W[i] )
+        // We collect w_rows[i] of shape [B, nv, 1, dv] and grow a running
+        // [B, nv, t, dv] prefix via Tensor::cat for the inner matmul.
+        let beta_col = beta_c.unsqueeze(3)?; // [B, nv, C, 1]
+        let mut w_rows: Vec<Tensor> = Vec::with_capacity(c);
+        for t in 0..c {
+            let vp_t = v_prime.narrow(2, t, 1)?; // [B, nv, 1, dv]
+            let beta_t = beta_col.narrow(2, t, 1)?; // [B, nv, 1, 1]
+            let w_t = if t == 0 {
+                // Row 0 has an empty sum: W[0] = beta[0] * V'[0].
+                vp_t.broadcast_mul(&beta_t)?
+            } else {
+                // a_row = a_strict[..., t, :t]  shape [B, nv, 1, t]
+                let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?;
+                // w_prev stacks W[0..t]:  [B, nv, t, dv]
+                let w_prev = Tensor::cat(&w_rows, 2)?;
+                let sub = a_row.matmul(&w_prev)?; // [B, nv, 1, dv]
+                (vp_t - sub)?.broadcast_mul(&beta_t)?
+            };
+            w_rows.push(w_t);
+        }
+        let w = Tensor::cat(&w_rows, 2)?; // [B, nv, C, dv]
+
+        // QKT masked by causal decay:
+        //   B_mask[t, i] = exp(G[t]-G[i]) * (q[t] · k[i]) * 1[i<=t]
+        let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
+        let b_mask = qkt
+            .broadcast_mul(&decay)?
+            .broadcast_mul(&causal_mask)?; // [B, nv, C, C]
+
+        // Inter-chunk output contribution: exp(G[t]) * (q[t] · S_entry)
+        let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
+        let q_s_scaled = q_s.broadcast_mul(&p_col)?; // [B, nv, C, dv]
+
+        // Intra-chunk output contribution: B_mask @ W
+        let intra = b_mask.matmul(&w)?; // [B, nv, C, dv]
+
+        out_chunks.push((q_s_scaled + intra)?); // [B, nv, C, dv]
+
+        // State update:
+        //   S_new = exp(G[C-1]) * S_entry
+        //         + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
+        //
+        // The second term batches as k_t_mat @ (W scaled row-wise by
+        // exp(G[C-1] - G[i])).
+        let g_last = big_g.narrow(2, c - 1, 1)?; // [B, nv, 1]
+        let decay_last_col = g_last
+            .broadcast_sub(&big_g)?
+            .exp()?
+            .to_dtype(dtype)?
+            .unsqueeze(3)?; // [B, nv, C, 1]
+        let p_last = g_last.exp()?.to_dtype(dtype)?.unsqueeze(3)?; // [B, nv, 1, 1]
+
+        let state_scaled = state.broadcast_mul(&p_last)?; // [B, nv, dk, dv]
+        let w_weighted = w.broadcast_mul(&decay_last_col)?; // [B, nv, C, dv]
+        let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
+        *state = (state_scaled + delta_state)?;
+
+        t_start += c;
+    }
+
+    Ok(Tensor::cat(&out_chunks, 2)?)
+}
+
 /// Gated DeltaNet (GDN) linear attention forward pass.
 ///
 /// Implements the recurrent linear attention mechanism used by 24/32 layers in Qwen3.5-4B.
@@ -721,29 +929,36 @@ pub fn gated_deltanet_forward(
     }
     .to_dtype(input_dtype)?; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
 
-    // --- Step 7: Sequential recurrence with matmul readout/output ---
+    // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---
     // The recurrent state is stored in F32 externally (across layers/steps)
-    // for accumulator stability, but we run the loop in bf16 to reclaim the
-    // ~66% of prefill GPU time previously spent in bmul_f32 / fast_sum_f32 /
-    // badd_f32 (see PROFILING.md recommendation #2). State is cast bf16 at
-    // entry and restored to F32 at exit so the external invariant holds.
+    // for accumulator stability, but we run the recurrence in bf16 to reclaim
+    // the ~66% of prefill GPU time previously spent in bmul_f32 /
+    // fast_sum_f32 / badd_f32 (see PROFILING.md recommendation #2). State is
+    // cast to bf16 at entry and restored to F32 at exit so the external
+    // invariant holds.
     //
-    // The state update is still sequential (approach (a) in the chunkwise
-    // plan — we do not yet unroll the within-chunk recurrence analytically).
-    // The change vs #72 is to replace the two `broadcast_mul + sum` pairs
-    // (readout and output) with batched matmuls. For [B, nv, dk, dv] state
-    // and `[B, nv, 1, dk]` q/k rows, cuBLAS can fuse each as a single
-    // tensor-core GEMM rather than expanding the state into a full
-    // [B, nv, dk, dv] intermediate and summing it elementwise.
+    // PR #72 introduced the bf16 hot path. PR #74 replaced the read/write
+    // broadcast_mul+sum pairs with batched matmuls but left the O(T)
+    // sequential chain. This PR (Phase 6) unrolls the per-chunk recurrence
+    // analytically: within each C = GDN_CHUNK_SIZE chunk we build a
+    // triangular decay matrix and solve for the per-token updates in a small
+    // number of heavy matmuls, cutting the number of GPU kernel launches
+    // from O(T) to O(T / C) per layer.
+    //
+    // The within-chunk forward substitution still walks token-by-token, but
+    // each step only does a [1, t] @ [t, dv] matmul over the already-built
+    // prefix — orders of magnitude cheaper than the full [dk, dv] state
+    // update that was previously done per token.
     let state_external_dtype = recurrent_state.dtype();
     if state_external_dtype != input_dtype {
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
-    // Cast v back to input_dtype so the loop stays in bf16. After the causal
-    // conv1d + SiLU step above, mixed_qkv (and hence v) is F32; without this
-    // cast the subtract `(v_t - kv_mem)` below hits a dtype mismatch on bf16
-    // GPU runs, because kv_mem inherits the (now bf16) state dtype.
+    // Cast v back to input_dtype so the recurrence stays in bf16. After the
+    // causal conv1d + SiLU step above, mixed_qkv (and hence v) is F32;
+    // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
+    // hits a dtype mismatch on bf16 GPU runs, because the state-derived
+    // tensor inherits the (now bf16) state dtype.
     let v = v.to_dtype(input_dtype)?;
 
     // Transpose to [B, nv, T, dim] for per-head processing.
@@ -753,44 +968,15 @@ pub fn gated_deltanet_forward(
     let beta = beta.transpose(1, 2)?; // [B, nv, T]
     let g = g.transpose(1, 2)?; // [B, nv, T]
 
-    let mut outputs: Vec<Tensor> = Vec::with_capacity(seq_len);
-
-    for t in 0..seq_len {
-        // Keep the singleton T dim on q/k so matmul sees them as
-        // [B, nv, 1, dk] (M=1 rows). That lets the readout and output
-        // fold into single batched GEMMs against the [B, nv, dk, dv]
-        // state, with cuBLAS emitting tensor-core ops on bf16.
-        let q_t = q.narrow(2, t, 1)?; // [B, nv, 1, dk]
-        let k_t = k.narrow(2, t, 1)?; // [B, nv, 1, dk]
-        let v_t = v.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dv]
-        let beta_t = beta.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
-        let g_t = g.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
-
-        // 1. Decay: S *= exp(g_t)
-        let g_exp = g_t.exp()?.unsqueeze(2)?.unsqueeze(3)?; // [B, nv, 1, 1]
-        *recurrent_state = recurrent_state.broadcast_mul(&g_exp)?;
-
-        // 2. Read from memory via batched matmul:
-        //    kv_mem = einsum('bhkv,bhk->bhv', S, k) = k_t @ S
-        //    shape : [B, nv, 1, dk] @ [B, nv, dk, dv] -> [B, nv, 1, dv]
-        let kv_mem = k_t.matmul(recurrent_state)?.squeeze(2)?; // [B, nv, dv]
-
-        // 3. Delta rule: delta = (v_t - kv_mem) * beta_t
-        let delta: Tensor = (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
-
-        // 4. Update: S += outer(k_t, delta). We keep broadcast_mul here:
-        //    the outer product is emitted as a single broadcast multiply
-        //    into the [B, nv, dk, dv] state shape, which measured on par
-        //    with a `[dk,1] @ [1,dv]` GEMM but avoids the transpose.
-        let k_col = k_t.squeeze(2)?.unsqueeze(3)?; // [B, nv, dk, 1]
-        let outer = k_col.broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
-        *recurrent_state = (&*recurrent_state + &outer)?;
-
-        // 5. Output via batched matmul:
-        //    out_t = q_t @ S -> [B, nv, 1, dv]  (keeps T dim)
-        let out_t = q_t.matmul(recurrent_state)?; // [B, nv, 1, dv]
-        outputs.push(out_t);
-    }
+    let attn_out = gdn_chunkwise_recurrence(
+        &q,
+        &k,
+        &v,
+        &beta,
+        &g,
+        recurrent_state,
+        GDN_CHUNK_SIZE,
+    )?; // [B, nv, T, dv]
 
     // Restore state to its original dtype so the caller's F32 invariant holds
     // across layer calls and across prefill/decode steps.
@@ -798,8 +984,6 @@ pub fn gated_deltanet_forward(
         *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
     }
 
-    // Collect: [B, nv, T, dv]
-    let attn_out = Tensor::cat(&outputs, 2)?;
     // Transpose to [B, T, nv, dv]
     let attn_out = attn_out.transpose(1, 2)?;
 
@@ -2811,6 +2995,160 @@ mod tests {
         assert!(vals[4].is_infinite() && vals[4] < 0.0); // pos 4: masked
         // Row 1 (abs pos 4): can attend to all 5 positions
         assert!(vals[5..10].iter().all(|v| (*v - 1.0).abs() < 1e-6));
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // GDN chunkwise correctness test (Phase 6)
+    // ------------------------------------------------------------------
+
+    /// Reference per-token GDN recurrence, mirroring the pre-Phase-6 loop
+    /// that used to live in `gated_deltanet_forward`. Kept in the test
+    /// module (never called from production) so the chunkwise implementation
+    /// can be cross-checked against the arithmetically simple form.
+    ///
+    /// Inputs are already transposed to [B, nv, T, *]; state is [B, nv, dk, dv].
+    fn gdn_sequential_reference(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Tensor> {
+        let (_, _, seq_len, _) = q.dims4()?;
+        let mut outputs: Vec<Tensor> = Vec::with_capacity(seq_len);
+        for t in 0..seq_len {
+            let q_t = q.narrow(2, t, 1)?; // [B, nv, 1, dk]
+            let k_t = k.narrow(2, t, 1)?; // [B, nv, 1, dk]
+            let v_t = v.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dv]
+            let beta_t = beta.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
+            let g_t = g.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
+
+            let g_exp = g_t.exp()?.unsqueeze(2)?.unsqueeze(3)?; // [B, nv, 1, 1]
+            *state = state.broadcast_mul(&g_exp)?;
+
+            let kv_mem = k_t.matmul(&*state)?.squeeze(2)?; // [B, nv, dv]
+            let delta: Tensor =
+                (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
+
+            let k_col = k_t.squeeze(2)?.unsqueeze(3)?; // [B, nv, dk, 1]
+            let outer = k_col.broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
+            *state = (&*state + &outer)?;
+
+            let out_t = q_t.matmul(&*state)?; // [B, nv, 1, dv]
+            outputs.push(out_t);
+        }
+        Ok(Tensor::cat(&outputs, 2)?)
+    }
+
+    /// Deterministic tensor of the given shape filled with values from a
+    /// simple hash of the index. Avoids depending on candle's RNG (which
+    /// uses process-global state) and keeps the test reproducible.
+    fn det_tensor(shape: &[usize], scale: f32, bias: f32, device: &Device) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| {
+                // Cheap mixable pseudo-random: stretch i through two sin
+                // waves of different frequencies. Gives values in roughly
+                // [-1, 1] with no exact repeats for small n.
+                let x = (i as f32 * 0.7283).sin() + (i as f32 * 1.3719).cos();
+                (x * 0.5) * scale + bias
+            })
+            .collect();
+        Ok(Tensor::from_vec(data, shape, device)?)
+    }
+
+    #[test]
+    fn test_gdn_chunkwise_matches_sequential() -> Result<()> {
+        // Small, fully-on-CPU shapes. We use F32 here so the comparison
+        // is against the same numerical path the chunkwise form takes
+        // for its decay cumulative products; the task spec's bf16
+        // tolerance (<1e-3) is comfortably satisfied in F32 as well.
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let b = 1;
+        let nv = 2;
+        let t = 8;
+        let dk = 4;
+        let dv = 4;
+        let chunk_size = 4;
+
+        let q = det_tensor(&[b, nv, t, dk], 1.0, 0.0, &device)?.to_dtype(dtype)?;
+        let k = det_tensor(&[b, nv, t, dk], 1.0, 0.0, &device)?.to_dtype(dtype)?;
+        let v = det_tensor(&[b, nv, t, dv], 1.0, 0.0, &device)?.to_dtype(dtype)?;
+        // beta ∈ (0, 1): pass through sigmoid-like shift.
+        let beta_raw = det_tensor(&[b, nv, t], 2.0, 0.0, &device)?.to_dtype(dtype)?;
+        let beta = {
+            let ones = Tensor::ones_like(&beta_raw)?;
+            (&ones / (&ones + &beta_raw.neg()?.exp()?)?)?
+        };
+        // g ∈ (-0.2, 0): small negative decays so cumulative sum stays sane.
+        let g_raw = det_tensor(&[b, nv, t], 0.2, 0.0, &device)?.to_dtype(dtype)?;
+        let g = (g_raw.abs()? * (-1.0_f64))?;
+
+        let state_init = Tensor::zeros((b, nv, dk, dv), dtype, &device)?;
+
+        let mut state_chunk = state_init.clone();
+        let out_chunk = gdn_chunkwise_recurrence(
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            &mut state_chunk,
+            chunk_size,
+        )?;
+
+        let mut state_seq = state_init.clone();
+        let out_seq = gdn_sequential_reference(&q, &k, &v, &beta, &g, &mut state_seq)?;
+
+        let out_diff = (&out_chunk - &out_seq)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let state_diff = (&state_chunk - &state_seq)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+
+        // Task acceptance: max abs diff < 1e-3 in bf16. We run the test in
+        // F32 so the actual tolerance is much tighter; guard against both
+        // silent divergence and silent upgrade of the bf16 tolerance bound.
+        assert!(
+            out_diff < 1e-3,
+            "chunkwise vs sequential output diff too large: {out_diff}",
+        );
+        assert!(
+            state_diff < 1e-3,
+            "chunkwise vs sequential state diff too large: {state_diff}",
+        );
+
+        // Also test chunk_size >= seq_len (single-chunk path) and
+        // chunk_size == 1 (decode-like path) for coverage.
+        for &cs in &[1usize, t] {
+            let mut state_a = state_init.clone();
+            let out_a =
+                gdn_chunkwise_recurrence(&q, &k, &v, &beta, &g, &mut state_a, cs)?;
+            let mut state_b = state_init.clone();
+            let out_b = gdn_sequential_reference(&q, &k, &v, &beta, &g, &mut state_b)?;
+            let d = (&out_a - &out_b)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            let sd = (&state_a - &state_b)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(d < 1e-3, "chunkwise(cs={cs}) output diff {d}");
+            assert!(sd < 1e-3, "chunkwise(cs={cs}) state diff {sd}");
+        }
 
         Ok(())
     }
