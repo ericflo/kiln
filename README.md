@@ -5,174 +5,240 @@
 <h1 align="center">Kiln</h1>
 
 <p align="center">
-  A single-model LLM inference server with live online learning.<br>
-  <strong>Train while you serve.</strong>
+  <strong>Your model gets better every time you use it.</strong><br>
+  A single-GPU inference server with live LoRA training. Pure Rust. Single binary.
 </p>
 
-## What is this?
+<p align="center">
+  <a href="QUICKSTART.md">Quickstart</a> &middot;
+  <a href="ARCHITECTURE.md">Architecture</a> &middot;
+  <a href="kiln.example.toml">Configuration</a>
+</p>
 
-Kiln is an inference server purpose-built for one model. The entire inference stack is tuned to that model — no abstractions, no multi-model support, no plugin system. Just fast, long-context inference with one killer feature: **you can submit training examples (SFT or GRPO) and the server immediately starts serving the updated weights via LoRA hot-swap.**
+---
 
-The idea: you run this on your home server, collect examples of failures, submit corrections or scored completions, and get an improved model within seconds — all without restarting the server or managing separate training infrastructure.
+Kiln serves a language model and trains it — in the same process, on the same GPU, at the same time. You submit corrections or scored completions over HTTP, and the model improves in seconds. No restarts, no separate training pipeline, no second copy of the weights.
 
-## Target Model
+It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
-**Qwen3.5-4B** — a hybrid architecture combining Gated DeltaNet linear attention with standard GQA attention. This is the ideal model for Kiln because:
+## Why
 
-- **262K native context** — long-context is a first-class capability, not an afterthought
-- **Hybrid attention** — 24 of 32 layers use linear attention (O(1) state), only 8 use full GQA attention. KV cache is ~32 KB/token instead of ~128 KB/token. This is what makes 128K+ context practical on a single 24GB GPU.
-- **4B parameters** — large enough to be genuinely capable, small enough for consumer hardware. LoRA training completes in seconds, not hours.
-- **248K vocabulary** — 202+ language support out of the box
-- **Built-in vision encoder** — future path to multimodal fine-tuning
+Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, redeploy, hope. Kiln collapses that into one API call:
 
-| Spec | Value |
-|---|---|
-| Layers | 32 (24 linear + 8 full attention) |
-| Hidden size | 2560 |
-| Attention heads | 16 Q / 4 KV (GQA, 4:1 ratio) |
-| Head dim | 256 |
-| FFN intermediate | 9216 |
-| Context length | 262,144 tokens (native) |
-| KV cache / token | ~32 KB (BF16, 8 full-attn layers only) |
+```bash
+# Submit a correction — the model learns it in seconds
+curl http://localhost:8420/v1/train/sft \
+  -H "Content-Type: application/json" \
+  -d '{
+    "examples": [
+      {"messages": [
+        {"role": "user", "content": "Summarize this contract clause..."},
+        {"role": "assistant", "content": "The clause establishes..."}
+      ]}
+    ]
+  }'
+
+# The next request already uses the updated weights
+curl http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Summarize this contract clause..."}]}'
+```
+
+A 4B model continuously tuned to your specific workload will outperform a generic 70B model on the tasks you actually care about. And it runs on hardware you already own.
+
+## Features
+
+- **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting.
+- **SFT training** over HTTP — submit examples, model updates in seconds via LoRA hot-swap.
+- **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function.
+- **LoRA hot-swap** — new adapter weights activate atomically at iteration boundaries. Zero downtime.
+- **Continuous batching** with chunked prefill — decode requests are never stalled by long prompts.
+- **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
+- **Paged KV cache** — virtual memory-style block allocation eliminates fragmentation.
+- **FP8 KV cache** — optional quantization doubles effective context length.
+- **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
+- **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
+- **Adapter management** — load, unload, compose, and version LoRA adapters.
+- **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
+- **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
+
+## The GRPO Loop
+
+This is the killer feature. Generate completions, score them with your own reward function, and feed the results back. The model learns what "good" means for your use case.
+
+```python
+import openai
+
+client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
+
+# 1. Generate candidates
+responses = [
+    client.chat.completions.create(
+        model="qwen3.5-4b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
+    for _ in range(8)
+]
+
+# 2. Score them however you want — regex, unit tests, another model, human eval
+scored = [{"text": r.choices[0].message.content, "reward": my_score(r)} for r in responses]
+
+# 3. Submit — the server trains and hot-swaps immediately
+requests.post("http://localhost:8420/v1/train/grpo", json={
+    "groups": [{"prompt": prompt, "completions": scored}]
+})
+
+# 4. Next inference already uses the improved weights
+```
+
+## Quick Start
+
+**Prerequisites:** NVIDIA GPU with 24GB+ VRAM, CUDA 12+, Rust stable toolchain.
+
+```bash
+git clone https://github.com/ericflo/kiln.git
+cd kiln
+cargo build --release --features cuda    # ~15-30 min first build (CUDA kernels)
+
+# Download model weights
+pip install huggingface-hub
+huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+
+# Start serving
+KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
+```
+
+```
+  ┌─────────────────────────────────────┐
+  │           🔥 K I L N 🔥             │
+  │   inference · training · adapters    │
+  └─────────────────────────────────────┘
+
+  Version: 0.1.0
+  Model:   ./Qwen3.5-4B
+  CUDA:    available ✓
+  Listen:  http://0.0.0.0:8420
+```
+
+```bash
+# Chat
+curl http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Hello!"}], "stream": true}'
+
+# Train
+curl http://localhost:8420/v1/train/sft \
+  -H "Content-Type: application/json" \
+  -d '{"examples": [{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hey there!"}]}]}'
+
+# Check training
+curl http://localhost:8420/v1/train/status
+```
+
+See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including GRPO, adapter management, Docker, and systemd setup.
+
+## Memory Budget (24GB GPU)
+
+Qwen3.5-4B's hybrid architecture is the key. Only 8 of 32 layers need KV cache, so long-context inference costs a fraction of what a pure transformer would.
+
+| Scenario | Total VRAM | Fits 24GB? |
+|---|---|---|
+| 128K context, 1 sequence, inference only | ~13 GB | Yes |
+| 128K context, 1 sequence, inference + training | ~18 GB | Yes |
+| 64K context, 4 sequences, inference + training | ~22 GB | Yes |
+| 32K context, 8 sequences, inference + training | ~22 GB | Yes |
+| 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
+
+## API
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible) |
+| POST | `/v1/train/sft` | Submit SFT training examples |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions |
+| GET | `/v1/train/status` | Training queue and job status |
+| GET | `/v1/adapters` | List loaded LoRA adapters |
+| POST | `/v1/adapters/load` | Load adapter from disk |
+| POST | `/v1/adapters/unload` | Unload active adapter |
+| GET | `/v1/models` | List available models |
+| GET | `/health` | Server health and diagnostics |
+| GET | `/metrics` | Prometheus metrics |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  KILN SERVER                     │
-│                                                  │
-│  HTTP API (axum)                                 │
-│    ├── /v1/chat/completions  (OpenAI-compat)    │
-│    ├── /v1/models                                │
-│    ├── /v1/adapters          (LoRA management)   │
-│    ├── /v1/train/sft         (submit examples)   │
-│    └── /v1/train/grpo        (submit scored)     │
-│                                                  │
-│  Scheduler (continuous batching, chunked prefill)│
-│    └── Block Manager (paged KV cache)            │
-│                                                  │
-│  Engine (model forward pass + LoRA application)  │
-│    ├── 24× Gated DeltaNet layers (linear attn)  │
-│    └──  8× GQA layers (full attention + KV)     │
-│                                                  │
-│  In-Process Training (pure Rust, candle)          │
-│    ├── SFT (cross-entropy on LoRA)              │
-│    └── GRPO (group relative policy optimization) │
-└─────────────────────────────────────────────────┘
+Single Rust binary:
+  HTTP (axum) ─── Scheduler (continuous batching, chunked prefill)
+                      │
+                  Block Manager (paged KV cache)
+                      │
+                  Engine (model forward + LoRA)
+                  ├── 24× Gated DeltaNet layers (linear attention, O(1) state)
+                  └──  8× GQA layers (full attention + KV cache)
+                      │
+                  Training (background thread, shares GPU memory)
+                  ├── SFT (cross-entropy on LoRA parameters)
+                  └── GRPO (advantage-weighted policy gradient)
 ```
 
-- **Inference**: Rust (axum HTTP server, iteration-level scheduler, paged KV cache)
-- **Training**: In-process LoRA training (pure Rust via candle, no Python dependency)
-- **LoRA hot-swap**: New adapter weights are swapped atomically at iteration boundaries
+Everything runs in one process. Training happens on a background thread sharing the already-loaded model — no second copy in VRAM, no Python sidecar.
 
-## Key Design Decisions
-
-- **Single model, fully tuned.** No runtime model switching. The scheduler, memory management, and kernels are all optimized for Qwen3.5-4B's hybrid architecture.
-- **Hybrid attention aware.** The engine knows which layers are linear (Gated DeltaNet) and which are full attention (GQA). KV cache is only allocated for the 8 full-attention layers. Linear layers maintain fixed-size recurrent state.
-- **Continuous batching with chunked prefill.** Sarathi-style: decode requests are never stalled by long prefills. The prefill is chunked across iterations.
-- **Paged KV cache.** Virtual memory-style block allocation eliminates fragmentation. Each request gets a block table mapping logical positions to physical blocks.
-- **LoRA-only training.** All learning happens through LoRA adapters. The base model weights are never modified. This means changes are reversible, composable, and cheap.
-- **GRPO as a first-class citizen.** Submit a batch of scored completions and the server runs a GRPO update — no separate training pipeline needed. The client controls the reward function.
-
-## The GRPO Loop
-
-```python
-# 1. Generate completions
-responses = client.generate_batch(prompts, n=8, temperature=0.7)
-
-# 2. Score them (your reward function — regex, code exec, another model, human)
-for r in responses:
-    r.reward = my_reward_fn(r.text)
-
-# 3. Submit GRPO update — server trains and hot-swaps immediately
-client.train_grpo(responses)
-
-# 4. Next inference call uses updated weights
-answer = client.chat("What is 2+2?")
-```
-
-## Memory Budget (24GB GPU)
-
-Qwen3.5-4B's hybrid architecture is the key enabler. Because only 8 of 32 layers need KV cache, the memory footprint at long context is ~4× lower than a pure transformer.
-
-| Scenario | Weights | KV Cache | LoRA + Training | Total |
-|---|---|---|---|---|
-| **128K ctx, 1 seq, inference only** | 8 GB | ~4 GB | — | ~13 GB ✓ |
-| **128K ctx, 1 seq, inference + training** | 8 GB | ~4 GB | ~5 GB | ~18 GB ✓ |
-| **128K ctx, 4 seq, inference only** | 8 GB | ~16 GB | — | ~25 GB ⚠️ |
-| **64K ctx, 4 seq, inference + training** | 8 GB | ~8 GB | ~5 GB | ~22 GB ✓ |
-| **32K ctx, 8 seq, inference + training** | 8 GB | ~8 GB | ~5 GB | ~22 GB ✓ |
-| **128K ctx, 4 seq, INT4 weights** | 2.5 GB | ~16 GB | — | ~19 GB ✓ |
-
-**128K context with a single sequence fits on a 24GB GPU with room to spare for training.** This is the hybrid architecture payoff — what would require 26+ GB on a pure transformer needs only 13 GB here.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
 
 ## Project Structure
 
 ```
 crates/
-  kiln-core/       Core types: block manager, config, request, sampling
-  kiln-model/      Engine trait, model loading, LoRA management
-  kiln-scheduler/  Continuous batching scheduler with chunked prefill
-  kiln-server/     HTTP server (axum), OpenAI-compatible API
-  kiln-train/      In-process LoRA training (pure Rust, candle)
+  kiln-core/         Core types: block manager, config, request lifecycle
+  kiln-flash-attn/   Vendored Flash-Attention-2 CUDA kernels (C-ABI + Rust FFI)
+  kiln-model/        Model loading, forward pass, LoRA, sampling
+  kiln-scheduler/    Continuous batching scheduler with prefix caching
+  kiln-server/       HTTP server, CLI, training queue, metrics, config
+  kiln-train/        SFT and GRPO training loops with gradient checkpointing
 ```
 
-## Quickstart
+## Configuration
 
-See [QUICKSTART.md](QUICKSTART.md) for the full guide. The short version:
+Kiln uses a TOML config file. Environment variables override config values. See [`kiln.example.toml`](kiln.example.toml) for all options.
 
-{"timestamp":"2026-04-15T15:59:27.528152Z","level":"INFO","fields":{"message":"loading tokenizer from HuggingFace Hub: Qwen/Qwen3.5-4B"},"target":"kiln"}
-{"timestamp":"2026-04-15T15:59:28.560485Z","level":"INFO","fields":{"message":"tokenizer loaded successfully","vocab_size":248070},"target":"kiln"}
-{"timestamp":"2026-04-15T15:59:28.560527Z","level":"INFO","fields":{"message":"loading model weights from ./Qwen3.5-4B"},"target":"kiln"}
+| Setting | Env Var | Default | Description |
+|---|---|---|---|
+| `model.path` | `KILN_MODEL_PATH` | — | Path to model weights (required) |
+| `server.port` | `KILN_PORT` | 8420 | Server listen port |
+| `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
+| `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
+| `logging.format` | — | json | `json`, `human`, `pretty`, or `text` |
+| `prefix_cache.enabled` | — | true | Reuse KV cache for shared prefixes |
 
-## Features
+## Deployment
 
-- **GPU inference** with continuous batching, chunked prefill, and paged KV cache
-- **128K+ context** on a single 24GB GPU (hybrid GDN + GQA architecture)
-- **OpenAI-compatible API** — drop-in replacement for local inference
-- **SSE streaming** for chat completions
-- **SFT training** via HTTP API or CLI — submit examples, model updates in seconds
-- **GRPO training** — reinforcement learning from scored completions
-- **LoRA hot-swap** — new adapter weights activate at iteration boundaries, zero downtime
-- **Adapter management** — load, unload, delete, compose multiple LoRAs
-- **Prefix caching** — reuse KV cache for shared prompt prefixes
-- **FP8 KV cache** — optional quantization doubles context length
-- **Gradient checkpointing** — training fits on 24GB GPUs
-- **Prometheus metrics** at /metrics
-- **Beautiful CLI** with progress bars and colored output
-- **Docker and systemd** deployment support
+```bash
+# Docker
+docker build -f deploy/Dockerfile -t kiln .
+docker run --gpus all -v /path/to/Qwen3.5-4B:/models -p 8420:8420 kiln serve
+
+# systemd
+sudo cp target/release/kiln /usr/local/bin/
+sudo cp deploy/kiln.service /etc/systemd/system/
+sudo systemctl enable --now kiln
+```
 
 ## Status
 
-Kiln is in active development. Phases 1-5 (core inference, LoRA serving, SFT training, GRPO training, production hardening) are complete. Current work: performance optimization and developer experience.
+Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, and production hardening are complete. Current work: performance benchmarking and optimization (FP8, CUDA graphs, quantization).
 
-## Building
-
-```bash
-cargo build --release
-```
-
-## Running
-
-```bash
-# Start with mock engine (for development/testing)
-KILN_PORT=8420 cargo run --release --bin kiln
-
-# Test
-curl http://localhost:8420/health
-curl http://localhost:8420/v1/models
-curl -X POST http://localhost:8420/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "Hello!"}]}'
-```
+Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 
 ## Prior Art
 
-- [Tinker API](https://thinkingmachines.ai/blog/announcing-tinker/) by Thinking Machines Lab — cloud-hosted LoRA training + serving. Kiln is the self-hosted, single-model, open-source version of this idea.
-- [vLLM](https://github.com/vllm-project/vllm) — production inference server with PagedAttention. Kiln borrows the paged KV cache and continuous batching concepts.
-- [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) — 1200-line reference implementation of continuous batching. Proves the core can be simple.
-- [S-LoRA](https://arxiv.org/abs/2311.03285) / [LoRAX](https://github.com/predibase/lorax) — multi-LoRA serving. Kiln's LoRA serving approach draws from these.
-- [DeepSeekMath](https://arxiv.org/abs/2402.03300) — introduced GRPO. Kiln implements GRPO as a first-class training method.
+Kiln builds on ideas from:
+
+- [vLLM](https://github.com/vllm-project/vllm) — paged KV cache, continuous batching
+- [DeepSeekMath](https://arxiv.org/abs/2402.03300) — GRPO algorithm
+- [S-LoRA](https://arxiv.org/abs/2311.03285) — multi-LoRA serving techniques
+- [Tinker](https://thinkingmachines.ai/blog/announcing-tinker/) — the cloud-hosted version of this idea. Kiln is the self-hosted, open-source take.
+- [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) — proof that the core can be simple
 
 ## License
 
