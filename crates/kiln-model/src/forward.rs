@@ -713,12 +713,14 @@ fn gdn_chunkwise_recurrence(
     while t_start < seq_len {
         let c = (seq_len - t_start).min(chunk_size);
 
-        // Slice the current chunk out of the per-head tensors.
-        let q_c = q.narrow(2, t_start, c)?; // [B, nv, C, dk]
-        let k_c = k.narrow(2, t_start, c)?; // [B, nv, C, dk]
-        let v_c = v.narrow(2, t_start, c)?; // [B, nv, C, dv]
-        let beta_c = beta.narrow(2, t_start, c)?; // [B, nv, C]
-        let g_c = g.narrow(2, t_start, c)?; // [B, nv, C]
+        // Slice the current chunk out of the per-head tensors. Narrow on a
+        // non-leading dim leaves the result non-contiguous, and candle's
+        // matmul requires contiguous inputs — so materialize each chunk.
+        let q_c = q.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C, dk]
+        let k_c = k.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C, dk]
+        let v_c = v.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C, dv]
+        let beta_c = beta.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C]
+        let g_c = g.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C]
 
         // Cumulative decay G[t] = Σ_{s=0..t} g[s].  Done in F32: exp() of
         // the cumulative sum is the only place bf16 would lose meaningful
@@ -756,7 +758,8 @@ fn gdn_chunkwise_recurrence(
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let a_strict = kkt
             .broadcast_mul(&decay)?
-            .broadcast_mul(&strict_mask)?; // [B, nv, C, C]
+            .broadcast_mul(&strict_mask)?
+            .contiguous()?; // [B, nv, C, C]
 
         // Forward substitution for W[t].
         //   W[t] = beta[t] * ( V'[t] - Σ_{i<t} a_strict[t, i] * W[i] )
@@ -772,7 +775,7 @@ fn gdn_chunkwise_recurrence(
                 vp_t.broadcast_mul(&beta_t)?
             } else {
                 // a_row = a_strict[..., t, :t]  shape [B, nv, 1, t]
-                let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?;
+                let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?.contiguous()?;
                 // w_prev stacks W[0..t]:  [B, nv, t, dv]
                 let w_prev = Tensor::cat(&w_rows, 2)?;
                 let sub = a_row.matmul(&w_prev)?; // [B, nv, 1, dv]
@@ -787,7 +790,8 @@ fn gdn_chunkwise_recurrence(
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let b_mask = qkt
             .broadcast_mul(&decay)?
-            .broadcast_mul(&causal_mask)?; // [B, nv, C, C]
+            .broadcast_mul(&causal_mask)?
+            .contiguous()?; // [B, nv, C, C]
 
         // Inter-chunk output contribution: exp(G[t]) * (q[t] · S_entry)
         let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
@@ -813,7 +817,7 @@ fn gdn_chunkwise_recurrence(
         let p_last = g_last.exp()?.to_dtype(dtype)?.unsqueeze(3)?; // [B, nv, 1, 1]
 
         let state_scaled = state.broadcast_mul(&p_last)?; // [B, nv, dk, dv]
-        let w_weighted = w.broadcast_mul(&decay_last_col)?; // [B, nv, C, dv]
+        let w_weighted = w.broadcast_mul(&decay_last_col)?.contiguous()?; // [B, nv, C, dv]
         let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
 
