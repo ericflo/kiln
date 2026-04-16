@@ -669,16 +669,22 @@ pub fn gated_deltanet_forward(
     };
 
     // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
+    // Normalize in F32 for numerical stability (sqrt/div), then cast back to
+    // the input dtype so the recurrent loop below runs in bf16 (see Step 7).
     let q = l2_normalize(&q)?; // F32
     let k = l2_normalize(&k)?; // F32
     let scale = 1.0 / (dk as f64).sqrt();
-    let q = (q * scale)?;
+    let q = (q * scale)?.to_dtype(input_dtype)?;
+    let k = k.to_dtype(input_dtype)?;
 
     // --- Step 6: Compute gates ---
-    // beta = sigmoid(b) — write gate, in (0, 1)
-    let beta = cuda_sigmoid(&b)?.to_dtype(DType::F32)?; // [B, T, nv]
+    // beta = sigmoid(b) — write gate, in (0, 1). sigmoid output is bounded so
+    // bf16 has enough precision; no F32 upcast needed.
+    let beta = cuda_sigmoid(&b)?; // [B, T, nv], bf16
 
-    // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space)
+    // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space).
+    // The softplus/exp pipeline is computed in F32 for stability (it involves
+    // exp and log near 0), then cast to the input dtype for the bf16 loop.
     let a_f32 = a.to_dtype(DType::F32)?;
     let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
     let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
@@ -687,10 +693,25 @@ pub fn gated_deltanet_forward(
         let sp = softplus(&a_biased)?;
         let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
         sp.broadcast_mul(&neg_decay)?
-    }; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
+    }
+    .to_dtype(input_dtype)?; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
 
-    // --- Step 7: Sequential recurrence (all F32) ---
-    let v = v.to_dtype(DType::F32)?;
+    // --- Step 7: Sequential recurrence ---
+    // The recurrent state is stored in F32 externally (across layers/steps)
+    // for accumulator stability, but we run the loop in bf16 to reclaim the
+    // ~66% of prefill GPU time previously spent in bmul_f32 / fast_sum_f32 /
+    // badd_f32 (see PROFILING.md recommendation #2). State is cast bf16 at
+    // entry and restored to F32 at exit so the external invariant holds.
+    let state_external_dtype = recurrent_state.dtype();
+    if state_external_dtype != input_dtype {
+        *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
+    }
+
+    // Cast v back to input_dtype so the loop stays in bf16. After the causal
+    // conv1d + SiLU step above, mixed_qkv (and hence v) is F32; without this
+    // cast the subtract `(v_t - kv_mem)` below hits a dtype mismatch on bf16
+    // GPU runs, because kv_mem inherits the (now bf16) state dtype.
+    let v = v.to_dtype(input_dtype)?;
 
     // Transpose to [B, nv, T, dim] for per-head processing
     let q = q.transpose(1, 2)?; // [B, nv, T, dk]
@@ -719,16 +740,24 @@ pub fn gated_deltanet_forward(
         // 3. Delta rule: delta = (v_t - kv_mem) * beta_t
         let delta: Tensor = (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
 
-        // 4. Update: S += outer(k_t, delta)
-        let outer = k_t
-            .unsqueeze(3)?
-            .broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
-        *recurrent_state = (recurrent_state.clone() + outer)?;
+        // 4. Update: S += outer(k_t, delta) — reference add, no explicit clone.
+        // The `Tensor::add` op takes references and allocates a new tensor for
+        // the result regardless of how `lhs` is passed, so clone() was pure
+        // Arc churn with no effect on storage allocation.
+        let outer = k_t.unsqueeze(3)?.broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
+        let new_state = (&*recurrent_state + &outer)?;
+        *recurrent_state = new_state;
 
         // 5. Output: out_t = einsum('bhkv,bhk->bhv', S, q_t)
         let q_expanded = q_t.unsqueeze(3)?; // [B, nv, dk, 1]
         let out_t = recurrent_state.broadcast_mul(&q_expanded)?.sum(2)?; // [B, nv, dv]
         outputs.push(out_t.unsqueeze(2)?); // [B, nv, 1, dv]
+    }
+
+    // Restore state to its original dtype so the caller's F32 invariant holds
+    // across layer calls and across prefill/decode steps.
+    if state_external_dtype != input_dtype {
+        *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
     }
 
     // Collect: [B, nv, T, dv]
