@@ -1,3 +1,4 @@
+pub mod adapter_merge;
 pub mod cuda_graph;
 pub mod engine;
 pub mod forward;

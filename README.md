@@ -161,6 +161,7 @@ Qwen3.5-4B's hybrid architecture is the key. Only 8 of 32 layers need KV cache, 
 | GET | `/v1/adapters` | List loaded LoRA adapters |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
+| POST | `/v1/adapters/merge` | Merge adapters via weighted average |
 | GET | `/v1/models` | List available models |
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |

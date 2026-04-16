@@ -5,6 +5,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use kiln_model::adapter_merge::{merge_linear, PeftLora};
 use kiln_model::lora_loader::LoraWeights;
 
 use crate::error::ApiError;
@@ -268,6 +269,180 @@ fn scan_adapter_dir(dir: &Path) -> Vec<AdapterDiskEntry> {
     entries
 }
 
+/// Source adapter to include in a merge.
+#[derive(Deserialize)]
+struct MergeSource {
+    /// Adapter name (subdirectory under adapter_dir).
+    name: String,
+    /// Weight applied to this adapter's tensors in the linear interpolation.
+    weight: f32,
+}
+
+/// Request body for POST /v1/adapters/merge.
+#[derive(Deserialize)]
+struct MergeAdapterRequest {
+    /// Source adapters and their interpolation weights. Must contain at least
+    /// two entries to be a true merge (a single source is allowed and behaves
+    /// as a copy with optional rescaling).
+    sources: Vec<MergeSource>,
+    /// Name of the output adapter (subdirectory created under adapter_dir).
+    output_name: String,
+    /// Merge mode. Currently only "weighted_average" (the default) is
+    /// supported. TIES and concatenation will arrive in follow-up PRs.
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// Source summary echoed back in the merge response.
+#[derive(Serialize)]
+struct MergeSourceInfo {
+    name: String,
+    weight: f32,
+}
+
+/// Response body for POST /v1/adapters/merge.
+#[derive(Serialize)]
+struct MergeAdapterResponse {
+    status: &'static str,
+    output_name: String,
+    mode: &'static str,
+    sources: Vec<MergeSourceInfo>,
+    /// Number of tensors in the merged adapter.
+    num_tensors: usize,
+}
+
+/// Merge multiple LoRA adapters via linear interpolation.
+///
+/// For each tensor key shared across the input adapters, computes the
+/// weighted sum `Σᵢ wᵢ · tensor_i` and writes the result to a new adapter
+/// directory in `adapter_dir`. Source adapters must have identical rank,
+/// target_modules, base model, and tensor shapes.
+async fn merge_adapters(
+    State(state): State<AppState>,
+    Json(req): Json<MergeAdapterRequest>,
+) -> Result<Json<MergeAdapterResponse>, ApiError> {
+    // Validate mode (default = weighted_average).
+    let mode = req.mode.as_deref().unwrap_or("weighted_average");
+    if mode != "weighted_average" {
+        return Err(ApiError::adapter_merge_invalid(format!(
+            "unsupported merge mode '{mode}' — only 'weighted_average' is supported in v1"
+        )));
+    }
+
+    // Need at least one source.
+    if req.sources.is_empty() {
+        return Err(ApiError::adapter_merge_invalid(
+            "sources must contain at least one entry",
+        ));
+    }
+
+    // Validate output_name: no path separators, not "." or "..", non-empty.
+    let output_name = req.output_name.trim().to_string();
+    if output_name.is_empty()
+        || output_name == "."
+        || output_name == ".."
+        || output_name.contains('/')
+        || output_name.contains('\\')
+    {
+        return Err(ApiError::adapter_merge_bad_name(&output_name));
+    }
+
+    // Resolve and confirm all source adapter directories exist before
+    // doing any I/O work.
+    let mut source_paths: Vec<(String, f32, std::path::PathBuf)> =
+        Vec::with_capacity(req.sources.len());
+    for src in &req.sources {
+        let path = state.adapter_dir.join(&src.name);
+        if !path.exists() || !path.is_dir() {
+            return Err(ApiError::adapter_not_found(&src.name));
+        }
+        source_paths.push((src.name.clone(), src.weight, path));
+    }
+
+    // Refuse to overwrite an existing output adapter.
+    let output_path = state.adapter_dir.join(&output_name);
+    if output_path.exists() {
+        return Err(ApiError::adapter_merge_output_exists(&output_name));
+    }
+
+    let sources_info: Vec<MergeSourceInfo> = req
+        .sources
+        .iter()
+        .map(|s| MergeSourceInfo {
+            name: s.name.clone(),
+            weight: s.weight,
+        })
+        .collect();
+
+    // Run the (potentially slow, CPU-bound) merge work on a blocking thread.
+    let output_name_for_task = output_name.clone();
+    let output_path_for_task = output_path.clone();
+    let merge_result = tokio::task::spawn_blocking(move || -> Result<usize, MergeError> {
+        // Load each source adapter from disk.
+        let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
+        for (name, weight, path) in source_paths {
+            let adapter = PeftLora::load(&path).map_err(|e| MergeError::Failed(format!(
+                "loading source adapter '{name}' from {}: {e}",
+                path.display()
+            )))?;
+            loaded.push((adapter, weight));
+        }
+
+        let refs: Vec<(&PeftLora, f32)> =
+            loaded.iter().map(|(a, w)| (a, *w)).collect();
+
+        let merged = merge_linear(&refs).map_err(|e| MergeError::Invalid(format!("{e}")))?;
+        let num_tensors = merged.tensors.len();
+        merged
+            .save(&output_path_for_task)
+            .map_err(|e| MergeError::Failed(format!(
+                "saving merged adapter to {}: {e}",
+                output_path_for_task.display()
+            )))?;
+        let _ = output_name_for_task;
+        Ok(num_tensors)
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
+
+    let num_tensors = match merge_result {
+        Ok(n) => n,
+        Err(MergeError::Invalid(msg)) => {
+            // Best-effort cleanup if we partially wrote anything.
+            let _ = std::fs::remove_dir_all(&output_path);
+            return Err(ApiError::adapter_merge_invalid(msg));
+        }
+        Err(MergeError::Failed(msg)) => {
+            let _ = std::fs::remove_dir_all(&output_path);
+            return Err(ApiError::adapter_merge_failed(msg));
+        }
+    };
+
+    tracing::info!(
+        output = %output_name,
+        num_sources = req.sources.len(),
+        num_tensors,
+        mode,
+        operation = "merge",
+        "merged LoRA adapters"
+    );
+
+    Ok(Json(MergeAdapterResponse {
+        status: "merged",
+        output_name,
+        mode: "weighted_average",
+        sources: sources_info,
+        num_tensors,
+    }))
+}
+
+/// Internal error type for the blocking merge task — distinguishes user
+/// validation failures (400) from internal I/O failures (500).
+enum MergeError {
+    Invalid(String),
+    Failed(String),
+}
+
 /// Convert days since Unix epoch to (year, month, day).
 fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     // Civil calendar algorithm from Howard Hinnant.
@@ -289,5 +464,6 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/adapters", get(list_adapters))
         .route("/v1/adapters/load", post(load_adapter))
         .route("/v1/adapters/unload", post(unload_adapter))
+        .route("/v1/adapters/merge", post(merge_adapters))
         .route("/v1/adapters/{name}", delete(delete_adapter))
 }

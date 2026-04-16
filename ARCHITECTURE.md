@@ -313,10 +313,35 @@ Applied to: q_proj, k_proj, v_proj, o_proj (attention), gate_proj, up_proj, down
 GET    /v1/adapters              List active + available adapters
 POST   /v1/adapters/load         Load adapter from disk
 POST   /v1/adapters/unload       Revert to base model
+POST   /v1/adapters/merge        Merge multiple adapters via weighted average
 DELETE /v1/adapters/{name}       Delete adapter from disk
 ```
 
 See `crates/kiln-server/src/api/adapters.rs`.
+
+### Adapter Merging
+
+Multiple PEFT adapters that share the same base model, rank, and target modules can be combined via linear interpolation:
+
+```
+merged = Σᵢ wᵢ · adapter_i        # element-wise on every (A, B) tensor
+```
+
+Request:
+
+```json
+POST /v1/adapters/merge
+{
+  "mode": "weighted_average",
+  "sources": [
+    {"name": "code-fix",   "weight": 0.6},
+    {"name": "doc-style",  "weight": 0.4}
+  ],
+  "output_name": "code-fix-doc-style"
+}
+```
+
+Sources must share `r`, `target_modules`, `base_model_name_or_path`, and per-tensor shapes. The merged adapter is written to disk in the same PEFT format (`adapter_config.json` + `adapter_model.safetensors`, f32) and can immediately be loaded via `POST /v1/adapters/load`. Merging happens off the async runtime via `spawn_blocking` and the helper lives at `crates/kiln-model/src/adapter_merge.rs::merge_linear`. TIES and concatenation merging are deferred to follow-up phases.
 
 ## Training Pipeline
 
