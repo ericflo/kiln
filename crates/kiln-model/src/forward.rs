@@ -721,12 +721,20 @@ pub fn gated_deltanet_forward(
     }
     .to_dtype(input_dtype)?; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
 
-    // --- Step 7: Sequential recurrence ---
+    // --- Step 7: Sequential recurrence with matmul readout/output ---
     // The recurrent state is stored in F32 externally (across layers/steps)
     // for accumulator stability, but we run the loop in bf16 to reclaim the
     // ~66% of prefill GPU time previously spent in bmul_f32 / fast_sum_f32 /
     // badd_f32 (see PROFILING.md recommendation #2). State is cast bf16 at
     // entry and restored to F32 at exit so the external invariant holds.
+    //
+    // The state update is still sequential (approach (a) in the chunkwise
+    // plan — we do not yet unroll the within-chunk recurrence analytically).
+    // The change vs #72 is to replace the two `broadcast_mul + sum` pairs
+    // (readout and output) with batched matmuls. For [B, nv, dk, dv] state
+    // and `[B, nv, 1, dk]` q/k rows, cuBLAS can fuse each as a single
+    // tensor-core GEMM rather than expanding the state into a full
+    // [B, nv, dk, dv] intermediate and summing it elementwise.
     let state_external_dtype = recurrent_state.dtype();
     if state_external_dtype != input_dtype {
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
@@ -738,7 +746,7 @@ pub fn gated_deltanet_forward(
     // GPU runs, because kv_mem inherits the (now bf16) state dtype.
     let v = v.to_dtype(input_dtype)?;
 
-    // Transpose to [B, nv, T, dim] for per-head processing
+    // Transpose to [B, nv, T, dim] for per-head processing.
     let q = q.transpose(1, 2)?; // [B, nv, T, dk]
     let k = k.transpose(1, 2)?; // [B, nv, T, dk]
     let v = v.transpose(1, 2)?; // [B, nv, T, dv]
@@ -748,8 +756,12 @@ pub fn gated_deltanet_forward(
     let mut outputs: Vec<Tensor> = Vec::with_capacity(seq_len);
 
     for t in 0..seq_len {
-        let q_t = q.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dk]
-        let k_t = k.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dk]
+        // Keep the singleton T dim on q/k so matmul sees them as
+        // [B, nv, 1, dk] (M=1 rows). That lets the readout and output
+        // fold into single batched GEMMs against the [B, nv, dk, dv]
+        // state, with cuBLAS emitting tensor-core ops on bf16.
+        let q_t = q.narrow(2, t, 1)?; // [B, nv, 1, dk]
+        let k_t = k.narrow(2, t, 1)?; // [B, nv, 1, dk]
         let v_t = v.narrow(2, t, 1)?.squeeze(2)?; // [B, nv, dv]
         let beta_t = beta.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
         let g_t = g.narrow(2, t, 1)?.squeeze(2)?; // [B, nv]
@@ -758,25 +770,26 @@ pub fn gated_deltanet_forward(
         let g_exp = g_t.exp()?.unsqueeze(2)?.unsqueeze(3)?; // [B, nv, 1, 1]
         *recurrent_state = recurrent_state.broadcast_mul(&g_exp)?;
 
-        // 2. Read from memory: kv_mem = einsum('bhkv,bhk->bhv', S, k_t)
-        let k_expanded = k_t.unsqueeze(3)?; // [B, nv, dk, 1]
-        let kv_mem = recurrent_state.broadcast_mul(&k_expanded)?.sum(2)?; // [B, nv, dv]
+        // 2. Read from memory via batched matmul:
+        //    kv_mem = einsum('bhkv,bhk->bhv', S, k) = k_t @ S
+        //    shape : [B, nv, 1, dk] @ [B, nv, dk, dv] -> [B, nv, 1, dv]
+        let kv_mem = k_t.matmul(recurrent_state)?.squeeze(2)?; // [B, nv, dv]
 
         // 3. Delta rule: delta = (v_t - kv_mem) * beta_t
         let delta: Tensor = (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
 
-        // 4. Update: S += outer(k_t, delta) — reference add, no explicit clone.
-        // The `Tensor::add` op takes references and allocates a new tensor for
-        // the result regardless of how `lhs` is passed, so clone() was pure
-        // Arc churn with no effect on storage allocation.
-        let outer = k_t.unsqueeze(3)?.broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
-        let new_state = (&*recurrent_state + &outer)?;
-        *recurrent_state = new_state;
+        // 4. Update: S += outer(k_t, delta). We keep broadcast_mul here:
+        //    the outer product is emitted as a single broadcast multiply
+        //    into the [B, nv, dk, dv] state shape, which measured on par
+        //    with a `[dk,1] @ [1,dv]` GEMM but avoids the transpose.
+        let k_col = k_t.squeeze(2)?.unsqueeze(3)?; // [B, nv, dk, 1]
+        let outer = k_col.broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
+        *recurrent_state = (&*recurrent_state + &outer)?;
 
-        // 5. Output: out_t = einsum('bhkv,bhk->bhv', S, q_t)
-        let q_expanded = q_t.unsqueeze(3)?; // [B, nv, dk, 1]
-        let out_t = recurrent_state.broadcast_mul(&q_expanded)?.sum(2)?; // [B, nv, dv]
-        outputs.push(out_t.unsqueeze(2)?); // [B, nv, 1, dv]
+        // 5. Output via batched matmul:
+        //    out_t = q_t @ S -> [B, nv, 1, dv]  (keeps T dim)
+        let out_t = q_t.matmul(recurrent_state)?; // [B, nv, 1, dv]
+        outputs.push(out_t);
     }
 
     // Restore state to its original dtype so the caller's F32 invariant holds
