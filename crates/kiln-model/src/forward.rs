@@ -707,6 +707,12 @@ pub fn gated_deltanet_forward(
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
+    // Cast v back to input_dtype so the loop stays in bf16. After the causal
+    // conv1d + SiLU step above, mixed_qkv (and hence v) is F32; without this
+    // cast the subtract `(v_t - kv_mem)` below hits a dtype mismatch on bf16
+    // GPU runs, because kv_mem inherits the (now bf16) state dtype.
+    let v = v.to_dtype(input_dtype)?;
+
     // Transpose to [B, nv, T, dim] for per-head processing
     let q = q.transpose(1, 2)?; // [B, nv, T, dk]
     let k = k.transpose(1, 2)?; // [B, nv, T, dk]
