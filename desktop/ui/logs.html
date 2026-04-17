@@ -58,6 +58,8 @@
         cursor: pointer;
       }
       button:hover { background: #3b7af5; }
+      button#copy.flash { background: #245a32; }
+      button#copy.flash-warn { background: #5a3324; }
       #log {
         flex: 1 1 auto;
         margin: 0;
@@ -82,6 +84,7 @@
     <header>
       <h1>Kiln server logs</h1>
       <label><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
+      <button id="copy" type="button" title="Copy all log lines to clipboard">Copy</button>
       <button id="clear" type="button">Clear view</button>
     </header>
     <div id="log" class="empty">(no log lines yet)</div>
@@ -92,6 +95,27 @@
       const logEl = document.getElementById("log");
       const autoscrollEl = document.getElementById("autoscroll");
       const clearEl = document.getElementById("clear");
+      const copyEl = document.getElementById("copy");
+
+      copyEl.addEventListener("click", async () => {
+        if (!invoke) return;
+        try {
+          const count = await invoke("copy_logs");
+          copyEl.textContent = count > 0 ? `Copied (${count} lines)` : "Nothing to copy";
+          copyEl.classList.add("flash");
+          setTimeout(() => {
+            copyEl.textContent = "Copy";
+            copyEl.classList.remove("flash");
+          }, 1500);
+        } catch (err) {
+          copyEl.textContent = "Copy failed";
+          copyEl.classList.add("flash-warn");
+          setTimeout(() => {
+            copyEl.textContent = "Copy";
+            copyEl.classList.remove("flash-warn");
+          }, 1800);
+        }
+      });
 
       // Lines beyond `baseline` are shown. "Clear view" sets baseline to the
       // current line count so the user sees only new lines from then on. The
