@@ -86,6 +86,9 @@
         font-size: 12px;
       }
       #toolbar button:hover { background: #232831; }
+      #toolbar button#stop-server:hover { background: #5a2424; border-color: #7a3232; color: #f2d6d6; }
+      #toolbar button#stop-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
+      #stop-server.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #copy-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
       #copy-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #status-badge {
@@ -147,6 +150,7 @@
       </span>
       <button id="open-logs" title="Open the log viewer window">View Logs</button>
       <button id="open-settings" title="Open the settings window">Settings</button>
+      <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
       <code id="base-url" class="empty" title="OpenAI base URL — server not running">—</code>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
     </div>
@@ -316,6 +320,44 @@
         try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
       });
 
+      const stopBtn = document.getElementById("stop-server");
+      const STOP_LABEL = "Stop Server";
+      const STOP_ACTIVE_STATES = ["Starting", "Running", "TrainingActive"];
+      let stopResetTimer = null;
+
+      function flashStopBtn(label, cls, durationMs) {
+        if (stopResetTimer) {
+          clearTimeout(stopResetTimer);
+          stopResetTimer = null;
+        }
+        stopBtn.textContent = label;
+        stopBtn.classList.remove("flash-warn");
+        if (cls) stopBtn.classList.add(cls);
+        stopResetTimer = setTimeout(() => {
+          stopBtn.textContent = STOP_LABEL;
+          stopBtn.classList.remove("flash-warn");
+          stopBtn.disabled = false;
+          stopResetTimer = null;
+        }, durationMs || 1500);
+      }
+
+      async function stopServer() {
+        if (!invoke) {
+          flashStopBtn("Stop failed", "flash-warn");
+          return;
+        }
+        stopBtn.disabled = true;
+        stopBtn.textContent = "Stopping…";
+        try {
+          await invoke("stop_server");
+        } catch (err) {
+          console.warn("stop_server failed", err);
+          flashStopBtn("Stop failed", "flash-warn");
+        }
+      }
+
+      stopBtn.addEventListener("click", stopServer);
+
       const statusBadge = document.getElementById("status-badge");
       const statusBadgeLabel = statusBadge.querySelector(".label");
       const STATE_CLASSES = [
@@ -403,11 +445,21 @@
         }
       }
 
+      function updateStopBtnVisibility(kind) {
+        const shouldShow = STOP_ACTIVE_STATES.includes(kind);
+        stopBtn.classList.toggle("hidden", !shouldShow);
+        if (!shouldShow && !stopResetTimer) {
+          stopBtn.disabled = false;
+          stopBtn.textContent = STOP_LABEL;
+        }
+      }
+
       let stateFailureLogged = false;
       async function pollServerState() {
         if (!invoke) {
           applyStatusBadge("Unknown", "Tauri bridge unavailable");
           await refreshBaseUrl("Unknown");
+          updateStopBtnVisibility("Unknown");
           return;
         }
         try {
@@ -419,10 +471,12 @@
             : `Kiln server state: ${info.label}`;
           applyStatusBadge(kind, tooltip);
           await refreshBaseUrl(kind);
+          updateStopBtnVisibility(kind);
           stateFailureLogged = false;
         } catch (err) {
           applyStatusBadge("Unknown", "Could not read server state");
           await refreshBaseUrl("Unknown");
+          updateStopBtnVisibility("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
             stateFailureLogged = true;
