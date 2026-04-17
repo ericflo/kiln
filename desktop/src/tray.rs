@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::supervisor::{ServerState, Supervisor};
 
@@ -68,6 +68,9 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     let _ = app_handle.emit("menu://open-dashboard", ());
                 }
                 ITEM_SETTINGS => {
+                    if let Err(e) = open_settings_window(&app_handle) {
+                        eprintln!("[tray] open_settings_window failed: {}", e);
+                    }
                     let _ = app_handle.emit("menu://open-settings", ());
                 }
                 ITEM_LOGS => {
@@ -79,6 +82,22 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .build(app)?;
 
     spawn_state_watcher(app.clone(), supervisor, start, stop);
+    Ok(())
+}
+
+fn open_settings_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window("settings") {
+        win.show()?;
+        win.set_focus()?;
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+        .title("Kiln Settings")
+        .inner_size(520.0, 640.0)
+        .resizable(true)
+        .visible(true)
+        .build()?;
+    win.set_focus()?;
     Ok(())
 }
 

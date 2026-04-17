@@ -78,7 +78,7 @@ impl RingBuffer {
 }
 
 pub struct Supervisor {
-    config: SupervisorConfig,
+    config: Arc<Mutex<SupervisorConfig>>,
     state: Arc<Mutex<ServerState>>,
     logs: Arc<Mutex<RingBuffer>>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -89,12 +89,18 @@ impl Supervisor {
     pub fn new(config: SupervisorConfig) -> Self {
         let cap = config.log_buffer_bytes;
         Self {
-            config,
+            config: Arc::new(Mutex::new(config)),
             state: Arc::new(Mutex::new(ServerState::Stopped)),
             logs: Arc::new(Mutex::new(RingBuffer::new(cap))),
             task: Arc::new(Mutex::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Replace the supervisor config. Does NOT restart a running child.
+    /// The new config takes effect on the next successful `start()`.
+    pub async fn update_config(&self, new_cfg: SupervisorConfig) {
+        *self.config.lock().await = new_cfg;
     }
 
     pub async fn start(&self) -> Result<(), String> {
@@ -110,7 +116,7 @@ impl Supervisor {
         *self.shutdown_tx.lock().await = Some(tx);
         *self.state.lock().await = ServerState::Starting;
 
-        let config = self.config.clone();
+        let config = self.config.lock().await.clone();
         let state = Arc::clone(&self.state);
         let logs = Arc::clone(&self.logs);
 
