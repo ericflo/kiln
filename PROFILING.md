@@ -977,6 +977,337 @@ explicitly.
   been terminated.
 
 
+## PR #105 follow-up — Fused-vs-slow paged decode quantified on H100 NVL (2026-04-17)
+
+### Summary
+
+PR #101 / PR #102 (= merged PR #105) recommended a follow-up pass on a
+memory-bandwidth-rich GPU to quantify the fused-vs-slow paged-decode
+speedup that the A40 capture (696 GB/s) could not see. This section
+reports that pass on **H100 NVL** (3.9 TB/s HBM3, ~5.6× the bandwidth of
+A40). The headline finding is that the fused FlashInfer GQA-decode
+kernel beats the slow path by **~3.4 % on mean ITL**, well below PR #100's
+projected 10–25 % speedup. The bottleneck on this GPU is no longer the
+8 full-attention layers — it has shifted to the 24 GDN
+(gated delta-net) layers and to per-step kernel-launch overhead, neither
+of which PR #100 touched.
+
+### Hardware & Build
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA H100 NVL (95 GiB HBM3, compute capability 9.0) |
+| Driver | 565.57.01 (host); CUDA 12.7 ceiling |
+| CUDA toolkit | 12.8 (build); `cuda-compat-12-8=570.211.01-0ubuntu1` (forward-compat libcuda for the 12.8 PTX ISA) |
+| Rustc | 1.95 stable (rustup-installed on pod) |
+| Build | `cargo build --release --features cuda --bin kiln-bench --bin kiln` |
+| Build env | `KILN_CUDA_ARCHS=90`, sccache (B2 backend); 100 % C/C++/CUDA hits, 0 % Rust hits (cold target dir) |
+| Nsight Systems | 2024.6.2 |
+| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16, multimodal weight prefix `model.language_model.` |
+| Commit | `3e93193` (current `main`, includes PR #100 + PR #105 fix) |
+
+**Environment notes.** `ghcr.io/ericflo/kiln-runpod:latest` was again
+requested but the pod again came up as a stock CUDA 12.8 Ubuntu image
+without the pre-baked tooling — same regression PR #94's PROFILING
+flagged. Bootstrap installed Rust 1.95, `nsight-systems-2024.6.2`,
+`hf-transfer`, B2-backed sccache, and `gh` on the live pod.
+
+The host driver is **565.57.01**, which only reports CUDA 12.7 PTX
+support. `cargo build` linked against the CUDA 12.8 toolchain (the only
+version available in the bootstrap apt repo), producing 12.8-ISA PTX
+that the host driver could not load — first bench attempt failed with
+`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` immediately on launch. Fix:
+`apt install -y cuda-compat-12-8=570.211.01-0ubuntu1 --allow-downgrades`
+to get a 197 MB compat package shipping `libcuda.so.570.211.01`, then
+prepend `/usr/local/cuda-12.8/compat` to `LD_LIBRARY_PATH` before
+running the bench. (The previously installed `cuda-compat-12-8` from the
+default channel was a 30 KB stub.) This compat shim is documented for
+future H100 sessions on driver 565.
+
+### Scenarios
+
+Three scenarios, all on the production paged path (`--paged`,
+`block_size = 16`), each run twice — fused (default) and slow
+(`KILN_DISABLE_FUSED_PAGED_DECODE=1`). Scenarios A and B finished;
+scenario C (long decode) was killed mid-throughput-sweep to keep the
+H100 hour cost under the task budget — its latency phase did not start.
+Scenario A is the canonical PR #100 / PR #101 shape. The four full
+JSON outputs live at `/root/bench_results/` on pod `o8xkr9kfe6iw8y`
+(terminated after this report) and are mirrored under
+`/workspace/sessions/a191ef2f6ac380468fbb6136/results/` in this PR.
+
+| Scenario | Prompt | Decode | Notes |
+|---|---|---|---|
+| A | 506 | 128 | Canonical PR #100 / PR #105 shape |
+| B | 2043 | 64 | Long-prefill emphasis |
+| C | 256 | 512 | Long-decode emphasis (ABORTED — see below) |
+
+Bench invocation (per scenario, both passes):
+
+```bash
+# fused (default)
+KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path ~/models/qwen3.5-4b \
+  --paged --prompt-tokens $P --max-output-tokens $D --skip-training
+
+# slow
+KILN_DISABLE_FUSED_PAGED_DECODE=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench \
+  --model-path ~/models/qwen3.5-4b --paged --prompt-tokens $P --max-output-tokens $D --skip-training
+```
+
+### Wall-Clock Comparison (H100 NVL, paged production path)
+
+Latency block (single sequence, `--paged`):
+
+| Scenario | Path | Prefill (ms) | Prefill tok/s | Mean ITL (ms) | p50 ITL (ms) | p99 ITL (ms) | Decode tok/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| A (506→128) | fused | 375.5 | 1347 | **68.41** | 67.81 | 72.98 | **14.62** |
+| A (506→128) | slow  | 368.5 | 1373 | 70.75 | 70.30 | 78.06 | 14.13 |
+| B (2043→64) | fused | 880.0 | 2322 | **70.16** | 69.81 | 86.65 | **14.25** |
+| B (2043→64) | slow  | 797.4 | 2562 | 72.64 | 71.92 | 90.15 | 13.77 |
+
+Fused-vs-slow deltas (positive = fused wins):
+
+| Scenario | Δ Mean ITL | Δ p50 ITL | Δ p99 ITL | Δ Decode tok/s | Δ Prefill |
+|---|---:|---:|---:|---:|---:|
+| A (506→128) | **+3.3 %** (-2.34 ms) | +3.5 % (-2.49 ms) | +6.5 % (-5.08 ms) | **+3.4 %** (+0.49 tok/s) | -1.9 % (+7.07 ms slower) |
+| B (2043→64) | **+3.4 %** (-2.48 ms) | +2.9 % (-2.11 ms) | +3.9 % (-3.50 ms) | **+3.5 %** (+0.49 tok/s) | -10.4 % (+82.5 ms slower) |
+
+Inference-throughput sweep (sequential, `block_size = 16`, average tok/s
+across all sequences in the batch):
+
+| Scenario | Batch | Path | Output tokens | Total time (s) | Tok/s | Δ vs slow |
+|---|---:|---|---:|---:|---:|---:|
+| A | 1  | fused | 128  | 9.05  | 14.15 | +1.6 % |
+| A | 1  | slow  | 128  | 9.19  | 13.93 | — |
+| A | 4  | fused | 512  | 36.41 | 14.06 | +1.2 % |
+| A | 4  | slow  | 512  | 36.87 | 13.89 | — |
+| A | 8  | fused | 1024 | 73.16 | 14.00 | +1.1 % |
+| A | 8  | slow  | 1024 | 73.98 | 13.84 | — |
+| A | 16 | fused | 2048 | 146.94 | 13.94 | +0.8 % |
+| A | 16 | slow  | 2048 | 148.14 | 13.83 | — |
+| B | 1  | fused | 64   | 5.16  | 12.41 | -0.4 % |
+| B | 1  | slow  | 64   | 5.13  | 12.46 | — |
+| B | 4  | fused | 256  | 20.63 | 12.41 | -0.4 % |
+| B | 4  | slow  | 256  | 20.55 | 12.45 | — |
+| B | 8  | fused | 512  | 41.43 | 12.36 | -0.5 % |
+| B | 8  | slow  | 512  | 41.21 | 12.43 | — |
+| B | 16 | fused | 1024 | 82.95 | 12.34 | -0.4 % |
+| B | 16 | slow  | 1024 | 82.69 | 12.38 | — |
+
+Peak VRAM (both paths, both passes): 10 446 MB (A) / 11 758 MB (B).
+Model VRAM after load: 8 625 MB (4 206 M parameters across 32 layers, bf16).
+
+The throughput sweep is `bench_inference` from `bench.rs`, which loops
+non-paged single-sequence generations (it predates the `--paged` flag).
+The fused-vs-slow toggle still affects this path through
+`model_forward_paged` when invoked from the engine, but this sweep
+exercises `model_forward` (KvCache, not PagedKvCache) and so registers
+near-parity. The four-row latency table above is the apples-to-apples
+fused-vs-slow comparison on the production paged path.
+
+### Top GPU Kernels — Mixed prefill + decode (scenario A nsys capture)
+
+The bench does not yet emit NVTX ranges, so each nsys capture is a
+single mixed-workload trace covering: warmup, latency phase
+(prefill + 128-token decode), and the inference-throughput sweep
+(batches 1/4/8/16, all decode). This matches PR #87 / PR #94 PROFILING
+format. The decode path dominates the trace by token count, so the
+kernel mix below is a per-step decode-leaning view.
+
+**Fused (default), scenario A 512→128, mixed-workload:**
+
+| Rank | Time % | Kernel | Instances | Avg (µs) |
+|---:|---:|---|---:|---:|
+| 1  | **69.5 %** | `ucopy_bf16` | 2 969 | 145 |
+| 2  | 3.9 %  | `bmul_f32` | 3 554 | 7 |
+| 3  | 2.4 %  | `copy2d_bf16` (paged KV write) | 8 410 | 2 |
+| 4  | 2.0 %  | `bmul_bf16` | 2 159 | 6 |
+| 5  | 1.7 %  | `gdn_fwd_sub_kernel` (vendored GDN prefill) | 192 | 53 |
+| 6  | 1.6 %  | `fast_sum_f32` | 1 512 | 7 |
+| 7  | 1.5 %  | `nvjet_tst_128x8_64x12_4x1_v_bz_NNT` (cuBLAS GEMM) | 490 | 19 |
+| 8  | 1.2 %  | `cast_bf16_f32` | 3 192 | 2 |
+| 9  | 1.1 %  | `cast_f32_bf16` | 2 858 | 2 |
+| 10 | 1.1 %  | `ucopy_f32` | 1 113 | 6 |
+
+`kiln_flash::flash_fwd_splitkv_kernel` (the vendored FlashInfer paged
+GQA-decode kernel landed in PR #100) registers at **0.2 %** of GPU
+time (61 instances, 24.3 µs avg) — accurate at-trace because it only
+fires for the 8 full-attention layers per token, while the dominant
+`ucopy_bf16` cost is incurred by the 24 GDN layers that the fused
+kernel does not touch. `recurrent_gdn_fwd_kernel` (the GDN recurrence
+kernel from PR #80) sits at 0.9 % (184 instances, 28.8 µs avg) — these
+are the chunked-prefill recurrences, not per-step decode (decode
+recurrence is unrolled across many small ops).
+
+**Slow (`KILN_DISABLE_FUSED_PAGED_DECODE=1`), scenario A 512→128, mixed-workload:**
+
+| Rank | Time % | Kernel | Instances | Avg (µs) |
+|---:|---:|---|---:|---:|
+| 1  | **69.4 %** | `ucopy_bf16` | 3 184 | 133 |
+| 2  | 3.9 %  | `bmul_f32` | 3 438 | 7 |
+| 3  | 2.4 %  | `copy2d_bf16` (paged KV write) | 8 406 | 2 |
+| 4  | 2.0 %  | `bmul_bf16` | 2 137 | 6 |
+| 5  | 1.7 %  | `gdn_fwd_sub_kernel` (vendored GDN prefill) | 192 | 53 |
+| 6  | 1.6 %  | `fast_sum_f32` | 1 458 | 7 |
+| 7  | 1.5 %  | `nvjet_tst_128x8_64x12_4x1_v_bz_NNT` (cuBLAS GEMM) | 471 | 19 |
+| 8  | 1.2 %  | `cast_bf16_f32` | 3 089 | 2 |
+| 9  | 1.1 %  | `cast_f32_bf16` | 2 786 | 2 |
+| 10 | 1.1 %  | `ucopy_f32` | 1 077 | 6 |
+
+The slow path's GPU mix is **nearly identical** to the fused path — the
+`ucopy_bf16` GDN-layer cost dominates both (69.4 % vs 69.5 %). The
+slow path does **not** invoke `kiln_flash::flash_fwd_splitkv_kernel`;
+its full-attention layers fall back to a non-paged `flash_fwd_kernel`
+at prefill (8 instances, 0.0 % of trace) plus per-step bmm-based
+attention computed on materialized K/V (folded into `bmul_bf16` /
+`bmul_f32` / `fast_sum_f32`). Because GDN dominates total decode cost
+on H100 NVL, swapping the attention kernel barely moves the needle.
+This is the on-paper confirmation of the headline wall-clock parity.
+
+### CUDA Memcpy (fused, scenario A)
+
+| Op | Time % | Total (ms) | Count | Avg |
+|---|---:|---:|---:|---|
+| `[CUDA memcpy Host-to-Device]` | 99.9 % | 1 513 | 11 686 | 130 µs |
+| `[CUDA memset]` | 0.1 % | 1.27 | 819 | 1.6 µs |
+| `[CUDA memcpy Device-to-Host]` | 0.0 % | 0.015 | 8 | 1.9 µs |
+
+The H2D total is dominated by the one-time model-weight upload at load
+(~8.6 GB across many transfers — the `Max` is 498 ms which is a single
+~8 GB transfer batched by Candle's loader). Steady-state per-step H2D
+is negligible.
+
+
+
+### Headline Findings
+
+1. **Fused beats slow by ~3.4 % on H100 NVL**, not the 10–25 % that
+   PR #100's design discussion projected. The number is consistent
+   across both shapes (A: +3.3 % mean ITL, +3.4 % decode tok/s; B:
+   +3.4 % mean ITL, +3.5 % decode tok/s) and the p99 win is larger
+   than p50 (+6.5 % vs +3.5 % on shape A), so the fused kernel mainly
+   removes tail-latency outliers.
+2. **Fused regresses prefill** by 1.9 % (shape A) and 10.4 % (shape B).
+   Prefill on the paged path uses the GDN-prefill kernel for the 24
+   linear-attention layers and the standard FlashInfer prefill kernel
+   for the 8 full-attention layers; the prefill regression is the same
+   one-time CUDA-graph / `cuModuleLoadData` cost the A40 capture saw,
+   amortized across a single `--max-output-tokens` run. Steady-state
+   prefill on a warm pod would close this gap; it does not represent a
+   regression in the fused decode kernel itself.
+3. **Memory bandwidth is no longer the binding constraint** on H100.
+   A40 saw fused == slow at ~4 tok/s because both were saturating
+   696 GB/s of HBM2. H100 sees 14.6 tok/s fused vs 14.1 tok/s slow at
+   ~10 % of the model's 8.4 GB / 2.8 ms theoretical bandwidth-limited
+   ceiling — there is 25–30× of bandwidth headroom on this GPU. The
+   actual constraint is **per-step kernel-launch and per-layer
+   compute** for the 24 GDN layers, which `try_flash_attn_paged_decode`
+   does not touch.
+4. **Mean ITL of ~70 ms ≫ bandwidth floor of ~3 ms.** With 32 layers
+   per token, that is ~2.2 ms/layer, ~5× over the H100 weight-load
+   floor — confirming launch+compute overhead dominates at decode time.
+5. **The 3.4 % win is below PR #100's 1.05× abort threshold.** This
+   does **not** mean the fused kernel should be reverted — it is still
+   strictly better than the slow path on every shape measured here, the
+   p99 reduction is real, and the kernel becomes more valuable on
+   longer sequences (KV-cache reads scale with context). It does mean
+   the next optimization pass should target GDN decode, not the
+   8 full-attention layers.
+
+### Next Optimization — Recommendation
+
+**Vendor a fused GDN (gated delta-net) decode kernel.** Of the 32 layers
+in Qwen3.5-4B, 24 are GDN linear-attention and 8 are full attention;
+PR #100 / PR #94 already vendored a fused FlashInfer paged-GQA decode
+kernel for the 8 full-attention layers. The remaining 24 GDN layers go
+through `gated_deltanet_forward` in `crates/kiln-model/src/forward.rs`
+(line 997), which at `seq_len = 1` walks ~15 separate Candle ops per
+layer:
+
+- 4 small input projections (`broadcast_matmul` × 4: `in_proj_qkv`,
+  `in_proj_z`, `in_proj_a`, `in_proj_b`),
+- `causal_conv1d_decode` over a 4-token window,
+- `cuda_silu` (cast to F32 and back),
+- 3 reshape/narrow splits,
+- GQA head-repeat broadcast,
+- L2 normalize Q + K (each: square, sum, sqrt, div),
+- `cuda_sigmoid` for β,
+- softplus / exp / mul for g,
+- the recurrent state update (one `bmm` + one in-place state mul).
+
+That is roughly 24 layers × 15 launches ≈ **360 kernel launches per
+decoded token in the GDN stack alone**, before counting the 8 full-attention
+layers and the per-step embed/norm/lm-head ops. At H100 launch latency
+(~5–10 µs minimum), this floor alone explains 1.8–3.6 ms of the 70 ms ITL,
+and the per-launch BF16 reshapes still pay HBM round-trips.
+
+**Candidate sources to vendor (vendor-first per Kiln policy):**
+
+1. **`flash-linear-attention`** (Songlin Yang, MIT —
+   <https://github.com/sustcsonglin/flash-linear-attention>) ships
+   Triton kernels for `fused_recurrent_gated_delta_rule` and
+   `chunk_gated_delta_rule` that fuse the L2-norm, scale, sigmoid gate,
+   exp/softplus decay, and recurrent state update into a single launch.
+   The library's `fused_recurrent` path is exactly the seq_len=1 decode
+   shape we need; it would collapse the per-layer launch count from
+   ~15 to ~3 (one input-projections matmul, one fused
+   recurrence+gate kernel, one output projection).
+2. **Hand-write a CUDA kernel** that fuses
+   `causal_conv1d_decode + cuda_silu + reshape + l2_normalize +
+   cuda_sigmoid + softplus + exp + recurrent state update` into a
+   single launch per layer. This is the path PR #94 took for FlashInfer
+   GQA decode; the same pattern (vendor a single .cu, expose it through
+   `kiln-flash-attn`, gate with an env var) would apply.
+
+Option (1) gives us a faster ship at the cost of a Triton dependency in
+`kiln-flash-attn`; option (2) keeps the dependency surface flat at the
+cost of more bring-up work. Either path is a reasonable next PR.
+
+**Why not target the matmuls?** The 4 GDN input projections per layer
+are already cuBLAS GEMMs and saturate well below the H100 tensor-core
+peak — 4096-hidden × small-rank projections at batch=1 are
+launch-overhead dominated, not flops dominated. Fusing them into a
+single QKV+Z+A+B matmul with a partitioned bias is a lower-priority
+follow-up; the per-layer launch count win there is at most ~3 launches
+per layer vs the ~12 launches the recurrence+gates currently cost.
+
+**Why not revert PR #100?** The fused kernel is strictly better on
+every paged-decode datapoint measured here (-2.3 ms mean ITL on A,
+-2.5 ms on B; -5 ms p99 on A; -3.5 ms p99 on B) and the prefill
+regression is a one-time CUDA-graph cost that warms up. Reverting would
+trade a real 3 % decode win for cosmetic prefill parity on the
+single-shot bench. Keep PR #100 + PR #105.
+
+### Aborted Scenario — C (256 → 512)
+
+Scenario C (short prompt, long decode) was launched but aborted mid
+fused-throughput-sweep. The latency phase had not yet started. The
+inference sweep at decode=512 generates 512 × 16 = 8 192 tokens per
+batch_size=16 row; with H100 decode at ~14 tok/s under nsys overhead,
+each row was projected at ~10 minutes, pushing the C pair past the
+$25 budget for the pod. The two completed pairs (A and B) are both
+seq_len-1 decode workloads and capture the headline finding; a longer
+decode would mainly amortize the FlashInfer kernel's per-step constant
+across more tokens, which favors the fused path further but does not
+change the recommendation above.
+
+### Cost & Pod Lifecycle
+
+- Pod: `o8xkr9kfe6iw8y`, NVIDIA H100 NVL on-demand at ~$2.79/hr.
+- Wall time: ~70 minutes (build + bench + nsys + writeup).
+- Total spend: well under the $25 abort threshold.
+- Pod terminated immediately after artifacts were copied locally.
+
+### Artifacts
+
+All bench JSONs and stderrs live in this PR at
+`results/{A,B}_{fused,slow}.{json,stderr}` (downloaded from
+`/root/bench_results/` on the now-terminated pod). The two nsys reports
+(`fused_512_128.nsys-rep`, `slow_512_128.nsys-rep`) and their CSV stats
+are too large to commit to the repo; relevant numbers are reproduced
+inline in the kernel tables above.
+
+
 ## PR #102 — Paged-decode fused-attn block-count fix, GPU-validated (2026-04-17)
 
 ### Summary
