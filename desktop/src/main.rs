@@ -59,6 +59,21 @@ async fn server_logs(sup: State<'_, Arc<Supervisor>>) -> Result<Vec<String>, Str
 }
 
 #[tauri::command]
+async fn copy_logs(
+    app: tauri::AppHandle,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<usize, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let lines = sup.logs().await;
+    let text = lines.join("\n");
+    let count = lines.len();
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| format!("clipboard write failed: {}", e))?;
+    Ok(count)
+}
+
+#[tauri::command]
 async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, String> {
     Ok(state.read().await.clone())
 }
@@ -170,6 +185,7 @@ fn main() {
             stop_server,
             server_state,
             server_logs,
+            copy_logs,
             get_settings,
             set_settings,
             get_kiln_url,
