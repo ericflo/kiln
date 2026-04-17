@@ -376,13 +376,46 @@
         Error: { cls: "state-error", label: "Error" },
         Unknown: { cls: "state-unknown", label: "Unknown" },
       };
+      const UPTIME_STATES = ["Running", "TrainingActive"];
+      let runningSinceMs = null;
+      let currentKind = null;
+      let currentTooltip = null;
+
+      function formatUptime(ms) {
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        if (totalSec < 60) return `${totalSec}s`;
+        const totalMin = Math.floor(totalSec / 60);
+        const sec = totalSec % 60;
+        if (totalMin < 60) return sec > 0 ? `${totalMin}m ${sec}s` : `${totalMin}m`;
+        const totalHr = Math.floor(totalMin / 60);
+        const min = totalMin % 60;
+        if (totalHr < 24) return min > 0 ? `${totalHr}h ${min}m` : `${totalHr}h`;
+        const day = Math.floor(totalHr / 24);
+        const hr = totalHr % 24;
+        return hr > 0 ? `${day}d ${hr}h` : `${day}d`;
+      }
 
       function applyStatusBadge(kind, tooltip) {
         const info = STATE_INFO[kind] || STATE_INFO.Unknown;
         statusBadge.classList.remove(...STATE_CLASSES);
         statusBadge.classList.add(info.cls);
-        statusBadgeLabel.textContent = info.label;
+        if (UPTIME_STATES.includes(kind)) {
+          if (runningSinceMs === null) runningSinceMs = Date.now();
+          const elapsed = Date.now() - runningSinceMs;
+          statusBadgeLabel.textContent = `${info.label} · ${formatUptime(elapsed)}`;
+        } else {
+          runningSinceMs = null;
+          statusBadgeLabel.textContent = info.label;
+        }
+        currentKind = kind;
+        currentTooltip = tooltip || null;
         statusBadge.title = tooltip || `Kiln server state: ${info.label}`;
+      }
+
+      function tickUptime() {
+        if (currentKind && UPTIME_STATES.includes(currentKind)) {
+          applyStatusBadge(currentKind, currentTooltip);
+        }
       }
 
       function parseServerState(state) {
@@ -488,6 +521,7 @@
         load();
         pollServerState();
         setInterval(pollServerState, 2000);
+        setInterval(tickUptime, 1000);
       });
     </script>
   </body>
