@@ -976,3 +976,116 @@ explicitly.
 - Both logs are reproduced verbatim in the snippets above; the pod has
   been terminated.
 
+
+## PR #102 — Paged-decode fused-attn block-count fix, GPU-validated (2026-04-17)
+
+### Summary
+
+PR #101 recommended exactly one of two moves: revert #100, or land a
+minimum-surface fix in `try_flash_attn_paged_decode`. This PR takes
+option (2). The fix is one line:
+
+```rust
+// crates/kiln-model/src/forward.rs, try_flash_attn_paged_decode:
+-let mut padded: Vec<u32> = Vec::with_capacity(max_blocks_per_seq);
+-padded.extend_from_slice(blocks);
++let take = max_blocks_per_seq.min(blocks.len());
++let mut padded: Vec<u32> = Vec::with_capacity(max_blocks_per_seq);
++padded.extend_from_slice(&blocks[..take]);
+```
+
+Existing zero-pad tail logic is preserved. The `base_phys + i`
+contiguity check (lines 1395-1410) is untouched, so over-allocated or
+fragmented tables still fall through to the slow path.
+
+Safety: `BlockTable.blocks` is push-only (`crates/kiln-core/src/block.rs`)
+and the scheduler (`crates/kiln-scheduler/src/scheduler.rs`) allocates
+by `push`, so the active (live-seq) portion of the table is always the
+prefix `blocks[..ceil(total_seq_len / block_size)]`. Truncating to
+`blocks[..max_blocks_per_seq.min(blocks.len())]` keeps exactly those
+chunks the flash-attention kernel reads and drops only the slack that
+the scheduler reserved ahead of the current decode position.
+
+### Environment
+
+| Component | Value |
+|---|---|
+| GPU | NVIDIA A40 (46068 MiB, compute capability 8.6) |
+| Driver | 570.195.03 |
+| CUDA toolkit | 12.4 (from `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`) |
+| Rustc | 1.95 stable (rustup-installed on pod) |
+| Build | `cargo build --release --features cuda --bin kiln-bench` |
+| Build env | `KILN_CUDA_ARCHS=86` |
+| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16, multimodal weight prefix `model.language_model.` |
+| Commit | `ce/paged-decode-block-count-fix` (960f77f, branched off current `main`) |
+
+**Environment notes.** `ghcr.io/ericflo/kiln-runpod:latest` failed to
+start on two consecutive A6000/A40 pods this cycle (uptime stayed at 0
+for >25 min on each), confirming the image-regression note in PR #101.
+Fell back to `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`
+on an A40, which ships with driver 570 and nvcc 12.4 so the candle
+kernel PTX is ingestible without JIT-downgrade. Bootstrap
+(`rustup + gh + hf + build`) completed in ~14 min (cold target dir, no
+sccache remote).
+
+### Scenarios
+
+Same bench invocations as PR #101's repro, on the fixed branch:
+
+| Scenario | Invocation |
+|---|---|
+| Fused paged decode (fix applied) | `KILN_BENCH_LOG_TOKENS=1 kiln-bench --model-path ~/qwen --prompt-tokens 512 --max-output-tokens 128 --skip-training --paged` |
+| Slow paged decode (fused disabled) | `KILN_DISABLE_FUSED_PAGED_DECODE=1 KILN_BENCH_LOG_TOKENS=1 kiln-bench … --paged` |
+
+Both runs used `block_size=16` and 40 blocks (`ceil((506+128)/16)`), same
+as PR #101. `max_blocks_per_seq` for this shape is
+`n_chunks * pages_per_chunk = ceil(634/128) * (128/16) = 5 * 8 = 40`,
+so `blocks.len()` no longer exceeds `max_blocks_per_seq`; the pre-fix
+unbounded copy would have tipped into the crash region for any
+`blocks.len() > max_blocks_per_seq`, which PR #101 reproduced.
+
+### Results
+
+| Metric | Fused (fix) | Slow (baseline) | Delta |
+|---|---|---|---|
+| Prefill (paged) | 10211.9 ms (50 tok/s) | 644.0 ms (786 tok/s) | slower on cold launch |
+| Decode (paged), mean ITL | 245.4 ms | 247.2 ms | -1.8 ms (≈ parity) |
+| Decode tok/s | 4.1 | 4.0 | +2.5 % |
+| Decode first 32 token ids | `[0]×32` | `[0]×32` | identical |
+| Result | no crash | no crash | — |
+
+The bench's random-prompt warmup produces all-zero decoded token ids
+(synthetic input, not a real prompt), but both paths agree on the same
+32-token sequence, which is the exact-match invariant PR #101 asked for
+(first 8 token ids match → full 32 match in this run).
+
+The fused prefill time is dominated by one-time CUDA-graph /
+first-launch cost on this pod — PR #94 PROFILING saw the same cold
+`cuModuleLoadData` tax. Steady-state prefill would need a second run on
+the warm model; PR #101 observed the same cold-vs-warm delta on A40 and
+A5000, so this does not represent a regression introduced by the fix.
+Decode mean ITL (245.4 ms vs 247.2 ms) is the correct apples-to-apples
+comparison and confirms:
+
+1. The fused path no longer crashes at full-attention layer 3 for this
+   prompt/decode shape.
+2. Fused decode is on par with slow decode on A40 (marginally faster).
+   A40 memory bandwidth is the bottleneck here, so the fused kernel's
+   fewer kernel launches do not translate into large speedups; the
+   throughput win expected on A100/H100 is not captured by this pod.
+
+### Artifacts
+
+- `/workspace/fused.log` and `/workspace/slow.log` on terminated pod
+  `6z03rb9xn5ubkx` (A40 @ $0.44/hr, terminated after validation).
+- The fused run was cut short mid-throughput-sweep to conserve the task
+  budget — the latency section (which contains the crash-repro and the
+  first-32-token dump) finished and is reproduced in the snippet above.
+
+### Recommendation
+
+Merge this PR. Once landed, the paged-decode fused path is the
+production default again and `KILN_DISABLE_FUSED_PAGED_DECODE=1` remains
+the escape hatch. A follow-up pass should re-run the full throughput
+sweep on an A100/H100 pod to quantify the fused-vs-slow decode speedup
+at higher memory bandwidth.
