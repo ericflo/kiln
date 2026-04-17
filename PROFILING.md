@@ -1590,3 +1590,154 @@ follow-up.
 
 The 2.4 GB `profile_nvtx.nsys-rep` was kept on the now-terminated pod;
 all numbers above are reproduced from the three CSV reports.
+
+
+## Tier-2 NVTX Attribution (post-PR #110) — 2026-04-17
+
+### Why this pass
+
+PR #110 named six attention call sites and showed that they hold only
+**0.046 %** (221 ms of 482.1 s) of the total `ucopy_bf16` mass. The
+remaining **99.95 %** (481.9 s) fell outside any NVTX range and was
+structurally unattributable. This pass ships ten Tier-2 NVTX guards at
+non-attention call sites in `crates/kiln-model/src/forward.rs` so the
+bulk of the `ucopy_bf16` cost can be localized to a specific layer
+component:
+
+| NVTX range | Call site |
+|---|---|
+| `kiln/proj/qkv` | fused QKV projection per full-attn layer |
+| `kiln/proj/o` | attention output projection per full-attn layer |
+| `kiln/mlp/gate` | gate projection (SwiGLU input) per layer |
+| `kiln/mlp/up` | up projection (SwiGLU input) per layer |
+| `kiln/mlp/down` | down projection per layer |
+| `kiln/norm/pre_attn` | pre-attention RMSNorm per layer |
+| `kiln/norm/pre_mlp` | pre-MLP RMSNorm per layer |
+| `kiln/residual` | per-block residual add |
+| `kiln/lm_head` | final RMSNorm + `embed_tokens^T` matmul + sampling |
+| `kiln/kv/copy` | paged KV staging copy per full-attn layer |
+
+The six PR #110 attention ranges (`kiln/attn/**`) are unchanged.
+
+### Environment
+
+| Component | Value |
+|---|---|
+| GPU | NVIDIA A40 (48 GiB, compute capability 8.6 — same `sm_86` tier as PR #110's A5000) |
+| Driver | 580.82.07 |
+| CUDA toolkit | 12.8 (V12.8.93) |
+| Nsys | 2024.6.2 |
+| Image | `ghcr.io/ericflo/kiln-runpod:latest` |
+| Build | `cargo build --release --features cuda,nvtx --bin kiln-bench` |
+| Build env | `KILN_CUDA_ARCHS=86` |
+| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16 |
+| Commit | `ce/nvtx-tier2-profile` (34a3807) |
+| Pod | RunPod A40, $0.44/hr |
+
+### Scenario
+
+Identical invocation to PR #110:
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cudabacktrace=none \
+  --stats=false --output=profile_nvtx_tier2 --force-overwrite=true \
+  --capture-range=none \
+  ./target/release/kiln-bench --paged --model-path ~/models/qwen3.5-4b \
+    --prompt-tokens 512 --max-output-tokens 64 --skip-training
+```
+
+Reports generated: `nvtx_pushpop_sum`, `nvtx_kern_sum`,
+`cuda_gpu_kern_sum` (CSV).
+
+### Per-range ucopy_bf16 attribution (`nvtx_kern_sum`)
+
+Total `ucopy_bf16` on this run: **430.27 s across 573,266 kernels**,
+which is 89.1 % of all GPU kernel time (`cuda_gpu_kern_sum` row 2).
+Per-range breakdown of the `ucopy_bf16` mass, sorted by GPU time:
+
+| NVTX range | ucopy_bf16 GPU time | Share of total ucopy_bf16 | ucopy inst |
+|---|---:|---:|---:|
+| `kiln/lm_head` | **206.770 s** | **48.06 %** | 1,970 |
+| `kiln/mlp/up` | 47.134 s | 10.95 % | 63,040 |
+| `kiln/mlp/gate` | 47.101 s | 10.95 % | 63,040 |
+| `kiln/mlp/down` | 44.367 s | 10.31 % | 63,040 |
+| `kiln/proj/qkv` | 13.614 s | 3.16 % | 47,280 |
+| `kiln/proj/o` | 5.098 s | 1.18 % | 15,760 |
+| `kiln/attn/full/decode_fused` | 0.165 s | 0.04 % | 512 |
+| `kiln/attn/full/prefill` | 0.004 s | ~0 % | 48 |
+| `kiln/kv/copy` | 0.0002 s | ~0 % | 16 |
+| Outside any NVTX range | 66.186 s | 15.38 % | 319,080 |
+| **Total** | **430.270 s** | **100.00 %** | **573,266** |
+
+The three RMSNorm / residual ranges (`kiln/norm/pre_attn`,
+`kiln/norm/pre_mlp`, `kiln/residual`) do not launch `ucopy_bf16`
+kernels — those paths dispatch `fast_sum_f32` / `bmul_f32` /
+`cast_bf16_f32` / `badd_bf16` stacks instead, so they contribute
+0 s to the `ucopy_bf16` total. They are still non-trivial in wall
+time (30.2 s, 19.4 s, 17.2 s in `nvtx_pushpop_sum`) but belong to a
+different optimization bucket.
+
+### Headline finding
+
+**The Tier-2 pass attributes 84.6 % (364.25 s) of the total
+`ucopy_bf16` mass to a named call site** (up from 0.046 % in PR #110).
+The remaining 15.4 % (66.19 s) stays in the "outside any NVTX range"
+bucket — layout-adjustment copies the bench wrapper, safetensors
+loader, tokenizer, and paged-cache bookkeeping do around the forward
+pass, not inside it.
+
+A single call site dominates: **`kiln/lm_head` is responsible for
+48.1 % of all `ucopy_bf16` mass** (206.77 s of 430.27 s), and for
+~43 % of all GPU kernel time on the run. `nvtx_kern_sum` shows
+`lm_head` launches one `ucopy_bf16` per decoded token (1,970 instances
+over the bench), each averaging **104.96 ms**, dwarfing the next
+class of emitter by 4.4×.
+
+Grouped by component:
+
+| Component | ucopy_bf16 time | Share of total |
+|---|---:|---:|
+| LM head | 206.77 s | **48.06 %** |
+| MLP projections (gate + up + down) | 138.60 s | **32.21 %** |
+| Attention projections (qkv + o) | 18.71 s | 4.35 %|
+| Attention kernels (prefill + decode_fused + kv/copy) | 0.17 s | 0.04 % |
+| Unattributed (outside ranges) | 66.19 s | 15.38 % |
+
+The `lm_head` guard wraps the final RMSNorm plus the
+`embed_tokens.t() @ hidden` matmul that produces logits. The
+104.96 ms per-invocation cost of its `ucopy_bf16` kernels is
+consistent with candle materializing the transposed tied-embedding
+matrix (151,936 × 2,560 bf16 ≈ 778 MiB) on every decode step rather
+than once at model load.
+
+### Recommendation
+
+The highest-leverage single change this profile identifies is:
+
+> **Precompute `embed_tokens.t()` once at model load and reuse it
+> for every decode step.** A ~778 MiB transpose-copy currently
+> happens 1× per token; eliminating it should remove ~207 s of GPU
+> time (~48 % of all `ucopy_bf16`, ~43 % of all GPU time) from this
+> bench, which is the single largest optimization available below
+> the attention layer.
+
+Second tier, once `lm_head` lands: attack the three MLP projections
+together (`kiln/mlp/{gate,up,down}`). Each launches exactly one
+`ucopy_bf16` per layer-per-step (63,040 inst each — i.e. 32 MLP
+layers × 1,970 decode positions), suggesting a Linear-emitted
+output reshape that should be folded into the matmul epilogue or
+the SwiGLU fusion. That class accounts for 32.2 % of total
+`ucopy_bf16`.
+
+Third tier: `kiln/proj/qkv` at 3.2 % (hot because the fused QKV
+projection runs 47,280 ucopy emissions — 3 per call × 15,760 calls).
+
+### Artifacts
+
+- `profile/profile_nvtx_tier2_nvtx_pushpop_sum.csv` — per-range wall time
+- `profile/profile_nvtx_tier2_nvtx_kern_sum.csv` — per-range kernel breakdown
+- `profile/profile_nvtx_tier2_cuda_gpu_kern_sum.csv` — global GPU kernel sum
+
+The 2.3 GB `profile_nvtx_tier2.nsys-rep` was kept on the
+now-terminated pod; all numbers above are reproduced from the three
+CSV reports committed alongside this section.

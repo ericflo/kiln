@@ -477,15 +477,24 @@ pub fn swiglu_ffn(
         None => (None, 0.0),
     };
     // x @ gate_proj^T -> [batch, seq_len, intermediate_size]
-    let gate = linear_with_lora(x, gate_proj, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?;
+    let gate = {
+        kiln_nvtx::range!(c"kiln/mlp/gate");
+        linear_with_lora(x, gate_proj, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?
+    };
     // SiLU activation: x * sigmoid(x)
     let gate = cuda_silu(&gate)?;
     // x @ up_proj^T -> [batch, seq_len, intermediate_size]
-    let up = linear_with_lora(x, up_proj, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?;
+    let up = {
+        kiln_nvtx::range!(c"kiln/mlp/up");
+        linear_with_lora(x, up_proj, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?
+    };
     // Element-wise multiply
     let hidden = (gate * up)?;
     // hidden @ down_proj^T -> [batch, seq_len, hidden_size]
-    let out = linear_with_lora(&hidden, down_proj, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/mlp/down");
+        linear_with_lora(&hidden, down_proj, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?
+    };
     Ok(out)
 }
 
@@ -1221,9 +1230,13 @@ pub fn gqa_attention(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
-    let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
-    let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+    let (q_raw, k, v) = {
+        kiln_nvtx::range!(c"kiln/proj/qkv");
+        let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+        let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
+        let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+        (q_raw, k, v)
+    };
 
     // Split Q and gate if output gate is enabled
     let (q, gate) = if attn_output_gate {
@@ -1270,7 +1283,10 @@ pub fn gqa_attention(
         } else {
             attn_output
         };
-        let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
+        let out = {
+            kiln_nvtx::range!(c"kiln/proj/o");
+            linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        };
         return Ok(out);
     }
 
@@ -1340,7 +1356,10 @@ pub fn gqa_attention(
     };
 
     // Output projection
-    let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/proj/o");
+        linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+    };
     Ok(out)
 }
 
@@ -1491,12 +1510,15 @@ fn try_flash_attn_paged_decode(
         attn_output
     };
 
-    let out = linear_with_lora(
-        &attn_output,
-        &attn_weights.o_proj,
-        lora_layer.and_then(|l| l.o_proj.as_ref()),
-        lora_scale,
-    )?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/proj/o");
+        linear_with_lora(
+            &attn_output,
+            &attn_weights.o_proj,
+            lora_layer.and_then(|l| l.o_proj.as_ref()),
+            lora_scale,
+        )?
+    };
     Ok(Some(out))
 }
 
@@ -1532,9 +1554,13 @@ pub fn gqa_attention_paged(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
-    let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
-    let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+    let (q_raw, k, v) = {
+        kiln_nvtx::range!(c"kiln/proj/qkv");
+        let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+        let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
+        let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+        (q_raw, k, v)
+    };
 
     let (q, gate) = if attn_output_gate {
         let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
@@ -1565,9 +1591,12 @@ pub fn gqa_attention_paged(
     let v = v.transpose(1, 2)?.contiguous()?;
 
     // Write new K/V into paged cache
-    paged_cache
-        .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
-        .context("paged KV cache write failed")?;
+    {
+        kiln_nvtx::range!(c"kiln/kv/copy");
+        paged_cache
+            .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+            .context("paged KV cache write failed")?;
+    }
 
     let total_seq_len = start_pos + seq_len;
 
@@ -1649,7 +1678,10 @@ pub fn gqa_attention_paged(
         } else {
             attn_output
         };
-        let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
+        let out = {
+            kiln_nvtx::range!(c"kiln/proj/o");
+            linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        };
         return Ok(out);
     }
 
@@ -1712,7 +1744,10 @@ pub fn gqa_attention_paged(
         } else {
             attn_output
         };
-        let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
+        let out = {
+            kiln_nvtx::range!(c"kiln/proj/o");
+            linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        };
         return Ok(out);
     }
 
@@ -1757,7 +1792,10 @@ pub fn gqa_attention_paged(
         attn_output
     };
 
-    let out = linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/proj/o");
+        linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+    };
     Ok(out)
 }
 
@@ -1845,7 +1883,10 @@ pub fn transformer_block(
     };
 
     // Pre-attention norm
-    let normed = rms_norm(x, &layer.input_layernorm, rms_norm_eps)?;
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_attn");
+        rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
+    };
 
     // Self-attention
     let attn_out = gqa_attention(
@@ -1865,10 +1906,16 @@ pub fn transformer_block(
     )?;
 
     // Residual connection
-    let x = (x + attn_out)?;
+    let x = {
+        kiln_nvtx::range!(c"kiln/residual");
+        (x + attn_out)?
+    };
 
     // Post-attention norm
-    let normed = rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?;
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+        rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
+    };
 
     // Feed-forward network
     let ffn_out = swiglu_ffn(
@@ -1880,7 +1927,10 @@ pub fn transformer_block(
     )?;
 
     // Residual connection
-    let out = (x + ffn_out)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/residual");
+        (x + ffn_out)?
+    };
     Ok(out)
 }
 
@@ -1913,7 +1963,10 @@ pub fn transformer_block_paged(
     };
 
     // Pre-attention norm
-    let normed = rms_norm(x, &layer.input_layernorm, rms_norm_eps)?;
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_attn");
+        rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
+    };
 
     // Self-attention with paged cache
     let attn_out = gqa_attention_paged(
@@ -1935,10 +1988,16 @@ pub fn transformer_block_paged(
     )?;
 
     // Residual connection
-    let x = (x + attn_out)?;
+    let x = {
+        kiln_nvtx::range!(c"kiln/residual");
+        (x + attn_out)?
+    };
 
     // Post-attention norm
-    let normed = rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?;
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+        rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
+    };
 
     // Feed-forward network
     let ffn_out = swiglu_ffn(
@@ -1950,7 +2009,10 @@ pub fn transformer_block_paged(
     )?;
 
     // Residual connection
-    let out = (x + ffn_out)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/residual");
+        (x + ffn_out)?
+    };
     Ok(out)
 }
 
@@ -2026,7 +2088,10 @@ pub fn model_forward(
                 let state = linear_state.as_mut()
                     .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
                 // Pre-attention RMSNorm
-                let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
                 // Gated DeltaNet linear attention
                 let attn_out = gated_deltanet_forward(
                     &normed,
@@ -2036,9 +2101,15 @@ pub fn model_forward(
                     &mut state.conv_states[linear_attn_idx],
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
-                hidden = (hidden + attn_out)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + attn_out)?
+                };
                 // Post-attention RMSNorm + FFN
-                let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                };
                 let ffn_out = swiglu_ffn(
                     &normed_post,
                     &layer.mlp.gate_proj,
@@ -2046,19 +2117,23 @@ pub fn model_forward(
                     &layer.mlp.down_proj,
                     layer_lora,
                 )?;
-                hidden = (hidden + ffn_out)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + ffn_out)?
+                };
                 linear_attn_idx += 1;
             }
         }
     }
 
-    // 3. Final RMSNorm
-    hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-
-    // 4. LM head projection (weight-tied: reuse embed_tokens transposed)
+    // 3. Final RMSNorm + 4. LM head projection (weight-tied: embed_tokens^T)
     // hidden: [1, seq_len, hidden_size], embed_tokens: [vocab_size, hidden_size]
     // logits = hidden @ embed_tokens^T -> [1, seq_len, vocab_size]
-    let logits = hidden.broadcast_matmul(&weights.embed_tokens.t()?)?;
+    let logits = {
+        kiln_nvtx::range!(c"kiln/lm_head");
+        hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        hidden.broadcast_matmul(&weights.embed_tokens.t()?)?
+    };
 
     Ok(logits)
 }
@@ -2121,7 +2196,10 @@ pub fn model_forward_segment(
             GpuAttentionWeights::Linear(lin_weights) => {
                 let state = linear_state.as_mut()
                     .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
-                let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
                 let attn_out = gated_deltanet_forward(
                     &normed,
                     lin_weights,
@@ -2130,8 +2208,14 @@ pub fn model_forward_segment(
                     &mut state.conv_states[linear_attn_idx],
                 )
                 .with_context(|| format!("segment gated deltanet layer {i}"))?;
-                hidden = (hidden + attn_out)?;
-                let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                };
                 let ffn_out = swiglu_ffn(
                     &normed_post,
                     &layer.mlp.gate_proj,
@@ -2139,7 +2223,10 @@ pub fn model_forward_segment(
                     &layer.mlp.down_proj,
                     layer_lora,
                 )?;
-                hidden = (hidden + ffn_out)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + ffn_out)?
+                };
                 linear_attn_idx += 1;
             }
         }
@@ -2172,6 +2259,7 @@ pub fn model_forward_head(
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
 ) -> Result<Tensor> {
+    kiln_nvtx::range!(c"kiln/lm_head");
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
     let logits = normed.broadcast_matmul(&weights.embed_tokens.t()?)?;
     Ok(logits)
@@ -2257,7 +2345,10 @@ pub fn model_forward_paged(
             GpuAttentionWeights::Linear(lin_weights) => {
                 let state = linear_state.as_mut()
                     .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
-                let normed = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
                 let attn_out = gated_deltanet_forward(
                     &normed,
                     lin_weights,
@@ -2266,8 +2357,14 @@ pub fn model_forward_paged(
                     &mut state.conv_states[linear_attn_idx],
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
-                hidden = (hidden + attn_out)?;
-                let normed_post = rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                };
                 let ffn_out = swiglu_ffn(
                     &normed_post,
                     &layer.mlp.gate_proj,
@@ -2275,17 +2372,21 @@ pub fn model_forward_paged(
                     &layer.mlp.down_proj,
                     layer_lora,
                 )?;
-                hidden = (hidden + ffn_out)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + ffn_out)?
+                };
                 linear_attn_idx += 1;
             }
         }
     }
 
-    // 3. Final RMSNorm
-    hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-
-    // 4. LM head projection (weight-tied)
-    let logits = hidden.broadcast_matmul(&weights.embed_tokens.t()?)?;
+    // 3. Final RMSNorm + 4. LM head projection (weight-tied)
+    let logits = {
+        kiln_nvtx::range!(c"kiln/lm_head");
+        hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        hidden.broadcast_matmul(&weights.embed_tokens.t()?)?
+    };
 
     Ok(logits)
 }
