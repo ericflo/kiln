@@ -15,7 +15,21 @@ const ITEM_STOP: &str = "stop_server";
 const ITEM_LOGS: &str = "view_logs";
 const ITEM_QUIT: &str = "quit";
 
-const ICON_BYTES: &[u8] = include_bytes!("../icons/32x32.png");
+const ICON_STOPPED: &[u8] = include_bytes!("../icons/tray/stopped.png");
+const ICON_STARTING: &[u8] = include_bytes!("../icons/tray/starting.png");
+const ICON_RUNNING: &[u8] = include_bytes!("../icons/tray/running.png");
+const ICON_TRAINING: &[u8] = include_bytes!("../icons/tray/training.png");
+const ICON_ERROR: &[u8] = include_bytes!("../icons/tray/error.png");
+
+fn state_icon_bytes(state: &ServerState) -> &'static [u8] {
+    match state {
+        ServerState::Stopped => ICON_STOPPED,
+        ServerState::Starting => ICON_STARTING,
+        ServerState::Running => ICON_RUNNING,
+        ServerState::TrainingActive => ICON_TRAINING,
+        ServerState::Error(_) => ICON_ERROR,
+    }
+}
 
 pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result<()> {
     let dashboard = MenuItemBuilder::with_id(ITEM_DASHBOARD, "Open Dashboard").build(app)?;
@@ -35,10 +49,9 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .item(&quit)
         .build()?;
 
-    let icon = tauri::image::Image::from_bytes(ICON_BYTES)?;
+    let icon = tauri::image::Image::from_bytes(state_icon_bytes(&ServerState::Stopped))?;
 
     let supervisor_for_events = Arc::clone(&supervisor);
-    // TODO: per-state tray icons in a later PR. Single icon for all states today.
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .tooltip("kiln: Stopped")
@@ -155,6 +168,9 @@ fn spawn_state_watcher(
                 let tooltip = format!("kiln: {}", state_label(&state));
                 if let Some(tray) = app.tray_by_id(TRAY_ID) {
                     let _ = tray.set_tooltip(Some(tooltip.as_str()));
+                    if let Ok(img) = tauri::image::Image::from_bytes(state_icon_bytes(&state)) {
+                        let _ = tray.set_icon(Some(img));
+                    }
                 }
                 let _ = start_item.set_enabled(start_enabled(&state));
                 let _ = stop_item.set_enabled(stop_enabled(&state));
@@ -242,5 +258,30 @@ mod tests {
         assert!(stop_enabled(&ServerState::TrainingActive));
         assert!(!stop_enabled(&ServerState::Stopped));
         assert!(!stop_enabled(&ServerState::Error("x".into())));
+    }
+
+    #[test]
+    fn icon_bytes_distinct_per_state() {
+        let states = [
+            ServerState::Stopped,
+            ServerState::Starting,
+            ServerState::Running,
+            ServerState::TrainingActive,
+            ServerState::Error("boom".into()),
+        ];
+        let mut ptrs: Vec<*const u8> = Vec::with_capacity(states.len());
+        for s in &states {
+            let bytes = state_icon_bytes(s);
+            assert!(!bytes.is_empty(), "icon bytes for {:?} must be non-empty", s);
+            ptrs.push(bytes.as_ptr());
+        }
+        let mut sorted = ptrs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            ptrs.len(),
+            "each ServerState must map to a distinct icon slice"
+        );
     }
 }
