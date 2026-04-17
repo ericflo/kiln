@@ -88,10 +88,40 @@
       #toolbar button:hover { background: #232831; }
       #copy-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
       #copy-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
+      #status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        background: #1b1e24;
+        color: #a8aeb8;
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        user-select: none;
+      }
+      #status-badge .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #6c7280;
+        flex-shrink: 0;
+      }
+      #status-badge.state-stopped .dot { background: #6c7280; }
+      #status-badge.state-starting .dot { background: #d4a64a; }
+      #status-badge.state-running .dot { background: #2f9e44; }
+      #status-badge.state-training .dot { background: #2a6df4; }
+      #status-badge.state-error .dot { background: #e03131; }
+      #status-badge.state-unknown .dot { background: #6c7280; }
     </style>
   </head>
   <body>
     <div id="toolbar">
+      <span id="status-badge" class="state-unknown" title="Kiln server state">
+        <span class="dot"></span>
+        <span class="label">Unknown</span>
+      </span>
       <button id="open-logs" title="Open the log viewer window">View Logs</button>
       <button id="open-settings" title="Open the settings window">Settings</button>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
@@ -262,7 +292,80 @@
         try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
       });
 
-      window.addEventListener("DOMContentLoaded", load);
+      const statusBadge = document.getElementById("status-badge");
+      const statusBadgeLabel = statusBadge.querySelector(".label");
+      const STATE_CLASSES = [
+        "state-stopped",
+        "state-starting",
+        "state-running",
+        "state-training",
+        "state-error",
+        "state-unknown",
+      ];
+      const STATE_INFO = {
+        Stopped: { cls: "state-stopped", label: "Stopped" },
+        Starting: { cls: "state-starting", label: "Starting" },
+        Running: { cls: "state-running", label: "Running" },
+        TrainingActive: { cls: "state-training", label: "Training" },
+        Error: { cls: "state-error", label: "Error" },
+        Unknown: { cls: "state-unknown", label: "Unknown" },
+      };
+
+      function applyStatusBadge(kind, tooltip) {
+        const info = STATE_INFO[kind] || STATE_INFO.Unknown;
+        statusBadge.classList.remove(...STATE_CLASSES);
+        statusBadge.classList.add(info.cls);
+        statusBadgeLabel.textContent = info.label;
+        statusBadge.title = tooltip || `Kiln server state: ${info.label}`;
+      }
+
+      function parseServerState(state) {
+        if (typeof state === "string") {
+          return { kind: state, message: null };
+        }
+        if (state && typeof state === "object") {
+          if (typeof state.kind === "string") {
+            return { kind: state.kind, message: state.message || null };
+          }
+          const keys = Object.keys(state);
+          if (keys.length > 0) {
+            const k = keys[0];
+            const v = state[k];
+            return { kind: k, message: typeof v === "string" ? v : null };
+          }
+        }
+        return { kind: "Unknown", message: null };
+      }
+
+      let stateFailureLogged = false;
+      async function pollServerState() {
+        if (!invoke) {
+          applyStatusBadge("Unknown", "Tauri bridge unavailable");
+          return;
+        }
+        try {
+          const raw = await invoke("server_state");
+          const { kind, message } = parseServerState(raw);
+          const info = STATE_INFO[kind] || STATE_INFO.Unknown;
+          const tooltip = message
+            ? `Kiln server state: ${info.label} — ${message}`
+            : `Kiln server state: ${info.label}`;
+          applyStatusBadge(kind, tooltip);
+          stateFailureLogged = false;
+        } catch (err) {
+          applyStatusBadge("Unknown", "Could not read server state");
+          if (!stateFailureLogged) {
+            console.error("server_state poll failed", err);
+            stateFailureLogged = true;
+          }
+        }
+      }
+
+      window.addEventListener("DOMContentLoaded", () => {
+        load();
+        pollServerState();
+        setInterval(pollServerState, 2000);
+      });
     </script>
   </body>
 </html>
