@@ -64,6 +64,11 @@
       button:hover { background: #3b7af5; }
       button:disabled { background: #2a2f3a; cursor: default; }
       .hidden { display: none !important; }
+      #status-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: center;
+      }
       #toolbar {
         position: absolute;
         top: 8px;
@@ -93,7 +98,10 @@
     <div id="status">
       <h1 id="status-title">Connecting to Kiln server…</h1>
       <p id="status-detail">Looking up the server URL from your settings.</p>
-      <button id="retry" class="hidden">Retry</button>
+      <div id="status-actions">
+        <button id="start-server" class="hidden">Start Server</button>
+        <button id="retry" class="hidden">Retry</button>
+      </div>
     </div>
     <script>
       const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
@@ -104,14 +112,19 @@
       const title = document.getElementById("status-title");
       const detail = document.getElementById("status-detail");
       const retry = document.getElementById("retry");
+      const startBtn = document.getElementById("start-server");
+      const START_LABEL = "Start Server";
 
-      function showStatus(titleText, detailText, showRetry) {
+      function showStatus(titleText, detailText, showRetry, showStart) {
         frame.classList.add("hidden");
         frame.src = "about:blank";
         status.classList.remove("hidden");
         title.textContent = titleText;
         detail.textContent = detailText;
         retry.classList.toggle("hidden", !showRetry);
+        startBtn.classList.toggle("hidden", !showStart);
+        startBtn.disabled = false;
+        startBtn.textContent = START_LABEL;
       }
 
       function showFrame(url) {
@@ -121,11 +134,12 @@
       }
 
       async function load() {
-        showStatus("Connecting to Kiln server…", "Looking up the server URL from your settings.", false);
+        showStatus("Connecting to Kiln server…", "Looking up the server URL from your settings.", false, false);
         if (!invoke) {
           showStatus(
             "Tauri bridge unavailable",
             "This page must run inside Kiln Desktop.",
+            false,
             false
           );
           return;
@@ -135,7 +149,8 @@
           if (!url) {
             showStatus(
               "Kiln server not running.",
-              "Start it from the tray menu, then retry.",
+              "Click Start Server to launch it, or start it from the tray menu.",
+              true,
               true
             );
             return;
@@ -145,12 +160,51 @@
           showStatus(
             "Could not reach Kiln server.",
             String(err || "Unknown error"),
-            true
+            true,
+            false
           );
         }
       }
 
       retry.addEventListener("click", load);
+
+      async function startServerInline() {
+        if (!invoke) {
+          detail.textContent = "Tauri bridge unavailable.";
+          return;
+        }
+        startBtn.disabled = true;
+        startBtn.textContent = "Starting…";
+        retry.classList.add("hidden");
+        try {
+          await invoke("start_server");
+        } catch (err) {
+          detail.textContent = String(err || "Failed to start server.");
+          startBtn.disabled = false;
+          startBtn.textContent = START_LABEL;
+          retry.classList.remove("hidden");
+          return;
+        }
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 500));
+          try {
+            const url = await invoke("get_kiln_url");
+            if (url) {
+              showFrame(url);
+              return;
+            }
+          } catch (_) {
+            // keep polling
+          }
+        }
+        detail.textContent = "Server did not come up in time. Check the log viewer.";
+        startBtn.disabled = false;
+        startBtn.textContent = START_LABEL;
+        retry.classList.remove("hidden");
+      }
+
+      startBtn.addEventListener("click", startServerInline);
 
       const copyBtn = document.getElementById("copy-url");
       const COPY_LABEL = "Copy OpenAI base URL";
