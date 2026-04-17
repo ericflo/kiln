@@ -65,6 +65,9 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     app_handle.exit(0);
                 }
                 ITEM_DASHBOARD => {
+                    if let Err(e) = open_dashboard_window(&app_handle) {
+                        eprintln!("[tray] open_dashboard_window failed: {}", e);
+                    }
                     let _ = app_handle.emit("menu://open-dashboard", ());
                 }
                 ITEM_SETTINGS => {
@@ -94,6 +97,22 @@ fn open_settings_window(app: &AppHandle) -> tauri::Result<()> {
     let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Kiln Settings")
         .inner_size(520.0, 640.0)
+        .resizable(true)
+        .visible(true)
+        .build()?;
+    win.set_focus()?;
+    Ok(())
+}
+
+fn open_dashboard_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window("dashboard") {
+        win.show()?;
+        win.set_focus()?;
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, "dashboard", WebviewUrl::App("dashboard.html".into()))
+        .title("Kiln Dashboard")
+        .inner_size(1024.0, 768.0)
         .resizable(true)
         .visible(true)
         .build()?;

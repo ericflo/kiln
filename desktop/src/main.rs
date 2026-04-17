@@ -38,6 +38,25 @@ async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, Strin
     Ok(state.read().await.clone())
 }
 
+/// Return the kiln server's /ui URL based on the current settings, but only
+/// when the supervisor reports a state that should have the HTTP server up.
+/// Returns an empty string when the server is Stopped or in Error, so the
+/// dashboard UI can distinguish "server not running" from a real URL.
+#[tauri::command]
+async fn get_kiln_url(
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<String, String> {
+    let server_state = sup.state().await;
+    match server_state {
+        ServerState::Stopped | ServerState::Error(_) => Ok(String::new()),
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            let s = state.read().await;
+            Ok(format!("http://{}:{}/ui", s.host, s.port))
+        }
+    }
+}
+
 /// Persist the supplied settings to disk and rebuild the supervisor's
 /// `SupervisorConfig`. A currently-running server is NOT restarted; the new
 /// args take effect on the next `start_server` call.
@@ -92,7 +111,8 @@ fn main() {
             server_state,
             server_logs,
             get_settings,
-            set_settings
+            set_settings,
+            get_kiln_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");
