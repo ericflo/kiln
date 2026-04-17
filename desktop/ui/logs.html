@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kiln Logs</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background: #0f1115;
+        color: #e6e6e6;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        background: #161922;
+        border-bottom: 1px solid #232733;
+        flex: 0 0 auto;
+      }
+      header h1 {
+        font-size: 13px;
+        font-weight: 600;
+        margin: 0;
+        flex: 1 1 auto;
+        color: #cfd3dc;
+      }
+      header label {
+        font-size: 12px;
+        color: #a8aeb8;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        user-select: none;
+      }
+      header input[type="checkbox"] {
+        accent-color: #2a6df4;
+        margin: 0;
+      }
+      button {
+        background: #2a6df4;
+        color: #fff;
+        border: 0;
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button:hover { background: #3b7af5; }
+      #log {
+        flex: 1 1 auto;
+        margin: 0;
+        padding: 12px 14px;
+        background: #0f1115;
+        color: #d6dae3;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      #log.empty {
+        color: #6c7280;
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Kiln server logs</h1>
+      <label><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
+      <button id="clear" type="button">Clear view</button>
+    </header>
+    <div id="log" class="empty">(no log lines yet)</div>
+    <script defer>
+      const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+        || (window.__TAURI__ && window.__TAURI__.invoke);
+
+      const logEl = document.getElementById("log");
+      const autoscrollEl = document.getElementById("autoscroll");
+      const clearEl = document.getElementById("clear");
+
+      // Lines beyond `baseline` are shown. "Clear view" sets baseline to the
+      // current line count so the user sees only new lines from then on. The
+      // supervisor ring buffer itself is never modified.
+      let baseline = 0;
+
+      function render(lines) {
+        const visible = lines.slice(baseline);
+        if (visible.length === 0) {
+          logEl.textContent = lines.length === 0
+            ? "(no log lines yet)"
+            : "(view cleared — new lines will appear here)";
+          logEl.classList.add("empty");
+          return;
+        }
+        logEl.classList.remove("empty");
+        logEl.textContent = visible.join("\n");
+        if (autoscrollEl.checked) {
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+      }
+
+      async function refresh() {
+        if (!invoke) {
+          logEl.textContent = "Tauri bridge unavailable. This page must run inside Kiln Desktop.";
+          logEl.classList.remove("empty");
+          return;
+        }
+        try {
+          const lines = await invoke("server_logs");
+          const arr = Array.isArray(lines) ? lines : [];
+          // If the ring buffer rotated and dropped lines below our baseline,
+          // clamp so we don't end up with a negative offset.
+          if (baseline > arr.length) {
+            baseline = arr.length;
+          }
+          render(arr);
+        } catch (err) {
+          logEl.textContent = "Failed to read logs: " + String(err || "unknown error");
+          logEl.classList.remove("empty");
+        }
+      }
+
+      clearEl.addEventListener("click", async () => {
+        try {
+          const lines = invoke ? await invoke("server_logs") : [];
+          baseline = Array.isArray(lines) ? lines.length : 0;
+        } catch {
+          // If we can't read, fall back to clearing what we have on screen.
+          baseline = 0;
+        }
+        render([]);
+      });
+
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>
