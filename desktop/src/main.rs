@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod supervisor;
+mod tray;
 
 use std::sync::Arc;
 
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 async fn start_server(sup: State<'_, Arc<Supervisor>>) -> Result<(), String> {
@@ -33,6 +34,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(supervisor)
+        .setup(|app| {
+            let sup: State<'_, Arc<Supervisor>> = app.state();
+            tray::build_tray(app.handle(), sup.inner().clone())?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_server,
             stop_server,
