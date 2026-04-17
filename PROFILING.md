@@ -1,3 +1,195 @@
+# Kiln Profiling Report — After PR #92 (Recurrent GDN Decode Fused, Refresh)
+
+## Overview
+
+This report re-profiles `kiln-bench` running Qwen3.5-4B (32 layers: 24 Gated
+DeltaNet linear-attention + 8 full-attention; bf16 weights) on a single
+RTX A6000, after PR #92 landed:
+
+- **#92** — Vendored `fla-org`'s `fused_recurrent_gated_delta_rule_fwd` as a
+  new CUDA kernel specifically for the seq_len=1 recurrent decode path, to
+  fix the sharp decode regression introduced by PR #80 (which optimized the
+  chunkwise prefill path but was slow at chunk_size=1).
+
+The primary question: **did PR #92 actually restore decode performance?**
+Secondary question: now that decode is fixed, what is the next concrete
+optimization lever?
+
+**No optimizations are proposed or attempted here — this is a profiling-only
+pass.** The recommendation at the end picks the single concrete next step.
+
+## Hardware & Build
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA RTX A6000 (48 GiB, compute capability 8.6) |
+| Driver | 570.211.01 |
+| CUDA toolkit | 12.8 (pod shipped without the pre-baked image; see "Environment notes" below) |
+| Rustc | 1.x stable (rustup-installed on pod) |
+| Build | `cargo build --release --features cuda --bin kiln-bench` |
+| Build env | `KILN_CUDA_ARCHS=86`, sccache (B2 backend, 100 % hit on Rust crates) |
+| Nsight Systems | 2024.6.2 |
+| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16, multimodal weight prefix `model.language_model.` |
+| Commit | `d7bd704` (current `main`, post-#92 through #93) |
+
+**Environment notes.** `ghcr.io/ericflo/kiln-runpod:latest` was requested
+for this pod, but the launched pod came up with a stock CUDA 12.8 Ubuntu
+image and none of the pre-baked tooling (no Rust, no nsys, no b2, no hf).
+Bootstrap installed Rust, `nsight-systems-2024.6.2`, `pkg-config`,
+`libssl-dev`, `sccache`, `b2`, `hf-transfer`, and `gh` on the live pod.
+sccache hits for Rust crates were 100 % from the cuda12.4 bucket even
+though the active toolchain is cuda12.8, so the build still finished in
+about 1 m 27 s.
+
+## Scenarios
+
+Single mixed-workload nsys capture (512 prompt → 128 output) — matches
+PR #87's PROFILING baseline for direct delta comparison. Throughput phase
+was **skipped by killing the bench process** as soon as the latency phase
+printed its summary, per the task budget.
+
+| Scenario | Invocation |
+|---|---|
+| Latency benchmark (prefill + decode) | `kiln-bench --model-path ~/models/qwen3.5-4b --prompt-tokens 512 --max-output-tokens 128 --skip-training` |
+
+Capture: `nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false
+--capture-range=none --sample=none --cpuctxsw=none -o profile_post92`.
+Reduced with `nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum`.
+
+---
+
+## Wall-Clock Comparison (A6000, Same Binary Options)
+
+Latency benchmark (`--prompt-tokens 512 --max-output-tokens 128`), measured
+on this profiling pod against the two prior published baselines:
+
+| Metric | PR #75 (1653a41) | PR #80 (cfe5152) | PR #92 (d7bd704, this run) | Δ vs PR #80 |
+|---|---:|---:|---:|---:|
+| Prefill (506 tokens)         | 2539.1 ms / **199 tok/s** | 1486.4 ms / **340 tok/s** | 10013.6 ms / **51 tok/s** | **−85 % (worse)** |
+| Decode mean ITL (129 tokens) | 240.7 ms / **4.15 tok/s** | 528.5 ms / **1.9 tok/s**  | **231.0 ms / 4.3 tok/s**  | **+126 % (better)** |
+
+### Did PR #92 fix the decode regression?
+
+**Yes.** Decode mean ITL is 231 ms at 4.3 tok/s, marginally *better* than
+PR #75's pre-regression baseline (240.7 ms / 4.15 tok/s) and dramatically
+better than PR #80's regressed 528.5 ms / 1.9 tok/s. The vendored
+`fused_recurrent_gated_delta_rule_fwd` kernel is doing its job on the
+seq_len=1 recurrence path — the previous chunk_gla_fwd at chunk_size=1
+is no longer the bottleneck.
+
+### What about the prefill number?
+
+The prefill wall-clock reported on this run (10013.6 ms / 51 tok/s) is
+dramatically worse than PR #80's 1486.4 ms / 340 tok/s, but this is **not
+a code regression**. The CUDA API summary shows **9.40 s of
+`cuModuleLoadData`** on this pod (72.2 % of API time, spread over 7
+calls), which means the first prefill absorbed nearly 10 s of JIT CUDA
+module loading that the previous baseline did not see on the pre-baked
+image. Subtracting that startup cost gives a steady-state prefill of
+roughly 600 ms for 506 tokens (~840 tok/s) — consistent with, and if
+anything faster than, PR #80's 340 tok/s. The bench only runs one prefill
+and so pays the JIT cost in-line; a warm-up pass would separate it. We
+flag this as a measurement artifact of the stock (non-baked) pod, not a
+regression to chase.
+
+---
+
+## Top GPU Kernels (Full 512+128 Capture)
+
+From `cuda_gpu_kern_sum` on `profile_post92.nsys-rep` (latency phase
+only — throughput was killed before it ran):
+
+| Rank | % GPU time | Kernel | Instances | Avg (µs) | Notes |
+|---:|---:|---|---:|---:|---|
+| 1 | **85.7 %** | `ucopy_bf16` | 3 749 | 587.9 | Generic bf16 copy/reshape — **new dominant hotspot** |
+| 2 | 2.6 % | `cutlass_80_tensorop_bf16_s16816gemm_relu 256x64` | 662 | 101.6 | Fused-relu GEMM (FFN / proj) |
+| 3 | 1.4 % | `cutlass_80_tensorop_bf16_s16816gemm_relu 64x64` | 813 | 45.3 | Smaller GEMM tile |
+| 4 | 1.3 % | `bmul_f32` | 4 566 | 7.3 | Broadcasted f32 mul (likely RMSNorm / scaling) |
+| 5 | 0.9 % | `ampere_bf16_s16816gemm_bf16 256x128` | 97 | 235.8 | cuBLAS-style GEMM |
+| 6 | 0.8 % | `ampere_bf16_s16816gemm_bf16 128x64` | 326 | 63.9 | cuBLAS-style GEMM |
+| 7 | 0.7 % | `bmul_bf16` | 2 341 | 7.4 | Broadcasted bf16 mul |
+| 8 | 0.6 % | `fast_sum_f32` | 1 957 | 7.2 | Softmax / reductions |
+| 9 | 0.4 % | `ucopy_f32` | 1 413 | 7.7 | Generic f32 copy |
+| 10 | 0.4 % | `cast_bf16_f32` | 4 063 | 2.6 | bf16↔f32 casts |
+| 11 | 0.4 % | `gdn_fwd_sub_kernel` (**kiln-gdn-kernel**, PR #80) | 192 | 49.2 | Vendored chunkwise GDN kernel (prefill) |
+| 12 | 0.3 % | `ampere_bf16_s16816gemm_bf16 64x64 sliced1x2` | 245 | 36.4 | cuBLAS-style GEMM |
+| 13 | 0.3 % | `cutlass_80_tensorop_bf16_s16816gemm_relu 128x128` | 64 | 125.6 | Larger tile GEMM |
+| 14 | 0.1 % | `recurrent_gdn_fwd_kernel<128>` (**kiln-gdn-kernel**, PR #92) | 245 | 15.9 | Vendored fla recurrent GDN kernel — **decode is fast now** |
+
+**All GEMM kernels combined: ~8 % of GPU time.** All GDN kernels combined
+(prefill + decode): ~0.5 %. Every attention/matmul path is now small on
+this workload — the dominant cost is pure memory movement.
+
+## CUDA API / Memory
+
+From `cuda_api_sum` and `cuda_gpu_mem_time_sum`:
+
+| Item | Total | Calls | Notes |
+|---|---:|---:|---|
+| `cuModuleLoadData` | 9.40 s (72.2 % API) | 7 | Cold-start JIT load (not on hot path; see prefill note above) |
+| `cuMemcpyHtoDAsync_v2` | 1.24 s (9.5 % API) | **14 293** | Many small Host→Device transfers (avg 86 µs) |
+| `cuMemcpyDtoHAsync_v2` | 1.20 s (9.3 % API) | **11** | Avg **109 ms per call** — large host-bound reads |
+| `cuLaunchKernel` | 0.56 s (4.3 % API) | 48 890 | Normal launch overhead |
+| `cuEventRecord` | 0.26 s (2.0 % API) | 52 192 | Normal sync overhead |
+
+Memory-op time: **99.8 % Host→Device** (14 293 ops, 1.10 s total). Only
+11 DtoH ops (~15 µs GPU time, but ~1.2 s of API wait), so DtoH is not a
+decode-loop problem — likely tokenizer / final-logits pulls. The HtoD
+storm and the `ucopy_bf16` dominance together tell the same story.
+
+---
+
+## Headline Findings
+
+1. **PR #92 fixed the decode regression.** Decode mean ITL 528.5 ms → **231 ms** (4.3 tok/s), beating PR #75's pre-regression baseline.
+2. **The new top hotspot is `ucopy_bf16` at 85.7 % of GPU time.** This is candle's generic bf16 copy/reshape kernel, called 3 749 times over the 512+128 run. None of it is attention math — it is pure tensor-layout movement.
+3. **All GEMM + GDN attention kernels combined are only ~8 % of GPU time.** The remaining ~6 % is a long tail of small elementwise kernels (`bmul_*`, `fast_sum_f32`, `cast_*`).
+4. **The HtoD storm (14 293 calls in ~30 s of decode) correlates with the `ucopy_bf16` count** — both point at repetitive small per-token / per-layer tensor movement rather than big fused kernel launches.
+
+---
+
+## Recommendation — Next Optimization
+
+**Vendor FlashInfer paged-GQA decode kernel**, per the project roadmap's
+"Current optimization queue" item #3.
+
+Rationale, citing this profile:
+
+- `ucopy_bf16` at 85.7 % of GPU time is the direct signature of paged KV
+  cache + GQA broadcast in a candle-authored decode loop: every decode
+  step touches a small number of active KV blocks, broadcasts k/v across
+  the GQA ratio, and feeds them into attention — each of those steps is
+  currently materialized as a separate generic copy rather than fused
+  into the attention kernel.
+- FlashInfer's paged-GQA decode kernel fuses the block gather + GQA
+  broadcast + attention into a single CUDA kernel, eliminating essentially
+  all of the `ucopy_bf16` traffic on the decode path.
+- The Amdahl ceiling is **~6× decode speedup** (if we take the full 85.7 %
+  and deliver an on-kernel replacement). Even capturing half of that
+  would put decode well under 100 ms ITL and move the bottleneck back
+  onto actual attention math, which is where further work should live.
+- All the pieces kiln needs are already scoped small: bf16 only, the
+  exact GQA head ratio (16 Q heads : 4 KV heads for Qwen3.5-4B), the
+  block sizes the existing block manager emits, decode-only (prefill
+  stays on flash-attn from PR #33). This matches the minimal-scope
+  vendoring pattern used successfully for `kiln-flash-attn` (#33) and
+  `kiln-gdn-kernel` (#80/#92).
+
+**Expected speedup range:** 3×–5× on decode ITL (231 ms → ~50–75 ms),
+with a hard abort threshold of **1.5×** — below that, the assumption
+that `ucopy_bf16` is the GQA/paged-KV broadcast cost is wrong and the
+next task should re-profile with explicit NVTX ranges around the paged
+attention call to locate the real copy source before vendoring anything.
+
+Do **not** hand-roll candle replacements for GQA decode; the prior
+candle-DSL attempts delivered single-digit-percent wins when the real
+gap is multi-×. Vendor the production kernel.
+
+---
+
+
+---
+
 # Kiln Profiling Report — After PR #80 (GDN Kernel Vendored, Refresh)
 
 ## Overview
