@@ -56,8 +56,14 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Rust stable (system-wide so any user can use it) ---
+# rustup-init with --default-toolchain installs the toolchain but does NOT
+# set a "default" for `rustup run` dispatch, so a bare `cargo`/`rustc` call
+# from a non-login shell errors with:
+#   "rustup could not choose a version of cargo to run"
+# Always follow up with `rustup default stable` to wire up the default.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && /usr/local/cargo/bin/rustup default stable \
     && chmod -R a+rwX /usr/local/rustup /usr/local/cargo \
     && rustc --version && cargo --version
 
@@ -90,12 +96,25 @@ RUN pip install --no-cache-dir \
         'b2[full]' huggingface-hub hf-transfer safetensors numpy
 
 # --- SSH server config (RunPod injects $PUBLIC_KEY at pod boot) ---
+# Also bake PATH into /etc/environment. Dockerfile ENV PATH=... only takes
+# effect when docker runs the container CMD; non-interactive SSH sessions
+# (which is how agents call commands) inherit PATH from /etc/environment or
+# per-user rc files. Without this, `ssh pod "cargo build"` fails with
+# `cargo: not found` even though cargo is baked in.
 RUN mkdir -p /var/run/sshd /root/.ssh \
     && chmod 700 /root/.ssh \
     && sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
     && sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/#\?AcceptEnv.*/AcceptEnv LANG LC_* RUNPOD_*/' /etc/ssh/sshd_config \
     && sed -i 's/#\?ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config \
-    && sed -i 's/#\?ClientAliveCountMax.*/ClientAliveCountMax 30/' /etc/ssh/sshd_config
+    && sed -i 's/#\?ClientAliveCountMax.*/ClientAliveCountMax 30/' /etc/ssh/sshd_config \
+    && echo 'PATH="/usr/local/cuda/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' > /etc/environment \
+    && echo 'CUDA_HOME="/usr/local/cuda"' >> /etc/environment \
+    && echo 'RUSTUP_HOME="/usr/local/rustup"' >> /etc/environment \
+    && echo 'CARGO_HOME="/usr/local/cargo"' >> /etc/environment \
+    && echo 'HF_HUB_ENABLE_HF_TRANSFER=1' >> /etc/environment \
+    && printf 'export PATH="/usr/local/cuda/bin:/usr/local/cargo/bin:$PATH"\nexport CUDA_HOME="/usr/local/cuda"\nexport RUSTUP_HOME="/usr/local/rustup"\nexport CARGO_HOME="/usr/local/cargo"\nexport HF_HUB_ENABLE_HF_TRANSFER=1\n' > /etc/profile.d/kiln-env.sh \
+    && chmod 644 /etc/profile.d/kiln-env.sh
 
 # --- MOTD: show baked tool versions on login so agents can verify ---
 COPY motd.sh /etc/profile.d/kiln-motd.sh
@@ -112,14 +131,29 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # --- Build-time smoke test: fail the image build if a tool regressed ---
+# Two passes:
+#   1. In-container PATH (docker run env) — catches missing binaries.
+#   2. Reset PATH to /etc/environment only (simulates non-interactive SSH)
+#      and re-check. Catches the specific class of bug where a tool is baked
+#      but only reachable from a login shell, which breaks `ssh pod "cargo ..."`.
+# Also exercises `cargo --version` so we catch a missing rustup default early.
 RUN set -e; \
-    for bin in nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3; do \
+    TOOLS="nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3"; \
+    for bin in $TOOLS; do \
         if ! command -v "$bin" >/dev/null 2>&1; then \
-            echo "FAIL: baked tool '$bin' not on PATH" >&2; exit 1; \
+            echo "FAIL (interactive env): '$bin' not on PATH" >&2; exit 1; \
         fi; \
     done; \
+    SSH_PATH="$(grep '^PATH=' /etc/environment | cut -d= -f2- | tr -d '\"')"; \
+    for bin in $TOOLS; do \
+        if ! env -i PATH="$SSH_PATH" sh -c "command -v $bin" >/dev/null 2>&1; then \
+            echo "FAIL (SSH-style env): '$bin' not reachable via /etc/environment PATH" >&2; exit 1; \
+        fi; \
+    done; \
+    env -i PATH="$SSH_PATH" sh -c "cargo --version" >/dev/null 2>&1 \
+        || (echo "FAIL: 'cargo --version' errored in clean env (rustup default not set?)" >&2; exit 1); \
     python3 -c "import torch; assert torch.version.cuda.startswith('12.'), torch.version.cuda"; \
-    echo "kiln-runpod smoke test: all baked tools present"
+    echo "kiln-runpod smoke test: all baked tools present (interactive + SSH-style envs)"
 
 WORKDIR /workspace
 
