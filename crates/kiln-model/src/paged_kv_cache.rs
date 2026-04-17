@@ -233,6 +233,22 @@ impl PagedKvCache {
     pub fn is_fp8(&self) -> bool {
         self.fp8
     }
+
+    /// Borrow the raw `(k_pool, v_pool)` tensors for `layer_idx`.
+    ///
+    /// Each pool has shape `[total_slots, num_kv_heads, head_dim]` where
+    /// `total_slots = num_blocks * block_size`. Returns `None` if `layer_idx`
+    /// is out of range.
+    ///
+    /// Intended for fused attention kernels (e.g. flash-attention paged decode)
+    /// that index into the pool directly via a precomputed block_table tensor.
+    /// For FP8 caches the returned tensors are still U8-encoded — callers must
+    /// either dequantize first or use a kernel that supports FP8 inputs.
+    pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&Tensor, &Tensor)> {
+        self.layers
+            .get(layer_idx)
+            .map(|(k, v)| (k, v))
+    }
 }
 
 #[cfg(test)]

@@ -43,6 +43,47 @@ kiln_flash_status_t kiln_flash_attn_fwd(
     void *stream
 );
 
+// Flash Attention Forward Pass — Paged Decode (single-query GQA)
+//
+// All pointer arguments must be CUDA device pointers.
+// Specialized for the decode step: query length = 1, K/V are gathered from a
+// paged pool indexed by `block_table`.
+//
+// Layouts:
+//   q       : [batch, 1, num_heads, head_dim] bf16
+//   k_pool  : [total_slots, num_heads_k, head_dim] bf16
+//   v_pool  : [total_slots, num_heads_k, head_dim] bf16
+//   block_table : [batch, max_blocks_per_seq] int32 (host-allocated, device-resident)
+//   out     : [batch, 1, num_heads, head_dim] bf16
+//   softmax_lse_out : [batch, num_heads, 1] float32
+//
+// The kernel reads `kBlockN` (= 128 for hdim128) consecutive K/V tokens per chunk
+// using a single block_table entry, so `page_block_size` must be >= 128 and
+// physical pages within a chunk must be contiguous. Callers using a smaller
+// logical page size (e.g. 16) must construct an equivalent block_table that
+// indexes 128-token-aligned super-blocks.
+//
+// max_seqlen_k is the current K/V length (number of cached tokens incl. the
+// freshly-written current step).
+kiln_flash_status_t kiln_flash_attn_fwd_paged_decode(
+    const void *q,
+    const void *k_pool,
+    const void *v_pool,
+    const int  *block_table,
+    void *out,
+    void *softmax_lse_out,
+    int batch_size,
+    int num_heads,
+    int num_heads_k,
+    int head_dim,
+    int max_seqlen_k,
+    int max_blocks_per_seq,
+    int page_block_size,
+    float softmax_scale,
+    int is_causal,
+    void *stream
+);
+
 // Flash Attention Backward Pass
 //
 // All pointer arguments must be CUDA device pointers.

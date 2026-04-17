@@ -32,6 +32,25 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_flash_attn_fwd_paged_decode(
+        q: *const core::ffi::c_void,
+        k_pool: *const core::ffi::c_void,
+        v_pool: *const core::ffi::c_void,
+        block_table: *const i32,
+        out: *mut core::ffi::c_void,
+        softmax_lse_out: *mut core::ffi::c_void,
+        batch_size: i32,
+        num_heads: i32,
+        num_heads_k: i32,
+        head_dim: i32,
+        max_seqlen_k: i32,
+        max_blocks_per_seq: i32,
+        page_block_size: i32,
+        softmax_scale: f32,
+        is_causal: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_flash_attn_bwd(
         dout: *const core::ffi::c_void,
         q: *const core::ffi::c_void,
@@ -169,6 +188,178 @@ pub fn flash_attn_fwd(
     }
 
     Ok((out, softmax_lse))
+}
+
+/// Flash-attention v2 forward pass — paged decode (single-query GQA).
+///
+/// Specialized for the decode step:
+///   - `q`            : `[batch, 1, num_heads, head_dim]` bf16 (contiguous)
+///   - `k_pool`       : `[total_slots, num_heads_k, head_dim]` bf16 (contiguous)
+///   - `v_pool`       : `[total_slots, num_heads_k, head_dim]` bf16 (contiguous)
+///   - `block_table`  : `[batch, max_blocks_per_seq]` i32 (CUDA tensor)
+///   - `seqlen_k`     : current K/V length per sequence (single value, applies to all batch entries)
+///   - `page_block_size`: tokens per logical page in `block_table`. Must be a multiple of 128
+///                      (the kernel reads kBlockN=128 contiguous tokens per chunk).
+///
+/// Returns the attention output `[batch, 1, num_heads, head_dim]` bf16.
+pub fn flash_attn_paged_decode(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    block_table: &Tensor,
+    seqlen_k: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    let device = q.device();
+    let (b, q_len, num_heads, head_dim) = q.dims4()?;
+    if q_len != 1 {
+        candle_core::bail!(
+            "flash_attn_paged_decode requires query_len==1, got {q_len}"
+        );
+    }
+    let (_total_slots, num_heads_k, hd_k) = k_pool.dims3()?;
+    if hd_k != head_dim {
+        candle_core::bail!(
+            "k_pool head_dim ({hd_k}) does not match q head_dim ({head_dim})"
+        );
+    }
+    if v_pool.dims3()?.2 != head_dim {
+        candle_core::bail!("v_pool head_dim mismatch");
+    }
+    if num_heads % num_heads_k != 0 {
+        candle_core::bail!(
+            "num_heads ({num_heads}) must be divisible by num_heads_k ({num_heads_k})"
+        );
+    }
+    if q.dtype() != DType::BF16
+        || k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+    {
+        candle_core::bail!("flash_attn_paged_decode requires bf16 q/k/v");
+    }
+    if head_dim != 128 && head_dim != 256 {
+        candle_core::bail!(
+            "flash_attn_paged_decode only supports head_dim=128,256, got {head_dim}"
+        );
+    }
+    // kBlockN = 128 for hdim128/hdim256 splitkv. Page size must divide kBlockN.
+    if page_block_size == 0 || 128 % page_block_size != 0 {
+        candle_core::bail!(
+            "flash_attn_paged_decode requires page_block_size to divide 128 (kBlockN), got {page_block_size}"
+        );
+    }
+    if block_table.dtype() != DType::U32 {
+        candle_core::bail!(
+            "flash_attn_paged_decode requires block_table dtype=u32, got {:?}",
+            block_table.dtype()
+        );
+    }
+
+    let (bt_batch, max_blocks_per_seq) = block_table.dims2()?;
+    if bt_batch != b {
+        candle_core::bail!(
+            "block_table batch dim ({bt_batch}) must match q batch ({b})"
+        );
+    }
+
+    // Ensure contiguous
+    let q = q.contiguous()?;
+    let k_pool = k_pool.contiguous()?;
+    let v_pool = v_pool.contiguous()?;
+    let block_table = block_table.contiguous()?;
+
+    // Allocate output and softmax LSE
+    let out = Tensor::zeros((b, 1, num_heads, head_dim), DType::BF16, device)?;
+    let softmax_lse = Tensor::zeros((b, num_heads, 1), DType::F32, device)?;
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k_pool.storage_and_layout();
+        let (v_storage, v_layout) = v_pool.storage_and_layout();
+        let (bt_storage, bt_layout) = block_table.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+        let (lse_storage, lse_layout) = softmax_lse.storage_and_layout();
+
+        macro_rules! cuda {
+            ($s:expr, $name:expr) => {
+                match &*$s {
+                    candle_core::Storage::Cuda(c) => c,
+                    _ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+                }
+            };
+        }
+
+        let q_cuda = cuda!(q_storage, "q");
+        let k_cuda = cuda!(k_storage, "k_pool");
+        let v_cuda = cuda!(v_storage, "v_pool");
+        let bt_cuda = cuda!(bt_storage, "block_table");
+        let out_cuda = cuda!(out_storage, "out");
+        let lse_cuda = cuda!(lse_storage, "softmax_lse");
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let q_slice = q_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(q_layout.start_offset()..);
+        let k_slice = k_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(k_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+        let lse_slice = lse_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(lse_layout.start_offset()..);
+
+        // The block_table tensor is u32 in candle; the FFI expects int32. They
+        // are bit-identical for non-negative IDs, so we can reinterpret the
+        // pointer.
+        let bt_slice = bt_cuda
+            .as_cuda_slice::<u32>()?
+            .slice(bt_layout.start_offset()..);
+
+        unsafe {
+            let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+            let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+            let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+            let (bt_ptr, _g4) = bt_slice.device_ptr(&stream);
+            let (out_ptr, _g5) = out_slice.device_ptr(&stream);
+            let (lse_ptr, _g6) = lse_slice.device_ptr(&stream);
+
+            let status = kiln_flash_attn_fwd_paged_decode(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                bt_ptr as *const i32,
+                out_ptr as *mut _,
+                lse_ptr as *mut _,
+                b as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                seqlen_k as i32,
+                max_blocks_per_seq as i32,
+                page_block_size as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                raw_stream,
+            );
+
+            if status != 0 {
+                candle_core::bail!(
+                    "kiln_flash_attn_fwd_paged_decode failed with status {status}"
+                );
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// Flash-attention v2 backward pass.
