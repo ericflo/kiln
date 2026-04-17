@@ -26,6 +26,15 @@
         "height": 640,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "dashboard",
+        "url": "dashboard.html",
+        "title": "Kiln Dashboard",
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

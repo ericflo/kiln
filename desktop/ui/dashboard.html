@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kiln Dashboard</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background: #0f1115;
+        color: #e6e6e6;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        overflow: hidden;
+      }
+      #frame {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        border: 0;
+        background: #0f1115;
+      }
+      #status {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+        box-sizing: border-box;
+        text-align: center;
+        background: #0f1115;
+      }
+      #status h1 {
+        font-size: 18px;
+        margin: 0 0 8px 0;
+        font-weight: 600;
+      }
+      #status p {
+        margin: 4px 0;
+        color: #a8aeb8;
+        font-size: 14px;
+        max-width: 440px;
+      }
+      #status code {
+        background: #1b1e24;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      button {
+        margin-top: 16px;
+        background: #2a6df4;
+        color: #fff;
+        border: 0;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover { background: #3b7af5; }
+      button:disabled { background: #2a2f3a; cursor: default; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
+    <div id="status">
+      <h1 id="status-title">Connecting to Kiln server…</h1>
+      <p id="status-detail">Looking up the server URL from your settings.</p>
+      <button id="retry" class="hidden">Retry</button>
+    </div>
+    <script>
+      const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+        || (window.__TAURI__ && window.__TAURI__.invoke);
+
+      const frame = document.getElementById("frame");
+      const status = document.getElementById("status");
+      const title = document.getElementById("status-title");
+      const detail = document.getElementById("status-detail");
+      const retry = document.getElementById("retry");
+
+      function showStatus(titleText, detailText, showRetry) {
+        frame.classList.add("hidden");
+        frame.src = "about:blank";
+        status.classList.remove("hidden");
+        title.textContent = titleText;
+        detail.textContent = detailText;
+        retry.classList.toggle("hidden", !showRetry);
+      }
+
+      function showFrame(url) {
+        frame.src = url;
+        frame.classList.remove("hidden");
+        status.classList.add("hidden");
+      }
+
+      async function load() {
+        showStatus("Connecting to Kiln server…", "Looking up the server URL from your settings.", false);
+        if (!invoke) {
+          showStatus(
+            "Tauri bridge unavailable",
+            "This page must run inside Kiln Desktop.",
+            false
+          );
+          return;
+        }
+        try {
+          const url = await invoke("get_kiln_url");
+          if (!url) {
+            showStatus(
+              "Kiln server not running.",
+              "Start it from the tray menu, then retry.",
+              true
+            );
+            return;
+          }
+          showFrame(url);
+        } catch (err) {
+          showStatus(
+            "Could not reach Kiln server.",
+            String(err || "Unknown error"),
+            true
+          );
+        }
+      }
+
+      retry.addEventListener("click", load);
+      window.addEventListener("DOMContentLoaded", load);
+    </script>
+  </body>
+</html>
