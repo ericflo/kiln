@@ -500,6 +500,11 @@ fn bench_latency_paged(
     let mut inter_token_ms: Vec<f64> = Vec::new();
     let mut num_tokens = 1usize; // counting the first token from prefill
     let mut current_pos = actual_prompt_tokens;
+    let log_tokens = std::env::var("KILN_BENCH_LOG_TOKENS").is_ok();
+    let mut decoded_tokens: Vec<u32> = Vec::new();
+    if log_tokens {
+        decoded_tokens.push(next_token);
+    }
 
     for _step in 0..max_output_tokens {
         if eos_token_ids.contains(&next_token) {
@@ -525,6 +530,18 @@ fn bench_latency_paged(
 
         inter_token_ms.push(step_time.as_secs_f64() * 1000.0);
         num_tokens += 1;
+        if log_tokens {
+            decoded_tokens.push(next_token);
+        }
+    }
+
+    if log_tokens {
+        let first_n: Vec<String> = decoded_tokens
+            .iter()
+            .take(32)
+            .map(|t| t.to_string())
+            .collect();
+        eprintln!("    Paged decode first 32 token ids: [{}]", first_n.join(","));
     }
 
     let mean_itl = if inter_token_ms.is_empty() {

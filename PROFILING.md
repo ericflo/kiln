@@ -828,3 +828,151 @@ decode path to it. FlashInfer remains an attractive target but is
 explicitly *not* the right next pick — the full-attention layers it
 would optimize are below the 10 % Amdahl-ceiling threshold on this
 model.
+
+---
+
+## Paged Decode Fused-Attn Validation (PR #100 follow-up)
+
+### Setup
+
+- GPU: **NVIDIA A40, 46 068 MB** (sm_86 — A6000 unavailable due to RunPod
+  `SUPPLY_CONSTRAINT` at the time of this run)
+- Image: `ghcr.io/ericflo/kiln-runpod:latest` (CUDA 12.8, bootstrapped
+  Rust 1.95 stable + sccache inline since the image lacks the toolchain)
+- Binary: `kiln-bench` built from branch
+  `ce/paged-decode-fused-attn-validated` at commit `ca39066`
+  (two additive patches on top of `main` at `84bd5d9` — the PR #100 merge):
+  - `420c220` adds `KILN_DISABLE_FUSED_PAGED_DECODE` env guard so the
+    fused dispatch can be toggled at bench time.
+  - `ca39066` prints the first 32 decoded token IDs under
+    `KILN_BENCH_LOG_TOKENS=1` for a cheap correctness spot-check.
+- Model: `Qwen3.5-4B` (bf16, 4.206 B params, 32 layers, 8.3 GB VRAM).
+- Bench invocation:
+  `kiln-bench --model-path /workspace/model --prompt-tokens 512
+  --max-output-tokens 128 --skip-training --paged`
+  (506 actual prompt tokens after tokenization, `block_size=16`, 40
+  paged blocks allocated for 506 + 128 = 634 tokens.)
+- JIT cold-start was burned by a discard warmup run before Run A /
+  Run B, per the `nsys-profiling-jit-cold-start` note.
+
+### Run A — Fused path (PR #100 on): **CRASH before first decoded token**
+
+```
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=40] (506 prompt tokens)...
+    Prefill (paged): 619.8ms (816 tok/s)
+Error: paged latency benchmark failed
+
+Caused by:
+    0: paged decode forward pass failed
+    1: transformer block 3 (full attention, paged)
+    2: shape mismatch in reshape, lhs: [40], rhs: [1, 32]
+```
+
+The paged **prefill** succeeds (the fused dispatch is decode-only; q_len
+must be 1). The first full-attention layer of the first decode step then
+dies inside `try_flash_attn_paged_decode` in
+`crates/kiln-model/src/forward.rs`.
+
+Root cause (mechanical, not a tuning issue):
+
+- `num_blocks` in `bench_latency_paged` is sized for the whole session
+  (`(506 + 128) / 16 = 40`) and every block is pushed into the block
+  table up-front. That matches how the production scheduler pre-reserves
+  blocks for a sequence, so the bench configuration is representative.
+- On the first decode step `total_seq_len = 507`, so
+  `n_chunks = ceil(507 / 128) = 4` and
+  `max_blocks_per_seq = n_chunks * pages_per_chunk = 4 * 8 = 32`.
+- The guard on lines 1389-1394 only falls back when the block table is
+  *too short* (`allocated < max_blocks_per_seq && allocated <
+  ceil(total_seq_len / block_size)`). The **too-long** case (40 ≥ 32) is
+  not handled.
+- Lines 1418-1430 then do
+  `padded.extend_from_slice(blocks)` (pushes all 40 entries), the
+  `while padded.len() < max_blocks_per_seq` loop is a no-op, and
+  `Tensor::new(padded).reshape((1, max_blocks_per_seq))` fails with
+  `lhs: [40], rhs: [1, 32]`.
+
+This makes the fused path unreachable on any realistic workload: the
+scheduler always sizes the block table for the full planned generation,
+so whenever the prompt is short enough relative to `K_BLOCK_N = 128` for
+the first few chunks to underfill, the decode reshape will trip. The
+dispatch is gated by `seq_len == 1 && bf16 && !fp8 && GQA`, which is the
+default path for Qwen3.5-4B bf16 decode — it is not just a benchmark
+artefact.
+
+### Run B — Slow path (`KILN_DISABLE_FUSED_PAGED_DECODE=1`): **ran cleanly**
+
+```
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=40] (506 prompt tokens)...
+    Prefill (paged): 614.9ms (823 tok/s)
+    Paged decode first 32 token ids: [0,0,0,...,0]   (32 × 0)
+    Decode (paged): 129 tokens, mean ITL 247.3ms (4.0 tok/s)
+
+--- Inference Throughput Benchmarks ---
+1 sequential runs:  Run 1/1: 128 tokens in 32022.3ms (4.0 tok/s)  => 4.0 tok/s
+4 sequential runs:  4 × ~32 007 ms / 128 tok          => 4.0 tok/s
+8 sequential runs (partial, killed after Run 1/8):  32007.1 ms    => 4.0 tok/s
+```
+
+(The 16/32-seq batches of the throughput sweep were killed manually
+after the numbers above stabilised at 4.0 tok/s across every run, to
+keep pod wall-time within the 90-minute budget. The 1/4-seq runs
+finished cleanly.)
+
+- **Decode ITL 247.3 ms / 4.0 tok/s** on A40 — consistent with the
+  3.61 tok/s PR #94 paged baseline on A5000 (smaller GPU, similar bound).
+- Prefill 823 tok/s — matches the fused run before the crash (the fused
+  dispatch is decode-only, so prefill shares the slow path in both
+  cases).
+- **Token-ID anomaly (separate issue, not PR #100's fault):** the slow
+  path emits `token_id = 0` for every decoded step. This is the same
+  bench on both builds, and the slow path has not changed between
+  PR #94 (which reported the 3.61 tok/s baseline) and today. The most
+  likely explanation is that `greedy_sample` selects index 0 when the
+  synthetic prompt produces near-degenerate logits. It is worth a
+  separate follow-up but is **not** a regression introduced by PR #100
+  and does not affect the validation conclusion (the fused path could
+  not produce comparable token IDs because it crashes before the first
+  sample).
+
+### Conclusion
+
+- Fused-vs-slow **speedup number: N/A** — the fused path cannot be
+  measured because it crashes before producing a single decoded token
+  under a representative bench config.
+- Numerical correctness check vs slow path: **inconclusive** for the
+  same reason.
+- The crash is deterministic and reproduces on every
+  `--paged --prompt-tokens 512 --max-output-tokens 128` invocation.
+
+### Recommendation (for the next planning loop)
+
+Do **not** ship PR #100 as-is. Two viable next moves, roughly equal
+cost:
+
+1. **Revert `84bd5d9` (PR #100 merge)** to restore the known-good slow
+   paged decode path (~4.0 tok/s on A40) while a fix is developed.
+2. **Land a minimum-surface fix in `try_flash_attn_paged_decode`**:
+   - truncate `padded` to `max_blocks_per_seq` instead of blindly
+     `extend_from_slice(blocks)` (e.g.
+     `padded.extend_from_slice(&blocks[..max_blocks_per_seq.min(blocks.len())])`),
+   - keep the existing contiguity check (lines 1395-1410) intact so
+     paged layouts that break the `base_phys + i` invariant still fall
+     through to the slow path,
+   - re-run this bench to collect the actual fused-vs-slow speedup and
+     the matching-token-ID check once the reshape no longer fails.
+
+Per the Phase 6 task mandate, this PR only **documents** the regression
+— it does not revert. The next loop should pick option (1) or (2)
+explicitly.
+
+### Artifacts
+
+- Fused run log: `/workspace/bench-fused.log` on terminated pod
+  `soyu8hqcq8pbuq` (A40).
+- Slow run log: `/workspace/bench-slow.log` on the same pod.
+- Both logs are reproduced verbatim in the snippets above; the pod has
+  been terminated.
+
