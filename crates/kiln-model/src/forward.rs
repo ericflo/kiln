@@ -851,7 +851,7 @@ fn gdn_chunkwise_recurrence(
             let out = kiln_gdn_kernel::gdn_recurrent_forward(
                 &q1, &k1, &v1, &beta1, &g1, state,
             )?;
-            return out.unsqueeze(2);
+            return Ok(out.unsqueeze(2)?);
         }
     }
 
@@ -3459,8 +3459,12 @@ mod tests {
         )?;
 
         // Kernel path: chunkwise dispatcher with seq_len == 1 routes to
-        // the new fused recurrent kernel.
-        std::env::remove_var("KILN_DISABLE_GDN_KERNEL");
+        // the new fused recurrent kernel. Make sure no prior test left the
+        // kill-switch set in this process.
+        // SAFETY: cargo test is single-threaded per test by default and we
+        // are only mutating an env var that the dispatcher reads at the top
+        // of the same call below. No other thread observes it concurrently.
+        unsafe { std::env::remove_var("KILN_DISABLE_GDN_KERNEL"); }
         let mut state_kernel = state_bf16.clone();
         let out_kernel = gdn_chunkwise_recurrence(
             &q, &k, &v, &beta, &g, &mut state_kernel, 1,
