@@ -59,6 +59,7 @@ jobs:
             type=sha,prefix=sha-
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: deploy/runpod
@@ -67,4 +68,27 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # provenance + sbom both off so buildx pushes a plain Docker v2
+          # manifest (not just an OCI index). Older Docker daemons — including
+          # RunPod's — reject OCI-only pulls with "denied: denied" even for
+          # public packages.
           provenance: false
+          sbom: false
+
+      - name: Verify image pulls via Docker v2 manifest
+        # Paired with provenance/sbom=false: anonymously fetch the Docker v2
+        # manifest for the pushed :latest tag. If buildx accidentally regresses
+        # to OCI-only output the manifest HEAD will 404 and this step fails.
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sf "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" | jq -r .token)
+          HTTP_CODE=$(curl -sI -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${IMAGE_NAME}/manifests/latest")
+          if [ "${HTTP_CODE}" != "200" ]; then
+              echo "FAIL: Docker v2 manifest HEAD returned ${HTTP_CODE}; image pushed as OCI-only" >&2
+              exit 1
+          fi
+          echo "OK: ghcr.io/${IMAGE_NAME}:latest pullable via Docker v2 manifest"
