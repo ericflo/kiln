@@ -49,6 +49,11 @@ async fn stop_server(sup: State<'_, Arc<Supervisor>>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn restart_server(sup: State<'_, Arc<Supervisor>>) -> Result<(), String> {
+    sup.restart().await
+}
+
+#[tauri::command]
 async fn server_state(sup: State<'_, Arc<Supervisor>>) -> Result<ServerState, String> {
     Ok(sup.state().await)
 }
@@ -193,6 +198,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_server,
             stop_server,
+            restart_server,
             server_state,
             server_logs,
             copy_logs,
