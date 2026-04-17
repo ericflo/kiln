@@ -77,6 +77,9 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     let _ = app_handle.emit("menu://open-settings", ());
                 }
                 ITEM_LOGS => {
+                    if let Err(e) = open_logs_window(&app_handle) {
+                        eprintln!("[tray] open_logs_window failed: {}", e);
+                    }
                     let _ = app_handle.emit("menu://view-logs", ());
                 }
                 _ => {}
@@ -113,6 +116,22 @@ fn open_dashboard_window(app: &AppHandle) -> tauri::Result<()> {
     let win = WebviewWindowBuilder::new(app, "dashboard", WebviewUrl::App("dashboard.html".into()))
         .title("Kiln Dashboard")
         .inner_size(1024.0, 768.0)
+        .resizable(true)
+        .visible(true)
+        .build()?;
+    win.set_focus()?;
+    Ok(())
+}
+
+fn open_logs_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window("logs") {
+        win.show()?;
+        win.set_focus()?;
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, "logs", WebviewUrl::App("logs.html".into()))
+        .title("Kiln Logs")
+        .inner_size(900.0, 600.0)
         .resizable(true)
         .visible(true)
         .build()?;

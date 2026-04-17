@@ -35,6 +35,15 @@
         "height": 768,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "logs",
+        "url": "logs.html",
+        "title": "Kiln Logs",
+        "width": 900,
+        "height": 600,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {
