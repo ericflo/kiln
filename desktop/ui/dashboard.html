@@ -92,6 +92,8 @@
   </head>
   <body>
     <div id="toolbar">
+      <button id="open-logs" title="Open the log viewer window">View Logs</button>
+      <button id="open-settings" title="Open the settings window">Settings</button>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
     </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
@@ -250,6 +252,15 @@
       }
 
       copyBtn.addEventListener("click", copyOpenAiBaseUrl);
+
+      const logsBtn = document.getElementById("open-logs");
+      const settingsBtn = document.getElementById("open-settings");
+      logsBtn.addEventListener("click", async () => {
+        try { await invoke("open_logs"); } catch (e) { console.error("open_logs failed", e); }
+      });
+      settingsBtn.addEventListener("click", async () => {
+        try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
+      });
 
       window.addEventListener("DOMContentLoaded", load);
     </script>

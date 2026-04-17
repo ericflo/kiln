@@ -140,7 +140,7 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
     Ok(())
 }
 
-fn open_settings_window(app: &AppHandle) -> tauri::Result<()> {
+pub(crate) fn open_settings_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(win) = app.get_webview_window("settings") {
         win.show()?;
         win.set_focus()?;
@@ -195,7 +195,7 @@ async fn copy_openai_base_url_to_clipboard(app: &AppHandle, supervisor: Arc<Supe
     }
 }
 
-fn open_logs_window(app: &AppHandle) -> tauri::Result<()> {
+pub(crate) fn open_logs_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(win) = app.get_webview_window("logs") {
         win.show()?;
         win.set_focus()?;

@@ -78,6 +78,16 @@ async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, Strin
     Ok(state.read().await.clone())
 }
 
+#[tauri::command]
+async fn open_settings(app: AppHandle) -> Result<(), String> {
+    tray::open_settings_window(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn open_logs(app: AppHandle) -> Result<(), String> {
+    tray::open_logs_window(&app).map_err(|e| e.to_string())
+}
+
 /// Build the OpenAI-compatible base URL for a given host/port. Kept as a pure
 /// helper so it can be unit-tested without a Tauri runtime.
 pub fn openai_base_url(host: &str, port: u16) -> String {
@@ -189,7 +199,9 @@ fn main() {
             get_settings,
             set_settings,
             get_kiln_url,
-            get_openai_base_url
+            get_openai_base_url,
+            open_settings,
+            open_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");
