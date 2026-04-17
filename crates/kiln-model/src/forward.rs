@@ -14,6 +14,11 @@ use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
 
+// NVTX is always linked: when the `nvtx` cargo feature is off the
+// `kiln_nvtx::range!` macro expands to a zero-sized RAII guard whose drop is
+// a no-op (verified by the optimizer in release). This keeps the call sites
+// below free of `#[cfg(feature = "nvtx")]` noise.
+
 /// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
 ///
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
@@ -736,6 +741,7 @@ fn compute_w_chunk(
             && beta_c.dtype() == DType::BF16
             && c <= 128
         {
+            kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
             return Ok(kiln_gdn_kernel::gdn_forward_substitution(
                 a_strict, v_prime, beta_c,
             )?);
@@ -843,14 +849,27 @@ fn gdn_chunkwise_recurrence(
             && dtype == DType::BF16
             && state.dtype() == DType::BF16
         {
-            let q1 = q.squeeze(2)?.contiguous()?;
-            let k1 = k.squeeze(2)?.contiguous()?;
-            let v1 = v.squeeze(2)?.contiguous()?;
-            let beta1 = beta.squeeze(2)?.contiguous()?;
-            let g1 = g.squeeze(2)?.contiguous()?;
-            let out = kiln_gdn_kernel::gdn_recurrent_forward(
-                &q1, &k1, &v1, &beta1, &g1, state,
-            )?;
+            // The five squeeze+contiguous calls below each emit a bf16 ucopy
+            // kernel before the recurrent forward runs. PROFILING.md (PR #107)
+            // marks this block as the suspected source of the 24-GDN-layer
+            // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
+            // it separately from the kernel itself.
+            let (q1, k1, v1, beta1, g1) = {
+                kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
+                (
+                    q.squeeze(2)?.contiguous()?,
+                    k.squeeze(2)?.contiguous()?,
+                    v.squeeze(2)?.contiguous()?,
+                    beta.squeeze(2)?.contiguous()?,
+                    g.squeeze(2)?.contiguous()?,
+                )
+            };
+            let out = {
+                kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
+                kiln_gdn_kernel::gdn_recurrent_forward(
+                    &q1, &k1, &v1, &beta1, &g1, state,
+                )?
+            };
             return Ok(out.unsqueeze(2)?);
         }
     }
@@ -1569,23 +1588,43 @@ pub fn gqa_attention_paged(
         && (num_heads / num_kv_heads) > 1
         && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
     {
-        if let Some(out) = try_flash_attn_paged_decode(
-            &q,
-            paged_cache,
-            block_table,
-            full_attn_layer_idx,
-            total_seq_len,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            gate.as_ref(),
-            attn_weights,
-            lora_layer,
-            lora_scale,
-        )? {
+        // Open the fused-decode range around the call so the kernel work is
+        // attributed to it. When the eligibility checks inside reject (return
+        // None) the range still closes here and the fallback range below
+        // takes over for the rest of the iteration. Eligibility-rejection is
+        // cheap so the over-attribution is small.
+        let out_opt = {
+            kiln_nvtx::range!(c"kiln/attn/full/decode_fused");
+            try_flash_attn_paged_decode(
+                &q,
+                paged_cache,
+                block_table,
+                full_attn_layer_idx,
+                total_seq_len,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                gate.as_ref(),
+                attn_weights,
+                lora_layer,
+                lora_scale,
+            )?
+        };
+        if let Some(out) = out_opt {
             return Ok(out);
         }
     }
+
+    // Open the fallback-decode range BEFORE the paged_cache.read so the read's
+    // gather/dequant ucopy is attributed to it. The range stays open through
+    // the GQA decode work below; it harmlessly also covers the prefill FA-2
+    // path (which has its own inner range and returns from inside it). The
+    // range is bound to the function scope so it always closes on return.
+    let _decode_fallback_nvtx = if seq_len == 1 {
+        Some(kiln_nvtx::Range::push(c"kiln/attn/full/decode_fallback"))
+    } else {
+        None
+    };
 
     // Read full K/V from paged cache (all positions 0..start_pos+seq_len)
     let (k, v) = paged_cache
@@ -1598,6 +1637,7 @@ pub fn gqa_attention_paged(
     // [batch, kv_len, heads, head_dim] for flash_attn.
     #[cfg(feature = "cuda")]
     if seq_len > 1 && q.dtype() == candle_core::DType::BF16 {
+        kiln_nvtx::range!(c"kiln/attn/full/prefill");
         let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
