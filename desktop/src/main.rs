@@ -8,8 +8,32 @@ use std::sync::Arc;
 
 use settings::{apply_to_supervisor_config, Settings};
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 use tokio::sync::RwLock;
+
+/// Reconcile the OS autostart registration with the desired `launch_at_login`
+/// setting. Errors are logged but never propagated — a broken autostart
+/// registration must not crash the app or block settings persistence.
+fn reconcile_autolaunch(app: &AppHandle, desired: bool) {
+    let manager = app.autolaunch();
+    let enabled = match manager.is_enabled() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[main] autolaunch is_enabled failed: {}", e);
+            return;
+        }
+    };
+    if desired && !enabled {
+        if let Err(e) = manager.enable() {
+            eprintln!("[main] autolaunch enable failed: {}", e);
+        }
+    } else if !desired && enabled {
+        if let Err(e) = manager.disable() {
+            eprintln!("[main] autolaunch disable failed: {}", e);
+        }
+    }
+}
 
 type SettingsState = Arc<RwLock<Settings>>;
 
@@ -75,12 +99,17 @@ async fn set_settings(
     let mut cfg = SupervisorConfig::default();
     apply_to_supervisor_config(&new, &mut cfg);
     sup.update_config(cfg).await;
+    reconcile_autolaunch(&app, new.launch_at_login);
     Ok(())
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let handle = app.handle().clone();
             let settings = Settings::load(&handle);
@@ -94,6 +123,8 @@ fn main() {
             app.manage(Arc::clone(&settings_state));
 
             tray::build_tray(app.handle(), Arc::clone(&supervisor))?;
+
+            reconcile_autolaunch(&handle, settings.launch_at_login);
 
             if settings.auto_start {
                 let sup = Arc::clone(&supervisor);
