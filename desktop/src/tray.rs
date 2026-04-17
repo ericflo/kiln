@@ -16,6 +16,7 @@ const ITEM_DASHBOARD: &str = "open_dashboard";
 const ITEM_SETTINGS: &str = "open_settings";
 const ITEM_START: &str = "start_server";
 const ITEM_STOP: &str = "stop_server";
+const ITEM_RESTART: &str = "restart_server";
 const ITEM_LOGS: &str = "view_logs";
 const ITEM_COPY_URL: &str = "copy_openai_url";
 const ITEM_QUIT: &str = "quit";
@@ -52,6 +53,9 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
     let stop = MenuItemBuilder::with_id(ITEM_STOP, "Stop Server")
         .enabled(false)
         .build(app)?;
+    let restart = MenuItemBuilder::with_id(ITEM_RESTART, "Restart Server")
+        .enabled(false)
+        .build(app)?;
     let logs = MenuItemBuilder::with_id(ITEM_LOGS, "View Logs").build(app)?;
     let quit = MenuItemBuilder::with_id(ITEM_QUIT, "Quit").build(app)?;
 
@@ -62,7 +66,7 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .separator()
         .item(&copy_url)
         .separator()
-        .items(&[&start, &stop, &logs])
+        .items(&[&start, &stop, &restart, &logs])
         .separator()
         .item(&quit)
         .build()?;
@@ -89,6 +93,13 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = supervisor.stop().await {
                             eprintln!("[tray] stop_server failed: {}", e);
+                        }
+                    });
+                }
+                ITEM_RESTART => {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = supervisor.restart().await {
+                            eprintln!("[tray] restart_server failed: {}", e);
                         }
                     });
                 }
@@ -125,7 +136,7 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         })
         .build(app)?;
 
-    spawn_state_watcher(app.clone(), supervisor, status, start, stop);
+    spawn_state_watcher(app.clone(), supervisor, status, start, stop, restart);
     Ok(())
 }
 
@@ -206,6 +217,7 @@ fn spawn_state_watcher(
     status_item: MenuItem<tauri::Wry>,
     start_item: MenuItem<tauri::Wry>,
     stop_item: MenuItem<tauri::Wry>,
+    restart_item: MenuItem<tauri::Wry>,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut last_kind: Option<&'static str> = None;
@@ -224,6 +236,7 @@ fn spawn_state_watcher(
                 let _ = status_item.set_text(status_menu_text(&state));
                 let _ = start_item.set_enabled(start_enabled(&state));
                 let _ = stop_item.set_enabled(stop_enabled(&state));
+                let _ = restart_item.set_enabled(restart_enabled(&state));
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -258,6 +271,13 @@ pub fn stop_enabled(state: &ServerState) -> bool {
     matches!(
         state,
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive
+    )
+}
+
+pub fn restart_enabled(state: &ServerState) -> bool {
+    matches!(
+        state,
+        ServerState::Running | ServerState::TrainingActive | ServerState::Error(_)
     )
 }
 
@@ -308,6 +328,15 @@ mod tests {
         assert!(stop_enabled(&ServerState::TrainingActive));
         assert!(!stop_enabled(&ServerState::Stopped));
         assert!(!stop_enabled(&ServerState::Error("x".into())));
+    }
+
+    #[test]
+    fn restart_button_enabled_when_running_or_errored() {
+        assert!(restart_enabled(&ServerState::Running));
+        assert!(restart_enabled(&ServerState::TrainingActive));
+        assert!(restart_enabled(&ServerState::Error("x".into())));
+        assert!(!restart_enabled(&ServerState::Stopped));
+        assert!(!restart_enabled(&ServerState::Starting));
     }
 
     #[test]
