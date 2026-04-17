@@ -212,6 +212,37 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `logging.format` | — | json | `json`, `human`, `pretty`, or `text` |
 | `prefix_cache.enabled` | — | true | Reuse KV cache for shared prefixes |
 
+## Desktop App
+
+Kiln Desktop is a system-tray app that wraps the `kiln` server for people who don't want to use a CLI. It spawns and supervises the `kiln` binary as a child process, shows server status in the tray, and opens a dashboard, settings, and log viewer in native windows.
+
+**Windows and Linux only.** Kiln is CUDA-only today, so there is no macOS build.
+
+**Download — [Kiln Desktop v0.1.0](https://github.com/ericflo/kiln/releases/tag/desktop-v0.1.0):**
+
+| Platform | Installer | Size |
+|---|---|---|
+| Windows | [Kiln.Desktop_0.1.0_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.0/Kiln.Desktop_0.1.0_x64-setup.exe) (NSIS) | 3.4 MB |
+| Windows | [Kiln.Desktop_0.1.0_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.0/Kiln.Desktop_0.1.0_x64_en-US.msi) (MSI) | 5.0 MB |
+| Linux | [Kiln.Desktop_0.1.0_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.0/Kiln.Desktop_0.1.0_amd64.deb) | 5.5 MB |
+| Linux | [Kiln.Desktop_0.1.0_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.0/Kiln.Desktop_0.1.0_amd64.AppImage) | 79 MB |
+
+The installer bundles the desktop wrapper only. You still need to install the `kiln` server binary and download model weights separately — see [QUICKSTART.md](QUICKSTART.md). Point the app at the `kiln` binary and model path from Settings on first launch.
+
+**Dashboard** — embeds the kiln `/ui` web dashboard in a native window.
+
+![Dashboard](docs/desktop/dashboard.png)
+
+**Settings** — model path, port, memory budget, FP8/CUDA graphs/prefix cache toggles, and startup options.
+
+![Settings](docs/desktop/settings.png)
+
+**Logs** — tails the kiln server's stdout/stderr from an in-process ring buffer.
+
+![Logs](docs/desktop/logs.png)
+
+Build and dev docs for the desktop app live in [desktop/README.md](desktop/README.md).
+
 ## Deployment
 
 ```bash
