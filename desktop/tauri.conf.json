@@ -17,6 +17,15 @@
         "height": 640,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "settings",
+        "url": "settings.html",
+        "title": "Kiln Settings",
+        "width": 520,
+        "height": 640,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

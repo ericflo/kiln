@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kiln Settings</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #0f1115;
+        color: #e6e6e6;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      .wrap { padding: 24px; max-width: 520px; box-sizing: border-box; }
+      h1 { font-size: 18px; margin: 0 0 16px 0; font-weight: 600; }
+      fieldset {
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        padding: 12px 16px 16px 16px;
+        margin: 0 0 16px 0;
+      }
+      legend { padding: 0 6px; color: #a8aeb8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+      label.row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 6px 0;
+        font-size: 13px;
+      }
+      label.row > span.name { color: #cfd3da; }
+      label.row > input[type="text"],
+      label.row > input[type="number"] {
+        background: #181b21;
+        color: #e6e6e6;
+        border: 1px solid #2a2f3a;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 13px;
+        width: 260px;
+        box-sizing: border-box;
+      }
+      label.row > input[type="number"].small { width: 100px; }
+      .actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 8px;
+      }
+      button {
+        background: #2f66f0;
+        color: #fff;
+        border: 0;
+        border-radius: 4px;
+        padding: 8px 14px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button.secondary { background: #2a2f3a; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .status { margin-top: 8px; font-size: 12px; color: #7fbf7f; min-height: 16px; }
+      .status.error { color: #f08080; }
+      .todo { color: #a8aeb8; font-size: 11px; margin-top: 4px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Kiln Settings</h1>
+
+      <fieldset>
+        <legend>Server</legend>
+        <!-- TODO: replace with native file picker via tauri-plugin-dialog -->
+        <label class="row"><span class="name">Model path</span>
+          <input type="text" id="model_path" placeholder="/path/to/model" />
+        </label>
+        <label class="row"><span class="name">Host</span>
+          <input type="text" id="host" />
+        </label>
+        <label class="row"><span class="name">Port</span>
+          <input type="number" class="small" id="port" min="1" max="65535" />
+        </label>
+        <label class="row"><span class="name">Adapter directory</span>
+          <input type="text" id="adapter_dir" placeholder="/path/to/adapters" />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Memory &amp; performance</legend>
+        <label class="row"><span class="name">Inference fraction (0..1)</span>
+          <input type="number" class="small" id="inference_fraction" min="0" max="1" step="0.05" />
+        </label>
+        <label class="row"><span class="name">FP8 KV cache</span>
+          <input type="checkbox" id="fp8_kv_cache" />
+        </label>
+        <label class="row"><span class="name">CUDA graphs</span>
+          <input type="checkbox" id="cuda_graphs" />
+        </label>
+        <label class="row"><span class="name">Prefix cache</span>
+          <input type="checkbox" id="prefix_cache" />
+        </label>
+        <label class="row"><span class="name">Speculative decoding</span>
+          <input type="checkbox" id="speculative_decoding" />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Startup</legend>
+        <label class="row"><span class="name">Auto-start kiln on app launch</span>
+          <input type="checkbox" id="auto_start" />
+        </label>
+        <label class="row"><span class="name">Auto-restart on crash</span>
+          <input type="checkbox" id="auto_restart" />
+        </label>
+        <label class="row"><span class="name">Launch at login</span>
+          <input type="checkbox" id="launch_at_login" />
+        </label>
+        <div class="todo">TODO: launch_at_login is persisted only; OS autostart integration is a follow-up.</div>
+      </fieldset>
+
+      <div class="actions">
+        <button class="secondary" id="reload">Reload</button>
+        <button id="save">Save</button>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+
+    <script>
+      const invoke = window.__TAURI__.core.invoke;
+      const statusEl = document.getElementById("status");
+
+      const fields = [
+        "model_path", "host", "port",
+        "inference_fraction", "fp8_kv_cache", "cuda_graphs",
+        "prefix_cache", "speculative_decoding", "adapter_dir",
+        "auto_start", "auto_restart", "launch_at_login",
+      ];
+
+      function readForm() {
+        const n = (id) => document.getElementById(id);
+        const strOrNull = (id) => {
+          const v = n(id).value.trim();
+          return v.length ? v : null;
+        };
+        return {
+          model_path: strOrNull("model_path"),
+          host: n("host").value.trim() || "127.0.0.1",
+          port: parseInt(n("port").value, 10) || 8000,
+          inference_fraction: parseFloat(n("inference_fraction").value) || 0.9,
+          fp8_kv_cache: n("fp8_kv_cache").checked,
+          cuda_graphs: n("cuda_graphs").checked,
+          prefix_cache: n("prefix_cache").checked,
+          speculative_decoding: n("speculative_decoding").checked,
+          adapter_dir: strOrNull("adapter_dir"),
+          auto_start: n("auto_start").checked,
+          auto_restart: n("auto_restart").checked,
+          launch_at_login: n("launch_at_login").checked,
+        };
+      }
+
+      function writeForm(s) {
+        const n = (id) => document.getElementById(id);
+        n("model_path").value = s.model_path || "";
+        n("host").value = s.host || "";
+        n("port").value = s.port ?? 8000;
+        n("inference_fraction").value = s.inference_fraction ?? 0.9;
+        n("fp8_kv_cache").checked = !!s.fp8_kv_cache;
+        n("cuda_graphs").checked = !!s.cuda_graphs;
+        n("prefix_cache").checked = !!s.prefix_cache;
+        n("speculative_decoding").checked = !!s.speculative_decoding;
+        n("adapter_dir").value = s.adapter_dir || "";
+        n("auto_start").checked = !!s.auto_start;
+        n("auto_restart").checked = !!s.auto_restart;
+        n("launch_at_login").checked = !!s.launch_at_login;
+      }
+
+      function setStatus(msg, err) {
+        statusEl.textContent = msg;
+        statusEl.className = err ? "status error" : "status";
+      }
+
+      async function load() {
+        try {
+          const s = await invoke("get_settings");
+          writeForm(s);
+          setStatus("Loaded.");
+        } catch (e) {
+          setStatus("Failed to load: " + e, true);
+        }
+      }
+
+      async function save() {
+        try {
+          await invoke("set_settings", { new: readForm() });
+          setStatus("Saved. New settings apply on next Start.");
+        } catch (e) {
+          setStatus("Save failed: " + e, true);
+        }
+      }
+
+      document.getElementById("reload").addEventListener("click", load);
+      document.getElementById("save").addEventListener("click", save);
+      load();
+    </script>
+  </body>
+</html>
