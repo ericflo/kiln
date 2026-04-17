@@ -42,6 +42,24 @@
         box-sizing: border-box;
       }
       label.row > input[type="number"].small { width: 100px; }
+      .path-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .path-row > input[type="text"] {
+        width: 204px;
+      }
+      button.browse {
+        background: #2a2f3a;
+        color: #e6e6e6;
+        border: 1px solid #3a4050;
+        border-radius: 4px;
+        padding: 3px 10px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button.browse:hover { background: #343a46; }
       .actions {
         display: flex;
         gap: 8px;
@@ -70,9 +88,17 @@
 
       <fieldset>
         <legend>Server</legend>
-        <!-- TODO: replace with native file picker via tauri-plugin-dialog -->
+        <label class="row"><span class="name">Kiln binary</span>
+          <span class="path-row">
+            <input type="text" id="kiln_binary" placeholder="(use PATH)" />
+            <button type="button" class="browse" id="pick_kiln_binary">Browse</button>
+          </span>
+        </label>
         <label class="row"><span class="name">Model path</span>
-          <input type="text" id="model_path" placeholder="/path/to/model" />
+          <span class="path-row">
+            <input type="text" id="model_path" placeholder="/path/to/model" />
+            <button type="button" class="browse" id="pick_model_path">Browse</button>
+          </span>
         </label>
         <label class="row"><span class="name">Host</span>
           <input type="text" id="host" />
@@ -81,7 +107,10 @@
           <input type="number" class="small" id="port" min="1" max="65535" />
         </label>
         <label class="row"><span class="name">Adapter directory</span>
-          <input type="text" id="adapter_dir" placeholder="/path/to/adapters" />
+          <span class="path-row">
+            <input type="text" id="adapter_dir" placeholder="/path/to/adapters" />
+            <button type="button" class="browse" id="pick_adapter_dir">Browse</button>
+          </span>
         </label>
       </fieldset>
 
@@ -126,10 +155,11 @@
 
     <script>
       const invoke = window.__TAURI__.core.invoke;
+      const dialog = window.__TAURI__.dialog;
       const statusEl = document.getElementById("status");
 
       const fields = [
-        "model_path", "host", "port",
+        "kiln_binary", "model_path", "host", "port",
         "inference_fraction", "fp8_kv_cache", "cuda_graphs",
         "prefix_cache", "speculative_decoding", "adapter_dir",
         "auto_start", "auto_restart", "launch_at_login",
@@ -142,6 +172,7 @@
           return v.length ? v : null;
         };
         return {
+          kiln_binary: strOrNull("kiln_binary"),
           model_path: strOrNull("model_path"),
           host: n("host").value.trim() || "127.0.0.1",
           port: parseInt(n("port").value, 10) || 8000,
@@ -159,6 +190,7 @@
 
       function writeForm(s) {
         const n = (id) => document.getElementById(id);
+        n("kiln_binary").value = s.kiln_binary || "";
         n("model_path").value = s.model_path || "";
         n("host").value = s.host || "";
         n("port").value = s.port ?? 8000;
@@ -171,6 +203,17 @@
         n("auto_start").checked = !!s.auto_start;
         n("auto_restart").checked = !!s.auto_restart;
         n("launch_at_login").checked = !!s.launch_at_login;
+      }
+
+      async function pickPath(inputId, opts) {
+        try {
+          const result = await dialog.open(opts);
+          if (typeof result === "string" && result.length) {
+            document.getElementById(inputId).value = result;
+          }
+        } catch (e) {
+          setStatus("Pick failed: " + e, true);
+        }
       }
 
       function setStatus(msg, err) {
@@ -199,6 +242,15 @@
 
       document.getElementById("reload").addEventListener("click", load);
       document.getElementById("save").addEventListener("click", save);
+      document.getElementById("pick_kiln_binary").addEventListener("click", () =>
+        pickPath("kiln_binary", { multiple: false, directory: false, title: "Select kiln binary" })
+      );
+      document.getElementById("pick_model_path").addEventListener("click", () =>
+        pickPath("model_path", { multiple: false, directory: false, title: "Select model file" })
+      );
+      document.getElementById("pick_adapter_dir").addEventListener("click", () =>
+        pickPath("adapter_dir", { multiple: false, directory: true, title: "Select adapter directory" })
+      );
       load();
     </script>
   </body>
