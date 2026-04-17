@@ -1,0 +1,15 @@
+[package]
+name = "kiln-gdn-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vendored Gated DeltaNet (GDN) chunk forward-substitution CUDA kernel with C-ABI wrapper"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"

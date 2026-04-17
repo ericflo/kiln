@@ -648,6 +648,128 @@ fn causal_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tens
     Ok(rows.ge(&cols)?.to_dtype(dtype)?)
 }
 
+/// Reshape `[B, nv, T, D]` to `[nc, B, nv, C, D]` (contiguous) where
+/// `T = nc * C`. Returns `None` when there are no full chunks. The result
+/// supports zero-copy chunk slicing along the leading axis via
+/// [`slice_chunked_4d`].
+fn preshape_chunked_4d(
+    t: &Tensor,
+    b: usize,
+    nv: usize,
+    nc: usize,
+    c: usize,
+    d: usize,
+) -> Result<Option<Tensor>> {
+    if nc == 0 {
+        return Ok(None);
+    }
+    let prefix_t = nc * c;
+    let head = if t.dim(2)? == prefix_t {
+        t.clone()
+    } else {
+        t.narrow(2, 0, prefix_t)?
+    };
+    // [B, nv, T, D] -> [B, nv, nc, C, D] (free reshape on contiguous input)
+    // -> permute leading chunk axis -> [nc, B, nv, C, D].
+    let chunked = head
+        .contiguous()?
+        .reshape((b, nv, nc, c, d))?
+        .permute((2, 0, 1, 3, 4))?
+        .contiguous()?;
+    Ok(Some(chunked))
+}
+
+/// Same as [`preshape_chunked_4d`] for 3-D `[B, nv, T]` tensors (beta, g).
+fn preshape_chunked_3d(
+    t: &Tensor,
+    b: usize,
+    nv: usize,
+    nc: usize,
+    c: usize,
+) -> Result<Option<Tensor>> {
+    if nc == 0 {
+        return Ok(None);
+    }
+    let prefix_t = nc * c;
+    let head = if t.dim(2)? == prefix_t {
+        t.clone()
+    } else {
+        t.narrow(2, 0, prefix_t)?
+    };
+    let chunked = head
+        .contiguous()?
+        .reshape((b, nv, nc, c))?
+        .permute((2, 0, 1, 3))?
+        .contiguous()?;
+    Ok(Some(chunked))
+}
+
+/// Slice the `ci`-th chunk out of a `[nc, B, nv, C, D]` pre-permuted tensor.
+/// The returned `[B, nv, C, D]` view is contiguous (stride/shape match), so
+/// no copy is required.
+fn slice_chunked_4d(t: &Tensor, ci: usize) -> Result<Tensor> {
+    Ok(t.narrow(0, ci, 1)?.squeeze(0)?)
+}
+
+/// 3-D variant of [`slice_chunked_4d`] for beta / g.
+fn slice_chunked_3d(t: &Tensor, ci: usize) -> Result<Tensor> {
+    Ok(t.narrow(0, ci, 1)?.squeeze(0)?)
+}
+
+/// Compute the chunk-local W = (I + A_strict)^{-1} (beta * V_prime) by
+/// forward substitution. On CUDA + bf16 with chunk_size <= 128 this calls
+/// the vendored `kiln-gdn-kernel` fused kernel (one CUDA block per
+/// (batch, head)). Otherwise it falls back to the per-token candle loop.
+fn compute_w_chunk(
+    a_strict: &Tensor, // [B, nv, C, C]
+    v_prime: &Tensor,  // [B, nv, C, dv]
+    beta_c: &Tensor,   // [B, nv, C]
+    c: usize,
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        let disabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_ok();
+        if !disabled
+            && a_strict.device().is_cuda()
+            && a_strict.dtype() == DType::BF16
+            && v_prime.dtype() == DType::BF16
+            && beta_c.dtype() == DType::BF16
+            && c <= 128
+        {
+            return Ok(kiln_gdn_kernel::gdn_forward_substitution(
+                a_strict, v_prime, beta_c,
+            )?);
+        }
+    }
+    compute_w_chunk_fallback(a_strict, v_prime, beta_c, c)
+}
+
+/// Reference per-token forward substitution. Kept as the CPU path and as
+/// the correctness oracle for the fused CUDA kernel.
+fn compute_w_chunk_fallback(
+    a_strict: &Tensor,
+    v_prime: &Tensor,
+    beta_c: &Tensor,
+    c: usize,
+) -> Result<Tensor> {
+    let beta_col = beta_c.unsqueeze(3)?; // [B, nv, C, 1]
+    let mut w_rows: Vec<Tensor> = Vec::with_capacity(c);
+    for t in 0..c {
+        let vp_t = v_prime.narrow(2, t, 1)?; // [B, nv, 1, dv]
+        let beta_t = beta_col.narrow(2, t, 1)?; // [B, nv, 1, 1]
+        let w_t = if t == 0 {
+            vp_t.broadcast_mul(&beta_t)?
+        } else {
+            let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?.contiguous()?;
+            let w_prev = Tensor::cat(&w_rows, 2)?;
+            let sub = a_row.matmul(&w_prev)?; // [B, nv, 1, dv]
+            (vp_t - sub)?.broadcast_mul(&beta_t)?
+        };
+        w_rows.push(w_t);
+    }
+    Ok(Tensor::cat(&w_rows, 2)?)
+}
+
 /// Analytical chunkwise form of the Gated DeltaNet recurrence.
 ///
 /// The per-token recurrence is
@@ -703,24 +825,49 @@ fn gdn_chunkwise_recurrence(
     state: &mut Tensor, // [B, nv, dk, dv]
     chunk_size: usize,
 ) -> Result<Tensor> {
-    let (_, _, seq_len, _) = q.dims4()?;
+    let (b, nv, seq_len, dk) = q.dims4()?;
+    let dv = v.dim(3)?;
     let dtype = q.dtype();
     let device = q.device();
 
+    let full_chunks = seq_len / chunk_size;
+    let tail = seq_len - full_chunks * chunk_size;
+
+    // Pre-permute the full-chunk prefix into a layout where the chunk axis
+    // is leading. After contiguous(), per-chunk slices are zero-copy
+    // (`narrow + squeeze` on the leading dim preserves contiguity), which
+    // turns N tiny per-chunk copies into one big upfront copy and
+    // eliminates the `copy2d_bf16` per-chunk hotspot from PROFILING.md.
+    let q_pre = preshape_chunked_4d(q, b, nv, full_chunks, chunk_size, dk)?;
+    let k_pre = preshape_chunked_4d(k, b, nv, full_chunks, chunk_size, dk)?;
+    let v_pre = preshape_chunked_4d(v, b, nv, full_chunks, chunk_size, dv)?;
+    let beta_pre = preshape_chunked_3d(beta, b, nv, full_chunks, chunk_size)?;
+    let g_pre = preshape_chunked_3d(g, b, nv, full_chunks, chunk_size)?;
+
     let mut out_chunks: Vec<Tensor> = Vec::with_capacity(seq_len.div_ceil(chunk_size));
 
-    let mut t_start: usize = 0;
-    while t_start < seq_len {
-        let c = (seq_len - t_start).min(chunk_size);
+    for ci in 0..(full_chunks + if tail > 0 { 1 } else { 0 }) {
+        let is_tail = ci >= full_chunks;
+        let c = if is_tail { tail } else { chunk_size };
 
-        // Slice the current chunk out of the per-head tensors. Narrow on a
-        // non-leading dim leaves the result non-contiguous, and candle's
-        // matmul requires contiguous inputs — so materialize each chunk.
-        let q_c = q.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C, dk]
-        let k_c = k.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C, dk]
-        let v_c = v.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C, dv]
-        let beta_c = beta.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C]
-        let g_c = g.narrow(2, t_start, c)?.contiguous()?; // [B, nv, C]
+        let (q_c, k_c, v_c, beta_c, g_c) = if is_tail {
+            let t_start = full_chunks * chunk_size;
+            (
+                q.narrow(2, t_start, tail)?.contiguous()?,
+                k.narrow(2, t_start, tail)?.contiguous()?,
+                v.narrow(2, t_start, tail)?.contiguous()?,
+                beta.narrow(2, t_start, tail)?.contiguous()?,
+                g.narrow(2, t_start, tail)?.contiguous()?,
+            )
+        } else {
+            (
+                slice_chunked_4d(q_pre.as_ref().unwrap(), ci)?,
+                slice_chunked_4d(k_pre.as_ref().unwrap(), ci)?,
+                slice_chunked_4d(v_pre.as_ref().unwrap(), ci)?,
+                slice_chunked_3d(beta_pre.as_ref().unwrap(), ci)?,
+                slice_chunked_3d(g_pre.as_ref().unwrap(), ci)?,
+            )
+        };
 
         // Cumulative decay G[t] = Σ_{s=0..t} g[s].  Done in F32: exp() of
         // the cumulative sum is the only place bf16 would lose meaningful
@@ -761,29 +908,14 @@ fn gdn_chunkwise_recurrence(
             .broadcast_mul(&strict_mask)?
             .contiguous()?; // [B, nv, C, C]
 
-        // Forward substitution for W[t].
+        // Forward substitution for W[t]:
         //   W[t] = beta[t] * ( V'[t] - Σ_{i<t} a_strict[t, i] * W[i] )
-        // We collect w_rows[i] of shape [B, nv, 1, dv] and grow a running
-        // [B, nv, t, dv] prefix via Tensor::cat for the inner matmul.
-        let beta_col = beta_c.unsqueeze(3)?; // [B, nv, C, 1]
-        let mut w_rows: Vec<Tensor> = Vec::with_capacity(c);
-        for t in 0..c {
-            let vp_t = v_prime.narrow(2, t, 1)?; // [B, nv, 1, dv]
-            let beta_t = beta_col.narrow(2, t, 1)?; // [B, nv, 1, 1]
-            let w_t = if t == 0 {
-                // Row 0 has an empty sum: W[0] = beta[0] * V'[0].
-                vp_t.broadcast_mul(&beta_t)?
-            } else {
-                // a_row = a_strict[..., t, :t]  shape [B, nv, 1, t]
-                let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?.contiguous()?;
-                // w_prev stacks W[0..t]:  [B, nv, t, dv]
-                let w_prev = Tensor::cat(&w_rows, 2)?;
-                let sub = a_row.matmul(&w_prev)?; // [B, nv, 1, dv]
-                (vp_t - sub)?.broadcast_mul(&beta_t)?
-            };
-            w_rows.push(w_t);
-        }
-        let w = Tensor::cat(&w_rows, 2)?; // [B, nv, C, dv]
+        //
+        // Dispatch: on CUDA + bf16 + chunk_size <= 128, use the vendored
+        // fused kernel from kiln-gdn-kernel which collapses the C-step
+        // serial chain into a single block per (batch, head). On CPU or
+        // outside that envelope, fall back to the per-token candle loop.
+        let w = compute_w_chunk(&a_strict, &v_prime, &beta_c, c)?; // [B, nv, C, dv]
 
         // QKT masked by causal decay:
         //   B_mask[t, i] = exp(G[t]-G[i]) * (q[t] · k[i]) * 1[i<=t]
@@ -820,8 +952,6 @@ fn gdn_chunkwise_recurrence(
         let w_weighted = w.broadcast_mul(&decay_last_col)?.contiguous()?; // [B, nv, C, dv]
         let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
-
-        t_start += c;
     }
 
     Ok(Tensor::cat(&out_chunks, 2)?)
@@ -3156,4 +3286,78 @@ mod tests {
 
         Ok(())
     }
+
+    /// Correctness test for the vendored kiln-gdn-kernel CUDA fused
+    /// forward-substitution kernel.
+    ///
+    /// Compares the fused kernel output against the per-token candle
+    /// fallback on the same random bf16 inputs at kiln's exact GDN config
+    /// (B=1, nv=32, C=64, dv=128). Asserts max abs diff < 1e-2 and mean
+    /// abs diff < 1e-3 — the fused path uses F32 accumulators and
+    /// per-token bf16 round-trips, so finite-precision drift is bounded
+    /// by bf16 rounding noise.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_kernel_matches_fallback() -> Result<()> {
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("CUDA not available, skipping test_gdn_kernel_matches_fallback");
+                return Ok(());
+            }
+        };
+
+        let b = 1usize;
+        let nv = 32usize;
+        let c = 64usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xC0FFEE_u64);
+
+        let n_a = b * nv * c * c;
+        let n_v = b * nv * c * dv;
+        let n_b = b * nv * c;
+
+        let a_data: Vec<f32> = (0..n_a).map(|_| rng.gen_range(-0.05f32..0.05f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+
+        let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?;
+        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, c), &device)?;
+
+        // Make A_strict actually strictly lower triangular (matches what
+        // the recurrence produces upstream of compute_w_chunk).
+        let mask = strict_lower_tri_mask(c, DType::F32, &device)?;
+        let a_f32 = a_f32.broadcast_mul(&mask)?;
+
+        let a = a_f32.to_dtype(DType::BF16)?;
+        let v = v_f32.to_dtype(DType::BF16)?;
+        let beta = beta_f32.to_dtype(DType::BF16)?;
+
+        let w_kernel = compute_w_chunk(&a, &v, &beta, c)?; // CUDA kernel
+        let w_fb = compute_w_chunk_fallback(&a, &v, &beta, c)?; // candle per-token
+
+        let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+
+        eprintln!("gdn-kernel vs fallback: max_abs_diff={max:e}, mean_abs_diff={mean:e}");
+
+        assert!(
+            max < 1e-2,
+            "kernel output exceeds tolerance: max_abs_diff = {max:e}"
+        );
+        assert!(
+            mean < 1e-3,
+            "kernel mean drift exceeds tolerance: mean_abs_diff = {mean:e}"
+        );
+
+        Ok(())
+    }
+
 }
