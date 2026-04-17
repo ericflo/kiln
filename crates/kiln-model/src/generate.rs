@@ -1057,6 +1057,7 @@ mod tests {
         let head_dim = config.head_dim;
 
         let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+        let embed_t = embed.t().unwrap().contiguous().unwrap();
         let final_norm = Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
 
         let layer = crate::forward::GpuLayerWeights {
@@ -1092,6 +1093,7 @@ mod tests {
 
         GpuWeights {
             embed_tokens: embed,
+            embed_tokens_t: embed_t,
             layers: vec![layer],
             final_norm,
             rotary_inv_freq,

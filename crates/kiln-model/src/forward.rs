@@ -108,6 +108,10 @@ fn flash_attention_forward(
 pub struct GpuWeights {
     /// Token embedding table: [vocab_size, hidden_size]
     pub embed_tokens: Tensor,
+    /// Pre-transposed token embedding table for tied LM head: [hidden_size, vocab_size], contiguous.
+    /// Computed once at load to avoid re-transposing the ~778 MiB bf16 matrix on every decode step
+    /// (was 48% of ucopy_bf16 / ~43% of GPU time per PR #113 profile).
+    pub embed_tokens_t: Tensor,
     /// Per-layer weights
     pub layers: Vec<GpuLayerWeights>,
     /// Final RMSNorm weight: [hidden_size]
@@ -241,6 +245,11 @@ impl GpuWeights {
     ) -> Result<Self> {
         let embed_tokens =
             weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
+        let embed_tokens_t = embed_tokens
+            .t()
+            .context("embed_tokens transpose")?
+            .contiguous()
+            .context("embed_tokens transpose contiguous")?;
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
@@ -302,6 +311,7 @@ impl GpuWeights {
 
         Ok(Self {
             embed_tokens,
+            embed_tokens_t,
             layers,
             final_norm,
             rotary_inv_freq,
@@ -2132,7 +2142,7 @@ pub fn model_forward(
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head");
         hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        hidden.broadcast_matmul(&weights.embed_tokens.t()?)?
+        hidden.broadcast_matmul(&weights.embed_tokens_t)?
     };
 
     Ok(logits)
@@ -2261,7 +2271,7 @@ pub fn model_forward_head(
 ) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/lm_head");
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
-    let logits = normed.broadcast_matmul(&weights.embed_tokens.t()?)?;
+    let logits = normed.broadcast_matmul(&weights.embed_tokens_t)?;
     Ok(logits)
 }
 
@@ -2385,7 +2395,7 @@ pub fn model_forward_paged(
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head");
         hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        hidden.broadcast_matmul(&weights.embed_tokens.t()?)?
+        hidden.broadcast_matmul(&weights.embed_tokens_t)?
     };
 
     Ok(logits)
@@ -2923,6 +2933,7 @@ mod tests {
         };
 
         let embed_tokens = randn(&[vocab_size, hidden_size])?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
         let final_norm = Tensor::zeros(hidden_size, DType::F32, device)?;
 
         let mut layers = Vec::with_capacity(num_layers);
@@ -2952,6 +2963,7 @@ mod tests {
 
         Ok(GpuWeights {
             embed_tokens,
+            embed_tokens_t,
             layers,
             final_norm,
             rotary_inv_freq,
@@ -3248,6 +3260,7 @@ mod tests {
         };
 
         let embed_tokens = randn(&[vocab_size, hidden_size])?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
         let final_norm = Tensor::zeros(hidden_size, DType::F32, device)?;
 
         // For linear attention: nk heads with key_head_dim, nv heads with value_head_dim
@@ -3303,6 +3316,7 @@ mod tests {
 
         Ok(GpuWeights {
             embed_tokens,
+            embed_tokens_t,
             layers,
             final_norm,
             rotary_inv_freq,
