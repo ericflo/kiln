@@ -148,6 +148,7 @@
 
       <div class="actions">
         <button class="secondary" id="reload">Reload</button>
+        <button class="secondary" id="restart" hidden>Restart now</button>
         <button id="save">Save</button>
       </div>
       <div class="status" id="status"></div>
@@ -157,6 +158,7 @@
       const invoke = window.__TAURI__.core.invoke;
       const dialog = window.__TAURI__.dialog;
       const statusEl = document.getElementById("status");
+      const restartBtn = document.getElementById("restart");
 
       const fields = [
         "kiln_binary", "model_path", "host", "port",
@@ -221,10 +223,16 @@
         statusEl.className = err ? "status error" : "status";
       }
 
+      function hideRestart() {
+        restartBtn.hidden = true;
+        restartBtn.disabled = false;
+      }
+
       async function load() {
         try {
           const s = await invoke("get_settings");
           writeForm(s);
+          hideRestart();
           setStatus("Loaded.");
         } catch (e) {
           setStatus("Failed to load: " + e, true);
@@ -234,14 +242,43 @@
       async function save() {
         try {
           await invoke("set_settings", { new: readForm() });
-          setStatus("Saved. New settings apply on next Start.");
+          let running = false;
+          try {
+            const state = await invoke("server_state");
+            const kind = state && state.kind;
+            running = kind === "Starting" || kind === "Running" || kind === "TrainingActive";
+          } catch (e) {
+            // If state lookup fails, fall back to the no-restart message.
+          }
+          if (running) {
+            setStatus("Saved. Restart server to apply new settings.");
+            restartBtn.hidden = false;
+            restartBtn.disabled = false;
+          } else {
+            hideRestart();
+            setStatus("Saved. New settings apply on next Start.");
+          }
         } catch (e) {
           setStatus("Save failed: " + e, true);
         }
       }
 
+      async function restart() {
+        restartBtn.disabled = true;
+        setStatus("Restarting…");
+        try {
+          await invoke("restart_server");
+          hideRestart();
+          setStatus("Restarted. New settings are now applied.");
+        } catch (e) {
+          restartBtn.disabled = false;
+          setStatus("Restart failed: " + e, true);
+        }
+      }
+
       document.getElementById("reload").addEventListener("click", load);
       document.getElementById("save").addEventListener("click", save);
+      restartBtn.addEventListener("click", restart);
       document.getElementById("pick_kiln_binary").addEventListener("click", () =>
         pickPath("kiln_binary", { multiple: false, directory: false, title: "Select kiln binary" })
       );
