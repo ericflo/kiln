@@ -105,6 +105,8 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
 
     cfg.args = args;
     cfg.auto_restart = s.auto_restart;
+    cfg.host = s.host.clone();
+    cfg.port = s.port;
 }
 
 #[cfg(test)]
@@ -142,6 +144,9 @@ mod tests {
         // Flags should contain the structured args in order.
         assert!(cfg.args.windows(2).any(|w| w == ["--host", "0.0.0.0"]));
         assert!(cfg.args.windows(2).any(|w| w == ["--port", "9000"]));
+        // Host/port are also propagated as structured fields for the poller.
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.port, 9000);
         assert!(cfg.args.iter().any(|a| a == "--fp8-kv-cache"));
         assert!(cfg.args.iter().any(|a| a == "--cuda-graphs"));
         assert!(cfg.args.iter().any(|a| a == "--prefix-cache"));
