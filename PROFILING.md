@@ -1,3 +1,338 @@
+# Kiln Profiling Report — Paged Production Path (Phase 6, post-PR #94)
+
+## Overview
+
+Every prior `PROFILING.md` (PRs #87 / #94) measured the **non-paged**
+`generate_from_tokens` path through `kiln-bench`, which routes through
+`KvCache` + `model_forward`. Production HTTP serving uses a different
+code path: `PagedKvCache` + `BlockTable` + `model_forward_paged`. PR #94
+added the vendored FlashInfer GQA-decode kernel and wired it into the
+paged path, but the bench at the time still measured the non-paged path,
+so the optimization recommendation could not be locked in against the
+production hot path.
+
+This Phase 6 report adds a `--paged` flag to `kiln-bench` and re-profiles
+the production paged path so the next optimization can be picked from
+production-shaped data.
+
+The questions answered here:
+
+1. **Is `ucopy_bf16` still the dominant hotspot on the paged path?** Yes.
+2. **Does the paged path have any meaningful new kernels not seen on the
+   non-paged path?** Yes — `copy2d_bf16` (per-token paged KV write) at
+   0.5 % of GPU time, plus a slightly different per-step memcpy mix.
+3. **What is the next optimization?** Same as PR #94's recommendation,
+   now confirmed on the production path: target `ucopy_bf16` either by
+   vendoring a paged-GQA fused kernel or by collapsing the surrounding
+   per-step bf16 reshapes.
+
+**No optimizations are proposed or attempted here — this is a profiling-only
+pass.** The recommendation at the end picks the single concrete next step.
+
+## Hardware & Build
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA RTX A5000 (24 GiB, compute capability 8.6) |
+| Driver | 570.211.01 |
+| CUDA toolkit | 12.8 (pod shipped without the pre-baked image; see "Environment notes" below) |
+| Rustc | 1.95 stable (rustup-installed on pod) |
+| Build | `cargo build --release --features cuda --bin kiln-bench` |
+| Build env | `KILN_CUDA_ARCHS=86`, sccache (B2 backend); 100 % C/C++/CUDA hits, 0 % Rust hits (cold target dir) |
+| Nsight Systems | 2024.6.2 |
+| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16, multimodal weight prefix `model.language_model.` |
+| Commit | `3390a39` (`ce/paged-bench-profile` branch, post-#94) |
+
+**Environment notes.** `ghcr.io/ericflo/kiln-runpod:latest` was again
+requested for this pod and again came up as a stock CUDA 12.8 Ubuntu
+image with none of the pre-baked tooling — same regression PROFILING.md
+flagged after PR #92. Bootstrap installed Rust 1.95, `nsight-systems-2024.6.2`,
+`hf-transfer`, and the B2-backed sccache prefix
+`/build-cache/kiln/x86_64-linux-cuda12.8/sccache`. The
+`kiln-flash-attn` C/C++ + CUDA cache was 100 % hot from the bucket so
+the build finished in **3 m 14 s**, even with 0 % Rust cache hits on
+this fresh clone. The kiln-runpod image regression should be triaged
+separately.
+
+The non-paged latency phase ran first on this pod and absorbed the cold
+`cuModuleLoadData` cost (~9 s, see PR #94 PROFILING). The paged latency
+phase ran second on the same pod and saw the loader warm, so its prefill
+number reflects steady-state, not first-launch JIT cost.
+
+## Scenarios
+
+Two latency captures on the same pod, with the same binary, against the
+same prompt configuration:
+
+| Scenario | Invocation |
+|---|---|
+| Non-paged latency (`KvCache` + `model_forward`) | `kiln-bench --model-path ~/models/qwen3.5-4b --prompt-tokens 512 --max-output-tokens 128 --skip-training` |
+| Paged latency (`PagedKvCache` + `BlockTable` + `model_forward_paged`, block_size=16, blocks=40) | `kiln-bench --paged …` (same args otherwise) |
+
+The paged scenario uses `block_size=16` (the production default) with
+40 blocks pre-allocated to cover the full 506 prompt + 128 decode
+window. The block table is built sequentially (logical block i →
+physical block i) since this is a single-sequence latency benchmark; the
+production scheduler will use the same block-table API in a more
+fragmented allocation pattern, but the per-token kernel mix is what we
+want to capture and that is unchanged by allocation pattern.
+
+Capture: `nsys profile -t cuda,nvtx,osrt --cuda-memory-usage=false
+--capture-range=none --sample=none --cpuctxsw=none -o profile_paged
+--force-overwrite=true …` for the paged run only. The bench was
+`SIGINT`ed during the throughput phase to flush the `.nsys-rep` and exit
+early, matching prior PROFILING reports' budget discipline. Reduced with
+`nsys stats --report cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum`.
+
+---
+
+## Wall-Clock Comparison — Paged vs Non-Paged
+
+Latency benchmark (`--prompt-tokens 512 --max-output-tokens 128`),
+measured on this pod:
+
+| Metric | Non-paged (`KvCache`) | Paged (`PagedKvCache`, block_size=16) | Δ paged vs non-paged |
+|---|---:|---:|---:|
+| Prefill (506 tokens)         | 11 719.2 ms / **43 tok/s**  | **851.7 ms / 594 tok/s**  | First run absorbed ~9 s of `cuModuleLoadData` JIT — see note below |
+| Decode mean ITL (129 tokens) | 265.1 ms / **3.77 tok/s**   | **276.9 ms / 3.61 tok/s** | **+4.5 % (paged slightly slower)** |
+
+### Why the prefill numbers look so different
+
+Do **not** read "paged prefill is 14× faster than non-paged prefill"
+into the table. The non-paged run was the **first** kiln-bench
+invocation on this pod and paid the full cold `cuModuleLoadData` cost
+on its prefill (PR #94 measured this at ~9.4 s for 7 module loads on
+the stock pod). The paged run was the **second** invocation on the
+same pod; the loader was warm and the steady-state prefill cost
+emerged: 851.7 ms / 594 tok/s on the paged path. Subtracting ~9 s of
+JIT from the non-paged number gives roughly 2.7 s — about 3× slower
+than paged steady-state, which would itself be a measurement artifact
+of running both paths back-to-back rather than a real architectural
+gap. This bench is built to compare **decode kernel mixes**, not to
+measure absolute prefill throughput; future benches that need clean
+prefill numbers should add an explicit warm-up pass.
+
+### Decode is the apples-to-apples comparison
+
+Both paths share the same loader warm-up budget by the time decode
+starts, and both run the same number of tokens through the same
+underlying GDN + full-attention layer mix. Decode ITL on the paged path
+is **+4.5 % vs non-paged** (276.9 ms vs 265.1 ms). That is the cost of
+the paged abstraction — `BlockTable` lookups, paged KV writes, and the
+slightly heavier per-token reshape pipeline. It is small and roughly in
+the noise of a single-shot bench, but consistent with the kernel-mix
+analysis below.
+
+---
+
+## Top GPU Kernels — Paged Path
+
+From `cuda_gpu_kern_sum` on `profile_paged.nsys-rep` (latency phase plus
+the partial throughput phase before SIGINT):
+
+| Rank | % GPU time | Kernel | Instances | Avg (µs) | Notes |
+|---:|---:|---|---:|---:|---|
+| 1  | **84.8 %** | `ucopy_bf16` | 3 187 | 623.6 | Generic bf16 copy/reshape — **same dominant hotspot as non-paged** |
+| 2  | 2.9 %      | `cutlass_80_tensorop_bf16_s16816gemm_relu 256x64` | 716 | 93.3 | Fused-relu GEMM (FFN / proj) |
+| 3  | 1.6 %      | `bmul_f32` | 3 440 | 10.7 | Broadcasted f32 mul (RMSNorm / scaling) |
+| 4  | 1.1 %      | `ampere_bf16_s16816gemm_bf16 64x64 sliced1x2` | 472 | 56.4 | cuBLAS-style GEMM |
+| 5  | 0.8 %      | `bmul_bf16` | 2 139 | 8.7 | Broadcasted bf16 mul |
+| 6  | 0.7 %      | `ampere_bf16_s1688gemm_bf16 128x128` | 64 | 263.0 | cuBLAS-style GEMM |
+| 7  | 0.7 %      | `ampere_bf16_s16816gemm_bf16 128x128` | 80 | 202.5 | cuBLAS-style GEMM |
+| 8  | 0.6 %      | `fast_sum_f32` | 1 459 | 9.6 | Softmax / reductions |
+| 9  | **0.5 %**  | `copy2d_bf16` | **8 406** | 1.5 | **Paged-only**: per-token paged KV-cache write into block-organized pool |
+| 10 | 0.5 %      | `ucopy_f32` | 1 077 | 10.9 | Generic f32 copy |
+| 11 | 0.4 %      | `cast_bf16_f32` | 3 091 | 3.4 | bf16↔f32 casts |
+| 12 | 0.4 %      | `cast_f32_bf16` | 2 787 | 3.5 | bf16↔f32 casts |
+| 13 | 0.4 %      | `badd_f32` | 1 512 | 6.4 | Broadcasted add |
+| 14 | 0.4 %      | `gdn_fwd_sub_kernel` (kiln-gdn-kernel, PR #80) | 192 | 48.0 | Vendored chunkwise GDN kernel (prefill) |
+| 15 | 0.4 %      | `ampere_bf16_s16816gemm_bf16 256x128` | 25 | 334.2 | cuBLAS-style GEMM |
+| —  | 0.1 %      | `recurrent_gdn_fwd_kernel<128>` (kiln-gdn-kernel, PR #92) | 177 | 16.7 | Vendored fla recurrent GDN kernel (decode) |
+| —  | <0.1 %     | `kiln_flash::flash_fwd_kernel` (kiln-flash-attn, PR #33/#94) | 8 | 61.2 | Vendored FlashInfer kernel — **8 prefill calls only; not on decode** |
+
+**All GEMM kernels combined: ~7 % of GPU time. All vendored attention
+kernels combined (flash-attn + GDN prefill + GDN decode): <1 %.**
+Same headline as the non-paged refresh after PR #92: every attention/matmul
+path is small on this workload — the dominant cost is pure memory movement.
+
+### Side-by-Side Kernel Share — Paged vs Non-Paged
+
+| Kernel | Non-paged share (PR #92) | Paged share (this run) | Δ |
+|---|---:|---:|---:|
+| `ucopy_bf16`                          | 85.7 % | **84.8 %** | −0.9 pp |
+| cutlass / ampere GEMMs (combined)     | ~6 %   | ~7 %       | +1 pp |
+| `bmul_f32` + `bmul_bf16`              | 3.3 %  | 2.4 %      | −0.9 pp |
+| `fast_sum_f32`                        | 0.6 %  | 0.6 %      | 0 |
+| `cast_bf16_f32` + `cast_f32_bf16`     | 0.4 %  | 0.8 %      | +0.4 pp |
+| `copy2d_bf16` (paged KV write)        | <0.1 % | **0.5 %**  | **+0.5 pp (new)** |
+| `gdn_fwd_sub_kernel` (GDN prefill)    | 0.4 %  | 0.4 %      | 0 |
+| `recurrent_gdn_fwd_kernel` (GDN decode) | 0.1 % | 0.1 %    | 0 |
+| `kiln_flash::flash_fwd_kernel`        | not used | <0.1 % (8 prefill calls) | + |
+
+The kernel mix is essentially identical between the two paths. The
+paged-only differences are:
+
+- `copy2d_bf16` reappears as a small (0.5 %) but distinct hotspot —
+  this is the per-token paged KV-cache write into the block-organized
+  pool tensors, called once per layer per token (24 layers, 129 decode
+  tokens ≈ 3 100 calls + a few per prefill chunk). It was effectively
+  zero on the non-paged path because the contiguous `KvCache` writes
+  collapse into the surrounding `ucopy_bf16` traffic.
+- `flash_fwd_kernel` runs **only on prefill** in this capture (8
+  invocations), confirming that the vendored FlashInfer kernel from
+  PR #94 is wired into the paged prefill path but is not on the decode
+  hot path. Decode still goes through the candle-DSL paged attention.
+- `cast_bf16_f32` / `cast_f32_bf16` traffic doubled (0.4 % → 0.8 %).
+  This is consistent with the BlockTable lookups and per-block index
+  arithmetic on the paged path.
+
+---
+
+## CUDA API / Memory — Paged Path
+
+From `cuda_api_sum` and `cuda_gpu_mem_time_sum`:
+
+| Item | Total | Calls | Notes |
+|---|---:|---:|---|
+| `cuMemcpyHtoDAsync_v2` | 1.98 s (45.5 % API) | **12 089** | Many small Host→Device transfers (avg 164 µs) |
+| `cuMemcpyDtoHAsync_v2` | 0.91 s (21.0 % API) | 8 | Avg **114 ms / call** — large host-bound reads (sample sync etc.) |
+| `cuEventRecord` | 0.48 s (11.0 % API) | 75 246 | Normal sync overhead |
+| `cuMemAllocAsync` | 0.38 s (8.6 % API) | **51 598** | Per-step allocator churn from candle |
+| `cuLaunchKernel` | 0.37 s (8.4 % API) | 46 440 | Normal launch overhead |
+| `cuModuleLoadData` | 40 ms (0.9 % API) | 7 | **Loader warm** — not on hot path; non-paged run absorbed JIT cost |
+
+GPU memory-side breakdown:
+
+| Op | Total | Count | Notes |
+|---|---:|---:|---|
+| Host → Device | 1.63 s (99.9 %) | 12 089 | Per-step constants / position tensors / block table |
+| memset        | 1.5 ms (0.1 %) | 697 | Negligible |
+| Device → Host |  12 µs (~0 %)  | 8 | Negligible bytes (sample sync only, ~1.5 KB total) |
+
+Observations:
+
+1. **The HtoD storm is back.** 12 089 HtoD calls in this capture, 99.9 %
+   of GPU memory-side time. PR #92's profile showed 14 293 HtoD calls
+   (most attributable to the vendored GDN kernel's host-side scaffolding);
+   the paged path adds the BlockTable upload per step on top of that, but
+   the dominant repetition pattern is the same. This is the same per-step
+   bf16 movement that surfaces as `ucopy_bf16` at 84.8 % of GPU time.
+2. **`cuMemAllocAsync` count tripled.** 51 598 alloc calls — much higher
+   than the non-paged run because the paged path materializes per-step
+   block-index tensors and per-layer paged-attention scratch buffers via
+   short-lived candle tensors. This is a candle-side allocator pattern,
+   not a CUDA-side cost.
+3. **`cuMemcpyDtoHAsync_v2` shrank to 8 calls / 0.9 s.** The non-paged
+   refreshes saw hundreds of DtoH calls from `to_scalar::<u32>()` in
+   `sampling.rs`. The paged run spent fewer steps in the throughput phase
+   before SIGINT, so the per-step DtoH barrier shows up as 8 large reads
+   rather than hundreds of small ones; per-token DtoH cost still exists,
+   it just was amortized across fewer iterations here.
+4. **`cuModuleLoadData` is 0.9 %** instead of the >70 % seen on the
+   non-paged cold run, confirming the warm-loader assumption above.
+
+---
+
+## Headline Findings
+
+1. **`ucopy_bf16` dominates the paged path at 84.8 % of GPU time.** This
+   is essentially identical to the non-paged share (85.7 %, PR #94).
+   PR #94's optimization recommendation is therefore **directly
+   applicable to the production hot path** — the paged-KV abstraction
+   does not move the bottleneck.
+2. **The vendored FlashInfer kernel (PR #94) is only used on the paged
+   prefill (8 calls, <0.1 % of GPU time).** It does **not** run on
+   the decode hot path. The decode path still goes through a candle-DSL
+   paged attention implementation that emits `ucopy_bf16` per layer per
+   token. This is the most concrete reason the next optimization should
+   wire `flash_fwd_kernel` (or an equivalent paged-GQA decode kernel)
+   into the decode loop.
+3. **Paged-only kernels are small.** `copy2d_bf16` (per-token paged KV
+   write) is 0.5 % of GPU time; the `cast_bf16_f32`/`cast_f32_bf16`
+   doubling is +0.4 pp; everything else is within noise of the non-paged
+   profile. The paged abstraction itself costs roughly **+1 percentage
+   point of GPU time** — meaningful but not the lever to pull.
+4. **Decode ITL paged vs non-paged: 276.9 ms vs 265.1 ms (+4.5 %).**
+   This is the wall-clock cost of the paged abstraction on a single
+   sequence. The kernel mix tells the same story — small overhead, same
+   dominant hotspot.
+5. **Allocator churn increased on paged.** 51 598 `cuMemAllocAsync`
+   calls vs the non-paged run's lower count. This is a candle-tensor
+   per-step allocation pattern around the BlockTable / paged-attention
+   path. Worth keeping in mind, but at 8.6 % of API time it is not the
+   lead lever.
+
+---
+
+## Next Optimization — Recommendation
+
+**Wire the vendored FlashInfer kernel (`kiln_flash::flash_fwd_kernel`,
+landed in PR #94) into the paged decode path so it replaces the candle-
+DSL paged attention used today.** Expand the kernel as needed for the
+decode-only signature (single-token query, paged K/V gather, GQA
+broadcast 16 → 4 heads, bf16, block_size=16) — it currently only ships
+the prefill signature.
+
+Rationale, citing this profile:
+
+- `ucopy_bf16` at **84.8 % of GPU time on the production paged path**
+  is the same dominant hotspot as on the non-paged path (85.7 %). The
+  paged abstraction did not change the bottleneck.
+- The kernel that PR #94 vendored is already in the binary and is
+  already wired into the paged prefill path (8 `flash_fwd_kernel` calls,
+  one per full-attention layer for the single prefill). The decode path
+  is the gap: 0 `flash_fwd_kernel` calls across 129 decode steps,
+  meaning every decode step on every full-attention layer is going
+  through the candle-DSL gather + GQA broadcast + softmax that emits
+  `ucopy_bf16`.
+- Routing decode through `flash_fwd_kernel` collapses the per-layer per-
+  token paged-KV gather + GQA broadcast + attention + softmax into one
+  fused CUDA kernel. The Amdahl ceiling is the share of `ucopy_bf16`
+  attributable to the 8 full-attention decode layers (the GDN layers
+  use a different, recurrent path and would not benefit). With 24 GDN
+  + 8 full-attention layers, the full-attention slice of decode
+  `ucopy_bf16` is roughly 8/32 = **~25 % of the 84.8 %** ≈ **~21 % of
+  total GPU time** — i.e. up to **~5× headroom on the
+  full-attention slice of decode** if the kernel fuses cleanly. Even
+  capturing half of that drops decode ITL by **~10 %** (276.9 ms → ~250 ms).
+- A clean second-step abort threshold: if the decode path lands a
+  paged-GQA fused kernel and `ucopy_bf16` falls below ~70 %, the next
+  target should rotate to the GDN-decode `ucopy_bf16` slice (~75 % of
+  the remaining `ucopy_bf16` mass) by fusing the recurrent state copies
+  inside `recurrent_gdn_fwd_kernel`.
+
+### Why this is the right next step (and what is rejected)
+
+- **Vendor a totally new paged-GQA decode kernel from FlashInfer's
+  upstream — REJECTED.** PR #94 already vendored `kiln-flash-attn`. The
+  decode signature is a small extension (different query length and
+  tile shape), not a fresh vendoring exercise. Reuse the existing crate
+  rather than introducing a parallel one.
+- **Optimize `copy2d_bf16` (paged KV write) — REJECTED.** It is 0.5 %
+  of GPU time. Below the 10 % Amdahl-ceiling threshold for a focused
+  optimization PR. Revisit only if it grows after the decode-path fix.
+- **Reduce HtoD churn from BlockTable uploads — REJECTED for now.**
+  Worth a small cleanup PR to cache BlockTable on `GpuWeights` /
+  `GpuRunner`, but at 8.6 % of API time it is not the lead lever; fold
+  it into the decode-path kernel work.
+- **CUDA-graph capture for paged decode — DEFERRED.** CUDA graphs
+  already help the throughput path (see `kiln_model::cuda_graph` log
+  line in the bench stderr). Latency-phase decode in this bench did
+  **not** use graphs; doing so would compress per-step launch overhead
+  but does **not** reduce `ucopy_bf16` traffic. Revisit after the
+  decode kernel fix lands.
+
+**Expected speedup range:** 1.10×–1.25× on decode ITL on the paged path
+(276.9 ms → ~220 ms–250 ms), assuming the fused kernel captures
+50–80 % of the full-attention `ucopy_bf16` slice. **Hard abort
+threshold: 1.05×.** Below that the assumption that `ucopy_bf16` on the
+full-attention decode layers is the GQA gather/broadcast cost is wrong;
+the next task should add explicit NVTX ranges around `attention_paged`
+to attribute the `ucopy_bf16` calls per call site before any further
+work.
+
+---
+
 # Kiln Profiling Report — After PR #92 (Recurrent GDN Decode Fused, Refresh)
 
 ## Overview
