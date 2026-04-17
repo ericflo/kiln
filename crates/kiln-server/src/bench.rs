@@ -10,14 +10,19 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_core::vram::detect_vram;
-use kiln_model::forward::{model_forward, GpuWeights, LinearAttentionState};
+use kiln_model::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
 use kiln_model::kv_cache::KvCache;
+use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::ModelRunner;
+
+/// Block size used for the paged-path benchmark. Matches the kiln-core default.
+const PAGED_BLOCK_SIZE: usize = 16;
 
 /// Results from the full benchmark suite.
 #[derive(Debug, Serialize)]
@@ -80,6 +85,11 @@ struct BenchArgs {
     prompt_tokens: usize,
     training_steps: usize,
     skip_training: bool,
+    /// When true, latency phase routes through PagedKvCache + model_forward_paged
+    /// (the production HTTP/scheduler path). Default false keeps the original
+    /// non-paged contiguous KvCache + model_forward path so prior numbers stay
+    /// comparable.
+    paged: bool,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -89,6 +99,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut prompt_tokens = 512;
     let mut training_steps = 10;
     let mut skip_training = false;
+    let mut paged = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -112,6 +123,9 @@ fn parse_args() -> Result<BenchArgs> {
             "--skip-training" => {
                 skip_training = true;
             }
+            "--paged" => {
+                paged = true;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -119,6 +133,8 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!("  --prompt-tokens <n>       Approximate prompt length in tokens (default: 512)");
                 eprintln!("  --training-steps <n>      Number of SFT training steps (default: 10)");
                 eprintln!("  --skip-training           Skip training benchmarks");
+                eprintln!("  --paged                   Route latency phase through PagedKvCache + model_forward_paged");
+                eprintln!("                            (matches the HTTP/scheduler production path)");
                 std::process::exit(0);
             }
             _ => {}
@@ -136,6 +152,7 @@ fn parse_args() -> Result<BenchArgs> {
         prompt_tokens,
         training_steps,
         skip_training,
+        paged,
     })
 }
 
@@ -394,6 +411,169 @@ fn bench_latency(
     })
 }
 
+/// Benchmark latency along the PAGED production path.
+///
+/// Mirrors `bench_latency` but uses `PagedKvCache` + `BlockTable` +
+/// `model_forward_paged` (the same code path the HTTP server / scheduler
+/// drives). This is what production inference actually runs; the non-paged
+/// `bench_latency` measures a code path that no real request takes.
+///
+/// Block size is fixed at `PAGED_BLOCK_SIZE` (matches kiln-core default).
+/// A single sequence is allocated `ceil(max_total / block_size)` physical
+/// blocks, mapped sequentially. CUDA graph capture is bypassed (we call
+/// `model_forward_paged` directly) for apples-to-apples timing with the
+/// non-paged latency phase.
+fn bench_latency_paged(
+    weights: &GpuWeights,
+    config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    prompt_tokens: usize,
+    max_output_tokens: usize,
+) -> Result<LatencyResult> {
+    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt_token_ids = tokenizer
+        .encode(&prompt)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let actual_prompt_tokens = prompt_token_ids.len();
+
+    let device = weights.embed_tokens.device();
+    let dtype = match config.dtype {
+        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+        kiln_core::config::DType::FP16 => candle_core::DType::F16,
+        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+    };
+
+    let max_total = actual_prompt_tokens + max_output_tokens;
+    let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
+
+    let mut paged_cache = PagedKvCache::new(
+        config.num_full_attention_layers,
+        num_blocks,
+        PAGED_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        dtype,
+        device,
+    )?;
+    let mut linear_state = LinearAttentionState::new(config, device)?;
+
+    // Build a block table that maps logical block i -> physical block i (sequential).
+    let mut block_table = BlockTable::new();
+    for i in 0..num_blocks as u32 {
+        block_table.push(i);
+    }
+
+    let eos_token_ids = tokenizer.eos_token_ids();
+
+    eprintln!(
+        "  Measuring latency [PAGED, block_size={PAGED_BLOCK_SIZE}, blocks={num_blocks}] \
+         ({actual_prompt_tokens} prompt tokens)..."
+    );
+
+    // Prefill: forward pass on all prompt tokens via paged path
+    let prefill_start = Instant::now();
+    let logits = model_forward_paged(
+        &prompt_token_ids,
+        weights,
+        config,
+        &mut paged_cache,
+        &block_table,
+        0,
+        Some(&mut linear_state),
+        None,
+        None,
+    )
+    .context("paged prefill forward pass failed")?;
+
+    // Sample first token
+    let mut next_token = greedy_sample(&logits)?;
+    let prefill_time = prefill_start.elapsed();
+
+    eprintln!(
+        "    Prefill (paged): {:.1}ms ({:.0} tok/s)",
+        prefill_time.as_secs_f64() * 1000.0,
+        actual_prompt_tokens as f64 / prefill_time.as_secs_f64()
+    );
+
+    // Decode: time each individual step.
+    // The paged path tracks position via `start_pos` (no advance() like KvCache).
+    let mut inter_token_ms: Vec<f64> = Vec::new();
+    let mut num_tokens = 1usize; // counting the first token from prefill
+    let mut current_pos = actual_prompt_tokens;
+
+    for _step in 0..max_output_tokens {
+        if eos_token_ids.contains(&next_token) {
+            break;
+        }
+
+        let step_start = Instant::now();
+        let logits = model_forward_paged(
+            &[next_token],
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            current_pos,
+            Some(&mut linear_state),
+            None,
+            None,
+        )
+        .context("paged decode forward pass failed")?;
+        current_pos += 1;
+        next_token = greedy_sample(&logits)?;
+        let step_time = step_start.elapsed();
+
+        inter_token_ms.push(step_time.as_secs_f64() * 1000.0);
+        num_tokens += 1;
+    }
+
+    let mean_itl = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        inter_token_ms.iter().sum::<f64>() / inter_token_ms.len() as f64
+    };
+
+    let mut sorted = inter_token_ms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let p50 = if sorted.is_empty() {
+        0.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+
+    let p99 = if sorted.is_empty() {
+        0.0
+    } else {
+        let idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
+        sorted[idx]
+    };
+
+    let decode_tok_per_sec = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        let total_decode_ms: f64 = inter_token_ms.iter().sum();
+        inter_token_ms.len() as f64 / (total_decode_ms / 1000.0)
+    };
+
+    eprintln!(
+        "    Decode (paged): {num_tokens} tokens, mean ITL {:.1}ms ({:.1} tok/s)",
+        mean_itl, decode_tok_per_sec
+    );
+
+    Ok(LatencyResult {
+        prompt_tokens: actual_prompt_tokens,
+        prefill_time_ms: prefill_time.as_secs_f64() * 1000.0,
+        prefill_tokens_per_sec: actual_prompt_tokens as f64 / prefill_time.as_secs_f64(),
+        time_to_first_token_ms: prefill_time.as_secs_f64() * 1000.0,
+        mean_inter_token_ms: mean_itl,
+        p50_inter_token_ms: p50,
+        p99_inter_token_ms: p99,
+        num_tokens_generated: num_tokens,
+        decode_tokens_per_sec: decode_tok_per_sec,
+    })
+}
+
 /// Benchmark SFT training speed.
 fn bench_training(
     model_config: &ModelConfig,
@@ -620,16 +800,29 @@ fn main() -> Result<()> {
         }
     };
 
-    // Latency benchmark (uses model_forward directly — must run before runner takes ownership)
-    eprintln!("--- Latency Benchmark ---");
-    let latency = bench_latency(
-        &gpu_weights,
-        &model_config,
-        &tokenizer,
-        args.prompt_tokens,
-        args.max_output_tokens,
-    )
-    .context("latency benchmark failed")?;
+    // Latency benchmark (uses model_forward directly — must run before runner takes ownership).
+    // When --paged is set, route through PagedKvCache + model_forward_paged (the production path).
+    let latency = if args.paged {
+        eprintln!("--- Latency Benchmark (PAGED — production path) ---");
+        bench_latency_paged(
+            &gpu_weights,
+            &model_config,
+            &tokenizer,
+            args.prompt_tokens,
+            args.max_output_tokens,
+        )
+        .context("paged latency benchmark failed")?
+    } else {
+        eprintln!("--- Latency Benchmark ---");
+        bench_latency(
+            &gpu_weights,
+            &model_config,
+            &tokenizer,
+            args.prompt_tokens,
+            args.max_output_tokens,
+        )
+        .context("latency benchmark failed")?
+    };
 
     // Training benchmark (borrows gpu_weights — must run before runner takes ownership)
     let training = if args.skip_training {
