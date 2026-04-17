@@ -17,10 +17,11 @@ memmap2 = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 kiln-flash-attn = { workspace = true, optional = true }
+kiln-gdn-kernel = { workspace = true, optional = true }
 rand = { workspace = true }
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-flash-attn"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
