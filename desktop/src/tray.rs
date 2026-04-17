@@ -4,7 +4,10 @@ use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tokio::sync::RwLock;
 
+use crate::settings::Settings;
 use crate::supervisor::{ServerState, Supervisor};
 
 const TRAY_ID: &str = "kiln-main";
@@ -13,6 +16,7 @@ const ITEM_SETTINGS: &str = "open_settings";
 const ITEM_START: &str = "start_server";
 const ITEM_STOP: &str = "stop_server";
 const ITEM_LOGS: &str = "view_logs";
+const ITEM_COPY_URL: &str = "copy_openai_url";
 const ITEM_QUIT: &str = "quit";
 
 const ICON_STOPPED: &[u8] = include_bytes!("../icons/tray/stopped.png");
@@ -34,6 +38,8 @@ fn state_icon_bytes(state: &ServerState) -> &'static [u8] {
 pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result<()> {
     let dashboard = MenuItemBuilder::with_id(ITEM_DASHBOARD, "Open Dashboard").build(app)?;
     let settings = MenuItemBuilder::with_id(ITEM_SETTINGS, "Settings…").build(app)?;
+    let copy_url =
+        MenuItemBuilder::with_id(ITEM_COPY_URL, "Copy OpenAI Base URL").build(app)?;
     let start = MenuItemBuilder::with_id(ITEM_START, "Start Server").build(app)?;
     let stop = MenuItemBuilder::with_id(ITEM_STOP, "Stop Server")
         .enabled(false)
@@ -43,6 +49,8 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
 
     let menu = MenuBuilder::new(app)
         .items(&[&dashboard, &settings])
+        .separator()
+        .item(&copy_url)
         .separator()
         .items(&[&start, &stop, &logs])
         .separator()
@@ -95,6 +103,12 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     }
                     let _ = app_handle.emit("menu://view-logs", ());
                 }
+                ITEM_COPY_URL => {
+                    let supervisor = Arc::clone(&supervisor);
+                    tauri::async_runtime::spawn(async move {
+                        copy_openai_base_url_to_clipboard(&app_handle, supervisor).await;
+                    });
+                }
                 _ => {}
             }
         })
@@ -134,6 +148,29 @@ fn open_dashboard_window(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
     win.set_focus()?;
     Ok(())
+}
+
+async fn copy_openai_base_url_to_clipboard(app: &AppHandle, supervisor: Arc<Supervisor>) {
+    let state = supervisor.state().await;
+    if !matches!(
+        state,
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive
+    ) {
+        eprintln!(
+            "[tray] copy OpenAI base URL skipped — server not running (state: {})",
+            state_label(&state)
+        );
+        return;
+    }
+    let (host, port) = {
+        let settings_state = app.state::<Arc<RwLock<Settings>>>();
+        let s = settings_state.read().await;
+        (s.host.clone(), s.port)
+    };
+    let url = crate::openai_base_url(&host, port);
+    if let Err(e) = app.clipboard().write_text(url) {
+        eprintln!("[tray] clipboard write_text failed: {}", e);
+    }
 }
 
 fn open_logs_window(app: &AppHandle) -> tauri::Result<()> {
