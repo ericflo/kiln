@@ -114,6 +114,29 @@
       #status-badge.state-training .dot { background: #2a6df4; }
       #status-badge.state-error .dot { background: #e03131; }
       #status-badge.state-unknown .dot { background: #6c7280; }
+      #base-url {
+        display: inline-flex;
+        align-items: center;
+        padding: 6px 10px;
+        font-size: 12px;
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: #1b1e24;
+        color: #a8aeb8;
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        user-select: text;
+        cursor: text;
+        max-width: 280px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #base-url.empty {
+        color: #6c7280;
+        font-family: inherit;
+        user-select: none;
+        cursor: default;
+      }
     </style>
   </head>
   <body>
@@ -124,6 +147,7 @@
       </span>
       <button id="open-logs" title="Open the log viewer window">View Logs</button>
       <button id="open-settings" title="Open the settings window">Settings</button>
+      <code id="base-url" class="empty" title="OpenAI base URL — server not running">—</code>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
     </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
@@ -337,10 +361,53 @@
         return { kind: "Unknown", message: null };
       }
 
+      const baseUrlEl = document.getElementById("base-url");
+      const BASE_URL_EMPTY_LABEL = "—";
+      const BASE_URL_EMPTY_TITLE = "OpenAI base URL — server not running";
+      let cachedBaseUrl = null;
+
+      function setBaseUrl(url) {
+        if (url) {
+          baseUrlEl.textContent = url;
+          baseUrlEl.title = url;
+          baseUrlEl.classList.remove("empty");
+        } else {
+          baseUrlEl.textContent = BASE_URL_EMPTY_LABEL;
+          baseUrlEl.title = BASE_URL_EMPTY_TITLE;
+          baseUrlEl.classList.add("empty");
+        }
+      }
+
+      async function refreshBaseUrl(kind) {
+        if (!invoke || kind !== "Running") {
+          if (cachedBaseUrl !== null) {
+            cachedBaseUrl = null;
+            setBaseUrl(null);
+          }
+          return;
+        }
+        try {
+          const url = await invoke("get_openai_base_url");
+          if (url && url !== cachedBaseUrl) {
+            cachedBaseUrl = url;
+            setBaseUrl(url);
+          } else if (!url && cachedBaseUrl !== null) {
+            cachedBaseUrl = null;
+            setBaseUrl(null);
+          }
+        } catch (err) {
+          if (cachedBaseUrl !== null) {
+            cachedBaseUrl = null;
+            setBaseUrl(null);
+          }
+        }
+      }
+
       let stateFailureLogged = false;
       async function pollServerState() {
         if (!invoke) {
           applyStatusBadge("Unknown", "Tauri bridge unavailable");
+          await refreshBaseUrl("Unknown");
           return;
         }
         try {
@@ -351,9 +418,11 @@
             ? `Kiln server state: ${info.label} — ${message}`
             : `Kiln server state: ${info.label}`;
           applyStatusBadge(kind, tooltip);
+          await refreshBaseUrl(kind);
           stateFailureLogged = false;
         } catch (err) {
           applyStatusBadge("Unknown", "Could not read server state");
+          await refreshBaseUrl("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
             stateFailureLogged = true;
