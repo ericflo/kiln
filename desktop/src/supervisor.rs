@@ -29,6 +29,11 @@ pub struct SupervisorConfig {
     pub max_restarts: u32,
     pub restart_backoff_ms: u64,
     pub log_buffer_bytes: usize,
+    /// Host the kiln server binds to — used by the health poller to build
+    /// `/v1/health` and `/v1/train/status` URLs.
+    pub host: String,
+    /// Port the kiln server binds to — used by the health poller.
+    pub port: u16,
 }
 
 impl Default for SupervisorConfig {
@@ -40,6 +45,8 @@ impl Default for SupervisorConfig {
             max_restarts: 5,
             restart_backoff_ms: 500,
             log_buffer_bytes: 4 * 1024 * 1024,
+            host: "127.0.0.1".to_string(),
+            port: 8000,
         }
     }
 }
@@ -113,12 +120,24 @@ impl Supervisor {
         *task_guard = None;
 
         let (tx, rx) = watch::channel(false);
+        let poller_shutdown = rx.clone();
         *self.shutdown_tx.lock().await = Some(tx);
         *self.state.lock().await = ServerState::Starting;
 
         let config = self.config.lock().await.clone();
         let state = Arc::clone(&self.state);
         let logs = Arc::clone(&self.logs);
+
+        // Spawn the HTTP health poller alongside the run loop. It shares the
+        // same shutdown receiver so `stop()` terminates both. The handle is
+        // detached — the poller also exits on its own when state flips to
+        // `Stopped`.
+        let _ = crate::poller::spawn_health_poller(
+            Arc::clone(&self.state),
+            config.host.clone(),
+            config.port,
+            poller_shutdown,
+        );
 
         let handle = tokio::spawn(async move {
             run_loop(config, state, logs, rx).await;
@@ -270,6 +289,8 @@ mod tests {
             max_restarts: 0,
             restart_backoff_ms: 100,
             log_buffer_bytes: 1024,
+            host: "127.0.0.1".to_string(),
+            port: 8000,
         };
         let sup = Supervisor::new(config);
         sup.start().await.expect("start");
@@ -300,6 +321,8 @@ mod tests {
             max_restarts: 0,
             restart_backoff_ms: 100,
             log_buffer_bytes: 1024,
+            host: "127.0.0.1".to_string(),
+            port: 8000,
         };
         let sup = Supervisor::new(config);
         sup.start().await.expect("start");
@@ -326,6 +349,8 @@ mod tests {
             max_restarts: 0,
             restart_backoff_ms: 10,
             log_buffer_bytes: 1024,
+            host: "127.0.0.1".to_string(),
+            port: 8000,
         };
         let sup = Supervisor::new(config);
         sup.start().await.expect("start");

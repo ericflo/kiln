@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod poller;
 mod settings;
 mod supervisor;
 mod tray;
