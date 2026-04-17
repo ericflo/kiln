@@ -1422,6 +1422,7 @@ mod tests {
         let vocab = config.vocab_size;
 
         let embed_tokens = Tensor::randn(0.0f32, 0.02, (vocab, h), device)?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
         let final_norm = Tensor::zeros(h, DType::F32, device)?; // (1+w)*x, so zeros = identity
 
         let mut layers = Vec::new();
@@ -1479,6 +1480,7 @@ mod tests {
 
         Ok(GpuWeights {
             embed_tokens,
+            embed_tokens_t,
             layers,
             final_norm,
             rotary_inv_freq,
