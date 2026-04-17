@@ -1411,12 +1411,20 @@ fn try_flash_attn_paged_decode(
 
     // Build a padded block_table tensor sized [1, n_chunks * pages_per_chunk].
     // Only the entries at indices c * pages_per_chunk are read by the kernel,
-    // but we copy the full kiln block table verbatim and pad the tail by
-    // continuing the contiguous run from the last valid block (so any
+    // but we copy the active prefix of the kiln block table and pad the tail
+    // by continuing the contiguous run from the last valid block (so any
     // stray reads stay within the cache pool).
+    //
+    // The scheduler may over-allocate blocks (blocks.len() > max_blocks_per_seq)
+    // when it reserves capacity ahead of the current decode position. Those
+    // extra blocks are not part of this iteration's active attention window,
+    // so we truncate to max_blocks_per_seq before copying. Without this,
+    // `reshape((1, max_blocks_per_seq))` crashes when allocated > max
+    // (observed: 40 blocks vs max 32 at block 3 of full-attention layers).
     let max_blocks_per_seq = n_chunks * pages_per_chunk;
+    let take = max_blocks_per_seq.min(blocks.len());
     let mut padded: Vec<u32> = Vec::with_capacity(max_blocks_per_seq);
-    padded.extend_from_slice(blocks);
+    padded.extend_from_slice(&blocks[..take]);
     if padded.is_empty() {
         return Ok(None);
     }
