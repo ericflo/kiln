@@ -11,6 +11,7 @@ use crate::settings::Settings;
 use crate::supervisor::{ServerState, Supervisor};
 
 const TRAY_ID: &str = "kiln-main";
+const ITEM_STATUS: &str = "status";
 const ITEM_DASHBOARD: &str = "open_dashboard";
 const ITEM_SETTINGS: &str = "open_settings";
 const ITEM_START: &str = "start_server";
@@ -18,6 +19,10 @@ const ITEM_STOP: &str = "stop_server";
 const ITEM_LOGS: &str = "view_logs";
 const ITEM_COPY_URL: &str = "copy_openai_url";
 const ITEM_QUIT: &str = "quit";
+
+fn status_menu_text(state: &ServerState) -> String {
+    format!("Status: {}", state_label(state))
+}
 
 const ICON_STOPPED: &[u8] = include_bytes!("../icons/tray/stopped.png");
 const ICON_STARTING: &[u8] = include_bytes!("../icons/tray/starting.png");
@@ -36,6 +41,9 @@ fn state_icon_bytes(state: &ServerState) -> &'static [u8] {
 }
 
 pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result<()> {
+    let status = MenuItemBuilder::with_id(ITEM_STATUS, status_menu_text(&ServerState::Stopped))
+        .enabled(false)
+        .build(app)?;
     let dashboard = MenuItemBuilder::with_id(ITEM_DASHBOARD, "Open Dashboard").build(app)?;
     let settings = MenuItemBuilder::with_id(ITEM_SETTINGS, "Settings…").build(app)?;
     let copy_url =
@@ -48,6 +56,8 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
     let quit = MenuItemBuilder::with_id(ITEM_QUIT, "Quit").build(app)?;
 
     let menu = MenuBuilder::new(app)
+        .item(&status)
+        .separator()
         .items(&[&dashboard, &settings])
         .separator()
         .item(&copy_url)
@@ -109,12 +119,13 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                         copy_openai_base_url_to_clipboard(&app_handle, supervisor).await;
                     });
                 }
+                ITEM_STATUS => {}
                 _ => {}
             }
         })
         .build(app)?;
 
-    spawn_state_watcher(app.clone(), supervisor, start, stop);
+    spawn_state_watcher(app.clone(), supervisor, status, start, stop);
     Ok(())
 }
 
@@ -192,6 +203,7 @@ fn open_logs_window(app: &AppHandle) -> tauri::Result<()> {
 fn spawn_state_watcher(
     app: AppHandle,
     supervisor: Arc<Supervisor>,
+    status_item: MenuItem<tauri::Wry>,
     start_item: MenuItem<tauri::Wry>,
     stop_item: MenuItem<tauri::Wry>,
 ) {
@@ -209,6 +221,7 @@ fn spawn_state_watcher(
                         let _ = tray.set_icon(Some(img));
                     }
                 }
+                let _ = status_item.set_text(status_menu_text(&state));
                 let _ = start_item.set_enabled(start_enabled(&state));
                 let _ = stop_item.set_enabled(stop_enabled(&state));
             }
@@ -295,6 +308,35 @@ mod tests {
         assert!(stop_enabled(&ServerState::TrainingActive));
         assert!(!stop_enabled(&ServerState::Stopped));
         assert!(!stop_enabled(&ServerState::Error("x".into())));
+    }
+
+    #[test]
+    fn status_text_matches_label() {
+        assert_eq!(
+            format!("Status: {}", state_label(&ServerState::Stopped)),
+            "Status: Stopped"
+        );
+        assert_eq!(
+            format!("Status: {}", state_label(&ServerState::Starting)),
+            "Status: Starting…"
+        );
+        assert_eq!(
+            format!("Status: {}", state_label(&ServerState::Running)),
+            "Status: Running"
+        );
+        assert_eq!(
+            format!("Status: {}", state_label(&ServerState::TrainingActive)),
+            "Status: Training"
+        );
+        assert_eq!(
+            format!("Status: {}", state_label(&ServerState::Error("boom".into()))),
+            "Status: Error: boom"
+        );
+        // Helper must match the inline format used by the watcher.
+        assert_eq!(
+            status_menu_text(&ServerState::Running),
+            format!("Status: {}", state_label(&ServerState::Running))
+        );
     }
 
     #[test]
