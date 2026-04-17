@@ -64,11 +64,13 @@ RUN curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_V
 
 # --- Python tooling ---
 # PyTorch cu124 + huggingface stack + b2 CLI + safetensors/numpy.
-# --break-system-packages is needed on Ubuntu 22.04 PEP 668 setups.
-RUN pip install --no-cache-dir --break-system-packages \
+# Ubuntu 22.04 ships pip 22.0.2 which predates --break-system-packages
+# (added in pip 23.0.1) and does not enforce PEP 668, so the flag is
+# neither available nor needed here.
+RUN pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu124 \
         torch==2.4.1 \
-    && pip install --no-cache-dir --break-system-packages \
+    && pip install --no-cache-dir \
         'b2[full]' huggingface-hub hf-transfer safetensors numpy
 
 # --- SSH server config (RunPod injects $PUBLIC_KEY at pod boot) ---
