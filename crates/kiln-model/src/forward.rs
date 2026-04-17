@@ -830,6 +830,31 @@ fn gdn_chunkwise_recurrence(
     let dtype = q.dtype();
     let device = q.device();
 
+    // Single-token decode fast path. The chunkwise machinery (preshape,
+    // decay matrix, KKT, forward sub, B_mask) costs more than the per-token
+    // recurrence itself when seq_len == 1, which is the cause of the −54%
+    // decode regression in PR #80. The vendored `gdn_recurrent_forward`
+    // kernel collapses the whole recurrence into one block per (B,H).
+    #[cfg(feature = "cuda")]
+    if seq_len == 1 {
+        let disabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_ok();
+        if !disabled
+            && device.is_cuda()
+            && dtype == DType::BF16
+            && state.dtype() == DType::BF16
+        {
+            let q1 = q.squeeze(2)?.contiguous()?;
+            let k1 = k.squeeze(2)?.contiguous()?;
+            let v1 = v.squeeze(2)?.contiguous()?;
+            let beta1 = beta.squeeze(2)?.contiguous()?;
+            let g1 = g.squeeze(2)?.contiguous()?;
+            let out = kiln_gdn_kernel::gdn_recurrent_forward(
+                &q1, &k1, &v1, &beta1, &g1, state,
+            )?;
+            return Ok(out.unsqueeze(2)?);
+        }
+    }
+
     let full_chunks = seq_len / chunk_size;
     let tail = seq_len - full_chunks * chunk_size;
 
@@ -3355,6 +3380,124 @@ mod tests {
         assert!(
             mean < 1e-3,
             "kernel mean drift exceeds tolerance: mean_abs_diff = {mean:e}"
+        );
+
+        Ok(())
+    }
+
+    /// Parity check for the single-token recurrent CUDA kernel.
+    ///
+    /// Compares output and final state of `gdn_chunkwise_recurrence` with
+    /// the new fused recurrent kernel against `gdn_sequential_reference`
+    /// at kiln's exact GDN config (B=1, nv=32, dk=128, dv=128, T=1).
+    /// Tolerance matches the chunkwise CUDA kernel test.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_recurrent_kernel_matches_reference() -> Result<()> {
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_recurrent_kernel_matches_reference"
+                );
+                return Ok(());
+            }
+        };
+
+        let b = 1usize;
+        let nv = 32usize;
+        let t = 1usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xDECAFBADu64);
+
+        let n_qk = b * nv * t * dk;
+        let n_v = b * nv * t * dv;
+        let n_b = b * nv * t;
+        let n_s = b * nv * dk * dv;
+
+        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> =
+            (0..n_b).map(|_| rng.gen_range(0.3f32..1.2f32)).collect();
+        // Small negative gates so exp(g) stays in (~0.8, 1.0).
+        let g_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(-0.2f32..0.0f32)).collect();
+        let s_data: Vec<f32> =
+            (0..n_s).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+
+        let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?;
+        let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (b, nv, t, dv), &device)?;
+        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, t), &device)?;
+        let g_f32 = Tensor::from_slice(&g_data, (b, nv, t), &device)?;
+        let state_f32 = Tensor::from_slice(&s_data, (b, nv, dk, dv), &device)?;
+
+        let q = q_f32.to_dtype(DType::BF16)?;
+        let k = k_f32.to_dtype(DType::BF16)?;
+        let v = v_f32.to_dtype(DType::BF16)?;
+        let beta = beta_f32.to_dtype(DType::BF16)?;
+        let g = g_f32.to_dtype(DType::BF16)?;
+        let state_bf16 = state_f32.to_dtype(DType::BF16)?;
+
+        // Reference path: F32 sequential recurrence on the same numerical
+        // inputs (cast back to F32 from the bf16 round-trip so the bf16
+        // quantization is shared between the two paths and only the kernel
+        // arithmetic differs).
+        let q_ref = q.to_dtype(DType::F32)?;
+        let k_ref = k.to_dtype(DType::F32)?;
+        let v_ref = v.to_dtype(DType::F32)?;
+        let beta_ref = beta.to_dtype(DType::F32)?;
+        let g_ref = g.to_dtype(DType::F32)?;
+        let mut state_ref = state_bf16.to_dtype(DType::F32)?;
+        let out_ref = gdn_sequential_reference(
+            &q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref,
+        )?;
+
+        // Kernel path: chunkwise dispatcher with seq_len == 1 routes to
+        // the new fused recurrent kernel. Make sure no prior test left the
+        // kill-switch set in this process.
+        // SAFETY: cargo test is single-threaded per test by default and we
+        // are only mutating an env var that the dispatcher reads at the top
+        // of the same call below. No other thread observes it concurrently.
+        unsafe { std::env::remove_var("KILN_DISABLE_GDN_KERNEL"); }
+        let mut state_kernel = state_bf16.clone();
+        let out_kernel = gdn_chunkwise_recurrence(
+            &q, &k, &v, &beta, &g, &mut state_kernel, 1,
+        )?;
+
+        let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
+        let abs = out_diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let s_diff = (state_kernel.to_dtype(DType::F32)? - &state_ref)?;
+        let s_abs = s_diff.abs()?;
+        let s_max = s_abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let s_mean = s_abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+
+        eprintln!(
+            "gdn-recurrent vs reference: out max={max:e} mean={mean:e}, state max={s_max:e} mean={s_mean:e}"
+        );
+
+        assert!(
+            max < 1e-2,
+            "recurrent kernel output exceeds tolerance: max_abs_diff = {max:e}"
+        );
+        assert!(
+            mean < 1e-3,
+            "recurrent kernel mean drift exceeds tolerance: mean_abs_diff = {mean:e}"
+        );
+        assert!(
+            s_max < 1e-2,
+            "recurrent kernel state exceeds tolerance: max_abs_diff = {s_max:e}"
+        );
+        assert!(
+            s_mean < 1e-3,
+            "recurrent kernel state mean drift exceeds tolerance: mean_abs_diff = {s_mean:e}"
         );
 
         Ok(())
