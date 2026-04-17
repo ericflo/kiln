@@ -79,6 +79,18 @@ async fn copy_logs(
 }
 
 #[tauri::command]
+async fn save_logs_to_file(
+    path: String,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<usize, String> {
+    let lines = sup.logs().await;
+    let count = lines.len();
+    let text = lines.join("\n");
+    std::fs::write(&path, text).map_err(|e| format!("write failed: {}", e))?;
+    Ok(count)
+}
+
+#[tauri::command]
 async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, String> {
     Ok(state.read().await.clone())
 }
@@ -202,6 +214,7 @@ fn main() {
             server_state,
             server_logs,
             copy_logs,
+            save_logs_to_file,
             get_settings,
             set_settings,
             get_kiln_url,

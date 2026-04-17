@@ -79,8 +79,8 @@
         cursor: pointer;
       }
       button:hover { background: #3b7af5; }
-      button#copy.flash { background: #245a32; }
-      button#copy.flash-warn { background: #5a3324; }
+      button#copy.flash, button#save.flash { background: #245a32; }
+      button#copy.flash-warn, button#save.flash-warn { background: #5a3324; }
       #log {
         flex: 1 1 auto;
         margin: 0;
@@ -108,6 +108,7 @@
       <input type="search" id="filter" placeholder="Filter…" autocomplete="off" spellcheck="false" />
       <span id="filter-count" class="hidden"></span>
       <button id="copy" type="button" title="Copy all log lines to clipboard">Copy</button>
+      <button id="save" type="button" title="Save all log lines to a file">Save…</button>
       <button id="clear" type="button">Clear view</button>
     </header>
     <div id="log" class="empty">(no log lines yet)</div>
@@ -119,6 +120,7 @@
       const autoscrollEl = document.getElementById("autoscroll");
       const clearEl = document.getElementById("clear");
       const copyEl = document.getElementById("copy");
+      const saveEl = document.getElementById("save");
       const filterEl = document.getElementById("filter");
       const filterCountEl = document.getElementById("filter-count");
 
@@ -142,6 +144,36 @@
             copyEl.textContent = "Copy";
             copyEl.classList.remove("flash-warn");
           }, 1800);
+        }
+      });
+
+      saveEl.addEventListener("click", async () => {
+        if (!invoke) return;
+        try {
+          const dialog = window.__TAURI__ && window.__TAURI__.dialog;
+          if (!dialog) {
+            throw new Error("dialog plugin unavailable");
+          }
+          const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
+          const path = await dialog.save({
+            defaultPath: `kiln-logs-${ts}.log`,
+            filters: [{ name: "Log files", extensions: ["log", "txt"] }],
+          });
+          if (!path) return;
+          const count = await invoke("save_logs_to_file", { path });
+          saveEl.textContent = count > 0 ? `Saved (${count} lines)` : "Nothing to save";
+          saveEl.classList.add("flash");
+          setTimeout(() => {
+            saveEl.textContent = "Save…";
+            saveEl.classList.remove("flash");
+          }, 1800);
+        } catch (err) {
+          saveEl.textContent = "Save failed";
+          saveEl.classList.add("flash-warn");
+          setTimeout(() => {
+            saveEl.textContent = "Save…";
+            saveEl.classList.remove("flash-warn");
+          }, 2400);
         }
       });
 
