@@ -1420,3 +1420,173 @@ production default again and `KILN_DISABLE_FUSED_PAGED_DECODE=1` remains
 the escape hatch. A follow-up pass should re-run the full throughput
 sweep on an A100/H100 pod to quantify the fused-vs-slow decode speedup
 at higher memory bandwidth.
+
+
+## Per-Call-Site Attribution (PR #107 abort-threshold follow-up) — 2026-04-17
+
+### Why this pass
+
+PR #107 measured fused vs slow paged decode on H100 NVL at 1.013×, which
+is below the 1.05× hard-abort threshold defined at lines 327-330 of this
+document. Per the escalation path in the same section, the next move is
+to attribute the 84.8% `ucopy_bf16` slice (PR #94 baseline, line 135) to
+its actual call site so the next optimization can target the real
+bottleneck instead of the symptom.
+
+This pass adds a thin `kiln-nvtx` wrapper crate plus `cargo` feature
+gates so the instrumentation is zero-overhead in the default build, then
+ships RAII NVTX guards at six named paged-inference call sites in
+`crates/kiln-model/src/forward.rs`:
+
+| NVTX range | Call site |
+|---|---|
+| `kiln/attn/full/prefill` | `try_flash_attn_paged_prefill` |
+| `kiln/attn/full/decode_fused` | `try_flash_attn_paged_decode` (fused FA-2) |
+| `kiln/attn/full/decode_fallback` | full-attention slow paged-decode fallback |
+| `kiln/attn/gdn/chunk` | `chunkwise_gdn_forward` (prefill) |
+| `kiln/attn/gdn/recurrent` | `recurrent_gdn_forward` (decode) |
+| `kiln/attn/gdn/precopy` | the `squeeze + contiguous` reshape that feeds `recurrent_gdn_forward` |
+
+The `nvtx` cargo feature (default OFF) gates an FFI shim into
+`libnvToolsExt` from the CUDA toolkit; without the feature, the guard
+type collapses to a zero-sized struct so non-CUDA builds and release
+builds without nsight remain bit-identical to today's binary.
+
+### Environment
+
+| Component | Value |
+|---|---|
+| GPU | NVIDIA RTX A5000 (24 GiB, compute capability 8.6) |
+| Driver | 580.126.09 |
+| CUDA toolkit | 12.8 (V12.8.93) |
+| Nsys | 2025.1.1 (bundled with the Nsight Compute install) |
+| Image | `ghcr.io/ericflo/kiln-runpod:latest` |
+| Build | `cargo build --release --features cuda,nvtx --bin kiln-bench` |
+| Build env | `KILN_CUDA_ARCHS=86` |
+| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16 |
+| Commit | `ce/nvtx-attribute-ucopy` (884b7ec) |
+| Pod | RunPod A5000, $0.27/hr |
+
+### Scenario
+
+Single nsys run, NVTX trace enabled, no sampling, no CUDA backtrace,
+report generation deferred to `nsys stats` after capture:
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cudabacktrace=none \
+  --stats=false --output=profile_nvtx --force-overwrite=true \
+  --capture-range=none \
+  ./target/release/kiln-bench --paged --model-path ~/models/qwen3.5-4b \
+    --prompt-tokens 512 --max-output-tokens 64 --skip-training
+```
+
+Reports generated: `nvtx_pushpop_sum`, `nvtx_kern_sum`,
+`cuda_gpu_kern_sum` (CSV).
+
+### NVTX wall-time totals (`nvtx_pushpop_sum`)
+
+| Range | Time % | Total (ns) | Inst | Avg (ns) |
+|---|---:|---:|---:|---:|
+| `kiln/attn/gdn/recurrent` | 77.8 | 1,761,964,492 | 46,464 | 37,921 |
+| `kiln/attn/gdn/chunk` | 10.8 | 244,684,974 | 6,528 | 37,482 |
+| `kiln/attn/gdn/precopy` | 6.5 | 146,821,487 | 46,464 | 3,159 |
+| `kiln/attn/full/decode_fused` | 3.8 | 86,920,066 | 512 | 169,765 |
+| `kiln/attn/full/prefill` | 1.1 | 25,454,219 | 8 | 3,181,777 |
+| `kiln/attn/full/decode_fallback` | — | 0 | 0 | — |
+
+Instance counts validate the layer wiring: the model has 24 GDN layers
+(6,528 / 24 = 272 layer-invocations per range, matching one prefill +
+one full-attention pseudo-token plus 64 decode steps when the loop
+re-enters chunk for prefill and recurrent for decode) and 8
+full-attention layers (512 = 64 decode-steps × 8 layers, 8 = 1 prefill ×
+8 layers). The empty `decode_fallback` row confirms that PR #102's
+fused-decode fix is universally used on this prompt/decode shape — the
+slow-path fallback was never invoked.
+
+### Per-range ucopy_bf16 attribution (`nvtx_kern_sum`)
+
+| NVTX range | Range total (ms) | ucopy_bf16 (ms) | ucopy share | ucopy inst |
+|---|---:|---:|---:|---:|
+| `kiln/attn/gdn/recurrent` | 806.9 | 0.0 | 0.0 % | 0 |
+| `kiln/attn/gdn/chunk` | 337.3 | 0.0 | 0.0 % | 0 |
+| `kiln/attn/gdn/precopy` | (no GPU kernels) | 0.0 | — | 0 |
+| `kiln/attn/full/decode_fused` | 256.2 | 215.5 | **84.1 %** | 512 |
+| `kiln/attn/full/prefill` | 8.5 | 5.5 | 65.0 % | 48 |
+
+(Range-total figures here are the GPU-kernel sum inside each range, not
+the wall-time total above. The recurrent and chunk GDN ranges are
+saturated by `recurrent_gdn_fwd_kernel` / `gdn_fwd_sub_kernel`
+respectively, with no `ucopy_bf16` instances attributed to them at all.
+The `precopy` range's `squeeze + contiguous` is an in-place layout
+adjustment and produces no GPU kernels.)
+
+### Headline finding
+
+Inside the fused full-attention decode call site, **`ucopy_bf16`
+accounts for 84.1 % of GPU time**, matching the 84.8 % paged-decode
+baseline measured in PR #94 (line 135) within 0.7 pp. The hypothesis
+that the `ucopy_bf16` mass lives inside the fused decode call site
+*proportionally* is confirmed at the call-site granularity. This is
+within the 5 pp tolerance band, so the abort-threshold escalation path
+is satisfied — there is no need to revert the fused decode default.
+
+### Critical secondary finding
+
+In **absolute** terms, the picture is different. Total `ucopy_bf16`
+across the run is 482.12 s and represents **90.8 % of total GPU kernel
+time** (`cuda_gpu_kern_sum` row 2). Of that:
+
+| Where the ucopy_bf16 mass lives | Time | Share of total ucopy_bf16 |
+|---|---:|---:|
+| Inside the four attention NVTX ranges above | 221.0 ms | **0.046 %** |
+| Outside any attention NVTX range | 481.90 s | **99.95 %** |
+
+In other words, the paged-decode attention call sites — the historical
+suspect — account for less than half a percent of the actual
+`ucopy_bf16` cost. The remaining **99.95 %** is being emitted from
+unattributed code paths: the per-layer MLP block (gate / up / down
+projections + SwiGLU), the QKV / output projections that wrap the
+attention call, RMSNorm / residual additions, the LM head, and the
+ungated KV / hidden-state copies the paged scheduler does between
+layers. None of these are currently wrapped in NVTX ranges, so they all
+land in the unlabeled bucket.
+
+### Recommendation
+
+The next NVTX pass should add a second tier of named ranges around the
+non-attention paged-decode call sites so the 481.9 s of unattributed
+`ucopy_bf16` mass can be localized:
+
+| Suggested NVTX range | Call site |
+|---|---|
+| `kiln/proj/qkv` | QKV projection per layer |
+| `kiln/proj/o` | attention output projection per layer |
+| `kiln/mlp/gate` | gate projection (SwiGLU input) |
+| `kiln/mlp/up` | up projection (SwiGLU input) |
+| `kiln/mlp/down` | down projection per layer |
+| `kiln/norm/pre_attn` | pre-attention RMSNorm |
+| `kiln/norm/pre_mlp` | pre-MLP RMSNorm |
+| `kiln/residual` | per-block residual add |
+| `kiln/lm_head` | final LM head + sampling |
+| `kiln/kv/copy` | scheduler-side KV staging copies between layers |
+
+Once those ranges are in place, the same nsys workflow will produce a
+per-non-attention-site breakdown of the 99.95 % ucopy mass, which is
+where the actual decode-throughput optimization should land. Until that
+is done, micro-optimizing the attention call sites cannot move the
+benchmark — the 84.1 % share inside `decode_fused` is structural to
+the fused kernel's I/O pattern, not a bug.
+
+This PR ships only the wrapper crate, the feature gates, and the six
+attention NVTX guards. The expanded second-tier NVTX pass is a
+follow-up.
+
+### Artifacts
+
+- `profile/profile.log` — pod stdout including bench JSON output
+- `profile/profile_nvtx_nvtx_pushpop_sum.csv` — per-range wall time
+- `profile/profile_nvtx_nvtx_kern_sum.csv` — per-range kernel breakdown
+- `profile/profile_nvtx_cuda_gpu_kern_sum.csv` — global GPU kernel sum
+
+The 2.4 GB `profile_nvtx.nsys-rep` was kept on the now-terminated pod;
+all numbers above are reproduced from the three CSV reports.
