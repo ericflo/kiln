@@ -8,6 +8,7 @@ use crate::supervisor::SupervisorConfig;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub kiln_binary: Option<PathBuf>,
     pub model_path: Option<PathBuf>,
     pub host: String,
     pub port: u16,
@@ -25,6 +26,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            kiln_binary: None,
             model_path: None,
             host: "127.0.0.1".to_string(),
             port: 8000,
@@ -107,6 +109,10 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
     cfg.auto_restart = s.auto_restart;
     cfg.host = s.host.clone();
     cfg.port = s.port;
+    cfg.binary_path = s
+        .kiln_binary
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("kiln"));
 }
 
 #[cfg(test)]
@@ -160,6 +166,23 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--adapter-dir", "/adapters"]));
         assert!(!cfg.auto_restart);
+    }
+
+    #[test]
+    fn kiln_binary_defaults_to_path_lookup() {
+        let s = Settings::default();
+        let mut cfg = SupervisorConfig::default();
+        apply_to_supervisor_config(&s, &mut cfg);
+        assert_eq!(cfg.binary_path, PathBuf::from("kiln"));
+    }
+
+    #[test]
+    fn kiln_binary_override_propagates() {
+        let mut s = Settings::default();
+        s.kiln_binary = Some(PathBuf::from("/opt/kiln/bin/kiln"));
+        let mut cfg = SupervisorConfig::default();
+        apply_to_supervisor_config(&s, &mut cfg);
+        assert_eq!(cfg.binary_path, PathBuf::from("/opt/kiln/bin/kiln"));
     }
 
     #[test]
