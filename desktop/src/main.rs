@@ -63,6 +63,12 @@ async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, Strin
     Ok(state.read().await.clone())
 }
 
+/// Build the OpenAI-compatible base URL for a given host/port. Kept as a pure
+/// helper so it can be unit-tested without a Tauri runtime.
+pub fn openai_base_url(host: &str, port: u16) -> String {
+    format!("http://{}:{}/v1", host, port)
+}
+
 /// Return the kiln server's /ui URL based on the current settings, but only
 /// when the supervisor reports a state that should have the HTTP server up.
 /// Returns an empty string when the server is Stopped or in Error, so the
@@ -78,6 +84,26 @@ async fn get_kiln_url(
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             let s = state.read().await;
             Ok(format!("http://{}:{}/ui", s.host, s.port))
+        }
+    }
+}
+
+/// Return the OpenAI-compatible base URL (`http://<host>:<port>/v1`) based on
+/// current settings, but only when the supervisor reports a state that should
+/// have the HTTP server up. Returns an empty string when the server is
+/// Stopped or in Error, so the UI can distinguish "server not running" from a
+/// real URL.
+#[tauri::command]
+async fn get_openai_base_url(
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<String, String> {
+    let server_state = sup.state().await;
+    match server_state {
+        ServerState::Stopped | ServerState::Error(_) => Ok(String::new()),
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            let s = state.read().await;
+            Ok(openai_base_url(&s.host, s.port))
         }
     }
 }
@@ -108,6 +134,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -145,8 +172,25 @@ fn main() {
             server_logs,
             get_settings,
             set_settings,
-            get_kiln_url
+            get_kiln_url,
+            get_openai_base_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_base_url;
+
+    #[test]
+    fn default_loopback() {
+        assert_eq!(openai_base_url("127.0.0.1", 8000), "http://127.0.0.1:8000/v1");
+    }
+
+    #[test]
+    fn alternate_host_and_port() {
+        assert_eq!(openai_base_url("0.0.0.0", 9001), "http://0.0.0.0:9001/v1");
+        assert_eq!(openai_base_url("localhost", 80), "http://localhost:80/v1");
+    }
 }

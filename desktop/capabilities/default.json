@@ -5,6 +5,7 @@
   "windows": ["*"],
   "permissions": [
     "core:default",
-    "dialog:default"
+    "dialog:default",
+    "clipboard-manager:allow-write-text"
   ]
 }

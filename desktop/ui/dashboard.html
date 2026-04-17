@@ -64,9 +64,31 @@
       button:hover { background: #3b7af5; }
       button:disabled { background: #2a2f3a; cursor: default; }
       .hidden { display: none !important; }
+      #toolbar {
+        position: absolute;
+        top: 8px;
+        right: 12px;
+        display: flex;
+        gap: 8px;
+        z-index: 10;
+      }
+      #toolbar button {
+        margin-top: 0;
+        background: #1b1e24;
+        color: #d8dbe2;
+        border: 1px solid #2a2f3a;
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+      #toolbar button:hover { background: #232831; }
+      #copy-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
+      #copy-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
     </style>
   </head>
   <body>
+    <div id="toolbar">
+      <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
+    </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
     <div id="status">
       <h1 id="status-title">Connecting to Kiln server…</h1>
@@ -129,6 +151,52 @@
       }
 
       retry.addEventListener("click", load);
+
+      const copyBtn = document.getElementById("copy-url");
+      const COPY_LABEL = "Copy OpenAI base URL";
+      let copyResetTimer = null;
+
+      function flashCopyBtn(label, cls) {
+        if (copyResetTimer) {
+          clearTimeout(copyResetTimer);
+          copyResetTimer = null;
+        }
+        copyBtn.textContent = label;
+        copyBtn.classList.remove("flash", "flash-warn");
+        if (cls) copyBtn.classList.add(cls);
+        copyResetTimer = setTimeout(() => {
+          copyBtn.textContent = COPY_LABEL;
+          copyBtn.classList.remove("flash", "flash-warn");
+          copyResetTimer = null;
+        }, 1500);
+      }
+
+      async function copyOpenAiBaseUrl() {
+        if (!invoke) {
+          flashCopyBtn("Tauri bridge unavailable", "flash-warn");
+          return;
+        }
+        try {
+          const url = await invoke("get_openai_base_url");
+          if (!url) {
+            flashCopyBtn("Server not running", "flash-warn");
+            return;
+          }
+          try {
+            await navigator.clipboard.writeText(url);
+            flashCopyBtn("Copied!", "flash");
+          } catch (err) {
+            flashCopyBtn("Copy failed", "flash-warn");
+            console.error("clipboard.writeText failed", err);
+          }
+        } catch (err) {
+          flashCopyBtn("Copy failed", "flash-warn");
+          console.error("get_openai_base_url failed", err);
+        }
+      }
+
+      copyBtn.addEventListener("click", copyOpenAiBaseUrl);
+
       window.addEventListener("DOMContentLoaded", load);
     </script>
   </body>
