@@ -175,6 +175,145 @@ extern "C" kiln_flash_status_t kiln_flash_attn_fwd(
     return 0;
 }
 
+extern "C" kiln_flash_status_t kiln_flash_attn_fwd_paged_decode(
+    const void *q,
+    const void *k_pool,
+    const void *v_pool,
+    const int  *block_table,
+    void *out,
+    void *softmax_lse_out,
+    int batch_size,
+    int num_heads,
+    int num_heads_k,
+    int head_dim,
+    int max_seqlen_k,
+    int max_blocks_per_seq,
+    int page_block_size,
+    float softmax_scale,
+    int is_causal,
+    void *stream)
+{
+    if (head_dim != 128 && head_dim != 256) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode: only head_dim=128,256 supported, got %d\n", head_dim);
+        return -1;
+    }
+    if (num_heads % num_heads_k != 0) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode: num_heads (%d) must be divisible by num_heads_k (%d)\n",
+                num_heads, num_heads_k);
+        return -2;
+    }
+    // The splitkv hdim128/hdim256 instantiations use kBlockN = 128. Within a
+    // single 128-token chunk, the kernel reads a contiguous run of physical
+    // tokens using a single block_table entry; therefore physical pages within
+    // each 128-token chunk must be contiguous in the pool. The kernel handles
+    // page_block_size <= kBlockN by computing per-chunk block_table indices,
+    // but kBlockN must be evenly divisible by page_block_size.
+    constexpr int kBlockN = 128;
+    if (page_block_size <= 0 || (kBlockN % page_block_size) != 0) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode: page_block_size (%d) must divide kBlockN (%d)\n",
+                page_block_size, kBlockN);
+        return -3;
+    }
+
+    FLASH_NAMESPACE::Flash_fwd_params params;
+    memset(&params, 0, sizeof(params));
+
+    params.is_bf16 = true;
+
+    // Pointers
+    params.q_ptr = const_cast<void *>(q);
+    params.k_ptr = const_cast<void *>(k_pool);
+    params.v_ptr = const_cast<void *>(v_pool);
+    params.o_ptr = out;
+    params.softmax_lse_ptr = softmax_lse_out;
+
+    // Q layout: [batch, 1, num_heads, head_dim]
+    params.q_row_stride   = num_heads * head_dim;
+    params.q_head_stride  = head_dim;
+    params.q_batch_stride = num_heads * head_dim;  // seqlen_q = 1
+
+    // K/V pool layout: each logical block is [page_block_size, num_heads_k, head_dim]
+    // The kernel computes the base of a block via:
+    //   row_offset_k = block_table[idx] * params.k_batch_stride + offset_in_block * params.k_row_stride + (kv_head) * params.k_head_stride
+    // So k_batch_stride is the stride between adjacent logical pages.
+    params.k_row_stride   = num_heads_k * head_dim;
+    params.v_row_stride   = num_heads_k * head_dim;
+    params.k_head_stride  = head_dim;
+    params.v_head_stride  = head_dim;
+    params.k_batch_stride = (int64_t)page_block_size * num_heads_k * head_dim;
+    params.v_batch_stride = (int64_t)page_block_size * num_heads_k * head_dim;
+
+    // Output: [batch, 1, num_heads, head_dim]
+    params.o_row_stride   = num_heads * head_dim;
+    params.o_head_stride  = head_dim;
+    params.o_batch_stride = num_heads * head_dim;
+
+    // Dimensions
+    params.b      = batch_size;
+    params.h      = num_heads;
+    params.h_k    = num_heads_k;
+    params.h_h_k_ratio = num_heads / num_heads_k;
+    params.seqlen_q = 1;
+    params.seqlen_k = max_seqlen_k;
+    params.d        = head_dim;
+    params.d_rounded = round_up(head_dim, 32);
+    params.seqlen_q_rounded = round_up(1, 128);
+    params.seqlen_k_rounded = round_up(max_seqlen_k, 128);
+
+    // Scale
+    params.scale_softmax = softmax_scale;
+    params.scale_softmax_log2 = softmax_scale * float(M_LOG2E);
+
+    // Dropout disabled
+    params.p_dropout = 1.0f;
+    params.p_dropout_in_uint8_t = 255;
+    params.rp_dropout = 1.0f;
+    params.scale_softmax_rp_dropout = params.scale_softmax;
+
+    // Causal mask
+    params.is_causal = is_causal != 0;
+    params.window_size_left = -1;
+    params.window_size_right = (is_causal != 0) ? 0 : -1;
+
+    // Paged KV
+    params.block_table = const_cast<int *>(block_table);
+    params.block_table_batch_stride = max_blocks_per_seq;
+    params.page_block_size = page_block_size;
+
+    // Unused
+    params.cu_seqlens_q = nullptr;
+    params.cu_seqlens_k = nullptr;
+    params.leftpad_k = nullptr;
+    params.seqused_k = nullptr;
+    params.p_ptr = nullptr;
+    params.softmax_lseaccum_ptr = nullptr;
+    params.oaccum_ptr = nullptr;
+    params.knew_ptr = nullptr;
+    params.vnew_ptr = nullptr;
+    params.rotary_cos_ptr = nullptr;
+    params.rotary_sin_ptr = nullptr;
+    params.cache_batch_idx = nullptr;
+    params.blockmask = nullptr;
+    params.alibi_slopes_ptr = nullptr;
+    params.rng_state = nullptr;
+
+    params.is_seqlens_k_cumulative = true;
+    params.is_rotary_interleaved = false;
+    params.num_splits = 1;  // no split-KV; avoids needing accum scratch
+    params.softcap = 0.0f;
+    params.unpadded_lse = false;
+    params.seqlenq_ngroups_swapped = false;
+
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    if (head_dim == 128) {
+        FLASH_NAMESPACE::run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 128, true>(params, cuda_stream);
+    } else {
+        FLASH_NAMESPACE::run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 256, true>(params, cuda_stream);
+    }
+
+    return 0;
+}
+
 extern "C" kiln_flash_status_t kiln_flash_attn_bwd(
     const void *dout,
     const void *q, const void *k, const void *v,

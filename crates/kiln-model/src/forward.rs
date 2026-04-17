@@ -1325,6 +1325,154 @@ pub fn gqa_attention(
     Ok(out)
 }
 
+/// Try the fused paged-decode flash-attention kernel.
+///
+/// Returns `Ok(Some(output))` on success and `Ok(None)` when the kernel
+/// preconditions cannot be satisfied (forcing the caller to fall back to the
+/// materializing slow path).
+///
+/// ### Preconditions checked here
+///   * `block_size` divides `kBlockN = 128`
+///   * Within each `kBlockN`-wide chunk of the block table, the underlying
+///     physical pages are contiguous in the pool. The FA2 splitkv paged kernel
+///     reads only one block-table entry per kBlockN chunk and assumes the next
+///     `kBlockN / block_size` pages are physically contiguous (see
+///     `flash_fwd_kernel.h` lines 587-596 and 770-779).
+///
+/// ### Output
+/// `[batch, 1, num_heads * head_dim]` after o_proj (matches the slow path).
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn try_flash_attn_paged_decode(
+    q: &Tensor,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    full_attn_layer_idx: usize,
+    total_seq_len: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    gate: Option<&Tensor>,
+    attn_weights: &GpuFullAttentionWeights,
+    lora_layer: Option<&LoraLayerWeights>,
+    lora_scale: f32,
+) -> Result<Option<Tensor>> {
+    const K_BLOCK_N: usize = 128;
+
+    let block_size = paged_cache.block_size();
+    if block_size == 0 || K_BLOCK_N % block_size != 0 {
+        return Ok(None);
+    }
+    let pages_per_chunk = K_BLOCK_N / block_size;
+
+    // q here is [batch, num_heads, 1, head_dim] after the transpose at the
+    // call site. Flash-attn wants [batch, 1, num_heads, head_dim].
+    let (batch, q_heads, q_len, q_hd) = q.dims4()?;
+    if q_len != 1 || q_heads != num_heads || q_hd != head_dim {
+        return Ok(None);
+    }
+    if batch != 1 {
+        // Multi-sequence dispatch needs a per-sequence block_table tensor.
+        // Defer to the slow path until the scheduler exercises it.
+        return Ok(None);
+    }
+
+    // Verify intra-chunk contiguity. The kernel reads block_table[c * 8] only
+    // (for block_size=16) and assumes pages [c*8 .. c*8+7] are physically
+    // contiguous in the pool. kiln's `BlockManager` allocates blocks
+    // sequentially from a free list, so a single freshly-allocated sequence
+    // satisfies this trivially. After eviction or interleaved allocation the
+    // condition may not hold, in which case we fall back.
+    let n_chunks = total_seq_len.div_ceil(K_BLOCK_N);
+    let blocks = &block_table.blocks;
+    let allocated = blocks.len();
+    if allocated < n_chunks * pages_per_chunk
+        && allocated < total_seq_len.div_ceil(block_size)
+    {
+        // Block table too short for the requested seqlen.
+        return Ok(None);
+    }
+    for c in 0..n_chunks {
+        let base_idx = c * pages_per_chunk;
+        if base_idx >= allocated {
+            break;
+        }
+        let base_phys = blocks[base_idx];
+        for i in 1..pages_per_chunk {
+            let idx = base_idx + i;
+            if idx >= allocated {
+                break;
+            }
+            if blocks[idx] != base_phys + i as u32 {
+                return Ok(None);
+            }
+        }
+    }
+
+    // Build a padded block_table tensor sized [1, n_chunks * pages_per_chunk].
+    // Only the entries at indices c * pages_per_chunk are read by the kernel,
+    // but we copy the full kiln block table verbatim and pad the tail by
+    // continuing the contiguous run from the last valid block (so any
+    // stray reads stay within the cache pool).
+    let max_blocks_per_seq = n_chunks * pages_per_chunk;
+    let mut padded: Vec<u32> = Vec::with_capacity(max_blocks_per_seq);
+    padded.extend_from_slice(blocks);
+    if padded.is_empty() {
+        return Ok(None);
+    }
+    while padded.len() < max_blocks_per_seq {
+        let next = padded.last().copied().unwrap_or(0).wrapping_add(1);
+        padded.push(next);
+    }
+
+    let device = q.device();
+    let bt_tensor = Tensor::new(padded.as_slice(), device)?
+        .reshape((1usize, max_blocks_per_seq))?;
+
+    // Reshape Q for the flash-attn API: [batch, num_heads, 1, head_dim]
+    // -> [batch, 1, num_heads, head_dim].
+    let q_fa = q.transpose(1, 2)?.contiguous()?;
+
+    let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    let attn_out = kiln_flash_attn::flash_attn_paged_decode(
+        &q_fa,
+        k_pool,
+        v_pool,
+        &bt_tensor,
+        total_seq_len,
+        block_size,
+        softmax_scale,
+        true,
+    )
+    .context("flash_attn_paged_decode kernel failed")?;
+
+    // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
+    // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
+    let _ = num_kv_heads; // unused — kept in signature for symmetry / future use
+    let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
+
+    let attn_output = if let Some(gate) = gate {
+        let sigmoid_gate = cuda_sigmoid(gate)?;
+        (attn_output * sigmoid_gate)?
+    } else {
+        attn_output
+    };
+
+    let out = linear_with_lora(
+        &attn_output,
+        &attn_weights.o_proj,
+        lora_layer.and_then(|l| l.o_proj.as_ref()),
+        lora_scale,
+    )?;
+    Ok(Some(out))
+}
+
 /// Grouped-query attention using a paged KV cache.
 ///
 /// Same computation as [`gqa_attention`] but reads/writes K/V through a
@@ -1394,8 +1542,43 @@ pub fn gqa_attention_paged(
         .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
         .context("paged KV cache write failed")?;
 
-    // Read full K/V from paged cache (all positions 0..start_pos+seq_len)
     let total_seq_len = start_pos + seq_len;
+
+    // Fast path: fused paged-decode flash-attention kernel.
+    // Eliminates the materializing `paged_cache.read()` (an `index_select` /
+    // u8→bf16 dequant) on the decode hot path. Limited to:
+    //   * CUDA + bf16 (the only kernel we compile)
+    //   * Decode steps (seq_len == 1)
+    //   * Non-FP8 caches (the kernel reads bf16 pool slots directly)
+    //   * Page sizes that divide kBlockN=128 (block_size=16 satisfies this)
+    //   * Single sequence with physically contiguous block allocation
+    //     (kiln's BlockManager allocates blocks in order from a free list, so
+    //     a freshly-allocated single sequence is always contiguous)
+    #[cfg(feature = "cuda")]
+    if seq_len == 1
+        && q.dtype() == candle_core::DType::BF16
+        && !paged_cache.is_fp8()
+        && (num_heads / num_kv_heads) > 1
+    {
+        if let Some(out) = try_flash_attn_paged_decode(
+            &q,
+            paged_cache,
+            block_table,
+            full_attn_layer_idx,
+            total_seq_len,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            gate.as_ref(),
+            attn_weights,
+            lora_layer,
+            lora_scale,
+        )? {
+            return Ok(out);
+        }
+    }
+
+    // Read full K/V from paged cache (all positions 0..start_pos+seq_len)
     let (k, v) = paged_cache
         .read(full_attn_layer_idx, block_table, total_seq_len)
         .context("paged KV cache read failed")?;
