@@ -1559,6 +1559,7 @@ pub fn gqa_attention_paged(
         && q.dtype() == candle_core::DType::BF16
         && !paged_cache.is_fp8()
         && (num_heads / num_kv_heads) > 1
+        && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
     {
         if let Some(out) = try_flash_attn_paged_decode(
             &q,
