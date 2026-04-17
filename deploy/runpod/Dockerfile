@@ -108,11 +108,7 @@ RUN mkdir -p /var/run/sshd /root/.ssh \
     && sed -i 's/#\?AcceptEnv.*/AcceptEnv LANG LC_* RUNPOD_*/' /etc/ssh/sshd_config \
     && sed -i 's/#\?ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config \
     && sed -i 's/#\?ClientAliveCountMax.*/ClientAliveCountMax 30/' /etc/ssh/sshd_config \
-    && echo 'PATH="/usr/local/cuda/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' > /etc/environment \
-    && echo 'CUDA_HOME="/usr/local/cuda"' >> /etc/environment \
-    && echo 'RUSTUP_HOME="/usr/local/rustup"' >> /etc/environment \
-    && echo 'CARGO_HOME="/usr/local/cargo"' >> /etc/environment \
-    && echo 'HF_HUB_ENABLE_HF_TRANSFER=1' >> /etc/environment \
+    && printf 'PATH=/usr/local/cuda/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nCUDA_HOME=/usr/local/cuda\nRUSTUP_HOME=/usr/local/rustup\nCARGO_HOME=/usr/local/cargo\nHF_HUB_ENABLE_HF_TRANSFER=1\n' > /etc/environment \
     && printf 'export PATH="/usr/local/cuda/bin:/usr/local/cargo/bin:$PATH"\nexport CUDA_HOME="/usr/local/cuda"\nexport RUSTUP_HOME="/usr/local/rustup"\nexport CARGO_HOME="/usr/local/cargo"\nexport HF_HUB_ENABLE_HF_TRANSFER=1\n' > /etc/profile.d/kiln-env.sh \
     && chmod 644 /etc/profile.d/kiln-env.sh
 
@@ -133,10 +129,12 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 # --- Build-time smoke test: fail the image build if a tool regressed ---
 # Two passes:
 #   1. In-container PATH (docker run env) — catches missing binaries.
-#   2. Reset PATH to /etc/environment only (simulates non-interactive SSH)
-#      and re-check. Catches the specific class of bug where a tool is baked
-#      but only reachable from a login shell, which breaks `ssh pod "cargo ..."`.
-# Also exercises `cargo --version` so we catch a missing rustup default early.
+#   2. Simulate a non-interactive SSH session: start from ONLY the vars in
+#      /etc/environment (which PAM loads at login), then re-check every tool
+#      and exercise `cargo --version`. Catches the specific class of bug
+#      where a tool is baked but only reachable from a login shell — e.g.
+#      missing PATH, missing RUSTUP_HOME/CARGO_HOME (rustup default won't
+#      resolve), etc.
 RUN set -e; \
     TOOLS="nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3"; \
     for bin in $TOOLS; do \
@@ -144,14 +142,22 @@ RUN set -e; \
             echo "FAIL (interactive env): '$bin' not on PATH" >&2; exit 1; \
         fi; \
     done; \
-    SSH_PATH="$(grep '^PATH=' /etc/environment | cut -d= -f2- | tr -d '\"')"; \
+    # Load /etc/environment into a shell-export string so `env -i <exports>`
+    # reproduces what PAM gives a real SSH session.
+    # Reproduce what PAM gives a non-interactive SSH session: parse
+    # /etc/environment into "KEY=VAL KEY=VAL ..." form (stripping any quotes
+    # that crept in) and feed it to `env -i`.
+    SSH_ENV="$(grep -v '^#' /etc/environment | grep '=' | sed 's/\"//g' | tr '\n' ' ')"; \
+    test -n "$SSH_ENV" || (echo "FAIL: /etc/environment is empty" >&2; exit 1); \
     for bin in $TOOLS; do \
-        if ! env -i PATH="$SSH_PATH" sh -c "command -v $bin" >/dev/null 2>&1; then \
-            echo "FAIL (SSH-style env): '$bin' not reachable via /etc/environment PATH" >&2; exit 1; \
+        if ! env -i $SSH_ENV sh -c "command -v $bin" >/dev/null 2>&1; then \
+            echo "FAIL (SSH-style env): '$bin' not reachable via /etc/environment" >&2; exit 1; \
         fi; \
     done; \
-    env -i PATH="$SSH_PATH" sh -c "cargo --version" >/dev/null 2>&1 \
-        || (echo "FAIL: 'cargo --version' errored in clean env (rustup default not set?)" >&2; exit 1); \
+    env -i $SSH_ENV sh -c "cargo --version" >/dev/null 2>&1 \
+        || (echo "FAIL: 'cargo --version' errored in clean env (missing rustup default or RUSTUP_HOME?)" >&2; env -i $SSH_ENV sh -c "cargo --version"; exit 1); \
+    env -i $SSH_ENV sh -c "nvcc --version" >/dev/null 2>&1 \
+        || (echo "FAIL: 'nvcc --version' errored in clean env" >&2; exit 1); \
     python3 -c "import torch; assert torch.version.cuda.startswith('12.'), torch.version.cuda"; \
     echo "kiln-runpod smoke test: all baked tools present (interactive + SSH-style envs)"
 
