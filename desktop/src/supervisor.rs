@@ -158,6 +158,25 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Stop the server if it's running, then start it again.
+    ///
+    /// Used by the tray's "Restart Server" menu item after the user changes
+    /// settings that only take effect on the next start (port, host, model
+    /// path, flags). Safe to call from any state: if the server is already
+    /// stopped, this is equivalent to `start`.
+    pub async fn restart(&self) -> Result<(), String> {
+        let state = self.state().await;
+        if matches!(
+            state,
+            ServerState::Starting | ServerState::Running | ServerState::TrainingActive
+        ) {
+            if let Err(e) = self.stop().await {
+                eprintln!("[supervisor] restart: stop failed, attempting start anyway: {}", e);
+            }
+        }
+        self.start().await
+    }
+
     pub async fn state(&self) -> ServerState {
         self.state.lock().await.clone()
     }
