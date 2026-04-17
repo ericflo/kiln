@@ -48,6 +48,27 @@
         accent-color: #2a6df4;
         margin: 0;
       }
+      header input[type="search"] {
+        background: #0f1115;
+        color: #e6e6e6;
+        border: 1px solid #232733;
+        border-radius: 6px;
+        padding: 4px 8px;
+        width: 180px;
+        font-size: 12px;
+        outline: none;
+      }
+      header input[type="search"]:focus {
+        border-color: #2a6df4;
+      }
+      #filter-count {
+        font-size: 12px;
+        color: #a8aeb8;
+        font-variant-numeric: tabular-nums;
+      }
+      #filter-count.hidden {
+        display: none;
+      }
       button {
         background: #2a6df4;
         color: #fff;
@@ -84,6 +105,8 @@
     <header>
       <h1>Kiln server logs</h1>
       <label><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
+      <input type="search" id="filter" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+      <span id="filter-count" class="hidden"></span>
       <button id="copy" type="button" title="Copy all log lines to clipboard">Copy</button>
       <button id="clear" type="button">Clear view</button>
     </header>
@@ -96,6 +119,11 @@
       const autoscrollEl = document.getElementById("autoscroll");
       const clearEl = document.getElementById("clear");
       const copyEl = document.getElementById("copy");
+      const filterEl = document.getElementById("filter");
+      const filterCountEl = document.getElementById("filter-count");
+
+      let currentFilter = "";
+      let lastLines = [];
 
       copyEl.addEventListener("click", async () => {
         if (!invoke) return;
@@ -123,11 +151,29 @@
       let baseline = 0;
 
       function render(lines) {
-        const visible = lines.slice(baseline);
+        lastLines = lines;
+        const afterBaseline = lines.slice(baseline);
+        const filterActive = currentFilter.length > 0;
+        const visible = filterActive
+          ? afterBaseline.filter((line) => line.toLowerCase().includes(currentFilter))
+          : afterBaseline;
+
+        if (filterActive) {
+          filterCountEl.textContent = `${visible.length}/${afterBaseline.length}`;
+          filterCountEl.classList.remove("hidden");
+        } else {
+          filterCountEl.textContent = "";
+          filterCountEl.classList.add("hidden");
+        }
+
         if (visible.length === 0) {
-          logEl.textContent = lines.length === 0
-            ? "(no log lines yet)"
-            : "(view cleared — new lines will appear here)";
+          if (lines.length === 0) {
+            logEl.textContent = "(no log lines yet)";
+          } else if (filterActive) {
+            logEl.textContent = "(no lines match filter)";
+          } else {
+            logEl.textContent = "(view cleared — new lines will appear here)";
+          }
           logEl.classList.add("empty");
           return;
         }
@@ -137,6 +183,11 @@
           logEl.scrollTop = logEl.scrollHeight;
         }
       }
+
+      filterEl.addEventListener("input", () => {
+        currentFilter = filterEl.value.trim().toLowerCase();
+        render(lastLines);
+      });
 
       async function refresh() {
         if (!invoke) {
