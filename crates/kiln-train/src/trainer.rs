@@ -1422,7 +1422,6 @@ mod tests {
         let vocab = config.vocab_size;
 
         let embed_tokens = Tensor::randn(0.0f32, 0.02, (vocab, h), device)?;
-        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
         let final_norm = Tensor::zeros(h, DType::F32, device)?; // (1+w)*x, so zeros = identity
 
         let mut layers = Vec::new();
@@ -1433,16 +1432,10 @@ mod tests {
             let gate_proj = Tensor::randn(0.0f32, 0.02, (inter, h), device)?;
             let up_proj = Tensor::randn(0.0f32, 0.02, (inter, h), device)?;
             let down_proj = Tensor::randn(0.0f32, 0.02, (h, inter), device)?;
-            let gate_proj_t = gate_proj.t()?.contiguous()?;
-            let up_proj_t = up_proj.t()?.contiguous()?;
-            let down_proj_t = down_proj.t()?.contiguous()?;
             let mlp = GpuFfnWeights {
                 gate_proj,
                 up_proj,
                 down_proj,
-                gate_proj_t,
-                up_proj_t,
-                down_proj_t,
             };
 
             let attention = if config.is_full_attention_layer(layer_idx) {
@@ -1453,10 +1446,6 @@ mod tests {
                 let k_proj = Tensor::randn(0.0f32, 0.02, (nkv * hd, h), device)?;
                 let v_proj = Tensor::randn(0.0f32, 0.02, (nkv * hd, h), device)?;
                 let o_proj = Tensor::randn(0.0f32, 0.02, (h, nh * hd), device)?;
-                let q_proj_t = q_proj.t()?.contiguous()?;
-                let k_proj_t = k_proj.t()?.contiguous()?;
-                let v_proj_t = v_proj.t()?.contiguous()?;
-                let o_proj_t = o_proj.t()?.contiguous()?;
                 GpuAttentionWeights::Full(GpuFullAttentionWeights {
                     q_proj,
                     k_proj,
@@ -1464,10 +1453,6 @@ mod tests {
                     o_proj,
                     q_norm: Tensor::ones((hd,), DType::F32, device)?,
                     k_norm: Tensor::ones((hd,), DType::F32, device)?,
-                    q_proj_t,
-                    k_proj_t,
-                    v_proj_t,
-                    o_proj_t,
                 })
             } else {
                 let qkv_dim = config.linear_qkv_dim();
@@ -1501,7 +1486,6 @@ mod tests {
 
         Ok(GpuWeights {
             embed_tokens,
-            embed_tokens_t,
             layers,
             final_norm,
             rotary_inv_freq,

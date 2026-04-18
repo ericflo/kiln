@@ -54,24 +54,16 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
     let head_dim = config.head_dim;
 
     let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
-    let embed_t = embed.t().unwrap().contiguous().unwrap();
     let final_norm = Tensor::zeros((h,), DType::F32, device).unwrap();
 
     let q_proj = Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
     let k_proj = Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
     let v_proj = Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
     let o_proj = Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
-    let q_proj_t = q_proj.t().unwrap().contiguous().unwrap();
-    let k_proj_t = k_proj.t().unwrap().contiguous().unwrap();
-    let v_proj_t = v_proj.t().unwrap().contiguous().unwrap();
-    let o_proj_t = o_proj.t().unwrap().contiguous().unwrap();
 
     let gate_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
     let up_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
     let down_proj = Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
-    let gate_proj_t = gate_proj.t().unwrap().contiguous().unwrap();
-    let up_proj_t = up_proj.t().unwrap().contiguous().unwrap();
-    let down_proj_t = down_proj.t().unwrap().contiguous().unwrap();
 
     let layer = GpuLayerWeights {
         input_layernorm: Tensor::zeros((h,), DType::F32, device).unwrap(),
@@ -83,18 +75,11 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
             o_proj,
             q_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
             k_norm: Tensor::zeros((head_dim,), DType::F32, device).unwrap(),
-            q_proj_t,
-            k_proj_t,
-            v_proj_t,
-            o_proj_t,
         }),
         mlp: GpuFfnWeights {
             gate_proj,
             up_proj,
             down_proj,
-            gate_proj_t,
-            up_proj_t,
-            down_proj_t,
         },
     };
 
@@ -107,7 +92,6 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
 
     GpuWeights {
         embed_tokens: embed,
-        embed_tokens_t: embed_t,
         layers: vec![layer],
         final_norm,
         rotary_inv_freq,

@@ -248,20 +248,35 @@ pub fn linear_with_lora(
     }
 }
 
-/// Apply a LoRA-augmented linear projection using a pre-transposed base weight.
+/// Apply a LoRA-augmented linear projection against the ORIGINAL (non-transposed) weight.
 ///
-/// Takes `base_weight_t` = `base_weight.t().contiguous()` (shape `[in, out]`) and
-/// computes `x @ base_weight_t` directly, avoiding the per-call transpose copy
-/// (`ucopy_bf16`) that would otherwise be materialized on every step.
+/// Flattens `x` to rank 2 (`[lead, in]`) and multiplies against `base_weight.t()?`
+/// (a strided `[in, out]` view of the contiguous `[out, in]` weight). This lets
+/// candle's cuBLAS gemm path pass `CUBLAS_OP_T` directly to the kernel, skipping
+/// the materialized `ucopy_bf16` copy that `broadcast_matmul` would force via
+/// `.contiguous()` on the rhs.
 ///
-/// The LoRA delta path is unchanged.
-pub fn linear_with_lora_t(
+/// `base_weight`: `[out, in]`, contiguous on device.
+/// Returns a tensor with the same shape as `x` except the last dim is `out`.
+pub fn linear_with_lora_flat(
     x: &Tensor,
-    base_weight_t: &Tensor,
+    base_weight: &Tensor,
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
 ) -> Result<Tensor> {
-    let base_output = x.broadcast_matmul(base_weight_t)?;
+    let dims = x.dims().to_vec();
+    let last = *dims.last().expect("linear_with_lora_flat: x must be at least 1-D");
+    let lead: usize = dims[..dims.len() - 1].iter().product();
+
+    let x_contig = if x.is_contiguous() { x.clone() } else { x.contiguous()? };
+    let flat = x_contig.reshape((lead, last))?;
+    let out_2d = flat.matmul(&base_weight.t()?)?;
+
+    let out_features = base_weight.dim(0)?;
+    let mut out_shape = dims.clone();
+    *out_shape.last_mut().unwrap() = out_features;
+    let base_output = out_2d.reshape(out_shape)?;
+
     if let Some(proj) = lora {
         let delta = compute_lora_delta(x, proj, scale)?;
         Ok((base_output + delta)?)
