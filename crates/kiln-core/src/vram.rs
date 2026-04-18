@@ -279,9 +279,11 @@ mod tests {
         }
         let info = detect_vram();
         assert_eq!(info.source, VramSource::AppleSilicon);
-        assert!(info.total_bytes > 0);
-        // Any Apple Silicon Mac has >= 8 GB physical; after reserve this
-        // should still clear 1 GB.
-        assert!(info.total_bytes > 1024 * 1024 * 1024);
+        // Source is enough — `total_bytes > 0` doesn't survive on tiny CI
+        // runners (GitHub macos-14 ships with ~7 GB, leaving ≤ 1 GB after
+        // the 6 GB OS reserve, and `saturating_sub` can hit 0 on the smallest
+        // runner SKUs). Production correctness is covered by the source
+        // identification; the byte budget is exercised by the recommendation
+        // tests above with synthetic VRAM values.
     }
 }
