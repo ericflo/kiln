@@ -229,7 +229,7 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 The installer bundles the desktop wrapper only. You still need to install the `kiln` server binary and download model weights separately — see [QUICKSTART.md](QUICKSTART.md). Point the app at the `kiln` binary and model path from Settings on first launch.
 
-**Dashboard** — embeds the kiln `/ui` web dashboard in a native window.
+**Dashboard** — toolbar shows server state, model path, VRAM budget, active LoRA adapter, training status, and the OpenAI base URL with a one-click copy. The kiln server's `/ui` is embedded below.
 
 ![Dashboard](docs/desktop/dashboard.png)
 
