@@ -177,6 +177,39 @@
         font-family: inherit;
         user-select: none;
       }
+      #vram-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        background: #1b1e24;
+        color: #a8aeb8;
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      #vram-pill .vram-label {
+        color: #6c7280;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+      }
+      #vram-value {
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: transparent;
+        padding: 0;
+        font-size: 12px;
+        color: inherit;
+        white-space: nowrap;
+        user-select: text;
+      }
+      #vram-value.empty {
+        color: #6c7280;
+        font-family: inherit;
+        user-select: none;
+      }
     </style>
   </head>
   <body>
@@ -193,6 +226,10 @@
         <code id="model-path" class="empty">—</code>
       </span>
       <code id="base-url" class="empty" title="OpenAI base URL — server not running">—</code>
+      <span id="vram-pill" title="Model / Total VRAM — server not running">
+        <span class="vram-label">VRAM:</span>
+        <code id="vram-value" class="empty">—</code>
+      </span>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
     </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
@@ -519,6 +556,59 @@
         }
       }
 
+      const vramPill = document.getElementById("vram-pill");
+      const vramValueEl = document.getElementById("vram-value");
+      const VRAM_EMPTY_LABEL = "—";
+      const VRAM_EMPTY_TITLE = "Model / Total VRAM — server not running";
+      let cachedVramText = null;
+
+      function setVramDisplay(text, tooltip) {
+        if (text) {
+          vramValueEl.textContent = text;
+          vramValueEl.classList.remove("empty");
+          vramPill.title = tooltip || `Model / Total VRAM: ${text}`;
+        } else {
+          vramValueEl.textContent = VRAM_EMPTY_LABEL;
+          vramValueEl.classList.add("empty");
+          vramPill.title = VRAM_EMPTY_TITLE;
+        }
+      }
+
+      async function refreshVramInfo(kind, baseUrl) {
+        if (kind !== "Running" || !baseUrl) {
+          if (cachedVramText !== null) {
+            cachedVramText = null;
+            setVramDisplay(null, null);
+          }
+          return;
+        }
+        const cfgUrl = baseUrl.replace(/\/v1$/, "") + "/v1/config";
+        try {
+          const resp = await fetch(cfgUrl, { cache: "no-store" });
+          if (!resp.ok) throw new Error(`status ${resp.status}`);
+          const cfg = await resp.json();
+          const budget = cfg && cfg.memory_budget;
+          const vramInfo = cfg && cfg.vram;
+          if (!budget || typeof budget.total_vram_gb !== "number" || typeof budget.model_gb !== "number") {
+            throw new Error("missing memory_budget fields");
+          }
+          const text = `${budget.model_gb.toFixed(1)} / ${budget.total_vram_gb.toFixed(1)} GB`;
+          const sourceLabel = vramInfo && vramInfo.source ? vramInfo.source : "unknown";
+          const tooltip = `Model / Total VRAM: ${text} (source: ${sourceLabel})`;
+          if (text !== cachedVramText) {
+            cachedVramText = text;
+            setVramDisplay(text, tooltip);
+          } else {
+            vramPill.title = tooltip;
+          }
+        } catch (err) {
+          if (cachedVramText !== null) {
+            cachedVramText = null;
+            setVramDisplay(null, null);
+          }
+        }
+      }
+
       function updateStopBtnVisibility(kind) {
         const shouldShow = STOP_ACTIVE_STATES.includes(kind);
         stopBtn.classList.toggle("hidden", !shouldShow);
@@ -533,6 +623,7 @@
         if (!invoke) {
           applyStatusBadge("Unknown", "Tauri bridge unavailable");
           await refreshBaseUrl("Unknown");
+          await refreshVramInfo("Unknown", null);
           updateStopBtnVisibility("Unknown");
           return;
         }
@@ -545,11 +636,13 @@
             : `Kiln server state: ${info.label}`;
           applyStatusBadge(kind, tooltip);
           await refreshBaseUrl(kind);
+          await refreshVramInfo(kind, cachedBaseUrl);
           updateStopBtnVisibility(kind);
           stateFailureLogged = false;
         } catch (err) {
           applyStatusBadge("Unknown", "Could not read server state");
           await refreshBaseUrl("Unknown");
+          await refreshVramInfo("Unknown", null);
           updateStopBtnVisibility("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
