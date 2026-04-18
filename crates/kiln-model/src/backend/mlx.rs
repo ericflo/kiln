@@ -75,6 +75,9 @@ impl BackendRuntime for MlxBackend {
         if !mlx_sdpa_dtype_supported(q.dtype()) {
             return Ok(None);
         }
+        if !mlx_sdpa_supports_head_dim(q.dim(candle_core::D::Minus1)?) {
+            return Ok(None);
+        }
         let out = sdpa_via_mlx(q, k, v, softmax_scale, causal, &self.device)?;
         Ok(Some(out))
     }
@@ -94,6 +97,9 @@ impl BackendRuntime for MlxBackend {
             return Ok(None);
         }
         let (batch, q_len, num_heads, head_dim) = q.dims4()?;
+        if !mlx_sdpa_supports_head_dim(head_dim) {
+            return Ok(None);
+        }
         if batch != 1 || q_len != 1 {
             return Ok(None);
         }
@@ -167,6 +173,15 @@ fn mlx_sdpa_dtype_supported(dtype: DType) -> bool {
     // MLX fast SDPA accepts f32/f16/bf16. Same whitelist as candle SDPA; we
     // decline on anything else (notably F64 and FP8-encoded U8).
     matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
+}
+
+/// MLX `fast::scaled_dot_product_attention` falls back to a slower non-fused
+/// path outside its fast-kernel envelope (no SIGSEGV — per mlx-rs's docstring,
+/// "handles other cases with regular MLX operations"). Mirror the candle-metal
+/// whitelist so both Apple Silicon backends decline the same shapes; non-fast
+/// paths route through the portable candle fallback which is usually a wash.
+fn mlx_sdpa_supports_head_dim(head_dim: usize) -> bool {
+    matches!(head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256 | 512)
 }
 
 /// candle → mlx via a host copy. Passes bf16/f16 through natively (both
@@ -376,6 +391,116 @@ mod tests {
         let (mlx_diff, candle_diff) = run_parity(true)?;
         assert!(mlx_diff < 1e-3, "MLX SDPA (causal) diverges from naive: {mlx_diff}");
         assert!(candle_diff < 1e-3, "candle SDPA (causal) diverges from naive: {candle_diff}");
+        Ok(())
+    }
+
+    /// End-to-end parity for `MlxBackend::flash_attn_paged_decode`: shuffled
+    /// block table, F32 inputs, real (non-degenerate) Q values. Validates the
+    /// candle-side gather (`index_select` → `narrow` → `unsqueeze`) hands off
+    /// the right K/V to the MLX SDPA path, and that the paged-decode result
+    /// matches a naive F32 reference computed directly on the materialized
+    /// K/V slots. Catches gather indexing bugs, layout/transpose mistakes,
+    /// and MLX SDPA correctness regressions in one shot.
+    #[test]
+    fn test_paged_decode_parity_vs_naive() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+
+        let num_heads = 4;
+        let num_kv_heads = 1;
+        let head_dim = 128;
+        let block_size = 16;
+        let num_blocks = 8;
+        let total_slots = num_blocks * block_size;
+        let max_blocks_per_seq = 4;
+        let total_seqlen_k = 50; // 4 blocks * 16 = 64 slots; only first 50 valid.
+
+        // Shuffled physical block table — exercises the gather, not just
+        // sequential blocks.
+        let block_ids: [u32; 4] = [3, 7, 0, 5];
+        let block_table = Tensor::new(block_ids.as_slice(), &device)?
+            .reshape((1usize, max_blocks_per_seq))?;
+
+        // Random pool + random Q so the softmax is non-degenerate (a uniform
+        // Q-K product would let any wrong gather pass by averaging).
+        let k_pool = Tensor::randn(0.0f32, 1.0, (total_slots, num_kv_heads, head_dim), &device)?;
+        let v_pool = Tensor::randn(0.0f32, 1.0, (total_slots, num_kv_heads, head_dim), &device)?;
+        let q = Tensor::randn(0.0f32, 1.0, (1, 1, num_heads, head_dim), &device)?;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        // causal=false to dodge a convention mismatch: MLX's Causal mask
+        // positions q at the END of k for q_len=1 (decode-style, attends to
+        // all of k), while a naive `j > i` mask with i=0 would attend to only
+        // k[0]. With q_len=1 there's nothing to mask either way, so this just
+        // sidesteps the ambiguity. Causal correctness is covered by the
+        // prefill parity tests.
+        let backend = MlxBackend::new(device.clone());
+        let mlx_out = backend
+            .flash_attn_paged_decode(
+                &q, &k_pool, &v_pool, &block_table, total_seqlen_k,
+                block_size, scale, false,
+            )?
+            .expect("MlxBackend should handle this shape");
+
+        // Reference: gather the same K/V the same way candle does, then run
+        // naive F32 attention on it. Stays in candle entirely so any
+        // disagreement is in the MLX path, not the reference.
+        let k_blocks = k_pool.reshape((num_blocks, block_size, num_kv_heads, head_dim))?;
+        let v_blocks = v_pool.reshape((num_blocks, block_size, num_kv_heads, head_dim))?;
+        let ids = block_table.flatten_all()?;
+        let k_live = k_blocks
+            .index_select(&ids, 0)?
+            .reshape((max_blocks_per_seq * block_size, num_kv_heads, head_dim))?
+            .narrow(0, 0, total_seqlen_k)?
+            .unsqueeze(0)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let v_live = v_blocks
+            .index_select(&ids, 0)?
+            .reshape((max_blocks_per_seq * block_size, num_kv_heads, head_dim))?
+            .narrow(0, 0, total_seqlen_k)?
+            .unsqueeze(0)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let q_ref = q.transpose(1, 2)?.contiguous()?;
+        // GQA: naive_attention expects K/V already broadcast to num_heads.
+        let gqa_ratio = num_heads / num_kv_heads;
+        let k_ref = k_live
+            .repeat((1usize, gqa_ratio, 1, 1))?
+            .contiguous()?;
+        let v_ref = v_live
+            .repeat((1usize, gqa_ratio, 1, 1))?
+            .contiguous()?;
+        let naive_out = naive_attention(&q_ref, &k_ref, &v_ref, scale, false)?
+            .transpose(1, 2)?
+            .contiguous()?;
+
+        assert_eq!(mlx_out.dims(), naive_out.dims());
+        let diff = (&mlx_out - &naive_out)?
+            .abs()?
+            .flatten_all()?
+            .max(D::Minus1)?
+            .to_scalar::<f32>()?;
+        eprintln!("paged decode parity: mlx_vs_naive={diff:.5}");
+        assert!(diff < 1e-3, "MLX paged decode diverges from naive: {diff}");
+        Ok(())
+    }
+
+    /// MLX backend declines (returns Ok(None)) on head_dims outside the
+    /// whitelist, so the caller cleanly falls back to the portable path.
+    #[test]
+    fn test_mlx_declines_unsupported_head_dim() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let head_dim = 4; // not on the whitelist
+        let q = Tensor::zeros((1usize, 1, 2, head_dim), DType::F32, &device)?;
+        let k = Tensor::zeros((1usize, 1, 2, head_dim), DType::F32, &device)?;
+        let v = Tensor::zeros((1usize, 1, 2, head_dim), DType::F32, &device)?;
+        let backend = MlxBackend::new(device);
+        let out = backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?;
+        assert!(out.is_none(), "should decline head_dim={head_dim}");
         Ok(())
     }
 }
