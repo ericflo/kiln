@@ -11,6 +11,7 @@ use settings::{apply_to_supervisor_config, Settings};
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::RwLock;
 
 /// Reconcile the OS autostart registration with the desired `launch_at_login`
@@ -105,6 +106,54 @@ async fn open_logs(app: AppHandle) -> Result<(), String> {
     tray::open_logs_window(&app).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct UpdateCheckResult {
+    available: bool,
+    version: Option<String>,
+    current_version: Option<String>,
+    notes: Option<String>,
+}
+
+/// Ask the configured updater endpoint whether a new release is available.
+/// The frontend uses the result to prompt the user to install via
+/// `install_update`.
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    match update {
+        Some(u) => Ok(UpdateCheckResult {
+            available: true,
+            version: Some(u.version.clone()),
+            current_version: Some(u.current_version.clone()),
+            notes: u.body.clone(),
+        }),
+        None => Ok(UpdateCheckResult {
+            available: false,
+            version: None,
+            current_version: None,
+            notes: None,
+        }),
+    }
+}
+
+/// Re-check, then download and install the available update, then restart the
+/// app. We re-check rather than caching an `Update` handle because Tauri
+/// commands are stateless and the small race window is acceptable.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let Some(update) = update else {
+        return Err("No update available".to_string());
+    };
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
+}
+
 /// Build the OpenAI-compatible base URL for a given host/port. Kept as a pure
 /// helper so it can be unit-tested without a Tauri runtime.
 pub fn openai_base_url(host: &str, port: u16) -> String {
@@ -148,6 +197,143 @@ async fn get_openai_base_url(
             Ok(openai_base_url(&s.host, s.port))
         }
     }
+}
+
+#[derive(serde::Serialize)]
+struct ActiveAdapterInfo {
+    active: Option<String>,
+    available_count: usize,
+}
+
+/// Report the currently active LoRA adapter (if any) plus the count of
+/// adapters available on disk by polling GET /v1/adapters on the kiln
+/// server. Returns an empty result on any HTTP/parse error so the UI can
+/// degrade gracefully rather than throwing.
+#[tauri::command]
+async fn get_active_adapter(
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<ActiveAdapterInfo, String> {
+    let server_state = sup.state().await;
+    let url = match server_state {
+        ServerState::Stopped | ServerState::Error(_) => {
+            return Ok(ActiveAdapterInfo {
+                active: None,
+                available_count: 0,
+            });
+        }
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            let s = state.read().await;
+            format!("http://{}:{}/v1/adapters", s.host, s.port)
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Response {
+        active: Option<String>,
+        available: Vec<serde_json::Value>,
+    }
+
+    let empty = ActiveAdapterInfo {
+        active: None,
+        available_count: 0,
+    };
+
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(empty),
+    };
+    match resp.json::<Response>().await {
+        Ok(r) => Ok(ActiveAdapterInfo {
+            active: r.active,
+            available_count: r.available.len(),
+        }),
+        Err(_) => Ok(empty),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ActiveTrainingJob {
+    job_id: String,
+    state: String,
+    progress: Option<f64>,
+    current_loss: Option<f64>,
+    adapter_name: Option<String>,
+}
+
+#[derive(serde::Serialize, Default)]
+struct TrainingStatusInfo {
+    active: Option<ActiveTrainingJob>,
+    total_jobs: usize,
+}
+
+/// Report the currently-running training job (if any) plus the total number
+/// of jobs known to the kiln server by polling GET /v1/train/status. Returns
+/// an empty result on any HTTP/parse error or when the server is
+/// Stopped/Error so the UI can degrade gracefully.
+#[tauri::command]
+async fn get_training_status(
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<TrainingStatusInfo, String> {
+    let server_state = sup.state().await;
+    let url = match server_state {
+        ServerState::Stopped | ServerState::Error(_) => {
+            return Ok(TrainingStatusInfo::default());
+        }
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            let s = state.read().await;
+            format!("http://{}:{}/v1/train/status", s.host, s.port)
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Job {
+        job_id: String,
+        state: String,
+        #[serde(default)]
+        progress: Option<f64>,
+        #[serde(default)]
+        current_loss: Option<f64>,
+        #[serde(default)]
+        adapter_name: Option<String>,
+    }
+
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(TrainingStatusInfo::default()),
+    };
+    let jobs: Vec<Job> = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return Ok(TrainingStatusInfo::default()),
+    };
+
+    let active = jobs
+        .iter()
+        .find(|j| j.state.eq_ignore_ascii_case("running"))
+        .or_else(|| jobs.first())
+        .map(|j| ActiveTrainingJob {
+            job_id: j.job_id.clone(),
+            state: j.state.clone(),
+            progress: j.progress,
+            current_loss: j.current_loss,
+            adapter_name: j.adapter_name.clone(),
+        });
+
+    Ok(TrainingStatusInfo {
+        active,
+        total_jobs: jobs.len(),
+    })
 }
 
 /// Persist the supplied settings to disk and rebuild the supervisor's
@@ -221,8 +407,12 @@ fn main() {
             set_settings,
             get_kiln_url,
             get_openai_base_url,
+            get_active_adapter,
+            get_training_status,
             open_settings,
-            open_logs
+            open_logs,
+            check_for_updates,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");

@@ -6,14 +6,16 @@ members = [
     "crates/kiln-gdn-kernel",
     "crates/kiln-model",
     "crates/kiln-nvtx",
+    "crates/kiln-rmsnorm-kernel",
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-train",
 ]
-# kiln-flash-attn and kiln-gdn-kernel unconditionally depend on candle-core/cuda,
-# which pulls cudarc into any `cargo build --workspace` and fails to link on
-# non-CUDA hosts (notably macOS). They're only compiled when a downstream crate
-# opts in via --features cuda, which activates them as optional dependencies.
+# kiln-flash-attn, kiln-gdn-kernel, and kiln-rmsnorm-kernel unconditionally
+# depend on candle-core/cuda, which pulls cudarc into any
+# `cargo build --workspace` and fails to link on non-CUDA hosts (notably
+# macOS). They're only compiled when a downstream crate opts in via
+# --features cuda, which activates them as optional dependencies.
 # Excluding them from default-members lets `cargo check`, `cargo build`, and
 # `cargo test` work on any host; Linux+CUDA builds still pull them via feature
 # activation on the real binary target.
@@ -78,6 +80,7 @@ candle-nn = "0.10"
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
+kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
 
 # Random number generation
 rand = "0.8"

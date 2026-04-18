@@ -1,0 +1,15 @@
+[package]
+name = "kiln-rmsnorm-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fused RMSNorm CUDA kernel (Liger-style) with C-ABI wrapper — collapses candle's ~11 launches into one"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"

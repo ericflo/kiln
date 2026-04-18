@@ -1753,6 +1753,7 @@ dependencies = [
  "kiln-flash-attn",
  "kiln-gdn-kernel",
  "kiln-nvtx",
+ "kiln-rmsnorm-kernel",
  "memmap2",
  "rand 0.8.6",
  "safetensors 0.5.3",
@@ -1766,6 +1767,15 @@ dependencies = [
 [[package]]
 name = "kiln-nvtx"
 version = "0.1.0"
+
+[[package]]
+name = "kiln-rmsnorm-kernel"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "cc",
+ "half",
+]
 
 [[package]]
 name = "kiln-scheduler"
