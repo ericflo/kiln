@@ -170,6 +170,138 @@ remains the governing preflight for any future FlashInfer proposal.
 - Estimated pod cost: **~$0.30** (well under the Phase 6 budget).
 
 
+## Not next target — fused_recurrent GDN decode vendor (preflight, 2026-04-18)
+
+Doc-only preflight-redirect. Third in the Phase 6 preflight-redundant
+series after PR #163 (FlashInfer paged GQA decode) and PR #164 (GDN
+gate-path fusion). **$0 pod spend.**
+
+### Scope the task asked for
+
+Vendor fla-org/flash-linear-attention's **`fused_recurrent_gated_delta_rule_fwd`**
+(Triton → raw CUDA C) into a new `kiln-gdn-recurrent-kernel` crate, wrap
+with a thin C-ABI + Rust FFI, and dispatch in kiln's GDN decode path.
+Scope: bf16 activations, F32 state accumulators, causal, forward only,
+per-token (`seq_len = 1`) decode, Qwen3.5-4B head dim. Expected speedup
+1.3–2.0× decode tok/s; abort floor 1.10×.
+
+### Why it is redundant
+
+**PR #92 "Vendor fla fused_recurrent_gated_delta_rule_fwd for GDN decode"**
+(merged 2026-04-17, commit `7aa62f1`) already shipped exactly this kernel
+with exactly this scope.
+
+| Component asked for                                      | Status in current HEAD (`c2579a1`) |
+| -------------------------------------------------------- | ---------------------------------- |
+| Fused per-token GDN recurrent CUDA kernel                | `crates/kiln-gdn-kernel/csrc/recurrent_gdn_fwd.cu` (added by PR #92) |
+| Thin C-ABI wrapper                                       | `crates/kiln-gdn-kernel/csrc/recurrent_gdn_fwd.h` — `kiln_gdn_recurrent_forward(...)` extern "C" entry point |
+| Rust FFI binding                                         | `crates/kiln-gdn-kernel/src/lib.rs` — `pub fn gdn_recurrent_forward(...)` at line 259, `kiln_gdn_recurrent_forward` FFI decl at line 80 |
+| Dispatch in decode path                                  | `crates/kiln-model/src/forward.rs:1077-1079` — `backend.gdn_recurrent_step(...)` inside `kiln/attn/gdn/recurrent` NVTX range (the `seq_len == 1` fast-path branch of `gdn_chunkwise_recurrence`) |
+| bf16 activations / F32 accumulators                      | Exactly this — see `recurrent_gdn_fwd.cu:49` (`__nv_bfloat16` inputs) and the F32 `s_local[MAX_DK]` state column |
+| Causal only, forward only                                | Yes — single-token forward, no backward path |
+| Qwen3.5-4B head dim                                      | `MAX_DK ∈ {128, 256}`; kiln configures `dk = dv = 128` |
+| Per-thread scope (one block per `(batch, head)`)         | Exactly the launch geometry in `recurrent_gdn_fwd.cu:169/181` |
+| `cargo build --release --features cuda` wired            | `crates/kiln-gdn-kernel/build.rs:44` compiles `recurrent_gdn_fwd.cu` via the `cc` crate |
+| Parity test vs candle fallback                           | `test_gdn_kernel_matches_fallback` (oracle = `kiln-model::forward::compute_w_chunk_fallback`) |
+
+The crate's top-level doc comment (`crates/kiln-gdn-kernel/src/lib.rs:33-35`)
+states plainly:
+
+> `gdn_recurrent_forward` — seq_len==1 decode fast path. Collapses the
+> single-token GDN recurrence (decay, delta, state-update, output
+> projection) into one block per (batch, head).
+
+That is the function the task asked me to vendor. It already exists.
+
+### Bounded-speedup math against the current profile
+
+Even ignoring the redundancy and imagining a hypothetical "better" vendor
+of the same slice, the post-#166 profile caps the ceiling:
+
+| Signal                                     | Share of decode |
+| ------------------------------------------ | --------------: |
+| `:kiln/attn/gdn/recurrent` NVTX region     |        **1.8 %** |
+| `recurrent_gdn_fwd_kernel<128>` CUDA kernel|        **2.4 %** |
+
+Upper bound on overall decode speedup from fully eliminating the
+`:kiln/attn/gdn/recurrent` region:
+
+    1 / (1 − 0.018) ≈ **1.018×**
+
+That is below the task's **1.10× abort floor** and an order of magnitude
+below the **1.3–2.0× expected range**. Even a theoretical "infinitely
+fast" recurrent kernel cannot meet the task's acceptance criteria given
+the current profile. This is the same bounded-ceiling argument applied in
+`flashinfer-decode-preflight-kiln-2026-04-18` (PR #163) and
+`kernel-vendor-precondition-check` (PR #131 precedent).
+
+### Root cause of the stale task
+
+The task body conflates two different kernels:
+
+1. **Per-token GDN recurrent step** (decay → delta → state update → output
+   projection). This is what `fused_recurrent_gated_delta_rule_fwd`
+   actually implements, and it is what PR #92 already vendored. It owns
+   1.8 % of decode today.
+2. **GDN gate-path preprocessing** (`:kiln/gdn/gates` + `:kiln/gdn/gated_norm`
+   + `:kiln/gdn/qk_norm`). These are the 50.4 % hotspot cited in this
+   file's "Recommended next optimization target" section
+   (lines 123–145). They happen **outside** the recurrent step — they
+   produce the inputs it consumes and post-process the output it produces.
+   The correct vendor target for the 50.4 % slice is `chunk_gla_fwd` (or
+   a narrower fused `gated_norm + qk_norm` kernel), not
+   `fused_recurrent_gated_delta_rule_fwd`.
+
+### Preflight performed
+
+- HEAD verified `c2579a1` on `ericflo/kiln` main.
+- `ls crates/` — found existing `kiln-gdn-kernel` with the target kernel
+  already compiled in.
+- `git log --all -- crates/kiln-gdn-kernel/csrc/recurrent_gdn_fwd.cu` —
+  first-add commit is `7aa62f1` (PR #92, merged 2026-04-17).
+- `gh pr view 92` — confirmed title "Vendor fla
+  fused_recurrent_gated_delta_rule_fwd for GDN decode" and that scope
+  matches the new task exactly.
+- Read `crates/kiln-gdn-kernel/src/lib.rs:25-93` to verify the FFI
+  surface and scope envelope.
+- Read `crates/kiln-model/src/forward.rs:1060-1085` to verify wiring as
+  the `seq_len == 1` fast-path branch of `gdn_chunkwise_recurrence`.
+- `gh pr list --state open` — no overlapping open PR at the time of
+  preflight.
+
+No RunPod pod launched. **Total cost: $0.**
+
+### Re-visit triggers
+
+Propose a new per-token GDN kernel only if **all three** hold on a fresh
+`nsys` profile of current `main`:
+
+1. `:kiln/attn/gdn/recurrent` NVTX region ≥ **8 %** of decode wall-clock
+   (it is 1.8 % today).
+2. `recurrent_gdn_fwd_kernel<*>` CUDA kernel ≥ **10 %** of decode kernel
+   time (it is 2.4 % today).
+3. A concrete code-level reason the PR #92 kernel is sub-optimal at the
+   current workload (e.g. register pressure at a larger head dim, shared
+   memory shortfall on sm_90, or an upstream fla change that materially
+   re-tunes the per-token step).
+
+Absent those, future per-token GDN proposals should be rejected at
+preflight.
+
+### Next actual target
+
+Per the unchanged "Recommended next optimization target" block at the top
+of this file (lines 123–145):
+
+- **Vendor `chunk_gla_fwd`** for the combined `:kiln/gdn/gates` +
+  `:kiln/gdn/gated_norm` + `:kiln/gdn/qk_norm` hotspot (**50.4 %** of
+  decode wall-clock, above the 40 % Phase 6 trigger).
+- Or, as a narrower scope, fuse just `gated_norm + qk_norm` (**32.4 %**).
+
+This is the only remaining single-target ≥ 3 % opportunity that has not
+already been vendored or ruled out by preflight.
+
+
 ## Phase 6 — `causal_conv1d_update` vendor decode bench (2026-04-18)
 
 Vendored NVIDIA Mamba's `causal_conv1d_update` into `kiln-conv1d-kernel`
