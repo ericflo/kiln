@@ -1112,6 +1112,9 @@ mod tests {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
             },
         };
 
