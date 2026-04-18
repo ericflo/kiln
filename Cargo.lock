@@ -1836,7 +1836,9 @@ dependencies = [
 name = "kiln-gdn-kernel"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "candle-core",
+ "candle-nn",
  "cc",
  "half",
 ]

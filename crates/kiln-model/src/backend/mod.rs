@@ -131,6 +131,27 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<Tensor>> {
         Ok(None)
     }
+
+    fn supports_gdn_gates(&self) -> bool {
+        false
+    }
+
+    /// Fused GDN gate computation.
+    ///
+    /// Collapses the Step-6 `sigmoid(b)` + `-exp(A_log) * softplus(a + dt_bias)`
+    /// chain into one CUDA launch. Inputs are bf16 tensors of shape
+    /// `[B, T, nv]` for `a`, `b` and `[nv]` for `a_log`, `dt_bias`.
+    /// Returns `(beta, g)`, both bf16 `[B, T, nv]`, or `Ok(None)` when
+    /// the backend declines (wrong dtype, envelope violation, disabled).
+    fn gdn_gates(
+        &self,
+        _a: &Tensor,
+        _b: &Tensor,
+        _a_log: &Tensor,
+        _dt_bias: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        Ok(None)
+    }
 }
 
 /// Pick the right backend for a given candle device.

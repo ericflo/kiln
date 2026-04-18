@@ -13,3 +13,7 @@ half = "2"
 
 [build-dependencies]
 cc = "1"
+
+[dev-dependencies]
+candle-nn = { workspace = true }
+anyhow = { workspace = true }
