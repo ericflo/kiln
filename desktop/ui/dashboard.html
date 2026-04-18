@@ -88,6 +88,8 @@
       #toolbar button:hover { background: #232831; }
       #toolbar button#stop-server:hover { background: #5a2424; border-color: #7a3232; color: #f2d6d6; }
       #toolbar button#stop-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
+      #toolbar button#restart-server:hover { background: #3a4a6a; border-color: #4a5a7a; color: #d6e0f2; }
+      #toolbar button#restart-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
       #toolbar .toolbar-divider {
         width: 1px;
         align-self: stretch;
@@ -95,6 +97,7 @@
         margin: 2px 4px;
       }
       #stop-server.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
+      #restart-server.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #copy-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
       #copy-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #check-updates-btn.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
@@ -321,6 +324,7 @@
       <span class="toolbar-divider" aria-hidden="true"></span>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
       <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
+      <button id="restart-server" class="hidden" title="Restart the kiln server">Restart Server</button>
       <button id="open-logs" title="Open the log viewer window">View Logs</button>
       <button id="open-settings" title="Open the settings window">Settings</button>
       <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
@@ -528,6 +532,44 @@
       }
 
       stopBtn.addEventListener("click", stopServer);
+
+      const restartBtn = document.getElementById("restart-server");
+      const RESTART_LABEL = "Restart Server";
+      const RESTART_ACTIVE_STATES = ["Running", "TrainingActive", "Error"];
+      let restartResetTimer = null;
+
+      function flashRestartBtn(label, cls, durationMs) {
+        if (restartResetTimer) {
+          clearTimeout(restartResetTimer);
+          restartResetTimer = null;
+        }
+        restartBtn.textContent = label;
+        restartBtn.classList.remove("flash-warn");
+        if (cls) restartBtn.classList.add(cls);
+        restartResetTimer = setTimeout(() => {
+          restartBtn.textContent = RESTART_LABEL;
+          restartBtn.classList.remove("flash-warn");
+          restartBtn.disabled = false;
+          restartResetTimer = null;
+        }, durationMs || 1500);
+      }
+
+      async function restartServer() {
+        if (!invoke) {
+          flashRestartBtn("Restart failed", "flash-warn");
+          return;
+        }
+        restartBtn.disabled = true;
+        restartBtn.textContent = "Restarting…";
+        try {
+          await invoke("restart_server");
+        } catch (err) {
+          console.warn("restart_server failed", err);
+          flashRestartBtn("Restart failed", "flash-warn");
+        }
+      }
+
+      restartBtn.addEventListener("click", restartServer);
 
       const statusBadge = document.getElementById("status-badge");
       const statusBadgeLabel = statusBadge.querySelector(".label");
@@ -855,6 +897,15 @@
         }
       }
 
+      function updateRestartBtnVisibility(kind) {
+        const shouldShow = RESTART_ACTIVE_STATES.includes(kind);
+        restartBtn.classList.toggle("hidden", !shouldShow);
+        if (!shouldShow && !restartResetTimer) {
+          restartBtn.disabled = false;
+          restartBtn.textContent = RESTART_LABEL;
+        }
+      }
+
       let stateFailureLogged = false;
       async function pollServerState() {
         if (!invoke) {
@@ -864,6 +915,7 @@
           await refreshAdapterInfo("Unknown");
           await refreshTrainingInfo("Unknown");
           updateStopBtnVisibility("Unknown");
+          updateRestartBtnVisibility("Unknown");
           return;
         }
         try {
@@ -908,6 +960,7 @@
           await refreshAdapterInfo(kind);
           await refreshTrainingInfo(kind);
           updateStopBtnVisibility(kind);
+          updateRestartBtnVisibility(kind);
           stateFailureLogged = false;
         } catch (err) {
           applyStatusBadge("Unknown", "Could not read server state");
@@ -916,6 +969,7 @@
           await refreshAdapterInfo("Unknown");
           await refreshTrainingInfo("Unknown");
           updateStopBtnVisibility("Unknown");
+          updateRestartBtnVisibility("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
             stateFailureLogged = true;
