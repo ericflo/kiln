@@ -60,6 +60,7 @@
         flex: 0 0 auto;
         display: flex;
         justify-content: flex-end;
+        gap: 8px;
         padding: 10px 14px;
         background: #161922;
         border-top: 1px solid #232733;
@@ -74,12 +75,24 @@
         cursor: pointer;
       }
       button:hover { background: #3b7af5; }
+      button.secondary {
+        background: #232733;
+        color: #e6e6e6;
+      }
+      button.secondary:hover { background: #2c313f; }
+      .platform {
+        color: #a8aeb8;
+        font-size: 12px;
+        margin: 0 0 18px 0;
+        font-variant-numeric: tabular-nums;
+      }
     </style>
   </head>
   <body>
     <div class="wrap">
       <h1>Kiln Desktop</h1>
       <p class="version">Version <span id="version">…</span></p>
+      <p class="platform">OS: <span id="platform">…</span></p>
       <p class="desc">
         System tray app for the kiln local LLM server. Spawns and supervises
         the kiln binary, exposes status and settings, and surfaces the
@@ -93,20 +106,38 @@
       <p class="meta">Built with Tauri.</p>
     </div>
     <footer>
+      <button id="copy-diag" class="secondary" type="button" title="Copy version + OS info to clipboard">Copy diagnostic info</button>
       <button id="close" type="button" title="Close (Esc)">Close</button>
     </footer>
     <script defer>
       const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
         || (window.__TAURI__ && window.__TAURI__.invoke);
 
+      const versionEl = document.getElementById("version");
+      const platformEl = document.getElementById("platform");
+      const diag = { version: "unknown", os: "unknown", arch: "unknown" };
+
+      function renderDiag() {
+        versionEl.textContent = diag.version;
+        platformEl.textContent = `${diag.os} (${diag.arch})`;
+      }
+
       if (invoke) {
-        invoke("get_app_version").then((v) => {
-          document.getElementById("version").textContent = v;
+        invoke("get_diagnostic_info").then((d) => {
+          if (d && typeof d === "object") {
+            if (d.version) diag.version = d.version;
+            if (d.os) diag.os = d.os;
+            if (d.arch) diag.arch = d.arch;
+          }
+          renderDiag();
         }).catch(() => {
-          document.getElementById("version").textContent = "unknown";
+          invoke("get_app_version").then((v) => {
+            if (v) diag.version = v;
+            renderDiag();
+          }).catch(renderDiag);
         });
       } else {
-        document.getElementById("version").textContent = "unknown";
+        renderDiag();
       }
 
       const repoLink = document.getElementById("repo-link");
@@ -115,6 +146,28 @@
         if (shell && typeof shell.open === "function") {
           e.preventDefault();
           shell.open(repoLink.href).catch(() => {});
+        }
+      });
+
+      const copyBtn = document.getElementById("copy-diag");
+      const COPY_LABEL = "Copy diagnostic info";
+      let copyResetTimer = null;
+      function flashCopy(label) {
+        if (copyResetTimer) clearTimeout(copyResetTimer);
+        copyBtn.textContent = label;
+        copyResetTimer = setTimeout(() => {
+          copyBtn.textContent = COPY_LABEL;
+          copyResetTimer = null;
+        }, 1200);
+      }
+      copyBtn.addEventListener("click", async () => {
+        const text = `Kiln Desktop v${diag.version}\nOS: ${diag.os} (${diag.arch})`;
+        try {
+          await navigator.clipboard.writeText(text);
+          flashCopy("Copied!");
+        } catch (err) {
+          flashCopy("Copy failed");
+          console.error("clipboard.writeText failed", err);
         }
       });
 
