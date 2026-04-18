@@ -199,6 +199,64 @@ async fn get_openai_base_url(
     }
 }
 
+#[derive(serde::Serialize)]
+struct ActiveAdapterInfo {
+    active: Option<String>,
+    available_count: usize,
+}
+
+/// Report the currently active LoRA adapter (if any) plus the count of
+/// adapters available on disk by polling GET /v1/adapters on the kiln
+/// server. Returns an empty result on any HTTP/parse error so the UI can
+/// degrade gracefully rather than throwing.
+#[tauri::command]
+async fn get_active_adapter(
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<ActiveAdapterInfo, String> {
+    let server_state = sup.state().await;
+    let url = match server_state {
+        ServerState::Stopped | ServerState::Error(_) => {
+            return Ok(ActiveAdapterInfo {
+                active: None,
+                available_count: 0,
+            });
+        }
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            let s = state.read().await;
+            format!("http://{}:{}/v1/adapters", s.host, s.port)
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Response {
+        active: Option<String>,
+        available: Vec<serde_json::Value>,
+    }
+
+    let empty = ActiveAdapterInfo {
+        active: None,
+        available_count: 0,
+    };
+
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(empty),
+    };
+    match resp.json::<Response>().await {
+        Ok(r) => Ok(ActiveAdapterInfo {
+            active: r.active,
+            available_count: r.available.len(),
+        }),
+        Err(_) => Ok(empty),
+    }
+}
+
 /// Persist the supplied settings to disk and rebuild the supervisor's
 /// `SupervisorConfig`. A currently-running server is NOT restarted; the new
 /// args take effect on the next `start_server` call.
@@ -270,6 +328,7 @@ fn main() {
             set_settings,
             get_kiln_url,
             get_openai_base_url,
+            get_active_adapter,
             open_settings,
             open_logs,
             check_for_updates,
