@@ -36,10 +36,6 @@ pub struct ModelRunner {
     /// CUDA graph runner for accelerated decode steps.
     /// Uses Mutex for interior mutability (graph state changes during &self generation).
     cuda_graph: Mutex<CudaGraphRunner>,
-    /// Backend runtime (CUDA kernels on CUDA devices, portable fallback on CPU/Metal).
-    /// Shared via Arc so clones of the trait-object handle (inside forward calls)
-    /// are cheap. The concrete type is chosen at construction time by
-    /// `backend::for_device`.
     backend: Arc<dyn BackendRuntime>,
 }
 

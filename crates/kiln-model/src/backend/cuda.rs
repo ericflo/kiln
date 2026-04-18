@@ -1,33 +1,29 @@
-//! CUDA backend implementation of [`BackendRuntime`].
+//! CUDA backend: FlashAttention-2 and Gated DeltaNet fused kernels.
 //!
-//! Wraps the two vendored CUDA kernel crates — `kiln-flash-attn` (FlashAttention-2
-//! forward / paged-decode / backward) and `kiln-gdn-kernel` (Gated DeltaNet
-//! forward-substitution + fused single-token recurrence) — with precondition
-//! checks that decide whether the fused kernel can run. `Ok(None)` falls back
-//! to the portable candle path in `forward.rs`.
-//!
-//! All preconditions mirror what `forward.rs` used to check inline inside
-//! `#[cfg(feature = "cuda")]` blocks; the logic was lifted here verbatim as
-//! part of the Phase 1 refactor.
+//! Wraps the vendored `kiln-flash-attn` and `kiln-gdn-kernel` crates.
+//! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 
 use super::BackendRuntime;
 
 #[derive(Debug)]
 pub struct CudaBackend {
     device: Device,
+    /// Cached at construction: reading env vars per decode step × 24 GDN layers
+    /// shows up in decode NVTX captures. Env vars don't change at runtime.
+    gdn_enabled: bool,
 }
 
 impl CudaBackend {
     pub fn new(device: Device) -> Self {
         debug_assert!(device.is_cuda(), "CudaBackend created on non-CUDA device");
-        Self { device }
-    }
-
-    fn gdn_disabled() -> bool {
-        std::env::var("KILN_DISABLE_GDN_KERNEL").is_ok()
+        let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
+        Self {
+            device,
+            gdn_enabled,
+        }
     }
 }
 
@@ -49,11 +45,11 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
-        !Self::gdn_disabled()
+        self.gdn_enabled
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
-        !Self::gdn_disabled()
+        self.gdn_enabled
     }
 
     fn flash_attn_prefill(
@@ -64,9 +60,6 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if q.dtype() != DType::BF16 || !q.device().is_cuda() {
-            return Ok(None);
-        }
         let out = kiln_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
             .context("flash_attn kernel failed")?;
         Ok(Some(out))
@@ -83,9 +76,6 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if q.dtype() != DType::BF16 || !q.device().is_cuda() {
-            return Ok(None);
-        }
         let out = kiln_flash_attn::flash_attn_paged_decode(
             q,
             k_pool,
@@ -106,20 +96,6 @@ impl BackendRuntime for CudaBackend {
         v_prime: &Tensor,
         beta: &Tensor,
     ) -> Result<Option<Tensor>> {
-        if Self::gdn_disabled()
-            || !a_strict.device().is_cuda()
-            || a_strict.dtype() != DType::BF16
-            || v_prime.dtype() != DType::BF16
-            || beta.dtype() != DType::BF16
-        {
-            return Ok(None);
-        }
-        // Kernel envelope: C <= 128. Enforced by caller via explicit check
-        // before invoking the trait; keep a defensive check here too.
-        let c = a_strict.dim(2)?;
-        if c > 128 {
-            return Ok(None);
-        }
         let out = kiln_gdn_kernel::gdn_forward_substitution(a_strict, v_prime, beta)?;
         Ok(Some(out))
     }
@@ -133,13 +109,6 @@ impl BackendRuntime for CudaBackend {
         g: &Tensor,
         state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
-        if Self::gdn_disabled()
-            || !q.device().is_cuda()
-            || q.dtype() != DType::BF16
-            || state.dtype() != DType::BF16
-        {
-            return Ok(None);
-        }
         let out = kiln_gdn_kernel::gdn_recurrent_forward(q, k, v, beta, g, state)?;
         Ok(Some(out))
     }

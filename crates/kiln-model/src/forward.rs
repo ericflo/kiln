@@ -98,9 +98,6 @@ fn flash_attention_forward(
         (k.clone(), v.clone())
     };
 
-    // Dispatch through the backend. A backend that doesn't implement
-    // flash-attn prefill (CpuBackend on macOS today) returns Ok(None);
-    // callers treat that as "fall back to the portable path".
     let Some(attn_output) = backend.flash_attn_prefill(q, &k, &v, softmax_scale, causal)? else {
         return Ok(None);
     };
