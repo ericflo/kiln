@@ -477,6 +477,20 @@ Evidence:
 
 Recommended scope for the next cycle:
 
+> **STATUS (2026-04-18): This recommendation is SUPERSEDED.** The
+> "collapse gates + gated_norm into one kernel" framing turned out to be
+> architecturally infeasible (the two NVTX regions are separated by Step
+> 7's chunkwise recurrence — see PR #158), and both halves have already
+> been attempted independently: PR #158 fused the `:kiln/gdn/gates`
+> Step-6 computation (merged, −1.5 pp share); PR #141 fused the
+> `:kiln/gdn/gated_norm` Step-8 computation (closed, null result
+> 1.003–1.005× at decode shape). See the "Post-PR #158 Decode Profile
+> (2026-04-18)" section above for the current live recommendation
+> (vendor `chunk_gla_fwd`) and the "Not next target — GDN gate-path
+> fusion (preflight, 2026-04-18)" section below for the full preflight
+> record explaining why a fresh gate-path fusion PR is not the right
+> next move.
+
 1. Vendor or author a fused **`gdn_gate`** kernel that folds the gate
    linear output, swish, gated elementwise multiply, RMSNorm, and
    residual-multiply into one kernel (bf16 in, bf16 out).
@@ -567,6 +581,141 @@ above, not FlashInfer.
   batch = 1 profile target) is where FlashInfer's tensor-core decode
   kernel is designed to win. Revisit when / if kiln targets larger
   inference batches.
+
+## Not next target — GDN gate-path fusion (preflight, 2026-04-18)
+
+A subsequent planner queued *"Phase 6: Fused GDN gate kernel
+(gate_lin + swish + mul + rmsnorm + residual, bf16, decode-shape)"*
+citing the **Recommended scope for the next cycle** section above
+(lines starting "Vendor or author a fused `gdn_gate` kernel …"). That
+section is stale at current `main` (HEAD `838f88f`): the combined
+gates + gated_norm fusion it proposed was both **architecturally
+impossible as one kernel** and **already attempted as two independent
+kernels**, one merged and one closed as a null result. This section
+records the preflight so future planning loops do not re-extract the
+same redundant task.
+
+No pod was spun up past the preflight `git clone`. Pod cost: **\$0**.
+
+### Scope the task asked for
+
+One fused CUDA kernel, bf16 decode shape only, collapsing:
+
+1. `swish(gate_lin_output)`
+2. elementwise multiply with the `gated_norm` input
+3. `RMSNorm` over the gated output (epsilon, weight)
+4. residual elementwise multiply
+
+Target NVTX regions per the stale recommendation: `:kiln/gdn/gates`
+(18.2 %) + `:kiln/gdn/gated_norm` (18.0 %) = 36.2 % of decode time at
+the PR #156 profile (HEAD `5aa22e1`).
+
+### Why it's redundant
+
+The two NVTX regions map to two disjoint steps of
+`gated_deltanet_forward` in `crates/kiln-model/src/forward.rs`:
+
+| NVTX region            | Step | Computation                                            | Status                              |
+| ---------------------- | ---- | ------------------------------------------------------ | ----------------------------------- |
+| `:kiln/gdn/gates`      | 6    | `beta = sigmoid(b); g = -exp(A_log) * softplus(a + dt_bias)` | **Fused by PR #158** (merged, bf16 in/out, `kiln-gdn-kernel` crate, `gdn_gates.cu`) |
+| `:kiln/gdn/gated_norm` | 8    | `bf16(w * rms_normalize(attn_out) * silu(z))`           | **Attempted by PR #141** (closed, null 1.003–1.005× at `rows=32, hidden=128`) |
+
+Between the two steps is Step 7 — the chunkwise recurrence that
+produces `attn_out` from `(q, k, v, beta, g)`. PR #158's description
+states the architectural finding explicitly:
+
+> "the two regions are separated by the chunkwise recurrence
+> (`Step 7 gdn_chunkwise_recurrence`) and cannot be combined into a
+> single kernel. They must be tackled independently."
+
+Step 7 internally launches `gdn_chunk_prep` (PR #162), the per-chunk
+forward-substitution kernel, matmuls, and the recurrent update — not
+something a gate-path elementwise fusion can absorb. "One kernel
+covering gate_lin + swish + mul + rmsnorm + residual" is therefore
+unreachable on this architecture.
+
+The two independently-fusable halves have both been addressed:
+
+- Step 6 (`:kiln/gdn/gates`): PR #158 fused the 8-op candle chain into
+  a single CUDA launch. Post-#158 Arm B profile (HEAD `7132f29`) shows
+  `:kiln/gdn/gates` moved from 18.2 % → 16.7 % (−1.5 pp), and the
+  proportional share of the downstream `gated_norm` / `qk_norm` also
+  shrank (−2.2 pp / −1.4 pp) because PR #158 dispatches fewer upstream
+  elementwise tensors.
+- Step 8 (`:kiln/gdn/gated_norm`): PR #141 vendored an FLA-style
+  `fused_norm_gate` kernel covering `rms_inv * silu(z) * w` in one
+  launch. Parity passed (max abs diff < 1e-2, bf16). Decode ITL
+  delta was **1.003–1.005× under CUDA graphs**, below run-to-run
+  noise and below the acceptance floor, so the PR was closed rather
+  than merged. The "residual elementwise multiply" the current task
+  description lists as a fourth op is not present in the Step 8 code
+  path (`gated_rms_norm`'s output feeds the Step 9 `o_proj` GEMM
+  directly — there is no per-element residual multiply between them).
+
+### What the current recommendation actually says
+
+The "Post-PR #158 Decode Profile (2026-04-18)" section above —
+captured on HEAD `7132f29` right after PR #158 landed — replaces the
+stale "Recommended scope" with a different next move:
+
+> "**Vendor `chunk_gla_fwd` from flash-linear-attention (roadmap step
+> 2).** The combined decode share of `gdn/gates` + `gdn/gated_norm` +
+> `gdn/qk_norm` + `gdn/conv` is still **57.9 %** of wall-clock. A
+> narrow gates-only fusion (like #158) only chips at the first of
+> those four regions. Vendoring the upstream `chunk_gla_fwd` kernel
+> that fuses the full GDN decode chain (conv + in_proj + gates +
+> gated_norm + qk_norm + recurrent) is the highest-leverage move
+> available — it would collapse ~58 % of decode wall-clock into a
+> single kernel dispatch and directly eliminate the elementwise zoo
+> that #158 could not reach."
+
+The project description's **Current optimization queue** lists the
+same item as step 2 ("Vendor fla-org/flash-linear-attention
+`chunk_gla_fwd` (minimal)"). Agent note `kiln-gdn-bottleneck-postpr105`
+points in the same direction.
+
+### When to revisit the narrow gate-path fusion
+
+Only if all three hold on a *fresh* Arm B profile:
+
+1. `:kiln/gdn/gated_norm` is still ≥ 15 % of decode (i.e. a combined
+   GDN-chain kernel never landed and this region is still the largest
+   single elementwise hotspot), **and**
+2. A parity-validated fused `gated_norm` kernel measures
+   ≥ 1.10× decode ITL on at least one of the W4A16 arms (clearing
+   PR #141's null-result ceiling), **and**
+3. The fusion does not duplicate work that a vendored `chunk_gla_fwd`
+   would already subsume.
+
+Until then, the next decode-side lever is `chunk_gla_fwd`, not another
+gate-path fusion PR.
+
+### Preflight record
+
+- Local clone of `ericflo/kiln` at HEAD `838f88f` (post-PR #163).
+- `grep 'Recommended scope for the next cycle' PROFILING.md` →
+  lines now include the STATUS callout flagging this section stale.
+- `gh pr list --limit 20 --state all | grep -iE 'gdn.*gate|gate.*fusion|fused.*gate'`
+  → PRs #158 (MERGED, gates fused) and #160, #163 (docs/re-profile).
+  PR #141 surfaced via `gh pr view 141` as the closed null-result
+  attempt for `:kiln/gdn/gated_norm`.
+- Upstream search:
+  - FLA (`flash-linear-attention`) exports `naive_gdn_gate` as an
+    elementwise reference but no standalone fused CUDA kernel; the
+    gate math is folded into the larger `chunkwise_gdn` Triton
+    kernel, which is what step 2 of the optimization queue vendors
+    next.
+  - Liger-Kernel has no GDN-specific gate op.
+  - `fused_norm_gate` (FLA) is exactly the shape PR #141 vendored
+    and measured as null at the Qwen3.5-4B decode shape.
+- Code inspection confirms Step 8 has no per-element residual multiply
+  to fuse: `gated_rms_norm`'s output feeds `o_proj` (Step 9) directly.
+
+Pattern match: identical redundancy class as the "chunk_gla_fwd
+already vendored" incident (PR #131 redirect) and the "FlashInfer
+paged GQA decode below threshold" preflight (this report, section
+above). Doc-only resolution, \$0 pod spend. See agent note
+`kernel-vendor-precondition-check` for the general rule.
 
 ## Files / Reproduction
 
