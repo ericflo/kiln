@@ -52,6 +52,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["deb", "appimage", "msi", "nsis"],
     "icon": [
       "icons/32x32.png",
@@ -62,5 +63,15 @@
     "category": "DeveloperTool",
     "shortDescription": "System tray app for the kiln local LLM server",
     "longDescription": "Kiln Desktop supervises the kiln local LLM server as a subprocess and exposes status, settings, and dashboard windows through a system tray. Windows and Linux only; kiln requires CUDA."
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://github.com/ericflo/kiln/releases/latest/download/latest.json"
+      ],
+      "pubkey": "RWSPRB7L9YJyJTeFv2viqQXbluv8fOskKFZyIbTuZZzfnTrcfefZe36r"
+    }
   }
 }
