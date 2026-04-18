@@ -1,4 +1,5 @@
 pub mod adapter_merge;
+pub mod backend;
 pub mod cuda_graph;
 pub mod engine;
 pub mod forward;
@@ -14,6 +15,7 @@ pub mod sampling;
 pub mod speculative;
 pub mod weights;
 
+pub use backend::{for_device as backend_for_device, BackendRuntime};
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{FinishReason, GenerationOutput, ModelRunner, StreamDone, StreamEvent, StreamToken};

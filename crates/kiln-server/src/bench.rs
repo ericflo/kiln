@@ -15,6 +15,7 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_core::vram::detect_vram;
+use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -309,6 +310,7 @@ fn bench_latency(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
 
     let eos_token_ids = tokenizer.eos_token_ids();
 
@@ -317,6 +319,7 @@ fn bench_latency(
     // Prefill: forward pass on all prompt tokens
     let prefill_start = Instant::now();
     let logits = model_forward(
+        &*backend,
         &prompt_token_ids,
         weights,
         config,
@@ -348,6 +351,7 @@ fn bench_latency(
 
         let step_start = Instant::now();
         let logits = model_forward(
+            &*backend,
             &[next_token],
             weights,
             config,
@@ -456,6 +460,7 @@ fn bench_latency_paged(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
 
     // Build a block table that maps logical block i -> physical block i (sequential).
     let mut block_table = BlockTable::new();
@@ -473,6 +478,7 @@ fn bench_latency_paged(
     // Prefill: forward pass on all prompt tokens via paged path
     let prefill_start = Instant::now();
     let logits = model_forward_paged(
+        &*backend,
         &prompt_token_ids,
         weights,
         config,
@@ -513,6 +519,7 @@ fn bench_latency_paged(
 
         let step_start = Instant::now();
         let logits = model_forward_paged(
+            &*backend,
             &[next_token],
             weights,
             config,
