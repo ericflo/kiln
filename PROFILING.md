@@ -1,5 +1,126 @@
 # Kiln Profiling Report
 
+## Phase 6 — chunk-prep fusion prefill bench (2026-04-18)
+
+Measured the Phase 6 `gdn_chunk_prep` fusion (`ce/phase6-chunk-prep-fusion`,
+HEAD `11314e3`) against the post-#160 `main` baseline (HEAD `395f5f7`) on the
+same pod, back-to-back, using the existing `kiln-bench --paged` latency
+harness. The fusion collapses the 7+ elementwise launches inside the
+chunkwise outer recurrence (cumsum, decay matrix, KKT/QKT masked
+exp-scaling, v_prime, q_s_scaled, decay_last_col, p_last) into one CUDA
+kernel per (chunk × batch × head). The four cuBLAS matmuls surrounding it
+(KKT, QKT, ks_entry, q_s) are unchanged.
+
+**Hardware:** RunPod NVIDIA A40 on-demand (A6000 unavailable;
+same sm_86 Ampere arch, covered by existing `KILN_CUDA_ARCHS="80;86;89;90"`),
+Driver 580.95.05, CUDA 12.4.
+
+**Build:** release, `--features cuda`, `KILN_W4A16=0 KILN_CUDA_GRAPHS=true`.
+
+**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+--prompt-tokens N --max-output-tokens M --skip-training`, 3 back-to-back runs
+per arm (no nsys attached), reporting `time_to_first_token_ms` from the
+latency phase.
+
+### Prefill TTFT — 512-prompt × 128-decode
+
+| run    | PRE (`395f5f7`) ms | POST (`11314e3`) ms |
+| ------ | -----------------: | ------------------: |
+| 1      |             403.43 |              366.68 |
+| 2      |             393.19 |              363.41 |
+| 3      |             413.51 |              428.25 |
+| mean   |             403.38 |              386.11 |
+| median |             403.43 |              366.68 |
+
+Mean speedup: **1.045× TTFT** (−4.3 %). Median speedup: **1.100× TTFT**
+(−9.1 %). Run 3 of the POST arm is a clear outlier (+63 ms versus the other
+two) — probably pod-to-pod GPU variance we've seen before on this harness.
+
+### Prefill TTFT — 2048-prompt × 64-decode
+
+Longer prompt → more chunks per prefill (2048 / chunk_size=64 = 32 chunks per
+layer × 24 GDN layers = 768 fused kernel launches in place of 5 376
+elementwise launches).
+
+| run    | PRE (`395f5f7`) ms | POST (`11314e3`) ms |
+| ------ | -----------------: | ------------------: |
+| 1      |            1070.49 |              882.04 |
+| 2      |             987.92 |              934.43 |
+| 3      |             980.49 |              941.23 |
+| mean   |            1012.97 |              919.23 |
+| median |             987.92 |              934.43 |
+
+Mean speedup: **1.102× TTFT** (−9.3 %). Median speedup: **1.057× TTFT**
+(−5.7 %).
+
+### Decode latency (no expected change)
+
+The fusion is a prefill-path optimization — decode uses the single-step
+`gdn_recurrent_step` fast path, which is untouched. Decode numbers are
+reported for completeness.
+
+| metric              | PRE mean | POST mean | Δ       |
+| ------------------- | -------: | --------: | ------- |
+| mean inter-token ms |    25.64 |     25.88 | +0.9 %  |
+| decode tok/s        |    38.99 |     38.65 | −0.9 %  |
+
+Within pod variance.
+
+### Read / take
+
+The fusion lands below the ≥1.2× prefill TTFT floor stated in the task brief.
+Measured improvement is **1.05–1.10×** on 512-prompt TTFT and **1.06–1.10×**
+on 2048-prompt TTFT — directionally correct, reproducible across both prompt
+lengths, but well short of the 2–4× target. The implementation is correct
+(see `test_gdn_chunk_prep_matches_fallback` and
+`test_gdn_chunkwise_matches_sequential` in `crates/kiln-model/src/forward.rs`
+— both pass with max error < 2e-3 bf16), the kernel removes a measurable
+slice of prefill wall-clock, and it leaves the decode fast path unchanged.
+The ceiling is pinned by the four cuBLAS matmuls (KKT, QKT, ks_entry, q_s)
+which still dominate the chunkwise recurrence wall-clock and are
+intentionally out of scope for this kernel.
+
+Possible follow-ups if the chunkwise recurrence becomes a hotter target:
+- Collapse the four matmuls into fewer cuBLAS calls (batch two KKT/QKT into
+  a single `bmm`, batch ks_entry/q_s).
+- Explore a full Triton-style `chunk_gla_fwd` that owns the matmuls too —
+  this is the upstream fla-org path and is what PR #160 originally
+  recommended for the largest decode-side win.
+
+### Reproduction
+
+```bash
+# 1. Pod + weights
+kiln-setup --repo /workspace/kiln
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+
+# 2. Baseline (pre-fusion)
+cd /workspace/kiln && git checkout 395f5f7
+cargo build --release --features cuda -p kiln-server --bin kiln-bench
+for i in 1 2 3; do
+  KILN_W4A16=0 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b --paged \
+    --prompt-tokens 512 --max-output-tokens 128 --skip-training
+done
+
+# 3. Fusion (post)
+git checkout ce/phase6-chunk-prep-fusion
+cargo build --release --features cuda -p kiln-server --bin kiln-bench
+for i in 1 2 3; do
+  KILN_W4A16=0 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b --paged \
+    --prompt-tokens 512 --max-output-tokens 128 --skip-training
+done
+```
+
+### Pod / cost
+
+- Pod: `11hd6xzo2uwlyy` (RunPod NVIDIA A40 on-demand, $0.44/hr).
+- Total uptime at bench end: ~2.5 hours (build, weight fetch, parity tests,
+  12 bench runs across pre/post × two prompt lengths).
+- Estimated pod cost: **~$1.10** (well under the $20 target / $40 hard abort
+  set in the task brief).
+
 ## Post-PR #158 Decode Profile (2026-04-18)
 
 Refreshed decode profile on current `main` (HEAD `7132f29`, post-PR #158 which

@@ -57,6 +57,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_chunk_prep(&self) -> bool {
+        false
+    }
+
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
     ///
     /// `q`, `k`, `v`: `[batch, seq_len, num_heads, head_dim]` bf16 contiguous.
@@ -129,6 +133,39 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _g: &Tensor,
         _state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Fused GDN chunk-prep kernel (prefill outer recurrence).
+    ///
+    /// Collapses the 7+ candle op launches (cumsum, decay matrix, exp, masked
+    /// scales, v_prime, q_s_scaled, decay_last_col, p_last) inside the
+    /// chunkwise recurrence's inner loop into a single CUDA launch per
+    /// (chunk × batch × head). Matmuls (KKT, QKT, ks_entry, q_s) stay on
+    /// cuBLAS — this kernel consumes their outputs.
+    ///
+    /// `g`: `[B, H, C]` bf16. `v`: `[B, H, C, dv]` bf16.
+    /// `kkt`, `qkt`: `[B, H, C, C]` bf16. `ks_entry`, `q_s`: `[B, H, C, dv]` bf16.
+    ///
+    /// Returns `(a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last)`:
+    ///   - `a_strict`:       `[B, H, C, C]` bf16 — `kkt * decay * strict_lower`
+    ///   - `b_mask`:         `[B, H, C, C]` bf16 — `qkt * decay * causal_lower`
+    ///   - `v_prime`:        `[B, H, C, dv]` bf16 — `v - ks_entry * p`
+    ///   - `q_s_scaled`:     `[B, H, C, dv]` bf16 — `q_s * p`
+    ///   - `decay_last_col`: `[B, H, C]` bf16 — `exp(big_g[C-1] - big_g[i])`
+    ///   - `p_last`:         `[B, H]` bf16 — `exp(big_g[C-1])`
+    ///
+    /// Returning `Ok(None)` is valid for backends that can't satisfy the
+    /// envelope; callers fall back to the candle-op path.
+    fn gdn_chunk_prep(
+        &self,
+        _g: &Tensor,
+        _v: &Tensor,
+        _kkt: &Tensor,
+        _qkt: &Tensor,
+        _ks_entry: &Tensor,
+        _q_s: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
         Ok(None)
     }
 
