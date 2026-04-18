@@ -19,6 +19,7 @@ const ITEM_STOP: &str = "stop_server";
 const ITEM_RESTART: &str = "restart_server";
 const ITEM_LOGS: &str = "view_logs";
 const ITEM_COPY_URL: &str = "copy_openai_url";
+const ITEM_CHECK_UPDATES: &str = "check_updates";
 const ITEM_QUIT: &str = "quit";
 
 fn status_menu_text(state: &ServerState) -> String {
@@ -57,6 +58,8 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .enabled(false)
         .build(app)?;
     let logs = MenuItemBuilder::with_id(ITEM_LOGS, "View Logs").build(app)?;
+    let check_updates =
+        MenuItemBuilder::with_id(ITEM_CHECK_UPDATES, "Check for Updates…").build(app)?;
     let quit = MenuItemBuilder::with_id(ITEM_QUIT, "Quit").build(app)?;
 
     let menu = MenuBuilder::new(app)
@@ -67,6 +70,8 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .item(&copy_url)
         .separator()
         .items(&[&start, &stop, &restart, &logs])
+        .separator()
+        .item(&check_updates)
         .separator()
         .item(&quit)
         .build()?;
@@ -128,6 +133,20 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     let supervisor = Arc::clone(&supervisor);
                     tauri::async_runtime::spawn(async move {
                         copy_openai_base_url_to_clipboard(&app_handle, supervisor).await;
+                    });
+                }
+                ITEM_CHECK_UPDATES => {
+                    if let Err(e) = open_dashboard_window(&app_handle) {
+                        eprintln!("[tray] open_dashboard_window failed: {}", e);
+                    }
+                    // Give a freshly-opened dashboard window a moment to mount
+                    // its event listener before we emit, so the request isn't
+                    // dropped on cold open.
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        if let Err(e) = app_handle.emit("menu://check-updates", ()) {
+                            eprintln!("[tray] emit menu://check-updates failed: {}", e);
+                        }
                     });
                 }
                 ITEM_STATUS => {}
