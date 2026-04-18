@@ -1093,80 +1093,102 @@ pub fn gated_deltanet_forward(
     let gqa_ratio = nv / nk;
 
     // --- Step 1: Input projections ---
-    let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv.t()?)?; // [B, T, qkv_dim]
-    let z = x.broadcast_matmul(&weights.in_proj_z.t()?)?;           // [B, T, v_dim]
-    let a = x.broadcast_matmul(&weights.in_proj_a.t()?)?;           // [B, T, nv]
-    let b = x.broadcast_matmul(&weights.in_proj_b.t()?)?;           // [B, T, nv]
+    let (mixed_qkv, z, a, b) = {
+        kiln_nvtx::range!(c"kiln/gdn/in_proj");
+        let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv.t()?)?; // [B, T, qkv_dim]
+        let z = x.broadcast_matmul(&weights.in_proj_z.t()?)?;           // [B, T, v_dim]
+        let a = x.broadcast_matmul(&weights.in_proj_a.t()?)?;           // [B, T, nv]
+        let b = x.broadcast_matmul(&weights.in_proj_b.t()?)?;           // [B, T, nv]
+        (mixed_qkv, z, a, b)
+    };
 
     // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
-    // Transpose to [B, channels, T] for conv
-    let mixed_qkv = mixed_qkv.transpose(1, 2)?.contiguous()?;
-    let mixed_qkv = if seq_len > 1 {
-        causal_conv1d_prefill(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
-    } else {
-        causal_conv1d_decode(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+    let mixed_qkv = {
+        kiln_nvtx::range!(c"kiln/gdn/conv");
+        // Transpose to [B, channels, T] for conv
+        let mixed_qkv = mixed_qkv.transpose(1, 2)?.contiguous()?;
+        let mixed_qkv = if seq_len > 1 {
+            causal_conv1d_prefill(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+        } else {
+            causal_conv1d_decode(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+        };
+        // SiLU activation (work in F32 for stability)
+        let mixed_qkv = cuda_silu(&mixed_qkv.to_dtype(DType::F32)?)?;
+        // Transpose back to [B, T, qkv_dim]
+        mixed_qkv.transpose(1, 2)?
     };
-    // SiLU activation (work in F32 for stability)
-    let mixed_qkv = cuda_silu(&mixed_qkv.to_dtype(DType::F32)?)?;
-    // Transpose back to [B, T, qkv_dim]
-    let mixed_qkv = mixed_qkv.transpose(1, 2)?;
 
     // --- Step 3: Split into Q, K, V and reshape to heads ---
-    let q = mixed_qkv
-        .narrow(2, 0, qk_dim)?
-        .reshape((batch, seq_len, nk, dk))?;
-    let k = mixed_qkv
-        .narrow(2, qk_dim, qk_dim)?
-        .reshape((batch, seq_len, nk, dk))?;
-    let v = mixed_qkv
-        .narrow(2, 2 * qk_dim, v_dim)?
-        .reshape((batch, seq_len, nv, dv))?;
-    let z = z.reshape((batch, seq_len, nv, dv))?;
+    let (q, k, v, z) = {
+        kiln_nvtx::range!(c"kiln/gdn/qkv_split");
+        let q = mixed_qkv
+            .narrow(2, 0, qk_dim)?
+            .reshape((batch, seq_len, nk, dk))?;
+        let k = mixed_qkv
+            .narrow(2, qk_dim, qk_dim)?
+            .reshape((batch, seq_len, nk, dk))?;
+        let v = mixed_qkv
+            .narrow(2, 2 * qk_dim, v_dim)?
+            .reshape((batch, seq_len, nv, dv))?;
+        let z = z.reshape((batch, seq_len, nv, dv))?;
+        (q, k, v, z)
+    };
 
     // --- Step 4: GQA head repeat (nk → nv) ---
-    let (q, k) = if gqa_ratio > 1 {
-        let q = q
-            .unsqueeze(3)?
-            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-            .contiguous()?
-            .reshape((batch, seq_len, nv, dk))?;
-        let k = k
-            .unsqueeze(3)?
-            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-            .contiguous()?
-            .reshape((batch, seq_len, nv, dk))?;
-        (q, k)
-    } else {
-        (q.contiguous()?, k.contiguous()?)
+    let (q, k) = {
+        kiln_nvtx::range!(c"kiln/gdn/head_expand");
+        if gqa_ratio > 1 {
+            let q = q
+                .unsqueeze(3)?
+                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                .contiguous()?
+                .reshape((batch, seq_len, nv, dk))?;
+            let k = k
+                .unsqueeze(3)?
+                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                .contiguous()?
+                .reshape((batch, seq_len, nv, dk))?;
+            (q, k)
+        } else {
+            (q.contiguous()?, k.contiguous()?)
+        }
     };
 
     // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
     // Normalize in F32 for numerical stability (sqrt/div), then cast back to
     // the input dtype so the recurrent loop below runs in bf16 (see Step 7).
-    let q = l2_normalize(&q)?; // F32
-    let k = l2_normalize(&k)?; // F32
-    let scale = 1.0 / (dk as f64).sqrt();
-    let q = (q * scale)?.to_dtype(input_dtype)?;
-    let k = k.to_dtype(input_dtype)?;
+    let (q, k) = {
+        kiln_nvtx::range!(c"kiln/gdn/qk_norm");
+        let q = l2_normalize(&q)?; // F32
+        let k = l2_normalize(&k)?; // F32
+        let scale = 1.0 / (dk as f64).sqrt();
+        let q = (q * scale)?.to_dtype(input_dtype)?;
+        let k = k.to_dtype(input_dtype)?;
+        (q, k)
+    };
 
     // --- Step 6: Compute gates ---
-    // beta = sigmoid(b) — write gate, in (0, 1). sigmoid output is bounded so
-    // bf16 has enough precision; no F32 upcast needed.
-    let beta = cuda_sigmoid(&b)?; // [B, T, nv], bf16
+    let (beta, g) = {
+        kiln_nvtx::range!(c"kiln/gdn/gates");
+        // beta = sigmoid(b) — write gate, in (0, 1). sigmoid output is bounded so
+        // bf16 has enough precision; no F32 upcast needed.
+        let beta = cuda_sigmoid(&b)?; // [B, T, nv], bf16
 
-    // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space).
-    // The softplus/exp pipeline is computed in F32 for stability (it involves
-    // exp and log near 0), then cast to the input dtype for the bf16 loop.
-    let a_f32 = a.to_dtype(DType::F32)?;
-    let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
-    let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
-    let g = {
-        let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
-        let sp = softplus(&a_biased)?;
-        let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
-        sp.broadcast_mul(&neg_decay)?
-    }
-    .to_dtype(input_dtype)?; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
+        // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space).
+        // The softplus/exp pipeline is computed in F32 for stability (it involves
+        // exp and log near 0), then cast to the input dtype for the bf16 loop.
+        let a_f32 = a.to_dtype(DType::F32)?;
+        let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
+        let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
+        let g = {
+            let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
+            let sp = softplus(&a_biased)?;
+            let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
+            sp.broadcast_mul(&neg_decay)?
+        }
+        .to_dtype(input_dtype)?; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
+        (beta, g)
+    };
 
     // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---
     // The recurrent state is stored in F32 externally (across layers/steps)
@@ -1198,14 +1220,18 @@ pub fn gated_deltanet_forward(
     // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
     // hits a dtype mismatch on bf16 GPU runs, because the state-derived
     // tensor inherits the (now bf16) state dtype.
-    let v = v.to_dtype(input_dtype)?;
+    let (q, k, v, beta, g) = {
+        kiln_nvtx::range!(c"kiln/gdn/recur_prep");
+        let v = v.to_dtype(input_dtype)?;
 
-    // Transpose to [B, nv, T, dim] for per-head processing.
-    let q = q.transpose(1, 2)?; // [B, nv, T, dk]
-    let k = k.transpose(1, 2)?; // [B, nv, T, dk]
-    let v = v.transpose(1, 2)?; // [B, nv, T, dv]
-    let beta = beta.transpose(1, 2)?; // [B, nv, T]
-    let g = g.transpose(1, 2)?; // [B, nv, T]
+        // Transpose to [B, nv, T, dim] for per-head processing.
+        let q = q.transpose(1, 2)?; // [B, nv, T, dk]
+        let k = k.transpose(1, 2)?; // [B, nv, T, dk]
+        let v = v.transpose(1, 2)?; // [B, nv, T, dv]
+        let beta = beta.transpose(1, 2)?; // [B, nv, T]
+        let g = g.transpose(1, 2)?; // [B, nv, T]
+        (q, k, v, beta, g)
+    };
 
     let attn_out = gdn_chunkwise_recurrence(
         &q,
@@ -1224,19 +1250,28 @@ pub fn gated_deltanet_forward(
     }
 
     // Transpose to [B, T, nv, dv]
-    let attn_out = attn_out.transpose(1, 2)?;
+    let attn_out = {
+        kiln_nvtx::range!(c"kiln/gdn/post_transpose");
+        attn_out.transpose(1, 2)?
+    };
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
-    let attn_out = gated_rms_norm(&attn_out, &z, &weights.norm, config.rms_norm_eps)?;
-    // Reshape to [B, T, v_dim] and cast back to input dtype
-    let attn_out = attn_out
-        .reshape((batch, seq_len, v_dim))?
-        .to_dtype(input_dtype)?;
+    let attn_out = {
+        kiln_nvtx::range!(c"kiln/gdn/gated_norm");
+        let attn_out = gated_rms_norm(&attn_out, &z, &weights.norm, config.rms_norm_eps)?;
+        // Reshape to [B, T, v_dim] and cast back to input dtype
+        attn_out
+            .reshape((batch, seq_len, v_dim))?
+            .to_dtype(input_dtype)?
+    };
 
     // --- Step 9: Output projection ---
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
     // it should be added to GpuLinearAttentionWeights and applied after conv1d.
-    let out = attn_out.broadcast_matmul(&weights.out_proj.t()?)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/gdn/out_proj");
+        attn_out.broadcast_matmul(&weights.out_proj.t()?)?
+    };
     Ok(out)
 }
 
@@ -1529,7 +1564,10 @@ fn try_flash_attn_paged_decode(
 
     // Reshape Q for the flash-attn API: [batch, num_heads, 1, head_dim]
     // -> [batch, 1, num_heads, head_dim].
-    let q_fa = q.transpose(1, 2)?.contiguous()?;
+    let q_fa = {
+        kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
+        q.transpose(1, 2)?.contiguous()?
+    };
 
     let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
         Some(p) => p,
@@ -1614,33 +1652,47 @@ pub fn gqa_attention_paged(
         (q_raw, k, v)
     };
 
-    let (q, gate) = if attn_output_gate {
-        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
-        let q = q_raw.narrow(3, 0, head_dim)?;
-        let gate = q_raw.narrow(3, head_dim, head_dim)?;
-        let gate = gate.contiguous()?.reshape(((), seq_len, num_heads * head_dim))?;
-        (q.contiguous()?, Some(gate))
-    } else {
-        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
-        (q, None)
+    let (q, gate) = {
+        kiln_nvtx::range!(c"kiln/proj/qkv_split");
+        if attn_output_gate {
+            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q = q_raw.narrow(3, 0, head_dim)?;
+            let gate = q_raw.narrow(3, head_dim, head_dim)?;
+            let gate = gate.contiguous()?.reshape(((), seq_len, num_heads * head_dim))?;
+            (q.contiguous()?, Some(gate))
+        } else {
+            let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+            (q, None)
+        }
     };
 
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
     let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
 
     // QK-norm
-    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
-    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+    let (q, k) = {
+        kiln_nvtx::range!(c"kiln/attn/qk_norm");
+        let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+        let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+        (q, k)
+    };
 
     // RoPE — only rotate first rotary_dim dimensions
     // Use the GPU tensor variant so positions remain at a stable GPU address
     // (critical for CUDA graph replay correctness)
-    let (q, k) = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+    let (q, k) = {
+        kiln_nvtx::range!(c"kiln/attn/rope");
+        rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+    };
 
     // Transpose to [batch, heads, seq_len, head_dim]
-    let q = q.transpose(1, 2)?.contiguous()?;
-    let k = k.transpose(1, 2)?.contiguous()?;
-    let v = v.transpose(1, 2)?.contiguous()?;
+    let (q, k, v) = {
+        kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = v.transpose(1, 2)?.contiguous()?;
+        (q, k, v)
+    };
 
     // Write new K/V into paged cache
     {
