@@ -310,9 +310,17 @@ impl AppState {
         // KILN_ALLOW_FP8_ON_METAL=1.
         let fp8_enabled = {
             let requested = memory_cfg.kv_cache_fp8;
+            // Require an explicit opt-in value (`1`/`true`) so the common
+            // misreading `KILN_ALLOW_FP8_ON_METAL=0` disables FP8 as intended
+            // instead of flipping the gate because the variable happens to
+            // be set.
+            let metal_override = matches!(
+                std::env::var("KILN_ALLOW_FP8_ON_METAL").as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE")
+            );
             if requested
                 && matches!(device, candle_core::Device::Metal(_))
-                && std::env::var("KILN_ALLOW_FP8_ON_METAL").is_err()
+                && !metal_override
             {
                 tracing::warn!(
                     "FP8 cache disabled on Metal (CPU round-trip cost); \
