@@ -2351,6 +2351,15 @@ the profile to expose the next tier of cost (RMSNorm + GDN body).
 > via `recurrent_gdn_fwd_kernel`) would amortize launch overhead and
 > cut the residual 24 % of NVTX wallclock those four ranges
 > occupy.
+>
+> **Not next target — already vendored**: the project's "Current
+> optimization queue" item *Vendor fla-org chunk_gla_fwd (minimal)*
+> landed in PR #80 (commit `0c9c519`, crate `kiln-gdn-kernel`,
+> kernels `gdn_fwd_sub_kernel` for chunkwise prefill and
+> `recurrent_gdn_fwd_kernel` for seq_len==1 decode). Both are
+> already in the per-kernel tables above and are *not* the next
+> hotspot. Planning loops re-proposing "vendor chunk_gla_fwd" should
+> redirect to the RMSNorm-fusion or GDN-body-vendor items.
 
 ### Comparison table — pre-fix vs. post-fix
 

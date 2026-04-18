@@ -1,22 +1,62 @@
 //! Vendored Gated DeltaNet (GDN) chunk forward-substitution CUDA kernel.
 //!
-//! This crate provides [`gdn_forward_substitution`], a thin candle wrapper
-//! around a single fused CUDA kernel that replaces the per-token forward
-//! substitution loop in kiln's chunkwise analytical GDN recurrence:
+//! # Provenance: fla-org `chunk_gla_fwd`
 //!
-//! ```text
-//! W[t, :] = beta[t] * ( V_prime[t, :]
-//!                      - sum_{i<t} A_strict[t, i] * W[i, :] )
-//! ```
+//! This crate is the vendored port of
+//! [`fla-org/flash-linear-attention`](https://github.com/fla-org/flash-linear-attention)'s
+//! `chunk_gla_fwd` Triton kernel (source: `fla/ops/gla/chunk.py`) into
+//! raw CUDA C. It landed as PR #80 (commit `0c9c519`) and fulfills the
+//! "Phase 6 — Vendor fla-org chunk_gla_fwd (minimal)" item from the
+//! project's performance-optimization queue in the project description.
 //!
-//! The kernel is intentionally narrow:
-//!   - bf16 activations only.
+//! Any follow-up planning task titled "vendor chunk_gla_fwd" should
+//! re-verify current `PROFILING.md` before opening a new PR — the core
+//! vendor is here, and the per-token Rust forward-sub loop it replaced
+//! is gone from the CUDA path. The remaining candle ops in
+//! `kiln-model::forward::gdn_chunkwise_recurrence` (cumsum + exp decay
+//! matrix, KKT/QKT matmuls, intra-chunk `B_mask @ W`, final state
+//! update) are *not* inside this vendor's scope; they are distinct
+//! operations the scheduler launches per chunk.
+//!
+//! # API
+//!
+//! - [`gdn_forward_substitution`] — chunkwise prefill forward-sub step.
+//!   Thin candle wrapper around a single fused CUDA kernel that
+//!   replaces the per-token forward-substitution loop in kiln's
+//!   chunkwise analytical GDN recurrence:
+//!
+//!   ```text
+//!   W[t, :] = beta[t] * ( V_prime[t, :]
+//!                        - sum_{i<t} A_strict[t, i] * W[i, :] )
+//!   ```
+//!
+//! - [`gdn_recurrent_forward`] — seq_len==1 decode fast path. Collapses
+//!   the single-token GDN recurrence (decay, delta, state-update,
+//!   output projection) into one block per `(batch, head)`.
+//!
+//! # Envelope
+//!
+//! The kernels are intentionally narrow (per the project's
+//! "minimal-scope vendoring" policy):
+//!
+//!   - bf16 activations, F32 accumulators inside the kernel.
+//!   - Causal / forward-pass only.
 //!   - `dv` <= 1024 (kiln uses 128).
-//!   - `chunk_size` <= 128 (kiln uses 64).
-//!   - One block per (batch, head); no tensor-core path.
+//!   - `chunk_size` <= 128 (kiln uses 64) for forward-sub.
+//!   - `dk` <= 256 (kiln uses 128) for recurrent.
+//!   - One CUDA block per `(batch, head)`; no tensor-core path.
 //!
-//! Anything outside that envelope should fall back to the Rust+candle
-//! implementation in `kiln-model::forward`.
+//! Anything outside that envelope falls back to the Rust+candle
+//! reference in `kiln-model::forward::compute_w_chunk_fallback`, which
+//! also serves as the correctness oracle for
+//! `test_gdn_kernel_matches_fallback`.
+//!
+//! # Not yet vendored
+//!
+//! Per `PROFILING.md` (post-PR #130, Phase 6), the next GDN-side
+//! targets are the GDN body ranges (`gated_norm`, `gates`, `conv`,
+//! `qk_norm`) and the two RMSNorm stages — these are upstream of the
+//! chunkwise recurrence and are *not* covered by this crate.
 
 use candle_core::{
     backend::BackendStorage,
