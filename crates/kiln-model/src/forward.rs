@@ -1317,15 +1317,13 @@ pub fn gqa_attention(
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
     let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
 
-    // FlashAttention-2 path for prefill (seq_len > 1, no KV cache).
-    // Flash-attn takes [batch, seq_len, num_heads, head_dim] — the layout we already have.
-    // When a KV cache is present, we fall through to the naive path which handles
-    // the cache update and Q_len != KV_len masking correctly.
-    if seq_len > 1
-        && kv_cache.is_none()
-        && q.dtype() == candle_core::DType::BF16
-        && backend.supports_flash_attn_prefill()
-    {
+    // Fused-attention path for prefill (seq_len > 1, no KV cache).
+    // Takes [batch, seq_len, num_heads, head_dim] — the layout we already
+    // have. When a KV cache is present we fall through to the naive path,
+    // which handles the cache update and Q_len != KV_len masking correctly.
+    // Backend declines (returns None) on dtype mismatch so non-BF16 configs
+    // (e.g. tests on F32) transparently fall back to naive softmax+matmul.
+    if seq_len > 1 && kv_cache.is_none() && backend.supports_flash_attn_prefill() {
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let v = v.contiguous()?;
@@ -1672,7 +1670,6 @@ pub fn gqa_attention_paged(
     //     (kiln's BlockManager allocates blocks in order from a free list, so
     //     a freshly-allocated single sequence is always contiguous)
     if seq_len == 1
-        && q.dtype() == candle_core::DType::BF16
         && !paged_cache.is_fp8()
         && (num_heads / num_kv_heads) > 1
         && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
@@ -1723,13 +1720,10 @@ pub fn gqa_attention_paged(
         .context("paged KV cache read failed")?;
     let kv_len = total_seq_len;
 
-    // FlashAttention-2 path for prefill (seq_len > 1).
+    // Fused-attention path for prefill (seq_len > 1).
     // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
-    // [batch, kv_len, heads, head_dim] for flash_attn.
-    if seq_len > 1
-        && q.dtype() == candle_core::DType::BF16
-        && backend.supports_flash_attn_prefill()
-    {
+    // [batch, kv_len, heads, head_dim] for the backend kernel.
+    if seq_len > 1 && backend.supports_flash_attn_prefill() {
         kiln_nvtx::range!(c"kiln/attn/full/prefill");
         let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
@@ -3545,6 +3539,220 @@ mod tests {
         // All values should be finite (no NaN/Inf)
         let flat = logits.flatten_all()?.to_vec1::<f32>()?;
         assert!(flat.iter().all(|v| v.is_finite()), "logits contain non-finite values");
+
+        Ok(())
+    }
+
+    /// Parity test exercising the `MetalBackend::flash_attn_prefill` path via
+    /// `candle_nn::ops::sdpa`. head_dim=128 is the smallest of candle-metal's
+    /// SDPA whitelist, large enough to hit the fused kernel without bloating
+    /// the test model.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_parity_sdpa_path() -> Result<()> {
+        let metal_device = match Device::new_metal(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Metal unavailable, skipping SDPA parity test: {e}");
+                return Ok(());
+            }
+        };
+        let cpu_device = Device::Cpu;
+
+        // Qwen-shaped-ish: GQA ratio 4, head_dim 128. Full-attention-only so
+        // we can verify that `MetalBackend::flash_attn_prefill` is actually
+        // taken (no GDN fallback to muddy the comparison).
+        let vocab_size = 32;
+        let num_heads = 4;
+        let num_kv_heads = 1;
+        let head_dim = 128;
+        let hidden_size = num_heads * head_dim;
+        let intermediate_size = hidden_size * 2;
+        let num_layers = 2;
+        let full_attention_interval = 1;
+
+        let weights_cpu = make_hybrid_gpu_weights(
+            &cpu_device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, num_layers, full_attention_interval,
+        )?;
+        let weights_metal = make_hybrid_gpu_weights(
+            &metal_device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, num_layers, full_attention_interval,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: num_layers,
+            full_attention_interval,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        };
+
+        // seq_len > 8 to take the full SDPA kernel (vs vector path).
+        let token_ids: Vec<u32> = (0..12u32).collect();
+
+        let cpu_backend = test_backend(&cpu_device);
+        let logits_cpu = model_forward(
+            &cpu_backend, &token_ids, &weights_cpu, &config, None, None, None,
+        )?;
+
+        let metal_backend = crate::backend::for_device(&metal_device);
+        assert_eq!(metal_backend.name(), "metal");
+        assert!(metal_backend.supports_flash_attn_prefill());
+
+        let logits_metal = model_forward(
+            &*metal_backend, &token_ids, &weights_metal, &config, None, None, None,
+        )?;
+
+        assert_eq!(logits_cpu.dims(), logits_metal.dims());
+
+        let cpu_flat = logits_cpu.flatten_all()?.to_vec1::<f32>()?;
+        let metal_flat = logits_metal
+            .to_device(&cpu_device)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        assert!(cpu_flat.iter().all(|v| v.is_finite()));
+        assert!(metal_flat.iter().all(|v| v.is_finite()));
+
+        let max_abs_diff = cpu_flat
+            .iter()
+            .zip(metal_flat.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+
+        // SDPA on Metal accumulates at FP32 internally but the intermediate
+        // softmax path may round differently from naive CPU softmax+matmul.
+        // 1e-2 accommodates both BF16-rounding and Metal FP32 noise; raise if
+        // this turns out too tight on hardware other than M1.
+        assert!(
+            max_abs_diff < 1e-2,
+            "CPU vs Metal-SDPA logits diverge: max abs diff = {max_abs_diff}"
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end parity: `model_forward` on Metal should match CPU outputs
+    /// within bf16-tolerable numerical drift. Validates that every op in the
+    /// portable fallback path (embed, RMSNorm, RoPE, SwiGLU, naive attention,
+    /// GDN recurrent composition) executes on Apple Silicon.
+    ///
+    /// Skipped gracefully when Metal isn't available so the test suite stays
+    /// portable on Linux + CUDA hosts. Exercises the same hybrid layer
+    /// topology as `test_model_forward_hybrid_layers`.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_parity_cpu_vs_metal() -> Result<()> {
+        let metal_device = match Device::new_metal(0) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Metal unavailable, skipping parity test: {e}");
+                return Ok(());
+            }
+        };
+        let cpu_device = Device::Cpu;
+
+        let vocab_size = 32;
+        let hidden_size = 16;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 4;
+        let intermediate_size = 32;
+        let num_layers = 4;
+        let full_attention_interval = 4;
+
+        let weights_cpu = make_hybrid_gpu_weights(
+            &cpu_device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, num_layers, full_attention_interval,
+        )?;
+        let weights_metal = make_hybrid_gpu_weights(
+            &metal_device, vocab_size, hidden_size, num_heads, num_kv_heads,
+            head_dim, intermediate_size, num_layers, full_attention_interval,
+        )?;
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size,
+            num_layers,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let token_ids: Vec<u32> = vec![1, 5, 3, 10];
+
+        let cpu_backend = test_backend(&cpu_device);
+        let mut cpu_linear = LinearAttentionState::new(&config, &cpu_device)?;
+        let logits_cpu = model_forward(
+            &cpu_backend, &token_ids, &weights_cpu, &config,
+            None, Some(&mut cpu_linear), None,
+        )?;
+
+        // Use the real `for_device` factory so the Metal side exercises
+        // `MetalBackend` (candle SDPA), not the portable fallback.
+        let metal_backend = crate::backend::for_device(&metal_device);
+        let mut metal_linear = LinearAttentionState::new(&config, &metal_device)?;
+        let logits_metal = model_forward(
+            &*metal_backend, &token_ids, &weights_metal, &config,
+            None, Some(&mut metal_linear), None,
+        )?;
+
+        assert_eq!(logits_cpu.dims(), logits_metal.dims());
+
+        let cpu_flat = logits_cpu.flatten_all()?.to_vec1::<f32>()?;
+        let metal_flat = logits_metal
+            .to_device(&cpu_device)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        assert!(
+            cpu_flat.iter().all(|v| v.is_finite()),
+            "CPU logits contain non-finite values"
+        );
+        assert!(
+            metal_flat.iter().all(|v| v.is_finite()),
+            "Metal logits contain non-finite values"
+        );
+
+        let max_abs_diff = cpu_flat
+            .iter()
+            .zip(metal_flat.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < 1e-3,
+            "CPU vs Metal logits diverge: max abs diff = {max_abs_diff}"
+        );
 
         Ok(())
     }

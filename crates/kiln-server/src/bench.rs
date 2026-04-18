@@ -788,11 +788,10 @@ fn main() -> Result<()> {
     let model_weights = kiln_model::load_model(model_path, &model_config)
         .context("failed to load model weights")?;
 
-    let device = if candle_core::utils::cuda_is_available() {
-        candle_core::Device::new_cuda(0)?
-    } else {
-        anyhow::bail!("CUDA not available — benchmarks require a GPU");
-    };
+    let device = kiln_server::device::select_device()?;
+    if matches!(device, candle_core::Device::Cpu) {
+        anyhow::bail!("No GPU available — benchmarks require CUDA or Metal");
+    }
 
     let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
         .context("failed to transfer weights to GPU")?;

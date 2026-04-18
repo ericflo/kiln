@@ -26,6 +26,9 @@ pub mod cpu;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 
+#[cfg(feature = "metal")]
+pub mod metal;
+
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
@@ -132,6 +135,8 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
     match device {
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(device.clone())),
+        #[cfg(feature = "metal")]
+        Device::Metal(_) => Arc::new(metal::MetalBackend::new(device.clone())),
         _ => Arc::new(cpu::CpuBackend::new(device.clone())),
     }
 }

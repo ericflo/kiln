@@ -4,7 +4,7 @@
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 
 use super::BackendRuntime;
 
@@ -60,6 +60,12 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
+        // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
+        // the caller falls back to the portable path instead of bubbling a
+        // hard error up for non-BF16 test configs.
+        if q.dtype() != DType::BF16 {
+            return Ok(None);
+        }
         let out = kiln_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
             .context("flash_attn kernel failed")?;
         Ok(Some(out))
@@ -76,6 +82,9 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
+        if q.dtype() != DType::BF16 {
+            return Ok(None);
+        }
         let out = kiln_flash_attn::flash_attn_paged_decode(
             q,
             k_pool,
@@ -96,6 +105,9 @@ impl BackendRuntime for CudaBackend {
         v_prime: &Tensor,
         beta: &Tensor,
     ) -> Result<Option<Tensor>> {
+        if a_strict.dtype() != DType::BF16 {
+            return Ok(None);
+        }
         let out = kiln_gdn_kernel::gdn_forward_substitution(a_strict, v_prime, beta)?;
         Ok(Some(out))
     }
@@ -109,6 +121,9 @@ impl BackendRuntime for CudaBackend {
         g: &Tensor,
         state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
+        if q.dtype() != DType::BF16 {
+            return Ok(None);
+        }
         let out = kiln_gdn_kernel::gdn_recurrent_forward(q, k, v, beta, g, state)?;
         Ok(Some(out))
     }
