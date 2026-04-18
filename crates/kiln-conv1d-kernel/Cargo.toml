@@ -1,0 +1,15 @@
+[package]
+name = "kiln-conv1d-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vendored mamba-ssm causal_conv1d_update CUDA kernel (decode-only, bf16, kernel_size=4) with C-ABI wrapper"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"

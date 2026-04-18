@@ -1811,6 +1811,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-conv1d-kernel"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "cc",
+ "half",
+]
+
+[[package]]
 name = "kiln-core"
 version = "0.1.0"
 dependencies = [
@@ -1860,6 +1869,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "half",
+ "kiln-conv1d-kernel",
  "kiln-core",
  "kiln-flash-attn",
  "kiln-gdn-kernel",

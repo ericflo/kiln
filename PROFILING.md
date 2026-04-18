@@ -1,5 +1,69 @@
 # Kiln Profiling Report
 
+
+## Phase 6 — `causal_conv1d_update` vendor decode bench (2026-04-18)
+
+Vendored NVIDIA Mamba's `causal_conv1d_update` into `kiln-conv1d-kernel`
+(cc-crate + Rust FFI wrapper, bf16/causal/fwd-only, cuda-gated,
+sm_86/sm_89/sm_90) and wired `kiln-model/src/backend/cuda.rs` to dispatch
+through a new `BackendRuntime::causal_conv1d_update` hint. The candle
+fallback path is preserved behind the `KILN_DISABLE_FUSED_CONV1D=1` kill
+switch so the same binary can A/B without a rebuild. This replaces the
+`:kiln/gdn/conv` decode region (documented at 12.2 % of decode in the
+earlier nsys breakdown).
+
+**Hardware:** RunPod NVIDIA RTX A6000 on-demand, Driver 580.95.05,
+CUDA 12.8, stock `runpod/pytorch:0.7.0-dev-cu1281-torch271-ubuntu2404`
+plus `cuda-nvcc-12-8 cuda-cudart-dev-12-8 cuda-nvrtc-dev-12-8
+libcublas-dev-12-8 libcurand-dev-12-8`.
+
+**Build:** release, `--features cuda`, `KILN_CUDA_ARCHS=86`,
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`.
+
+**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+--prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
+runs per arm. Decode path = `model_forward_paged` (production
+HTTP/scheduler path). Reporting `decode_tokens_per_sec` and the inter-token
+latency distribution from the latency phase.
+
+### Decode tok/s — 512-prompt × 128-decode
+
+| run    | PRE (candle fallback) tok/s | POST (fused kernel) tok/s |
+| ------ | --------------------------: | ------------------------: |
+| 1      |                       45.10 |                     45.97 |
+| 2      |                       49.04 |                     52.59 |
+| 3      |                       44.08 |                     52.52 |
+| mean   |                       46.07 |                     50.36 |
+| median |                       45.10 |                     52.52 |
+
+Median speedup: **1.164× decode tok/s** (+16.4 %). Mean speedup: **1.093×**
+(+9.3 %). Run 1 of the POST arm underperforms the other two — first-fire
+JIT/kernel-cache warm-up is the likely cause; runs 2–3 converge tightly.
+
+### Inter-token latency (median of 3 runs)
+
+| stat    | PRE ms | POST ms |
+| ------- | -----: | ------: |
+| mean    |  22.17 |   19.04 |
+| p50     |  22.14 |   18.83 |
+| p99     |  26.22 |   24.14 |
+
+Consistent −3 ms mean ITL and −2 ms p99 ITL across runs.
+
+### Parity
+
+`cargo nextest run --release --features cuda -p kiln-model -E
+'test(test_causal_conv1d_update_matches_fallback)'`: PASS.
+
+### Verdict
+
+1.164× decode speedup clears the 1.03× ship floor. Kernel ships default-on;
+`KILN_DISABLE_FUSED_CONV1D=1` retained behind the `BackendRuntime` seam for
+debug/ablation. `:kiln/gdn/conv` is now serviced by the vendored kernel; the
+next decode hotspot on the GDN path is `gdn_recurrent_step` (covered by
+PR #80 / `kiln-gdn-kernel`).
+
+
 ## Phase 6 — chunk-prep fusion prefill bench (2026-04-18)
 
 Measured the Phase 6 `gdn_chunk_prep` fusion (`ce/phase6-chunk-prep-fusion`,

@@ -17,6 +17,10 @@ pub struct CudaBackend {
     /// Same pattern: cache the env-var read. The fused gates kernel is
     /// gated behind its own kill switch so it can be disabled independently.
     gdn_gates_enabled: bool,
+    /// Kill switch for the fused causal_conv1d_update kernel (decode
+    /// kiln/gdn/conv region). When off, forward.rs falls back to the
+    /// candle to_f32/cat/sum/narrow chain.
+    fused_conv1d_enabled: bool,
 }
 
 impl CudaBackend {
@@ -25,10 +29,12 @@ impl CudaBackend {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
+        let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
         Self {
             device,
             gdn_enabled,
             gdn_gates_enabled,
+            fused_conv1d_enabled,
         }
     }
 }
@@ -174,5 +180,27 @@ impl BackendRuntime for CudaBackend {
         let (beta, g) = kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias)
             .context("gdn_gates kernel failed")?;
         Ok(Some((beta, g)))
+    }
+
+    fn supports_causal_conv1d_update(&self) -> bool {
+        self.fused_conv1d_enabled
+    }
+
+    fn causal_conv1d_update(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        conv_state: &mut Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<Tensor>> {
+        if !self.fused_conv1d_enabled {
+            return Ok(None);
+        }
+        if !kiln_conv1d_kernel::supports(x, weight, conv_state, kernel_size) {
+            return Ok(None);
+        }
+        let out = kiln_conv1d_kernel::causal_conv1d_update(x, weight, conv_state, kernel_size)
+            .context("causal_conv1d_update kernel failed")?;
+        Ok(Some(out))
     }
 }

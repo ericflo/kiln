@@ -173,6 +173,36 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_causal_conv1d_update(&self) -> bool {
+        false
+    }
+
+    /// Fused single-step causal depthwise conv1d + state update + silu.
+    ///
+    /// Replaces the candle `to_f32 -> cat(state, x) -> sum(window * weight) ->
+    /// narrow/contiguous -> silu` chain inside `kiln/gdn/conv` with one CUDA
+    /// launch per (batch, channel).
+    ///
+    /// `x`: `[B, C, 1]` bf16 contiguous. `weight`: `[C, 1, K]` bf16 contiguous
+    /// (or `[C, K]` equivalently — width stride = 1). `conv_state`:
+    /// `[B, C, K-1]` F32, mutated in place to drop oldest col and append
+    /// newest `x`. `kernel_size`: must be 4 for the current CUDA
+    /// specialisation.
+    ///
+    /// Returns `Ok(Some(out))` with `out: [B, C, 1]` F32 (silu-fused), or
+    /// `Ok(None)` when the backend declines (wrong dtype, wrong K, envelope
+    /// violation, disabled via env kill switch). When `Some`, the caller must
+    /// NOT apply `silu` again — it is fused into the kernel epilogue.
+    fn causal_conv1d_update(
+        &self,
+        _x: &Tensor,
+        _weight: &Tensor,
+        _conv_state: &mut Tensor,
+        _kernel_size: usize,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     /// Fused GDN gate computation.
     ///
     /// Collapses the Step-6 `sigmoid(b)` + `-exp(A_log) * softplus(a + dt_bias)`
