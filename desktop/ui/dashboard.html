@@ -336,6 +336,7 @@
       <div id="status-actions">
         <button id="start-server" class="hidden">Start Server</button>
         <button id="retry" class="hidden">Retry</button>
+        <button id="open-settings-btn" class="hidden">Open Settings</button>
       </div>
     </div>
     <script>
@@ -348,6 +349,7 @@
       const detail = document.getElementById("status-detail");
       const retry = document.getElementById("retry");
       const startBtn = document.getElementById("start-server");
+      const settingsNeededBtn = document.getElementById("open-settings-btn");
       const START_LABEL = "Start Server";
 
       function showStatus(titleText, detailText, showRetry, showStart) {
@@ -360,6 +362,21 @@
         startBtn.classList.toggle("hidden", !showStart);
         startBtn.disabled = false;
         startBtn.textContent = START_LABEL;
+        settingsNeededBtn.classList.add("hidden");
+      }
+
+      function showSetupNeeded() {
+        frame.classList.add("hidden");
+        frame.src = "about:blank";
+        status.classList.remove("hidden");
+        title.textContent = "Kiln is not configured yet";
+        detail.textContent =
+          "Set your model path in Settings to get started. Kiln needs to know which model to load.";
+        retry.classList.add("hidden");
+        startBtn.classList.add("hidden");
+        startBtn.disabled = false;
+        startBtn.textContent = START_LABEL;
+        settingsNeededBtn.classList.remove("hidden");
       }
 
       function showFrame(url) {
@@ -378,6 +395,16 @@
             false
           );
           return;
+        }
+        try {
+          const s = await invoke("get_settings");
+          if (!s || !s.model_path || !String(s.model_path).trim()) {
+            showSetupNeeded();
+            return;
+          }
+        } catch (_) {
+          // If settings fetch fails, fall through to the existing flow
+          // so we still surface get_kiln_url errors normally.
         }
         try {
           const url = await invoke("get_kiln_url");
@@ -492,6 +519,9 @@
         try { await invoke("open_logs"); } catch (e) { console.error("open_logs failed", e); }
       });
       settingsBtn.addEventListener("click", async () => {
+        try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
+      });
+      settingsNeededBtn.addEventListener("click", async () => {
         try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
       });
 
