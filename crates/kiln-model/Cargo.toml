@@ -18,6 +18,7 @@ candle-core = { workspace = true }
 candle-nn = { workspace = true }
 kiln-flash-attn = { workspace = true, optional = true }
 kiln-gdn-kernel = { workspace = true, optional = true }
+kiln-marlin-gemm = { workspace = true, optional = true }
 kiln-rmsnorm-kernel = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
@@ -27,7 +28,7 @@ mlx-rs = { workspace = true, optional = true }
 half = { version = "2", optional = true }
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-rmsnorm-kernel"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel"]
 # Enable candle's Metal backend on Apple Silicon. Pulls in candle-metal-kernels
 # (JIT-compiled MSL shaders cached in the MetalDevice); no Xcode required.
 metal = ["candle-core/metal", "candle-nn/metal"]
