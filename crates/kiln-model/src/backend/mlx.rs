@@ -299,12 +299,8 @@ mod tests {
     }
 
     fn run_parity(causal: bool) -> Result<(f32, f32)> {
-        let device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Metal unavailable: {e}");
-                return Ok((0.0, 0.0));
-            }
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok((0.0, 0.0));
         };
 
         let (batch, seq_len, num_heads, head_dim) = (1, 12, 4, 128);
@@ -351,9 +347,8 @@ mod tests {
     /// Must be bit-identical for F32 inputs.
     #[test]
     fn test_tensor_roundtrip_f32() -> Result<()> {
-        let device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(_) => return Ok(()),
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
         };
         let shape = &[1usize, 4, 12, 128];
         let t = Tensor::randn(0.0f32, 1.0, shape, &device)?;
