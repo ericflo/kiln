@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
 use crate::kv_cache::KvCache;
-use crate::lora_loader::{linear_with_lora, LoraLayerWeights, LoraWeights};
+use crate::lora_loader::{linear_with_lora_t, LoraLayerWeights, LoraWeights};
 use crate::paged_kv_cache::PagedKvCache;
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
@@ -162,6 +162,13 @@ pub struct GpuFullAttentionWeights {
     pub o_proj: Tensor,
     pub q_norm: Tensor,
     pub k_norm: Tensor,
+    /// Pre-transposed q_proj for the forward hot path (contiguous).
+    /// Avoids re-transposing bf16 projection weights on every layer / every step.
+    /// Per PR #124 PROFILING.md: attention projection ucopy_bf16 was ~6.9% of decode GPU time.
+    pub q_proj_t: Tensor,
+    pub k_proj_t: Tensor,
+    pub v_proj_t: Tensor,
+    pub o_proj_t: Tensor,
 }
 
 pub struct GpuLinearAttentionWeights {
@@ -180,6 +187,13 @@ pub struct GpuFfnWeights {
     pub gate_proj: Tensor,
     pub up_proj: Tensor,
     pub down_proj: Tensor,
+    /// Pre-transposed MLP projections for the forward hot path (contiguous).
+    /// Avoids re-transposing bf16 projection weights on every layer / every step.
+    /// Per PR #124 PROFILING.md: MLP projection ucopy_bf16 was 50.7% of decode GPU time
+    /// (61.8% of all ucopy_bf16 mass). Same class of fix as PR #117 (embed_tokens_t).
+    pub gate_proj_t: Tensor,
+    pub up_proj_t: Tensor,
+    pub down_proj_t: Tensor,
 }
 
 /// State for Gated DeltaNet linear attention layers.
@@ -266,13 +280,29 @@ impl GpuWeights {
 
             let attention = match &lw.attention {
                 crate::weights::AttentionWeights::Full(attn) => {
+                    let q_proj = weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?;
+                    let k_proj = weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
+                    let v_proj = weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
+                    let o_proj = weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
+                    let q_proj_t = q_proj.t().context(ctx("q_proj.t"))?
+                        .contiguous().context(ctx("q_proj.t contiguous"))?;
+                    let k_proj_t = k_proj.t().context(ctx("k_proj.t"))?
+                        .contiguous().context(ctx("k_proj.t contiguous"))?;
+                    let v_proj_t = v_proj.t().context(ctx("v_proj.t"))?
+                        .contiguous().context(ctx("v_proj.t contiguous"))?;
+                    let o_proj_t = o_proj.t().context(ctx("o_proj.t"))?
+                        .contiguous().context(ctx("o_proj.t contiguous"))?;
                     GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                        q_proj: weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?,
-                        k_proj: weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?,
-                        v_proj: weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?,
-                        o_proj: weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?,
+                        q_proj,
+                        k_proj,
+                        v_proj,
+                        o_proj,
                         q_norm: weight_to_tensor(&attn.q_norm, device).context(ctx("q_norm"))?,
                         k_norm: weight_to_tensor(&attn.k_norm, device).context(ctx("k_norm"))?,
+                        q_proj_t,
+                        k_proj_t,
+                        v_proj_t,
+                        o_proj_t,
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
@@ -295,10 +325,22 @@ impl GpuWeights {
                 }
             };
 
+            let gate_proj = weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?;
+            let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
+            let down_proj = weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
+            let gate_proj_t = gate_proj.t().context(ctx("gate_proj.t"))?
+                .contiguous().context(ctx("gate_proj.t contiguous"))?;
+            let up_proj_t = up_proj.t().context(ctx("up_proj.t"))?
+                .contiguous().context(ctx("up_proj.t contiguous"))?;
+            let down_proj_t = down_proj.t().context(ctx("down_proj.t"))?
+                .contiguous().context(ctx("down_proj.t contiguous"))?;
             let mlp = GpuFfnWeights {
-                gate_proj: weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?,
-                up_proj: weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?,
-                down_proj: weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?,
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_proj_t,
+                up_proj_t,
+                down_proj_t,
             };
 
             layers.push(GpuLayerWeights {
@@ -470,40 +512,40 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, head_dim: usize, rotary_di
 /// Computes: down_proj @ (silu(gate_proj @ x) * (up_proj @ x))
 ///
 /// `x`: [batch, seq_len, hidden_size]
-/// `gate_proj`: [intermediate_size, hidden_size]
-/// `up_proj`: [intermediate_size, hidden_size]
-/// `down_proj`: [hidden_size, intermediate_size]
+/// `gate_proj_t`: [hidden_size, intermediate_size] (pre-transposed)
+/// `up_proj_t`: [hidden_size, intermediate_size] (pre-transposed)
+/// `down_proj_t`: [intermediate_size, hidden_size] (pre-transposed)
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn swiglu_ffn(
     x: &Tensor,
-    gate_proj: &Tensor,
-    up_proj: &Tensor,
-    down_proj: &Tensor,
+    gate_proj_t: &Tensor,
+    up_proj_t: &Tensor,
+    down_proj_t: &Tensor,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    // x @ gate_proj^T -> [batch, seq_len, intermediate_size]
+    // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
-        linear_with_lora(x, gate_proj, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(x, gate_proj_t, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?
     };
     // SiLU activation: x * sigmoid(x)
     let gate = cuda_silu(&gate)?;
-    // x @ up_proj^T -> [batch, seq_len, intermediate_size]
+    // x @ up_proj_t -> [batch, seq_len, intermediate_size]
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
-        linear_with_lora(x, up_proj, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(x, up_proj_t, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?
     };
     // Element-wise multiply
     let hidden = (gate * up)?;
-    // hidden @ down_proj^T -> [batch, seq_len, hidden_size]
+    // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
-        linear_with_lora(&hidden, down_proj, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(&hidden, down_proj_t, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?
     };
     Ok(out)
 }
@@ -1242,9 +1284,9 @@ pub fn gqa_attention(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
-        let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
-        let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+        let q_raw = linear_with_lora_t(x, &attn_weights.q_proj_t, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+        let k = linear_with_lora_t(x, &attn_weights.k_proj_t, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
+        let v = linear_with_lora_t(x, &attn_weights.v_proj_t, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
         (q_raw, k, v)
     };
 
@@ -1295,7 +1337,7 @@ pub fn gqa_attention(
         };
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+            linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
         };
         return Ok(out);
     }
@@ -1368,7 +1410,7 @@ pub fn gqa_attention(
     // Output projection
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
     };
     Ok(out)
 }
@@ -1522,9 +1564,9 @@ fn try_flash_attn_paged_decode(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora(
+        linear_with_lora_t(
             &attn_output,
-            &attn_weights.o_proj,
+            &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
         )?
@@ -1566,9 +1608,9 @@ pub fn gqa_attention_paged(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = linear_with_lora(x, &attn_weights.q_proj, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
-        let k = linear_with_lora(x, &attn_weights.k_proj, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
-        let v = linear_with_lora(x, &attn_weights.v_proj, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+        let q_raw = linear_with_lora_t(x, &attn_weights.q_proj_t, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+        let k = linear_with_lora_t(x, &attn_weights.k_proj_t, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
+        let v = linear_with_lora_t(x, &attn_weights.v_proj_t, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
         (q_raw, k, v)
     };
 
@@ -1690,7 +1732,7 @@ pub fn gqa_attention_paged(
         };
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+            linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
         };
         return Ok(out);
     }
@@ -1756,7 +1798,7 @@ pub fn gqa_attention_paged(
         };
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+            linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
         };
         return Ok(out);
     }
@@ -1804,7 +1846,7 @@ pub fn gqa_attention_paged(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora(&attn_output, &attn_weights.o_proj, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
     };
     Ok(out)
 }
@@ -1930,9 +1972,9 @@ pub fn transformer_block(
     // Feed-forward network
     let ffn_out = swiglu_ffn(
         &normed,
-        &layer.mlp.gate_proj,
-        &layer.mlp.up_proj,
-        &layer.mlp.down_proj,
+        &layer.mlp.gate_proj_t,
+        &layer.mlp.up_proj_t,
+        &layer.mlp.down_proj_t,
         lora,
     )?;
 
@@ -2012,9 +2054,9 @@ pub fn transformer_block_paged(
     // Feed-forward network
     let ffn_out = swiglu_ffn(
         &normed,
-        &layer.mlp.gate_proj,
-        &layer.mlp.up_proj,
-        &layer.mlp.down_proj,
+        &layer.mlp.gate_proj_t,
+        &layer.mlp.up_proj_t,
+        &layer.mlp.down_proj_t,
         lora,
     )?;
 
@@ -2122,9 +2164,9 @@ pub fn model_forward(
                 };
                 let ffn_out = swiglu_ffn(
                     &normed_post,
-                    &layer.mlp.gate_proj,
-                    &layer.mlp.up_proj,
-                    &layer.mlp.down_proj,
+                    &layer.mlp.gate_proj_t,
+                    &layer.mlp.up_proj_t,
+                    &layer.mlp.down_proj_t,
                     layer_lora,
                 )?;
                 hidden = {
@@ -2228,9 +2270,9 @@ pub fn model_forward_segment(
                 };
                 let ffn_out = swiglu_ffn(
                     &normed_post,
-                    &layer.mlp.gate_proj,
-                    &layer.mlp.up_proj,
-                    &layer.mlp.down_proj,
+                    &layer.mlp.gate_proj_t,
+                    &layer.mlp.up_proj_t,
+                    &layer.mlp.down_proj_t,
                     layer_lora,
                 )?;
                 hidden = {
@@ -2377,9 +2419,9 @@ pub fn model_forward_paged(
                 };
                 let ffn_out = swiglu_ffn(
                     &normed_post,
-                    &layer.mlp.gate_proj,
-                    &layer.mlp.up_proj,
-                    &layer.mlp.down_proj,
+                    &layer.mlp.gate_proj_t,
+                    &layer.mlp.up_proj_t,
+                    &layer.mlp.down_proj_t,
                     layer_lora,
                 )?;
                 hidden = {
@@ -2616,8 +2658,11 @@ mod tests {
         let gate = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
         let up = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
         let down = Tensor::randn(0.0_f32, 0.1, (hidden, intermediate), &device)?;
+        let gate_t = gate.t()?.contiguous()?;
+        let up_t = up.t()?.contiguous()?;
+        let down_t = down.t()?.contiguous()?;
 
-        let result = swiglu_ffn(&x, &gate, &up, &down, None)?;
+        let result = swiglu_ffn(&x, &gate_t, &up_t, &down_t, None)?;
         assert_eq!(result.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -2634,8 +2679,11 @@ mod tests {
         let gate = Tensor::zeros((intermediate, hidden), DType::F32, &device)?;
         let up = Tensor::ones((intermediate, hidden), DType::F32, &device)?;
         let down = Tensor::ones((hidden, intermediate), DType::F32, &device)?;
+        let gate_t = gate.t()?.contiguous()?;
+        let up_t = up.t()?.contiguous()?;
+        let down_t = down.t()?.contiguous()?;
 
-        let result = swiglu_ffn(&x, &gate, &up, &down, None)?;
+        let result = swiglu_ffn(&x, &gate_t, &up_t, &down_t, None)?;
         let vals = result.to_vec3::<f32>()?;
 
         for v in &vals[0][0] {
@@ -2681,13 +2729,25 @@ mod tests {
         hidden: usize,
         device: &Device,
     ) -> Result<GpuFullAttentionWeights> {
+        let q_proj = Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, hidden), device)?;
+        let k_proj = Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?;
+        let v_proj = Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?;
+        let o_proj = Tensor::randn(0.0_f32, 0.02, (hidden, num_heads * head_dim), device)?;
+        let q_proj_t = q_proj.t()?.contiguous()?;
+        let k_proj_t = k_proj.t()?.contiguous()?;
+        let v_proj_t = v_proj.t()?.contiguous()?;
+        let o_proj_t = o_proj.t()?.contiguous()?;
         Ok(GpuFullAttentionWeights {
-            q_proj: Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, hidden), device)?,
-            k_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?,
-            v_proj: Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, hidden), device)?,
-            o_proj: Tensor::randn(0.0_f32, 0.02, (hidden, num_heads * head_dim), device)?,
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
             q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
             k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+            q_proj_t,
+            k_proj_t,
+            v_proj_t,
+            o_proj_t,
         })
     }
 
@@ -2796,6 +2856,13 @@ mod tests {
         let x = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, hidden), &device)?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
+        let gate_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
+        let up_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
+        let down_proj = Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?;
+        let gate_proj_t = gate_proj.t()?.contiguous()?;
+        let up_proj_t = up_proj.t()?.contiguous()?;
+        let down_proj_t = down_proj.t()?.contiguous()?;
+
         let layer = GpuLayerWeights {
             input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
@@ -2803,9 +2870,12 @@ mod tests {
                 make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
             ),
             mlp: GpuFfnWeights {
-                gate_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
-                up_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
-                down_proj: Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?,
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_proj_t,
+                up_proj_t,
+                down_proj_t,
             },
         };
 
@@ -2831,6 +2901,13 @@ mod tests {
         let x = Tensor::ones((1, 2, hidden), DType::F32, &device)?;
         let positions = vec![0u32, 1];
 
+        let gate_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
+        let up_proj = Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?;
+        let down_proj = Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?;
+        let gate_proj_t = gate_proj.t()?.contiguous()?;
+        let up_proj_t = up_proj.t()?.contiguous()?;
+        let down_proj_t = down_proj.t()?.contiguous()?;
+
         let layer = GpuLayerWeights {
             input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
@@ -2838,9 +2915,12 @@ mod tests {
                 make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
             ),
             mlp: GpuFfnWeights {
-                gate_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
-                up_proj: Tensor::randn(0.0_f32, 0.02, (intermediate, hidden), &device)?,
-                down_proj: Tensor::randn(0.0_f32, 0.02, (hidden, intermediate), &device)?,
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_proj_t,
+                up_proj_t,
+                down_proj_t,
             },
         };
 
@@ -2880,6 +2960,9 @@ mod tests {
                 gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
                 up_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
                 down_proj: Tensor::zeros((hidden, 1), DType::F32, &device)?,
+                gate_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
+                up_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
+                down_proj_t: Tensor::zeros((1, hidden), DType::F32, &device)?,
             },
         };
 
@@ -2938,21 +3021,42 @@ mod tests {
 
         let mut layers = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
+            let q_proj = randn(&[num_heads * head_dim, hidden_size])?;
+            let k_proj = randn(&[num_kv_heads * head_dim, hidden_size])?;
+            let v_proj = randn(&[num_kv_heads * head_dim, hidden_size])?;
+            let o_proj = randn(&[hidden_size, num_heads * head_dim])?;
+            let q_proj_t = q_proj.t()?.contiguous()?;
+            let k_proj_t = k_proj.t()?.contiguous()?;
+            let v_proj_t = v_proj.t()?.contiguous()?;
+            let o_proj_t = o_proj.t()?.contiguous()?;
+            let gate_proj = randn(&[intermediate_size, hidden_size])?;
+            let up_proj = randn(&[intermediate_size, hidden_size])?;
+            let down_proj = randn(&[hidden_size, intermediate_size])?;
+            let gate_proj_t = gate_proj.t()?.contiguous()?;
+            let up_proj_t = up_proj.t()?.contiguous()?;
+            let down_proj_t = down_proj.t()?.contiguous()?;
             layers.push(GpuLayerWeights {
                 input_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
                 post_attention_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
                 attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                    q_proj: randn(&[num_heads * head_dim, hidden_size])?,
-                    k_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
-                    v_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
-                    o_proj: randn(&[hidden_size, num_heads * head_dim])?,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
                     q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
                     k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+                    q_proj_t,
+                    k_proj_t,
+                    v_proj_t,
+                    o_proj_t,
                 }),
                 mlp: GpuFfnWeights {
-                    gate_proj: randn(&[intermediate_size, hidden_size])?,
-                    up_proj: randn(&[intermediate_size, hidden_size])?,
-                    down_proj: randn(&[hidden_size, intermediate_size])?,
+                    gate_proj,
+                    up_proj,
+                    down_proj,
+                    gate_proj_t,
+                    up_proj_t,
+                    down_proj_t,
                 },
             });
         }
@@ -3276,13 +3380,25 @@ mod tests {
         for i in 0..num_layers {
             let is_full = (i + 1) % full_attention_interval == 0;
             let attention = if is_full {
+                let q_proj = randn(&[num_heads * head_dim, hidden_size])?;
+                let k_proj = randn(&[num_kv_heads * head_dim, hidden_size])?;
+                let v_proj = randn(&[num_kv_heads * head_dim, hidden_size])?;
+                let o_proj = randn(&[hidden_size, num_heads * head_dim])?;
+                let q_proj_t = q_proj.t()?.contiguous()?;
+                let k_proj_t = k_proj.t()?.contiguous()?;
+                let v_proj_t = v_proj.t()?.contiguous()?;
+                let o_proj_t = o_proj.t()?.contiguous()?;
                 GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                    q_proj: randn(&[num_heads * head_dim, hidden_size])?,
-                    k_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
-                    v_proj: randn(&[num_kv_heads * head_dim, hidden_size])?,
-                    o_proj: randn(&[hidden_size, num_heads * head_dim])?,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
                     q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
                     k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+                    q_proj_t,
+                    k_proj_t,
+                    v_proj_t,
+                    o_proj_t,
                 })
             } else {
                 GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
@@ -3298,14 +3414,23 @@ mod tests {
                 })
             };
 
+            let gate_proj = randn(&[intermediate_size, hidden_size])?;
+            let up_proj = randn(&[intermediate_size, hidden_size])?;
+            let down_proj = randn(&[hidden_size, intermediate_size])?;
+            let gate_proj_t = gate_proj.t()?.contiguous()?;
+            let up_proj_t = up_proj.t()?.contiguous()?;
+            let down_proj_t = down_proj.t()?.contiguous()?;
             layers.push(GpuLayerWeights {
                 input_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
                 post_attention_layernorm: Tensor::zeros(hidden_size, DType::F32, device)?,
                 attention,
                 mlp: GpuFfnWeights {
-                    gate_proj: randn(&[intermediate_size, hidden_size])?,
-                    up_proj: randn(&[intermediate_size, hidden_size])?,
-                    down_proj: randn(&[hidden_size, intermediate_size])?,
+                    gate_proj,
+                    up_proj,
+                    down_proj,
+                    gate_proj_t,
+                    up_proj_t,
+                    down_proj_t,
                 },
             });
         }
