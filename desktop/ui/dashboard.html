@@ -140,6 +140,43 @@
         user-select: none;
         cursor: default;
       }
+      #model-path-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        background: #1b1e24;
+        color: #a8aeb8;
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        max-width: 280px;
+        overflow: hidden;
+      }
+      #model-path-pill .model-label {
+        color: #6c7280;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+      }
+      #model-path {
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: transparent;
+        padding: 0;
+        font-size: 12px;
+        color: inherit;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        user-select: text;
+        min-width: 0;
+      }
+      #model-path.empty {
+        color: #6c7280;
+        font-family: inherit;
+        user-select: none;
+      }
     </style>
   </head>
   <body>
@@ -151,6 +188,10 @@
       <button id="open-logs" title="Open the log viewer window">View Logs</button>
       <button id="open-settings" title="Open the settings window">Settings</button>
       <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
+      <span id="model-path-pill" title="Configured model path — not set">
+        <span class="model-label">Model:</span>
+        <code id="model-path" class="empty">—</code>
+      </span>
       <code id="base-url" class="empty" title="OpenAI base URL — server not running">—</code>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
     </div>
@@ -517,9 +558,35 @@
         }
       }
 
+      const modelPathEl = document.getElementById("model-path");
+      const modelPathPill = document.getElementById("model-path-pill");
+      const MODEL_EMPTY_LABEL = "—";
+      const MODEL_EMPTY_TITLE = "Configured model path — not set";
+
+      async function refreshModelPath() {
+        if (!invoke) return;
+        try {
+          const settings = await invoke("get_settings");
+          if (settings && settings.model_path) {
+            modelPathEl.textContent = settings.model_path;
+            modelPathEl.classList.remove("empty");
+            modelPathPill.title = `Configured model path: ${settings.model_path}`;
+          } else {
+            modelPathEl.textContent = MODEL_EMPTY_LABEL;
+            modelPathEl.classList.add("empty");
+            modelPathPill.title = MODEL_EMPTY_TITLE;
+          }
+        } catch (err) {
+          console.error("get_settings failed", err);
+        }
+      }
+
+      window.addEventListener("focus", refreshModelPath);
+
       window.addEventListener("DOMContentLoaded", () => {
         load();
         pollServerState();
+        refreshModelPath();
         setInterval(pollServerState, 2000);
         setInterval(tickUptime, 1000);
       });
