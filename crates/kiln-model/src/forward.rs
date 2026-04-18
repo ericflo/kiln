@@ -218,6 +218,17 @@ pub struct GpuFfnWeights {
     pub gate_proj_t: Tensor,
     pub up_proj_t: Tensor,
     pub down_proj_t: Tensor,
+    /// Optional Marlin W4A16-packed MLP projections. Populated at load time
+    /// when the `KILN_W4A16=1` env var is set on a CUDA build whose projection
+    /// shape fits Marlin's tile constraints (k%128 && n%256). When present,
+    /// the forward path routes the corresponding projection through the
+    /// Marlin kernel instead of the BF16 `broadcast_matmul` via `*_t`. LoRA
+    /// deltas are still applied on top. Mirrors the q_proj_marlin wire-in
+    /// from PR #149 but expands coverage from 8 layers (q_proj on full-attn
+    /// layers only) to all 32 layers × 3 MLP projections.
+    pub gate_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
+    pub up_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
+    pub down_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
 }
 
 /// State for Gated DeltaNet linear attention layers.
@@ -389,6 +400,24 @@ impl GpuWeights {
                 .contiguous().context(ctx("up_proj.t contiguous"))?;
             let down_proj_t = down_proj.t().context(ctx("down_proj.t"))?
                 .contiguous().context(ctx("down_proj.t contiguous"))?;
+            // KILN_W4A16=1 opt-in: pack each MLP projection into Marlin W4A16
+            // layout once, and let the forward path route through the Marlin
+            // kernel. Skip gracefully per-projection if the shape doesn't fit
+            // Marlin's tile constraints — the forward path falls back to the
+            // BF16 `broadcast_matmul(*_t)` for any projection that returns
+            // None.
+            let (gate_proj_marlin, up_proj_marlin, down_proj_marlin) =
+                if crate::marlin_proj::env_enabled() {
+                    let g = crate::marlin_proj::pack_from_bf16(&gate_proj_t, 128)
+                        .context(ctx("gate_proj marlin pack"))?;
+                    let u = crate::marlin_proj::pack_from_bf16(&up_proj_t, 128)
+                        .context(ctx("up_proj marlin pack"))?;
+                    let d = crate::marlin_proj::pack_from_bf16(&down_proj_t, 128)
+                        .context(ctx("down_proj marlin pack"))?;
+                    (g, u, d)
+                } else {
+                    (None, None, None)
+                };
             let mlp = GpuFfnWeights {
                 gate_proj,
                 up_proj,
@@ -396,6 +425,9 @@ impl GpuWeights {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_proj_marlin,
+                up_proj_marlin,
+                down_proj_marlin,
             };
 
             layers.push(GpuLayerWeights {
@@ -588,16 +620,18 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, head_dim: usize, rotary_di
 /// Computes: down_proj @ (silu(gate_proj @ x) * (up_proj @ x))
 ///
 /// `x`: [batch, seq_len, hidden_size]
-/// `gate_proj_t`: [hidden_size, intermediate_size] (pre-transposed)
-/// `up_proj_t`: [hidden_size, intermediate_size] (pre-transposed)
-/// `down_proj_t`: [intermediate_size, hidden_size] (pre-transposed)
+/// `mlp`: MLP weight bundle, including optional Marlin W4A16-packed projections.
+///
+/// Dispatch each projection through the Marlin W4A16 path when the matching
+/// `*_marlin` field is `Some`, else the existing BF16 `broadcast_matmul(*_t)`
+/// path. LoRA deltas are always added on top so behaviour matches
+/// `linear_with_lora_t` in the absence of Marlin weights. Mirrors
+/// `q_proj_forward`'s Marlin routing from PR #149.
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn swiglu_ffn(
     x: &Tensor,
-    gate_proj_t: &Tensor,
-    up_proj_t: &Tensor,
-    down_proj_t: &Tensor,
+    mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (lora_layer, lora_scale) = match lora {
@@ -607,23 +641,68 @@ pub fn swiglu_ffn(
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
-        linear_with_lora_t(x, gate_proj_t, lora_layer.and_then(|l| l.gate_proj.as_ref()), lora_scale)?
+        mlp_proj_forward(
+            x,
+            &mlp.gate_proj_t,
+            mlp.gate_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.gate_proj.as_ref()),
+            lora_scale,
+        )?
     };
     // SiLU activation: x * sigmoid(x)
     let gate = cuda_silu(&gate)?;
     // x @ up_proj_t -> [batch, seq_len, intermediate_size]
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
-        linear_with_lora_t(x, up_proj_t, lora_layer.and_then(|l| l.up_proj.as_ref()), lora_scale)?
+        mlp_proj_forward(
+            x,
+            &mlp.up_proj_t,
+            mlp.up_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.up_proj.as_ref()),
+            lora_scale,
+        )?
     };
     // Element-wise multiply
     let hidden = (gate * up)?;
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
-        linear_with_lora_t(&hidden, down_proj_t, lora_layer.and_then(|l| l.down_proj.as_ref()), lora_scale)?
+        mlp_proj_forward(
+            &hidden,
+            &mlp.down_proj_t,
+            mlp.down_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.down_proj.as_ref()),
+            lora_scale,
+        )?
     };
     Ok(out)
+}
+
+/// Route a single MLP projection through Marlin W4A16 when packed weights are
+/// present, else fall back to the BF16 `linear_with_lora_t` path. LoRA deltas
+/// are added on top of either base matmul. Mirrors `q_proj_forward`'s routing.
+fn mlp_proj_forward(
+    x: &Tensor,
+    weight_t: &Tensor,
+    marlin: Option<&crate::marlin_proj::MarlinPackedProj>,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(packed) = marlin {
+        let base = crate::marlin_proj::matmul_bf16(x, packed)
+            .context("mlp_proj_forward: marlin matmul")?;
+        if let Some(proj) = lora {
+            let delta = compute_lora_delta(x, proj, lora_scale)
+                .context("mlp_proj_forward: lora delta")?;
+            return Ok((base + delta).context("mlp_proj_forward: add lora delta")?);
+        }
+        return Ok(base);
+    }
+    // Non-CUDA builds never carry Marlin weights; reference the parameter so
+    // the signature stays unified without a dead_code warning.
+    let _ = marlin;
+    linear_with_lora_t(x, weight_t, lora, lora_scale)
 }
 
 // ---------------------------------------------------------------------------
@@ -2142,13 +2221,7 @@ pub fn transformer_block(
     };
 
     // Feed-forward network
-    let ffn_out = swiglu_ffn(
-        &normed,
-        &layer.mlp.gate_proj_t,
-        &layer.mlp.up_proj_t,
-        &layer.mlp.down_proj_t,
-        lora,
-    )?;
+    let ffn_out = swiglu_ffn(&normed, &layer.mlp, lora)?;
 
     // Residual connection
     let out = {
@@ -2226,13 +2299,7 @@ pub fn transformer_block_paged(
     };
 
     // Feed-forward network
-    let ffn_out = swiglu_ffn(
-        &normed,
-        &layer.mlp.gate_proj_t,
-        &layer.mlp.up_proj_t,
-        &layer.mlp.down_proj_t,
-        lora,
-    )?;
+    let ffn_out = swiglu_ffn(&normed, &layer.mlp, lora)?;
 
     // Residual connection
     let out = {
@@ -2339,13 +2406,7 @@ pub fn model_forward(
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
                     rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
                 };
-                let ffn_out = swiglu_ffn(
-                    &normed_post,
-                    &layer.mlp.gate_proj_t,
-                    &layer.mlp.up_proj_t,
-                    &layer.mlp.down_proj_t,
-                    layer_lora,
-                )?;
+                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -2448,13 +2509,7 @@ pub fn model_forward_segment(
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
                     rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
                 };
-                let ffn_out = swiglu_ffn(
-                    &normed_post,
-                    &layer.mlp.gate_proj_t,
-                    &layer.mlp.up_proj_t,
-                    &layer.mlp.down_proj_t,
-                    layer_lora,
-                )?;
+                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -2600,13 +2655,7 @@ pub fn model_forward_paged(
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
                     rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
                 };
-                let ffn_out = swiglu_ffn(
-                    &normed_post,
-                    &layer.mlp.gate_proj_t,
-                    &layer.mlp.up_proj_t,
-                    &layer.mlp.down_proj_t,
-                    layer_lora,
-                )?;
+                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -2852,7 +2901,18 @@ mod tests {
         let up_t = up.t()?.contiguous()?;
         let down_t = down.t()?.contiguous()?;
 
-        let result = swiglu_ffn(&x, &gate_t, &up_t, &down_t, None)?;
+        let mlp = GpuFfnWeights {
+            gate_proj: gate,
+            up_proj: up,
+            down_proj: down,
+            gate_proj_t: gate_t,
+            up_proj_t: up_t,
+            down_proj_t: down_t,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        };
+        let result = swiglu_ffn(&x, &mlp, None)?;
         assert_eq!(result.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -2873,7 +2933,18 @@ mod tests {
         let up_t = up.t()?.contiguous()?;
         let down_t = down.t()?.contiguous()?;
 
-        let result = swiglu_ffn(&x, &gate_t, &up_t, &down_t, None)?;
+        let mlp = GpuFfnWeights {
+            gate_proj: gate,
+            up_proj: up,
+            down_proj: down,
+            gate_proj_t: gate_t,
+            up_proj_t: up_t,
+            down_proj_t: down_t,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        };
+        let result = swiglu_ffn(&x, &mlp, None)?;
         let vals = result.to_vec3::<f32>()?;
 
         for v in &vals[0][0] {
@@ -3070,6 +3141,9 @@ mod tests {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
             },
         };
 
@@ -3116,6 +3190,9 @@ mod tests {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
             },
         };
 
@@ -3164,6 +3241,9 @@ mod tests {
                 gate_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
                 up_proj_t: Tensor::zeros((hidden, 1), DType::F32, &device)?,
                 down_proj_t: Tensor::zeros((1, hidden), DType::F32, &device)?,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
             },
         };
 
@@ -3260,6 +3340,9 @@ mod tests {
                     gate_proj_t,
                     up_proj_t,
                     down_proj_t,
+                    gate_proj_marlin: None,
+                    up_proj_marlin: None,
+                    down_proj_marlin: None,
                 },
             });
         }
@@ -3654,6 +3737,9 @@ mod tests {
                     gate_proj_t,
                     up_proj_t,
                     down_proj_t,
+                    gate_proj_marlin: None,
+                    up_proj_marlin: None,
+                    down_proj_marlin: None,
                 },
             });
         }
