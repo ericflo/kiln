@@ -184,6 +184,28 @@ async fn get_kiln_url(
     }
 }
 
+/// Open the kiln /ui page in the user's default external browser. This gives
+/// users devtools/bookmarking/URL-sharing access without crowding the in-app
+/// dashboard toolbar. Returns Err when the server is not running so the UI
+/// can surface an appropriate hint.
+#[tauri::command]
+async fn open_kiln_ui_in_browser(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    let server_state = sup.state().await;
+    let (host, port) = {
+        let s = state.read().await;
+        (s.host.clone(), s.port)
+    };
+    match tray::kiln_ui_url(&server_state, &host, port) {
+        Some(url) => app.shell().open(url, None).map_err(|e| e.to_string()),
+        None => Err("Kiln server is not running".into()),
+    }
+}
+
 /// Return the OpenAI-compatible base URL (`http://<host>:<port>/v1`) based on
 /// current settings, but only when the supervisor reports a state that should
 /// have the HTTP server up. Returns an empty string when the server is
@@ -413,6 +435,7 @@ fn main() {
             set_settings,
             get_kiln_url,
             get_openai_base_url,
+            open_kiln_ui_in_browser,
             get_active_adapter,
             get_training_status,
             open_settings,

@@ -6,6 +6,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_shell::ShellExt;
 use tokio::sync::RwLock;
 
 use crate::settings::Settings;
@@ -20,6 +21,7 @@ const ITEM_STOP: &str = "stop_server";
 const ITEM_RESTART: &str = "restart_server";
 const ITEM_LOGS: &str = "view_logs";
 const ITEM_COPY_URL: &str = "copy_openai_url";
+const ITEM_OPEN_IN_BROWSER: &str = "open_in_browser";
 const ITEM_CHECK_UPDATES: &str = "check_updates";
 const ITEM_QUIT: &str = "quit";
 
@@ -51,6 +53,8 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
     let settings = MenuItemBuilder::with_id(ITEM_SETTINGS, "Settings…").build(app)?;
     let copy_url =
         MenuItemBuilder::with_id(ITEM_COPY_URL, "Copy OpenAI Base URL").build(app)?;
+    let open_in_browser =
+        MenuItemBuilder::with_id(ITEM_OPEN_IN_BROWSER, "Open Kiln UI in Browser").build(app)?;
     let start = MenuItemBuilder::with_id(ITEM_START, "Start Server").build(app)?;
     let stop = MenuItemBuilder::with_id(ITEM_STOP, "Stop Server")
         .enabled(false)
@@ -68,7 +72,7 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .separator()
         .items(&[&dashboard, &settings])
         .separator()
-        .item(&copy_url)
+        .items(&[&copy_url, &open_in_browser])
         .separator()
         .items(&[&start, &stop, &restart, &logs])
         .separator()
@@ -136,6 +140,14 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                         copy_openai_base_url_to_clipboard(&app_handle, supervisor).await;
                     });
                 }
+                ITEM_OPEN_IN_BROWSER => {
+                    let supervisor = Arc::clone(&supervisor);
+                    let app_for_emit = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        open_kiln_ui_in_default_browser(&app_handle, supervisor).await;
+                    });
+                    let _ = app_for_emit.emit("menu://open-in-browser", ());
+                }
                 ITEM_CHECK_UPDATES => {
                     if let Err(e) = open_dashboard_window(&app_handle) {
                         eprintln!("[tray] open_dashboard_window failed: {}", e);
@@ -190,6 +202,40 @@ fn open_dashboard_window(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
     win.set_focus()?;
     Ok(())
+}
+
+/// Return the kiln `/ui` URL for the current server state, or `None` when
+/// the server is Stopped or in Error. Pure function kept out of the Tauri
+/// runtime so it can be unit-tested directly.
+pub(crate) fn kiln_ui_url(state: &ServerState, host: &str, port: u16) -> Option<String> {
+    match state {
+        ServerState::Stopped | ServerState::Error(_) => None,
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            Some(format!("http://{}:{}/ui", host, port))
+        }
+    }
+}
+
+async fn open_kiln_ui_in_default_browser(app: &AppHandle, supervisor: Arc<Supervisor>) {
+    let state = supervisor.state().await;
+    let (host, port) = {
+        let settings_state = app.state::<Arc<RwLock<Settings>>>();
+        let s = settings_state.read().await;
+        (s.host.clone(), s.port)
+    };
+    match kiln_ui_url(&state, &host, port) {
+        Some(url) => {
+            if let Err(e) = app.shell().open(url, None) {
+                eprintln!("[tray] open_kiln_ui_in_default_browser shell.open failed: {}", e);
+            }
+        }
+        None => {
+            eprintln!(
+                "[tray] open Kiln UI skipped — server not running (state: {})",
+                state_label(&state)
+            );
+        }
+    }
 }
 
 async fn copy_openai_base_url_to_clipboard(app: &AppHandle, supervisor: Arc<Supervisor>) {
@@ -461,6 +507,39 @@ mod tests {
         assert_eq!(
             format_tray_tooltip(&ServerState::Running, 12345),
             "kiln: Running on :12345"
+        );
+    }
+
+    #[test]
+    fn kiln_ui_url_returns_none_for_stopped() {
+        assert_eq!(kiln_ui_url(&ServerState::Stopped, "127.0.0.1", 9000), None);
+    }
+
+    #[test]
+    fn kiln_ui_url_returns_none_for_error() {
+        assert_eq!(
+            kiln_ui_url(&ServerState::Error("boom".into()), "127.0.0.1", 9000),
+            None
+        );
+        assert_eq!(
+            kiln_ui_url(&ServerState::Error(String::new()), "127.0.0.1", 9000),
+            None
+        );
+    }
+
+    #[test]
+    fn kiln_ui_url_returns_url_for_running_and_training() {
+        assert_eq!(
+            kiln_ui_url(&ServerState::Running, "127.0.0.1", 9000),
+            Some("http://127.0.0.1:9000/ui".to_string())
+        );
+        assert_eq!(
+            kiln_ui_url(&ServerState::TrainingActive, "127.0.0.1", 9000),
+            Some("http://127.0.0.1:9000/ui".to_string())
+        );
+        assert_eq!(
+            kiln_ui_url(&ServerState::Starting, "127.0.0.1", 8080),
+            Some("http://127.0.0.1:8080/ui".to_string())
         );
     }
 
