@@ -4,17 +4,26 @@
 //! tokenizer I/O, the paged pool's memory allocation, and every op not in the
 //! MLX fast path. MLX takes over the fused attention primitive
 //! (`fast::scaled_dot_product_attention`) which is hand-tuned by Apple for
-//! Apple Silicon and outperforms candle SDPA in published benchmarks.
+//! Apple Silicon.
 //!
-//! Tensors cross the candle↔mlx boundary via a host copy (`to_vec` +
-//! `Array::from_slice`). On Apple Silicon's unified memory pool this is a
-//! memcpy, not a PCIe transfer — slow compared to kernel time for big tensors
-//! but fine as a first-cut. Zero-copy via shared `MTLBuffer` handles is a
-//! follow-up optimization documented in MACOS_MLX_PLAN.md.
+//! Tensors cross the candle↔mlx boundary via a host copy. On unified memory
+//! this is a memcpy, not a PCIe transfer, but it's still a per-call cost;
+//! zero-copy via shared `MTLBuffer` handles is a follow-up.
 //!
 //! Build requirements: full Xcode (for `xcrun metal` — MLX AOT-compiles MSL,
-//! unlike candle-metal which JITs at runtime). Accept the Xcode license with
-//! `sudo xcodebuild -license accept` before `cargo build --features mlx`.
+//! unlike candle-metal which JITs at runtime), plus the on-demand Metal
+//! Toolchain (`xcodebuild -downloadComponent MetalToolchain`) and an
+//! accepted license (`sudo xcodebuild -license accept`).
+//!
+//! Testing: run with `--test-threads=1` when the suite also includes
+//! candle-metal tests. MLX and candle-metal both grab the default Metal
+//! device and can SIGSEGV under concurrent access.
+//!
+//! Stride handling: MLX's fused SDPA sometimes returns arrays whose physical
+//! memory layout doesn't match the logical shape (e.g., strides
+//! `[8192, 128, 256, 1]` on a `[1,2,32,128]` output). `Array::as_slice` is a
+//! raw-memory view that ignores strides, so we explicitly walk the logical
+//! shape when copying back to candle.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
@@ -172,9 +181,9 @@ fn mlx_sdpa_dtype_supported(dtype: DType) -> bool {
     matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
 }
 
-/// candle → mlx via a host copy. BF16 has no direct `from_slice` on `Array`,
-/// so we route through f32 for BF16 tensors (small accuracy cost on the
-/// boundary; the recomputation on the MLX side runs in its native dtype).
+/// candle → mlx via a host copy. `Array::from_slice` accepts native Rust
+/// types (f32, i32, etc.) — no direct bf16, so we route f16/bf16 tensors
+/// through f32 and rely on `as_dtype` for the mlx-side downcast.
 fn tensor_to_array(t: &Tensor) -> Result<Array> {
     let shape: Vec<i32> = t.dims().iter().map(|&d| d as i32).collect();
     let t_contig = t.contiguous()?;
@@ -186,19 +195,23 @@ fn tensor_to_array(t: &Tensor) -> Result<Array> {
         DType::F16 => {
             let data = t_contig.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             let a = Array::from_slice(&data, &shape);
-            Ok(a.astype(MlxDtype::Float16)?)
+            Ok(a.as_dtype(MlxDtype::Float16)?)
         }
         DType::BF16 => {
             let data = t_contig.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             let a = Array::from_slice(&data, &shape);
-            Ok(a.astype(MlxDtype::Bfloat16)?)
+            Ok(a.as_dtype(MlxDtype::Bfloat16)?)
         }
         other => anyhow::bail!("tensor_to_array: unsupported dtype {other:?}"),
     }
 }
 
-/// mlx → candle via a host copy. Forces an `eval` so lazy mlx graphs don't
-/// leak across the boundary.
+/// mlx → candle via a host copy. MLX's fused kernels sometimes return
+/// arrays whose physical memory layout doesn't match the logical shape
+/// (strides [8192, 128, 256, 1] for a [1,2,32,128] SDPA output on M1 was
+/// the motivating case). `Array::as_slice` gives us the raw buffer
+/// ignoring strides, so we explicitly walk the logical shape with the
+/// reported strides to materialize a row-major `Vec<f32>`.
 fn array_to_tensor(
     arr: &Array,
     out_dtype: DType,
@@ -207,20 +220,59 @@ fn array_to_tensor(
 ) -> Result<Tensor> {
     arr.eval()?;
     let f32_arr = if arr.dtype() != MlxDtype::Float32 {
-        arr.astype(MlxDtype::Float32)?
+        arr.as_dtype(MlxDtype::Float32)?
     } else {
         arr.clone()
     };
     f32_arr.eval()?;
-    let host: Vec<f32> = f32_arr
-        .try_into()
-        .context("mlx Array::try_into::<Vec<f32>> failed")?;
-    let tensor = Tensor::from_vec(host, shape, device)?;
+
+    let raw = f32_arr.as_slice::<f32>();
+    let strides = f32_arr.strides();
+    let total: usize = shape.iter().product();
+
+    let row_major = if is_row_major(shape, strides) {
+        raw.to_vec()
+    } else {
+        let mut dst = Vec::with_capacity(total);
+        let ndim = shape.len();
+        let mut idx = vec![0usize; ndim];
+        for _ in 0..total {
+            let mut phys = 0usize;
+            for dim in 0..ndim {
+                phys += idx[dim] * strides[dim];
+            }
+            dst.push(raw[phys]);
+            for dim in (0..ndim).rev() {
+                idx[dim] += 1;
+                if idx[dim] < shape[dim] {
+                    break;
+                }
+                idx[dim] = 0;
+            }
+        }
+        dst
+    };
+
+    let tensor = Tensor::from_vec(row_major, shape, device)?;
     if tensor.dtype() != out_dtype {
         Ok(tensor.to_dtype(out_dtype)?)
     } else {
         Ok(tensor)
     }
+}
+
+fn is_row_major(shape: &[usize], strides: &[usize]) -> bool {
+    if shape.len() != strides.len() {
+        return false;
+    }
+    let mut expected: usize = 1;
+    for dim in (0..shape.len()).rev() {
+        if shape[dim] != 1 && strides[dim] != expected {
+            return false;
+        }
+        expected *= shape[dim];
+    }
+    true
 }
 
 #[cfg(test)]
@@ -232,47 +284,112 @@ mod tests {
     /// SDPA on the same inputs (within BF16-rounding tolerance). Exercises
     /// the candle ↔ mlx Array round-trip + mlx's fused SDPA. Gated behind
     /// `--features mlx` because it links against mlx-sys.
-    #[test]
-    fn test_prefill_parity_vs_candle_sdpa() -> Result<()> {
+    /// Naive F32 attention reference: `softmax(Q @ K^T * scale) @ V`, optionally
+    /// causal-masked. Works in candle F32 on any device — both MLX SDPA and
+    /// candle SDPA should agree with this up to floating-point rounding.
+    fn naive_attention(
+        q: &Tensor, // [batch, heads, seq_q, head_dim]
+        k: &Tensor, // [batch, heads, seq_k, head_dim]
+        v: &Tensor, // [batch, heads, seq_k, head_dim]
+        scale: f32,
+        causal: bool,
+    ) -> Result<Tensor> {
+        let scores = q.matmul(&k.transpose(candle_core::D::Minus2, candle_core::D::Minus1)?)?;
+        let scores = (scores * scale as f64)?;
+        let scores = if causal {
+            let (_, _, sq, sk) = scores.dims4()?;
+            let mask: Vec<f32> = (0..sq)
+                .flat_map(|i| (0..sk).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
+                .collect();
+            let mask_t = Tensor::from_vec(mask, (sq, sk), scores.device())?;
+            scores.broadcast_add(&mask_t)?
+        } else {
+            scores
+        };
+        let weights = candle_nn::ops::softmax_last_dim(&scores)?;
+        Ok(weights.matmul(v)?)
+    }
+
+    fn run_parity(causal: bool) -> Result<(f32, f32)> {
         let device = match Device::new_metal(0) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Metal unavailable, skipping mlx parity test: {e}");
-                return Ok(());
+                eprintln!("Metal unavailable: {e}");
+                return Ok((0.0, 0.0));
             }
         };
 
         let (batch, seq_len, num_heads, head_dim) = (1, 12, 4, 128);
-        let q = Tensor::randn(0.0f32, 0.02, (batch, seq_len, num_heads, head_dim), &device)?;
-        let k = Tensor::randn(0.0f32, 0.02, (batch, seq_len, num_heads, head_dim), &device)?;
-        let v = Tensor::randn(0.0f32, 0.02, (batch, seq_len, num_heads, head_dim), &device)?;
+        let q = Tensor::randn(0.0f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
+        let k = Tensor::randn(0.0f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
+        let v = Tensor::randn(0.0f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
         let scale = 1.0 / (head_dim as f32).sqrt();
 
         let backend = MlxBackend::new(device.clone());
         let mlx_out = backend
-            .flash_attn_prefill(&q, &k, &v, scale, true)?
+            .flash_attn_prefill(&q, &k, &v, scale, causal)?
             .expect("mlx backend should handle this shape");
 
-        // Reference: candle SDPA on the same inputs.
         let q_t = q.transpose(1, 2)?.contiguous()?;
         let k_t = k.transpose(1, 2)?.contiguous()?;
         let v_t = v.transpose(1, 2)?.contiguous()?;
-        let ref_out = candle_nn::ops::sdpa(&q_t, &k_t, &v_t, None, true, scale, 1.0)?;
-        let ref_out = ref_out.transpose(1, 2)?.contiguous()?;
+        let naive_out = naive_attention(&q_t, &k_t, &v_t, scale, causal)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let candle_out = candle_nn::ops::sdpa(&q_t, &k_t, &v_t, None, causal, scale, 1.0)?
+            .transpose(1, 2)?
+            .contiguous()?;
 
-        assert_eq!(mlx_out.dims(), ref_out.dims());
-        let diff = (&mlx_out - &ref_out)?
+        let mlx_diff = (&mlx_out - &naive_out)?
             .abs()?
             .flatten_all()?
             .max(D::Minus1)?
             .to_scalar::<f32>()?;
-        // BF16 round-trip on the boundary (f32 → bf16 → f32) is the
-        // dominant error source. 5e-3 fits M1/M2 measurements; tighten on
-        // better hardware if it proves conservative.
-        assert!(
-            diff < 5e-3,
-            "mlx vs candle SDPA diverge: max abs diff = {diff}"
+        let candle_diff = (&candle_out - &naive_out)?
+            .abs()?
+            .flatten_all()?
+            .max(D::Minus1)?
+            .to_scalar::<f32>()?;
+        eprintln!(
+            "parity (causal={causal}): mlx_vs_naive={mlx_diff:.5}, candle_vs_naive={candle_diff:.5}"
         );
+        Ok((mlx_diff, candle_diff))
+    }
+
+    /// MLX SDPA agrees with a naive F32 reference within 1e-3. Same tolerance
+    /// applies to candle SDPA — both are bit-inexact vs the reference due to
+    /// fused-kernel accumulation, but both should land in the same ballpark.
+    /// Diagnostic: round-trip a tensor through the candle↔mlx conversion.
+    /// Must be bit-identical for F32 inputs.
+    #[test]
+    fn test_tensor_roundtrip_f32() -> Result<()> {
+        let device = match Device::new_metal(0) {
+            Ok(d) => d,
+            Err(_) => return Ok(()),
+        };
+        let shape = &[1usize, 4, 12, 128];
+        let t = Tensor::randn(0.0f32, 1.0, shape, &device)?;
+        let arr = tensor_to_array(&t)?;
+        let back = array_to_tensor(&arr, DType::F32, &device, shape)?;
+        let diff = (&t - &back)?.abs()?.flatten_all()?.max(D::Minus1)?.to_scalar::<f32>()?;
+        eprintln!("roundtrip max abs diff: {diff}");
+        assert!(diff < 1e-6, "tensor round-trip should be identity: {diff}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_prefill_vs_naive_noncausal() -> Result<()> {
+        let (mlx_diff, candle_diff) = run_parity(false)?;
+        assert!(mlx_diff < 1e-3, "MLX SDPA diverges from naive reference: {mlx_diff}");
+        assert!(candle_diff < 1e-3, "candle SDPA diverges from naive reference: {candle_diff}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_prefill_vs_naive_causal() -> Result<()> {
+        let (mlx_diff, candle_diff) = run_parity(true)?;
+        assert!(mlx_diff < 1e-3, "MLX SDPA (causal) diverges from naive: {mlx_diff}");
+        assert!(candle_diff < 1e-3, "candle SDPA (causal) diverges from naive: {candle_diff}");
         Ok(())
     }
 }

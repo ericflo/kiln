@@ -117,13 +117,22 @@ Once the Metal backend is landed and the trait is stable:
   without the full-Xcode requirement; `--features mlx` is the peak-perf
   opt-in).
 
-**Build requirement:** `--features mlx` pulls in `mlx-sys`, which AOT
-compiles MLX's Metal kernels at build time. This needs the `metal`
-shader compiler from full Xcode (not just Command Line Tools). First
-build on a machine requires `sudo xcodebuild -license accept`. By
-contrast, `--features metal` uses candle-metal which JITs MSL at
-runtime and works with CLT alone — that stays the default Apple Silicon
-path.
+**Build requirement for `--features mlx`:**
+
+1. Full Xcode (not just Command Line Tools).
+2. Accepted license: `sudo xcodebuild -license accept`.
+3. On-demand Metal Toolchain component (Xcode 16+ split this out):
+   `xcodebuild -downloadComponent MetalToolchain` (~700 MB download).
+4. CMake ≥ 3.25 (mlx-sys's vendored MLX source requires it).
+
+`--features metal` uses candle-metal which JITs MSL at runtime and
+works with CLT alone — that stays the default Apple Silicon path.
+
+**Testing:** MLX and candle-metal both grab the default Metal device.
+Running the two test suites concurrently (the default `cargo test`
+behavior) can SIGSEGV when they contend for the device. Run with
+`--test-threads=1` when exercising `--features mlx`. CI already does
+this.
 
 ### Phase 9 — CI, benchmarks, docs
 

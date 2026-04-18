@@ -51,6 +51,34 @@ jobs:
         run: |
           cargo test --locked --features metal -- --test-threads=1 --skip test_env_var_overrides --skip test_health_with_real_backend
 
+  macos-mlx:
+    name: macOS / MLX (M-series)
+    runs-on: macos-14
+    # mlx-sys AOT-compiles MLX's MSL kernels via `xcrun metal`, which needs
+    # the Metal Toolchain and an accepted Xcode license. GitHub's macos-14
+    # runners have full Xcode with license pre-accepted; we still have to
+    # download the on-demand Metal Toolchain component.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Download Metal Toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Build (MLX)
+        run: cargo build --locked --features mlx
+
+      - name: Test (MLX — serialized; candle-metal + mlx-rs share the Metal
+          device, so concurrent tests can SIGSEGV)
+        run: |
+          cargo test --locked --features mlx -- --test-threads=1 \
+            --skip test_env_var_overrides --skip test_health_with_real_backend
+
   linux-default:
     name: Linux / default features
     runs-on: ubuntu-22.04
