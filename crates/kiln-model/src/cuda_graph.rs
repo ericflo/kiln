@@ -31,11 +31,14 @@
 //! - Falls back gracefully to eager execution if capture fails.
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
+use candle_core::Device;
+#[cfg(feature = "cuda")]
+use candle_core::Tensor;
 use tracing;
 
 use kiln_core::config::ModelConfig;
 
+use crate::backend::BackendRuntime;
 use crate::forward::{model_forward_paged, GpuWeights, LinearAttentionState};
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
@@ -115,8 +118,10 @@ impl CudaGraphRunner {
     /// 1. First call → eager warmup (primes GPU allocator pools).
     /// 2. Second call → attempt CUDA graph capture; fall back to eager on failure.
     /// 3. Subsequent calls → replay captured graph; fall back to eager on failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn decode_step_paged(
         &mut self,
+        backend: &dyn BackendRuntime,
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
@@ -128,7 +133,8 @@ impl CudaGraphRunner {
     ) -> Result<candle_core::Tensor> {
         if !self.enabled {
             return Self::eager_forward(
-                token_id, weights, config, paged_cache, block_table, seq_len, linear_state, lora,
+                backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                linear_state, lora,
             );
         }
 
@@ -137,7 +143,8 @@ impl CudaGraphRunner {
             self.warmup_done = true;
             tracing::debug!("CUDA graph: warmup decode step");
             return Self::eager_forward(
-                token_id, weights, config, paged_cache, block_table, seq_len, linear_state, lora,
+                backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                linear_state, lora,
             );
         }
 
@@ -154,7 +161,7 @@ impl CudaGraphRunner {
                         self.captured = None;
                         self.enabled = false;
                         return Self::eager_forward(
-                            token_id, weights, config, paged_cache, block_table, seq_len,
+                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
                             linear_state, lora,
                         );
                     }
@@ -168,8 +175,8 @@ impl CudaGraphRunner {
                             self.captured = None;
                             self.enabled = false;
                             return Self::eager_forward(
-                                token_id, weights, config, paged_cache, block_table, seq_len,
-                                linear_state, lora,
+                                backend, token_id, weights, config, paged_cache, block_table,
+                                seq_len, linear_state, lora,
                             );
                         }
                     }
@@ -181,14 +188,15 @@ impl CudaGraphRunner {
 
             // Phase 2: capture
             match self.try_capture(
-                token_id, weights, config, paged_cache, block_table, seq_len, linear_state, lora,
+                backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                linear_state, lora,
             ) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
                     tracing::warn!("CUDA graph capture failed: {e:#}, using eager decode");
                     self.enabled = false;
                     return Self::eager_forward(
-                        token_id, weights, config, paged_cache, block_table, seq_len,
+                        backend, token_id, weights, config, paged_cache, block_table, seq_len,
                         linear_state, lora,
                     );
                 }
@@ -197,7 +205,8 @@ impl CudaGraphRunner {
 
         #[cfg(not(feature = "cuda"))]
         Self::eager_forward(
-            token_id, weights, config, paged_cache, block_table, seq_len, linear_state, lora,
+            backend, token_id, weights, config, paged_cache, block_table, seq_len, linear_state,
+            lora,
         )
     }
 
@@ -246,8 +255,10 @@ impl CudaGraphRunner {
 
     /// Attempt to capture a CUDA graph during a decode forward pass.
     #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
     fn try_capture(
         &mut self,
+        backend: &dyn BackendRuntime,
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
@@ -287,6 +298,7 @@ impl CudaGraphRunner {
         // All kernels are captured, including RoPE which reads from
         // position_buffer's stable GPU address.
         let logits_result = model_forward_paged(
+            backend,
             &[token_id],
             weights,
             config,
@@ -331,7 +343,9 @@ impl CudaGraphRunner {
     }
 
     /// Eager (non-graph) paged decode.
+    #[allow(clippy::too_many_arguments)]
     fn eager_forward(
+        backend: &dyn BackendRuntime,
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
@@ -342,6 +356,7 @@ impl CudaGraphRunner {
         lora: Option<&LoraWeights>,
     ) -> Result<candle_core::Tensor> {
         model_forward_paged(
+            backend,
             &[token_id],
             weights,
             config,

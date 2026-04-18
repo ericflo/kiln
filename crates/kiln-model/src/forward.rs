@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
+use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{linear_with_lora_t, LoraLayerWeights, LoraWeights};
 use crate::paged_kv_cache::PagedKvCache;
@@ -49,22 +50,25 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
     Ok(exp_shifted.broadcast_div(&sum_exp)?)
 }
 
-/// Compute attention using FlashAttention-2 CUDA kernels.
+/// Compute attention using a backend FlashAttention-2 fast path.
 ///
 /// Takes Q, K, V in `[batch, seq_len, num_heads, head_dim]` layout (pre-transpose).
 /// K/V may have fewer heads than Q (GQA); they are expanded to match Q's head count
 /// before calling the flash kernel, which requires uniform head counts.
 ///
-/// Returns `[batch, seq_len, num_heads * head_dim]` (already reshaped for output projection).
-#[cfg(feature = "cuda")]
+/// Routes through `backend.flash_attn_prefill`. Returns `Ok(Some(out))` with
+/// `out` shaped `[batch, seq_len, num_heads * head_dim]` (already reshaped for
+/// output projection) when the backend handles it, or `Ok(None)` when the
+/// backend declines — callers must fall back to the portable candle path.
 fn flash_attention_forward(
+    backend: &dyn BackendRuntime,
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-) -> Result<Tensor> {
+) -> Result<Option<Tensor>> {
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
     let causal = true;
 
@@ -94,14 +98,14 @@ fn flash_attention_forward(
         (k.clone(), v.clone())
     };
 
-    // flash_attn expects [batch, seq_len, num_heads, head_dim]
-    let attn_output = kiln_flash_attn::flash_attn(q, &k, &v, softmax_scale, causal)
-        .context("flash_attn kernel failed")?;
+    let Some(attn_output) = backend.flash_attn_prefill(q, &k, &v, softmax_scale, causal)? else {
+        return Ok(None);
+    };
 
     // Reshape to [batch, seq_len, hidden]
     let (batch, seq_len, _heads, _hd) = attn_output.dims4()?;
     let attn_output = attn_output.reshape((batch, seq_len, num_heads * head_dim))?;
-    Ok(attn_output)
+    Ok(Some(attn_output))
 }
 
 /// GPU-ready tensors organized by layer, converted from raw `ModelWeights` bytes.
@@ -834,29 +838,23 @@ fn slice_chunked_3d(t: &Tensor, ci: usize) -> Result<Tensor> {
 }
 
 /// Compute the chunk-local W = (I + A_strict)^{-1} (beta * V_prime) by
-/// forward substitution. On CUDA + bf16 with chunk_size <= 128 this calls
-/// the vendored `kiln-gdn-kernel` fused kernel (one CUDA block per
-/// (batch, head)). Otherwise it falls back to the per-token candle loop.
+/// forward substitution. On backends that advertise
+/// `supports_gdn_forward_substitution()` (today: CUDA + bf16 only), dispatches
+/// to the fused kernel (one kernel block per (batch, head)) when
+/// `chunk_size <= 128`. Otherwise it falls back to the per-token candle loop.
 fn compute_w_chunk(
+    backend: &dyn BackendRuntime,
     a_strict: &Tensor, // [B, nv, C, C]
     v_prime: &Tensor,  // [B, nv, C, dv]
     beta_c: &Tensor,   // [B, nv, C]
     c: usize,
 ) -> Result<Tensor> {
-    #[cfg(feature = "cuda")]
-    {
-        let disabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_ok();
-        if !disabled
-            && a_strict.device().is_cuda()
-            && a_strict.dtype() == DType::BF16
-            && v_prime.dtype() == DType::BF16
-            && beta_c.dtype() == DType::BF16
-            && c <= 128
-        {
-            kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
-            return Ok(kiln_gdn_kernel::gdn_forward_substitution(
-                a_strict, v_prime, beta_c,
-            )?);
+    // The kernel envelope is C <= 128; callers enforce this precondition so
+    // we never pay for a backend call we know will decline.
+    if c <= 128 && backend.supports_gdn_forward_substitution() {
+        kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
+        if let Some(out) = backend.gdn_forward_substitution(a_strict, v_prime, beta_c)? {
+            return Ok(out);
         }
     }
     compute_w_chunk_fallback(a_strict, v_prime, beta_c, c)
@@ -935,6 +933,7 @@ fn compute_w_chunk_fallback(
 ///
 /// Returns: `[B, nv, T, dv]`.
 fn gdn_chunkwise_recurrence(
+    backend: &dyn BackendRuntime,
     q: &Tensor,         // [B, nv, T, dk]
     k: &Tensor,         // [B, nv, T, dk]
     v: &Tensor,         // [B, nv, T, dv]
@@ -951,37 +950,34 @@ fn gdn_chunkwise_recurrence(
     // Single-token decode fast path. The chunkwise machinery (preshape,
     // decay matrix, KKT, forward sub, B_mask) costs more than the per-token
     // recurrence itself when seq_len == 1, which is the cause of the −54%
-    // decode regression in PR #80. The vendored `gdn_recurrent_forward`
-    // kernel collapses the whole recurrence into one block per (B,H).
-    #[cfg(feature = "cuda")]
-    if seq_len == 1 {
-        let disabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_ok();
-        if !disabled
-            && device.is_cuda()
-            && dtype == DType::BF16
-            && state.dtype() == DType::BF16
-        {
-            // The five squeeze+contiguous calls below each emit a bf16 ucopy
-            // kernel before the recurrent forward runs. PROFILING.md (PR #107)
-            // marks this block as the suspected source of the 24-GDN-layer
-            // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
-            // it separately from the kernel itself.
-            let (q1, k1, v1, beta1, g1) = {
-                kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
-                (
-                    q.squeeze(2)?.contiguous()?,
-                    k.squeeze(2)?.contiguous()?,
-                    v.squeeze(2)?.contiguous()?,
-                    beta.squeeze(2)?.contiguous()?,
-                    g.squeeze(2)?.contiguous()?,
-                )
-            };
-            let out = {
-                kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
-                kiln_gdn_kernel::gdn_recurrent_forward(
-                    &q1, &k1, &v1, &beta1, &g1, state,
-                )?
-            };
+    // decode regression in PR #80. The backend's `gdn_recurrent_step`
+    // kernel (CUDA today) collapses the whole recurrence into one block
+    // per (B,H).
+    if seq_len == 1
+        && dtype == DType::BF16
+        && state.dtype() == DType::BF16
+        && backend.supports_gdn_recurrent_step()
+    {
+        // The five squeeze+contiguous calls below each emit a bf16 ucopy
+        // kernel before the recurrent forward runs. PROFILING.md (PR #107)
+        // marks this block as the suspected source of the 24-GDN-layer
+        // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
+        // it separately from the kernel itself.
+        let (q1, k1, v1, beta1, g1) = {
+            kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
+            (
+                q.squeeze(2)?.contiguous()?,
+                k.squeeze(2)?.contiguous()?,
+                v.squeeze(2)?.contiguous()?,
+                beta.squeeze(2)?.contiguous()?,
+                g.squeeze(2)?.contiguous()?,
+            )
+        };
+        let out_opt = {
+            kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
+            backend.gdn_recurrent_step(&q1, &k1, &v1, &beta1, &g1, state)?
+        };
+        if let Some(out) = out_opt {
             return Ok(out.unsqueeze(2)?);
         }
     }
@@ -1071,7 +1067,7 @@ fn gdn_chunkwise_recurrence(
         // fused kernel from kiln-gdn-kernel which collapses the C-step
         // serial chain into a single block per (batch, head). On CPU or
         // outside that envelope, fall back to the per-token candle loop.
-        let w = compute_w_chunk(&a_strict, &v_prime, &beta_c, c)?; // [B, nv, C, dv]
+        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?; // [B, nv, C, dv]
 
         // QKT masked by causal decay:
         //   B_mask[t, i] = exp(G[t]-G[i]) * (q[t] · k[i]) * 1[i<=t]
@@ -1126,6 +1122,7 @@ fn gdn_chunkwise_recurrence(
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn gated_deltanet_forward(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     weights: &GpuLinearAttentionWeights,
     config: &kiln_core::config::ModelConfig,
@@ -1287,6 +1284,7 @@ pub fn gated_deltanet_forward(
     };
 
     let attn_out = gdn_chunkwise_recurrence(
+        backend,
         &q,
         &k,
         &v,
@@ -1347,6 +1345,7 @@ pub fn gated_deltanet_forward(
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn gqa_attention(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
     positions: &[u32],
@@ -1407,28 +1406,32 @@ pub fn gqa_attention(
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
     let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
 
-    // FlashAttention-2 path for prefill (seq_len > 1, no KV cache).
-    // Flash-attn takes [batch, seq_len, num_heads, head_dim] — the layout we already have.
-    // When a KV cache is present, we fall through to the naive path which handles
-    // the cache update and Q_len != KV_len masking correctly.
-    #[cfg(feature = "cuda")]
-    if seq_len > 1 && kv_cache.is_none() && q.dtype() == candle_core::DType::BF16 {
+    // Fused-attention path for prefill (seq_len > 1, no KV cache).
+    // Takes [batch, seq_len, num_heads, head_dim] — the layout we already
+    // have. When a KV cache is present we fall through to the naive path,
+    // which handles the cache update and Q_len != KV_len masking correctly.
+    // Backend declines (returns None) on dtype mismatch so non-BF16 configs
+    // (e.g. tests on F32) transparently fall back to naive softmax+matmul.
+    if seq_len > 1 && kv_cache.is_none() && backend.supports_flash_attn_prefill() {
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let v = v.contiguous()?;
-        let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
-        // Apply output gate: attn_output * sigmoid(gate)
-        let attn_output = if let Some(ref gate) = gate {
-            let sigmoid_gate = cuda_sigmoid(gate)?;
-            (attn_output * sigmoid_gate)?
-        } else {
-            attn_output
-        };
-        let out = {
-            kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
-        };
-        return Ok(out);
+        if let Some(attn_output) =
+            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
+        {
+            // Apply output gate: attn_output * sigmoid(gate)
+            let attn_output = if let Some(ref gate) = gate {
+                let sigmoid_gate = cuda_sigmoid(gate)?;
+                (attn_output * sigmoid_gate)?
+            } else {
+                attn_output
+            };
+            let out = {
+                kiln_nvtx::range!(c"kiln/proj/o");
+                linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+            };
+            return Ok(out);
+        }
     }
 
     // Transpose to [batch, heads, seq_len, head_dim] for naive attention
@@ -1520,9 +1523,9 @@ pub fn gqa_attention(
 ///
 /// ### Output
 /// `[batch, 1, num_heads * head_dim]` after o_proj (matches the slow path).
-#[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 fn try_flash_attn_paged_decode(
+    backend: &dyn BackendRuntime,
     q: &Tensor,
     paged_cache: &PagedKvCache,
     block_table: &BlockTable,
@@ -1630,7 +1633,7 @@ fn try_flash_attn_paged_decode(
 
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
 
-    let attn_out = kiln_flash_attn::flash_attn_paged_decode(
+    let attn_out = match backend.flash_attn_paged_decode(
         &q_fa,
         k_pool,
         v_pool,
@@ -1639,8 +1642,10 @@ fn try_flash_attn_paged_decode(
         block_size,
         softmax_scale,
         true,
-    )
-    .context("flash_attn_paged_decode kernel failed")?;
+    )? {
+        Some(t) => t,
+        None => return Ok(None),
+    };
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
@@ -1675,6 +1680,7 @@ fn try_flash_attn_paged_decode(
 /// The caller must ensure the block table has enough blocks allocated for all
 /// positions up to `positions.last() + 1`.
 pub fn gqa_attention_paged(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
     positions: &Tensor,
@@ -1761,19 +1767,19 @@ pub fn gqa_attention_paged(
     // Fast path: fused paged-decode flash-attention kernel.
     // Eliminates the materializing `paged_cache.read()` (an `index_select` /
     // u8→bf16 dequant) on the decode hot path. Limited to:
-    //   * CUDA + bf16 (the only kernel we compile)
+    //   * Backends that advertise `supports_flash_attn_paged_decode()`
+    //     (CUDA + bf16 today)
     //   * Decode steps (seq_len == 1)
     //   * Non-FP8 caches (the kernel reads bf16 pool slots directly)
     //   * Page sizes that divide kBlockN=128 (block_size=16 satisfies this)
     //   * Single sequence with physically contiguous block allocation
     //     (kiln's BlockManager allocates blocks in order from a free list, so
     //     a freshly-allocated single sequence is always contiguous)
-    #[cfg(feature = "cuda")]
     if seq_len == 1
-        && q.dtype() == candle_core::DType::BF16
         && !paged_cache.is_fp8()
         && (num_heads / num_kv_heads) > 1
         && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
+        && backend.supports_flash_attn_paged_decode()
     {
         // Open the fused-decode range around the call so the kernel work is
         // attributed to it. When the eligibility checks inside reject (return
@@ -1783,6 +1789,7 @@ pub fn gqa_attention_paged(
         let out_opt = {
             kiln_nvtx::range!(c"kiln/attn/full/decode_fused");
             try_flash_attn_paged_decode(
+                backend,
                 &q,
                 paged_cache,
                 block_table,
@@ -1819,28 +1826,30 @@ pub fn gqa_attention_paged(
         .context("paged KV cache read failed")?;
     let kv_len = total_seq_len;
 
-    // FlashAttention-2 path for prefill (seq_len > 1).
+    // Fused-attention path for prefill (seq_len > 1).
     // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
-    // [batch, kv_len, heads, head_dim] for flash_attn.
-    #[cfg(feature = "cuda")]
-    if seq_len > 1 && q.dtype() == candle_core::DType::BF16 {
+    // [batch, kv_len, heads, head_dim] for the backend kernel.
+    if seq_len > 1 && backend.supports_flash_attn_prefill() {
         kiln_nvtx::range!(c"kiln/attn/full/prefill");
         let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
         let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
         let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
-        let attn_output = flash_attention_forward(&q, &k, &v, num_heads, num_kv_heads, head_dim)?;
-        // Apply output gate: attn_output * sigmoid(gate)
-        let attn_output = if let Some(ref gate) = gate {
-            let sigmoid_gate = cuda_sigmoid(gate)?;
-            (attn_output * sigmoid_gate)?
-        } else {
-            attn_output
-        };
-        let out = {
-            kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
-        };
-        return Ok(out);
+        if let Some(attn_output) =
+            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
+        {
+            // Apply output gate: attn_output * sigmoid(gate)
+            let attn_output = if let Some(ref gate) = gate {
+                let sigmoid_gate = cuda_sigmoid(gate)?;
+                (attn_output * sigmoid_gate)?
+            } else {
+                attn_output
+            };
+            let out = {
+                kiln_nvtx::range!(c"kiln/proj/o");
+                linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+            };
+            return Ok(out);
+        }
     }
 
     // GQA head expansion and attention
@@ -2019,6 +2028,7 @@ fn apply_causal_mask_with_offset(
 ///
 /// Returns: [batch, seq_len, hidden_size]
 pub fn transformer_block(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     layer: &GpuLayerWeights,
     config: &kiln_core::config::ModelConfig,
@@ -2048,6 +2058,7 @@ pub fn transformer_block(
 
     // Self-attention
     let attn_out = gqa_attention(
+        backend,
         &normed,
         attn_weights,
         positions,
@@ -2097,6 +2108,7 @@ pub fn transformer_block(
 /// Same as [`transformer_block`] but reads/writes K/V through a [`PagedKvCache`]
 /// and [`BlockTable`] instead of a contiguous [`KvCache`].
 pub fn transformer_block_paged(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     layer: &GpuLayerWeights,
     config: &kiln_core::config::ModelConfig,
@@ -2128,6 +2140,7 @@ pub fn transformer_block_paged(
 
     // Self-attention with paged cache
     let attn_out = gqa_attention_paged(
+        backend,
         &normed,
         attn_weights,
         positions,
@@ -2192,6 +2205,7 @@ pub fn transformer_block_paged(
 /// - After this function returns, the caller must call `kv_cache.advance(token_ids.len())`
 ///   to update the cached sequence length.
 pub fn model_forward(
+    backend: &dyn BackendRuntime,
     token_ids: &[u32],
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
@@ -2225,6 +2239,7 @@ pub fn model_forward(
                 // Reborrow the cache for each layer call
                 let cache_ref = kv_cache.as_mut().map(|c| &mut **c);
                 hidden = transformer_block(
+                    backend,
                     &hidden,
                     layer,
                     config,
@@ -2252,6 +2267,7 @@ pub fn model_forward(
                 };
                 // Gated DeltaNet linear attention
                 let attn_out = gated_deltanet_forward(
+                    backend,
                     &normed,
                     lin_weights,
                     config,
@@ -2307,6 +2323,7 @@ pub fn model_forward(
 ///
 /// Returns: [1, seq_len, hidden_size] — output hidden state.
 pub fn model_forward_segment(
+    backend: &dyn BackendRuntime,
     mut hidden: Tensor,
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
@@ -2334,6 +2351,7 @@ pub fn model_forward_segment(
             GpuAttentionWeights::Full(_) => {
                 // Training doesn't use KV cache
                 hidden = transformer_block(
+                    backend,
                     &hidden,
                     layer,
                     config,
@@ -2359,6 +2377,7 @@ pub fn model_forward_segment(
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
                 let attn_out = gated_deltanet_forward(
+                    backend,
                     &normed,
                     lin_weights,
                     config,
@@ -2436,6 +2455,7 @@ pub fn model_forward_head(
 ///
 /// Returns logits tensor with shape [1, seq_len, vocab_size].
 pub fn model_forward_paged(
+    backend: &dyn BackendRuntime,
     token_ids: &[u32],
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
@@ -2481,6 +2501,7 @@ pub fn model_forward_paged(
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
                 hidden = transformer_block_paged(
+                    backend,
                     &hidden,
                     layer,
                     config,
@@ -2508,6 +2529,7 @@ pub fn model_forward_paged(
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
                 let attn_out = gated_deltanet_forward(
+                    backend,
                     &normed,
                     lin_weights,
                     config,
@@ -2552,6 +2574,13 @@ pub fn model_forward_paged(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::cpu::CpuBackend;
+
+    /// Tests all run on `Device::Cpu`, so the `CpuBackend` (all kernel methods
+    /// return `Ok(None)`) is the right dispatch target.
+    fn test_backend(device: &Device) -> CpuBackend {
+        CpuBackend::new(device.clone())
+    }
 
     #[test]
     fn test_embedding_lookup() -> Result<()> {
@@ -2872,7 +2901,8 @@ mod tests {
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
+        let backend = test_backend(&device);
+        let out = gqa_attention(&backend, &x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -2894,7 +2924,8 @@ mod tests {
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
-        let out = gqa_attention(&x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
+        let backend = test_backend(&device);
+        let out = gqa_attention(&backend, &x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
@@ -2919,7 +2950,8 @@ mod tests {
         let attn = make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?;
 
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
-        let out = gqa_attention(&x, &attn, &[0], num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
+        let backend = test_backend(&device);
+        let out = gqa_attention(&backend, &x, &attn, &[0], num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -2987,7 +3019,8 @@ mod tests {
 
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
-        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
+        let backend = test_backend(&device);
+        let out = transformer_block(&backend, &x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -3032,7 +3065,8 @@ mod tests {
 
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
-        let out = transformer_block(&x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
+        let backend = test_backend(&device);
+        let out = transformer_block(&backend, &x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
@@ -3080,7 +3114,8 @@ mod tests {
         let x = Tensor::ones((1, 1, hidden), DType::F32, &device)?;
         let cfg = make_test_config(2, 1, 4, 8);
         let inv_freq = compute_rotary_inv_freq(4, 10_000.0, &device)?;
-        let result = transformer_block(&x, &layer, &cfg, &[0], 2, 1, 4, 4, &inv_freq, 1e-6, None, 0, None);
+        let backend = test_backend(&device);
+        let result = transformer_block(&backend, &x, &layer, &cfg, &[0], 2, 1, 4, 4, &inv_freq, 1e-6, None, 0, None);
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -3231,7 +3266,8 @@ mod tests {
         };
 
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
-        let logits = model_forward(&token_ids, &weights, &config, None, None, None)?;
+        let backend = test_backend(&device);
+        let logits = model_forward(&backend, &token_ids, &weights, &config, None, None, None)?;
 
         // Expected shape: [1, seq_len, vocab_size]
         assert_eq!(logits.dims(), &[1, 4, vocab_size]);
@@ -3283,7 +3319,8 @@ mod tests {
             partial_rotary_factor: 1.0,
         };
 
-        let logits = model_forward(&[7], &weights, &config, None, None, None)?;
+        let backend = test_backend(&device);
+        let logits = model_forward(&backend, &[7], &weights, &config, None, None, None)?;
         assert_eq!(logits.dims(), &[1, 1, vocab_size]);
 
         // Logits should be finite
@@ -3344,9 +3381,10 @@ mod tests {
         };
 
         let tokens: Vec<u32> = vec![1, 5, 3, 10, 7];
+        let backend = test_backend(&device);
 
         // Reference: full forward pass without KV cache
-        let logits_ref = model_forward(&tokens, &weights, &config, None, None, None)?;
+        let logits_ref = model_forward(&backend, &tokens, &weights, &config, None, None, None)?;
         // Extract last position logits: [1, 5, vocab] -> last position
         let last_ref = logits_ref.narrow(1, tokens.len() - 1, 1)?; // [1, 1, vocab]
         let last_ref_vals = last_ref.flatten_all()?.to_vec1::<f32>()?;
@@ -3357,12 +3395,12 @@ mod tests {
         )?;
 
         // Prefill
-        let _prefill_logits = model_forward(&tokens[..4], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let _prefill_logits = model_forward(&backend, &tokens[..4], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(4);
         assert_eq!(kv_cache.seq_len(), 4);
 
         // Decode the 5th token
-        let decode_logits = model_forward(&tokens[4..], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let decode_logits = model_forward(&backend, &tokens[4..], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
         assert_eq!(kv_cache.seq_len(), 5);
 
@@ -3424,24 +3462,25 @@ mod tests {
         };
 
         let tokens: Vec<u32> = vec![3, 7, 1];
+        let backend = test_backend(&device);
 
         // Reference
-        let logits_ref = model_forward(&tokens, &weights, &config, None, None, None)?;
+        let logits_ref = model_forward(&backend, &tokens, &weights, &config, None, None, None)?;
         let last_ref = logits_ref.narrow(1, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
 
         // KV cache: process token by token
         let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 16, DType::F32, &device)?;
 
         // Token 0
-        let _ = model_forward(&[3], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let _ = model_forward(&backend, &[3], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
 
         // Token 1
-        let _ = model_forward(&[7], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let _ = model_forward(&backend, &[7], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
 
         // Token 2
-        let logits_cached = model_forward(&[1], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let logits_cached = model_forward(&backend, &[1], &weights, &config, Some(&mut kv_cache), None, None)?;
         kv_cache.advance(1);
 
         let last_cached = logits_cached.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
@@ -3619,7 +3658,8 @@ mod tests {
 
         // Prefill with multiple tokens
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
-        let logits = model_forward(&token_ids, &weights, &config, None, Some(&mut linear_state), None)?;
+        let backend = test_backend(&device);
+        let logits = model_forward(&backend, &token_ids, &weights, &config, None, Some(&mut linear_state), None)?;
         assert_eq!(logits.dims(), &[1, 4, vocab_size]);
 
         // All values should be finite (no NaN/Inf)
@@ -3627,6 +3667,167 @@ mod tests {
         assert!(flat.iter().all(|v| v.is_finite()), "logits contain non-finite values");
 
         Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    struct ParityScenario {
+        label: &'static str,
+        vocab_size: usize,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_size: usize,
+        num_layers: usize,
+        full_attention_interval: usize,
+        token_ids: Vec<u32>,
+        max_abs_diff: f32,
+    }
+
+    /// Runs `model_forward` on CPU and Metal with matching random-weight
+    /// models and asserts the logits agree within `scenario.max_abs_diff`.
+    /// Drives both parity tests below; the scenario controls whether the
+    /// `MetalBackend` SDPA path activates (head_dim ∈ whitelist) or whether
+    /// the portable candle fallback runs.
+    ///
+    /// Returns `Ok(())` without running if Metal isn't available so the
+    /// suite stays portable on Linux + CUDA hosts.
+    #[cfg(feature = "metal")]
+    fn run_cpu_metal_parity(scenario: ParityScenario) -> Result<()> {
+        let Some(metal_device) = crate::backend::metal::try_new_metal() else {
+            eprintln!("skipping parity test '{}'", scenario.label);
+            return Ok(());
+        };
+        let cpu_device = Device::Cpu;
+
+        let weights_cpu = make_hybrid_gpu_weights(
+            &cpu_device,
+            scenario.vocab_size, scenario.hidden_size,
+            scenario.num_heads, scenario.num_kv_heads, scenario.head_dim,
+            scenario.intermediate_size, scenario.num_layers,
+            scenario.full_attention_interval,
+        )?;
+        let weights_metal = make_hybrid_gpu_weights(
+            &metal_device,
+            scenario.vocab_size, scenario.hidden_size,
+            scenario.num_heads, scenario.num_kv_heads, scenario.head_dim,
+            scenario.intermediate_size, scenario.num_layers,
+            scenario.full_attention_interval,
+        )?;
+
+        // Linear attention dims are 0 when full_attention_interval == 1 (no
+        // GDN layers in the model); otherwise set to head_dim so GDN state
+        // is shaped for the fallback path.
+        let has_linear_layers = scenario.full_attention_interval > 1;
+        let linear_num_kv_heads = if has_linear_layers { scenario.num_kv_heads } else { 0 };
+        let linear_num_value_heads = if has_linear_layers { scenario.num_heads } else { 0 };
+        let linear_head_dim = if has_linear_layers { scenario.head_dim } else { 0 };
+        let linear_conv_kernel_dim = if has_linear_layers { 4 } else { 0 };
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: scenario.hidden_size,
+            num_layers: scenario.num_layers,
+            num_attention_heads: scenario.num_heads,
+            num_kv_heads: scenario.num_kv_heads,
+            head_dim: scenario.head_dim,
+            intermediate_size: scenario.intermediate_size,
+            vocab_size: scenario.vocab_size,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: if has_linear_layers { 1 } else { scenario.num_layers },
+            full_attention_interval: scenario.full_attention_interval,
+            attn_output_gate: false,
+            linear_num_key_heads: linear_num_kv_heads,
+            linear_key_head_dim: linear_head_dim,
+            linear_num_value_heads,
+            linear_value_head_dim: linear_head_dim,
+            linear_conv_kernel_dim,
+            partial_rotary_factor: 1.0,
+        };
+
+        let cpu_backend = test_backend(&cpu_device);
+        let mut cpu_linear = LinearAttentionState::new(&config, &cpu_device)?;
+        let logits_cpu = model_forward(
+            &cpu_backend, &scenario.token_ids, &weights_cpu, &config,
+            None, Some(&mut cpu_linear), None,
+        )?;
+
+        let metal_backend = crate::backend::for_device(&metal_device);
+        let mut metal_linear = LinearAttentionState::new(&config, &metal_device)?;
+        let logits_metal = model_forward(
+            &*metal_backend, &scenario.token_ids, &weights_metal, &config,
+            None, Some(&mut metal_linear), None,
+        )?;
+
+        assert_eq!(logits_cpu.dims(), logits_metal.dims());
+
+        let cpu_flat = logits_cpu.flatten_all()?.to_vec1::<f32>()?;
+        let metal_flat = logits_metal
+            .to_device(&cpu_device)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        assert!(cpu_flat.iter().all(|v| v.is_finite()), "{}: CPU logits non-finite", scenario.label);
+        assert!(metal_flat.iter().all(|v| v.is_finite()), "{}: Metal logits non-finite", scenario.label);
+
+        let max_abs_diff = cpu_flat.iter().zip(metal_flat.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < scenario.max_abs_diff,
+            "{}: CPU vs Metal logits diverge: max abs diff = {max_abs_diff} (bound {})",
+            scenario.label, scenario.max_abs_diff,
+        );
+        Ok(())
+    }
+
+    /// Qwen-shaped: GQA ratio 4, head_dim 128, full attention only. Exercises
+    /// `MetalBackend::flash_attn_prefill` (candle SDPA) directly — head_dim
+    /// 128 is in the SDPA whitelist, seq_len 12 > 8 for the full SDPA kernel
+    /// (not the vector path).
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_parity_sdpa_path() -> Result<()> {
+        run_cpu_metal_parity(ParityScenario {
+            label: "sdpa_path",
+            vocab_size: 32,
+            num_heads: 4,
+            num_kv_heads: 1,
+            head_dim: 128,
+            hidden_size: 512,
+            intermediate_size: 1024,
+            num_layers: 2,
+            full_attention_interval: 1,
+            token_ids: (0..12u32).collect(),
+            // SDPA internally accumulates at FP32 but softmax rounds differently
+            // from the naive CPU path. 1e-2 accommodates M1 drift; tighten if
+            // later hardware proves it's conservative.
+            max_abs_diff: 1e-2,
+        })
+    }
+
+    /// Hybrid full + GDN layers with head_dim 4, below the SDPA whitelist.
+    /// `MetalBackend` declines into the portable fallback, so this validates
+    /// that the whole candle composition (embed, RMSNorm, RoPE, SwiGLU, naive
+    /// softmax+matmul, GDN recurrent loop) runs correctly on Apple Silicon.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_parity_cpu_vs_metal() -> Result<()> {
+        run_cpu_metal_parity(ParityScenario {
+            label: "portable_fallback",
+            vocab_size: 32,
+            hidden_size: 16,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            num_layers: 4,
+            full_attention_interval: 4,
+            token_ids: vec![1, 5, 3, 10],
+            max_abs_diff: 1e-3,
+        })
     }
 
     #[test]
@@ -3672,14 +3873,15 @@ mod tests {
 
         let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 32, DType::F32, &device)?;
         let mut linear_state = LinearAttentionState::new(&config, &device)?;
+        let backend = test_backend(&device);
 
         // Prefill
-        let prefill_logits = model_forward(&[1, 5, 3], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
+        let prefill_logits = model_forward(&backend, &[1, 5, 3], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
         kv_cache.advance(3);
         assert_eq!(prefill_logits.dims(), &[1, 3, vocab_size]);
 
         // Decode: single token should work with persisted linear state
-        let decode_logits = model_forward(&[10], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
+        let decode_logits = model_forward(&backend, &[10], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
         kv_cache.advance(1);
         assert_eq!(decode_logits.dims(), &[1, 1, vocab_size]);
 
@@ -3847,9 +4049,11 @@ mod tests {
         let g = (g_raw.abs()? * (-1.0_f64))?;
 
         let state_init = Tensor::zeros((b, nv, dk, dv), dtype, &device)?;
+        let backend = test_backend(&device);
 
         let mut state_chunk = state_init.clone();
         let out_chunk = gdn_chunkwise_recurrence(
+            &backend,
             &q,
             &k,
             &v,
@@ -3890,7 +4094,7 @@ mod tests {
         for &cs in &[1usize, t] {
             let mut state_a = state_init.clone();
             let out_a =
-                gdn_chunkwise_recurrence(&q, &k, &v, &beta, &g, &mut state_a, cs)?;
+                gdn_chunkwise_recurrence(&backend, &q, &k, &v, &beta, &g, &mut state_a, cs)?;
             let mut state_b = state_init.clone();
             let out_b = gdn_sequential_reference(&q, &k, &v, &beta, &g, &mut state_b)?;
             let d = (&out_a - &out_b)?
@@ -3961,7 +4165,8 @@ mod tests {
         let v = v_f32.to_dtype(DType::BF16)?;
         let beta = beta_f32.to_dtype(DType::BF16)?;
 
-        let w_kernel = compute_w_chunk(&a, &v, &beta, c)?; // CUDA kernel
+        let backend = crate::backend::for_device(&device);
+        let w_kernel = compute_w_chunk(&*backend, &a, &v, &beta, c)?; // CUDA kernel
         let w_fb = compute_w_chunk_fallback(&a, &v, &beta, c)?; // candle per-token
 
         let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
@@ -4063,9 +4268,10 @@ mod tests {
         // are only mutating an env var that the dispatcher reads at the top
         // of the same call below. No other thread observes it concurrently.
         unsafe { std::env::remove_var("KILN_DISABLE_GDN_KERNEL"); }
+        let backend = crate::backend::for_device(&device);
         let mut state_kernel = state_bf16.clone();
         let out_kernel = gdn_chunkwise_recurrence(
-            &q, &k, &v, &beta, &g, &mut state_kernel, 1,
+            &*backend, &q, &k, &v, &beta, &g, &mut state_kernel, 1,
         )?;
 
         let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;

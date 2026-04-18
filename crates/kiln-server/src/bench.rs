@@ -15,6 +15,7 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_core::vram::detect_vram;
+use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -27,6 +28,10 @@ const PAGED_BLOCK_SIZE: usize = 16;
 /// Results from the full benchmark suite.
 #[derive(Debug, Serialize)]
 struct BenchmarkResults {
+    /// Which `BackendRuntime` ran the forward pass — one of
+    /// `cuda` / `metal` / `cpu`. Lets downstream comparison scripts split
+    /// runs by hardware path without parsing GPU names.
+    backend: String,
     gpu_info: GpuInfo,
     model_load: ModelLoadResult,
     inference: Vec<InferenceBenchResult>,
@@ -309,6 +314,7 @@ fn bench_latency(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
 
     let eos_token_ids = tokenizer.eos_token_ids();
 
@@ -317,6 +323,7 @@ fn bench_latency(
     // Prefill: forward pass on all prompt tokens
     let prefill_start = Instant::now();
     let logits = model_forward(
+        &*backend,
         &prompt_token_ids,
         weights,
         config,
@@ -348,6 +355,7 @@ fn bench_latency(
 
         let step_start = Instant::now();
         let logits = model_forward(
+            &*backend,
             &[next_token],
             weights,
             config,
@@ -456,6 +464,7 @@ fn bench_latency_paged(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
 
     // Build a block table that maps logical block i -> physical block i (sequential).
     let mut block_table = BlockTable::new();
@@ -473,6 +482,7 @@ fn bench_latency_paged(
     // Prefill: forward pass on all prompt tokens via paged path
     let prefill_start = Instant::now();
     let logits = model_forward_paged(
+        &*backend,
         &prompt_token_ids,
         weights,
         config,
@@ -513,6 +523,7 @@ fn bench_latency_paged(
 
         let step_start = Instant::now();
         let logits = model_forward_paged(
+            &*backend,
             &[next_token],
             weights,
             config,
@@ -781,11 +792,11 @@ fn main() -> Result<()> {
     let model_weights = kiln_model::load_model(model_path, &model_config)
         .context("failed to load model weights")?;
 
-    let device = if candle_core::utils::cuda_is_available() {
-        candle_core::Device::new_cuda(0)?
-    } else {
-        anyhow::bail!("CUDA not available — benchmarks require a GPU");
-    };
+    let device = kiln_server::device::select_device()?;
+    if matches!(device, candle_core::Device::Cpu) {
+        anyhow::bail!("No GPU available — benchmarks require CUDA or Metal");
+    }
+    let backend_name = runtime_backend::for_device(&device).name();
 
     let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
         .context("failed to transfer weights to GPU")?;
@@ -796,8 +807,9 @@ fn main() -> Result<()> {
     let model_vram = (vram_after.saturating_sub(vram_before)) / (1024 * 1024);
 
     eprintln!(
-        "Model loaded in {:.2}s (VRAM: {} MB)\n",
+        "Model loaded in {:.2}s (backend: {}, VRAM: {} MB)\n",
         load_time.as_secs_f64(),
+        backend_name,
         model_vram
     );
 
@@ -894,6 +906,7 @@ fn main() -> Result<()> {
     }
 
     let results = BenchmarkResults {
+        backend: backend_name.to_string(),
         gpu_info,
         model_load,
         inference: inference_results,

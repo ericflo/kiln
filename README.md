@@ -94,12 +94,17 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
 
 ## Quick Start
 
-**Prerequisites:** NVIDIA GPU with 24GB+ VRAM, CUDA 12+, Rust stable toolchain.
+**Prerequisites:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+ **OR** Apple Silicon Mac with 16GB+ unified memory. Rust stable toolchain on both.
 
 ```bash
 git clone https://github.com/ericflo/kiln.git
 cd kiln
-cargo build --release --features cuda    # ~15-30 min first build (CUDA kernels)
+
+# Linux / Windows + NVIDIA
+cargo build --release --features cuda     # ~15-30 min first build (CUDA kernels)
+
+# macOS + Apple Silicon
+cargo build --release --features metal    # Metal backend via candle
 
 # Download model weights
 pip install huggingface-hub
@@ -149,6 +154,20 @@ Qwen3.5-4B's hybrid architecture is the key. Only 8 of 32 layers need KV cache, 
 | 64K context, 4 sequences, inference + training | ~22 GB | Yes |
 | 32K context, 8 sequences, inference + training | ~22 GB | Yes |
 | 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
+
+### Apple Silicon (M3 Max / M4 Max 64GB unified memory)
+
+On Apple Silicon, model weights, KV cache, and training state all live in unified memory shared with the OS. A 64 GB chip leaves generous headroom for long contexts and concurrent training.
+
+| Scenario | Unified Memory | Fits 64GB? |
+|---|---|---|
+| 128K context, 1 sequence, inference only | ~13 GB | Yes |
+| 128K context, 1 sequence, inference + training | ~18 GB | Yes |
+| 64K context, 4 sequences, inference + training | ~22 GB | Yes |
+| 128K context, 8 sequences, inference + training | ~32 GB | Yes |
+| 128K context, 4 sequences, FP8 KV cache | ~19 GB | Yes |
+
+16 GB M-series chips fit short-context inference; 32 GB fits 64K context comfortably; 64 GB+ matches or exceeds the 24 GB CUDA envelope.
 
 ## API
 
@@ -216,7 +235,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 
 Kiln Desktop is a system-tray app that wraps the `kiln` server for people who don't want to use a CLI. It spawns and supervises the `kiln` binary as a child process, shows server status in the tray, and opens a dashboard, settings, and log viewer in native windows.
 
-**Windows and Linux only.** Kiln is CUDA-only today, so there is no macOS build.
+**Windows, Linux, and macOS (Apple Silicon).** The Windows and Linux installers drive the CUDA build of `kiln`; the macOS installer drives the candle-metal build on M-series hardware. Intel Macs are not supported. A signed + notarized `.dmg` will ship alongside the existing installers once the macOS port lands — see [MACOS_MLX_PLAN.md](MACOS_MLX_PLAN.md), Phase 7.
 
 **Download — [Kiln Desktop v0.1.0](https://github.com/ericflo/kiln/releases/tag/desktop-v0.1.0):**
 
@@ -258,7 +277,7 @@ sudo systemctl enable --now kiln
 
 ## Status
 
-Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, and production hardening are complete. Current work: performance benchmarking and optimization (FP8, CUDA graphs, quantization).
+Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, and production hardening are complete. Inference on macOS / Apple Silicon (Phase 1 port) is shipped via the candle-metal backend. Current work: performance benchmarking and optimization (FP8, CUDA graphs, quantization).
 
 Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 

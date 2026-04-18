@@ -18,6 +18,7 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 
+use crate::backend::BackendRuntime;
 use crate::forward::{
     model_forward, model_forward_embed, model_forward_head, model_forward_segment,
     GpuWeights, LinearAttentionState,
@@ -80,6 +81,7 @@ pub struct SpeculativeStepResult {
 /// This produces lower-quality logits but runs much faster since it skips
 /// most of the model's layers.
 fn draft_forward(
+    backend: &dyn BackendRuntime,
     token_ids: &[u32],
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -91,6 +93,7 @@ fn draft_forward(
 
     // Run only the first `draft_layers` layers
     let hidden = model_forward_segment(
+        backend,
         hidden,
         weights,
         config,
@@ -235,13 +238,14 @@ fn resample_adjusted(
 /// through the draft layers. The logits output is discarded; only the state
 /// mutation matters.
 pub fn draft_forward_for_state_init(
+    backend: &dyn BackendRuntime,
     token_ids: &[u32],
     weights: &GpuWeights,
     config: &ModelConfig,
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
 ) -> Result<()> {
-    let _ = draft_forward(token_ids, weights, config, draft_layers, linear_state)?;
+    let _ = draft_forward(backend, token_ids, weights, config, draft_layers, linear_state)?;
     Ok(())
 }
 
@@ -253,7 +257,9 @@ pub fn draft_forward_for_state_init(
 /// `last_token`: the last accepted token (input to both draft and verify).
 ///
 /// Returns the accepted tokens and whether EOS was hit.
+#[allow(clippy::too_many_arguments)]
 pub fn speculative_decode_step(
+    backend: &dyn BackendRuntime,
     last_token: TokenId,
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -280,6 +286,7 @@ pub fn speculative_decode_step(
 
     for _ in 0..k {
         let draft_logits = draft_forward(
+            backend,
             &[current_token],
             weights,
             config,
@@ -320,6 +327,7 @@ pub fn speculative_decode_step(
     verify_input.extend_from_slice(&draft_tokens);
 
     let verify_logits = model_forward(
+        backend,
         &verify_input,
         weights,
         config,

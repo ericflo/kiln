@@ -4,8 +4,10 @@ This guide gets you from a fresh machine to running Kiln with real GPU inference
 
 ## Prerequisites
 
-- **GPU**: NVIDIA with 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.)
-- **CUDA**: 12.0 or later (`nvcc --version` to check)
+Either an NVIDIA GPU **or** an Apple Silicon Mac.
+
+- **NVIDIA path**: GPU with 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.) and CUDA 12.0+ (`nvcc --version` to check)
+- **Apple Silicon path**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
 - **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
 - **Disk**: ~20GB free (model weights + build artifacts)
 
@@ -14,10 +16,23 @@ This guide gets you from a fresh machine to running Kiln with real GPU inference
 ```bash
 git clone https://github.com/ericflo/kiln.git
 cd kiln
+```
+
+**Linux / Windows + NVIDIA:**
+
+```bash
 cargo build --release --features cuda
 ```
 
 The first build takes 15-30 minutes (CUDA kernel compilation). Subsequent builds are fast.
+
+**macOS + Apple Silicon:**
+
+```bash
+cargo build --release --features metal
+```
+
+No nvcc needed — Xcode Command Line Tools are sufficient. `candle-metal-kernels` JIT-compiles Metal Shading Language at runtime, so there's no Xcode IDE dependency.
 
 The binary is at `target/release/kiln`.
 
@@ -77,6 +92,8 @@ You'll see the startup banner:
   CUDA:    available ✓
   Listen:  http://0.0.0.0:8420
 ```
+
+On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. No config changes needed — the binary selects the backend that was compiled in.
 
 ## 4. Test Inference
 

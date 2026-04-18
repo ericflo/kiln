@@ -11,6 +11,7 @@ use candle_core::{DType, Device, Tensor, Var};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
+use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
     model_forward, model_forward_embed, model_forward_head, model_forward_segment,
     GpuWeights, LinearAttentionState,
@@ -305,6 +306,7 @@ pub fn sft_train(
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     let device = weights.embed_tokens.device().clone();
+    let backend = backend::for_device(&device);
 
     tracing::info!(
         num_examples = examples.len(),
@@ -380,6 +382,7 @@ pub fn sft_train(
             if let Some(ref segs) = segments {
                 // Gradient-checkpointed forward/backward
                 let (lv, accumulated_grads) = checkpointed_forward_backward(
+                    &*backend,
                     input_ids,
                     weights,
                     model_config,
@@ -393,6 +396,7 @@ pub fn sft_train(
             } else {
                 // Standard (non-checkpointed) forward/backward
                 let (lv, grads) = standard_forward_backward(
+                    &*backend,
                     input_ids,
                     weights,
                     model_config,
@@ -485,6 +489,7 @@ pub fn grpo_train(
     progress_cb: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
     let device = weights.embed_tokens.device().clone();
+    let backend = backend::for_device(&device);
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
     tracing::info!(
@@ -567,6 +572,7 @@ pub fn grpo_train(
             let ref_log_probs = {
                 let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
                 let ref_logits = model_forward(
+                    &*backend,
                     &comp.input_ids,
                     weights,
                     model_config,
@@ -586,6 +592,7 @@ pub fn grpo_train(
             if let Some(ref segs) = segments {
                 // Gradient-checkpointed GRPO step
                 let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
+                    &*backend,
                     &comp.input_ids,
                     weights,
                     model_config,
@@ -605,6 +612,7 @@ pub fn grpo_train(
                 let lora_weights = params.as_lora_weights();
                 let mut linear_state = LinearAttentionState::new(model_config, &device)?;
                 let policy_logits = model_forward(
+                    &*backend,
                     &comp.input_ids,
                     weights,
                     model_config,
@@ -1108,7 +1116,9 @@ fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(us
 ///
 /// Memory: only one segment's activations are in the autograd graph at a time.
 /// Compute: ~(N+1)/2 × N forward passes for N segments (with N=4, ~2.5× overhead).
+#[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward(
+    backend: &dyn BackendRuntime,
     input_ids: &[u32],
     weights: &GpuWeights,
     model_config: &ModelConfig,
@@ -1131,6 +1141,7 @@ fn checkpointed_forward_backward(
         for &(start, end) in segments.iter() {
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
             current = model_forward_segment(
+                backend,
                 current,
                 weights,
                 model_config,
@@ -1160,6 +1171,7 @@ fn checkpointed_forward_backward(
         let lora_weights_for_seg = params.as_lora_weights();
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         let mut hidden = model_forward_segment(
+            backend,
             seg_input,
             weights,
             model_config,
@@ -1178,6 +1190,7 @@ fn checkpointed_forward_backward(
             // Use the original (non-Var) lora weights so they don't get tracked
             let lora_for_later = params.as_lora_weights();
             hidden = model_forward_segment(
+                backend,
                 hidden,
                 weights,
                 model_config,
@@ -1210,6 +1223,7 @@ fn checkpointed_forward_backward(
 
 /// Run one training step WITHOUT gradient checkpointing (original behavior).
 fn standard_forward_backward(
+    backend: &dyn BackendRuntime,
     input_ids: &[u32],
     weights: &GpuWeights,
     model_config: &ModelConfig,
@@ -1221,6 +1235,7 @@ fn standard_forward_backward(
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
     let logits = model_forward(
+        backend,
         input_ids,
         weights,
         model_config,
@@ -1280,7 +1295,9 @@ fn grpo_loss(
 /// Similar to `checkpointed_forward_backward` but computes GRPO loss
 /// (policy vs reference) instead of cross-entropy. The reference log-probs
 /// are pre-computed and passed in (they don't need gradient tracking).
+#[allow(clippy::too_many_arguments)]
 fn checkpointed_grpo_forward_backward(
+    backend: &dyn BackendRuntime,
     input_ids: &[u32],
     weights: &GpuWeights,
     model_config: &ModelConfig,
@@ -1307,6 +1324,7 @@ fn checkpointed_grpo_forward_backward(
         for &(start, end) in segments.iter() {
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
             current = model_forward_segment(
+                backend,
                 current,
                 weights,
                 model_config,
@@ -1336,6 +1354,7 @@ fn checkpointed_grpo_forward_backward(
         let lora_weights_for_seg = params.as_lora_weights();
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         let mut hidden = model_forward_segment(
+            backend,
             seg_input,
             weights,
             model_config,
@@ -1352,6 +1371,7 @@ fn checkpointed_grpo_forward_backward(
             let mut later_linear_state = LinearAttentionState::new(model_config, device)?;
             let lora_for_later = params.as_lora_weights();
             hidden = model_forward_segment(
+                backend,
                 hidden,
                 weights,
                 model_config,
@@ -1581,10 +1601,12 @@ mod tests {
         let weights = tiny_weights(&config, &device)?;
 
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7];
+        let backend = backend::for_device(&device);
 
         // Full forward pass (no KV cache, no LoRA)
         let mut linear_state_full = LinearAttentionState::new(&config, &device)?;
         let logits_full = model_forward(
+            &*backend,
             &input_ids,
             &weights,
             &config,
@@ -1597,6 +1619,7 @@ mod tests {
         let (hidden, positions) = model_forward_embed(&input_ids, &weights)?;
         let mut linear_state_seg = LinearAttentionState::new(&config, &device)?;
         let hidden = model_forward_segment(
+            &*backend,
             hidden,
             &weights,
             &config,
@@ -1611,6 +1634,7 @@ mod tests {
         // However, LinearAttentionState::new creates state for ALL linear layers.
         // model_forward_segment handles the indexing internally.
         let hidden = model_forward_segment(
+            &*backend,
             hidden,
             &weights,
             &config,
@@ -1643,9 +1667,10 @@ mod tests {
             &config, &weights, 4, 8.0, &device,
         )?;
 
+        let backend = backend::for_device(&device);
         // Standard (non-checkpointed) forward/backward
         let (loss_std, _grads_std) = standard_forward_backward(
-            &input_ids, &weights, &config, &params_std, &label_mask, &device,
+            &*backend, &input_ids, &weights, &config, &params_std, &label_mask, &device,
         )?;
 
         // Checkpointed forward/backward with 2 segments
@@ -1656,7 +1681,7 @@ mod tests {
         )?;
         let segments = compute_segment_boundaries(config.num_layers, 2);
         let (loss_ckpt, _grads_ckpt) = checkpointed_forward_backward(
-            &input_ids, &weights, &config, &params_ckpt, &label_mask, &segments, &device,
+            &*backend, &input_ids, &weights, &config, &params_ckpt, &label_mask, &segments, &device,
         )?;
 
         // Both losses should be finite and in a reasonable range for random weights
@@ -1683,8 +1708,9 @@ mod tests {
         )?;
 
         let segments = compute_segment_boundaries(config.num_layers, 2);
+        let backend = backend::for_device(&device);
         let (_loss, grads) = checkpointed_forward_backward(
-            &input_ids, &weights, &config, &params, &label_mask, &segments, &device,
+            &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, &device,
         )?;
 
         // Verify that we got gradients for LoRA params in BOTH segments
@@ -1708,33 +1734,30 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_checkpointed_training_loss_decreases() -> Result<()> {
-        let device = Device::Cpu;
+    /// Runs 5 SFT steps with gradient checkpointing on `device` and asserts
+    /// the final loss is lower than the initial loss. Drives both the CPU
+    /// and Metal variants below.
+    fn run_checkpointed_training_loss_decreases(device: &Device) -> Result<()> {
         let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
+        let weights = tiny_weights(&config, device)?;
 
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
         let label_mask = vec![false, false, true, true, true, true, true, false];
         let lr = 0.01;
 
-        let params = TrainableLoraParams::initialize(
-            &config, &weights, 4, 8.0, &device,
-        )?;
-
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, device)?;
         let segments = compute_segment_boundaries(config.num_layers, 2);
+        let backend = backend::for_device(device);
 
-        // Run a few training steps and check loss decreases
         let mut prev_loss = f64::MAX;
         let mut losses = Vec::new();
         for step in 0..5 {
             let (loss_val, grads) = checkpointed_forward_backward(
-                &input_ids, &weights, &config, &params, &label_mask, &segments, &device,
+                &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, device,
             )?;
             sgd_step_from_map(&params, &grads, lr)?;
             losses.push(loss_val);
             if step > 0 {
-                // Loss should generally decrease (allow small fluctuations)
                 assert!(
                     loss_val < prev_loss + 0.5,
                     "loss increased too much at step {step}: {prev_loss:.4} -> {loss_val:.4}"
@@ -1743,15 +1766,32 @@ mod tests {
             prev_loss = loss_val;
         }
 
-        // Overall: final loss should be meaningfully less than initial loss
         let initial = losses[0];
         let final_loss = *losses.last().unwrap();
         assert!(
             final_loss < initial,
-            "loss did not decrease over 5 steps: {initial:.4} -> {final_loss:.4}"
+            "loss did not decrease over 5 steps on {:?}: {initial:.4} -> {final_loss:.4}",
+            device,
         );
-
         Ok(())
+    }
+
+    /// End-to-end SFT loop on Metal. Validates candle autograd + SGD +
+    /// gradient checkpointing through the `BackendRuntime` seam on Apple
+    /// Silicon. Skipped gracefully when Metal isn't available.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_checkpointed_training_loss_decreases_metal() -> Result<()> {
+        let Some(device) = kiln_model::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        assert_eq!(backend::for_device(&device).name(), "metal");
+        run_checkpointed_training_loss_decreases(&device)
+    }
+
+    #[test]
+    fn test_checkpointed_training_loss_decreases() -> Result<()> {
+        run_checkpointed_training_loss_decreases(&Device::Cpu)
     }
 
     #[test]

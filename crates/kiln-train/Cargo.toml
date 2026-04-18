@@ -21,6 +21,7 @@ chrono = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda"]
+metal = ["kiln-model/metal"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

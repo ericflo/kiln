@@ -302,7 +302,27 @@ impl AppState {
             }
         };
 
-        let fp8_enabled = memory_cfg.kv_cache_fp8;
+        // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
+        // write — fine on CUDA where bf16→fp8 packing is amortized over the
+        // kernel work, but on Metal the round-trip dominates decode. Gate it
+        // off on Metal with a warning rather than silently shipping a slow
+        // path; users who know what they're doing can re-enable via
+        // KILN_ALLOW_FP8_ON_METAL=1.
+        let fp8_enabled = {
+            let requested = memory_cfg.kv_cache_fp8;
+            if requested
+                && matches!(device, candle_core::Device::Metal(_))
+                && std::env::var("KILN_ALLOW_FP8_ON_METAL").is_err()
+            {
+                tracing::warn!(
+                    "FP8 cache disabled on Metal (CPU round-trip cost); \
+                     set KILN_ALLOW_FP8_ON_METAL=1 to override"
+                );
+                false
+            } else {
+                requested
+            }
+        };
         tracing::info!(num_blocks, block_size, ?kv_dtype, fp8_enabled, "allocating paged KV cache");
 
         let block_manager = BlockManager::new(num_blocks, block_size);
@@ -386,8 +406,8 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
 
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.
 ///
-/// Uses the shared VRAM detection from kiln-core (nvidia-smi + env override).
-/// For CPU devices, still checks KILN_GPU_MEMORY_GB for testing purposes.
+/// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
+/// hw.memsize on Apple Silicon + env override).
 fn query_gpu_total_memory(device: &candle_core::Device) -> u64 {
     let vram = kiln_core::vram::detect_vram();
     match device {
@@ -401,12 +421,27 @@ fn query_gpu_total_memory(device: &candle_core::Device) -> u64 {
                 );
                 vram.total_bytes
             } else {
-                // CUDA device exists but detection failed — assume 24GB
                 tracing::warn!("CUDA device present but VRAM detection failed; assuming 24GB");
                 24 * 1024 * 1024 * 1024
             }
         }
-        _ => vram.total_bytes, // 0 if no GPU, or env override for testing
+        #[cfg(feature = "metal")]
+        candle_core::Device::Metal(_) => {
+            if vram.total_bytes > 0 {
+                tracing::info!(
+                    total_gb = vram.total_bytes as f64 / 1e9,
+                    source = %vram.source,
+                    "unified memory detected (Apple Silicon)"
+                );
+                vram.total_bytes
+            } else {
+                tracing::warn!(
+                    "Metal device present but unified memory detection failed; assuming 16GB"
+                );
+                16 * 1024 * 1024 * 1024
+            }
+        }
+        _ => vram.total_bytes,
     }
 }
 

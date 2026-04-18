@@ -430,3 +430,67 @@ async fn test_health_with_real_backend() {
     // scheduler should be null for real backend
     assert!(resp["scheduler"].is_null());
 }
+
+/// End-to-end: HTTP → axum → ModelRunner → Metal → generate. Runs the tiny
+/// random-weight model on `Device::Metal(0)`. Head_dim=4 routes through the
+/// portable fallback rather than candle SDPA, so this validates that every
+/// op in the non-fused path (embed, RMSNorm, RoPE, QK-norm, naive attention,
+/// SwiGLU, sampling) executes on Apple Silicon end-to-end.
+///
+/// Skipped gracefully when Metal isn't available so the test stays portable
+/// on Linux+CUDA hosts.
+#[cfg(feature = "metal")]
+#[tokio::test]
+async fn test_real_model_chat_completion_metal() {
+    let Some(device) = kiln_model::backend::metal::try_new_metal() else {
+        return;
+    };
+
+    let config = tiny_config();
+    let weights = tiny_weights(&config, &device);
+
+    let runner_tokenizer = test_tokenizer();
+    let state_tokenizer = test_tokenizer();
+
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device,
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        300,
+    );
+
+    let app = api::router(state);
+
+    let body = json!({
+        "messages": [{"role": "user", "content": "t1 t2 t3"}],
+        "max_tokens": 5,
+        "temperature": 0.0
+    });
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    if status != StatusCode::OK {
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        panic!("Expected 200, got {status}: {body_str}");
+    }
+
+    let resp: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(resp["object"], "chat.completion");
+    assert!(resp["choices"][0]["message"]["content"].is_string());
+    assert!(resp["usage"]["completion_tokens"].as_u64().unwrap() > 0);
+}

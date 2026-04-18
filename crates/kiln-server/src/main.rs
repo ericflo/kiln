@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use kiln_server::api;
+use kiln_server::device::select_device;
 use kiln_server::cli::{
     self, AdapterCommands, Cli, Commands, TrainCommands,
 };
@@ -108,13 +109,7 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
         let model_weights = kiln_model::load_model(Path::new(mp), &model_config)?;
-        let device = if candle_core::utils::cuda_is_available() {
-            tracing::info!("CUDA available — using GPU device 0");
-            candle_core::Device::new_cuda(0)?
-        } else {
-            tracing::info!("CUDA not available — using CPU");
-            candle_core::Device::Cpu
-        };
+        let device = select_device()?;
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
 
         // ModelRunner takes ownership of a tokenizer, so load a second instance.

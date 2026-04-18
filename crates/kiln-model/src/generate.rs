@@ -6,13 +6,14 @@
 use anyhow::{Context, Result};
 use candle_core::DType;
 use std::path::Path;
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
+use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
 use crate::kv_cache::KvCache;
@@ -35,6 +36,7 @@ pub struct ModelRunner {
     /// CUDA graph runner for accelerated decode steps.
     /// Uses Mutex for interior mutability (graph state changes during &self generation).
     cuda_graph: Mutex<CudaGraphRunner>,
+    backend: Arc<dyn BackendRuntime>,
 }
 
 /// Output from a generation call.
@@ -105,6 +107,7 @@ impl ModelRunner {
         let eos_token_ids = tokenizer.eos_token_ids();
         let device = weights.embed_tokens.device().clone();
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
+        let backend = backend::for_device(&device);
         Self {
             weights,
             tokenizer,
@@ -112,6 +115,7 @@ impl ModelRunner {
             eos_token_ids,
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
+            backend,
         }
     }
 
@@ -234,7 +238,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(&prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
+        let logits = model_forward(&*self.backend, &prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
             .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
@@ -308,7 +312,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token
-            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
+            let logits = model_forward(&*self.backend, &[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
                 .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
@@ -350,7 +354,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
+        let logits = model_forward(&*self.backend, prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
             .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
@@ -408,7 +412,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
-            let logits = model_forward(&[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
+            let logits = model_forward(&*self.backend, &[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
                 .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
@@ -519,6 +523,7 @@ impl ModelRunner {
 
         // Prefill: forward pass on all prompt tokens (never uses CUDA graphs)
         let logits = model_forward_paged(
+            &*self.backend,
             prompt_tokens,
             &self.weights,
             &self.config,
@@ -590,6 +595,7 @@ impl ModelRunner {
 
             // Decode step: use CUDA graph runner (captures/replays when enabled)
             let logits = graph_runner.decode_step_paged(
+                &*self.backend,
                 next_token,
                 &self.weights,
                 &self.config,
@@ -680,6 +686,7 @@ impl ModelRunner {
 
         // Prefill: full model forward pass on all prompt tokens
         let logits = model_forward(
+            &*self.backend,
             prompt_tokens,
             &self.weights,
             &self.config,
@@ -693,6 +700,7 @@ impl ModelRunner {
         // Also run draft layers on prompt to initialize draft linear state
         // (we don't need the output, just the state update)
         let _ = crate::speculative::draft_forward_for_state_init(
+            &*self.backend,
             prompt_tokens,
             &self.weights,
             &self.config,
@@ -769,6 +777,7 @@ impl ModelRunner {
             };
 
             let result = speculative_decode_step(
+                &*self.backend,
                 last_token,
                 &self.weights,
                 &self.config,
@@ -885,6 +894,7 @@ impl ModelRunner {
 
         // Prefill
         let logits = match model_forward_paged(
+            &*self.backend,
             &prompt_tokens,
             &self.weights,
             &self.config,
@@ -975,6 +985,7 @@ impl ModelRunner {
 
             // Decode step: use CUDA graph runner
             let logits = match graph_runner.decode_step_paged(
+                &*self.backend,
                 next_token,
                 &self.weights,
                 &self.config,
