@@ -2617,11 +2617,8 @@ mod tests {
         let gate = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
         let up = Tensor::randn(0.0_f32, 0.1, (intermediate, hidden), &device)?;
         let down = Tensor::randn(0.0_f32, 0.1, (hidden, intermediate), &device)?;
-        let gate_t = gate.t()?.contiguous()?;
-        let up_t = up.t()?.contiguous()?;
-        let down_t = down.t()?.contiguous()?;
 
-        let result = swiglu_ffn(&x, &gate_t, &up_t, &down_t, None)?;
+        let result = swiglu_ffn(&x, &gate, &up, &down, None)?;
         assert_eq!(result.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -2638,11 +2635,8 @@ mod tests {
         let gate = Tensor::zeros((intermediate, hidden), DType::F32, &device)?;
         let up = Tensor::ones((intermediate, hidden), DType::F32, &device)?;
         let down = Tensor::ones((hidden, intermediate), DType::F32, &device)?;
-        let gate_t = gate.t()?.contiguous()?;
-        let up_t = up.t()?.contiguous()?;
-        let down_t = down.t()?.contiguous()?;
 
-        let result = swiglu_ffn(&x, &gate_t, &up_t, &down_t, None)?;
+        let result = swiglu_ffn(&x, &gate, &up, &down, None)?;
         let vals = result.to_vec3::<f32>()?;
 
         for v in &vals[0][0] {
