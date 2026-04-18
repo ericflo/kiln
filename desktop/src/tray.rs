@@ -5,6 +5,7 @@ use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::RwLock;
 
 use crate::settings::Settings;
@@ -244,6 +245,7 @@ fn spawn_state_watcher(
             let state = supervisor.state().await;
             let kind = state_kind(&state);
             if last_kind != Some(kind) {
+                let prev_kind = last_kind;
                 last_kind = Some(kind);
                 let port = {
                     let settings_state = app.state::<Arc<RwLock<Settings>>>();
@@ -261,6 +263,22 @@ fn spawn_state_watcher(
                 let _ = start_item.set_enabled(start_enabled(&state));
                 let _ = stop_item.set_enabled(stop_enabled(&state));
                 let _ = restart_item.set_enabled(restart_enabled(&state));
+
+                // Fire a single native OS notification on entry into Error.
+                // We only notify on the transition into the error kind, not
+                // on every poll while still errored, and we ignore failures
+                // so a broken notification backend can never panic the
+                // watcher loop.
+                if kind == "error" && prev_kind != Some("error") {
+                    if let ServerState::Error(msg) = &state {
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("Kiln server crashed")
+                            .body(msg.as_str())
+                            .show();
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -327,6 +345,12 @@ mod tests {
             state_label(&ServerState::Error("boom".into())),
             "Error: boom"
         );
+    }
+
+    #[test]
+    fn state_kind_for_error_is_error() {
+        assert_eq!(state_kind(&ServerState::Error("boom".into())), "error");
+        assert_eq!(state_kind(&ServerState::Error(String::new())), "error");
     }
 
     #[test]
