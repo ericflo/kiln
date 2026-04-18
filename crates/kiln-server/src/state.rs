@@ -315,8 +315,8 @@ impl AppState {
                 && std::env::var("KILN_ALLOW_FP8_ON_METAL").is_err()
             {
                 tracing::warn!(
-                    "kv_cache_fp8 requested but disabled on Metal (CPU round-trip dominates \
-                     decode); set KILN_ALLOW_FP8_ON_METAL=1 to override"
+                    "FP8 cache disabled on Metal (CPU round-trip cost); \
+                     set KILN_ALLOW_FP8_ON_METAL=1 to override"
                 );
                 false
             } else {

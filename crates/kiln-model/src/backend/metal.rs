@@ -119,6 +119,11 @@ impl BackendRuntime for MetalBackend {
         let k_blocks = k_pool.reshape((num_blocks, page_block_size, num_kv_heads, head_dim))?;
         let v_blocks = v_pool.reshape((num_blocks, page_block_size, num_kv_heads, head_dim))?;
 
+        // The block_table is identical across all 8 full-attention layers in
+        // a decode step, but the trait forces us to re-flatten it per call.
+        // Threading a pre-flattened handle through the trait would save
+        // ~8× redundant flattens per token; defer until the signature can
+        // grow a cache parameter.
         let block_ids = block_table.flatten_all()?;
 
         let k_gathered = k_blocks.index_select(&block_ids, 0)?;

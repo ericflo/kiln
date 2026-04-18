@@ -147,12 +147,10 @@ mixed-platform reports can split runs without parsing GPU names.
 ### Compare against
 - **llama.cpp Metal**: `cmake -B build -DGGML_METAL=ON` (no CUDA
   dependency), then the same `llama-bench` invocation.
-- **MLX-LM**: Apple's reference inference stack, comparable baseline
-  for "peak perf on Apple Silicon" until Kiln's Wave 2 mlx-rs backend
-  lands.
+- **MLX-LM**: Apple's reference inference stack; good baseline for
+  Apple Silicon peak perf.
 
-Kiln's Metal backend uses `candle_nn::ops::sdpa` (MLX-style fused
-scaled-dot-product attention) for the prefill path and a gather+SDPA
-composition for paged decode. GDN linear attention currently runs on
-the portable candle composition; an MSL kernel port is follow-up work
-tracked in MACOS_MLX_PLAN.md.
+Kiln's Metal backend uses `candle_nn::ops::sdpa` for both prefill and
+paged decode (the latter via an `index_select` gather from the paged
+pool). GDN linear-attention layers run on the portable candle
+composition.

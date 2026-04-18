@@ -1719,106 +1719,68 @@ mod tests {
         Ok(())
     }
 
-    /// End-to-end SFT training loop on Metal: loss must decrease over a few
-    /// steps. Validates candle autograd + SGD through the `BackendRuntime`
-    /// seam on Apple Silicon. Skipped gracefully when Metal isn't available.
+    /// Runs 5 SFT steps with gradient checkpointing on `device` and asserts
+    /// the final loss is lower than the initial loss. Drives both the CPU
+    /// and Metal variants below.
+    fn run_checkpointed_training_loss_decreases(device: &Device) -> Result<()> {
+        let config = tiny_config();
+        let weights = tiny_weights(&config, device)?;
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
+        let label_mask = vec![false, false, true, true, true, true, true, false];
+        let lr = 0.01;
+
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, device)?;
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let backend = backend::for_device(device);
+
+        let mut prev_loss = f64::MAX;
+        let mut losses = Vec::new();
+        for step in 0..5 {
+            let (loss_val, grads) = checkpointed_forward_backward(
+                &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, device,
+            )?;
+            sgd_step_from_map(&params, &grads, lr)?;
+            losses.push(loss_val);
+            if step > 0 {
+                assert!(
+                    loss_val < prev_loss + 0.5,
+                    "loss increased too much at step {step}: {prev_loss:.4} -> {loss_val:.4}"
+                );
+            }
+            prev_loss = loss_val;
+        }
+
+        let initial = losses[0];
+        let final_loss = *losses.last().unwrap();
+        assert!(
+            final_loss < initial,
+            "loss did not decrease over 5 steps on {:?}: {initial:.4} -> {final_loss:.4}",
+            device,
+        );
+        Ok(())
+    }
+
+    /// End-to-end SFT loop on Metal. Validates candle autograd + SGD +
+    /// gradient checkpointing through the `BackendRuntime` seam on Apple
+    /// Silicon. Skipped gracefully when Metal isn't available.
     #[cfg(feature = "metal")]
     #[test]
     fn test_checkpointed_training_loss_decreases_metal() -> Result<()> {
         let device = match Device::new_metal(0) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Metal unavailable, skipping Metal training test: {e}");
+                eprintln!("Metal unavailable, skipping: {e}");
                 return Ok(());
             }
         };
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
-        let label_mask = vec![false, false, true, true, true, true, true, false];
-        let lr = 0.01;
-
-        let params = TrainableLoraParams::initialize(
-            &config, &weights, 4, 8.0, &device,
-        )?;
-
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let backend = backend::for_device(&device);
-        assert_eq!(backend.name(), "metal");
-
-        let mut prev_loss = f64::MAX;
-        let mut losses = Vec::new();
-        for step in 0..5 {
-            let (loss_val, grads) = checkpointed_forward_backward(
-                &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, &device,
-            )?;
-            sgd_step_from_map(&params, &grads, lr)?;
-            losses.push(loss_val);
-            if step > 0 {
-                assert!(
-                    loss_val < prev_loss + 0.5,
-                    "loss increased too much at step {step}: {prev_loss:.4} -> {loss_val:.4}"
-                );
-            }
-            prev_loss = loss_val;
-        }
-
-        let initial = losses[0];
-        let final_loss = *losses.last().unwrap();
-        assert!(
-            final_loss < initial,
-            "Metal training loss did not decrease over 5 steps: {initial:.4} -> {final_loss:.4}"
-        );
-
-        Ok(())
+        assert_eq!(backend::for_device(&device).name(), "metal");
+        run_checkpointed_training_loss_decreases(&device)
     }
 
     #[test]
     fn test_checkpointed_training_loss_decreases() -> Result<()> {
-        let device = Device::Cpu;
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
-        let label_mask = vec![false, false, true, true, true, true, true, false];
-        let lr = 0.01;
-
-        let params = TrainableLoraParams::initialize(
-            &config, &weights, 4, 8.0, &device,
-        )?;
-
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let backend = backend::for_device(&device);
-
-        // Run a few training steps and check loss decreases
-        let mut prev_loss = f64::MAX;
-        let mut losses = Vec::new();
-        for step in 0..5 {
-            let (loss_val, grads) = checkpointed_forward_backward(
-                &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, &device,
-            )?;
-            sgd_step_from_map(&params, &grads, lr)?;
-            losses.push(loss_val);
-            if step > 0 {
-                // Loss should generally decrease (allow small fluctuations)
-                assert!(
-                    loss_val < prev_loss + 0.5,
-                    "loss increased too much at step {step}: {prev_loss:.4} -> {loss_val:.4}"
-                );
-            }
-            prev_loss = loss_val;
-        }
-
-        // Overall: final loss should be meaningfully less than initial loss
-        let initial = losses[0];
-        let final_loss = *losses.last().unwrap();
-        assert!(
-            final_loss < initial,
-            "loss did not decrease over 5 steps: {initial:.4} -> {final_loss:.4}"
-        );
-
-        Ok(())
+        run_checkpointed_training_loss_decreases(&Device::Cpu)
     }
 
     #[test]
