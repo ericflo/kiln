@@ -248,6 +248,28 @@ pub fn linear_with_lora(
     }
 }
 
+/// Apply a LoRA-augmented linear projection using a pre-transposed base weight.
+///
+/// Takes `base_weight_t` = `base_weight.t().contiguous()` (shape `[in, out]`) and
+/// computes `x @ base_weight_t` directly, avoiding the per-call transpose copy
+/// (`ucopy_bf16`) that would otherwise be materialized on every step.
+///
+/// The LoRA delta path is unchanged.
+pub fn linear_with_lora_t(
+    x: &Tensor,
+    base_weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    scale: f32,
+) -> Result<Tensor> {
+    let base_output = x.broadcast_matmul(base_weight_t)?;
+    if let Some(proj) = lora {
+        let delta = compute_lora_delta(x, proj, scale)?;
+        Ok((base_output + delta)?)
+    } else {
+        Ok(base_output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
