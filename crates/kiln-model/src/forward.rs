@@ -3543,187 +3543,98 @@ mod tests {
         Ok(())
     }
 
-    /// Parity test exercising the `MetalBackend::flash_attn_prefill` path via
-    /// `candle_nn::ops::sdpa`. head_dim=128 is the smallest of candle-metal's
-    /// SDPA whitelist, large enough to hit the fused kernel without bloating
-    /// the test model.
     #[cfg(feature = "metal")]
-    #[test]
-    fn test_model_forward_parity_sdpa_path() -> Result<()> {
-        let metal_device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Metal unavailable, skipping SDPA parity test: {e}");
-                return Ok(());
-            }
-        };
-        let cpu_device = Device::Cpu;
-
-        // Qwen-shaped-ish: GQA ratio 4, head_dim 128. Full-attention-only so
-        // we can verify that `MetalBackend::flash_attn_prefill` is actually
-        // taken (no GDN fallback to muddy the comparison).
-        let vocab_size = 32;
-        let num_heads = 4;
-        let num_kv_heads = 1;
-        let head_dim = 128;
-        let hidden_size = num_heads * head_dim;
-        let intermediate_size = hidden_size * 2;
-        let num_layers = 2;
-        let full_attention_interval = 1;
-
-        let weights_cpu = make_hybrid_gpu_weights(
-            &cpu_device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, num_layers, full_attention_interval,
-        )?;
-        let weights_metal = make_hybrid_gpu_weights(
-            &metal_device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, num_layers, full_attention_interval,
-        )?;
-
-        let config = kiln_core::config::ModelConfig {
-            hidden_size,
-            num_layers,
-            num_attention_heads: num_heads,
-            num_kv_heads,
-            head_dim,
-            intermediate_size,
-            vocab_size,
-            max_position_embeddings: 1024,
-            rms_norm_eps: 1e-6,
-            rope_theta: 10000.0,
-            dtype: kiln_core::config::DType::FP32,
-            num_full_attention_layers: num_layers,
-            full_attention_interval,
-            attn_output_gate: false,
-            linear_num_key_heads: 0,
-            linear_key_head_dim: 0,
-            linear_num_value_heads: 0,
-            linear_value_head_dim: 0,
-            linear_conv_kernel_dim: 0,
-            partial_rotary_factor: 1.0,
-        };
-
-        // seq_len > 8 to take the full SDPA kernel (vs vector path).
-        let token_ids: Vec<u32> = (0..12u32).collect();
-
-        let cpu_backend = test_backend(&cpu_device);
-        let logits_cpu = model_forward(
-            &cpu_backend, &token_ids, &weights_cpu, &config, None, None, None,
-        )?;
-
-        let metal_backend = crate::backend::for_device(&metal_device);
-        assert_eq!(metal_backend.name(), "metal");
-        assert!(metal_backend.supports_flash_attn_prefill());
-
-        let logits_metal = model_forward(
-            &*metal_backend, &token_ids, &weights_metal, &config, None, None, None,
-        )?;
-
-        assert_eq!(logits_cpu.dims(), logits_metal.dims());
-
-        let cpu_flat = logits_cpu.flatten_all()?.to_vec1::<f32>()?;
-        let metal_flat = logits_metal
-            .to_device(&cpu_device)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-
-        assert!(cpu_flat.iter().all(|v| v.is_finite()));
-        assert!(metal_flat.iter().all(|v| v.is_finite()));
-
-        let max_abs_diff = cpu_flat
-            .iter()
-            .zip(metal_flat.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-
-        // SDPA on Metal accumulates at FP32 internally but the intermediate
-        // softmax path may round differently from naive CPU softmax+matmul.
-        // 1e-2 accommodates both BF16-rounding and Metal FP32 noise; raise if
-        // this turns out too tight on hardware other than M1.
-        assert!(
-            max_abs_diff < 1e-2,
-            "CPU vs Metal-SDPA logits diverge: max abs diff = {max_abs_diff}"
-        );
-
-        Ok(())
+    struct ParityScenario {
+        label: &'static str,
+        vocab_size: usize,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        intermediate_size: usize,
+        num_layers: usize,
+        full_attention_interval: usize,
+        token_ids: Vec<u32>,
+        max_abs_diff: f32,
     }
 
-    /// End-to-end parity: `model_forward` on Metal should match CPU outputs
-    /// within bf16-tolerable numerical drift. Validates that every op in the
-    /// portable fallback path (embed, RMSNorm, RoPE, SwiGLU, naive attention,
-    /// GDN recurrent composition) executes on Apple Silicon.
+    /// Runs `model_forward` on CPU and Metal with matching random-weight
+    /// models and asserts the logits agree within `scenario.max_abs_diff`.
+    /// Drives both parity tests below; the scenario controls whether the
+    /// `MetalBackend` SDPA path activates (head_dim ∈ whitelist) or whether
+    /// the portable candle fallback runs.
     ///
-    /// Skipped gracefully when Metal isn't available so the test suite stays
-    /// portable on Linux + CUDA hosts. Exercises the same hybrid layer
-    /// topology as `test_model_forward_hybrid_layers`.
+    /// Returns `Ok(())` without running if Metal isn't available so the
+    /// suite stays portable on Linux + CUDA hosts.
     #[cfg(feature = "metal")]
-    #[test]
-    fn test_model_forward_parity_cpu_vs_metal() -> Result<()> {
+    fn run_cpu_metal_parity(scenario: ParityScenario) -> Result<()> {
         let metal_device = match Device::new_metal(0) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("Metal unavailable, skipping parity test: {e}");
+                eprintln!("Metal unavailable, skipping parity test '{}': {e}", scenario.label);
                 return Ok(());
             }
         };
         let cpu_device = Device::Cpu;
 
-        let vocab_size = 32;
-        let hidden_size = 16;
-        let num_heads = 4;
-        let num_kv_heads = 2;
-        let head_dim = 4;
-        let intermediate_size = 32;
-        let num_layers = 4;
-        let full_attention_interval = 4;
-
         let weights_cpu = make_hybrid_gpu_weights(
-            &cpu_device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, num_layers, full_attention_interval,
+            &cpu_device,
+            scenario.vocab_size, scenario.hidden_size,
+            scenario.num_heads, scenario.num_kv_heads, scenario.head_dim,
+            scenario.intermediate_size, scenario.num_layers,
+            scenario.full_attention_interval,
         )?;
         let weights_metal = make_hybrid_gpu_weights(
-            &metal_device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, num_layers, full_attention_interval,
+            &metal_device,
+            scenario.vocab_size, scenario.hidden_size,
+            scenario.num_heads, scenario.num_kv_heads, scenario.head_dim,
+            scenario.intermediate_size, scenario.num_layers,
+            scenario.full_attention_interval,
         )?;
 
+        // Linear attention dims are 0 when full_attention_interval == 1 (no
+        // GDN layers in the model); otherwise set to head_dim so GDN state
+        // is shaped for the fallback path.
+        let has_linear_layers = scenario.full_attention_interval > 1;
+        let linear_num_kv_heads = if has_linear_layers { scenario.num_kv_heads } else { 0 };
+        let linear_num_value_heads = if has_linear_layers { scenario.num_heads } else { 0 };
+        let linear_head_dim = if has_linear_layers { scenario.head_dim } else { 0 };
+        let linear_conv_kernel_dim = if has_linear_layers { 4 } else { 0 };
+
         let config = kiln_core::config::ModelConfig {
-            hidden_size,
-            num_layers,
-            num_attention_heads: num_heads,
-            num_kv_heads,
-            head_dim,
-            intermediate_size,
-            vocab_size,
+            hidden_size: scenario.hidden_size,
+            num_layers: scenario.num_layers,
+            num_attention_heads: scenario.num_heads,
+            num_kv_heads: scenario.num_kv_heads,
+            head_dim: scenario.head_dim,
+            intermediate_size: scenario.intermediate_size,
+            vocab_size: scenario.vocab_size,
             max_position_embeddings: 1024,
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
             dtype: kiln_core::config::DType::FP32,
-            num_full_attention_layers: 1,
-            full_attention_interval,
+            num_full_attention_layers: if has_linear_layers { 1 } else { scenario.num_layers },
+            full_attention_interval: scenario.full_attention_interval,
             attn_output_gate: false,
-            linear_num_key_heads: num_kv_heads,
-            linear_key_head_dim: head_dim,
-            linear_num_value_heads: num_heads,
-            linear_value_head_dim: head_dim,
-            linear_conv_kernel_dim: 4,
+            linear_num_key_heads: linear_num_kv_heads,
+            linear_key_head_dim: linear_head_dim,
+            linear_num_value_heads,
+            linear_value_head_dim: linear_head_dim,
+            linear_conv_kernel_dim,
             partial_rotary_factor: 1.0,
         };
-
-        let token_ids: Vec<u32> = vec![1, 5, 3, 10];
 
         let cpu_backend = test_backend(&cpu_device);
         let mut cpu_linear = LinearAttentionState::new(&config, &cpu_device)?;
         let logits_cpu = model_forward(
-            &cpu_backend, &token_ids, &weights_cpu, &config,
+            &cpu_backend, &scenario.token_ids, &weights_cpu, &config,
             None, Some(&mut cpu_linear), None,
         )?;
 
-        // Use the real `for_device` factory so the Metal side exercises
-        // `MetalBackend` (candle SDPA), not the portable fallback.
         let metal_backend = crate::backend::for_device(&metal_device);
         let mut metal_linear = LinearAttentionState::new(&config, &metal_device)?;
         let logits_metal = model_forward(
-            &*metal_backend, &token_ids, &weights_metal, &config,
+            &*metal_backend, &scenario.token_ids, &weights_metal, &config,
             None, Some(&mut metal_linear), None,
         )?;
 
@@ -3735,26 +3646,65 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
 
-        assert!(
-            cpu_flat.iter().all(|v| v.is_finite()),
-            "CPU logits contain non-finite values"
-        );
-        assert!(
-            metal_flat.iter().all(|v| v.is_finite()),
-            "Metal logits contain non-finite values"
-        );
+        assert!(cpu_flat.iter().all(|v| v.is_finite()), "{}: CPU logits non-finite", scenario.label);
+        assert!(metal_flat.iter().all(|v| v.is_finite()), "{}: Metal logits non-finite", scenario.label);
 
-        let max_abs_diff = cpu_flat
-            .iter()
-            .zip(metal_flat.iter())
+        let max_abs_diff = cpu_flat.iter().zip(metal_flat.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(
-            max_abs_diff < 1e-3,
-            "CPU vs Metal logits diverge: max abs diff = {max_abs_diff}"
+            max_abs_diff < scenario.max_abs_diff,
+            "{}: CPU vs Metal logits diverge: max abs diff = {max_abs_diff} (bound {})",
+            scenario.label, scenario.max_abs_diff,
         );
-
         Ok(())
+    }
+
+    /// Qwen-shaped: GQA ratio 4, head_dim 128, full attention only. Exercises
+    /// `MetalBackend::flash_attn_prefill` (candle SDPA) directly — head_dim
+    /// 128 is in the SDPA whitelist, seq_len 12 > 8 for the full SDPA kernel
+    /// (not the vector path).
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_parity_sdpa_path() -> Result<()> {
+        run_cpu_metal_parity(ParityScenario {
+            label: "sdpa_path",
+            vocab_size: 32,
+            num_heads: 4,
+            num_kv_heads: 1,
+            head_dim: 128,
+            hidden_size: 512,
+            intermediate_size: 1024,
+            num_layers: 2,
+            full_attention_interval: 1,
+            token_ids: (0..12u32).collect(),
+            // SDPA internally accumulates at FP32 but softmax rounds differently
+            // from the naive CPU path. 1e-2 accommodates M1 drift; tighten if
+            // later hardware proves it's conservative.
+            max_abs_diff: 1e-2,
+        })
+    }
+
+    /// Hybrid full + GDN layers with head_dim 4, below the SDPA whitelist.
+    /// `MetalBackend` declines into the portable fallback, so this validates
+    /// that the whole candle composition (embed, RMSNorm, RoPE, SwiGLU, naive
+    /// softmax+matmul, GDN recurrent loop) runs correctly on Apple Silicon.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_parity_cpu_vs_metal() -> Result<()> {
+        run_cpu_metal_parity(ParityScenario {
+            label: "portable_fallback",
+            vocab_size: 32,
+            hidden_size: 16,
+            num_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            num_layers: 4,
+            full_attention_interval: 4,
+            token_ids: vec![1, 5, 3, 10],
+            max_abs_diff: 1e-3,
+        })
     }
 
     #[test]
