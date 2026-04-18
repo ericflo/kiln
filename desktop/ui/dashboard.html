@@ -88,6 +88,12 @@
       #toolbar button:hover { background: #232831; }
       #toolbar button#stop-server:hover { background: #5a2424; border-color: #7a3232; color: #f2d6d6; }
       #toolbar button#stop-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
+      #toolbar .toolbar-divider {
+        width: 1px;
+        align-self: stretch;
+        background: #2a2f3a;
+        margin: 2px 4px;
+      }
       #stop-server.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #copy-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
       #copy-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
@@ -295,9 +301,6 @@
         <span class="dot"></span>
         <span class="label">Unknown</span>
       </span>
-      <button id="open-logs" title="Open the log viewer window">View Logs</button>
-      <button id="open-settings" title="Open the settings window">Settings</button>
-      <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
       <span id="model-path-pill" title="Configured model path — not set">
         <span class="model-label">Model:</span>
         <code id="model-path" class="empty">—</code>
@@ -315,7 +318,11 @@
         <span class="training-label">Training:</span>
         <code id="training-value" class="empty">—</code>
       </span>
+      <span class="toolbar-divider" aria-hidden="true"></span>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
+      <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
+      <button id="open-logs" title="Open the log viewer window">View Logs</button>
+      <button id="open-settings" title="Open the settings window">Settings</button>
       <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
     </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
