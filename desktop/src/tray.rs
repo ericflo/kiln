@@ -142,10 +142,11 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                 }
                 ITEM_OPEN_IN_BROWSER => {
                     let supervisor = Arc::clone(&supervisor);
+                    let app_for_emit = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         open_kiln_ui_in_default_browser(&app_handle, supervisor).await;
                     });
-                    let _ = app_handle.emit("menu://open-in-browser", ());
+                    let _ = app_for_emit.emit("menu://open-in-browser", ());
                 }
                 ITEM_CHECK_UPDATES => {
                     if let Err(e) = open_dashboard_window(&app_handle) {
