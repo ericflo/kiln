@@ -169,9 +169,9 @@ fn mlx_sdpa_dtype_supported(dtype: DType) -> bool {
     matches!(dtype, DType::F32 | DType::F16 | DType::BF16)
 }
 
-/// candle → mlx via a host copy. `Array::from_slice` accepts native Rust
-/// types (f32, i32, etc.) — no direct bf16, so we route f16/bf16 tensors
-/// through f32 and rely on `as_dtype` for the mlx-side downcast.
+/// candle → mlx via a host copy. Passes bf16/f16 through natively (both
+/// `half::{bf16,f16}` in candle and mlx-rs) instead of round-tripping
+/// through f32, which doubles the copied bytes and burns a cast.
 fn tensor_to_array(t: &Tensor) -> Result<Array> {
     let shape: Vec<i32> = t.dims().iter().map(|&d| d as i32).collect();
     let t_contig = t.contiguous()?;
@@ -181,86 +181,76 @@ fn tensor_to_array(t: &Tensor) -> Result<Array> {
             Ok(Array::from_slice(&data, &shape))
         }
         DType::F16 => {
-            let data = t_contig.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            let a = Array::from_slice(&data, &shape);
-            Ok(a.as_dtype(MlxDtype::Float16)?)
+            let data = t_contig.flatten_all()?.to_vec1::<half::f16>()?;
+            Ok(Array::from_slice(&data, &shape))
         }
         DType::BF16 => {
-            let data = t_contig.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            let a = Array::from_slice(&data, &shape);
-            Ok(a.as_dtype(MlxDtype::Bfloat16)?)
+            let data = t_contig.flatten_all()?.to_vec1::<half::bf16>()?;
+            Ok(Array::from_slice(&data, &shape))
         }
         other => anyhow::bail!("tensor_to_array: unsupported dtype {other:?}"),
     }
 }
 
-/// mlx → candle via a host copy. MLX's fused kernels sometimes return
-/// arrays whose physical memory layout doesn't match the logical shape
-/// (strides [8192, 128, 256, 1] for a [1,2,32,128] SDPA output on M1 was
-/// the motivating case). `Array::as_slice` gives us the raw buffer
-/// ignoring strides, so we explicitly walk the logical shape with the
-/// reported strides to materialize a row-major `Vec<f32>`.
+/// mlx → candle via a host copy. MLX's fused kernels sometimes return arrays
+/// whose physical memory layout doesn't match the logical shape (strides
+/// `[8192, 128, 256, 1]` on a `[1,2,32,128]` SDPA output on M1 was the
+/// motivating case), so we force row-major materialization on the MLX side
+/// via a no-op `reshape` before calling `as_slice` (which is a raw-memory
+/// view and ignores strides). Doing it in MLX keeps the materialize loop
+/// vectorized on-device instead of running a per-element Rust walk.
+///
+/// Reads the native dtype when it matches `out_dtype` to avoid the BF16 →
+/// F32 → BF16 round-trip that the prior implementation did unconditionally.
 fn array_to_tensor(
     arr: &Array,
     out_dtype: DType,
     device: &Device,
     shape: &[usize],
 ) -> Result<Tensor> {
-    arr.eval()?;
-    let f32_arr = if arr.dtype() != MlxDtype::Float32 {
-        arr.as_dtype(MlxDtype::Float32)?
-    } else {
-        arr.clone()
-    };
-    f32_arr.eval()?;
+    // Force row-major materialization on-device via `flatten` → `reshape`:
+    // flatten to 1D (MLX can't keep a transposed view through this because
+    // the result must be contiguous in the logical axis order), then reshape
+    // back. A `reshape(same_shape)` on a strided array is a no-op view — the
+    // round-trip through 1D is what actually materializes.
+    let shape_i32: Vec<i32> = shape.iter().map(|&d| d as i32).collect();
+    let contig = arr
+        .flatten(None, None)?
+        .reshape(&shape_i32)?;
+    contig.eval()?;
 
-    let raw = f32_arr.as_slice::<f32>();
-    let strides = f32_arr.strides();
-    let total: usize = shape.iter().product();
-
-    let row_major = if is_row_major(shape, strides) {
-        raw.to_vec()
-    } else {
-        let mut dst = Vec::with_capacity(total);
-        let ndim = shape.len();
-        let mut idx = vec![0usize; ndim];
-        for _ in 0..total {
-            let mut phys = 0usize;
-            for dim in 0..ndim {
-                phys += idx[dim] * strides[dim];
-            }
-            dst.push(raw[phys]);
-            for dim in (0..ndim).rev() {
-                idx[dim] += 1;
-                if idx[dim] < shape[dim] {
-                    break;
-                }
-                idx[dim] = 0;
-            }
+    // Read natively when the dtype already matches what we want; otherwise
+    // let MLX cast on-device (vectorized) before copying.
+    let tensor = match (contig.dtype(), out_dtype) {
+        (MlxDtype::Float32, DType::F32) => {
+            Tensor::from_slice(contig.as_slice::<f32>(), shape, device)?
         }
-        dst
-    };
-
-    let tensor = Tensor::from_vec(row_major, shape, device)?;
-    if tensor.dtype() != out_dtype {
-        Ok(tensor.to_dtype(out_dtype)?)
-    } else {
-        Ok(tensor)
-    }
-}
-
-fn is_row_major(shape: &[usize], strides: &[usize]) -> bool {
-    if shape.len() != strides.len() {
-        return false;
-    }
-    let mut expected: usize = 1;
-    for dim in (0..shape.len()).rev() {
-        if shape[dim] != 1 && strides[dim] != expected {
-            return false;
+        (MlxDtype::Float16, DType::F16) => {
+            Tensor::from_slice(contig.as_slice::<half::f16>(), shape, device)?
         }
-        expected *= shape[dim];
-    }
-    true
+        (MlxDtype::Bfloat16, DType::BF16) => {
+            Tensor::from_slice(contig.as_slice::<half::bf16>(), shape, device)?
+        }
+        // Dtype mismatch between MLX output and candle request — cast on MLX
+        // (on-device, vectorized) and read the target dtype directly.
+        (_, DType::F32) => {
+            let cast = contig.as_dtype(MlxDtype::Float32)?;
+            cast.eval()?;
+            Tensor::from_slice(cast.as_slice::<f32>(), shape, device)?
+        }
+        (_, DType::F16) => {
+            let cast = contig.as_dtype(MlxDtype::Float16)?;
+            cast.eval()?;
+            Tensor::from_slice(cast.as_slice::<half::f16>(), shape, device)?
+        }
+        (_, DType::BF16) => {
+            let cast = contig.as_dtype(MlxDtype::Bfloat16)?;
+            cast.eval()?;
+            Tensor::from_slice(cast.as_slice::<half::bf16>(), shape, device)?
+        }
+        (_, other) => anyhow::bail!("array_to_tensor: unsupported out_dtype {other:?}"),
+    };
+    Ok(tensor)
 }
 
 #[cfg(test)]
@@ -268,13 +258,8 @@ mod tests {
     use super::*;
     use candle_core::D;
 
-    /// Parity: `MlxBackend::flash_attn_prefill` agrees with a direct candle
-    /// SDPA on the same inputs (within BF16-rounding tolerance). Exercises
-    /// the candle ↔ mlx Array round-trip + mlx's fused SDPA. Gated behind
-    /// `--features mlx` because it links against mlx-sys.
     /// Naive F32 softmax+matmul attention. Deterministic reference for both
-    /// MLX and candle SDPA parity checks — both should match within
-    /// floating-point rounding.
+    /// MLX and candle SDPA parity checks.
     fn naive_attention(
         q: &Tensor, // [batch, heads, seq_q, head_dim]
         k: &Tensor, // [batch, heads, seq_k, head_dim]
@@ -340,11 +325,8 @@ mod tests {
         Ok((mlx_diff, candle_diff))
     }
 
-    /// MLX SDPA agrees with a naive F32 reference within 1e-3. Same tolerance
-    /// applies to candle SDPA — both are bit-inexact vs the reference due to
-    /// fused-kernel accumulation, but both should land in the same ballpark.
-    /// Diagnostic: round-trip a tensor through the candle↔mlx conversion.
-    /// Must be bit-identical for F32 inputs.
+    /// Round-trip a tensor through the candle↔mlx conversion. Must be
+    /// bit-identical for F32 inputs.
     #[test]
     fn test_tensor_roundtrip_f32() -> Result<()> {
         let Some(device) = crate::backend::metal::try_new_metal() else {
@@ -357,6 +339,27 @@ mod tests {
         let diff = (&t - &back)?.abs()?.flatten_all()?.max(D::Minus1)?.to_scalar::<f32>()?;
         eprintln!("roundtrip max abs diff: {diff}");
         assert!(diff < 1e-6, "tensor round-trip should be identity: {diff}");
+        Ok(())
+    }
+
+    /// Native BF16 round-trip — covers the path that skips the f32 staging.
+    /// Must be bit-identical because both sides use the same `half::bf16`.
+    #[test]
+    fn test_tensor_roundtrip_bf16() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let shape = &[1usize, 4, 12, 128];
+        let t = Tensor::randn(0.0f32, 1.0, shape, &device)?.to_dtype(DType::BF16)?;
+        let arr = tensor_to_array(&t)?;
+        let back = array_to_tensor(&arr, DType::BF16, &device, shape)?;
+        assert_eq!(back.dtype(), DType::BF16);
+        let diff = (&t.to_dtype(DType::F32)? - &back.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(D::Minus1)?
+            .to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0, "bf16 round-trip should be bit-identical");
         Ok(())
     }
 
