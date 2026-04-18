@@ -260,6 +260,16 @@ Kiln vendors the Flash-Attention-2 CUDA kernels directly, with no PyTorch depend
 
 The build uses `cc` crate to compile CUDA via nvcc with CUTLASS headers. The instantiation matrix is trimmed to only what Qwen3.5-4B needs (BF16, hdim128/256, causal).
 
+## Backend Abstraction
+
+Most of `kiln-model`'s forward pass is expressed as portable `candle_core::Tensor` ops that run on any candle device. A small set of ops with no candle equivalent sits behind the `BackendRuntime` trait in `kiln-model::backend`. The trait abstracts four platform-specific kernel ops: FlashAttention-2 prefill, FlashAttention-2 paged decode, Gated DeltaNet chunkwise forward-substitution, and the Gated DeltaNet single-token recurrent step. Each method returns `Result<Option<Tensor>>`: returning `Ok(None)` means the backend declines the call, and the caller falls back to a portable candle-op path. This keeps `#[cfg(feature = "...")]` gates out of every call site in `forward.rs`, `generate.rs`, `paged_kv_cache.rs`, and the training loop.
+
+Three backends implement the trait. `CudaBackend` dispatches to the vendored `kiln-flash-attn` kernels plus the `kiln-gdn-kernel` fused recurrent/forward-substitution kernels. `MetalBackend` uses candle's native `scaled_dot_product_attention` on Apple Silicon and declines the GDN ops (the portable candle path handles them). `CpuBackend` declines every op and routes all work through the portable fallback — used in mock mode and on platforms without a GPU feature enabled.
+
+Backend selection is build-time via Cargo features: `--features cuda` pulls in `CudaBackend`, `--features metal` pulls in `MetalBackend`, and omitting both yields the CPU-only fallback. At runtime, `backend::for_device()` picks the concrete backend for the active candle `Device`.
+
+Reference: `crates/kiln-model/src/backend/mod.rs`.
+
 ## LoRA System
 
 ### Adapter Loading
