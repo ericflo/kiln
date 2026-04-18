@@ -1,0 +1,30 @@
+
+NOTICE: Existing SQLite export found: profile_armB.sqlite
+        It is assumed file was previously exported from: profile_armB.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [profile_armB.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
+18.2,3827640947,864,4430140.0,4449224.0,3573934,6354537,207341.1,PushPop,:kiln/gdn/gates
+18.0,3788535453,865,4379809.8,4401976.0,3538944,5112545,188866.1,PushPop,:kiln/gdn/gated_norm
+14.7,3094876465,864,3582032.9,3604734.0,2904502,4511697,153604.0,PushPop,:kiln/gdn/qk_norm
+12.4,2608579448,864,3019189.2,3026061.5,2409604,5931018,178196.9,PushPop,:kiln/gdn/conv
+5.5,1164832198,1154,1009386.7,1012494.0,803318,1481340,52464.8,PushPop,:kiln/mlp/gate
+5.5,1161549011,1153,1007414.6,1010119.0,801921,1378115,49514.5,PushPop,:kiln/mlp/up
+5.5,1161489277,1153,1007362.8,1010189.0,794937,1572204,54161.5,PushPop,:kiln/mlp/down
+4.9,1037116045,864,1200365.8,1203336.0,964722,1750510,59080.1,PushPop,:kiln/gdn/in_proj
+3.6,765536494,2307,331832.0,343970.0,182216,566276,44678.3,PushPop,:kiln/residual
+2.7,575185330,864,665723.8,666184.0,521298,908918,34842.4,PushPop,:kiln/gdn/head_expand
+2.4,507797556,289,1757085.0,1760567.0,1432172,2041539,79829.1,PushPop,:kiln/proj/qkv
+1.6,335152846,865,387459.9,387481.0,305208,545463,22307.8,PushPop,:kiln/gdn/out_proj
+1.2,254191914,865,293863.5,292915.0,233341,874836,29205.3,PushPop,:kiln/attn/gdn/recurrent
+1.2,243419966,1154,210935.8,210467.5,163708,411088,14021.9,PushPop,:kiln/norm/pre_mlp
+1.1,240947772,1153,208974.7,208198.0,164197,527025,16682.7,PushPop,:kiln/norm/pre_attn
+0.6,123256108,865,142492.6,141918.0,101271,192483,9775.3,PushPop,:kiln/gdn/recur_prep
+0.5,113310299,289,392077.2,393208.0,309398,498250,24298.2,PushPop,:kiln/proj/o
+0.1,25473041,36,707584.5,705923.5,664194,752264,20349.4,PushPop,:kiln/lm_head
+0.0,7147022,864,8272.0,8032.0,5657,19415,1226.0,PushPop,:kiln/gdn/qkv_split
+0.0,6904177,865,7981.7,7613.0,5169,15645,1240.0,PushPop,:kiln/attn/gdn/precopy
+0.0,6243478,865,7217.9,7054.0,4679,26959,1549.2,PushPop,:kiln/gdn/post_transpose
+
+

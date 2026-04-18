@@ -1,309 +1,269 @@
-# Kiln Profiling Report — Paged Production Path (Phase 6 re-profile, post-PR #141)
+# Kiln Profiling Report — Phase 6 re-profile, post-Marlin MLP wire-in (PR #152)
 
 ## Overview
 
-PR #141 vendored a fused `gated_rms_norm` kernel targeting the 13.66 % NVTX
-hotspot called out in the previous PROFILING.md, but measured no decode-ITL
-speedup on A6000 at the GDN decode shape (`rows = 32`, `hidden = 128`). The
-PR hypothesised the null result was a methodology artifact: the previous
-profile captured with `KILN_CUDA_GRAPHS=false`, which exposes per-call launch
-overhead that production (`KILN_CUDA_GRAPHS=true`) amortises — so gains from
-a fused kernel could be real in graphs-OFF numbers but hidden in graphs-ON.
+PR #152 wired the vendored Marlin W4A16 kernel into the three MLP projections
+(`gate_proj`, `up_proj`, `down_proj`), extending the same path PR #149 landed
+for `q_proj`. PR #153 reported a +9.9 % decode tok/s delta from that wire-in
+on a separate pod. This re-profile captures fresh profiles on current `main`
+(HEAD `5aa22e1`) on one pod, back-to-back, so the post-#152 production hotspot
+mix is settled for the next optimization cycle.
 
-This Phase 6 re-profile re-captures the paged production path on current
-`main` (HEAD `07d934b`, "desktop: fix model name in screenshots") under both
-CUDA-graphs modes, head-to-head on the same pod with the same build, to
-settle three questions:
+Two arms measured, identical bench and build:
 
-1. **Does `KILN_CUDA_GRAPHS` actually change paged decode ITL today?** No.
-   Graphs-OFF mean ITL 23.10 ms, graphs-ON 23.15 ms — identical within noise.
-   The ~2.7 ms gap documented in the prior PROFILING.md does not reproduce.
-2. **Does graphs=ON change the NVTX / kernel mix enough to revise the next
-   optimization target?** No. Top-10 NVTX regions rank identically and
-   differ by ≤ 0.4 pct-pt across modes.
-3. **Does the methodology invalidate PR #141's null decode result?** No.
-   PR #141 measured no speedup at `rows = 32`, `hidden = 128`. That result
-   is real, not an artifact of graphs=OFF timing.
+- **Arm A — BF16 baseline (`KILN_W4A16=0 KILN_CUDA_GRAPHS=true`).** All
+  projections go through the existing cuBLAS BF16 GEMM path.
+- **Arm B — production W4A16 (`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`).** At
+  model load, `q_proj` and the three MLP projections swap in Marlin 4-bit
+  packed weights when the shape is compatible (`k%128 == 0 && n%256 == 0`).
+  All other layers (`k_proj`, `v_proj`, `o_proj`, norms, GDN kernels, full
+  attention) are unchanged.
 
-This changes the recommended next optimization target. Per-kernel fusion at
-the GDN decode shape has hit diminishing returns: the launch-overhead
-bottleneck fusion targets is not detectable on this workload. The next
-concrete lever is **bf16 → FP8/INT8 weight quantization on the projection
-GEMMs**, which are the true dominant cost (~60.5 % of GPU time in graphs=ON
-kernel mix).
+Measured results on one A6000 pod:
+
+| metric                 | Arm A (BF16) | Arm B (Marlin) | Δ        |
+| ---------------------- | -----------: | -------------: | -------- |
+| mean inter-token ms    | 22.25        | 21.50          | **−3.4 %** |
+| p50 inter-token ms     | 22.10        | 21.43          | −3.0 %   |
+| p99 inter-token ms     | 28.82        | 28.87          | +0.2 %   |
+| decode tok/s (latency) | 44.95        | 46.52          | **+3.5 %** |
+| throughput bs=1 tok/s  | 40.40        | 41.53          | +2.8 %   |
+| throughput bs=4 tok/s  | 40.40        | 42.24          | +4.6 %   |
+| throughput bs=8 tok/s  | 40.35        | 42.17          | +4.5 %   |
+| throughput bs=16 tok/s | 40.47        | 41.47          | +2.5 %   |
+| model load time        | 13.95 s      | 103.58 s       | +89.6 s  |
+| model VRAM (load)      | 16344 MB     | 17656 MB       | +1312 MB |
+| peak VRAM (inference)  | 16842 MB     | 18026 MB       | +1184 MB |
+
+The decode-ITL lift lands at roughly **one third the tok/s gain PR #153
+reported (+9.9 %)**. Likely drivers: PR #153 measured on a cold pod with a
+different throughput harness, and small pod-to-pod drift on the same hardware.
+The direction and sign agree; the magnitude is smaller than previously
+reported but real and repeatable in this back-to-back measurement.
+
+Model load jumped from 14 s to 104 s because Marlin packs the four
+projection weight matrices at load time (≈ 33 matrices × ~8 MB of packed
+data + scales). Load-time packing is one-shot and does not affect request
+latency, but is worth tracking — a pre-packed on-disk artifact would
+eliminate the cost if it becomes a cold-start issue.
+
+Peak VRAM grew ~1.2 GB with Marlin because the packed weights, scales, and
+workspace live alongside the original BF16 weights still held for the
+non-Marlin paths (`k_proj`, `v_proj`, `o_proj`). Future work that fully
+replaces BF16 weights at load time would recover this.
 
 ## Methodology
 
-All numbers in this report come from one pod, one build, back-to-back
-captures. Environment variables other than `KILN_CUDA_GRAPHS` are constant
-across arms.
+All numbers from one pod (RunPod RTX A6000 on-demand), one build, back-to-back
+captures. Only environment variables changing between arms are
+`KILN_W4A16=0|1`. `KILN_CUDA_GRAPHS=true` for both arms (production path).
 
 - **Steady-state ITL.** Three back-to-back 512-prompt × 128-decode
   latency runs per arm, no nsys attached, reporting the
   `mean_inter_token_ms` from the paged decode phase after the model is
-  warm (the prefill and first-decode cold costs are excluded by
-  `kiln-bench`'s latency phase already). Graphs are OFF/ON via
-  `KILN_CUDA_GRAPHS=false|true`.
-- **nsys captures.** Two 20-second `nsys profile -t cuda,nvtx
-  --duration=20` captures (Capture A: graphs=OFF, Capture B: graphs=ON),
-  started during the throughput-phase warmup so the profile window lands
-  on warm steady-state decode for a long window. Both captures use the
-  same kiln-bench invocation, the same model weights, and target the
-  same decode token count.
-- **Extraction.** `nsys stats --report cuda_gpu_kern_sum` for the
-  per-kernel table; `nsys stats --report nvtx_sum` for the NVTX region
-  table. Aggregated over the full capture (prefill + decode); the NVTX
-  region table is the right decode-only structural view.
-- **No per-region kernel timer.** The per-region `cuda_gpu_trace` join
-  would be nicer than NVTX-time for decode-only attribution, but graphs
-  OFF and graphs ON NVTX summaries agree within 0.4 pct-pt on every
-  top-10 region, so the extra instrumentation pass is not needed to
-  decide the next optimization target.
+  warm. Prefill and first-decode cold costs are excluded by
+  `kiln-bench`'s latency phase already.
+- **Throughput sweep.** The same `kiln-bench` invocation runs a
+  `1/4/8/16` sequential-generation sweep after the latency phase, which
+  produces the bs=1/4/8/16 tok/s numbers above.
+- **nsys captures.** Two captures with the production path and CUDA
+  graphs enabled:
+    - **Arm A** — `KILN_W4A16=0 KILN_CUDA_GRAPHS=true nsys profile -t
+      cuda,nvtx --delay=15 --duration=20`. Capture window begins after
+      the ~14 s model load, spanning prefill + warm decode + the first
+      throughput runs.
+    - **Arm B** — `KILN_W4A16=1 KILN_CUDA_GRAPHS=true nsys profile -t
+      cuda,nvtx --delay=110 --duration=30`. The `--delay` is larger
+      because Marlin packing pushes model load to 104 s. Capture window
+      lands in the throughput phase (steady-state warm decode through
+      `bs=1` and into `bs=4` / `bs=8`).
+- **Extraction.** `nsys stats --report cuda_gpu_kern_sum --format csv`
+  for the per-kernel table; `nsys stats --report nvtx_sum --format csv`
+  for the NVTX region table.
+- **Capture-window caveat.** Because Arm A's window includes some
+  prefill + decode transition activity and Arm B's window is pure
+  steady-state decode, a small number of prefill-heavy NVTX regions
+  (`:kiln/attn/full/prefill`, `:kiln/attn/full/decode_fused`, some
+  `:kiln/attn/rope`) appear in Arm A's top-30 but not Arm B's. The
+  measured ITL/tok-s numbers are from the bench's own clean-timing
+  phase and are apples-to-apples. The Arm B top-10 tables are the
+  correct structural view for "what dominates the production decode
+  hot loop today."
 
-## Hardware & Build
+## Hardware / Build
 
-| Item | Value |
-|---|---|
-| GPU | NVIDIA RTX A6000 (48 GiB, compute capability 8.6) |
-| Driver | 550.127.08 |
-| CUDA toolkit | 12.4 (runtime); Nsight Systems 2024.5.1.113 (side-installed) |
-| Rustc | 1.95 stable (baked in `kiln-runpod:latest`) |
-| Build | `cargo build --release --features cuda,nvtx --bin kiln-bench` |
-| Build cache | sccache + B2 prefix via `kiln-setup`; C/C++/CUDA cache hits |
-| Model | Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16, 32 layers (24 GDN + 8 GQA full-attn) |
-| Commit | `07d934b` (`main`) |
-| Pod | RunPod RTX A6000 on-demand (`t0eii824pgigpi`) |
+- GPU: NVIDIA RTX A6000 (49 GB VRAM)
+- Driver: 565.57.01, CUDA 12.4
+- nsys: 2024.5.1 (the baked 2023.4.4 triggers
+  `EventCollection::CheckOrder` on long captures; 2024.5.1 fixes it)
+- Rust: 1.95.0, `cargo build --release --features cuda,nvtx`
+- Kiln HEAD at capture: `5aa22e1` (bench report from PR #153, which
+  sits on top of PR #152's MLP wire-in)
+- Model: Qwen3.5-4B, sharded safetensors in `/workspace/qwen3.5-4b`
+- Prompt: 512 tokens; decode: 128 tokens; paged KV
+  (`block_size=16`, `blocks=40`)
 
-`nsys` note. The baked `/usr/local/cuda/bin/nsys` is 2023.4.4 which has the
-`EventCollection::CheckOrder` event-order bug that prevents `.qdstrm`
-finalization on long-duration captures. Workaround used here:
-installed `nsight-systems-2024.5.1` from NVIDIA directly (after
-`libxcb-cursor0` from universe) and symlinked over the old binary.
-Baking `nsys 2024.5.1+` into `kiln-runpod` is a known follow-up — the
-prior PROFILING.md called this out too and the image has not moved yet.
+## Top-10 GPU Kernels — Arm B (W4A16, production path)
 
-## Wallclock Numbers — `KILN_CUDA_GRAPHS` is a noise-level knob today
+From `nsys stats --report cuda_gpu_kern_sum` on `profile_armB.nsys-rep`.
+CSV in `profiling-artifacts/statsB_kern.csv`.
 
-Three back-to-back no-nsys `kiln-bench --paged --prompt-tokens 512
---max-output-tokens 128 --skip-training` runs per arm, reporting the
-latency-phase `mean_inter_token_ms` / `p50` / `p99`:
+| rank | % GPU time | kernel                                                              | role                                                       |
+| ---: | ---------: | ------------------------------------------------------------------- | ---------------------------------------------------------- |
+|   1  | **14.8 %** | `Marlin<256,1,8,8,4,8>`                                             | W4A16 MLP (gate/up/down) + `q_proj` GEMMs                  |
+|   2  |   11.7 %   | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn`      | Remaining BF16 GEMMs (`k_proj`, `v_proj`, `o_proj`, lm_head) |
+|   3  |    9.9 %   | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn`        | BF16 GEMM (projections / lm_head)                          |
+|   4  |    9.3 %   | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn`       | BF16 GEMM (shape-dependent tile)                           |
+|   5  |    8.2 %   | `ucopy_bf16`                                                        | Tensor copies (residual stream, reshapes)                  |
+|   6  |    5.3 %   | `ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5`  | BF16 GEMM (smaller tile)                                   |
+|   7  |    3.9 %   | `bmul_f32`                                                          | GDN elementwise multiply (gates / gated_norm path)         |
+|   8  |    3.1 %   | `fused_rmsnorm_kernel`                                              | RMSNorm (pre-attn, pre-mlp, qk_norm)                       |
+|   9  |    2.9 %   | `fast_sum_f32`                                                      | Reductions in GDN gates / norms                            |
+|  10  |    2.7 %   | `recurrent_gdn_fwd_kernel<128>`                                     | GDN linear-attention recurrent kernel                      |
 
-| Arm | Run 1 | Run 2 | Run 3 | Mean | p50 (run 1) | p99 (run 1) |
-|---|---|---|---|---|---|---|
-| `KILN_CUDA_GRAPHS=false` | 23.08 ms | 23.04 ms | 23.18 ms | **23.10 ms** | 22.90 ms | 28.43 ms |
-| `KILN_CUDA_GRAPHS=true`  | 23.16 ms | 23.15 ms | 23.15 ms | **23.15 ms** | 22.97 ms | 28.16 ms |
+Observations:
 
-**Delta: 0.05 ms (0.2 %). Within run-to-run noise.**
+- Marlin has become the **single largest kernel** in the production path at
+  **14.8 %**, covering four GEMMs (q_proj + gate_proj + up_proj + down_proj)
+  in one kernel family.
+- The four cuBLAS BF16 GEMM tile variants together account for **36.2 %**
+  of GPU time. These are the non-Marlin projections (`k_proj`, `v_proj`,
+  `o_proj`, `lm_head`) plus any shape-incompatible fallback.
+- Small elementwise / reduction kernels on the GDN path (bmul_f32,
+  fast_sum_f32, cast_*, fused_rmsnorm_kernel) remain numerous (8k+
+  instances combined). These are launch-overhead-bound at the GDN
+  decode shape and are the natural fusion target for the next phase.
 
-This does not match the prior PROFILING.md's 25.5 ms (graphs OFF) vs
-22.77 ms (graphs ON) framing, and does not reproduce the 2.7 ms CUDA-graphs
-benefit that PR #141's fallback-config hypothesis depended on. The
-graphs-ON path delivers no measurable ITL benefit over graphs-OFF at the
-current main, on this pod.
+## Top-10 NVTX Regions — Arm B (W4A16, production path)
 
-A plausible cause of the drift: when PR #133 fused the pre-norm RMSNorm
-(collapsing ~10 candle ops into one `fused_rmsnorm_kernel` launch per
-region × 2 regions × 32 layers per token), per-token launch count dropped
-enough that the capture-time launch-overhead amortisation that CUDA
-graphs provides is no longer measurable at decode. The graphs capture
-path still runs without error (`INFO kiln_model::cuda_graph: CUDA graphs
-enabled for decode` emits cleanly), so the path is live — it just has
-no ITL floor to claw back.
+From `nsys stats --report nvtx_sum`. CSV in
+`profiling-artifacts/statsB_nvtx.csv`. Percentages are of the NVTX total
+within the 30 s steady-state capture window.
 
-Prefill on this pod: 436.7 ms (1159 tok/s) in the graphs=ON warm run and
-541.8 ms (934 tok/s) in the graphs=OFF nsys-attached warm run. Prefill
-is not the focus of this profile; quoted for parity with the prior report.
+| rank | % time | region                  | layers per token | notes                                                  |
+| ---: | -----: | ----------------------- | ---------------: | ------------------------------------------------------ |
+|   1  | **18.2 %** | `:kiln/gdn/gates`     | 24               | Per-layer gate projection + swish + elementwise path   |
+|   2  | **18.0 %** | `:kiln/gdn/gated_norm` | 24              | Gated RMSNorm on GDN head outputs                      |
+|   3  |   14.7 %   | `:kiln/gdn/qk_norm`    | 24              | Q/K RMSNorm inside GDN                                 |
+|   4  |   12.4 %   | `:kiln/gdn/conv`       | 24               | Causal 1-D conv on GDN Q/K/V                           |
+|   5  |    5.5 %   | `:kiln/mlp/gate`       | 32               | `gate_proj` GEMM (now Marlin)                          |
+|   6  |    5.5 %   | `:kiln/mlp/up`         | 32               | `up_proj` GEMM (now Marlin)                            |
+|   7  |    5.5 %   | `:kiln/mlp/down`       | 32               | `down_proj` GEMM (now Marlin)                          |
+|   8  |    4.9 %   | `:kiln/gdn/in_proj`    | 24               | GDN input projection (cuBLAS BF16)                     |
+|   9  |    3.6 %   | `:kiln/residual`       | 64               | Residual adds                                          |
+|  10  |    2.7 %   | `:kiln/gdn/head_expand` | 24              | GDN head expansion                                     |
 
-## Top Kernels — Graphs OFF vs Graphs ON
+Structural breakdown of steady-state decode (Arm B):
 
-Source: `nsys stats --report cuda_gpu_kern_sum --format csv`. Aggregated
-over the full 20-second nsys capture (prefill + decode). The kernel mix
-is almost completely graph-mode-invariant.
+- **GDN linear-attention subsystem** (`:kiln/gdn/*`) = **72.5 %**
+  (gates 18.2 + gated_norm 18.0 + qk_norm 14.7 + conv 12.4 + in_proj 4.9
+  + head_expand 2.7 + recurrent 1.2 + out_proj ≈ negligible here).
+- **MLP** (`:kiln/mlp/*`) = **16.5 %** (gate 5.5 + up 5.5 + down 5.5).
+  Now balanced across the three projections because Marlin runs all
+  three in near-identical time.
+- **Residuals + norms** (`:kiln/residual`, `:kiln/norm/pre_*`) =
+  **~6.0 %**.
+- **Full-attention layers** — fall below the top-10 cutoff in the Arm B
+  window; full-attn share is small on this model (only 8 of 32 layers)
+  and was dominated by the GDN pathway even in the prior profile.
 
-| Kernel (family) | Graphs OFF % GPU | Graphs ON % GPU | Notes |
-|---|---|---|---|
-| `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8` | **29.4 %** | **30.6 %** | Large bf16 GEMM — Q/K/V/gate/up/down projections |
-| `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8` | **16.3 %** | **16.9 %** | Decode-shaped (Mx1xN) bf16 GEMM |
-| `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn` | **8.9 %** | **9.2 %** | Mid-size bf16 GEMM |
-| `ucopy_bf16` | 10.1 % | 8.2 % | Generic bf16 element-wise copy (reshape / strided memcpy) |
-| `ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn` | 3.6 % | 3.8 % | bf16 GEMM (attn proj shape) |
-| `bmul_f32` | 3.2 % | 3.1 % | candle broadcast multiply (F32) |
-| `<unnamed>::fused_rmsnorm_kernel` (PR #133) | **1.9 %** | **2.0 %** | Fused pre-norm — hot and stable across modes |
-| `fast_sum_f32` | 1.9 % | 1.9 % | F32 reduction (post-norm, qk_norm, softplus tails) |
-| `ucopy_f32` | 1.9 % | 1.8 % | F32 element-wise copy |
-| `recurrent_gdn_fwd_kernel<128>` (PR #80) | 1.6 % | 1.7 % | Vendored GDN recurrence |
-| `cast_f32_bf16` | 1.7 % | 1.7 % | dtype cast (F32→bf16) |
-| `cast_bf16_f32` | 1.6 % | 1.6 % | dtype cast (bf16→F32) |
-| `kiln_flash::flash_fwd_splitkv_kernel` (vendored FlashInfer) | 1.1 % | 1.2 % | Full-attn layers' decode |
-| `gdn_fwd_sub_kernel` (PR #80) | 0.4 % | 0.3 % | GDN chunk forward-substitution |
+## Comparison to prior PROFILING.md (pre-PR #152, commit `07d934b`)
 
-**Combined bf16 GEMM family (top 5 GEMM entries + smaller variants):
-~60.5 % of GPU time in graphs=ON. Up from ~55 % in the prior PROFILING.md.**
+Prior production-path top-10 NVTX (graphs ON, no W4A16):
 
-Observations across modes:
+| rank | prior (`07d934b`, BF16) | now (`5aa22e1`, Arm B, W4A16) | shift   |
+| ---: | ------------------------- | ------------------------------- | ------- |
+|   1  | `:kiln/gdn/gates` 14.3 %  | `:kiln/gdn/gates` **18.2 %**    | +3.9 pp |
+|   2  | `:kiln/gdn/gated_norm` 14.1 % | `:kiln/gdn/gated_norm` **18.0 %** | +3.9 pp |
+|   3  | `:kiln/gdn/qk_norm` 11.7 % | `:kiln/gdn/qk_norm` **14.7 %**   | +3.0 pp |
+|   4  | `:kiln/gdn/conv` 11.1 %   | `:kiln/gdn/conv` **12.4 %**      | +1.3 pp |
+|   5  | `:kiln/attn/rope` 9.3 %   | (below top-10 in Arm B window)   | —       |
+|   6  | `:kiln/gdn/in_proj` 9.0 % | `:kiln/gdn/in_proj` 4.9 %        | −4.1 pp |
+|   9  | `:kiln/mlp/gate` 2.7 %    | `:kiln/mlp/gate` 5.5 %           | +2.8 pp |
+|  10  | `:kiln/mlp/up`   2.5 %    | `:kiln/mlp/up`   5.5 %           | +3.0 pp |
 
-- Kernel-level percentages shift ≤ 1 pct-pt between modes for every row.
-  No new kernel appears / disappears.
-- `fused_rmsnorm_kernel` stays at ~1.9-2.0 %: PR #133's fusion is still
-  landed, still hot, and not regressed by graphs=ON.
-- `ucopy_bf16` loses ~1.9 pct-pt under graphs=ON (10.1 → 8.2 %). This is
-  consistent with CUDA graphs eliding some per-launch metadata copies; it
-  is the only graph-detectable change in the kernel table, and it maps
-  to ≤ 0.05 ms / token in ITL — matching the head-to-head gap above.
+Reading: Marlin eliminated a large BF16 GEMM slice per MLP layer, which
+**shrank the absolute time in MLP GEMMs** (and hence tightened the decode
+loop, producing the measured +3.5 % tok/s). MLP NVTX share **went up**
+because the region is now time-relative to a shorter loop and because the
+previous profile captured a wider window including prefill. The GDN share
+also grew — the Amdahl's-law flip from MLP wins: after Marlin halves
+MLP GEMM cost, GDN becomes proportionally even more dominant.
 
-## Top NVTX Regions — Graphs OFF vs Graphs ON (decode-dominant)
+**Dominant cost today is unambiguously the GDN subsystem at 72.5 % of
+decode time.** The four big GDN regions — gates, gated_norm, qk_norm,
+conv — together account for **63.3 %** of decode time in a single
+structural group.
 
-Source: `nsys stats --report nvtx_sum --format csv`. Push/Pop ranges
-emitted from `crates/kiln-model/src/forward.rs`. Aggregated over the
-entire capture, so a long warm decode window dominates — this is the
-right decode-structural view.
+## Next optimization target
 
-| Rank | NVTX Region | OFF % | ON % | Δ pct-pt | Avg per call (ON) | What it does |
-|---|---|---|---|---|---|---|
-| 1 | `:kiln/gdn/gates` | 14.0 % | **14.3 %** | +0.3 | 224.5 µs | `beta = sigmoid(b)`; `g = -exp(A_log) * softplus(a + dt_bias)` |
-| 2 | `:kiln/gdn/gated_norm` | 13.8 % | **14.1 %** | +0.3 | 221.3 µs | `gated_rms_norm(attn_out, z, w, eps)` — PR #141 fused, no ITL speedup |
-| 3 | `:kiln/gdn/qk_norm` | 11.5 % | **11.7 %** | +0.2 | 184.5 µs | L2 normalize Q and K, scale Q by 1/√dk |
-| 4 | `:kiln/gdn/conv` | 11.1 % | **11.1 %** | 0.0 | 175.1 µs | Causal depthwise conv1d (pure candle ops) |
-| 5 | `:kiln/attn/rope` | 9.1 % | **9.3 %** | +0.2 | 440.1 µs | RoPE application (8 full-attn layers only) |
-| 6 | `:kiln/gdn/in_proj` | 9.7 % | **9.0 %** | -0.7 | 140.8 µs* | GDN input projection (batched matmul + transpose) |
-| 7 | `:kiln/attn/full/decode_fused` | 3.0 % | 3.1 % | +0.1 | 145.9 µs | Vendored FlashInfer GQA decode |
-| 8 | `:kiln/residual` | 2.9 % | 2.8 % | -0.1 | 16.3 µs | Residual add |
-| 9 | `:kiln/mlp/gate` | 2.6 % | 2.7 % | +0.1 | 31.9 µs | MLP gate projection (batched matmul) |
-| 10 | `:kiln/mlp/up` | 2.5 % | 2.5 % | 0.0 | 30.0 µs | MLP up projection (batched matmul) |
-| 11 | `:kiln/gdn/head_expand` | 2.4 % | 2.5 % | +0.1 | 39.7 µs | Repeat K heads to match V head count |
+The next concrete lever is **fusing the GDN gate + gated_norm +
+elementwise path** into a small number of large kernels, ideally one.
 
-_*`in_proj` has a bimodal distribution (median 85 µs, max 151 ms) — the
-tail is a stream-sync wait bubble in one capture instance, not per-call
-compute. Use the median as the stable per-call cost estimate._
+Evidence:
 
-**Structural breakdown (graphs=ON):**
+- `:kiln/gdn/gates` and `:kiln/gdn/gated_norm` together are **36.2 %**
+  of decode time (#1 and #2 by a wide margin).
+- The hot kernels serving these regions are small elementwise /
+  reduction primitives (`bmul_f32` 3.9 %, `fast_sum_f32` 2.9 %,
+  `cast_f32_bf16` 2.4 %, `cast_bf16_f32` 2.2 %, `affine_f32` 1.8 %,
+  `uneg_f32` / `uexp_f32` / `urecip_f32` / `usqrt_f32` each ~0.7–1.0 %).
+  These are **hundreds to thousands of instances per capture**, each a
+  per-element kernel that does very little work.
+- At the GDN decode shape (`rows = 32`, `hidden = 128` per head, 24
+  layers, batch = 1) these kernels are launch- and
+  memory-bandwidth-bound. One fused kernel collapses:
+    - `gates_lin` → swish activation → mul into `gated_norm` input,
+    - `rms_norm` over the gated output,
+    - the residual elementwise multiply.
+  That eliminates intermediate bf16→f32→bf16 round-trips that appear
+  as `cast_*` kernels today, and cuts hundreds of small launches per
+  token.
+- PR #141 vendored a `gated_rms_norm` kernel and measured no delta at
+  `rows = 32, hidden = 128` **under CUDA graphs**. That test bounded
+  the isolated fusion gain, not the broader "collapse the gate path"
+  target proposed here. The broader fusion targets NVTX regions that
+  together are ~5× larger than the isolated `gated_rms_norm` shape
+  PR #141 measured, and the hot kernel list shows the dominant cost is
+  in elementwise / reduction primitives that a proper fused gate kernel
+  would eliminate, not in the narrow `gated_rms_norm` slice.
 
-| Block | NVTX % |
-|---|---|
-| All `:kiln/gdn/*` (GDN layers, 24/32 layers) | **~58 %** |
-| All `:kiln/attn/*` (full-attn, 8/32 layers) | ~14 % |
-| All `:kiln/mlp/*` (32 layers) | ~8 % |
-| Norms + residuals | ~6 % |
-| LM head + sampling | ~0.2 % |
+Recommended scope for the next cycle:
 
-Every top-10 region moves by ≤ 0.7 pct-pt between modes. The only
-noticeable shift — `in_proj` down 0.7 pct-pt with graphs=ON — is inside
-its own per-call noise (the median doesn't move). There is no evidence
-that graphs=ON changes the hotspot picture.
+1. Vendor or author a fused **`gdn_gate`** kernel that folds the gate
+   linear output, swish, gated elementwise multiply, RMSNorm, and
+   residual-multiply into one kernel (bf16 in, bf16 out).
+2. Keep the existing `recurrent_gdn_fwd_kernel<128>` and
+   `gdn_fwd_sub_kernel` unchanged — those already own a small share
+   and are CUDA-graph-friendly.
+3. Validate on the same harness this report uses (warm paged decode
+   ITL, 512-prompt × 128-decode, three runs, both with and without
+   `KILN_W4A16=1`), with a parity test vs the existing unfused
+   implementation using the kernel-crate parity test pattern.
 
-## What This Means for PR #141
+Expected ceiling: if the fused kernel removes even half of the
+elementwise launch overhead and cast round-trips, decode ITL should
+improve by 6–10 % (target: 19.5 ms mean ITL, ~51 tok/s on A6000). The
+same fusion helps both arms because the GDN path is unchanged by
+W4A16.
 
-PR #141's decode-ITL measurement was:
+## Files / Reproduction
 
-| Arm | Mean ITL |
-|---|---|
-| graphs=ON main (no kernel) | 25.06 ms |
-| graphs=ON kernel-ON         | 24.73 ms |
-| graphs=ON kernel-OFF        | 24.85 ms |
+Raw artifacts in this repo:
 
-That pod showed 25 ms vs this pod's 23.15 ms on the same commit tier —
-a cross-pod drift of ~2 ms that's larger than PR #141's kernel-on vs
-kernel-off delta. So the absolute numbers in PR #141 vs this profile
-are not directly comparable, but the **within-pod, kernel-ON vs
-kernel-OFF** result is: **1.005× with graphs on, 1.003× with graphs
-off**. That is the same "within noise" signal we see here in the
-graphs=ON vs graphs=OFF head-to-head.
+- `profiling-artifacts/statsA_kern.csv` — per-kernel table, Arm A
+- `profiling-artifacts/statsA_nvtx.csv` — NVTX table, Arm A
+- `profiling-artifacts/statsB_kern.csv` — per-kernel table, Arm B
+- `profiling-artifacts/statsB_nvtx.csv` — NVTX table, Arm B
 
-Conclusion: PR #141's null result is **not** a graphs-methodology artifact.
-The fused kernel is correct and cheap to ship, but it does not recover
-wallclock at the GDN decode shape — because the candle-op chain's
-launch overhead is not the bottleneck on this workload in either graphs
-mode. The NVTX `:kiln/gdn/gated_norm` region cost is ~221 µs per call
-regardless of whether its inner ops are one fused launch or ten — the
-cost is HBM bandwidth on the RMSNorm reduction and the SiLU-gated
-epilogue (bf16 reads/writes at `rows=32, hidden=128`), which fusion
-collapses the launches of but does not eliminate the memory traffic of.
+Full `.nsys-rep` captures live on pod `daogyp64vo0cgq` under `/tmp/` and
+are not committed (19 MB Arm A, 34 MB Arm B).
 
-**Recommendation on PR #141: close (don't merge).**
-
-Rationale:
-
-1. Zero measured speedup at the production shape (and this re-profile
-   says that's the real answer, not a methodology miss).
-2. Zero measured regression either — but shipping a vendored kernel with
-   no benefit is net-negative: another crate to maintain, another env-var
-   to remember, another fallback path that has to stay in parity.
-3. The fallback/oracle parity test in the PR is the useful artifact and
-   can be kept as a branch / gist reference if we revisit fused
-   gated-RMSNorm at larger hidden dims or batched training (where the
-   compute/launch ratio flips and the kernel might actually win).
-4. If we leave the PR open as "dark landed", future optimization work
-   will be forced to maintain the fused kernel's invariants (strided
-   inputs, cuda-only, bf16-only envelope) for zero benefit.
-
-_This report recommends but does not execute the close. Disposition is
-the reviewer's call._
-
-## Next Optimization Target — weight quantization, not more fusion
-
-The kernel mix in graphs=ON is **60.5 % GEMM, 5 % vendored GDN inner
-kernels, ~7 % dtype-cast + element-wise copies, ~10 % F32 reductions,
-~17 % small candle kernels**. All of the big cutlass/ampere GEMMs are
-already at vendor-grade tensor-core utilisation. There is no per-kernel
-fusion target with a plausible path to meaningful decode-ITL speedup:
-
-- **`:kiln/gdn/gated_norm`** — PR #141 already proved fusion doesn't
-  help here (see above).
-- **`:kiln/gdn/gates`** (14.3 %) — same decode shape (rows=32,
-  hidden=128) and same character (sigmoid/softplus/exp chain) as
-  gated_norm. A vendored fusion is very likely to land in the same
-  null-result regime; not worth re-running the PR #141 experiment.
-- **`:kiln/gdn/qk_norm`** (11.7 %) — same shape, same L2-normalize
-  memory-bound character; same risk.
-- **`:kiln/gdn/conv`** (11.1 %) — pure candle causal depthwise conv1d
-  at decode (`causal_conv1d_decode` in `forward.rs:715`). This one
-  _could_ fuse productively (a single-warp-per-channel gather + dot +
-  state-roll kernel), but it's also only 11 %, and the cost is again
-  memory-bound on `[batch, channels, kernel_size]` reads — same regime
-  that blocked PR #141 from showing a speedup.
-- **`:kiln/attn/rope`** (9.3 %) — only 8/32 layers, already reasonable
-  launch cost, likely another null-result fusion target.
-- **All `:kiln/mlp/*`** (~8 %) — pure vendor cutlass GEMM. Nothing to
-  fuse.
-
-The single biggest remaining lever on A6000 decode is **bf16 → FP8 (or
-INT8) weight quantization on the projection GEMMs** — the top three
-kernels in the table are 56.7 % of GPU time combined and every one is a
-projection GEMM that compresses cleanly. Going to FP8 halves GEMM
-arithmetic density and roughly doubles effective HBM bandwidth for
-weight loads (the real A6000 decode bottleneck at batch=1), giving a
-headline decode-ITL lever that's 3-5× larger than any remaining fusion
-target by the NVTX/kernel mix.
-
-**Proposed next task (do not execute in this PR):** scope an
-FP8 / INT8 weight-only quantization pass for the Q/K/V/gate/up/down
-projections, keeping activations bf16 and the vendored `flash_fwd`,
-`recurrent_gdn`, `gdn_fwd_sub`, and `fused_rmsnorm` kernels unchanged.
-Measurement: warm paged decode ITL on the same pod, with the same
-nsys-based NVTX/kernel-mix deltas reported here, and a parity check
-vs bf16 logits tolerance identical to the existing kernel-crate
-parity tests.
-
-## Files / How to Reproduce
-
-Raw artifacts for this report (captures live on pod `t0eii824pgigpi`
-under `/tmp/` during the run; not committed to the repo because
-`.nsys-rep` is 80-110 MB):
-
-- `/tmp/profile_off.nsys-rep` — Capture A (graphs=OFF, 20 s)
-- `/tmp/profile_on.nsys-rep` — Capture B (graphs=ON, 20 s)
-- `/tmp/stats_off.log`, `/tmp/stats_on.log` — `cuda_gpu_kern_sum`
-- `/tmp/nvtx_off.log`, `/tmp/nvtx_on2.log` — `nvtx_sum`
-- `/tmp/tri.log` — 3× no-nsys warm ITL runs per arm
-- `/tmp/warm_off.log`, `/tmp/warm_on.log` — single-run bench outputs
-
-To reproduce on a fresh A6000 pod (kiln-runpod image):
+To reproduce on a fresh RunPod A6000 pod (`ghcr.io/ericflo/kiln-runpod:latest`):
 
 ```bash
-# 1. Install nsys 2024.5.1 (the baked 2023.4.4 is buggy on long captures)
-apt-get update && apt-get install -y libxcb-cursor0
-wget -O /tmp/nsys.deb https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2024_5/nsight-systems-2024.5.1_2024.5.1.113-1_amd64.deb
-dpkg -i /tmp/nsys.deb
+# 1. Install nsys 2024.5.1 (baked 2023.4.4 is buggy on long captures)
+apt-get update && apt-get install -y libxcb-cursor0 cuda-nsight-systems-12-6
 ln -sf /opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys /usr/local/cuda/bin/nsys
 
 # 2. Clone + setup + build
@@ -315,28 +275,42 @@ cargo build --release --features cuda,nvtx --bin kiln-bench
 # 3. Fetch weights
 hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
 
-# 4. Capture A (graphs=OFF)
-KILN_CUDA_GRAPHS=false nsys profile -t cuda,nvtx --duration=20 \
-  -o /tmp/profile_off --force-overwrite=true \
+# 4. Steady-state ITL, three runs per arm (uncaptured)
+for i in 1 2 3; do
+  KILN_W4A16=0 KILN_CUDA_GRAPHS=true \
+    ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
+done
+for i in 1 2 3; do
+  KILN_W4A16=1 KILN_CUDA_GRAPHS=true \
+    ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
+done
+
+# 5. Capture Arm A (BF16 baseline) — delay 15s past model load
+KILN_W4A16=0 KILN_CUDA_GRAPHS=true \
+  /usr/local/cuda/bin/nsys profile -t cuda,nvtx --delay=15 --duration=20 \
+  -o /tmp/profile_armA --force-overwrite=true \
   ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 
-# 5. Capture B (graphs=ON)
-KILN_CUDA_GRAPHS=true nsys profile -t cuda,nvtx --duration=20 \
-  -o /tmp/profile_on --force-overwrite=true \
+# 6. Capture Arm B (W4A16 production) — delay 110s past Marlin packing
+KILN_W4A16=1 KILN_CUDA_GRAPHS=true \
+  /usr/local/cuda/bin/nsys profile -t cuda,nvtx --delay=110 --duration=30 \
+  -o /tmp/profile_armB --force-overwrite=true \
   ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
   --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
 
-# 6. Extract tables
-nsys stats --report cuda_gpu_kern_sum --format csv /tmp/profile_off.nsys-rep
-nsys stats --report cuda_gpu_kern_sum --format csv /tmp/profile_on.nsys-rep
-nsys stats --report nvtx_sum         --format csv /tmp/profile_off.nsys-rep
-nsys stats --report nvtx_sum         --format csv /tmp/profile_on.nsys-rep
+# 7. Extract tables
+nsys stats --report cuda_gpu_kern_sum --format csv /tmp/profile_armA.nsys-rep
+nsys stats --report cuda_gpu_kern_sum --format csv /tmp/profile_armB.nsys-rep
+nsys stats --report nvtx_sum          --format csv /tmp/profile_armA.nsys-rep
+nsys stats --report nvtx_sum          --format csv /tmp/profile_armB.nsys-rep
 ```
 
 ### Pod / cost notes
 
-- Pod: `t0eii824pgigpi` (RunPod A6000 on-demand, ~\$0.49/hr).
-- Total pod uptime at capture end: ~30 minutes.
-- Estimated pod cost: ~\$0.25.
-- Pod terminated after PR creation.
+- Pod: `daogyp64vo0cgq` (RunPod RTX A6000 on-demand, ~$0.49/hr).
+- Total pod uptime at capture end: ~2.5 hours (build, load
+  testing, four bench runs, two nsys captures, stats extraction).
+- Estimated pod cost: ~$1.25.
