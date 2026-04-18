@@ -81,6 +81,12 @@ kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
+# Apple's MLX framework via unofficial Rust bindings. Wave 2 peak-perf
+# backend for Apple Silicon — see MACOS_MLX_PLAN.md. Requires full Xcode
+# (for the MSL `metal` shader compiler) at build time because `mlx-sys`
+# compiles MLX's Metal kernels ahead-of-time, unlike candle-metal which
+# JITs at runtime.
+mlx-rs = { version = "0.25", default-features = false }
 
 # Random number generation
 rand = "0.8"
