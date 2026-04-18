@@ -75,34 +75,7 @@ impl BackendRuntime for MlxBackend {
         if !mlx_sdpa_dtype_supported(q.dtype()) {
             return Ok(None);
         }
-
-        // candle layout:  [batch, seq_len, num_heads, head_dim]
-        // mlx SDPA layout: [batch, num_heads, seq_len, head_dim]
-        let q_t = q.transpose(1, 2)?.contiguous()?;
-        let k_t = k.transpose(1, 2)?.contiguous()?;
-        let v_t = v.transpose(1, 2)?.contiguous()?;
-
-        let q_mlx = tensor_to_array(&q_t)?;
-        let k_mlx = tensor_to_array(&k_t)?;
-        let v_mlx = tensor_to_array(&v_t)?;
-
-        let mask = if causal {
-            Some(ScaledDotProductAttentionMask::Causal)
-        } else {
-            None
-        };
-        let out_mlx = mlx_rs::fast::scaled_dot_product_attention(
-            &q_mlx,
-            &k_mlx,
-            &v_mlx,
-            softmax_scale,
-            mask,
-        )
-        .context("mlx scaled_dot_product_attention failed")?;
-
-        // Back to candle + reverse the transpose to match CUDA/Metal output.
-        let out = array_to_tensor(&out_mlx, q.dtype(), &self.device, q_t.dims())?;
-        let out = out.transpose(1, 2)?.contiguous()?;
+        let out = sdpa_via_mlx(q, k, v, softmax_scale, causal, &self.device)?;
         Ok(Some(out))
     }
 
@@ -131,8 +104,8 @@ impl BackendRuntime for MlxBackend {
         let num_blocks = total_slots / page_block_size;
         let max_blocks_per_seq = block_table.dim(1)?;
 
-        // Gather the live slice of the paged pool on the candle side (cheaper
-        // than round-tripping block_table indices through MLX).
+        // Gather the live K/V window on the candle side — cheaper than
+        // round-tripping block_table indices through MLX.
         let k_blocks = k_pool.reshape((num_blocks, page_block_size, num_kv_heads, head_dim))?;
         let v_blocks = v_pool.reshape((num_blocks, page_block_size, num_kv_heads, head_dim))?;
         let block_ids = block_table.flatten_all()?;
@@ -140,39 +113,54 @@ impl BackendRuntime for MlxBackend {
         let k_live = k_blocks
             .index_select(&block_ids, 0)?
             .reshape((total_gathered, num_kv_heads, head_dim))?
-            .narrow(0, 0, total_seqlen_k)?;
+            .narrow(0, 0, total_seqlen_k)?
+            .unsqueeze(0)?;
         let v_live = v_blocks
             .index_select(&block_ids, 0)?
             .reshape((total_gathered, num_kv_heads, head_dim))?
-            .narrow(0, 0, total_seqlen_k)?;
+            .narrow(0, 0, total_seqlen_k)?
+            .unsqueeze(0)?;
 
-        let q_t = q.transpose(1, 2)?.contiguous()?; // [1, num_heads, 1, head_dim]
-        let k_t = k_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?; // [1, num_kv_heads, L, head_dim]
-        let v_t = v_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?;
-
-        let q_mlx = tensor_to_array(&q_t)?;
-        let k_mlx = tensor_to_array(&k_t)?;
-        let v_mlx = tensor_to_array(&v_t)?;
-
-        let mask = if causal {
-            Some(ScaledDotProductAttentionMask::Causal)
-        } else {
-            None
-        };
-        let out_mlx = mlx_rs::fast::scaled_dot_product_attention(
-            &q_mlx,
-            &k_mlx,
-            &v_mlx,
-            softmax_scale,
-            mask,
-        )
-        .context("mlx scaled_dot_product_attention (paged decode) failed")?;
-
-        let out = array_to_tensor(&out_mlx, q.dtype(), &self.device, &[1, num_heads, 1, head_dim])?;
-        let out = out.transpose(1, 2)?.contiguous()?;
+        // After unsqueeze both sides are candle-layout [batch=1, seq_len,
+        // num_{q,kv}_heads, head_dim] — the same layout `sdpa_via_mlx`
+        // expects, so the decode path reuses the helper unchanged.
+        let out = sdpa_via_mlx(q, &k_live, &v_live, softmax_scale, causal, &self.device)?;
         debug_assert_eq!(out.dims(), &[1, 1, num_heads, head_dim]);
         Ok(Some(out))
     }
+}
+
+/// Call MLX's fused SDPA on candle tensors in kiln's `[batch, seq, heads,
+/// head_dim]` convention. Handles the transpose to MLX's `[batch, heads,
+/// seq, head_dim]` layout, the candle↔mlx conversion, the causal mask, and
+/// the transpose back. Shared by prefill and paged-decode paths.
+fn sdpa_via_mlx(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+    device: &Device,
+) -> Result<Tensor> {
+    let q_t = q.transpose(1, 2)?.contiguous()?;
+    let k_t = k.transpose(1, 2)?.contiguous()?;
+    let v_t = v.transpose(1, 2)?.contiguous()?;
+
+    let q_mlx = tensor_to_array(&q_t)?;
+    let k_mlx = tensor_to_array(&k_t)?;
+    let v_mlx = tensor_to_array(&v_t)?;
+
+    let mask = if causal {
+        Some(ScaledDotProductAttentionMask::Causal)
+    } else {
+        None
+    };
+    let out_mlx =
+        mlx_rs::fast::scaled_dot_product_attention(&q_mlx, &k_mlx, &v_mlx, softmax_scale, mask)
+            .context("mlx scaled_dot_product_attention failed")?;
+
+    let out = array_to_tensor(&out_mlx, q.dtype(), device, q_t.dims())?;
+    Ok(out.transpose(1, 2)?.contiguous()?)
 }
 
 fn mlx_sdpa_dtype_supported(dtype: DType) -> bool {
@@ -284,9 +272,9 @@ mod tests {
     /// SDPA on the same inputs (within BF16-rounding tolerance). Exercises
     /// the candle ↔ mlx Array round-trip + mlx's fused SDPA. Gated behind
     /// `--features mlx` because it links against mlx-sys.
-    /// Naive F32 attention reference: `softmax(Q @ K^T * scale) @ V`, optionally
-    /// causal-masked. Works in candle F32 on any device — both MLX SDPA and
-    /// candle SDPA should agree with this up to floating-point rounding.
+    /// Naive F32 softmax+matmul attention. Deterministic reference for both
+    /// MLX and candle SDPA parity checks — both should match within
+    /// floating-point rounding.
     fn naive_attention(
         q: &Tensor, // [batch, heads, seq_q, head_dim]
         k: &Tensor, // [batch, heads, seq_k, head_dim]

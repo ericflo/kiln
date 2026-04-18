@@ -98,26 +98,12 @@ The Tauri workspace under `desktop/` is currently configured Windows + Linux onl
 
 ### Phase 8 — Wave 2: mlx-rs backend (follow-up)
 
-Once the Metal backend is landed and the trait is stable:
+Peak Apple Silicon perf via Apple's MLX framework. Lives alongside
+`MetalBackend`: `--features metal` alone uses candle-metal (no-Xcode
+default); `--features mlx` layers MLX's fused attention primitive on
+top, keeping candle-metal for everything else.
 
-- [x] Add `MlxBackend` in `kiln-model/src/backend/mlx.rs` implementing
-  `BackendRuntime` via `mlx-rs`. Lives alongside `MetalBackend` (the latter
-  covers `--features metal` alone; `--features mlx` layers MLX on top of
-  Metal for the attention hot path).
-- [x] Use `mlx_rs::fast::scaled_dot_product_attention` for both prefill
-  and paged decode. Parity test vs candle's SDPA within 5e-3 (BF16 round
-  trip on the tensor-conversion boundary is the dominant error source).
-- [ ] Port weights loading to MLX arrays for zero-copy — currently
-  tensors round-trip through host memory at the candle↔mlx boundary.
-- [ ] Use MLX's native MX INT4 format for weights (convert from GPTQ at
-  load).
-- [ ] `mx.compile` on the decode step as MLX's analog to CUDA graphs.
-- [ ] Benchmark head-to-head vs candle-metal; document in BENCHMARKS.md.
-- [x] Keep candle-metal as a selectable backend (`--features metal` ships
-  without the full-Xcode requirement; `--features mlx` is the peak-perf
-  opt-in).
-
-**Build requirement for `--features mlx`:**
+**Build prerequisites for `--features mlx`:**
 
 1. Full Xcode (not just Command Line Tools).
 2. Accepted license: `sudo xcodebuild -license accept`.
@@ -125,14 +111,30 @@ Once the Metal backend is landed and the trait is stable:
    `xcodebuild -downloadComponent MetalToolchain` (~700 MB download).
 4. CMake ≥ 3.25 (mlx-sys's vendored MLX source requires it).
 
-`--features metal` uses candle-metal which JITs MSL at runtime and
-works with CLT alone — that stays the default Apple Silicon path.
+`--features metal` uses candle-metal's runtime MSL JIT and works with
+CLT alone — that stays the default Apple Silicon path.
 
-**Testing:** MLX and candle-metal both grab the default Metal device.
-Running the two test suites concurrently (the default `cargo test`
-behavior) can SIGSEGV when they contend for the device. Run with
-`--test-threads=1` when exercising `--features mlx`. CI already does
-this.
+**Testing:** MLX and candle-metal both grab the default Metal device;
+concurrent tests can SIGSEGV. Run with `--test-threads=1` when
+exercising `--features mlx`. CI already does this.
+
+**Checklist:**
+
+- [x] Add `MlxBackend` in `kiln-model/src/backend/mlx.rs` implementing
+  `BackendRuntime` via `mlx-rs`.
+- [x] `mlx_rs::fast::scaled_dot_product_attention` for both prefill and
+  paged decode, with stride-aware candle↔mlx tensor conversion
+  (MLX's fused SDPA returns non-contiguous arrays that `Array::as_slice`
+  doesn't handle correctly without the fix).
+- [x] Parity: MLX SDPA matches a naive F32 reference at machine
+  precision (0.00000 diff) for both causal and non-causal.
+- [x] Keep candle-metal as a selectable backend.
+- [ ] Port weights loading to MLX arrays for zero-copy — currently
+  tensors round-trip through host memory at the candle↔mlx boundary.
+- [ ] Use MLX's native MX INT4 format for weights (convert from GPTQ
+  at load).
+- [ ] `mx.compile` on the decode step as MLX's analog to CUDA graphs.
+- [ ] Benchmark head-to-head vs candle-metal; document in BENCHMARKS.md.
 
 ### Phase 9 — CI, benchmarks, docs
 
