@@ -245,7 +245,12 @@ fn spawn_state_watcher(
             let kind = state_kind(&state);
             if last_kind != Some(kind) {
                 last_kind = Some(kind);
-                let tooltip = format!("kiln: {}", state_label(&state));
+                let port = {
+                    let settings_state = app.state::<Arc<RwLock<Settings>>>();
+                    let s = settings_state.read().await;
+                    s.port
+                };
+                let tooltip = format_tray_tooltip(&state, port);
                 if let Some(tray) = app.tray_by_id(TRAY_ID) {
                     let _ = tray.set_tooltip(Some(tooltip.as_str()));
                     if let Ok(img) = tauri::image::Image::from_bytes(state_icon_bytes(&state)) {
@@ -279,6 +284,14 @@ pub fn state_label(state: &ServerState) -> String {
         ServerState::Running => "Running".to_string(),
         ServerState::TrainingActive => "Training".to_string(),
         ServerState::Error(msg) => format!("Error: {}", msg),
+    }
+}
+
+pub fn format_tray_tooltip(state: &ServerState, port: u16) -> String {
+    match state {
+        ServerState::Running => format!("kiln: Running on :{}", port),
+        ServerState::TrainingActive => format!("kiln: Training on :{}", port),
+        _ => format!("kiln: {}", state_label(state)),
     }
 }
 
@@ -384,6 +397,46 @@ mod tests {
         assert_eq!(
             status_menu_text(&ServerState::Running),
             format!("Status: {}", state_label(&ServerState::Running))
+        );
+    }
+
+    #[test]
+    fn tooltip_includes_port_when_running() {
+        assert_eq!(
+            format_tray_tooltip(&ServerState::Running, 9000),
+            "kiln: Running on :9000"
+        );
+        assert_eq!(
+            format_tray_tooltip(&ServerState::TrainingActive, 9000),
+            "kiln: Training on :9000"
+        );
+    }
+
+    #[test]
+    fn tooltip_omits_port_for_non_active_states() {
+        assert_eq!(
+            format_tray_tooltip(&ServerState::Stopped, 9000),
+            "kiln: Stopped"
+        );
+        assert_eq!(
+            format_tray_tooltip(&ServerState::Starting, 9000),
+            "kiln: Starting…"
+        );
+        assert_eq!(
+            format_tray_tooltip(&ServerState::Error("boom".into()), 9000),
+            "kiln: Error: boom"
+        );
+    }
+
+    #[test]
+    fn tooltip_uses_configured_port() {
+        assert_eq!(
+            format_tray_tooltip(&ServerState::Running, 8000),
+            "kiln: Running on :8000"
+        );
+        assert_eq!(
+            format_tray_tooltip(&ServerState::Running, 12345),
+            "kiln: Running on :12345"
         );
     }
 
