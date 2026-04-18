@@ -494,6 +494,80 @@ improve by 6–10 % (target: 19.5 ms mean ITL, ~51 tok/s on A6000). The
 same fusion helps both arms because the GDN path is unchanged by
 W4A16.
 
+## Not next target — FlashInfer paged GQA decode (deferred, preflight 2026-04-18)
+
+The project's "Current optimization queue" item *Vendor FlashInfer paged
+GQA decode (minimal, decode-only, bf16, hdim128)* — step 3 of the
+optimization queue in the project description — is **deferred** based
+on the Arm B NVTX numbers immediately above. This section records the
+preflight finding so future planning loops do not re-propose it before
+the GDN gate-path fusion above lands.
+
+No pod was spun up past the preflight `git clone`. Pod cost: \$0.
+
+### Why deferred
+
+FlashInfer's paged-KV GQA decode kernel replaces the **inner paged
+attention kernel** inside kiln's 8 full-attention layers. It does **not**
+touch the GDN path (24 layers) and it does **not** touch the `qkv_proj` /
+`o_proj` GEMMs (those are cuBLAS BF16 / Marlin today).
+
+Arm B NVTX shares for the full-attention path at current `main`
+(`5aa22e1`, 864 decode steps captured):
+
+| region                | % decode time | notes                                           |
+| --------------------- | ------------: | ----------------------------------------------- |
+| `:kiln/proj/qkv`      |        2.4 %  | Full-attn projection GEMM (289 instances)       |
+| `:kiln/proj/o`        |        0.5 %  | Full-attn output projection GEMM (289 instances) |
+| `:kiln/attn/full/*`   |     below 0.5 % | Below top-NVTX cutoff; doesn't appear in table |
+
+The paged attention kernel itself (the thing FlashInfer would replace)
+is a subset of that sub-0.5 % `:kiln/attn/full/*` slice. Even a
+hypothetical **infinite** speedup on that kernel would reduce overall
+decode by at most ~0.5 %, i.e. **overall decode speedup ≤ 1.005×**. The
+vendor task stated an expected range of 1.3–2× overall decode and a
+1.15× abort threshold. Both are mathematically unreachable at the
+current profile because attention is already too small a share of
+decode.
+
+### Why it's below the threshold on this model
+
+Qwen3.5-4B is a hybrid architecture: **24 GDN linear-attention layers +
+8 full-attention GQA layers** (ratio 3:1). The 8 full-attention layers
+are the only place FlashInfer could help, and per the NVTX table above
+their contribution is dominated by the surrounding projections, not the
+attention kernel. This is the opposite regime from a standard
+attention-dominated decoder-only LLM where FlashInfer typically shines.
+
+### When to revisit
+
+Re-evaluate after the GDN gate-path fusion recommended in the previous
+section lands. If that fusion brings GDN decode share down by ~20 pp
+(from 72.5 % → ~50 %), `:kiln/attn/full/*` proportional share roughly
+doubles. Even then, full-attention would still only be ~7–8 % of
+decode and FlashInfer would still be below the 1.15× abort threshold —
+so the right trigger for re-proposing this task is:
+
+1. Full-attention NVTX share ≥ 10 % of decode (per a fresh Arm B
+   profile), **and**
+2. The inner `:kiln/attn/full/*` region (attention kernel, not qkv /
+   o projections) is itself ≥ 8 % of decode.
+
+Until both hold, the next decode-side lever is the GDN gate-path fusion
+above, not FlashInfer.
+
+### What would still make sense to vendor from FlashInfer later
+
+- **Paged append / prefill** could help prefill TTFT on long contexts
+  (128K+) where flash-attn-2's non-paged shape is less efficient than
+  FlashInfer's page-aware kernels. This is a **prefill-path** change,
+  not a decode-path change, and should be evaluated independently
+  against Phase 6's prefill profile (not the decode profile above).
+- **Batched decode** at large batch sizes (not kiln's current
+  batch = 1 profile target) is where FlashInfer's tensor-core decode
+  kernel is designed to win. Revisit when / if kiln targets larger
+  inference batches.
+
 ## Files / Reproduction
 
 Raw artifacts in this repo:
