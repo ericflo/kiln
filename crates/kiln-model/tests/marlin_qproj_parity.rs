@@ -69,19 +69,30 @@ fn max_abs_diff(a: &Tensor, b: &Tensor) -> f32 {
 #[cfg(feature = "cuda")]
 fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
     use kiln_model::forward::q_proj_forward;
-    use kiln_model::marlin_proj;
+    use kiln_model::marlin_proj::MarlinPackedProj;
 
-    // --- Build a synthetic q_proj weight of shape [n, k] (the HuggingFace
-    // Linear layout). Pre-transpose it to `[k, n]` for the forward path.
-    let weight_host = random_vec(n * k, 0x9E37_79B1_1234_5678 ^ (k as u64), 0.25);
-    let weight_cpu = Tensor::from_vec(weight_host, (n, k), &Device::Cpu)
-        .expect("weight cpu tensor");
-    let q_proj = weight_cpu
+    // --- Build a synthetic f32 weight of shape [k, n] on host and run the
+    // Marlin packer directly. This gives us the matched pair `(dequant, packed)`
+    // used by the kernel's own parity test: any residual error between a BF16
+    // matmul against `dequant` and the Marlin kernel against `packed` is the
+    // kernel's own rounding error, not the INT4 quantization gap.
+    let weight_host = random_vec(k * n, 0x9E37_79B1_1234_5678 ^ (k as u64), 0.25);
+    let groupsize: i32 = 128;
+    let (b_packed_vec, scales_vec, dequant_f32) =
+        kiln_marlin_gemm::pack::quantize_and_pack(&weight_host, k, n, groupsize as i64);
+
+    // Baseline q_proj_t is the dequantized weight in [k, n] layout, on device.
+    let q_proj_t = Tensor::from_vec(dequant_f32, (k, n), &Device::Cpu)
+        .expect("dequant cpu tensor")
         .to_dtype(DType::BF16)
-        .expect("weight -> bf16")
+        .expect("dequant -> bf16")
         .to_device(device)
-        .expect("weight -> cuda");
-    let q_proj_t = q_proj.t().expect("q_proj.t").contiguous().expect("q_proj_t contiguous");
+        .expect("dequant -> cuda")
+        .contiguous()
+        .expect("q_proj_t contiguous");
+    // q_proj (untransposed) is only read for shape; the forward path only
+    // touches q_proj_t and q_proj_marlin, so alias it here.
+    let q_proj = q_proj_t.clone();
 
     // --- Build a synthetic activation of shape [1, m, k] (the forward path
     // consumes `[batch, seq, hidden]`).
@@ -94,10 +105,23 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         .to_device(device)
         .expect("acts -> cuda");
 
-    // Pack the weight into Marlin layout (groupsize = 128).
-    let packed = marlin_proj::pack_from_bf16(&q_proj_t, 128)
-        .expect("pack_from_bf16")
-        .expect("pack returned None for supported shape");
+    // Construct MarlinPackedProj from the same packed/scales as above.
+    let b_packed = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &Device::Cpu)
+        .expect("b_packed cpu tensor")
+        .to_device(device)
+        .expect("b_packed -> cuda");
+    let num_groups = k / groupsize as usize;
+    let scales = Tensor::from_vec(scales_vec, (num_groups, n), &Device::Cpu)
+        .expect("scales cpu tensor")
+        .to_device(device)
+        .expect("scales -> cuda");
+    let packed = MarlinPackedProj {
+        b_packed,
+        scales,
+        groupsize,
+        k,
+        n,
+    };
 
     // Dummy norm tensors just so we can construct a GpuFullAttentionWeights.
     // q_proj_forward itself only reads q_proj_t and q_proj_marlin, so the
