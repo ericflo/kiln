@@ -250,6 +250,43 @@
         font-family: inherit;
         user-select: none;
       }
+      #training-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        background: #1b1e24;
+        color: #a8aeb8;
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        max-width: 260px;
+        overflow: hidden;
+      }
+      #training-pill .training-label {
+        color: #6c7280;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+      }
+      #training-value {
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: transparent;
+        padding: 0;
+        font-size: 12px;
+        color: inherit;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        user-select: text;
+        min-width: 0;
+      }
+      #training-value.empty {
+        color: #6c7280;
+        font-family: inherit;
+        user-select: none;
+      }
     </style>
   </head>
   <body>
@@ -273,6 +310,10 @@
       <span id="adapter-pill" title="Active LoRA adapter — none">
         <span class="adapter-label">Adapter:</span>
         <code id="adapter-name" class="empty">—</code>
+      </span>
+      <span id="training-pill" title="Training status — server not running">
+        <span class="training-label">Training:</span>
+        <code id="training-value" class="empty">—</code>
       </span>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
       <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
@@ -711,6 +752,91 @@
         }
       }
 
+      const trainingPill = document.getElementById("training-pill");
+      const trainingValueEl = document.getElementById("training-value");
+      const TRAINING_EMPTY_LABEL = "—";
+      const TRAINING_EMPTY_TITLE = "Training status — server not running";
+      const TRAINING_IDLE_TITLE = "No training jobs";
+      const TRAINING_VISIBLE_STATES = ["Starting", "Running", "TrainingActive"];
+      let cachedTrainingText = null;
+
+      function setTrainingDisplay(text, tooltip, isEmptyStyle) {
+        trainingValueEl.textContent = text;
+        if (isEmptyStyle) {
+          trainingValueEl.classList.add("empty");
+        } else {
+          trainingValueEl.classList.remove("empty");
+        }
+        trainingPill.title = tooltip;
+      }
+
+      function clearTrainingDisplay() {
+        if (cachedTrainingText !== null) {
+          cachedTrainingText = null;
+          setTrainingDisplay(TRAINING_EMPTY_LABEL, TRAINING_EMPTY_TITLE, true);
+        }
+      }
+
+      function formatTrainingText(active) {
+        const stateRaw = (active.state || "").toString();
+        const stateLabel = stateRaw
+          ? stateRaw.charAt(0).toUpperCase() + stateRaw.slice(1).toLowerCase()
+          : "Unknown";
+        const parts = [stateLabel];
+        if (typeof active.progress === "number" && isFinite(active.progress)) {
+          const pct = Math.max(0, Math.min(100, active.progress * 100));
+          parts.push(`${pct.toFixed(0)}%`);
+        }
+        let text = parts.join(" ");
+        if (typeof active.current_loss === "number" && isFinite(active.current_loss)) {
+          text += ` (loss ${active.current_loss.toFixed(2)})`;
+        }
+        return text;
+      }
+
+      async function refreshTrainingInfo(kind) {
+        if (!invoke || !TRAINING_VISIBLE_STATES.includes(kind)) {
+          clearTrainingDisplay();
+          return;
+        }
+        let info;
+        try {
+          info = await invoke("get_training_status");
+        } catch (_) {
+          clearTrainingDisplay();
+          return;
+        }
+        if (info && info.active) {
+          const text = formatTrainingText(info.active);
+          const tooltipBits = [`Training job ${info.active.job_id}`];
+          if (info.active.adapter_name) {
+            tooltipBits.push(`adapter: ${info.active.adapter_name}`);
+          }
+          if (typeof info.total_jobs === "number" && info.total_jobs > 1) {
+            tooltipBits.push(`${info.total_jobs} total jobs`);
+          }
+          const tooltip = tooltipBits.join(" — ");
+          if (text !== cachedTrainingText) {
+            cachedTrainingText = text;
+            setTrainingDisplay(text, tooltip, false);
+          } else {
+            trainingPill.title = tooltip;
+          }
+        } else {
+          const text = "idle";
+          const tooltip =
+            info && typeof info.total_jobs === "number" && info.total_jobs > 0
+              ? `${info.total_jobs} training jobs — none running`
+              : TRAINING_IDLE_TITLE;
+          if (text !== cachedTrainingText) {
+            cachedTrainingText = text;
+            setTrainingDisplay(text, tooltip, false);
+          } else {
+            trainingPill.title = tooltip;
+          }
+        }
+      }
+
       function updateStopBtnVisibility(kind) {
         const shouldShow = STOP_ACTIVE_STATES.includes(kind);
         stopBtn.classList.toggle("hidden", !shouldShow);
@@ -727,6 +853,7 @@
           await refreshBaseUrl("Unknown");
           await refreshVramInfo("Unknown", null);
           await refreshAdapterInfo("Unknown");
+          await refreshTrainingInfo("Unknown");
           updateStopBtnVisibility("Unknown");
           return;
         }
@@ -741,6 +868,7 @@
           await refreshBaseUrl(kind);
           await refreshVramInfo(kind, cachedBaseUrl);
           await refreshAdapterInfo(kind);
+          await refreshTrainingInfo(kind);
           updateStopBtnVisibility(kind);
           stateFailureLogged = false;
         } catch (err) {
@@ -748,6 +876,7 @@
           await refreshBaseUrl("Unknown");
           await refreshVramInfo("Unknown", null);
           await refreshAdapterInfo("Unknown");
+          await refreshTrainingInfo("Unknown");
           updateStopBtnVisibility("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
