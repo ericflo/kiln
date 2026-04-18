@@ -80,6 +80,7 @@
       .status { margin-top: 8px; font-size: 12px; color: #7fbf7f; min-height: 16px; }
       .status.error { color: #f08080; }
       .todo { color: #a8aeb8; font-size: 11px; margin-top: 4px; }
+      .version-footer { margin-top: 16px; color: #6c7280; font-size: 11px; text-align: right; }
     </style>
   </head>
   <body>
@@ -152,6 +153,7 @@
         <button id="save">Save</button>
       </div>
       <div class="status" id="status"></div>
+      <div class="version-footer">Kiln Desktop v<span id="app-version">—</span></div>
     </div>
 
     <script>
@@ -288,6 +290,9 @@
       document.getElementById("pick_adapter_dir").addEventListener("click", () =>
         pickPath("adapter_dir", { multiple: false, directory: true, title: "Select adapter directory" })
       );
+      invoke("get_app_version").then(v => {
+        document.getElementById("app-version").textContent = v;
+      }).catch(() => {});
       load();
     </script>
   </body>
