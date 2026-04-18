@@ -1741,3 +1741,193 @@ projection runs 47,280 ucopy emissions — 3 per call × 15,760 calls).
 The 2.3 GB `profile_nvtx_tier2.nsys-rep` was kept on the
 now-terminated pod; all numbers above are reproduced from the three
 CSV reports committed alongside this section.
+
+---
+
+## Post-PR #117 Profile — 2026-04-18
+
+This section re-profiles kiln on `main` after [PR #117][pr117], which
+caches `embed_tokens.t().contiguous()` as `embed_tokens_t` at model
+load instead of re-materializing the transposed tied-embedding
+matrix once per decode step. The profile validates that the fix
+eliminated the 48% `lm_head`/`ucopy_bf16` hotspot called out in the
+PR #113 section above, and identifies the new top-3 hotspots that
+should drive the next round of optimization.
+
+[pr117]: https://github.com/ericflo/kiln/pull/117
+
+### Provenance
+
+- **Commit**: `6ec3936` (post-PR-117 main)
+- **Hardware**: RTX A6000 48GB on RunPod
+- **Software**: CUDA 12.4.131, driver 550.127.05, rustc 1.95.0
+- **Build features**: `cuda,nvtx` with `KILN_CUDA_ARCHS=86`
+- **Profiler**: `nsys` 2024.6.2 (Nsight Systems 2023.4.4 hit
+  the EventCollection `InvalidArgument` bug on this workload; the
+  2024.6.2 build produced `.nsys-rep` directly without qdstrm
+  import and captured cleanly)
+- **Model**: Qwen3-Next-80B-A3B-BF16 tied-embedding, paged KV cache
+- **Bench**: `kiln-bench --paged` with the latency phase only
+  (pod-local `KILN_BENCH_EXIT_AFTER_LATENCY` patch — not committed)
+- **Scenarios**:
+  - Decode: 512 prompt / 64 decode tokens
+  - Prefill: 4096 prompt / 4 decode tokens
+
+### Headline: lm_head fix validated, 2.07× decode speedup
+
+| Metric | PR #94 baseline | PR #113 baseline | **Post PR #117** |
+| --- | --- | --- | --- |
+| Decode ITL (paged) | 276.9 ms | — | **133.8 ms** |
+| Decode throughput | 3.61 tok/s | — | **7.47 tok/s** |
+| `kiln/lm_head` share of NVTX wallclock | — | 48.06 % | **0.48 %** |
+| `ucopy_bf16` attributed to `lm_head` | 207 s / 48 % | 48 % | **14.98 ms / 0.22 %** |
+
+PR #117 removed the 778 MiB transpose-copy per decode step and the
+2.07× decode ITL improvement matches the ~43 %-of-GPU-time savings
+predicted in the PR #113 recommendation.
+
+### Decode hotspots (512/64 paged)
+
+Total GPU kernel time: **8350 ms**. Top GPU kernels:
+
+| Rank | Kernel | Total (ms) | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ucopy_bf16` | 6848.0 | **82.0 %** | 17833 |
+| 2 | `cutlass 256x64_32x4 gemm` | 445.4 | 5.3 % | 4160 |
+| 3 | `cutlass 64x64_32x6 gemm` | 243.0 | 2.9 % | 5120 |
+| 4 | `ampere 128x64_stages_64x3 gemm` | 137.8 | 1.6 % | 2048 |
+| 5 | `ampere 128x128_stages_32x3 gemm` | 132.8 | 1.6 % | 2080 |
+
+NVTX pushpop wallclock (total ≈ 3186 ms):
+
+| Rank | Range | Share |
+| ---: | --- | ---: |
+| 1 | `kiln/residual` | 24.1 % |
+| 2 | `kiln/norm/pre_mlp` | 20.6 % |
+| 3 | `kiln/mlp/up` | 12.6 % |
+| 4 | `kiln/norm/pre_attn` | 12.1 % |
+| 5 | `kiln/attn/full/decode_fused` | 10.4 % |
+| 6 | `kiln/kv/copy` | 5.0 % |
+| 7 | `kiln/mlp/gate` | 4.2 % |
+| 8 | `kiln/mlp/down` | 3.7 % |
+| 9 | `kiln/proj/qkv` | 2.5 % |
+| 10 | `kiln/proj/o` | 1.7 % |
+| … | `kiln/lm_head` | **0.5 %** |
+
+`ucopy_bf16` attribution (6848 ms total) by NVTX range:
+
+| Range | Total (ms) | Share of all GPU time | Share of `ucopy_bf16` | Instances |
+| --- | ---: | ---: | ---: | ---: |
+| `kiln/mlp/up` | 1433.98 | 17.2 % | 20.9 % | 2080 |
+| `kiln/mlp/gate` | 1432.68 | 17.2 % | 20.9 % | 2080 |
+| `kiln/mlp/down` | 1360.55 | 16.3 % | 19.9 % | 2080 |
+| `kiln/proj/qkv` | 414.75 | 5.0 % | 6.1 % | 1560 |
+| `kiln/proj/o` | 156.20 | 1.9 % | 2.3 % | 520 |
+| `kiln/attn/full/decode_fused` | 153.83 | 1.8 % | 2.2 % | 512 |
+| `kiln/attn/full/prefill` | 3.95 | 0.0 % | 0.1 % | 48 |
+| `kiln/kv/copy` | 0.20 | 0.0 % | 0.0 % | 16 |
+| (outside named ranges) | ~1892 | 22.7 % | 27.6 % | ~9457 |
+
+**MLP projections alone account for 50.7 % of all decode GPU time**
+and 61.8 % of `ucopy_bf16` mass. Each of the three MLP Linear ops
+emits one `ucopy_bf16` per layer per decode position (2080
+instances = 32 decode-active layers × 65 positions).
+
+### Prefill hotspots (4096/4 paged)
+
+Top GPU kernels:
+
+| Rank | Kernel | Total (ms) | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ucopy_bf16` | 749.6 | 35.3 % | 3337 |
+| 2 | `bmul_f32` | 183.0 | 8.6 % | 2082 |
+| 3 | `ampere 256x128_stages_32x3 gemm` | 133.6 | 6.3 % | 89 |
+| 4 | `bmul_bf16` | 127.9 | 6.0 % | 12648 |
+| 5 | `copy2d_bf16` | 107.8 | 5.1 % | 67120 |
+| 6 | `cutlass 256x128_32x3 gemm` | 86.1 | 4.1 % | 64 |
+| 7 | `gdn_fwd_sub_kernel` | 75.5 | 3.6 % | 1536 |
+
+NVTX pushpop wallclock (total ≈ 971 ms):
+
+| Rank | Range | Share |
+| ---: | --- | ---: |
+| 1 | `kiln/kv/copy` | **62.0 %** |
+| 2 | `kiln/attn/gdn/chunk` | 8.5 % |
+| 3 | `kiln/norm/pre_attn` | 5.5 % |
+| 4 | `kiln/residual` | 5.1 % |
+| 5 | `kiln/norm/pre_mlp` | 4.7 % |
+| 6 | `kiln/attn/full/prefill` | 4.0 % |
+| 7 | `kiln/mlp/up` | 2.7 % |
+| 8 | `kiln/attn/full/decode_fused` | 2.3 % |
+| 9 | `kiln/mlp/gate` | 1.9 % |
+| 10 | `kiln/lm_head` | 1.1 % |
+
+Paged KV-cache writes dominate the long-prompt prefill. The
+62 %/602 ms cost of `kiln/kv/copy` is far above the 5 % it costs in
+decode, and the wallclock variance (std-dev 30.2 ms across 40
+invocations) points at a single slow path rather than steady-state
+cost.
+
+### Top-3 hotspots and next optimizations
+
+**Decode (512/64 paged)**:
+
+1. **MLP projection `ucopy_bf16` — 50.7 % of decode GPU time.** The
+   three MLP Linears emit a full-rank bf16 output reshape per layer
+   per token. Folding the reshape into the GEMM epilogue (or
+   vendoring a SwiGLU-fused kernel that writes bf16 directly) would
+   remove the bulk of the remaining `ucopy_bf16`. This is the
+   obvious single biggest win available below the attention layer
+   and should be the immediate next optimization.
+2. **`kiln/residual` wallclock — 24 % of decode NVTX time.** The
+   residual range is cheap per call (avg 0.18 ms) but runs 4160
+   times per 64-token decode. Coalescing residual-add with the
+   following RMSNorm (or with the preceding GEMM bias-add) would
+   both reduce launch count and keep activations in registers.
+3. **Attention projections (`proj/qkv` + `proj/o`) — 6.9 % of GPU
+   time via ucopy.** Smaller than MLP, same root cause, should get
+   the same epilogue-fusion treatment for free once MLP lands.
+
+**Prefill (4096/4 paged)**:
+
+1. **Paged `kiln/kv/copy` — 62 % of prefill NVTX wallclock.** At
+   4096 tokens the paged KV write path is the single dominant cost.
+   Investigating whether pages can be batched (one launch per
+   layer-block instead of many per page) or whether the current
+   path can use a vendor copy kernel is the highest-leverage prefill
+   change.
+2. **`kiln/attn/gdn/chunk` — 8.5 % of prefill NVTX wallclock.**
+   The chunked GDN path is already cheaper than before PR #110 but
+   remains the #2 contributor at long context. Vendoring FLA's
+   `chunk_gla_fwd` (already on the project queue) would replace the
+   stage with a fused kernel and reclaim most of this tier.
+3. **`bmul_f32` + `copy2d_bf16` — 13.7 % combined.** These are
+   un-attributed candle utility ops firing outside named NVTX
+   ranges. A pass that scopes more of the prefill path under NVTX
+   would clarify whether they belong to GDN, to the attention
+   bookkeeping, or to post-softmax processing.
+
+### Recommendation
+
+> **Decode**: fuse the MLP projection bf16 epilogue. Eliminating
+> the three per-step `ucopy_bf16` emissions should remove ~50 % of
+> decode GPU time. This is the direct successor to the PR #117
+> `lm_head` fix — same class of optimization, one layer down.
+>
+> **Prefill**: attack `kiln/kv/copy` first (62 % of 4096-token
+> prefill wallclock), then land the vendored `chunk_gla_fwd` for
+> the GDN chunk path.
+
+### Artifacts
+
+CSV reports from nsys 2024.6.2 (committed):
+
+- `profile-out/decode-post-117_cuda_gpu_kern_sum.csv`
+- `profile-out/decode-post-117_nvtx_pushpop_sum.csv`
+- `profile-out/decode-post-117_nvtx_kern_sum.csv`
+- `profile-out/prefill-post-117_cuda_gpu_kern_sum.csv`
+- `profile-out/prefill-post-117_nvtx_pushpop_sum.csv`
+- `profile-out/prefill-post-117_nvtx_kern_sum.csv`
+
+The `.nsys-rep` files (≈3 GB each) were not committed; all numbers
+above are reproduced from the CSV reports.
