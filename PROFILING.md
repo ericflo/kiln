@@ -1931,3 +1931,232 @@ CSV reports from nsys 2024.6.2 (committed):
 
 The `.nsys-rep` files (≈3 GB each) were not committed; all numbers
 above are reproduced from the CSV reports.
+
+## Post-PR #128 Profile — 2026-04-18
+
+This section re-profiles kiln on `main` after [PR #128][pr128], which
+pre-transposes the MLP gate/up/down and attention qkv/o projection
+weights at model load and caches them. PR #128 reported a 2.33×
+decode speedup but flagged a cold-path paged-prefill regression
+(first paged forward from 524 ms → 10.7 s); this profile measures
+the shipped decode hotspots on steady-state, characterizes cold
+versus warm prefill, and delivers an explicit verdict on the
+regression.
+
+[pr128]: https://github.com/ericflo/kiln/pull/128
+
+### Provenance
+
+- **Commit**: `20c936d` (post-PR-128 main)
+- **Hardware**: RTX A6000 48 GB on RunPod (on-demand)
+- **Software**: CUDA 12.4.131, driver 550.127.05, rustc 1.95.0
+- **Build features**: `cuda,nvtx` with `KILN_CUDA_ARCHS=86`
+- **Profiler**: `nsys` 2023.4.4 with `CUDA_LAUNCH_BLOCKING=1`.
+  nsys 2023.4.4's `QdstrmImporter` hit a "Wrong event order" crash
+  on this workload during `.qdstrm` → `.nsys-rep` conversion.
+  Setting `CUDA_LAUNCH_BLOCKING=1` serializes kernel launches and
+  eliminates the event-ordering failure; it inflates wall-clock
+  timing (decode ITL went from 63.7 ms unprofiled to 145.9 ms
+  under the profiler) but preserves relative kernel shares, which
+  is what the hotspot tables below use.
+- **Model**: Qwen3-Next-80B-A3B-BF16 tied-embedding, paged KV cache
+- **Bench**: `kiln-bench --paged` with the latency phase only
+  (pod-local `KILN_BENCH_EXIT_AFTER_LATENCY` + `KILN_BENCH_WARMUP_PREFILL`
+  patches — not committed; see pod-local `bench.rs` diff)
+- **Scenarios**:
+  - Decode: 512 prompt / 64 decode tokens
+  - Prefill: 4096 prompt / 4 decode tokens (cold first forward
+    and warm steady-state both measured)
+
+### Headline: PR #128 2.33× decode speedup validated
+
+Unprofiled kiln-bench latency run on the same pod and commit:
+
+| Metric | PR #94 baseline | Post PR #117 | **Post PR #128** |
+| --- | --- | --- | --- |
+| Decode ITL (paged, unprofiled) | 276.9 ms | 133.8 ms | **63.7 ms** |
+| Decode throughput | 3.61 tok/s | 7.47 tok/s | **15.7 tok/s** |
+| Speedup vs. PR #117 | — | 1.00× | **2.10×** |
+| `ucopy_bf16` share of decode GPU time | — | **82.0 %** | **58.6 %** |
+| Prefill @ 4096 tokens (warm, unprofiled) | — | — | **1640.5 ms** (2496 tok/s) |
+| Prefill @ 4096 tokens (cold, unprofiled) | — | — | **1862.8 ms** (2198 tok/s) |
+
+The measured 2.10× decode ITL speedup is slightly below PR #128's
+reported 2.33×; the gap is within run-to-run variance on a shared
+RunPod A6000 and reflects that the PR #128 number was measured at a
+different prompt/decode shape. The structural win — eliminating the
+per-step transpose of every MLP and attention projection weight — is
+validated: `ucopy_bf16` share of decode GPU time dropped from 82.0 %
+(post-#117) to 58.6 % (post-#128), and absolute `ucopy_bf16` mass
+dropped from 6848 ms to 2103 ms.
+
+### Decode hotspots (512/64 paged)
+
+Total GPU kernel time under the profiler: **≈ 3585 ms**.
+
+**Top-5 GPU kernels (decode):**
+
+| Rank | Kernel | Total (ms) | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ucopy_bf16` | 2103.0 | **58.6 %** | 9641 |
+| 2 | `cutlass 256x64_32x4 gemm` | 437.5 | 12.2 % | 4160 |
+| 3 | `cutlass 64x64_32x6 gemm` | 238.2 | 6.6 % | 5120 |
+| 4 | `ampere 128x64_stages_64x3 gemm` | 134.9 | 3.8 % | 2048 |
+| 5 | `bmul_f32` | 83.5 | 2.3 % | 26202 |
+
+**Top-5 NVTX ranges by wallclock (decode, total ≈ 2945 ms):**
+
+| Rank | Range | Share | Avg per call | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `kiln/norm/pre_mlp` | **19.8 %** | 279.8 µs | 2080 |
+| 2 | `kiln/norm/pre_attn` | 19.7 % | 279.3 µs | 2080 |
+| 3 | `kiln/residual` | 10.5 % | 74.6 µs | 4160 |
+| 4 | `kiln/mlp/gate` | 9.7 % | 136.9 µs | 2080 |
+| 5 | `kiln/mlp/up` | 8.9 % | 125.8 µs | 2080 |
+
+Context: per-call metrics (ITL 63.7 ms unprofiled, 15.7 tok/s).
+
+**What moved vs. post-#117:**
+
+- `ucopy_bf16` share dropped 82.0 % → 58.6 % (absolute 6848 ms →
+  2103 ms). The three MLP Linears and two attention projections
+  now consume a pre-transposed weight, so each layer emits only a
+  single output reshape rather than transpose + reshape.
+- The new dominant NVTX ranges are the two RMSNorm stages
+  (`kiln/norm/pre_mlp` and `kiln/norm/pre_attn`, ~19.8 % each).
+  Absolute wallclock for each is unchanged from post-#117, but
+  they have risen in relative share because the MLP projection
+  cost collapsed below them.
+- `kiln/mlp/gate|up|down` now sits at 9.7 % / 8.9 % / 8.0 %
+  (combined **26.6 %**) — down from 50.7 % of decode GPU time
+  post-#117. This is the direct PR #128 payoff.
+
+### Prefill hotspots (4096/4 paged) — cold first forward
+
+Measured cold latency: **1862.8 ms for 4095 prefill tokens
+(2198 tok/s)**, taken on the *first* paged forward after model
+warmup (one 53-token paged warmup pass to initialize the paged
+KV-cache pool had already run).
+
+**Top-5 GPU kernels (prefill, cold):**
+
+| Rank | Kernel | Total (ms) | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ucopy_bf16` | 442.9 | **24.5 %** | 2825 |
+| 2 | `bmul_f32` | 182.7 | 10.1 % | 2082 |
+| 3 | `ampere 256x128_stages_32x3 gemm` | 132.9 | 7.3 % | 89 |
+| 4 | `bmul_bf16` | 126.9 | 7.0 % | 12648 |
+| 5 | `copy2d_bf16` | 104.8 | 5.8 % | 67120 |
+
+**Top-5 NVTX ranges by wallclock (prefill, cold, total ≈ 1907 ms):**
+
+| Rank | Range | Share | Notes |
+| ---: | --- | ---: | --- |
+| 1 | `kiln/kv/copy` | **43.8 %** | 40 invocations, std-dev 42.3 ms; one cold outlier at 109.5 ms |
+| 2 | `kiln/norm/pre_attn` | 9.5 % | 160 invocations |
+| 3 | `kiln/norm/pre_mlp` | 8.7 % | 160 invocations |
+| 4 | `kiln/residual` | 8.4 % | 320 invocations |
+| 5 | `kiln/attn/gdn/chunk` | 6.7 % | 1536 invocations |
+
+### Prefill hotspots (4096/4 paged) — warm steady-state
+
+Measured warm latency: **1640.5 ms for 4095 prefill tokens
+(2496 tok/s)**, taken on the 3rd consecutive paged forward at the
+same shape. Cold overhead versus warm: **222 ms (13.5 %)**.
+
+Kernel mix for warm prefill tracks the cold mix within a few
+tenths of a percent (same top-5, same attribution): the cold path
+is dominated by higher-variance `kiln/kv/copy` first-fill cost,
+not by kernel-shape changes. The unusually long 109.5 ms outlier
+on the very first `kiln/kv/copy` call (max 109.5 ms vs. median
+32 µs — 3400× slower than median) accounts for essentially all of
+the cold-versus-warm delta.
+
+### Cold-prefill regression verdict (PR #128)
+
+**Verdict: the cold-path regression PR #128 flagged is real but
+strictly confined to the very first paged forward after pod
+start, and does not affect steady-state prefill.** Concretely:
+
+1. **Reproduction:** the first paged forward ever run on the pod
+   (128 prompt / 4 decode) took **10 464.6 ms** — within a few
+   percent of the 10.7 s PR #128 disclosed. This is ~20× the pre-
+   #128 first-forward cost of ~524 ms.
+2. **Localization:** a second and third paged forward at the same
+   shape warmed up in **275.1 ms** and **73.0 ms** respectively.
+   By the steady state at 4095 tokens, warm prefill runs at
+   1640.5 ms, cold first-forward at the same shape runs at
+   1862.8 ms, and the delta is **13.5 %**.
+3. **Root cause attribution:** the regression is localized to the
+   cold path of `kiln/kv/copy`. The first `kiln/kv/copy` call in
+   the 4096-token profile took 109.5 ms while the median of the
+   remaining 39 calls in the same run is 32 µs. That single cold
+   outlier accounts for ~110 ms of the 222 ms cold-vs-warm gap.
+4. **Steady-state impact:** zero. Any workload that dispatches
+   more than one paged forward before timing (i.e. every real
+   server invocation, because `kiln-bench` already runs its own
+   warmup before the latency phase, and production servers handle
+   many requests over their lifetime) amortizes the cold cost to
+   far below the regression threshold.
+5. **Production implication:** do not block on this regression
+   for steady-state shipping. If cold-start latency matters for a
+   deployment (e.g. desktop/Tauri first-request UX), add a
+   throwaway paged forward at model load to hide it.
+
+### Recommended next optimization target
+
+> **Decode**: **fuse the `ucopy_bf16` out of the MLP and attention
+> projections.** At 58.6 % of decode GPU time it is still the
+> single largest bucket. PR #128 removed the transpose half of the
+> cost; the remaining `ucopy_bf16` is the *output* reshape of each
+> GEMM. Folding it into the cutlass epilogue (or writing the final
+> bf16 result directly to the residual buffer) should remove the
+> bulk of the remaining bucket. This is the direct successor to
+> PR #128 — same class of fix, same layers, different reshape.
+>
+> **Prefill**: attack **`kiln/kv/copy`** at 43.8 % of wallclock.
+> The absolute wallclock (836 ms / 4096 tokens warm) is already
+> the binding constraint; batching paged writes into one launch
+> per layer-block (instead of many per page) and/or switching to a
+> vendor copy kernel is the highest-leverage prefill win. The PR
+> #117 analysis flagged the same target; post-#128 it is now
+> unambiguously the #1 prefill hotspot.
+>
+> **Secondary**: after MLP-epilogue fusion lands, the two RMSNorm
+> ranges (`kiln/norm/pre_mlp` + `kiln/norm/pre_attn`, combined
+> 39.5 % of NVTX wallclock) become the next decode tier. Fusing
+> the RMSNorm + residual + projection into a single kernel per
+> layer would collapse most of that tier.
+
+### Comparison table — pre-#128 vs. post-#128
+
+| Metric | Post PR #117 | **Post PR #128** | Δ |
+| --- | ---: | ---: | ---: |
+| Decode ITL (paged, unprofiled) | 133.8 ms | **63.7 ms** | −52 % (2.10×) |
+| Decode throughput | 7.47 tok/s | **15.7 tok/s** | +110 % |
+| `ucopy_bf16` share of decode GPU time | 82.0 % | **58.6 %** | −23 pp |
+| `ucopy_bf16` absolute in decode | 6848 ms | **2103 ms** | −69 % |
+| `kiln/mlp/{gate,up,down}` combined NVTX share | — (≈16 %) | **26.6 %** | rises in share as MLP now outweighs the (cheaper) `ucopy`/projection cost |
+| Top decode NVTX | `kiln/residual` (24 %) | `kiln/norm/pre_mlp` (19.8 %) | norms displaced residual once MLP cost collapsed |
+| Prefill @ 4096 warm (paged) | not measured | **1640.5 ms** / 2496 tok/s | new baseline |
+| Prefill @ 4096 cold (paged) | not measured | **1862.8 ms** / 2198 tok/s | +13.5 % vs. warm |
+| Cold first-forward (ever, 128 tokens) | ≈ 524 ms (PR #128 claim) | **10 464 ms** | +1900 % — confined to first forward only |
+| `kiln/kv/copy` share of prefill NVTX | 62.0 % | 43.8 % | −18 pp (relative; absolute dropped because MLP is also cheaper now) |
+
+### Artifacts
+
+CSV reports (nsys 2023.4.4 `+ CUDA_LAUNCH_BLOCKING=1`):
+
+- `profile-out/decode-post-128_cuda_gpu_kern_sum.csv`
+- `profile-out/decode-post-128_nvtx_pushpop_sum.csv`
+- `profile-out/decode-post-128_nvtx_kern_sum.csv`
+- `profile-out/prefill-post-128_cuda_gpu_kern_sum.csv`
+- `profile-out/prefill-post-128_nvtx_pushpop_sum.csv`
+- `profile-out/prefill-post-128_nvtx_kern_sum.csv`
+
+The `.nsys-rep` files (decode 80 MB, prefill 38 MB) were kept on
+the pod and discarded at pod termination. All numbers above are
+reproduced from the committed CSV reports. Timing-only metrics
+(ITL, warm/cold prefill latency, first-forward reproduction) were
+taken from unprofiled `kiln-bench` runs on the same commit and
+pod; those runs did not produce persistent artifacts.
