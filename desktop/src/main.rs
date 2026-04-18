@@ -257,6 +257,85 @@ async fn get_active_adapter(
     }
 }
 
+#[derive(serde::Serialize)]
+struct ActiveTrainingJob {
+    job_id: String,
+    state: String,
+    progress: Option<f64>,
+    current_loss: Option<f64>,
+    adapter_name: Option<String>,
+}
+
+#[derive(serde::Serialize, Default)]
+struct TrainingStatusInfo {
+    active: Option<ActiveTrainingJob>,
+    total_jobs: usize,
+}
+
+/// Report the currently-running training job (if any) plus the total number
+/// of jobs known to the kiln server by polling GET /v1/train/status. Returns
+/// an empty result on any HTTP/parse error or when the server is
+/// Stopped/Error so the UI can degrade gracefully.
+#[tauri::command]
+async fn get_training_status(
+    state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+) -> Result<TrainingStatusInfo, String> {
+    let server_state = sup.state().await;
+    let url = match server_state {
+        ServerState::Stopped | ServerState::Error(_) => {
+            return Ok(TrainingStatusInfo::default());
+        }
+        ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
+            let s = state.read().await;
+            format!("http://{}:{}/v1/train/status", s.host, s.port)
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Job {
+        job_id: String,
+        state: String,
+        #[serde(default)]
+        progress: Option<f64>,
+        #[serde(default)]
+        current_loss: Option<f64>,
+        #[serde(default)]
+        adapter_name: Option<String>,
+    }
+
+    let resp = match reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(TrainingStatusInfo::default()),
+    };
+    let jobs: Vec<Job> = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return Ok(TrainingStatusInfo::default()),
+    };
+
+    let active = jobs
+        .iter()
+        .find(|j| j.state.eq_ignore_ascii_case("running"))
+        .or_else(|| jobs.first())
+        .map(|j| ActiveTrainingJob {
+            job_id: j.job_id.clone(),
+            state: j.state.clone(),
+            progress: j.progress,
+            current_loss: j.current_loss,
+            adapter_name: j.adapter_name.clone(),
+        });
+
+    Ok(TrainingStatusInfo {
+        active,
+        total_jobs: jobs.len(),
+    })
+}
+
 /// Persist the supplied settings to disk and rebuild the supervisor's
 /// `SupervisorConfig`. A currently-running server is NOT restarted; the new
 /// args take effect on the next `start_server` call.
@@ -329,6 +408,7 @@ fn main() {
             get_kiln_url,
             get_openai_base_url,
             get_active_adapter,
+            get_training_status,
             open_settings,
             open_logs,
             check_for_updates,
