@@ -100,13 +100,30 @@ The Tauri workspace under `desktop/` is currently configured Windows + Linux onl
 
 Once the Metal backend is landed and the trait is stable:
 
-- Add `kiln-mlx/` crate with `BackendRuntime` implemented on `mlx-rs`.
-- Port weights loading to MLX arrays (lazy eval semantics differ from candle).
-- Use `mx.fast::scaled_dot_product_attention` for full attention.
-- Use MLX's native MX INT4 format for weights (convert from GPTQ at load).
-- `mx.compile` on the decode step as MLX's analog to CUDA graphs.
-- Benchmark head-to-head vs candle-metal; document in BENCHMARKS.md.
-- Don't remove candle-metal — keep both as selectable backends.
+- [x] Add `MlxBackend` in `kiln-model/src/backend/mlx.rs` implementing
+  `BackendRuntime` via `mlx-rs`. Lives alongside `MetalBackend` (the latter
+  covers `--features metal` alone; `--features mlx` layers MLX on top of
+  Metal for the attention hot path).
+- [x] Use `mlx_rs::fast::scaled_dot_product_attention` for both prefill
+  and paged decode. Parity test vs candle's SDPA within 5e-3 (BF16 round
+  trip on the tensor-conversion boundary is the dominant error source).
+- [ ] Port weights loading to MLX arrays for zero-copy — currently
+  tensors round-trip through host memory at the candle↔mlx boundary.
+- [ ] Use MLX's native MX INT4 format for weights (convert from GPTQ at
+  load).
+- [ ] `mx.compile` on the decode step as MLX's analog to CUDA graphs.
+- [ ] Benchmark head-to-head vs candle-metal; document in BENCHMARKS.md.
+- [x] Keep candle-metal as a selectable backend (`--features metal` ships
+  without the full-Xcode requirement; `--features mlx` is the peak-perf
+  opt-in).
+
+**Build requirement:** `--features mlx` pulls in `mlx-sys`, which AOT
+compiles MLX's Metal kernels at build time. This needs the `metal`
+shader compiler from full Xcode (not just Command Line Tools). First
+build on a machine requires `sudo xcodebuild -license accept`. By
+contrast, `--features metal` uses candle-metal which JITs MSL at
+runtime and works with CLT alone — that stays the default Apple Silicon
+path.
 
 ### Phase 9 — CI, benchmarks, docs
 
