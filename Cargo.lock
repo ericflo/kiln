@@ -1842,6 +1842,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-marlin-gemm"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "cc",
+ "half",
+]
+
+[[package]]
 name = "kiln-model"
 version = "0.1.0"
 dependencies = [
@@ -1852,6 +1861,7 @@ dependencies = [
  "kiln-core",
  "kiln-flash-attn",
  "kiln-gdn-kernel",
+ "kiln-marlin-gemm",
  "kiln-nvtx",
  "kiln-rmsnorm-kernel",
  "memmap2",

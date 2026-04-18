@@ -4,6 +4,7 @@ members = [
     "crates/kiln-core",
     "crates/kiln-flash-attn",
     "crates/kiln-gdn-kernel",
+    "crates/kiln-marlin-gemm",
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-rmsnorm-kernel",
@@ -11,8 +12,8 @@ members = [
     "crates/kiln-server",
     "crates/kiln-train",
 ]
-# kiln-flash-attn, kiln-gdn-kernel, and kiln-rmsnorm-kernel unconditionally
-# depend on candle-core/cuda, which pulls cudarc into any
+# kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm, and kiln-rmsnorm-kernel
+# unconditionally depend on candle-core/cuda, which pulls cudarc into any
 # `cargo build --workspace` and fails to link on non-CUDA hosts (notably
 # macOS). They're only compiled when a downstream crate opts in via
 # --features cuda, which activates them as optional dependencies.
@@ -79,6 +80,7 @@ candle-core = "0.10"
 candle-nn = "0.10"
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
+kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
 # Apple's MLX framework via unofficial Rust bindings. Wave 2 peak-perf

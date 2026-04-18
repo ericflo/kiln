@@ -1,0 +1,15 @@
+[package]
+name = "kiln-marlin-gemm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vendored IST-DASLab/marlin W4A16 GEMM CUDA kernel with a thin BF16 C-ABI wrapper"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"
