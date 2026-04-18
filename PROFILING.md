@@ -2335,22 +2335,23 @@ the profile to expose the next tier of cost (RMSNorm + GDN body).
 
 ### Recommended next optimization target
 
-> **Decode**: with the GDN projection `ucopy_bf16` mass eliminated,
-> the next decode tier is the two RMSNorm stages
-> (`kiln/norm/pre_mlp` + `kiln/norm/pre_attn`) and the GDN body
-> kernels (`gated_norm`, `gates`, `conv`, `qk_norm`), which are now
-> the relative top of the profile. Fusing `pre_*norm + projection`
-> into a single kernel per layer is the same class of fix that
-> collapsed the projection cost; on Qwen3.5-4B it would target the
-> remaining ~13 % of decode wallclock that the two RMSNorms occupy
-> in the post-fix profile.
+> **Not next target — landed in this PR**: fusing the two RMSNorm
+> stages (`kiln/norm/pre_mlp` + `kiln/norm/pre_attn`, combined ~22 %
+> of decode NVTX in the prior profile) was the recommended next
+> decode-tier fix. It landed as the Liger-style fused RMSNorm CUDA
+> kernel in crate `kiln-rmsnorm-kernel` (this PR), collapsing
+> candle's ~11-launch op chain into a single fused kernel. Measured
+> decode ITL (paged, 506-token prompt) improved **27.67 ms →
+> 22.77 ms (1.215×)** with peak VRAM unchanged (16 840 MB). See the
+> "Phase 6 — Fused RMSNorm" section below.
 >
-> **Secondary**: the GDN body (`gated_norm`, `gates`, `conv`,
-> `qk_norm`) is currently expressed as candle ops; vendoring a fused
-> Triton/CUDA kernel for the recurrent step (already partially done
-> via `recurrent_gdn_fwd_kernel`) would amortize launch overhead and
-> cut the residual 24 % of NVTX wallclock those four ranges
-> occupy.
+> **Decode (next)**: with the RMSNorm mass collapsed, the GDN body
+> kernels (`gated_norm`, `gates`, `conv`, `qk_norm`) are now the
+> relative top of the profile. These are still expressed as candle
+> ops; vendoring a fused Triton/CUDA kernel for the recurrent GDN
+> body step (already partially done via `recurrent_gdn_fwd_kernel`)
+> would amortize launch overhead and cut the residual ~38 % of
+> decode NVTX wallclock those four ranges occupy.
 >
 > **Not next target — already vendored**: the project's "Current
 > optimization queue" item *Vendor fla-org chunk_gla_fwd (minimal)*
@@ -2359,7 +2360,7 @@ the profile to expose the next tier of cost (RMSNorm + GDN body).
 > `recurrent_gdn_fwd_kernel` for seq_len==1 decode). Both are
 > already in the per-kernel tables above and are *not* the next
 > hotspot. Planning loops re-proposing "vendor chunk_gla_fwd" should
-> redirect to the RMSNorm-fusion or GDN-body-vendor items.
+> redirect to the GDN-body-vendor item above.
 
 ### Comparison table — pre-fix vs. post-fix
 
@@ -2398,3 +2399,139 @@ Timing-only metrics (ITL, prefill latency, throughput) were taken
 from unprofiled `kiln-bench` runs on the same pod and the fix
 commit; those runs are preserved in the committed `*_bench.log`
 files.
+
+---
+
+# Kiln Profiling Report — Phase 6, Fused RMSNorm Kernel
+
+## Summary
+
+This round fuses the pre-norm RMSNorm into a single CUDA kernel,
+collapsing candle's ~11-launch op chain
+(`cast → sqr → mean → add_eps → sqrt → recip → bmul → cast(w) →
+ones_like → add → bmul → cast_back`) into one kernel per call.
+
+The recommendation from the previous round (PR #130 section above)
+explicitly named this as the next decode-tier target:
+
+> "Fusing `pre_*norm + projection` into a single kernel per layer
+> … would target the remaining ~13 % of decode wallclock that the
+> two RMSNorms occupy in the post-fix profile."
+
+This PR lands the fused-RMSNorm half of that target. Body-side
+fusion with the subsequent GEMM is left for a follow-up.
+
+## Fix Summary
+
+- **New crate**: `kiln-rmsnorm-kernel` (workspace member)
+  - `csrc/fused_rmsnorm.cu` — Liger-style fused kernel: one block
+    per row, 256 threads/block, `__shfl_xor_sync` warp reduction +
+    shared-memory block reduction, F32 accumulation + F32 epilogue
+    with bf16 load/store. Implements Qwen3.5's **`(1 + weight) * x *
+    rsqrt(mean(x²) + eps)`** formulation. Envelope: `hidden_size ≤
+    8192`, bf16 activations, row-major contiguous rows.
+  - `csrc/fused_rmsnorm.h` — C-ABI:
+    `kiln_fused_rmsnorm(x_bf16, w_bf16, out_bf16, rows, hidden, eps,
+    stream) -> status`. Pattern matches `kiln-flash-attn` and
+    `kiln-gdn-kernel`.
+  - `build.rs` — compiles the `.cu` via the `cc` crate for archs
+    `80;86;89;90` (override via `KILN_CUDA_ARCHS`).
+  - `src/lib.rs` — Rust FFI wrapper with `supports()` and
+    `fused_rmsnorm()`. Guards on `DType::BF16`, contiguous rows,
+    non-empty input, `hidden ≤ 8192`, and a `Cuda` device. Uses
+    `storage_and_layout` + `as_cuda_slice::<bf16>()` +
+    `.device_ptr()` + `.cu_stream() as *mut c_void` to match the
+    existing vendored-kernel pattern.
+
+- **Integration** (`kiln-model/src/forward.rs`): the `rms_norm`
+  helper now dispatches to the fused kernel when `feature = "cuda"`
+  is enabled, the env toggle `KILN_DISABLE_RMSNORM_KERNEL` is
+  unset, and `kiln_rmsnorm_kernel::supports(&x, &weight)` returns
+  true. Otherwise it falls back to the original candle op chain
+  (preserved verbatim as `rms_norm_fallback`). The dispatch point
+  is intentionally inside the single `rms_norm` helper so every
+  call site (`transformer_block`, `transformer_block_paged`, and
+  the GDN `model_forward` paths) picks up the fused kernel
+  transparently.
+
+- **Workspace glue**: `kiln-rmsnorm-kernel` added to
+  `Cargo.toml` members, `workspace.dependencies`, and `kiln-model`
+  enables it under the existing `cuda` feature (same pattern as
+  `kiln-flash-attn` and `kiln-gdn-kernel`).
+
+## Parity
+
+All 3 in-crate unit tests pass with tolerance **1e-2** max abs
+diff vs the candle op chain on deterministic LCG inputs
+(`candle-core 0.10`, A6000, bf16):
+
+| Test | Shape | Result |
+| --- | --- | --- |
+| `parity_decode_row` | `[1, 2560]` (hot decode path) | **ok** |
+| `parity_multi_row` | `[512, 2560]` (prefill path) | **ok** |
+| `parity_with_batch_dim` | `[2, 3, 2560]` (batched) | **ok** |
+
+```
+running 3 tests
+test tests::parity_multi_row ... ok
+test tests::parity_decode_row ... ok
+test tests::parity_with_batch_dim ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored
+```
+
+## Benchmark — Paged production path (506 tokens, 128 decoded)
+
+Captured on the same RunPod A6000 pod (`na9gxbvmn0chht`) against
+the Qwen3.5-4B baseline, same model, same prompt, same pod, `main`
+vs `ce/fuse-pre-norm-projection`:
+
+| Metric | Pre-fix (`main` @ `9b7e09d`) | **Post-fix (this PR)** | Δ |
+| --- | ---: | ---: | ---: |
+| Mean ITL (paged) | 27.67 ms | **22.77 ms** | −17.7 % (**1.215×**) |
+| P50 ITL (paged) | 27.59 ms | **22.65 ms** | −17.9 % (1.218×) |
+| P99 ITL (paged) | 37.48 ms | **28.13 ms** | −25.0 % (1.332×) |
+| Decode throughput (paged, single) | 36.15 tok/s | **43.91 tok/s** | +21.5 % |
+| Prefill @ 506 tokens (paged) | 424.2 ms (1 193 tok/s) | **405.8 ms (1 247 tok/s)** | −4.3 % (+4.5 % tok/s) |
+| Peak inference VRAM | 16 840 MB | **16 840 MB** | 0 MB (within ±500 MB) |
+
+Non-paged path (`generate_from_tokens`) also improved:
+
+| Metric | Pre-fix | **Post-fix** | Δ |
+| --- | ---: | ---: | ---: |
+| Mean ITL (non-paged) | 26.73 ms | **24.27 ms** | −9.2 % (1.101×) |
+| P50 ITL (non-paged) | 26.47 ms | **24.01 ms** | −9.3 % (1.103×) |
+| P99 ITL (non-paged) | 29.02 ms | **28.05 ms** | −3.3 % |
+| Decode throughput (non-paged, single) | 37.42 tok/s | **41.21 tok/s** | +10.1 % |
+
+### Acceptance criteria (from task spec)
+
+| Criterion | Target | **Result** |
+| --- | --- | --- |
+| Parity vs candle op chain | `max_abs_diff < 1e-2` | ✅ all 3 shapes |
+| Decode ITL speedup (paged) | 1.15×–1.35× (hard floor 1.05×) | ✅ **1.215×** |
+| Prefill @ 506 tokens (paged) | regression ≤ ±3 % | ✅ **−4.3 % (improvement)** |
+| Peak inference VRAM | within ±500 MB of main | ✅ **0 MB delta** |
+
+The ~13 % decode-wallclock envelope quoted in the prior section
+(`pre_attn` 11.1 % + `pre_mlp` 11.0 %, combined 22.1 % of decode
+NVTX) cashed in at **17.7 %** of total paged decode wallclock. The
+extra headroom comes from collapsed launch overhead: the fused
+kernel replaces ~11 kernel launches × 32 layers × 2 norms
+(~700 fewer launches per decode step in the non-paged path,
+similar on the paged path) with a single launch per norm call.
+
+## Artifacts
+
+- Baseline (main) bench: `/tmp/bench-main-final.log` on the pod
+  (discarded at pod termination; numbers reproduced in the tables
+  above).
+- Branch bench: `/tmp/branch-run.log` on the pod (same).
+- Unit tests: `cargo test --release -p kiln-rmsnorm-kernel` — 3/3
+  pass on A6000.
+
+No new CSV / nsys artifacts were collected for this round — the
+improvement target (two RMSNorm NVTX ranges) and its size were
+already characterized by the prior round's CSVs (committed in PR
+#130). The only new evidence needed for this PR is the unprofiled
+timing comparison and the parity tests, both included above.

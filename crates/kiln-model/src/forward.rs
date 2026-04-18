@@ -414,7 +414,28 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
 /// `eps`: small constant for numerical stability (1e-6 for Qwen3.5-4B)
 ///
 /// Returns: same shape as `x`.
+///
+/// On CUDA+bf16 inputs within the kernel envelope (hidden <= 8192), dispatches
+/// to `kiln_rmsnorm_kernel::fused_rmsnorm`, which collapses the ~11 candle op
+/// launches (to_dtype, sqr, mean_keepdim, +eps, sqrt, recip, broadcast_mul,
+/// to_dtype, ones_like + w, broadcast_mul, to_dtype) into a single fused kernel.
+/// Falls back to the candle-op path on CPU, non-bf16, or out-of-envelope inputs.
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        let disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
+        if !disabled && kiln_rmsnorm_kernel::supports(x, weight) {
+            return kiln_rmsnorm_kernel::fused_rmsnorm(x, weight, eps as f32)
+                .context("fused_rmsnorm kernel failed");
+        }
+    }
+    rms_norm_fallback(x, weight, eps)
+}
+
+/// Candle-op reference RMSNorm. Kept as the CPU path and as the correctness
+/// oracle for the fused CUDA kernel. Matches HF semantics exactly:
+/// `out = (1 + w) * x * rsqrt(mean(x^2) + eps)` with F32 reduction and epilogue.
+pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
