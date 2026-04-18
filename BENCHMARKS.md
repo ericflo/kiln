@@ -115,3 +115,44 @@ python3 convert_hf_to_gguf.py qwen3.5-4b --outfile qwen3.5-4b-bf16.gguf --outtyp
 ```
 
 Raw JSON for this run is checked in under [`bench-results/`](bench-results/).
+
+## macOS / Apple Silicon (Metal)
+
+Kiln also runs on Apple Silicon via candle-metal. Measured numbers are
+not yet in this doc — the methodology below lets a contributor with
+M3/M4 Max hardware drop them in.
+
+### Provision
+M3 Pro/Max, M4 Pro/Max, or M2 Ultra. Xcode Command Line Tools only
+(full Xcode is **not** required — candle-metal-kernels JIT-compiles MSL
+at runtime). Rust stable. No x86_64 Macs — Metal perf there is
+unusable.
+
+### Build kiln
+```bash
+cargo build --release --features metal --bin kiln-bench
+```
+
+### Run
+```bash
+./target/release/kiln-bench \
+  --model-path qwen3.5-4b \
+  --prompt-tokens 512 --max-output-tokens 256 \
+  --paged --skip-training > kiln-bench-metal.json
+```
+
+The JSON output includes a top-level `"backend": "metal"` field so
+mixed-platform reports can split runs without parsing GPU names.
+
+### Compare against
+- **llama.cpp Metal**: `cmake -B build -DGGML_METAL=ON` (no CUDA
+  dependency), then the same `llama-bench` invocation.
+- **MLX-LM**: Apple's reference inference stack, comparable baseline
+  for "peak perf on Apple Silicon" until Kiln's Wave 2 mlx-rs backend
+  lands.
+
+Kiln's Metal backend uses `candle_nn::ops::sdpa` (MLX-style fused
+scaled-dot-product attention) for the prefill path and a gather+SDPA
+composition for paged decode. GDN linear attention currently runs on
+the portable candle composition; an MSL kernel port is follow-up work
+tracked in MACOS_MLX_PLAN.md.

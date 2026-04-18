@@ -28,6 +28,10 @@ const PAGED_BLOCK_SIZE: usize = 16;
 /// Results from the full benchmark suite.
 #[derive(Debug, Serialize)]
 struct BenchmarkResults {
+    /// Which `BackendRuntime` ran the forward pass — one of
+    /// `cuda` / `metal` / `cpu`. Lets downstream comparison scripts split
+    /// runs by hardware path without parsing GPU names.
+    backend: String,
     gpu_info: GpuInfo,
     model_load: ModelLoadResult,
     inference: Vec<InferenceBenchResult>,
@@ -792,6 +796,7 @@ fn main() -> Result<()> {
     if matches!(device, candle_core::Device::Cpu) {
         anyhow::bail!("No GPU available — benchmarks require CUDA or Metal");
     }
+    let backend_name = runtime_backend::for_device(&device).name();
 
     let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
         .context("failed to transfer weights to GPU")?;
@@ -802,8 +807,9 @@ fn main() -> Result<()> {
     let model_vram = (vram_after.saturating_sub(vram_before)) / (1024 * 1024);
 
     eprintln!(
-        "Model loaded in {:.2}s (VRAM: {} MB)\n",
+        "Model loaded in {:.2}s (backend: {}, VRAM: {} MB)\n",
         load_time.as_secs_f64(),
+        backend_name,
         model_vram
     );
 
@@ -900,6 +906,7 @@ fn main() -> Result<()> {
     }
 
     let results = BenchmarkResults {
+        backend: backend_name.to_string(),
         gpu_info,
         model_load,
         inference: inference_results,

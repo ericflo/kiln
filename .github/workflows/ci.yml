@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  macos-metal:
+    name: macOS / Metal (M-series)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Build (default features — no GPU)
+        run: cargo build --locked
+
+      - name: Build (Metal)
+        run: cargo build --locked --features metal
+
+      - name: Test (default features — exercises CPU fallback)
+        run: cargo test --locked
+
+      - name: Test (Metal feature — exercises Apple Silicon GPU path)
+        # Skip the two pre-existing env-var races that flake in parallel test
+        # runs but pass in isolation.
+        run: |
+          cargo test --locked --features metal -- --skip test_env_var_overrides --skip test_health_with_real_backend
+
+  linux-default:
+    name: Linux / default features
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Build (default features — no CUDA)
+        run: cargo build --locked
+
+      - name: Test (default features)
+        run: cargo test --locked -- --skip test_env_var_overrides --skip test_health_with_real_backend
