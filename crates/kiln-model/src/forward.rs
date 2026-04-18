@@ -635,12 +635,35 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
 
 /// Gated RMSNorm: rms_norm(x, weight) * silu(z).
 ///
-/// Applied per-group on the last dimension. Returns F32.
+/// Applied per-group on the last dimension. Returns `x.dtype()`.
 ///
 /// `x`: [..., dim] — attention output
 /// `z`: [..., dim] — output gate (from in_proj_z)
 /// `weight`: [dim] — learnable scale
+///
+/// On CUDA+bf16 inputs within the kernel envelope (hidden <= 8192, all tensors
+/// bf16 + contiguous), dispatches to `kiln_gated_rms_norm_kernel::fused_gated_rms_norm`,
+/// which collapses the 10-op candle chain (to_dtype*3, sqr, mean_keepdim, +eps,
+/// sqrt, recip, broadcast_mul*2, silu, mul) into a single fused kernel launch.
+/// Falls back to the candle-op path on CPU, non-bf16, out-of-envelope, or when
+/// `KILN_DISABLE_FUSED_GATED_RMSNORM` is set.
 fn gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        let disabled = std::env::var("KILN_DISABLE_FUSED_GATED_RMSNORM").is_ok();
+        if !disabled && kiln_gated_rms_norm_kernel::supports(x, z, weight) {
+            return kiln_gated_rms_norm_kernel::fused_gated_rms_norm(x, z, weight, eps as f32)
+                .context("fused_gated_rms_norm kernel failed");
+        }
+    }
+    gated_rms_norm_fallback(x, z, weight, eps)
+}
+
+/// Candle-op reference gated RMSNorm. Kept as the CPU path and as the
+/// correctness oracle for the fused CUDA kernel. Note that unlike the main
+/// transformer RMSNorm (`(1 + w)`), GDN's gated RMSNorm uses the standard
+/// weight convention (weights centred on 1): `out = w * x * rsqrt(mean(x^2) + eps) * silu(z)`.
+fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let z_f32 = z.to_dtype(DType::F32)?;
     let w_f32 = weight.to_dtype(DType::F32)?;
@@ -654,7 +677,7 @@ fn gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<T
     // Output gate: silu(z) = z * sigmoid(z)
     let gate = cuda_silu(&z_f32)?;
     let out = (normed * gate)?;
-    Ok(out)
+    Ok(out.to_dtype(x.dtype())?)
 }
 
 /// Causal depthwise conv1d for prefill (seq_len > 1).
@@ -1309,13 +1332,12 @@ pub fn gated_deltanet_forward(
     };
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
+    // `gated_rms_norm` returns the same dtype as `attn_out` (bf16 under the
+    // CUDA hot path, matching input_dtype), so no post-cast is needed here.
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
         let attn_out = gated_rms_norm(&attn_out, &z, &weights.norm, config.rms_norm_eps)?;
-        // Reshape to [B, T, v_dim] and cast back to input dtype
-        attn_out
-            .reshape((batch, seq_len, v_dim))?
-            .to_dtype(input_dtype)?
+        attn_out.reshape((batch, seq_len, v_dim))?
     };
 
     // --- Step 9: Output projection ---

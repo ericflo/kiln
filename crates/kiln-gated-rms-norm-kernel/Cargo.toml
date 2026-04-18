@@ -1,0 +1,15 @@
+[package]
+name = "kiln-gated-rms-norm-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fused gated RMSNorm CUDA kernel — collapses the 10-op candle sequence in kiln-model::forward::gated_rms_norm (rms_norm*silu gate) into one launch"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"

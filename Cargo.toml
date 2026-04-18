@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kiln-core",
     "crates/kiln-flash-attn",
+    "crates/kiln-gated-rms-norm-kernel",
     "crates/kiln-gdn-kernel",
     "crates/kiln-model",
     "crates/kiln-nvtx",
@@ -62,6 +63,7 @@ memmap2 = "0.9"
 candle-core = "0.10"
 candle-nn = "0.10"
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
+kiln-gated-rms-norm-kernel = { path = "crates/kiln-gated-rms-norm-kernel" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
