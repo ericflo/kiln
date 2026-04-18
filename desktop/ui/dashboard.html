@@ -213,6 +213,43 @@
         font-family: inherit;
         user-select: none;
       }
+      #adapter-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        background: #1b1e24;
+        color: #a8aeb8;
+        border: 1px solid #2a2f3a;
+        border-radius: 6px;
+        max-width: 220px;
+        overflow: hidden;
+      }
+      #adapter-pill .adapter-label {
+        color: #6c7280;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+      }
+      #adapter-name {
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: transparent;
+        padding: 0;
+        font-size: 12px;
+        color: inherit;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        user-select: text;
+        min-width: 0;
+      }
+      #adapter-name.empty {
+        color: #6c7280;
+        font-family: inherit;
+        user-select: none;
+      }
     </style>
   </head>
   <body>
@@ -232,6 +269,10 @@
       <span id="vram-pill" title="Model / Total VRAM — server not running">
         <span class="vram-label">VRAM:</span>
         <code id="vram-value" class="empty">—</code>
+      </span>
+      <span id="adapter-pill" title="Active LoRA adapter — none">
+        <span class="adapter-label">Adapter:</span>
+        <code id="adapter-name" class="empty">—</code>
       </span>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
       <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
@@ -613,6 +654,63 @@
         }
       }
 
+      const adapterPill = document.getElementById("adapter-pill");
+      const adapterNameEl = document.getElementById("adapter-name");
+      const ADAPTER_EMPTY_LABEL = "—";
+      const ADAPTER_EMPTY_TITLE = "Active LoRA adapter — none";
+      const ADAPTER_VISIBLE_STATES = ["Starting", "Running", "TrainingActive"];
+      let cachedAdapterText = null;
+
+      function setAdapterDisplay(text, tooltip, isEmptyStyle) {
+        adapterNameEl.textContent = text;
+        if (isEmptyStyle) {
+          adapterNameEl.classList.add("empty");
+        } else {
+          adapterNameEl.classList.remove("empty");
+        }
+        adapterPill.title = tooltip;
+      }
+
+      function clearAdapterDisplay() {
+        if (cachedAdapterText !== null) {
+          cachedAdapterText = null;
+          setAdapterDisplay(ADAPTER_EMPTY_LABEL, ADAPTER_EMPTY_TITLE, true);
+        }
+      }
+
+      async function refreshAdapterInfo(kind) {
+        if (!invoke || !ADAPTER_VISIBLE_STATES.includes(kind)) {
+          clearAdapterDisplay();
+          return;
+        }
+        let info;
+        try {
+          info = await invoke("get_active_adapter");
+        } catch (_) {
+          clearAdapterDisplay();
+          return;
+        }
+        if (info && info.active) {
+          const text = info.active;
+          if (text !== cachedAdapterText) {
+            cachedAdapterText = text;
+            setAdapterDisplay(text, `Active LoRA adapter: ${text}`, false);
+          }
+        } else if (info && info.available_count > 0) {
+          const text = "none";
+          if (text !== cachedAdapterText) {
+            cachedAdapterText = text;
+            setAdapterDisplay(
+              text,
+              `No LoRA adapter loaded (${info.available_count} available on disk)`,
+              false
+            );
+          }
+        } else {
+          clearAdapterDisplay();
+        }
+      }
+
       function updateStopBtnVisibility(kind) {
         const shouldShow = STOP_ACTIVE_STATES.includes(kind);
         stopBtn.classList.toggle("hidden", !shouldShow);
@@ -628,6 +726,7 @@
           applyStatusBadge("Unknown", "Tauri bridge unavailable");
           await refreshBaseUrl("Unknown");
           await refreshVramInfo("Unknown", null);
+          await refreshAdapterInfo("Unknown");
           updateStopBtnVisibility("Unknown");
           return;
         }
@@ -641,12 +740,14 @@
           applyStatusBadge(kind, tooltip);
           await refreshBaseUrl(kind);
           await refreshVramInfo(kind, cachedBaseUrl);
+          await refreshAdapterInfo(kind);
           updateStopBtnVisibility(kind);
           stateFailureLogged = false;
         } catch (err) {
           applyStatusBadge("Unknown", "Could not read server state");
           await refreshBaseUrl("Unknown");
           await refreshVramInfo("Unknown", null);
+          await refreshAdapterInfo("Unknown");
           updateStopBtnVisibility("Unknown");
           if (!stateFailureLogged) {
             console.error("server_state poll failed", err);
