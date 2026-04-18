@@ -359,6 +359,7 @@ fn load_full_attention(
         o_proj,
         q_norm,
         k_norm,
+        q_proj_marlin: None,
     })
 }
 
@@ -627,6 +628,16 @@ fn load_full_attention_gptq(
     let q_proj = load_gptq_linear(tensor_map, &format!("{attn}q_proj"), gptq_config, &ctx("q_proj"))?;
     validate_shape(&q_proj, &[q_proj_dim, config.hidden_size], &ctx("q_proj"))?;
 
+    // Optional Marlin W4A16 repack for q_proj, gated on KILN_W4A16=1 at load time.
+    // Keeps the bf16 q_proj WeightTensor in place so the forward path can fall
+    // back to the standard matmul if the Marlin branch is not selected.
+    let q_proj_marlin = maybe_repack_q_proj_marlin(
+        tensor_map,
+        &format!("{attn}q_proj"),
+        gptq_config,
+        &ctx("q_proj Marlin repack"),
+    )?;
+
     let k_proj = load_gptq_linear(tensor_map, &format!("{attn}k_proj"), gptq_config, &ctx("k_proj"))?;
     validate_shape(&k_proj, &[kv_dim, config.hidden_size], &ctx("k_proj"))?;
 
@@ -650,7 +661,82 @@ fn load_full_attention_gptq(
         o_proj,
         q_norm,
         k_norm,
+        q_proj_marlin,
     })
+}
+
+/// When `KILN_W4A16=1` is set and the checkpoint is GPTQ INT4 with a Marlin-
+/// compatible `group_size`, repack the raw GPTQ payload for `name` into
+/// Marlin's tiled/permuted W4A16 layout. Returns `None` when the flag is
+/// unset, when the build lacks the `cuda` feature, or when the layer's shape
+/// does not satisfy Marlin's `k%128 == 0 && n%256 == 0 && group_size == 128`
+/// constraints.
+#[cfg(feature = "cuda")]
+fn maybe_repack_q_proj_marlin(
+    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    name: &str,
+    gptq_config: &GptqConfig,
+    ctx: &str,
+) -> Result<Option<(WeightTensor, WeightTensor)>> {
+    if std::env::var("KILN_W4A16").ok().as_deref() != Some("1") {
+        return Ok(None);
+    }
+    if gptq_config.group_size != 128 {
+        tracing::warn!(
+            "KILN_W4A16=1 but GPTQ group_size={} (only 128 is supported by Marlin); \
+             falling back to bf16 q_proj",
+            gptq_config.group_size
+        );
+        return Ok(None);
+    }
+
+    let qweight = extract_raw_tensor(tensor_map, &format!("{name}.qweight"))
+        .with_context(|| format!("{ctx}: qweight"))?;
+    let scales = extract_raw_tensor(tensor_map, &format!("{name}.scales"))
+        .with_context(|| format!("{ctx}: scales"))?;
+    let qzeros = extract_raw_tensor(tensor_map, &format!("{name}.qzeros"))
+        .with_context(|| format!("{ctx}: qzeros"))?;
+    let scales_dtype = convert_dtype(scales.2)
+        .with_context(|| format!("{ctx}: scales dtype {:?}", scales.2))?;
+
+    // qweight_shape = [in_features/8, out_features]
+    let in_features = qweight.1[0] * 8;
+    let out_features = qweight.1[1];
+    if in_features % 128 != 0 || out_features % 256 != 0 {
+        tracing::warn!(
+            "KILN_W4A16=1 but q_proj shape [in={in_features}, out={out_features}] \
+             does not satisfy Marlin's k%128==0 && n%256==0; falling back to bf16"
+        );
+        return Ok(None);
+    }
+
+    let result = quantized::repack_gptq_to_marlin(
+        &qweight.0,
+        &qweight.1,
+        &scales.0,
+        &scales.1,
+        scales_dtype,
+        &qzeros.0,
+        &qzeros.1,
+        gptq_config.group_size,
+    )
+    .with_context(|| format!("{ctx}: repack_gptq_to_marlin"))?;
+    tracing::info!(
+        "KILN_W4A16=1: repacked q_proj ({name}) to Marlin layout \
+         [in={in_features}, out={out_features}, group_size={}]",
+        gptq_config.group_size
+    );
+    Ok(Some(result))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn maybe_repack_q_proj_marlin(
+    _tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    _name: &str,
+    _gptq_config: &GptqConfig,
+    _ctx: &str,
+) -> Result<Option<(WeightTensor, WeightTensor)>> {
+    Ok(None)
 }
 
 /// Load GPTQ-quantized Gated DeltaNet linear attention weights.

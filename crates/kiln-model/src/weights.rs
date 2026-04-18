@@ -6,6 +6,9 @@ pub enum TensorDType {
     F16,
     BF16,
     F32,
+    /// Signed 32-bit integer. Used for Marlin W4A16 packed INT4 weights
+    /// (8 nibbles per word).
+    I32,
 }
 
 impl TensorDType {
@@ -13,7 +16,7 @@ impl TensorDType {
     pub fn size_bytes(self) -> usize {
         match self {
             TensorDType::F16 | TensorDType::BF16 => 2,
-            TensorDType::F32 => 4,
+            TensorDType::F32 | TensorDType::I32 => 4,
         }
     }
 }
@@ -24,6 +27,7 @@ impl fmt::Display for TensorDType {
             TensorDType::F16 => write!(f, "f16"),
             TensorDType::BF16 => write!(f, "bf16"),
             TensorDType::F32 => write!(f, "f32"),
+            TensorDType::I32 => write!(f, "i32"),
         }
     }
 }
@@ -88,6 +92,12 @@ pub struct FullAttentionWeights {
     pub q_norm: WeightTensor,
     /// [head_dim]
     pub k_norm: WeightTensor,
+    /// Optional Marlin W4A16 repacked q_proj: `(b_packed I32 [k/16, n*16/8],
+    /// scales F16 [k/groupsize, n])`. Populated only when `KILN_W4A16=1` is
+    /// set at load time AND the checkpoint is GPTQ INT4 with group_size=128.
+    /// When present, the forward pass uses `kiln-marlin-gemm::marlin_w4a16_gemm`
+    /// for q_proj instead of the standard bf16 matmul.
+    pub q_proj_marlin: Option<(WeightTensor, WeightTensor)>,
 }
 
 /// Gated DeltaNet linear attention weights.
@@ -178,6 +188,10 @@ impl ModelWeights {
                     total += attn.o_proj.size_bytes();
                     total += attn.q_norm.size_bytes();
                     total += attn.k_norm.size_bytes();
+                    if let Some((b, s)) = &attn.q_proj_marlin {
+                        total += b.size_bytes();
+                        total += s.size_bytes();
+                    }
                 }
                 AttentionWeights::Linear(attn) => {
                     total += attn.in_proj_qkv.size_bytes();
@@ -213,6 +227,9 @@ impl ModelWeights {
                     total += attn.o_proj.numel();
                     total += attn.q_norm.numel();
                     total += attn.k_norm.numel();
+                    // Marlin weights are a storage-only artifact; they duplicate
+                    // q_proj in compressed form and should not inflate the
+                    // reported parameter count.
                 }
                 AttentionWeights::Linear(attn) => {
                     total += attn.in_proj_qkv.numel();

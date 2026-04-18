@@ -44,3 +44,4 @@ nvtx = ["kiln-nvtx/nvtx"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+half = "2"

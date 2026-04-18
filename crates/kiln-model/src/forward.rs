@@ -9,7 +9,9 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
-use crate::lora_loader::{linear_with_lora_t, LoraLayerWeights, LoraWeights};
+use crate::lora_loader::{linear_with_lora_t, LoraLayerWeights, LoraProjectionWeights, LoraWeights};
+#[cfg(feature = "cuda")]
+use crate::lora_loader::compute_lora_delta;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
@@ -173,6 +175,13 @@ pub struct GpuFullAttentionWeights {
     pub k_proj_t: Tensor,
     pub v_proj_t: Tensor,
     pub o_proj_t: Tensor,
+    /// Optional Marlin W4A16 packed q_proj weights: `(b_packed I32 [k/16, n*16/8],
+    /// scales F16 [k/groupsize, n])`. Populated only when `KILN_W4A16=1` was set
+    /// at model-load time. When `Some`, the forward pass uses
+    /// `kiln_marlin_gemm::marlin_w4a16_gemm` for q_proj instead of the standard
+    /// bf16 `linear_with_lora_t` matmul.
+    #[cfg(feature = "cuda")]
+    pub q_proj_marlin: Option<(Tensor, Tensor)>,
 }
 
 pub struct GpuLinearAttentionWeights {
@@ -255,6 +264,7 @@ fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
         TensorDType::F16 => DType::F16,
         TensorDType::BF16 => DType::BF16,
         TensorDType::F32 => DType::F32,
+        TensorDType::I32 => DType::I32,
     };
     let t = Tensor::from_raw_buffer(&w.data, dtype, &w.shape, device)
         .context("failed to create tensor from raw buffer")?;
@@ -306,6 +316,17 @@ impl GpuWeights {
                         .contiguous().context(ctx("v_proj.t contiguous"))?;
                     let o_proj_t = o_proj.t().context(ctx("o_proj.t"))?
                         .contiguous().context(ctx("o_proj.t contiguous"))?;
+                    #[cfg(feature = "cuda")]
+                    let q_proj_marlin = match &attn.q_proj_marlin {
+                        Some((b, s)) => {
+                            let b_t = weight_to_tensor(b, device)
+                                .context(ctx("q_proj_marlin.b_packed"))?;
+                            let s_t = weight_to_tensor(s, device)
+                                .context(ctx("q_proj_marlin.scales"))?;
+                            Some((b_t, s_t))
+                        }
+                        None => None,
+                    };
                     GpuAttentionWeights::Full(GpuFullAttentionWeights {
                         q_proj,
                         k_proj,
@@ -317,6 +338,8 @@ impl GpuWeights {
                         k_proj_t,
                         v_proj_t,
                         o_proj_t,
+                        #[cfg(feature = "cuda")]
+                        q_proj_marlin,
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
@@ -1327,6 +1350,59 @@ pub fn gated_deltanet_forward(
     Ok(out)
 }
 
+/// Compute the q_proj matmul, routing through Marlin W4A16 when enabled.
+///
+/// When the `cuda` feature is enabled and `attn_weights.q_proj_marlin` is
+/// `Some`, this calls `kiln_marlin_gemm::marlin_w4a16_gemm` on the packed
+/// INT4 weights and applies the LoRA delta on top. Otherwise it falls back
+/// to the standard pre-transposed bf16 matmul via `linear_with_lora_t`,
+/// which is bit-identical to the legacy path.
+///
+/// Public so that integration tests (e.g. `tests/parity_q_proj_marlin.rs`)
+/// can drive the helper directly without standing up a full attention layer.
+pub fn q_proj_matmul(
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if let Some((b_packed, scales)) = &attn_weights.q_proj_marlin {
+            let (batch, seq_len, hidden) = x.dims3()?;
+            // Marlin kernel requires bf16 activations (the wrapper handles the
+            // bf16<->fp16 cast internally). Flatten to [m, k].
+            let x_bf16 = if x.dtype() == DType::BF16 {
+                x.clone()
+            } else {
+                x.to_dtype(DType::BF16)?
+            };
+            let x_flat = x_bf16
+                .reshape((batch * seq_len, hidden))?
+                .contiguous()?;
+            let y_flat = kiln_marlin_gemm::marlin_w4a16_gemm(&x_flat, b_packed, scales, 128)
+                .context("marlin_w4a16_gemm q_proj")?;
+            let n = y_flat.dim(1)?;
+            let base = y_flat.reshape((batch, seq_len, n))?;
+            // Cast base to match the dtype expected downstream (matches what
+            // `linear_with_lora_t` would have produced from a bf16 input).
+            let base = if base.dtype() == x.dtype() {
+                base
+            } else {
+                base.to_dtype(x.dtype())?
+            };
+            return match lora {
+                Some(proj) => {
+                    let delta = compute_lora_delta(x, proj, lora_scale)?;
+                    Ok((base + delta)?)
+                }
+                None => Ok(base),
+            };
+        }
+    }
+    linear_with_lora_t(x, &attn_weights.q_proj_t, lora, lora_scale)
+}
+
 /// Grouped-Query Attention (GQA).
 ///
 /// Computes scaled dot-product attention with fewer KV heads than Q heads.
@@ -1372,7 +1448,7 @@ pub fn gqa_attention(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = linear_with_lora_t(x, &attn_weights.q_proj_t, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+        let q_raw = q_proj_matmul(x, attn_weights, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
         let k = linear_with_lora_t(x, &attn_weights.k_proj_t, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
         let v = linear_with_lora_t(x, &attn_weights.v_proj_t, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
         (q_raw, k, v)
@@ -1706,7 +1782,7 @@ pub fn gqa_attention_paged(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = linear_with_lora_t(x, &attn_weights.q_proj_t, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
+        let q_raw = q_proj_matmul(x, attn_weights, lora_layer.and_then(|l| l.q_proj.as_ref()), lora_scale)?;
         let k = linear_with_lora_t(x, &attn_weights.k_proj_t, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
         let v = linear_with_lora_t(x, &attn_weights.v_proj_t, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
         (q_raw, k, v)
@@ -2883,6 +2959,8 @@ mod tests {
             k_proj_t,
             v_proj_t,
             o_proj_t,
+            #[cfg(feature = "cuda")]
+            q_proj_marlin: None,
         })
     }
 
@@ -3195,6 +3273,8 @@ mod tests {
                     k_proj_t,
                     v_proj_t,
                     o_proj_t,
+                    #[cfg(feature = "cuda")]
+                    q_proj_marlin: None,
                 }),
                 mlp: GpuFfnWeights {
                     gate_proj,
@@ -3549,6 +3629,8 @@ mod tests {
                     k_proj_t,
                     v_proj_t,
                     o_proj_t,
+                    #[cfg(feature = "cuda")]
+                    q_proj_marlin: None,
                 })
             } else {
                 let in_proj_qkv = randn(&[qkv_dim, hidden_size])?;

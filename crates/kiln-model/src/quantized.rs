@@ -63,6 +63,150 @@ pub fn load_gptq_config(model_dir: &Path) -> Result<Option<GptqConfig>> {
     Ok(Some(config))
 }
 
+/// Repack GPTQ-packed INT4 weights into Marlin's tiled/permuted W4A16 layout.
+///
+/// Produces the two device-side tensors that `kiln_marlin_gemm::marlin_w4a16_gemm`
+/// consumes for a single linear projection:
+///
+///   - `b_packed`: `[k/16, n*16/8]` I32, Marlin's tile-permuted packed weights
+///   - `scales`:   `[k/groupsize, n]` F16, Marlin's permuted per-group scales
+///
+/// where `k = in_features`, `n = out_features`, and `groupsize == group_size`
+/// (Marlin only instantiates `groupsize ∈ {-1, 128}`; GPTQ Qwen uses 128).
+///
+/// Implementation: dequantize the GPTQ payload to an `[in, out]` f32 matrix
+/// using GPTQ's asymmetric `(q - zero) * scale` grid, then hand that matrix
+/// to `kiln_marlin_gemm::pack::quantize_and_pack`, which re-quantizes under
+/// Marlin's symmetric INT4 grid and applies the tile permutation. Re-quant
+/// adds one INT4 round of error on top of the GPTQ grid, which is within the
+/// parity tolerance we enforce downstream (rel_err ≤ 2% or abs_err ≤ 5e-3).
+///
+/// Caller constraints (Marlin kernel limits):
+///   - `k % 128 == 0`, `n % 256 == 0`
+///   - `group_size ∈ {-1, 128}` (here we expect 128 for Qwen3.5-4B)
+#[cfg(feature = "cuda")]
+pub fn repack_gptq_to_marlin(
+    qweight_data: &[u8],
+    qweight_shape: &[usize],
+    scales_data: &[u8],
+    scales_shape: &[usize],
+    scales_dtype: TensorDType,
+    qzeros_data: &[u8],
+    qzeros_shape: &[usize],
+    group_size: usize,
+) -> Result<(WeightTensor, WeightTensor)> {
+    let pack_factor = 8usize; // 32 / 4 bits
+
+    if qweight_shape.len() != 2 {
+        bail!("qweight must be 2-D, got shape {:?}", qweight_shape);
+    }
+
+    let in_features_packed = qweight_shape[0];
+    let out_features = qweight_shape[1];
+    let in_features = in_features_packed * pack_factor;
+    let num_groups = scales_shape[0];
+
+    if scales_shape.len() != 2 || scales_shape[1] != out_features {
+        bail!(
+            "scales shape mismatch: expected [*, {out_features}], got {:?}",
+            scales_shape
+        );
+    }
+    if qzeros_shape.len() != 2 || qzeros_shape[0] != num_groups {
+        bail!(
+            "qzeros shape mismatch: expected [{num_groups}, *], got {:?}",
+            qzeros_shape
+        );
+    }
+
+    // Marlin layout constraints. Checked early so we can fall back cleanly
+    // before doing any work.
+    if in_features % 128 != 0 {
+        bail!(
+            "kiln Marlin repack: k (in_features) must be a multiple of 128 (got {in_features})"
+        );
+    }
+    if out_features % 256 != 0 {
+        bail!(
+            "kiln Marlin repack: n (out_features) must be a multiple of 256 (got {out_features})"
+        );
+    }
+    if group_size != 128 {
+        bail!(
+            "kiln Marlin repack: only group_size=128 is supported (got {group_size})"
+        );
+    }
+
+    let qweight = bytes_as_u32(qweight_data).context("qweight byte alignment")?;
+    let qzeros = bytes_as_u32(qzeros_data).context("qzeros byte alignment")?;
+
+    if qweight.len() < in_features_packed * out_features {
+        bail!(
+            "qweight data too short: need {} u32s, got {}",
+            in_features_packed * out_features,
+            qweight.len()
+        );
+    }
+
+    let scales_f32 = scales_to_f32(scales_data, scales_dtype, num_groups * out_features)?;
+    let out_features_packed = qzeros_shape[1];
+
+    // Dequantize to f32 in [in, out] row-major (this is what quantize_and_pack
+    // expects as input — NOT the [out, in] layout used elsewhere in kiln).
+    let mut weight_f32 = vec![0.0f32; in_features * out_features];
+    for in_idx in 0..in_features {
+        let group = in_idx / group_size;
+        let pack_row = in_idx / pack_factor;
+        let bit_offset = (in_idx % pack_factor) * 4;
+        for out_idx in 0..out_features {
+            let packed_val = qweight[pack_row * out_features + out_idx];
+            let weight_int = ((packed_val >> bit_offset) & 0xF) as i32;
+
+            let zero_pack_col = out_idx / pack_factor;
+            let zero_bit_offset = (out_idx % pack_factor) * 4;
+            let zero_packed = qzeros[group * out_features_packed + zero_pack_col];
+            let zero_int = ((zero_packed >> zero_bit_offset) & 0xF) as i32;
+
+            let scale = scales_f32[group * out_features + out_idx];
+            weight_f32[in_idx * out_features + out_idx] =
+                (weight_int - zero_int) as f32 * scale;
+        }
+    }
+
+    let (b_packed_i32, scales_f16, _dequant_f32) = kiln_marlin_gemm::pack::quantize_and_pack(
+        &weight_f32,
+        in_features,
+        out_features,
+        group_size as i64,
+    );
+
+    // Serialize b_packed (i32) to raw bytes.
+    let mut b_bytes: Vec<u8> = Vec::with_capacity(b_packed_i32.len() * 4);
+    for v in &b_packed_i32 {
+        b_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let b_shape = vec![in_features / 16, out_features * 16 / 8];
+    let b_tensor = WeightTensor {
+        data: b_bytes,
+        shape: b_shape,
+        dtype: TensorDType::I32,
+    };
+
+    // Serialize scales (f16) to raw bytes.
+    let mut scale_bytes: Vec<u8> = Vec::with_capacity(scales_f16.len() * 2);
+    for s in &scales_f16 {
+        scale_bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    let scale_shape = vec![in_features / group_size, out_features];
+    let scales_tensor = WeightTensor {
+        data: scale_bytes,
+        shape: scale_shape,
+        dtype: TensorDType::F16,
+    };
+
+    Ok((b_tensor, scales_tensor))
+}
+
 /// Dequantize a GPTQ-packed linear layer weight to a dense BF16 `WeightTensor`.
 ///
 /// The GPTQ format stores weights column-major: `qweight[in/8, out]`.
@@ -224,6 +368,9 @@ fn scales_to_f32(data: &[u8], dtype: TensorDType, count: usize) -> Result<Vec<f3
                 .take(count)
                 .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                 .collect())
+        }
+        TensorDType::I32 => {
+            bail!("scales dtype I32 is not supported (scales must be F16/BF16/F32)")
         }
     }
 }
