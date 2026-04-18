@@ -106,6 +106,11 @@ async fn open_logs(app: AppHandle) -> Result<(), String> {
     tray::open_logs_window(&app).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[derive(serde::Serialize)]
 struct UpdateCheckResult {
     available: bool,
@@ -411,6 +416,7 @@ fn main() {
             get_training_status,
             open_settings,
             open_logs,
+            get_app_version,
             check_for_updates,
             install_update
         ])
