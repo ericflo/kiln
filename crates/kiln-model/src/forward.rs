@@ -1121,65 +1121,106 @@ fn gdn_chunkwise_recurrence(
             )
         };
 
-        // Cumulative decay G[t] = Σ_{s=0..t} g[s].  Done in F32: exp() of
-        // the cumulative sum is the only place bf16 would lose meaningful
-        // precision (G can reach -10 or more across a full 64-token chunk
-        // even though individual g_t are small, and exp() of that range
-        // benefits from F32's wider mantissa).
-        let g_f32 = g_c.to_dtype(DType::F32)?;
-        let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C], F32
-
-        // Decay matrix D[t, i] = exp(G[t] - G[i]).
-        let big_g_col = big_g.unsqueeze(3)?; // [B, nv, C, 1]
-        let big_g_row = big_g.unsqueeze(2)?; // [B, nv, 1, C]
-        let decay_f32 = big_g_col.broadcast_sub(&big_g_row)?.exp()?; // [B, nv, C, C]
-        let decay = decay_f32.to_dtype(dtype)?; // back to hot dtype
-
-        // p[t] = exp(G[t]): scales (q[t] · S_entry) and (k[t] · S_entry).
-        let p = big_g.exp()?.to_dtype(dtype)?; // [B, nv, C]
-        let p_col = p.unsqueeze(3)?; // [B, nv, C, 1]
-
-        // Triangular masks (shared across batch/head via broadcasting).
-        let strict_mask = strict_lower_tri_mask(c, dtype, device)?; // [C, C]
-        let causal_mask = causal_lower_tri_mask(c, dtype, device)?; // [C, C]
-
-        // Inter-chunk read: K @ S_entry -> [B, nv, C, dv]
-        let ks_entry = k_c.matmul(&*state)?;
-
-        // V'[t] = v[t] - exp(G[t]) * (k[t] · S_entry)
-        let v_prime = (&v_c - ks_entry.broadcast_mul(&p_col)?)?; // [B, nv, C, dv]
-
-        // K^T reused for both KKT (intra-chunk similarities) and the final
-        // outer product into the state update.
+        // Matmuls first — these are well-tuned cuBLAS GEMMs and stay on
+        // candle. K^T is reused for KKT (intra-chunk similarities) and the
+        // final outer product into the state update.
         let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
-
-        // A_strict[t, i] = exp(G[t]-G[i]) * (k[t] · k[i]) * 1[i<t]
+        let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
-        let a_strict = kkt
-            .broadcast_mul(&decay)?
-            .broadcast_mul(&strict_mask)?
-            .contiguous()?; // [B, nv, C, C]
+        let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
+        let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
+
+        // Fused prep: cumsum + decay + exp + masked scales + v_prime +
+        // q_s_scaled + decay_last_col + p_last in a single CUDA launch.
+        // Falls back to the candle-op chain when the backend declines
+        // (non-CUDA, non-bf16, envelope violation).
+        //
+        // Post-conditions on all four paths:
+        //   a_strict:         [B, nv, C, C] bf16 — kkt * decay * strict_lower
+        //   b_mask:           [B, nv, C, C] bf16 — qkt * decay * causal_lower
+        //   v_prime:          [B, nv, C, dv] bf16 — v - ks_entry * p
+        //   q_s_scaled:       [B, nv, C, dv] bf16 — q_s * p
+        //   decay_last_col_u: [B, nv, C, 1]  bf16 — exp(big_g[C-1] - big_g[i])
+        //   p_last_u:         [B, nv, 1, 1]  bf16 — exp(big_g[C-1])
+        let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col_u, p_last_u) = {
+            kiln_nvtx::range!(c"kiln/attn/gdn/chunk_prep");
+            let prep_out = if backend.supports_gdn_chunk_prep() && dtype == DType::BF16 {
+                backend.gdn_chunk_prep(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?
+            } else {
+                None
+            };
+            match prep_out {
+                Some((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last)) => {
+                    let decay_last_col_u = decay_last_col.unsqueeze(3)?; // [B,nv,C,1]
+                    let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?; // [B,nv,1,1]
+                    (
+                        a_strict.contiguous()?,
+                        b_mask.contiguous()?,
+                        v_prime,
+                        q_s_scaled,
+                        decay_last_col_u,
+                        p_last_u,
+                    )
+                }
+                None => {
+                    // Cumulative decay G[t] = Σ_{s=0..t} g[s].  Done in F32:
+                    // exp() of the cumulative sum is the only place bf16
+                    // would lose meaningful precision (G can reach -10 or
+                    // more across a full 64-token chunk).
+                    let g_f32 = g_c.to_dtype(DType::F32)?;
+                    let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C], F32
+
+                    // Decay matrix D[t, i] = exp(G[t] - G[i]).
+                    let big_g_col = big_g.unsqueeze(3)?; // [B, nv, C, 1]
+                    let big_g_row = big_g.unsqueeze(2)?; // [B, nv, 1, C]
+                    let decay_f32 = big_g_col.broadcast_sub(&big_g_row)?.exp()?;
+                    let decay = decay_f32.to_dtype(dtype)?; // back to hot dtype
+
+                    // p[t] = exp(G[t]).
+                    let p = big_g.exp()?.to_dtype(dtype)?; // [B, nv, C]
+                    let p_col = p.unsqueeze(3)?; // [B, nv, C, 1]
+
+                    let strict_mask = strict_lower_tri_mask(c, dtype, device)?;
+                    let causal_mask = causal_lower_tri_mask(c, dtype, device)?;
+
+                    let v_prime = (&v_c - ks_entry.broadcast_mul(&p_col)?)?;
+                    let a_strict = kkt
+                        .broadcast_mul(&decay)?
+                        .broadcast_mul(&strict_mask)?
+                        .contiguous()?;
+                    let b_mask = qkt
+                        .broadcast_mul(&decay)?
+                        .broadcast_mul(&causal_mask)?
+                        .contiguous()?;
+                    let q_s_scaled = q_s.broadcast_mul(&p_col)?;
+
+                    let g_last = big_g.narrow(2, c - 1, 1)?; // [B, nv, 1]
+                    let decay_last_col_u = g_last
+                        .broadcast_sub(&big_g)?
+                        .exp()?
+                        .to_dtype(dtype)?
+                        .unsqueeze(3)?; // [B, nv, C, 1]
+                    let p_last_u = g_last.exp()?.to_dtype(dtype)?.unsqueeze(3)?; // [B,nv,1,1]
+
+                    (
+                        a_strict,
+                        b_mask,
+                        v_prime,
+                        q_s_scaled,
+                        decay_last_col_u,
+                        p_last_u,
+                    )
+                }
+            }
+        };
 
         // Forward substitution for W[t]:
         //   W[t] = beta[t] * ( V'[t] - Σ_{i<t} a_strict[t, i] * W[i] )
         //
         // Dispatch: on CUDA + bf16 + chunk_size <= 128, use the vendored
-        // fused kernel from kiln-gdn-kernel which collapses the C-step
-        // serial chain into a single block per (batch, head). On CPU or
-        // outside that envelope, fall back to the per-token candle loop.
+        // fused kernel from kiln-gdn-kernel. On CPU or outside that
+        // envelope, fall back to the per-token candle loop.
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?; // [B, nv, C, dv]
-
-        // QKT masked by causal decay:
-        //   B_mask[t, i] = exp(G[t]-G[i]) * (q[t] · k[i]) * 1[i<=t]
-        let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
-        let b_mask = qkt
-            .broadcast_mul(&decay)?
-            .broadcast_mul(&causal_mask)?
-            .contiguous()?; // [B, nv, C, C]
-
-        // Inter-chunk output contribution: exp(G[t]) * (q[t] · S_entry)
-        let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
-        let q_s_scaled = q_s.broadcast_mul(&p_col)?; // [B, nv, C, dv]
 
         // Intra-chunk output contribution: B_mask @ W
         let intra = b_mask.matmul(&w)?; // [B, nv, C, dv]
@@ -1189,19 +1230,8 @@ fn gdn_chunkwise_recurrence(
         // State update:
         //   S_new = exp(G[C-1]) * S_entry
         //         + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
-        //
-        // The second term batches as k_t_mat @ (W scaled row-wise by
-        // exp(G[C-1] - G[i])).
-        let g_last = big_g.narrow(2, c - 1, 1)?; // [B, nv, 1]
-        let decay_last_col = g_last
-            .broadcast_sub(&big_g)?
-            .exp()?
-            .to_dtype(dtype)?
-            .unsqueeze(3)?; // [B, nv, C, 1]
-        let p_last = g_last.exp()?.to_dtype(dtype)?.unsqueeze(3)?; // [B, nv, 1, 1]
-
-        let state_scaled = state.broadcast_mul(&p_last)?; // [B, nv, dk, dv]
-        let w_weighted = w.broadcast_mul(&decay_last_col)?.contiguous()?; // [B, nv, C, dv]
+        let state_scaled = state.broadcast_mul(&p_last_u)?; // [B, nv, dk, dv]
+        let w_weighted = w.broadcast_mul(&decay_last_col_u)?.contiguous()?; // [B,nv,C,dv]
         let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
     }
@@ -4475,6 +4505,122 @@ mod tests {
             s_mean < 1e-3,
             "recurrent kernel state mean drift exceeds tolerance: mean_abs_diff = {s_mean:e}"
         );
+
+        Ok(())
+    }
+
+    /// Parity check for the fused chunk-prep CUDA kernel.
+    ///
+    /// Generates random bf16 `kkt`, `qkt`, `ks_entry`, `q_s`, `v`, `g` at
+    /// kiln's GDN prefill shape (B=1, nv=32, C=64, dv=128), then asserts
+    /// that the fused `gdn_chunk_prep` kernel produces the same six
+    /// output tensors as the candle-op reference chain it replaces.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_chunk_prep_matches_fallback() -> Result<()> {
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("CUDA not available, skipping test_gdn_chunk_prep_matches_fallback");
+                return Ok(());
+            }
+        };
+
+        let b = 1usize;
+        let nv = 32usize;
+        let c = 64usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xB00B1E5_u64);
+
+        let n_g = b * nv * c;
+        let n_v = b * nv * c * dv;
+        let n_cc = b * nv * c * c;
+
+        // Small negative gates so big_g stays in a reasonable range — the
+        // recurrence produces g_t near zero so the cumulative sum caps
+        // around -10 at most.
+        let g_data: Vec<f32> = (0..n_g).map(|_| rng.gen_range(-0.15f32..0.0f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let ks_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let qs_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+
+        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let ks_entry =
+            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+
+        // Kernel path.
+        let (
+            a_strict_k,
+            b_mask_k,
+            v_prime_k,
+            q_s_scaled_k,
+            decay_last_col_k,
+            p_last_k,
+        ) = kiln_gdn_kernel::gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
+
+        // Candle reference chain — mirrors the else branch in
+        // gdn_chunkwise_recurrence.
+        let g_f32 = g.to_dtype(DType::F32)?;
+        let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C] F32
+        let big_g_col = big_g.unsqueeze(3)?;
+        let big_g_row = big_g.unsqueeze(2)?;
+        let decay_f32 = big_g_col.broadcast_sub(&big_g_row)?.exp()?;
+        let decay = decay_f32.to_dtype(DType::BF16)?;
+        let p = big_g.exp()?.to_dtype(DType::BF16)?;
+        let p_col = p.unsqueeze(3)?;
+
+        let strict_mask = strict_lower_tri_mask(c, DType::BF16, &device)?;
+        let causal_mask = causal_lower_tri_mask(c, DType::BF16, &device)?;
+
+        let v_prime_ref = (&v - ks_entry.broadcast_mul(&p_col)?)?;
+        let a_strict_ref = kkt
+            .broadcast_mul(&decay)?
+            .broadcast_mul(&strict_mask)?
+            .contiguous()?;
+        let b_mask_ref = qkt
+            .broadcast_mul(&decay)?
+            .broadcast_mul(&causal_mask)?
+            .contiguous()?;
+        let q_s_scaled_ref = q_s.broadcast_mul(&p_col)?;
+
+        let g_last = big_g.narrow(2, c - 1, 1)?; // [B, nv, 1]
+        let decay_last_col_ref =
+            g_last.broadcast_sub(&big_g)?.exp()?.to_dtype(DType::BF16)?; // [B, nv, C]
+        let p_last_ref = g_last.squeeze(2)?.exp()?.to_dtype(DType::BF16)?; // [B, nv]
+
+        let check = |name: &str, k: &Tensor, r: &Tensor| -> Result<()> {
+            let diff = (k.to_dtype(DType::F32)? - r.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!("gdn-chunk-prep {name}: max={max:e} mean={mean:e}");
+            assert!(
+                max < 1e-2,
+                "chunk-prep {name} max_abs_diff {max:e} exceeds 1e-2"
+            );
+            assert!(
+                mean < 1e-3,
+                "chunk-prep {name} mean_abs_diff {mean:e} exceeds 1e-3"
+            );
+            Ok(())
+        };
+
+        check("a_strict", &a_strict_k, &a_strict_ref)?;
+        check("b_mask", &b_mask_k, &b_mask_ref)?;
+        check("v_prime", &v_prime_k, &v_prime_ref)?;
+        check("q_s_scaled", &q_s_scaled_k, &q_s_scaled_ref)?;
+        check("decay_last_col", &decay_last_col_k, &decay_last_col_ref)?;
+        check("p_last", &p_last_k, &p_last_ref)?;
 
         Ok(())
     }
