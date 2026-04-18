@@ -548,9 +548,11 @@
         Unknown: { cls: "state-unknown", label: "Unknown" },
       };
       const UPTIME_STATES = ["Running", "TrainingActive"];
+      const FRAMED_STATES = ["Running", "TrainingActive"];
       let runningSinceMs = null;
       let currentKind = null;
       let currentTooltip = null;
+      let lastFramedKind = null;
 
       function formatUptime(ms) {
         const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -871,6 +873,35 @@
           const tooltip = message
             ? `Kiln server state: ${info.label} — ${message}`
             : `Kiln server state: ${info.label}`;
+          const wasFramed = FRAMED_STATES.includes(lastFramedKind);
+          const isFramed = FRAMED_STATES.includes(kind);
+          if (wasFramed && !isFramed) {
+            if (kind === "Error") {
+              showStatus(
+                "Kiln server stopped unexpectedly.",
+                message || "The server exited. See View Logs for details.",
+                true,
+                false
+              );
+            } else if (kind === "Stopped") {
+              showStatus(
+                "Kiln server stopped.",
+                "Click Start Server to launch it, or start it from the tray menu.",
+                true,
+                true
+              );
+            } else {
+              showStatus(
+                "Reconnecting to Kiln server…",
+                message || "Waiting for the server to come back up.",
+                true,
+                false
+              );
+            }
+          } else if (!wasFramed && isFramed) {
+            await load();
+          }
+          lastFramedKind = kind;
           applyStatusBadge(kind, tooltip);
           await refreshBaseUrl(kind);
           await refreshVramInfo(kind, cachedBaseUrl);
