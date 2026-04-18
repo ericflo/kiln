@@ -181,6 +181,16 @@ pub struct GpuLinearAttentionWeights {
     pub norm: Tensor,
     pub a_log: Tensor,
     pub dt_bias: Tensor,
+    /// Pre-transposed GDN projection weights for the forward hot path (contiguous).
+    /// Same fix class as PR #128 (MLP/full-attn pre-transpose) and PR #117 (embed_tokens_t).
+    /// Per Phase 6 PROFILING.md: GDN in_proj+out_proj together accounted for ~95% of
+    /// decode-time `ucopy_bf16` mass on Qwen3.5-4B; eliminating the per-step `.t()` copies
+    /// removes that bandwidth completely.
+    pub in_proj_qkv_t: Tensor,
+    pub in_proj_z_t: Tensor,
+    pub in_proj_a_t: Tensor,
+    pub in_proj_b_t: Tensor,
+    pub out_proj_t: Tensor,
 }
 
 pub struct GpuFfnWeights {
@@ -306,21 +316,41 @@ impl GpuWeights {
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
+                    let in_proj_qkv = weight_to_tensor(&attn.in_proj_qkv, device)
+                        .context(ctx("in_proj_qkv"))?;
+                    let in_proj_z = weight_to_tensor(&attn.in_proj_z, device)
+                        .context(ctx("in_proj_z"))?;
+                    let out_proj = weight_to_tensor(&attn.out_proj, device)
+                        .context(ctx("out_proj"))?;
+                    let in_proj_a = weight_to_tensor(&attn.in_proj_a, device)
+                        .context(ctx("in_proj_a"))?;
+                    let in_proj_b = weight_to_tensor(&attn.in_proj_b, device)
+                        .context(ctx("in_proj_b"))?;
+                    let in_proj_qkv_t = in_proj_qkv.t().context(ctx("in_proj_qkv.t"))?
+                        .contiguous().context(ctx("in_proj_qkv.t contiguous"))?;
+                    let in_proj_z_t = in_proj_z.t().context(ctx("in_proj_z.t"))?
+                        .contiguous().context(ctx("in_proj_z.t contiguous"))?;
+                    let in_proj_a_t = in_proj_a.t().context(ctx("in_proj_a.t"))?
+                        .contiguous().context(ctx("in_proj_a.t contiguous"))?;
+                    let in_proj_b_t = in_proj_b.t().context(ctx("in_proj_b.t"))?
+                        .contiguous().context(ctx("in_proj_b.t contiguous"))?;
+                    let out_proj_t = out_proj.t().context(ctx("out_proj.t"))?
+                        .contiguous().context(ctx("out_proj.t contiguous"))?;
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
-                        in_proj_qkv: weight_to_tensor(&attn.in_proj_qkv, device)
-                            .context(ctx("in_proj_qkv"))?,
-                        in_proj_z: weight_to_tensor(&attn.in_proj_z, device)
-                            .context(ctx("in_proj_z"))?,
-                        out_proj: weight_to_tensor(&attn.out_proj, device)
-                            .context(ctx("out_proj"))?,
-                        in_proj_a: weight_to_tensor(&attn.in_proj_a, device)
-                            .context(ctx("in_proj_a"))?,
-                        in_proj_b: weight_to_tensor(&attn.in_proj_b, device)
-                            .context(ctx("in_proj_b"))?,
+                        in_proj_qkv,
+                        in_proj_z,
+                        out_proj,
+                        in_proj_a,
+                        in_proj_b,
                         conv1d: weight_to_tensor(&attn.conv1d, device).context(ctx("conv1d"))?,
                         norm: weight_to_tensor(&attn.norm, device).context(ctx("gdn_norm"))?,
                         a_log: weight_to_tensor(&attn.a_log, device).context(ctx("a_log"))?,
                         dt_bias: weight_to_tensor(&attn.dt_bias, device).context(ctx("dt_bias"))?,
+                        in_proj_qkv_t,
+                        in_proj_z_t,
+                        in_proj_a_t,
+                        in_proj_b_t,
+                        out_proj_t,
                     })
                 }
             };
@@ -1093,12 +1123,14 @@ pub fn gated_deltanet_forward(
     let gqa_ratio = nv / nk;
 
     // --- Step 1: Input projections ---
+    // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
+    // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
     let (mixed_qkv, z, a, b) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
-        let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv.t()?)?; // [B, T, qkv_dim]
-        let z = x.broadcast_matmul(&weights.in_proj_z.t()?)?;           // [B, T, v_dim]
-        let a = x.broadcast_matmul(&weights.in_proj_a.t()?)?;           // [B, T, nv]
-        let b = x.broadcast_matmul(&weights.in_proj_b.t()?)?;           // [B, T, nv]
+        let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
+        let z = x.broadcast_matmul(&weights.in_proj_z_t)?;           // [B, T, v_dim]
+        let a = x.broadcast_matmul(&weights.in_proj_a_t)?;           // [B, T, nv]
+        let b = x.broadcast_matmul(&weights.in_proj_b_t)?;           // [B, T, nv]
         (mixed_qkv, z, a, b)
     };
 
@@ -1268,9 +1300,10 @@ pub fn gated_deltanet_forward(
     // --- Step 9: Output projection ---
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
     // it should be added to GpuLinearAttentionWeights and applied after conv1d.
+    // Pre-transposed cache (see Step 1 note).
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
-        attn_out.broadcast_matmul(&weights.out_proj.t()?)?
+        attn_out.broadcast_matmul(&weights.out_proj_t)?
     };
     Ok(out)
 }
@@ -3007,6 +3040,11 @@ mod tests {
                 norm: Tensor::zeros((1,), DType::F32, &device)?,
                 a_log: Tensor::zeros((1,), DType::F32, &device)?,
                 dt_bias: Tensor::zeros((1,), DType::F32, &device)?,
+                in_proj_qkv_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_z_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_a_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_b_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+                out_proj_t: Tensor::zeros((1, 1), DType::F32, &device)?,
             }),
             mlp: GpuFfnWeights {
                 gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
@@ -3453,16 +3491,31 @@ mod tests {
                     o_proj_t,
                 })
             } else {
+                let in_proj_qkv = randn(&[qkv_dim, hidden_size])?;
+                let in_proj_z = randn(&[nv * dv, hidden_size])?;
+                let out_proj = randn(&[hidden_size, nv * dv])?;
+                let in_proj_a = randn(&[nv, hidden_size])?;
+                let in_proj_b = randn(&[nv, hidden_size])?;
+                let in_proj_qkv_t = in_proj_qkv.t()?.contiguous()?;
+                let in_proj_z_t = in_proj_z.t()?.contiguous()?;
+                let in_proj_a_t = in_proj_a.t()?.contiguous()?;
+                let in_proj_b_t = in_proj_b.t()?.contiguous()?;
+                let out_proj_t = out_proj.t()?.contiguous()?;
                 GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
-                    in_proj_qkv: randn(&[qkv_dim, hidden_size])?,
-                    in_proj_z: randn(&[nv * dv, hidden_size])?,
-                    out_proj: randn(&[hidden_size, nv * dv])?,
-                    in_proj_a: randn(&[nv, hidden_size])?,
-                    in_proj_b: randn(&[nv, hidden_size])?,
+                    in_proj_qkv,
+                    in_proj_z,
+                    out_proj,
+                    in_proj_a,
+                    in_proj_b,
                     conv1d: randn(&[qkv_dim, 1, conv_kernel])?,
                     norm: Tensor::ones(dk, DType::F32, device)?,
                     a_log: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::F32, device)?,
+                    in_proj_qkv_t,
+                    in_proj_z_t,
+                    in_proj_a_t,
+                    in_proj_b_t,
+                    out_proj_t,
                 })
             };
 

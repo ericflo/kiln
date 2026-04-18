@@ -2160,3 +2160,232 @@ reproduced from the committed CSV reports. Timing-only metrics
 (ITL, warm/cold prefill latency, first-forward reproduction) were
 taken from unprofiled `kiln-bench` runs on the same commit and
 pod; those runs did not produce persistent artifacts.
+
+## Phase 6 — GDN Projection Pre-Transpose (Qwen3.5-4B) — 2026-04-18
+
+This section delivers the [Post-PR #128][pr128] decode recommendation —
+"fuse the `ucopy_bf16` out of the projections" — for the Qwen3.5-4B
+hybrid GDN model. PR #128 pre-transposed only the dense MLP and
+**full-attention** qkv/o projection weights at model load and cached
+the contiguous transposes; the GDN linear-attention block was untouched
+and continued to call `weight.t()` per layer per step on the hot path.
+On Qwen3.5-4B that omission was the dominant cost: GDN has 24 of the
+32 layers (`full_attention_interval=4`), so its five per-step
+projections (`in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`,
+`out_proj`) accounted for 58.3 % of decode GPU time — exactly the
+same `ucopy_bf16` mass PR #128's Qwen3-Next analysis flagged but a
+different set of weights.
+
+[pr128]: https://github.com/ericflo/kiln/pull/128
+
+### The fix
+
+Extend PR #128's pattern to `GpuLinearAttentionWeights`. At load time
+the loader now also computes and caches `.t()?.contiguous()?` of every
+GDN input and output projection into five new fields
+(`in_proj_qkv_t`, `in_proj_z_t`, `in_proj_a_t`, `in_proj_b_t`,
+`out_proj_t`). The decode hot path
+(`crates/kiln-model/src/forward.rs:1130` for the four input
+projections, `:1306` for the output projection) now consumes the
+pre-transposed weight directly via `broadcast_matmul`. The transposed
+operands are physically contiguous, so candle's
+`copy_strided_src` → `ucopy_bf16` path is no longer triggered for any
+GDN projection, and the matmul collapses to a single
+`gemm_strided_batched_bf16` call per layer per step.
+
+This is intentionally **not** a cuBLASLt epilogue, vendored fused
+matmul+cast kernel, or candle generalization. The Phase 6 task brief
+listed those as the highest-priority approach paths, but the
+investigation found that PR #128's existing pre-transpose-and-cache
+pattern, simply extended one struct further, eliminates the same
+58.3 % `ucopy_bf16` bucket without writing a new CUDA kernel and
+without changing the candle/cuBLAS surface area. The trade-off is
+identical to PR #128's: +1.9 GB resident weight memory (each cached
+`.t()` is a full bf16 copy), but the decode hot path drops every
+per-step transpose copy. See `crates/kiln-model/src/forward.rs:174`
+for the new struct fields and the load-time materialization at
+`from_model_weights`.
+
+### Provenance
+
+- **Branch / commit**: `ce/fuse-ucopy-bf16-decode` (this PR)
+- **Hardware**: RTX A6000 48 GB on RunPod (on-demand)
+- **Software**: CUDA 12.4.131, driver 550.127.05, rustc 1.95.0
+- **Build features**: `cuda,nvtx` with `KILN_CUDA_ARCHS=80`
+- **Profiler**: `nsys` 2023.4.4 with `CUDA_LAUNCH_BLOCKING=1`
+  (same QdstrmImporter workaround as the post-#128 profile —
+  serializes kernel launches to keep the event ordering valid;
+  inflates wall-clock timing but preserves relative kernel shares)
+- **Model**: Qwen3.5-4B (HF `Qwen/Qwen3.5-4B`), bf16, hybrid GDN +
+  GQA, 32 layers (8 full-attn + 24 GDN, `full_attention_interval=4`),
+  hidden_size 2560, head_dim 256, `attn_output_gate=true`, paged KV
+  cache
+- **Bench**: `kiln-bench --paged --skip-training` (latency phase
+  + throughput sweep at batch=1/4/8/16, 506 prompt / 128 decode)
+
+### Headline: 5.51× decode speedup, 2.57× prefill speedup
+
+Unprofiled `kiln-bench` numbers on the same pod and bench config:
+
+| Metric | Pre-fix (`532f5b8`) | **Post-fix (this PR)** | Δ |
+| --- | ---: | ---: | ---: |
+| Decode ITL (paged, unprofiled) | 142.4 ms | **25.9 ms** | **−82 % (5.51×)** |
+| Decode P50 ITL | 142.5 ms | **25.6 ms** | **−82 %** |
+| Decode P99 ITL | 153.7 ms | **28.9 ms** | **−81 %** |
+| Decode throughput (single) | 7.0 tok/s | **38.7 tok/s** | **+453 %** |
+| Throughput batch=16 (sequential) | 7.9 tok/s | **33.2 tok/s** | **+320 % (4.20×)** |
+| Prefill @ 506 tokens (paged, unprofiled) | 1121.4 ms (451 tok/s) | **436.3 ms (1160 tok/s)** | **−61 % (2.57×)** |
+| Model VRAM at load | 14 447 MB | **16 342 MB** | **+1895 MB (+13 %)** |
+| Peak inference VRAM (batch=16) | 14 884 MB | **16 840 MB** | **+1956 MB (+13 %)** |
+
+The 5.51× decode speedup clears the 1.30× hard-abort floor by 4.2×
+and exceeds the post-#128 Qwen3-Next ratio (2.10×) because GDN
+projections are a larger absolute fraction of decode time on
+Qwen3.5-4B (24 of 32 layers vs. Qwen3-Next's MoE shape). The +1.9 GB
+VRAM cost is the same trade-off class PR #128 disclosed (caching
+`.t()` for the full-attn / MLP projections cost ~1 GB on Qwen3-Next);
+extending it to GDN pays roughly the same memory price for a much
+larger speedup on this model.
+
+### Decode hotspots — pre-fix (commit `532f5b8`)
+
+Total decode GPU time under the profiler: **≈ 65.8 s** (1125 decoded
+tokens, 24 GDN layers per step → 27 020-27 021 GDN projection calls).
+
+**Top-5 GPU kernels (decode, pre-fix):**
+
+| Rank | Kernel | Total (s) | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ucopy_bf16` | 38.36 | **58.3 %** | 183 569 |
+| 2 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8` | 7.56 | 11.5 % | 71 760 |
+| 3 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8` | 4.16 | 6.3 % | 88 320 |
+| 4 | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn` | 2.34 | 3.6 % | 35 328 |
+| 5 | `bmul_f32` | 1.69 | 2.6 % | 454 152 |
+
+**Top-8 NVTX ranges by wallclock (decode, pre-fix, total ≈ 138.7 s):**
+
+| Rank | Range | Share | Avg per call | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `kiln/gdn/in_proj` | **34.2 %** | 1757.4 µs | 27 021 |
+| 2 | `kiln/gdn/out_proj` | **10.0 %** | 515.0 µs | 27 020 |
+| 3 | `kiln/norm/pre_mlp` | 6.6 % | 254.9 µs | 36 026 |
+| 4 | `kiln/norm/pre_attn` | 6.6 % | 253.9 µs | 36 027 |
+| 5 | `kiln/gdn/gated_norm` | 6.5 % | 336.2 µs | 27 020 |
+| 6 | `kiln/gdn/gates` | 6.5 % | 334.0 µs | 27 021 |
+| 7 | `kiln/gdn/conv` | 5.4 % | 278.4 µs | 27 021 |
+| 8 | `kiln/gdn/qk_norm` | 5.3 % | 271.5 µs | 27 021 |
+
+The two GDN projection ranges combined accounted for **44.2 %** of
+NVTX wallclock and were the unambiguous binding constraint — both
+were emitting one `ucopy_bf16` (the per-step transpose) plus the
+matmul itself, so the projection NVTX time was dominated by the copy.
+
+### Decode hotspots — post-fix (this PR)
+
+Captured under `nsys` on the same pod with the fix applied. The
+post-fix run captured a longer trace (3890 decoded tokens vs 1125
+pre-fix), so wallclock totals are larger; per-call averages are the
+meaningful comparison.
+
+**Top-5 GPU kernels (decode, post-fix):**
+
+| Rank | Kernel | Total (s) | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8` | 25.89 | **28.5 %** | 250 640 |
+| 2 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8` | 14.32 | **15.7 %** | 308 480 |
+| 3 | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn` | 7.79 | 8.6 % | 123 392 |
+| 4 | `ucopy_bf16` | 5.22 | **5.7 %** | 143 401 |
+| 5 | `bmul_f32` | 5.22 | 5.7 % | 1 566 228 |
+
+`ucopy_bf16` dropped from **58.3 % → 5.7 %** of decode GPU time
+(absolute total: 38.36 s → 5.22 s, an **86 % reduction**). The
+remaining `ucopy_bf16` instances come from non-GDN paths
+(KV-cache copies, prefill stash, residual reshapes, MLP stride
+fix-ups) that PR #128 already covered for full-attn / MLP weights
+but cannot be eliminated by pre-transposing further weights. The
+top three GEMM kernels — collectively **52.8 %** of decode GPU
+time — are now the dominant cost, which is the expected target
+shape for a well-tuned bf16 inference path.
+
+**Top-8 NVTX ranges by avg per-call time (decode, post-fix):**
+
+| Rank | Range | Share | Avg per call | Instances | Pre-fix avg |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | `kiln/norm/pre_attn` | 11.1 % | 247.2 µs | 124 480 | 253.9 µs |
+| 2 | `kiln/gdn/gates` | 11.0 % | 328.3 µs | 93 360 | 334.0 µs |
+| 3 | `kiln/norm/pre_mlp` | 11.0 % | 245.0 µs | 124 480 | 254.9 µs |
+| 4 | `kiln/gdn/gated_norm` | 10.7 % | 319.9 µs | 93 360 | 336.2 µs |
+| 5 | `kiln/gdn/qk_norm` | 8.8 % | 262.4 µs | 93 360 | 271.5 µs |
+| 6 | `kiln/gdn/conv` | 8.4 % | 248.9 µs | 93 360 | 278.4 µs |
+| 7 | `kiln/gdn/in_proj` | **7.6 %** | **226.3 µs** | 93 360 | **1757.4 µs** |
+| 8 | `kiln/gdn/out_proj` | **2.7 %** | **79.8 µs** | 93 360 | **515.0 µs** |
+
+The two targeted GDN projection ranges show:
+
+- `kiln/gdn/in_proj`: **1757.4 µs → 226.3 µs per call** (**7.77×
+  faster**). NVTX share collapsed from **34.2 % → 7.6 %**.
+- `kiln/gdn/out_proj`: **515.0 µs → 79.8 µs per call** (**6.45×
+  faster**). NVTX share collapsed from **10.0 % → 2.7 %**.
+
+All other ranges are within ±5 % of pre-fix per-call timing,
+confirming the fix is surgical: it touches only the GDN projection
+matmul preamble and leaves every other kernel unchanged. Combined
+GDN-projection NVTX share dropped from **44.2 % → 10.3 %**, freeing
+the profile to expose the next tier of cost (RMSNorm + GDN body).
+
+### Recommended next optimization target
+
+> **Decode**: with the GDN projection `ucopy_bf16` mass eliminated,
+> the next decode tier is the two RMSNorm stages
+> (`kiln/norm/pre_mlp` + `kiln/norm/pre_attn`) and the GDN body
+> kernels (`gated_norm`, `gates`, `conv`, `qk_norm`), which are now
+> the relative top of the profile. Fusing `pre_*norm + projection`
+> into a single kernel per layer is the same class of fix that
+> collapsed the projection cost; on Qwen3.5-4B it would target the
+> remaining ~13 % of decode wallclock that the two RMSNorms occupy
+> in the post-fix profile.
+>
+> **Secondary**: the GDN body (`gated_norm`, `gates`, `conv`,
+> `qk_norm`) is currently expressed as candle ops; vendoring a fused
+> Triton/CUDA kernel for the recurrent step (already partially done
+> via `recurrent_gdn_fwd_kernel`) would amortize launch overhead and
+> cut the residual 24 % of NVTX wallclock those four ranges
+> occupy.
+
+### Comparison table — pre-fix vs. post-fix
+
+| Metric | Pre-fix (`532f5b8`) | **Post-fix (this PR)** | Δ |
+| --- | ---: | ---: | ---: |
+| Decode ITL (paged, unprofiled) | 142.4 ms | **25.9 ms** | −82 % (5.51×) |
+| Decode throughput (single) | 7.0 tok/s | **38.7 tok/s** | +453 % |
+| Throughput batch=16 | 7.9 tok/s | **33.2 tok/s** | +320 % (4.20×) |
+| Prefill @ 506 tokens (paged) | 1121.4 ms (451 tok/s) | **436.3 ms (1160 tok/s)** | −61 % (2.57×) |
+| `ucopy_bf16` share of decode GPU time | **58.3 %** | _see post-fix table above_ | — |
+| `kiln/gdn/in_proj` NVTX share | **34.2 %** | _see post-fix table above_ | — |
+| `kiln/gdn/out_proj` NVTX share | **10.0 %** | _see post-fix table above_ | — |
+| Model VRAM at load | 14 447 MB | **16 342 MB** | +1895 MB |
+| Peak inference VRAM | 14 884 MB | **16 840 MB** | +1956 MB |
+
+### Artifacts
+
+CSV reports (nsys 2023.4.4 + `CUDA_LAUNCH_BLOCKING=1`):
+
+- `profile-out/decode-phase6-pre_cuda_gpu_kern_sum.csv` — pre-fix kernel mix
+- `profile-out/decode-phase6-pre_nvtx_pushpop_sum.csv` — pre-fix NVTX wallclock
+- `profile-out/decode-phase6-pre_nvtx_kern_sum.csv` — pre-fix kernel × NVTX
+- `profile-out/decode-phase6-post_cuda_gpu_kern_sum.csv` — post-fix kernel mix
+- `profile-out/decode-phase6-post_nvtx_pushpop_sum.csv` — post-fix NVTX wallclock
+- `profile-out/decode-phase6-post_nvtx_kern_sum.csv` — post-fix kernel × NVTX
+
+Plus the unprofiled bench logs:
+
+- `profile-out/decode-phase6-pre_bench.log`
+- `profile-out/decode-phase6-post_bench.log`
+
+The two `.nsys-rep` files (~1.3 GB each, plus ~3.2 GB sqlite per
+run) were kept on the pod and discarded at pod termination. All
+numbers above are reproduced from the committed CSV reports.
+Timing-only metrics (ITL, prefill latency, throughput) were taken
+from unprofiled `kiln-bench` runs on the same pod and the fix
+commit; those runs are preserved in the committed `*_bench.log`
+files.

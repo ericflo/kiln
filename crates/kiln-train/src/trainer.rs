@@ -1472,16 +1472,31 @@ mod tests {
             } else {
                 let qkv_dim = config.linear_qkv_dim();
                 let v_dim = config.linear_v_dim();
+                let in_proj_qkv = Tensor::randn(0.0f32, 0.02, (qkv_dim, h), device)?;
+                let in_proj_z = Tensor::randn(0.0f32, 0.02, (v_dim, h), device)?;
+                let out_proj = Tensor::randn(0.0f32, 0.02, (h, v_dim), device)?;
+                let in_proj_a = Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
+                let in_proj_b = Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
+                let in_proj_qkv_t = in_proj_qkv.t()?.contiguous()?;
+                let in_proj_z_t = in_proj_z.t()?.contiguous()?;
+                let in_proj_a_t = in_proj_a.t()?.contiguous()?;
+                let in_proj_b_t = in_proj_b.t()?.contiguous()?;
+                let out_proj_t = out_proj.t()?.contiguous()?;
                 GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
-                    in_proj_qkv: Tensor::randn(0.0f32, 0.02, (qkv_dim, h), device)?,
-                    in_proj_z: Tensor::randn(0.0f32, 0.02, (v_dim, h), device)?,
-                    out_proj: Tensor::randn(0.0f32, 0.02, (h, v_dim), device)?,
-                    in_proj_a: Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?,
-                    in_proj_b: Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?,
+                    in_proj_qkv,
+                    in_proj_z,
+                    out_proj,
+                    in_proj_a,
+                    in_proj_b,
                     conv1d: Tensor::randn(0.0f32, 0.02, (qkv_dim, 1, config.linear_conv_kernel_dim), device)?,
                     norm: Tensor::zeros(config.linear_key_head_dim, DType::F32, device)?,
                     a_log: Tensor::randn(0.0f32, 0.5, (config.linear_num_key_heads,), device)?,
                     dt_bias: Tensor::zeros(config.linear_num_key_heads, DType::F32, device)?,
+                    in_proj_qkv_t,
+                    in_proj_z_t,
+                    in_proj_a_t,
+                    in_proj_b_t,
+                    out_proj_t,
                 })
             };
 
