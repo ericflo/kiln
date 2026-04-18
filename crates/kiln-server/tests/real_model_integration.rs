@@ -442,12 +442,8 @@ async fn test_health_with_real_backend() {
 #[cfg(feature = "metal")]
 #[tokio::test]
 async fn test_real_model_chat_completion_metal() {
-    let device = match Device::new_metal(0) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Metal unavailable, skipping integration test: {e}");
-            return;
-        }
+    let Some(device) = kiln_model::backend::metal::try_new_metal() else {
+        return;
     };
 
     let config = tiny_config();

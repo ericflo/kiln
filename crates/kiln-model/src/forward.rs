@@ -3568,12 +3568,9 @@ mod tests {
     /// suite stays portable on Linux + CUDA hosts.
     #[cfg(feature = "metal")]
     fn run_cpu_metal_parity(scenario: ParityScenario) -> Result<()> {
-        let metal_device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Metal unavailable, skipping parity test '{}': {e}", scenario.label);
-                return Ok(());
-            }
+        let Some(metal_device) = crate::backend::metal::try_new_metal() else {
+            eprintln!("skipping parity test '{}'", scenario.label);
+            return Ok(());
         };
         let cpu_device = Device::Cpu;
 

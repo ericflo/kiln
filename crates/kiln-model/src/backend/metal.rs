@@ -168,6 +168,26 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
     matches!(head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256 | 512)
 }
 
+/// Test helper: try to initialize a Metal device, returning `None` if Metal
+/// isn't available OR if candle-metal's `MetalDevice::new` panics (observed on
+/// GitHub's macos-14 runners, where the CI sandbox can produce an empty device
+/// list and candle 0.10.2's `swap_remove` panics instead of returning `Err`).
+#[doc(hidden)]
+pub fn try_new_metal() -> Option<Device> {
+    let result = std::panic::catch_unwind(|| Device::new_metal(0));
+    match result {
+        Ok(Ok(d)) => Some(d),
+        Ok(Err(e)) => {
+            eprintln!("Metal unavailable: {e}");
+            None
+        }
+        Err(_) => {
+            eprintln!("Metal device init panicked (likely CI sandbox with no Metal access)");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,12 +198,8 @@ mod tests {
     /// Validates the paged gather (index_select + narrow) logic.
     #[test]
     fn test_paged_decode_parity_with_direct_sdpa() -> Result<()> {
-        let device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Metal unavailable, skipping paged decode parity: {e}");
-                return Ok(());
-            }
+        let Some(device) = try_new_metal() else {
+            return Ok(());
         };
 
         let num_heads = 4;
@@ -265,9 +281,8 @@ mod tests {
     /// Non-SDPA head_dim should decline cleanly so the caller falls back.
     #[test]
     fn test_paged_decode_declines_on_unsupported_head_dim() -> Result<()> {
-        let device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(_) => return Ok(()),
+        let Some(device) = try_new_metal() else {
+            return Ok(());
         };
         let head_dim = 4; // not in whitelist
         let total_slots = 16;

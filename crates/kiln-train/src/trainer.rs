@@ -1767,12 +1767,8 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn test_checkpointed_training_loss_decreases_metal() -> Result<()> {
-        let device = match Device::new_metal(0) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Metal unavailable, skipping: {e}");
-                return Ok(());
-            }
+        let Some(device) = kiln_model::backend::metal::try_new_metal() else {
+            return Ok(());
         };
         assert_eq!(backend::for_device(&device).name(), "metal");
         run_checkpointed_training_loss_decreases(&device)
