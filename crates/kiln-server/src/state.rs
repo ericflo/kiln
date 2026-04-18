@@ -302,7 +302,27 @@ impl AppState {
             }
         };
 
-        let fp8_enabled = memory_cfg.kv_cache_fp8;
+        // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
+        // write — fine on CUDA where bf16→fp8 packing is amortized over the
+        // kernel work, but on Metal the round-trip dominates decode. Gate it
+        // off on Metal with a warning rather than silently shipping a slow
+        // path; users who know what they're doing can re-enable via
+        // KILN_ALLOW_FP8_ON_METAL=1.
+        let fp8_enabled = {
+            let requested = memory_cfg.kv_cache_fp8;
+            if requested
+                && matches!(device, candle_core::Device::Metal(_))
+                && std::env::var("KILN_ALLOW_FP8_ON_METAL").is_err()
+            {
+                tracing::warn!(
+                    "kv_cache_fp8 requested but disabled on Metal (CPU round-trip dominates \
+                     decode); set KILN_ALLOW_FP8_ON_METAL=1 to override"
+                );
+                false
+            } else {
+                requested
+            }
+        };
         tracing::info!(num_blocks, block_size, ?kv_dtype, fp8_enabled, "allocating paged KV cache");
 
         let block_manager = BlockManager::new(num_blocks, block_size);
