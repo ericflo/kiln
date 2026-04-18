@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/kiln-core",
+    "crates/kiln-conv1d-kernel",
     "crates/kiln-flash-attn",
     "crates/kiln-gdn-kernel",
     "crates/kiln-marlin-gemm",
@@ -12,11 +13,12 @@ members = [
     "crates/kiln-server",
     "crates/kiln-train",
 ]
-# kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm, and kiln-rmsnorm-kernel
-# unconditionally depend on candle-core/cuda, which pulls cudarc into any
-# `cargo build --workspace` and fails to link on non-CUDA hosts (notably
-# macOS). They're only compiled when a downstream crate opts in via
-# --features cuda, which activates them as optional dependencies.
+# kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm,
+# and kiln-rmsnorm-kernel unconditionally depend on candle-core/cuda, which
+# pulls cudarc into any `cargo build --workspace` and fails to link on
+# non-CUDA hosts (notably macOS). They're only compiled when a downstream
+# crate opts in via --features cuda, which activates them as optional
+# dependencies.
 # Excluding them from default-members lets `cargo check`, `cargo build`, and
 # `cargo test` work on any host; Linux+CUDA builds still pull them via feature
 # activation on the real binary target.
@@ -78,6 +80,7 @@ memmap2 = "0.9"
 # Tensor compute
 candle-core = "0.10"
 candle-nn = "0.10"
+kiln-conv1d-kernel = { path = "crates/kiln-conv1d-kernel" }
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }

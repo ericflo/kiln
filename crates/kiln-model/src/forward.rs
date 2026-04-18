@@ -1310,19 +1310,55 @@ pub fn gated_deltanet_forward(
     };
 
     // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
+    //
+    // Decode fast path: a fused CUDA kernel (`backend.causal_conv1d_update`)
+    // collapses the to_f32 / cat / sum / narrow / silu chain into a single
+    // launch per (batch, channel). It returns F32 with SiLU already fused, so
+    // the subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Non-CUDA,
+    // non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D` kill
+    // switch all route through the portable candle path below — which is the
+    // parity oracle.
     let mixed_qkv = {
         kiln_nvtx::range!(c"kiln/gdn/conv");
         // Transpose to [B, channels, T] for conv
-        let mixed_qkv = mixed_qkv.transpose(1, 2)?.contiguous()?;
-        let mixed_qkv = if seq_len > 1 {
-            causal_conv1d_prefill(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+        let mixed_qkv_ct = mixed_qkv.transpose(1, 2)?.contiguous()?;
+        let post_silu = if seq_len == 1 && backend.supports_causal_conv1d_update() {
+            match backend.causal_conv1d_update(
+                &mixed_qkv_ct,
+                &weights.conv1d,
+                conv_state,
+                kernel_size,
+            )? {
+                Some(out) => out, // F32, SiLU fused into the kernel epilogue
+                None => {
+                    let y = causal_conv1d_decode(
+                        &mixed_qkv_ct,
+                        &weights.conv1d,
+                        conv_state,
+                        kernel_size,
+                    )?;
+                    cuda_silu(&y.to_dtype(DType::F32)?)?
+                }
+            }
+        } else if seq_len > 1 {
+            let y = causal_conv1d_prefill(
+                &mixed_qkv_ct,
+                &weights.conv1d,
+                conv_state,
+                kernel_size,
+            )?;
+            cuda_silu(&y.to_dtype(DType::F32)?)?
         } else {
-            causal_conv1d_decode(&mixed_qkv, &weights.conv1d, conv_state, kernel_size)?
+            let y = causal_conv1d_decode(
+                &mixed_qkv_ct,
+                &weights.conv1d,
+                conv_state,
+                kernel_size,
+            )?;
+            cuda_silu(&y.to_dtype(DType::F32)?)?
         };
-        // SiLU activation (work in F32 for stability)
-        let mixed_qkv = cuda_silu(&mixed_qkv.to_dtype(DType::F32)?)?;
         // Transpose back to [B, T, qkv_dim]
-        mixed_qkv.transpose(1, 2)?
+        post_silu.transpose(1, 2)?
     };
 
     // --- Step 3: Split into Q, K, V and reshape to heads ---
@@ -4625,4 +4661,98 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the fused causal_conv1d_update kernel against the
+    /// portable `causal_conv1d_decode` + `cuda_silu` chain, at Qwen3.5-4B's
+    /// exact decode shape: B=1, C=linear_qkv_dim=8192, K=4.
+    ///
+    /// Verifies (a) the silu-fused F32 output matches within bf16-rounding
+    /// noise and (b) the mutated conv_state matches bit-for-bit (both paths
+    /// write the same K-1 previous inputs from the same bf16 source).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_causal_conv1d_update_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_causal_conv1d_update_matches_fallback"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
+        let kernel_size = 4usize;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DBEEF);
+        let n_x = batch * channels * 1;
+        let n_w = channels * kernel_size;
+        let n_s = batch * channels * (kernel_size - 1);
+
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+
+        let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
+        let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
+        let s_init =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+
+        let x = x_f32.to_dtype(DType::BF16)?;
+        let w = w_f32.to_dtype(DType::BF16)?;
+
+        // Fallback path: candle decode + silu in F32.
+        let mut s_fb = s_init.clone();
+        let out_fb = causal_conv1d_decode(&x, &w, &mut s_fb, kernel_size)?;
+        let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
+
+        // Fused kernel path via the backend dispatch.
+        let backend = crate::backend::for_device(&device);
+        if !backend.supports_causal_conv1d_update() {
+            eprintln!(
+                "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
+            );
+            return Ok(());
+        }
+        let mut s_k = s_init.clone();
+        let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "backend declined causal_conv1d_update at Qwen3.5 envelope; skipping"
+                );
+                return Ok(());
+            }
+        };
+
+        // Output parity (silu fused on the kernel side).
+        let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("conv1d_update vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 2e-3,
+            "fused conv1d_update output max_abs_diff={max:e} exceeds 2e-3"
+        );
+        assert!(
+            mean < 5e-4,
+            "fused conv1d_update output mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        // State parity — both paths write the same K-1 previous inputs.
+        let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        eprintln!("conv1d_update state parity: max_abs_diff={smax:e}");
+        assert!(
+            smax < 1e-5,
+            "fused conv1d_update state max_abs_diff={smax:e} exceeds 1e-5"
+        );
+
+        Ok(())
+    }
 }
