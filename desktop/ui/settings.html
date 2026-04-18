@@ -148,9 +148,9 @@
       </fieldset>
 
       <div class="actions">
-        <button class="secondary" id="reload">Reload</button>
+        <button class="secondary" id="reload" title="Reload (Cmd/Ctrl+R)">Reload</button>
         <button class="secondary" id="restart" hidden>Restart now</button>
-        <button id="save">Save</button>
+        <button id="save" title="Save (Cmd/Ctrl+S)">Save</button>
       </div>
       <div class="status" id="status"></div>
       <div class="version-footer">Kiln Desktop v<span id="app-version">—</span></div>
@@ -278,9 +278,25 @@
         }
       }
 
-      document.getElementById("reload").addEventListener("click", load);
-      document.getElementById("save").addEventListener("click", save);
+      const reloadBtn = document.getElementById("reload");
+      const saveBtn = document.getElementById("save");
+      reloadBtn.addEventListener("click", load);
+      saveBtn.addEventListener("click", save);
       restartBtn.addEventListener("click", restart);
+
+      document.addEventListener("keydown", (e) => {
+        const mod = e.metaKey || e.ctrlKey;
+        if (!mod) return;
+        const shift = e.shiftKey;
+        const lower = typeof e.key === "string" ? e.key.toLowerCase() : "";
+        if (!shift && lower === "s") {
+          e.preventDefault();
+          if (!saveBtn.disabled) saveBtn.click();
+        } else if (!shift && lower === "r") {
+          e.preventDefault();
+          if (!reloadBtn.disabled) reloadBtn.click();
+        }
+      });
       document.getElementById("pick_kiln_binary").addEventListener("click", () =>
         pickPath("kiln_binary", { multiple: false, directory: false, title: "Select kiln binary" })
       );
