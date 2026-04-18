@@ -23,6 +23,7 @@ const ITEM_LOGS: &str = "view_logs";
 const ITEM_COPY_URL: &str = "copy_openai_url";
 const ITEM_OPEN_IN_BROWSER: &str = "open_in_browser";
 const ITEM_CHECK_UPDATES: &str = "check_updates";
+const ITEM_ABOUT: &str = "about";
 const ITEM_QUIT: &str = "quit";
 
 fn status_menu_text(state: &ServerState) -> String {
@@ -65,6 +66,7 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
     let logs = MenuItemBuilder::with_id(ITEM_LOGS, "View Logs").build(app)?;
     let check_updates =
         MenuItemBuilder::with_id(ITEM_CHECK_UPDATES, "Check for Updates…").build(app)?;
+    let about = MenuItemBuilder::with_id(ITEM_ABOUT, "About Kiln Desktop").build(app)?;
     let quit = MenuItemBuilder::with_id(ITEM_QUIT, "Quit").build(app)?;
 
     let menu = MenuBuilder::new(app)
@@ -77,6 +79,8 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .items(&[&start, &stop, &restart, &logs])
         .separator()
         .item(&check_updates)
+        .separator()
+        .item(&about)
         .separator()
         .item(&quit)
         .build()?;
@@ -161,6 +165,11 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                             eprintln!("[tray] emit menu://check-updates failed: {}", e);
                         }
                     });
+                }
+                ITEM_ABOUT => {
+                    if let Err(e) = open_about_window(&app_handle) {
+                        eprintln!("[tray] open_about_window failed: {}", e);
+                    }
                 }
                 ITEM_STATUS => {}
                 _ => {}
@@ -271,6 +280,22 @@ pub(crate) fn open_logs_window(app: &AppHandle) -> tauri::Result<()> {
         .title("Kiln Logs")
         .inner_size(900.0, 600.0)
         .resizable(true)
+        .visible(true)
+        .build()?;
+    win.set_focus()?;
+    Ok(())
+}
+
+pub(crate) fn open_about_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(win) = app.get_webview_window("about") {
+        win.show()?;
+        win.set_focus()?;
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
+        .title("About Kiln Desktop")
+        .inner_size(420.0, 380.0)
+        .resizable(false)
         .visible(true)
         .build()?;
     win.set_focus()?;

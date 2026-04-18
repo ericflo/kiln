@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About Kiln Desktop</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        background: #0f1115;
+        color: #e6e6e6;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        overflow: hidden;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      .wrap {
+        flex: 1 1 auto;
+        padding: 24px 28px 16px 28px;
+        box-sizing: border-box;
+        overflow-y: auto;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 4px 0;
+        color: #f0f2f6;
+      }
+      .version {
+        color: #a8aeb8;
+        font-size: 13px;
+        margin: 0 0 18px 0;
+        font-variant-numeric: tabular-nums;
+      }
+      p.desc {
+        color: #cfd3da;
+        font-size: 13px;
+        line-height: 1.55;
+        margin: 0 0 14px 0;
+      }
+      .meta {
+        color: #a8aeb8;
+        font-size: 12px;
+        line-height: 1.6;
+        margin: 14px 0 0 0;
+      }
+      .meta a {
+        color: #5f9bff;
+        text-decoration: none;
+      }
+      .meta a:hover {
+        text-decoration: underline;
+      }
+      footer {
+        flex: 0 0 auto;
+        display: flex;
+        justify-content: flex-end;
+        padding: 10px 14px;
+        background: #161922;
+        border-top: 1px solid #232733;
+      }
+      button {
+        background: #2a6df4;
+        color: #fff;
+        border: 0;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button:hover { background: #3b7af5; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Kiln Desktop</h1>
+      <p class="version">Version <span id="version">…</span></p>
+      <p class="desc">
+        System tray app for the kiln local LLM server. Spawns and supervises
+        the kiln binary, exposes status and settings, and surfaces the
+        OpenAI-compatible base URL.
+      </p>
+      <p class="meta">
+        Repository:
+        <a id="repo-link" href="https://github.com/ericflo/kiln" target="_blank" rel="noopener noreferrer">github.com/ericflo/kiln</a>
+      </p>
+      <p class="meta">Licensed under MIT.</p>
+      <p class="meta">Built with Tauri.</p>
+    </div>
+    <footer>
+      <button id="close" type="button" title="Close (Esc)">Close</button>
+    </footer>
+    <script defer>
+      const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
+        || (window.__TAURI__ && window.__TAURI__.invoke);
+
+      if (invoke) {
+        invoke("get_app_version").then((v) => {
+          document.getElementById("version").textContent = v;
+        }).catch(() => {
+          document.getElementById("version").textContent = "unknown";
+        });
+      } else {
+        document.getElementById("version").textContent = "unknown";
+      }
+
+      const repoLink = document.getElementById("repo-link");
+      repoLink.addEventListener("click", (e) => {
+        const shell = window.__TAURI__ && window.__TAURI__.shell;
+        if (shell && typeof shell.open === "function") {
+          e.preventDefault();
+          shell.open(repoLink.href).catch(() => {});
+        }
+      });
+
+      const closeBtn = document.getElementById("close");
+      function closeWindow() {
+        const win = window.__TAURI__ && window.__TAURI__.window;
+        const cur = win && typeof win.getCurrent === "function" ? win.getCurrent() : null;
+        if (cur && typeof cur.close === "function") {
+          cur.close();
+        } else {
+          window.close();
+        }
+      }
+      closeBtn.addEventListener("click", closeWindow);
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeWindow();
+          return;
+        }
+        const mod = e.metaKey || e.ctrlKey;
+        if (!mod) return;
+        const lower = typeof e.key === "string" ? e.key.toLowerCase() : "";
+        if (lower === "w" || lower === "s") {
+          e.preventDefault();
+          closeWindow();
+        }
+      });
+    </script>
+  </body>
+</html>
