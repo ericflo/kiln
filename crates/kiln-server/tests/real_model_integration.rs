@@ -87,6 +87,7 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
             k_proj_t,
             v_proj_t,
             o_proj_t,
+            q_proj_marlin: None,
         }),
         mlp: GpuFfnWeights {
             gate_proj,

@@ -1102,6 +1102,7 @@ mod tests {
                     k_proj_t,
                     v_proj_t,
                     o_proj_t,
+                    q_proj_marlin: None,
                 },
             ),
             mlp: crate::forward::GpuFfnWeights {
