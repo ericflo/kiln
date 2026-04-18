@@ -1488,6 +1488,7 @@ mod tests {
                     k_proj_t,
                     v_proj_t,
                     o_proj_t,
+                    q_proj_marlin: None,
                 })
             } else {
                 let qkv_dim = config.linear_qkv_dim();
