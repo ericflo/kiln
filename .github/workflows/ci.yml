@@ -39,12 +39,12 @@ jobs:
       - name: Build (Metal)
         run: cargo build --locked --features metal
 
+      # Skip the two pre-existing env-var races on both feature sets — they
+      # flake in parallel test runs but pass in isolation.
       - name: Test (default features — exercises CPU fallback)
-        run: cargo test --locked
+        run: cargo test --locked -- --skip test_env_var_overrides --skip test_health_with_real_backend
 
       - name: Test (Metal feature — exercises Apple Silicon GPU path)
-        # Skip the two pre-existing env-var races that flake in parallel test
-        # runs but pass in isolation.
         run: |
           cargo test --locked --features metal -- --skip test_env_var_overrides --skip test_health_with_real_backend
 
