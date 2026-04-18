@@ -386,8 +386,8 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
 
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.
 ///
-/// Uses the shared VRAM detection from kiln-core (nvidia-smi + env override).
-/// For CPU devices, still checks KILN_GPU_MEMORY_GB for testing purposes.
+/// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
+/// hw.memsize on Apple Silicon + env override).
 fn query_gpu_total_memory(device: &candle_core::Device) -> u64 {
     let vram = kiln_core::vram::detect_vram();
     match device {
@@ -401,12 +401,27 @@ fn query_gpu_total_memory(device: &candle_core::Device) -> u64 {
                 );
                 vram.total_bytes
             } else {
-                // CUDA device exists but detection failed — assume 24GB
                 tracing::warn!("CUDA device present but VRAM detection failed; assuming 24GB");
                 24 * 1024 * 1024 * 1024
             }
         }
-        _ => vram.total_bytes, // 0 if no GPU, or env override for testing
+        #[cfg(feature = "metal")]
+        candle_core::Device::Metal(_) => {
+            if vram.total_bytes > 0 {
+                tracing::info!(
+                    total_gb = vram.total_bytes as f64 / 1e9,
+                    source = %vram.source,
+                    "unified memory detected (Apple Silicon)"
+                );
+                vram.total_bytes
+            } else {
+                tracing::warn!(
+                    "Metal device present but unified memory detection failed; assuming 16GB"
+                );
+                16 * 1024 * 1024 * 1024
+            }
+        }
+        _ => vram.total_bytes,
     }
 }
 
