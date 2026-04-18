@@ -11,6 +11,7 @@ use settings::{apply_to_supervisor_config, Settings};
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::RwLock;
 
 /// Reconcile the OS autostart registration with the desired `launch_at_login`
@@ -103,6 +104,54 @@ async fn open_settings(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn open_logs(app: AppHandle) -> Result<(), String> {
     tray::open_logs_window(&app).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct UpdateCheckResult {
+    available: bool,
+    version: Option<String>,
+    current_version: Option<String>,
+    notes: Option<String>,
+}
+
+/// Ask the configured updater endpoint whether a new release is available.
+/// The frontend uses the result to prompt the user to install via
+/// `install_update`.
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    match update {
+        Some(u) => Ok(UpdateCheckResult {
+            available: true,
+            version: Some(u.version.clone()),
+            current_version: Some(u.current_version.clone()),
+            notes: u.body.clone(),
+        }),
+        None => Ok(UpdateCheckResult {
+            available: false,
+            version: None,
+            current_version: None,
+            notes: None,
+        }),
+    }
+}
+
+/// Re-check, then download and install the available update, then restart the
+/// app. We re-check rather than caching an `Update` handle because Tauri
+/// commands are stateless and the small race window is acceptable.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let Some(update) = update else {
+        return Err("No update available".to_string());
+    };
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
 }
 
 /// Build the OpenAI-compatible base URL for a given host/port. Kept as a pure
@@ -222,7 +271,9 @@ fn main() {
             get_kiln_url,
             get_openai_base_url,
             open_settings,
-            open_logs
+            open_logs,
+            check_for_updates,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");
