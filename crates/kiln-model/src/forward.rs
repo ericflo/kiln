@@ -1221,6 +1221,33 @@ fn gdn_chunkwise_recurrence(
 /// `conv_state`: [batch, conv_dim, kernel_size-1] — mutable conv buffer, updated in place
 ///
 /// Returns: [batch, seq_len, hidden_size]
+
+/// Candle-op reference path for the Step-6 GDN gates. This is the original
+/// Phase-6 implementation; it's kept as a fallback for shapes/dtypes outside
+/// the fused kernel's envelope and as the algorithmic oracle for parity tests.
+///
+/// beta = sigmoid(b)                                // bf16
+/// g    = -exp(A_log) * softplus(a + dt_bias)       // bf16 (F32 intermediates)
+fn gated_deltanet_gates_fallback(
+    a: &Tensor,
+    b: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    input_dtype: DType,
+) -> Result<(Tensor, Tensor)> {
+    let beta = cuda_sigmoid(b)?; // [B, T, nv], bf16
+    let a_f32 = a.to_dtype(DType::F32)?;
+    let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
+    let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
+    let g = {
+        let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
+        let sp = softplus(&a_biased)?;
+        let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
+        sp.broadcast_mul(&neg_decay)?
+    }
+    .to_dtype(input_dtype)?;
+    Ok((beta, g))
+}
+
 pub fn gated_deltanet_forward(
     backend: &dyn BackendRuntime,
     x: &Tensor,
@@ -1318,26 +1345,27 @@ pub fn gated_deltanet_forward(
     };
 
     // --- Step 6: Compute gates ---
+    //
+    // Two paths: a fused CUDA kernel (\`backend.gdn_gates\`) that collapses
+    // the sigmoid + softplus + exp + mul chain into one launch, and the
+    // candle-op reference path for everything outside the kernel's
+    // envelope (non-CUDA, non-bf16, nv > 256, or the kill switch
+    // \`KILN_DISABLE_FUSED_GDN_GATES=1\`). The two are algorithmically
+    // identical — the reference path is the original Phase-6 implementation
+    // and remains the parity oracle.
     let (beta, g) = {
         kiln_nvtx::range!(c"kiln/gdn/gates");
-        // beta = sigmoid(b) — write gate, in (0, 1). sigmoid output is bounded so
-        // bf16 has enough precision; no F32 upcast needed.
-        let beta = cuda_sigmoid(&b)?; // [B, T, nv], bf16
-
-        // g = -exp(A_log) * softplus(a + dt_bias) — decay (negative log-space).
-        // The softplus/exp pipeline is computed in F32 for stability (it involves
-        // exp and log near 0), then cast to the input dtype for the bf16 loop.
-        let a_f32 = a.to_dtype(DType::F32)?;
-        let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
-        let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
-        let g = {
-            let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
-            let sp = softplus(&a_biased)?;
-            let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
-            sp.broadcast_mul(&neg_decay)?
+        if backend.supports_gdn_gates() {
+            if let Some((beta, g)) =
+                backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
+            {
+                (beta, g)
+            } else {
+                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+            }
+        } else {
+            gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
         }
-        .to_dtype(input_dtype)?; // [B, T, nv], negative values → exp(g) ∈ (0, 1)
-        (beta, g)
     };
 
     // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---

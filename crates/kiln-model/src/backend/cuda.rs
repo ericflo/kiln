@@ -14,15 +14,21 @@ pub struct CudaBackend {
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
+    /// Same pattern: cache the env-var read. The fused gates kernel is
+    /// gated behind its own kill switch so it can be disabled independently.
+    gdn_gates_enabled: bool,
 }
 
 impl CudaBackend {
     pub fn new(device: Device) -> Self {
         debug_assert!(device.is_cuda(), "CudaBackend created on non-CUDA device");
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
+        let gdn_gates_enabled =
+            gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
         Self {
             device,
             gdn_enabled,
+            gdn_gates_enabled,
         }
     }
 }
@@ -126,5 +132,26 @@ impl BackendRuntime for CudaBackend {
         }
         let out = kiln_gdn_kernel::gdn_recurrent_forward(q, k, v, beta, g, state)?;
         Ok(Some(out))
+    }
+
+    fn supports_gdn_gates(&self) -> bool {
+        self.gdn_gates_enabled
+    }
+
+    fn gdn_gates(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        // Decline quietly when the envelope isn't met — the candle reference
+        // path handles non-CUDA, non-bf16, and oversized nv.
+        if !kiln_gdn_kernel::gdn_gates_supports(a, b, a_log, dt_bias) {
+            return Ok(None);
+        }
+        let (beta, g) = kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias)
+            .context("gdn_gates kernel failed")?;
+        Ok(Some((beta, g)))
     }
 }

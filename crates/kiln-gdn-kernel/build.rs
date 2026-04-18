@@ -42,6 +42,7 @@ fn main() {
 
     build.file(csrc_dir.join("gdn_fwd_sub.cu"));
     build.file(csrc_dir.join("recurrent_gdn_fwd.cu"));
+    build.file(csrc_dir.join("gdn_gates.cu"));
 
     build.compile("kiln_gdn_kernel");
 
