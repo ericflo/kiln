@@ -67,8 +67,13 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
 
-      - name: Download Metal Toolchain
-        run: xcodebuild -downloadComponent MetalToolchain
+      - name: Download Metal Toolchain (Xcode 16+)
+        # `-downloadComponent` was introduced in Xcode 16; older Xcode (e.g.,
+        # 15.x on GitHub's current macos-14 runners) bundles the Metal compiler
+        # directly and rejects the flag with `invalid option`. Treat the
+        # failure as a no-op — if the metal compiler is genuinely missing,
+        # the Build (MLX) step below will fail clearly.
+        run: xcodebuild -downloadComponent MetalToolchain || true
 
       - name: Build (MLX)
         run: cargo build --locked --features mlx
