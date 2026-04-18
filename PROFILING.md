@@ -1,3 +1,129 @@
+# Kiln Profiling Report
+
+## Post-PR #158 Decode Profile (2026-04-18)
+
+Refreshed decode profile on current `main` (HEAD `7132f29`, post-PR #158 which
+fused the GDN decode gates path into one CUDA kernel). Re-ran the same nsys
+methodology as the PR #156 profile below for an apples-to-apples comparison.
+Only Arm B (production W4A16) was re-captured — the baseline Arm A path was
+not changed by #158.
+
+**Hardware:** RunPod RTX A6000 on-demand, Driver 565.57.01, CUDA 12.4, nsys
+2024.5.1 (apt-installed; the baked 2023.4.4 has the
+`EventCollection::CheckOrder` finalization bug).
+
+**Build:** release, `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, bench command
+identical to PR #156 (`kiln-bench --delay=110 --duration=30 --nvtx ...`).
+
+### Arm B decode latency (post-#158 vs PR #156)
+
+| metric                     | PR #156 | post-#158 | Δ           |
+| -------------------------- | ------: | --------: | ----------- |
+| mean inter-token ms        | 21.50   | 22.92     | +6.6 %      |
+| p50 inter-token ms         | 21.43   | 22.61     | +5.5 %      |
+| p99 inter-token ms         | 28.87   | 25.13     | **−13.0 %** |
+| decode tok/s (latency)     | 46.52   | 43.63     | −6.2 %      |
+
+The p99 tightening is the clearest effect of #158. Mean ITL regressed by
+~1.4 ms, which is within the pod-to-pod variance previously observed on this
+harness (PR #152→#153→#156 moved the same metric by a similar magnitude
+without any code change). Directionally consistent: the GDN hotspots all
+moved down proportionally.
+
+### Top-10 NVTX regions (Arm B, post-#158)
+
+| rank | %     | region                        |
+| ---: | ----: | ----------------------------- |
+|    1 | 16.7% | `:kiln/gdn/gates`             |
+|    2 | 15.8% | `:kiln/gdn/gated_norm`        |
+|    3 | 13.3% | `:kiln/gdn/qk_norm`           |
+|    4 | 12.2% | `:kiln/gdn/conv`              |
+|    5 |  6.8% | `:kiln/gdn/in_proj`           |
+|    6 |  5.8% | `:kiln/mlp/gate`              |
+|    7 |  5.6% | `:kiln/mlp/up`                |
+|    8 |  5.4% | `:kiln/mlp/down`              |
+|    9 |  3.1% | `:kiln/residual`              |
+|   10 |  2.8% | `:kiln/gdn/head_expand`       |
+|   +  |  2.7% | `:kiln/proj/qkv`              |
+|   +  |  2.5% | `:kiln/gdn/out_proj`          |
+|   +  |  1.6% | `:kiln/attn/gdn/recurrent`    |
+
+GDN subsystem (in_proj + gates + gated_norm + qk_norm + conv + head_expand +
+out_proj + recurrent) still owns **~73 %** of decode wall-clock. The MLP
+trio (`gate`/`up`/`down`) is **16.8 %**. Residual + norms are ~6 %.
+
+### Top-10 CUDA kernels (Arm B, post-#158)
+
+| rank | %     | kernel                                                                     |
+| ---: | ----: | -------------------------------------------------------------------------- |
+|    1 | 14.5% | `Marlin<256,1,8,8,4,8>`                                                    |
+|    2 | 12.0% | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn`             |
+|    3 |  9.8% | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f`                              |
+|    4 |  9.2% | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn`              |
+|    5 |  7.5% | `ucopy_bf16`                                                               |
+|    6 |  5.2% | `ampere_bf16_s16816gemm_bf16_64x64_sliced1x2`                              |
+|    7 |  4.1% | `bmul_f32`                                                                 |
+|    8 |  2.6% | `fused_rmsnorm_kernel`                                                     |
+|    9 |  2.5% | `fast_sum_f32`                                                             |
+|   10 |  2.4% | `ucopy_f32`                                                                |
+|   +  |  2.2% | `cast_f32_bf16`                                                            |
+|   +  |  2.1% | `recurrent_gdn_fwd_kernel<128>`                                            |
+|   +  |  2.0% | `cast_bf16_f32`                                                            |
+
+Marlin remains the single largest kernel (q_proj + 3×MLP). The cutlass /
+ampere BF16 GEMM stack sitting at #2/#3/#4/#6 is the non-Marlin projection
+work (k_proj, v_proj, o_proj, lm_head, GDN in_proj/out_proj). The long tail
+of `bmul_f32`/`fast_sum_f32`/`ucopy_*`/`cast_*` elementwise kernels is the
+remaining GDN gates + norm plumbing that PR #158 did not absorb.
+
+### Delta vs PR #156 (NVTX top-4)
+
+| region                   | PR #156 | post-#158 | Δ pp   |
+| ------------------------ | ------: | --------: | -----: |
+| `:kiln/gdn/gates`        | 18.2 %  | 16.7 %    | −1.5   |
+| `:kiln/gdn/gated_norm`   | 18.0 %  | 15.8 %    | −2.2   |
+| `:kiln/gdn/qk_norm`      | 14.7 %  | 13.3 %    | −1.4   |
+| `:kiln/gdn/conv`         | 12.4 %  | 12.2 %    | −0.2   |
+
+Every GDN hotspot moved down — #158's fusion reduced the proportional share
+of the gates path and the downstream gated_norm/qk_norm (they dispatch fewer
+upstream elementwise tensors). The gain is real but narrow: the top-50
+kernel list still contains the full elementwise zoo (`bmul_f32`,
+`fast_sum_f32`, `cast_f32_bf16`, `cast_bf16_f32`, `ucopy_bf16`, `affine_f32`,
+`uneg_f32`, `uexp_f32`, `urecip_f32`, `usqrt_f32`) in similar quantities to
+PR #156. No single fused-gate kernel dominates — the fusion collapsed part
+of the gate arithmetic but the surrounding norm / cast / copy traffic is
+unchanged.
+
+### Recommended next optimization target
+
+**Vendor `chunk_gla_fwd` from flash-linear-attention (roadmap step 2).**
+
+The combined decode share of `gdn/gates` + `gdn/gated_norm` + `gdn/qk_norm`
++ `gdn/conv` is still **57.9 %** of wall-clock. A narrow gates-only fusion
+(like #158) only chips at the first of those four regions. Vendoring the
+upstream `chunk_gla_fwd` kernel that fuses the full GDN decode chain
+(conv + in_proj + gates + gated_norm + qk_norm + recurrent) is the
+highest-leverage move available — it would collapse ~58 % of decode
+wall-clock into a single kernel dispatch and directly eliminate the
+elementwise zoo that #158 could not reach.
+
+Vendoring approach follows the established pattern (Marlin vendor in PR
+#149, GDN substitution kernel in PR #80, narrow scope under
+`crates/kiln-chunk-gla-kernel/`, C-ABI entrypoint, cuda-gated, parity test
+vs existing reference). Preflight note: confirmed no prior crate or PR
+already lands this (`git log --all --grep="chunk_gla"` and
+`ls crates/ | grep -i chunk` both empty).
+
+## Reproduction (post-#158)
+
+Identical to the PR #156 reproduction section below, with one substitution:
+install nsys 2024.5.1 (`apt-get install -y cuda-nsight-systems-12-6`) before
+the `kiln-bench --nvtx` capture. The baked `ghcr.io/ericflo/kiln-runpod`
+image ships nsys 2023.4.4 which finalizes broken `.nsys-rep` files.
+
+---
+
 # Kiln Profiling Report — Phase 6 re-profile, post-Marlin MLP wire-in (PR #152)
 
 ## Overview
