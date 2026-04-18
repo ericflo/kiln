@@ -105,11 +105,11 @@
     <header>
       <h1>Kiln server logs</h1>
       <label><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
-      <input type="search" id="filter" placeholder="Filter…" autocomplete="off" spellcheck="false" />
+      <input type="search" id="filter" placeholder="Filter…" autocomplete="off" spellcheck="false" title="Focus filter (Ctrl/Cmd+F)" />
       <span id="filter-count" class="hidden"></span>
       <button id="copy" type="button" title="Copy all log lines to clipboard">Copy</button>
-      <button id="save" type="button" title="Save all log lines to a file">Save…</button>
-      <button id="clear" type="button">Clear view</button>
+      <button id="save" type="button" title="Save all log lines to a file (Ctrl/Cmd+S)">Save…</button>
+      <button id="clear" type="button" title="Clear view (Ctrl/Cmd+Shift+K)">Clear view</button>
     </header>
     <div id="log" class="empty">(no log lines yet)</div>
     <script defer>
@@ -251,6 +251,33 @@
           baseline = 0;
         }
         render([]);
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && document.activeElement === filterEl) {
+          if (filterEl.value.length > 0) {
+            filterEl.value = "";
+            filterEl.dispatchEvent(new Event("input"));
+          }
+          filterEl.blur();
+          e.preventDefault();
+          return;
+        }
+        const mod = e.metaKey || e.ctrlKey;
+        if (!mod) return;
+        const shift = e.shiftKey;
+        const lower = typeof e.key === "string" ? e.key.toLowerCase() : "";
+        if (!shift && lower === "f") {
+          e.preventDefault();
+          filterEl.focus();
+          filterEl.select();
+        } else if (!shift && lower === "s") {
+          e.preventDefault();
+          saveEl.click();
+        } else if (shift && lower === "k") {
+          e.preventDefault();
+          clearEl.click();
+        }
       });
 
       refresh();
