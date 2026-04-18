@@ -322,11 +322,11 @@
         <code id="training-value" class="empty">—</code>
       </span>
       <span class="toolbar-divider" aria-hidden="true"></span>
-      <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server">Copy OpenAI base URL</button>
+      <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server (Ctrl/Cmd+Shift+C)">Copy OpenAI base URL</button>
       <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
-      <button id="restart-server" class="hidden" title="Restart the kiln server">Restart Server</button>
-      <button id="open-logs" title="Open the log viewer window">View Logs</button>
-      <button id="open-settings" title="Open the settings window">Settings</button>
+      <button id="restart-server" class="hidden" title="Restart the kiln server (Ctrl/Cmd+Shift+R)">Restart Server</button>
+      <button id="open-logs" title="Open the log viewer window (Ctrl/Cmd+L)">View Logs</button>
+      <button id="open-settings" title="Open the settings window (Ctrl/Cmd+,)">Settings</button>
       <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
     </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
@@ -570,6 +570,33 @@
       }
 
       restartBtn.addEventListener("click", restartServer);
+
+      document.addEventListener("keydown", (e) => {
+        const mod = e.metaKey || e.ctrlKey;
+        if (!mod) return;
+        const target = e.target;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+          return;
+        }
+        const shift = e.shiftKey;
+        const key = e.key;
+        const lower = typeof key === "string" ? key.toLowerCase() : "";
+        if (!shift && lower === "l") {
+          e.preventDefault();
+          invoke("open_logs").catch((err) => console.error("open_logs failed", err));
+        } else if (!shift && key === ",") {
+          e.preventDefault();
+          invoke("open_settings").catch((err) => console.error("open_settings failed", err));
+        } else if (shift && lower === "c") {
+          e.preventDefault();
+          copyOpenAiBaseUrl();
+        } else if (shift && lower === "r") {
+          e.preventDefault();
+          if (RESTART_ACTIVE_STATES.includes(currentKind)) {
+            restartServer();
+          }
+        }
+      });
 
       const statusBadge = document.getElementById("status-badge");
       const statusBadgeLabel = statusBadge.querySelector(".label");
