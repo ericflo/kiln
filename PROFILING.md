@@ -1,6 +1,175 @@
 # Kiln Profiling Report
 
 
+## Phase 6 — Post-PR #166 decode profile (2026-04-18)
+
+Fresh nsys capture on current `main` (HEAD `c2579a1`, PR #166 vendored
+`causal_conv1d_update` into `kiln-conv1d-kernel` and wired
+`BackendRuntime::causal_conv1d_update` in `kiln-model/src/backend/cuda.rs`).
+This is now the source-of-truth decode breakdown for the next optimization
+task — it supersedes the "Post-PR #158 Decode Profile" section below for
+planning purposes. Methodology matches the post-#158 profile (Arm B only,
+W4A16 + CUDA graphs production path).
+
+**Hardware:** RunPod NVIDIA RTX A6000 on-demand ($0.49/hr), Driver
+580.95.05, CUDA 12.8, `ghcr.io/ericflo/kiln-runpod:latest` (CUDA 12.4
+toolchain, nsys 2024.5.1 — the baked 2023.4.4 still has the
+`EventCollection::CheckOrder` finalization bug noted in prior sections).
+
+**Build:** release, `--features cuda`, `KILN_CUDA_ARCHS=86`,
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, sccache ON (backblaze B2 bucket).
+
+**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+--prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
+uncaptured runs for tok/s + ITL, 1 separate `nsys profile --delay=110
+--duration=30 --capture-range=nvtx -p 'kiln/*' ...` capture for NVTX +
+CUDA kernel stats. Single-token paged decode path
+(`model_forward_paged`) exactly as served by the HTTP scheduler.
+
+### Decode tok/s — 512-prompt × 128-decode (Arm B, 3 runs)
+
+| run    | decode tok/s | mean ITL ms | p50 ITL ms | p99 ITL ms |
+| ------ | -----------: | ----------: | ---------: | ---------: |
+| 1      |        54.24 |       18.44 |      18.43 |      20.90 |
+| 2      |        49.76 |       20.10 |      19.91 |      25.46 |
+| 3      |        49.45 |       20.22 |      20.10 |      25.59 |
+| mean   |    **51.15** |   **19.59** |  **19.48** |  **23.98** |
+| median |    **49.76** |   **20.10** |  **19.91** |  **25.46** |
+
+Run 1 is again the fastest and tightest — consistent with the pattern seen
+in the earlier #166 A/B bench where the first POST run was slower; here
+sccache / graph-cache warmth appears to favor run 1 instead. Runs 2–3
+converge to ~49.5 tok/s.
+
+### Top-10 NVTX regions (Arm B, post-#166)
+
+| rank | %     | region                        |
+| ---: | ----: | ----------------------------- |
+|    1 | 18.0% | `:kiln/gdn/gates`             |
+|    2 | 17.5% | `:kiln/gdn/gated_norm`        |
+|    3 | 14.9% | `:kiln/gdn/qk_norm`           |
+|    4 |  7.4% | `:kiln/gdn/in_proj`           |
+|    5 |  6.3% | `:kiln/mlp/gate`              |
+|    6 |  6.2% | `:kiln/mlp/up`                |
+|    7 |  5.9% | `:kiln/mlp/down`              |
+|    8 |  3.8% | `:kiln/gdn/head_expand`       |
+|    9 |  3.4% | `:kiln/residual`              |
+|   10 |  3.0% | `:kiln/proj/qkv`              |
+|   +  |  2.9% | `:kiln/gdn/out_proj`          |
+|   +  |  2.1% | `:kiln/norm/pre_mlp`          |
+|   +  |  1.9% | `:kiln/norm/pre_attn`         |
+|   +  |  1.8% | `:kiln/attn/gdn/recurrent`    |
+|   +  |  1.8% | `:kiln/gdn/conv`              |
+
+GDN (in_proj + gates + gated_norm + qk_norm + conv + head_expand + out_proj
++ recurrent) now owns **~69%** of decode wall-clock (down from ~73% post-#158
+as conv collapsed). MLP trio is **18.4%**. Norms/residual ≈ 7.4%. Full-attn
+projections (`:kiln/proj/qkv` + `:kiln/proj/o`) are ~3.5% combined — still
+below the 10% threshold that would justify FlashInfer paged GQA decode
+(see `flashinfer-decode-preflight-kiln-2026-04-18`).
+
+### Top-10 CUDA kernels (Arm B, post-#166)
+
+| rank | %     | kernel                                                                     |
+| ---: | ----: | -------------------------------------------------------------------------- |
+|    1 | 14.6% | `Marlin<256,1,8,8,4,8>`                                                    |
+|    2 | 11.8% | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn`             |
+|    3 |  9.9% | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn`               |
+|    4 |  9.2% | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn`              |
+|    5 |  8.3% | `ucopy_bf16`                                                               |
+|    6 |  5.4% | `ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn`      |
+|    7 |  4.0% | `bmul_f32`                                                                 |
+|    8 |  2.9% | `fused_rmsnorm_kernel`                                                     |
+|    9 |  2.4% | `recurrent_gdn_fwd_kernel<128>`                                            |
+|   10 |  2.4% | `cast_f32_bf16`                                                            |
+|   +  |  2.2% | `ucopy_f32`                                                                |
+|   +  |  1.7% | `cast_bf16_f32`                                                            |
+|   +  |  1.6% | `affine_f32`                                                               |
+|   +  |  1.3% | `fast_sum_f32`                                                             |
+|   +  |  0.3% | `kiln_conv1d_update_k4_kernel<true>` *(vendored in PR #166)*               |
+
+The vendored `kiln_conv1d_update_k4_kernel<true>` now runs in **0.3%** of
+decode time (30.3 ms / 17,560 invocations, avg 1.7 μs per call). The
+Marlin + cutlass + ampere GEMM stack composition is essentially unchanged
+vs post-#158; the displaced conv1d time (was ~10% as an
+elementwise-kernel tail) has been absorbed proportionally across the
+remaining GDN gate-path tensors — the top-50 kernel list still shows the
+same elementwise zoo (`bmul_f32`, `cast_*`, `ucopy_*`, `affine_f32`,
+`fast_sum_f32`, `bdiv_f32`, `badd_f32`) at similar totals.
+
+### Δ vs post-#158 (NVTX)
+
+| region                   | post-#158 | post-#166 | Δ pp     |
+| ------------------------ | --------: | --------: | -------: |
+| `:kiln/gdn/conv`         |   12.2 %  |    1.8 %  | **−10.4** |
+| `:kiln/gdn/gates`        |   16.7 %  |   18.0 %  |    +1.3  |
+| `:kiln/gdn/gated_norm`   |   15.8 %  |   17.5 %  |    +1.7  |
+| `:kiln/gdn/qk_norm`      |   13.3 %  |   14.9 %  |    +1.6  |
+| `:kiln/gdn/in_proj`      |    6.8 %  |    7.4 %  |    +0.6  |
+| `:kiln/mlp/gate`         |    5.8 %  |    6.3 %  |    +0.5  |
+| `:kiln/mlp/up`           |    5.6 %  |    6.2 %  |    +0.6  |
+| `:kiln/mlp/down`         |    5.4 %  |    5.9 %  |    +0.5  |
+| `:kiln/gdn/head_expand`  |    2.8 %  |    3.8 %  |    +1.0  |
+| `:kiln/residual`         |    3.1 %  |    3.4 %  |    +0.3  |
+| `:kiln/proj/qkv`         |    2.7 %  |    3.0 %  |    +0.3  |
+
+`:kiln/gdn/conv` dropped from the #4 hottest region to the #15 — the sole
+intended effect of PR #166. Every other region's share went up by
+~0.3–1.7 pp as the freed ~10 pp redistributed proportionally; this is the
+expected "proportional rebasing" pattern and is not a regression of those
+regions in wall-clock terms. Decode tok/s (median 49.76 vs #158's 43.63 on
+the same methodology) is **+14.1%** faster.
+
+### Recommended next optimization target
+
+`:kiln/gdn/gates` + `:kiln/gdn/gated_norm` + `:kiln/gdn/qk_norm` =
+**50.4 %** of decode, which is above the 40 % threshold the Phase 6 brief
+set as the trigger for the next vendor task. The natural next step is to
+vendor **`chunk_gla_fwd`** from
+[`fla-org/flash-linear-attention`](https://github.com/fla-org/flash-linear-attention)
+— it fuses the gated-linear-attention chunked forward path (gates + qk_norm
++ gated_norm) that is currently three separate Candle-dispatched region
+groups on our side. Per the `kernel-vendoring-call-pattern-regression` note,
+the scope should be narrowed to the **decode-only (single-token)** call
+pattern so the vendored kernel does not regress prefill / chunk paths — a
+decode-specialized split of `chunk_gla_fwd` (or its underlying block-GLA
+step kernel) is the concrete target. Alternative narrower targets if
+`chunk_gla_fwd` is too broad: a fused `gated_norm`-then-`qk_norm` kernel
+on its own would still claim the **32.4 %** of decode those two regions
+own.
+
+Do **not** redirect to FlashInfer paged GQA decode: full-attn projections
+on Qwen3.5-4B (24 GDN + 8 full-attn layers) are still only ~3.5 % of
+decode, bounded at ≤1.035× overall speedup — well below the 1.15 %
+abort threshold. The `flashinfer-decode-preflight-kiln-2026-04-18` note
+remains the governing preflight for any future FlashInfer proposal.
+
+### Preflight record
+
+- HEAD verified `c2579a1` (`git log --oneline -1`).
+- `crates/kiln-conv1d-kernel/` exists (Cargo.toml, build.rs, csrc/,
+  src/lib.rs) — confirms PR #166 landed as advertised.
+- `BackendRuntime::causal_conv1d_update` present in
+  `crates/kiln-model/src/backend/cuda.rs` (line 20 declaration, lines
+  185-205 dispatch).
+- `gh pr list` showed no open PR touching GDN / conv paths at capture
+  time; `git log --all --grep='chunk_gla'` returned no prior vendor work
+  for the next recommended target.
+- nsys 2024.5.1 used (baked 2023.4.4 avoided for the
+  `EventCollection::CheckOrder` bug).
+- `profiling-artifacts/post166_nvtx.csv` and
+  `profiling-artifacts/post166_kern.csv` are the raw tables the above
+  rankings were derived from (nsys stats `nvtxsum` / `cuda_gpu_kern_sum`
+  reports).
+
+### Pod / cost
+
+- Pod: `povpyv0bkwqrte` (RunPod NVIDIA RTX A6000 on-demand, $0.49/hr).
+- Total uptime at capture end: ~35 minutes (pull + clone + warmup + 3
+  bench runs + 1 nsys capture + stats extraction).
+- Estimated pod cost: **~$0.30** (well under the Phase 6 budget).
+
+
 ## Phase 6 — `causal_conv1d_update` vendor decode bench (2026-04-18)
 
 Vendored NVIDIA Mamba's `causal_conv1d_update` into `kiln-conv1d-kernel`
