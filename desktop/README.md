@@ -4,7 +4,11 @@ System-tray app that wraps the `kiln` local LLM server in a GUI for people who d
 
 ## Platform scope
 
-Windows and Linux only. Kiln is CUDA-only today; macOS is deliberately out of scope.
+Windows, Linux, and macOS (Apple Silicon). The Linux and Windows bundles drive
+CUDA-backed `kiln`; the macOS bundle drives the candle-metal backend on
+Apple Silicon (M-series) Macs. Intel Macs are not supported — Metal/MLX need
+Apple Silicon and an x86_64 build would be strictly worse than running Linux
+in a VM.
 
 ## Releases
 
@@ -28,13 +32,13 @@ The desktop installer bundles only the wrapper — the `kiln` server binary and 
 - **Log viewer** — tails captured stdout/stderr lines from the ring buffer with auto-scroll and clear-view.
 - **Health and training polling** — hits `/v1/health` and `/v1/train/status` and drives the tray icon state.
 - **Auto-start kiln on app launch** — configurable; default on.
-- **Launch-at-login** — Windows and Linux.
+- **Launch-at-login** — Windows, Linux, and macOS (via LaunchAgent).
 - **Real Kiln logo icons** — PNG/ICO/ICNS baked into all platform bundles.
 - **GitHub Actions CI** — builds Windows MSI and NSIS installers and Linux `.deb` / `.AppImage`, attaches artifacts to tag releases.
 
 ## Architecture
 
-The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight CUDA server, and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA into the Tauri build.
+The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight GPU server (CUDA on Linux/Windows, Metal on macOS), and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA/Metal into the Tauri build.
 
 ```
 Kiln Desktop (Tauri)
@@ -48,12 +52,12 @@ Kiln Desktop (Tauri)
 └── Log viewer window           (HTML + invoke())
           │
           ▼
-    kiln binary (separate process)  ── CUDA, model, training loop
+    kiln binary (separate process)  ── CUDA / Metal, model, training loop
 ```
 
 ## Workspace isolation
 
-This crate is **not** a member of the root `kiln` Cargo workspace. `desktop/Cargo.toml` declares its own empty `[workspace]` section so it is its own workspace root. This keeps Tauri and system-webview dependencies out of the inference workspace and vice versa, and means the desktop app builds without CUDA.
+This crate is **not** a member of the root `kiln` Cargo workspace. `desktop/Cargo.toml` declares its own empty `[workspace]` section so it is its own workspace root. This keeps Tauri and system-webview dependencies out of the inference workspace and vice versa, and means the desktop app builds without CUDA or Metal — only the `kiln` child process needs a GPU toolchain.
 
 ## Build
 
@@ -61,15 +65,51 @@ This crate is **not** a member of the root `kiln` Cargo workspace. `desktop/Carg
 cd desktop
 cargo check                 # quick validation
 cargo build --release       # release build
-cargo tauri build           # full installer bundle (.deb/.AppImage/.msi/.exe)
+cargo tauri build           # full installer bundle (.deb/.AppImage/.msi/.exe/.dmg/.app)
 ```
 
-System libraries are required on Linux: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `patchelf`. CI runs on `ubuntu-22.04` and `windows-latest` and has everything preinstalled.
+System libraries are required on Linux: `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `patchelf`. CI runs on `ubuntu-22.04`, `windows-latest`, and `macos-14` and has everything preinstalled.
 
 Packaging targets in `tauri.conf.json`:
 
 - Linux: `.deb`, `.AppImage`
 - Windows: `.msi`, `.nsis`
+- macOS: `.app`, `.dmg` (Apple Silicon only)
+
+### macOS (Apple Silicon)
+
+Prerequisites: Xcode Command Line Tools (`xcode-select --install`) and a
+recent stable Rust toolchain. The Tauri CLI is a dev dependency you can
+install once with `cargo install tauri-cli --locked`.
+
+```bash
+cd desktop
+cargo check                                  # quick validation
+cargo tauri dev                              # hot-reload dev run
+cargo tauri build --target aarch64-apple-darwin   # produces .app + .dmg
+```
+
+Artifacts land in `desktop/target/aarch64-apple-darwin/release/bundle/`:
+
+- `macos/Kiln Desktop.app` — the bundled app
+- `dmg/Kiln Desktop_<version>_aarch64.dmg` — the drag-to-Applications installer
+
+The app targets macOS 11.0 (Big Sur) or later — that's the earliest arm64-only
+release, and we deliberately do not ship an x86_64 build.
+
+**Code signing and notarization.** For public distribution you must sign with
+an Apple Developer ID Application certificate and notarize via Apple's
+notary service, otherwise Gatekeeper will block first-launch. Configure via
+the standard Tauri env vars (`APPLE_CERTIFICATE`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_PASSWORD`) — see the
+[Tauri macOS signing docs](https://v2.tauri.app/distribute/sign/macos/).
+Local dev and CI ad-hoc builds work unsigned; users will need to right-click
+and "Open" to bypass Gatekeeper on an unsigned build, or run
+`xattr -dr com.apple.quarantine /Applications/Kiln\ Desktop.app`.
+
+**Menu-bar integration.** Tauri's `tray-icon` crate maps the same code path
+we use for Windows/Linux onto `NSStatusItem` on macOS — no platform-specific
+Rust is needed in this crate.
 
 ## Layout
 
@@ -80,9 +120,9 @@ desktop/
 ├── tauri.conf.json    # Tauri v2 config
 ├── src/               # Rust backend (supervisor, tray, polling, IPC commands)
 ├── ui/                # HTML frontend — dashboard, settings, logs, index
-└── icons/             # Kiln logo icons (.png, .ico, .icns)
+└── icons/             # Kiln logo icons (.png for Linux, .ico for Windows, .icns for macOS)
 ```
 
 ## CI
 
-Release workflow lives in `.github/workflows/desktop-build.yml`. On `desktop-v*` tag push it builds the Tauri bundle on `ubuntu-22.04` and `windows-latest` and publishes the artifacts to the matching GitHub Release.
+Release workflow lives in `.github/workflows/desktop-build.yml`. On `desktop-v*` tag push it builds the Tauri bundle on `ubuntu-22.04`, `windows-latest`, and `macos-14` and publishes the artifacts to the matching GitHub Release. The macOS job runs `--target aarch64-apple-darwin` to produce an Apple Silicon `.dmg` + `.app`.
