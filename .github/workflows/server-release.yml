@@ -1,0 +1,148 @@
+name: Kiln server release
+
+# Publishes prebuilt `kiln` server binaries on `kiln-v*` tags. The desktop
+# app fetches from these releases to onboard users who don't want to build
+# from source (see desktop/src/installer.rs and docs/desktop/signing.md).
+#
+# Platform matrix today:
+#   - macOS aarch64 (Apple Silicon) + Metal feature — signed + notarized
+#
+# Linux/Windows CUDA builds require an NVIDIA toolchain on the runner and
+# are a separate project (see deploy/runpod/ for a Docker-based approach);
+# until they land, the desktop onboarding falls back to "build from source"
+# on those platforms.
+
+on:
+  push:
+    tags:
+      - "kiln-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos-metal:
+    name: macOS / aarch64 / Metal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: kiln-server-macos-metal
+
+      - name: Build kiln (Metal)
+        run: cargo build --release --locked --features metal --bin kiln --target aarch64-apple-darwin
+
+      - name: Write App Store Connect API key to disk
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/appstore"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/appstore/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/appstore/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Create temp keychain and import Developer ID cert
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Prepend our temp keychain to the search list so codesign can
+          # find the identity; keep the login keychain present for the
+          # system trust anchors.
+          ORIG=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $ORIG
+          security import "$RUNNER_TEMP/cert.p12" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -k "$KEYCHAIN_PATH" \
+            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
+          # Allow codesign to use the key non-interactively.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Sign, notarize, and package kiln binary
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          BIN="target/aarch64-apple-darwin/release/kiln"
+          test -x "$BIN"
+
+          # Sign with hardened runtime + timestamp so the binary can be notarized.
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+
+          # notarytool accepts zip/pkg/dmg, not raw binaries. Submit a zip,
+          # but ship a tar.gz (what Unix users expect). The notarization
+          # ticket is cached server-side — stapling doesn't work on bare
+          # binaries, but Gatekeeper will check online when the binary runs.
+          STAGE="$RUNNER_TEMP/stage"
+          mkdir -p "$STAGE"
+          cp "$BIN" "$STAGE/kiln"
+          ditto -c -k --keepParent "$STAGE/kiln" "$RUNNER_TEMP/kiln-notarize.zip"
+
+          echo "Submitting for notarization (this can take several minutes)..."
+          xcrun notarytool submit "$RUNNER_TEMP/kiln-notarize.zip" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+
+          # Package final tar.gz for distribution.
+          VERSION="${TAG#kiln-v}"
+          ARTIFACT="kiln-${VERSION}-aarch64-apple-darwin-metal.tar.gz"
+          tar -czf "$ARTIFACT" -C "$STAGE" kiln
+          shasum -a 256 "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha256"
+          echo "Produced $ARTIFACT ($(wc -c < "$ARTIFACT") bytes, sha256=$(cat "$ARTIFACT.sha256"))"
+          echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          ARTIFACT: ${{ env.ARTIFACT }}
+        run: |
+          set -euo pipefail
+          # Create (or reuse) the release. Drafted so the author can review
+          # before publishing; `gh release upload --clobber` works on drafts.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Kiln server $TAG" \
+              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms."
+          fi
+          gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload artifact (non-tag)
+        if: "!startsWith(github.ref, 'refs/tags/kiln-v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiln-macos-aarch64-metal-unsigned
+          path: target/aarch64-apple-darwin/release/kiln
+          retention-days: 7
