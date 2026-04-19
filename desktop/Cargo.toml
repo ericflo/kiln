@@ -4,7 +4,7 @@
 
 [package]
 name = "kiln-desktop"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Kiln Desktop — system tray app for the kiln local LLM server"
 authors = ["Eric Florenzano <eric@eflorenzano.com>"]
