@@ -21,6 +21,8 @@ in a VM.
 
 The desktop installer bundles only the wrapper — the `kiln` server binary and model weights must be installed separately. See the root [QUICKSTART.md](../QUICKSTART.md) and point the app at the binary and model path from Settings on first launch.
 
+macOS `.dmg` releases are signed with a Developer ID certificate and notarized by Apple. See [docs/desktop/signing.md](../docs/desktop/signing.md) for the CI setup and required secrets.
+
 ## What ships in v0.1.0
 
 - **Subprocess supervisor** — Tokio child process driving the `kiln` binary, with stdout/stderr captured into an in-process ring buffer.

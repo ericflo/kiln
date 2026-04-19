@@ -59,12 +59,36 @@ jobs:
         with:
           workspaces: './desktop -> target'
 
+      - name: Write App Store Connect API key to disk (macOS)
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/desktop-v')
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/appstore"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/appstore/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/appstore/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8" >> "$GITHUB_ENV"
+
       - name: Build (tauri-action)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple Developer ID signing + notarization (macOS only — other
+          # platforms ignore these). Without them, downloaded .dmgs trip
+          # Gatekeeper with "Kiln Desktop is damaged and can't be opened."
+          # tauri-action creates a temp keychain, imports the cert, signs
+          # with hardened runtime, submits to notarytool, waits, and
+          # staples the .app bundle automatically. A follow-up step below
+          # notarizes and staples the .dmg wrapper, which tauri-action
+          # does not handle.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          # APPLE_API_KEY_PATH is exported by the "Write ... key to disk" step above.
         with:
           projectPath: desktop
           tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
@@ -72,6 +96,34 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Notarize + staple .dmg and re-upload (macOS)
+        # tauri-action notarizes the .app bundle but not the .dmg wrapper, so
+        # the uploaded .dmg is signed-but-not-notarized. Gatekeeper rejects it
+        # on download ("Kiln Desktop is damaged") before the user ever reaches
+        # the notarized .app inside. Fix: submit the .dmg to notarytool,
+        # staple the ticket, replace the release asset. gh release upload
+        # --clobber works on drafts, which is what tauri-action creates here.
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/desktop-v')
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DMG=$(ls desktop/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg | head -1)
+          echo "Notarizing $DMG..."
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          echo "Stapling..."
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "Re-uploading notarized DMG to release (clobber)..."
+          gh release upload "$GITHUB_REF_NAME" "$DMG" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Upload artifacts (non-tag)
         if: "!startsWith(github.ref, 'refs/tags/desktop-v')"
