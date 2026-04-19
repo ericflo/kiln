@@ -23,15 +23,15 @@
         box-sizing: border-box;
       }
       h1 { font-size: 22px; margin: 0 0 8px 0; font-weight: 600; }
-      p  { margin: 4px 0; color: #a8aeb8; font-size: 14px; }
-      code { background: #1b1e24; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+      p  { margin: 8px 0; color: #a8aeb8; font-size: 14px; max-width: 560px; }
+      p.hint { color: #6b7280; font-size: 12px; }
     </style>
   </head>
   <body>
     <div class="wrap">
       <h1>Kiln Desktop</h1>
-      <p>Scaffold only. Tray, server supervision, and dashboard coming soon.</p>
-      <p>Build locally with <code>cd desktop &amp;&amp; cargo check</code>.</p>
+      <p>Running in the system tray. Click the Kiln icon in your menu bar or system tray to open the dashboard, change settings, view logs, or quit.</p>
+      <p class="hint">If you do not see the tray icon, check that the app is running and that your OS is showing tray icons.</p>
     </div>
   </body>
 </html>
