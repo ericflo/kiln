@@ -384,6 +384,92 @@
         font-family: inherit;
         user-select: none;
       }
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(4px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+      }
+      .modal-overlay.hidden {
+        display: none !important;
+      }
+      .modal-card {
+        background: #1b1e24;
+        border: 1px solid #2a2f3a;
+        border-radius: 8px;
+        padding: 20px 24px;
+        max-width: 420px;
+        width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+      }
+      .modal-card header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin: 0 0 14px 0;
+      }
+      .modal-card header h2 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+        color: #e6e6e6;
+      }
+      .modal-card header button#shortcuts-close {
+        margin: 0;
+        background: transparent;
+        color: #a8aeb8;
+        border: 0;
+        padding: 0 4px;
+        font-size: 22px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .modal-card header button#shortcuts-close:hover {
+        color: #e6e6e6;
+        background: transparent;
+      }
+      .modal-card dl {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        column-gap: 16px;
+        row-gap: 10px;
+        margin: 0;
+        align-items: center;
+      }
+      .modal-card dt {
+        color: #d8dbe2;
+        font-size: 13px;
+      }
+      .modal-card dd {
+        margin: 0;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+      }
+      .modal-card kbd {
+        display: inline-block;
+        background: #0f1115;
+        border: 1px solid #2a2f3a;
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 11px;
+        color: #e6e6e6;
+        line-height: 1;
+      }
+      .modal-card p.hint {
+        margin: 14px 0 0 0;
+        color: #6c7280;
+        font-size: 11px;
+      }
     </style>
   </head>
   <body>
@@ -445,6 +531,31 @@
         <a class="doc-link" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md"
            target="_blank" rel="noopener noreferrer">Prefer to build from source?</a>
       </p>
+    </div>
+    <div id="shortcuts-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="modal-card">
+        <header>
+          <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
+          <button id="shortcuts-close" aria-label="Close">×</button>
+        </header>
+        <dl>
+          <dt>Start Server</dt>
+          <dd><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></dd>
+          <dt>Stop Server</dt>
+          <dd><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd></dd>
+          <dt>Restart Server</dt>
+          <dd><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></dd>
+          <dt>Copy OpenAI base URL</dt>
+          <dd><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></dd>
+          <dt>Open Logs</dt>
+          <dd><kbd>Ctrl</kbd>+<kbd>L</kbd></dd>
+          <dt>Open Settings</dt>
+          <dd><kbd>Ctrl</kbd>+<kbd>,</kbd></dd>
+          <dt>Show this help</dt>
+          <dd><kbd>?</kbd> or <kbd>Ctrl</kbd>+<kbd>/</kbd></dd>
+        </dl>
+        <p class="hint">Use Cmd in place of Ctrl on macOS. (Windows/Linux builds only today.)</p>
+      </div>
     </div>
     <script>
       const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
@@ -888,16 +999,46 @@
 
       restartBtn.addEventListener("click", restartServer);
 
+      const shortcutsModal = document.getElementById("shortcuts-modal");
+      const shortcutsCloseBtn = document.getElementById("shortcuts-close");
+      function openShortcutsModal() {
+        shortcutsModal.classList.remove("hidden");
+      }
+      function closeShortcutsModal() {
+        shortcutsModal.classList.add("hidden");
+      }
+      shortcutsCloseBtn.addEventListener("click", closeShortcutsModal);
+      shortcutsModal.addEventListener("click", (e) => {
+        if (e.target === shortcutsModal) closeShortcutsModal();
+      });
+
       document.addEventListener("keydown", (e) => {
-        const mod = e.metaKey || e.ctrlKey;
-        if (!mod) return;
         const target = e.target;
-        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        const inInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+        const modalOpen = !shortcutsModal.classList.contains("hidden");
+        if (modalOpen) {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            closeShortcutsModal();
+          }
           return;
         }
+        if (inInput) return;
+        const mod = e.metaKey || e.ctrlKey;
         const shift = e.shiftKey;
         const key = e.key;
         const lower = typeof key === "string" ? key.toLowerCase() : "";
+        if (!mod && (key === "?" || (shift && key === "/"))) {
+          e.preventDefault();
+          openShortcutsModal();
+          return;
+        }
+        if (mod && !shift && key === "/") {
+          e.preventDefault();
+          openShortcutsModal();
+          return;
+        }
+        if (!mod) return;
         if (!shift && lower === "l") {
           e.preventDefault();
           invoke("open_logs").catch((err) => console.error("open_logs failed", err));
