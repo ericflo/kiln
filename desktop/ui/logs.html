@@ -204,6 +204,8 @@
     <header>
       <h1>Kiln server logs</h1>
       <label><input type="checkbox" id="autoscroll" checked /> Auto-scroll</label>
+      <label title="Show stdout lines (Alt+1)"><input type="checkbox" id="show-stdout" checked /> stdout</label>
+      <label title="Show stderr lines (Alt+2)"><input type="checkbox" id="show-stderr" checked /> stderr</label>
       <input type="search" id="filter" placeholder="Filter…" autocomplete="off" spellcheck="false" title="Focus filter (Ctrl/Cmd+F)" />
       <span id="filter-count" class="hidden"></span>
       <button id="copy" type="button" title="Copy all log lines to clipboard">Copy</button>
@@ -228,6 +230,10 @@
           <dd><kbd>Ctrl</kbd>+<kbd>S</kbd></dd>
           <dt>Clear view</dt>
           <dd><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd></dd>
+          <dt>Toggle stdout</dt>
+          <dd><kbd>Alt</kbd>+<kbd>1</kbd></dd>
+          <dt>Toggle stderr</dt>
+          <dd><kbd>Alt</kbd>+<kbd>2</kbd></dd>
           <dt>Clear filter (when focused)</dt>
           <dd><kbd>Esc</kbd></dd>
         </dl>
@@ -245,6 +251,8 @@
       const saveEl = document.getElementById("save");
       const filterEl = document.getElementById("filter");
       const filterCountEl = document.getElementById("filter-count");
+      const showStdoutEl = document.getElementById("show-stdout");
+      const showStderrEl = document.getElementById("show-stderr");
 
       let currentFilter = "";
       let lastLines = [];
@@ -308,11 +316,17 @@
         lastLines = lines;
         const afterBaseline = lines.slice(baseline);
         const filterActive = currentFilter.length > 0;
-        const visible = filterActive
-          ? afterBaseline.filter((line) => line.toLowerCase().includes(currentFilter))
-          : afterBaseline;
+        const stdoutOn = showStdoutEl.checked;
+        const stderrOn = showStderrEl.checked;
+        const streamFilterActive = !stdoutOn || !stderrOn;
+        const visible = afterBaseline.filter((line) => {
+          if (line.startsWith("[stderr] ") && !stderrOn) return false;
+          if (line.startsWith("[stdout] ") && !stdoutOn) return false;
+          if (filterActive && !line.toLowerCase().includes(currentFilter)) return false;
+          return true;
+        });
 
-        if (filterActive) {
+        if (filterActive || streamFilterActive) {
           filterCountEl.textContent = `${visible.length}/${afterBaseline.length}`;
           filterCountEl.classList.remove("hidden");
         } else {
@@ -323,7 +337,7 @@
         if (visible.length === 0) {
           if (lines.length === 0) {
             logEl.textContent = "(no log lines yet)";
-          } else if (filterActive) {
+          } else if (filterActive || streamFilterActive) {
             logEl.textContent = "(no lines match filter)";
           } else {
             logEl.textContent = "(view cleared — new lines will appear here)";
@@ -355,6 +369,9 @@
         currentFilter = filterEl.value.trim().toLowerCase();
         render(lastLines);
       });
+
+      showStdoutEl.addEventListener("change", () => render(lastLines));
+      showStderrEl.addEventListener("change", () => render(lastLines));
 
       async function refresh() {
         if (!invoke) {
@@ -452,6 +469,20 @@
           e.preventDefault();
           openShortcutsModal();
           return;
+        }
+        if (!inInput && e.altKey && !mod && !shift) {
+          if (key === "1") {
+            e.preventDefault();
+            showStdoutEl.checked = !showStdoutEl.checked;
+            render(lastLines);
+            return;
+          }
+          if (key === "2") {
+            e.preventDefault();
+            showStderrEl.checked = !showStderrEl.checked;
+            render(lastLines);
+            return;
+          }
         }
         if (!mod) return;
         if (!shift && lower === "w") {
