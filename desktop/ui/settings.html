@@ -284,12 +284,41 @@
       saveBtn.addEventListener("click", save);
       restartBtn.addEventListener("click", restart);
 
+      function closeWindow() {
+        // Tauri v2: webview windows expose close() via getCurrentWebviewWindow.
+        // Fall back across a couple of namespace shapes since different
+        // tauri versions / withGlobalTauri flags expose different globals.
+        const webview = window.__TAURI__ && window.__TAURI__.webviewWindow;
+        const windowNs = window.__TAURI__ && window.__TAURI__.window;
+        const getter =
+          (webview && typeof webview.getCurrentWebviewWindow === "function" && webview.getCurrentWebviewWindow) ||
+          (windowNs && typeof windowNs.getCurrentWindow === "function" && windowNs.getCurrentWindow) ||
+          null;
+        const cur = getter ? getter() : null;
+        if (cur && typeof cur.close === "function") {
+          cur.close();
+        } else {
+          window.close();
+        }
+      }
+
       document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          const tag = e.target && e.target.tagName;
+          if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") {
+            e.preventDefault();
+            closeWindow();
+            return;
+          }
+        }
         const mod = e.metaKey || e.ctrlKey;
         if (!mod) return;
         const shift = e.shiftKey;
         const lower = typeof e.key === "string" ? e.key.toLowerCase() : "";
-        if (!shift && lower === "s") {
+        if (!shift && lower === "w") {
+          e.preventDefault();
+          closeWindow();
+        } else if (!shift && lower === "s") {
           e.preventDefault();
           if (!saveBtn.disabled) saveBtn.click();
         } else if (!shift && lower === "r") {
