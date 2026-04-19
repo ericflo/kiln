@@ -73,9 +73,17 @@
         position: absolute;
         top: 8px;
         right: 12px;
+        left: 12px;
+        max-width: calc(100vw - 24px);
         display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
         gap: 8px;
         z-index: 10;
+        background: rgba(15, 17, 21, 0.85);
+        backdrop-filter: blur(4px);
+        padding: 6px 8px;
+        border-radius: 8px;
       }
       #toolbar button {
         margin-top: 0;
