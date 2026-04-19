@@ -30,6 +30,11 @@ pub enum ServerState {
 pub struct SupervisorConfig {
     pub binary_path: PathBuf,
     pub args: Vec<String>,
+    /// Environment variables passed to the spawned kiln server. The desktop
+    /// uses these (rather than CLI flags) because kiln's CLI is structured
+    /// around `--config <toml>` and exposes overrides via `KILN_*` env vars,
+    /// not per-setting flags. See `settings::apply_to_supervisor_config`.
+    pub envs: Vec<(String, String)>,
     pub auto_restart: bool,
     pub max_restarts: u32,
     pub restart_backoff_ms: u64,
@@ -46,6 +51,7 @@ impl Default for SupervisorConfig {
         Self {
             binary_path: PathBuf::from("kiln"),
             args: Vec::new(),
+            envs: Vec::new(),
             auto_restart: true,
             max_restarts: 5,
             restart_backoff_ms: 500,
@@ -216,6 +222,7 @@ async fn run_loop(
 
         let spawn_result = Command::new(&config.binary_path)
             .args(&config.args)
+            .envs(config.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn();
@@ -338,6 +345,7 @@ mod tests {
         let config = SupervisorConfig {
             binary_path: PathBuf::from("/bin/sleep"),
             args: vec!["0.1".to_string()],
+            envs: Vec::new(),
             auto_restart: false,
             max_restarts: 0,
             restart_backoff_ms: 100,
@@ -370,6 +378,7 @@ mod tests {
         let config = SupervisorConfig {
             binary_path: PathBuf::from("/bin/sleep"),
             args: vec!["10".to_string()],
+            envs: Vec::new(),
             auto_restart: false,
             max_restarts: 0,
             restart_backoff_ms: 100,
@@ -398,6 +407,7 @@ mod tests {
         let config = SupervisorConfig {
             binary_path: PathBuf::from("/definitely/not/a/binary/kiln-xyz"),
             args: vec![],
+            envs: Vec::new(),
             auto_restart: false,
             max_restarts: 0,
             restart_backoff_ms: 10,

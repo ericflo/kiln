@@ -75,37 +75,47 @@ impl Settings {
     }
 }
 
+/// Translate desktop Settings into the env-var overrides the kiln server
+/// recognizes (see `crates/kiln-server/src/config.rs::apply_env_overrides`).
+/// kiln's CLI surface is `--config <toml>` plus subcommands; per-setting
+/// overrides go through `KILN_*` env vars, not flags. Pre-0.1.5 the desktop
+/// passed CLI flags that the server didn't accept, which made the supervisor
+/// crashloop with "unexpected argument '--host'".
 pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
-    let mut args: Vec<String> = Vec::new();
-    args.push("--host".to_string());
-    args.push(s.host.clone());
-    args.push("--port".to_string());
-    args.push(s.port.to_string());
-    args.push("--inference-fraction".to_string());
-    args.push(format!("{}", s.inference_fraction));
-
-    if s.fp8_kv_cache {
-        args.push("--fp8-kv-cache".to_string());
-    }
-    if s.cuda_graphs {
-        args.push("--cuda-graphs".to_string());
-    }
-    if s.prefix_cache {
-        args.push("--prefix-cache".to_string());
-    }
-    if s.speculative_decoding {
-        args.push("--speculative-decoding".to_string());
-    }
+    let mut envs: Vec<(String, String)> = Vec::new();
+    envs.push(("KILN_HOST".to_string(), s.host.clone()));
+    envs.push(("KILN_PORT".to_string(), s.port.to_string()));
+    envs.push((
+        "KILN_INFERENCE_MEMORY_FRACTION".to_string(),
+        format!("{}", s.inference_fraction),
+    ));
+    // Booleans: always emit so the env value is the source of truth (a
+    // setting toggled off must be able to override a true default).
+    envs.push((
+        "KILN_KV_CACHE_FP8".to_string(),
+        bool_env(s.fp8_kv_cache),
+    ));
+    envs.push((
+        "KILN_CUDA_GRAPHS".to_string(),
+        bool_env(s.cuda_graphs),
+    ));
+    envs.push((
+        "KILN_PREFIX_CACHE_ENABLED".to_string(),
+        bool_env(s.prefix_cache),
+    ));
+    envs.push((
+        "KILN_SPEC_ENABLED".to_string(),
+        bool_env(s.speculative_decoding),
+    ));
     if let Some(dir) = &s.adapter_dir {
-        args.push("--adapter-dir".to_string());
-        args.push(dir.display().to_string());
+        envs.push(("KILN_ADAPTER_DIR".to_string(), dir.display().to_string()));
     }
     if let Some(model) = &s.model_path {
-        args.push("--model".to_string());
-        args.push(model.display().to_string());
+        envs.push(("KILN_MODEL_PATH".to_string(), model.display().to_string()));
     }
 
-    cfg.args = args;
+    cfg.args = Vec::new();
+    cfg.envs = envs;
     cfg.auto_restart = s.auto_restart;
     cfg.host = s.host.clone();
     cfg.port = s.port;
@@ -113,6 +123,10 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
         .kiln_binary
         .clone()
         .unwrap_or_else(|| PathBuf::from("kiln"));
+}
+
+fn bool_env(b: bool) -> String {
+    if b { "1".into() } else { "0".into() }
 }
 
 #[cfg(test)]
@@ -135,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_builds_args_with_expected_flags() {
+    fn apply_populates_env_vars_for_kiln_server() {
         let mut s = Settings::default();
         s.port = 9000;
         s.host = "0.0.0.0".to_string();
@@ -147,24 +161,25 @@ mod tests {
         let mut cfg = SupervisorConfig::default();
         apply_to_supervisor_config(&s, &mut cfg);
 
-        // Flags should contain the structured args in order.
-        assert!(cfg.args.windows(2).any(|w| w == ["--host", "0.0.0.0"]));
-        assert!(cfg.args.windows(2).any(|w| w == ["--port", "9000"]));
-        // Host/port are also propagated as structured fields for the poller.
+        // No CLI flags — kiln's CLI doesn't accept per-setting overrides.
+        assert!(cfg.args.is_empty(), "args should be empty: {:?}", cfg.args);
+
+        // Settings flow through KILN_* env vars (see kiln-server config.rs).
+        let env_get = |k: &str| -> Option<&str> {
+            cfg.envs.iter().find(|(name, _)| name == k).map(|(_, v)| v.as_str())
+        };
+        assert_eq!(env_get("KILN_HOST"), Some("0.0.0.0"));
+        assert_eq!(env_get("KILN_PORT"), Some("9000"));
+        assert_eq!(env_get("KILN_KV_CACHE_FP8"), Some("1"));
+        assert_eq!(env_get("KILN_CUDA_GRAPHS"), Some("1")); // default true
+        assert_eq!(env_get("KILN_PREFIX_CACHE_ENABLED"), Some("1")); // default true
+        assert_eq!(env_get("KILN_SPEC_ENABLED"), Some("0")); // default false
+        assert_eq!(env_get("KILN_MODEL_PATH"), Some("/models/foo"));
+        assert_eq!(env_get("KILN_ADAPTER_DIR"), Some("/adapters"));
+
+        // Host/port also propagated as structured fields for the poller.
         assert_eq!(cfg.host, "0.0.0.0");
         assert_eq!(cfg.port, 9000);
-        assert!(cfg.args.iter().any(|a| a == "--fp8-kv-cache"));
-        assert!(cfg.args.iter().any(|a| a == "--cuda-graphs"));
-        assert!(cfg.args.iter().any(|a| a == "--prefix-cache"));
-        assert!(!cfg.args.iter().any(|a| a == "--speculative-decoding"));
-        assert!(cfg
-            .args
-            .windows(2)
-            .any(|w| w == ["--model", "/models/foo"]));
-        assert!(cfg
-            .args
-            .windows(2)
-            .any(|w| w == ["--adapter-dir", "/adapters"]));
         assert!(!cfg.auto_restart);
     }
 
