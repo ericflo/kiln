@@ -57,6 +57,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_recurrent_step_fused_norm(&self) -> bool {
+        false
+    }
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         false
     }
@@ -132,6 +136,37 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _beta: &Tensor,
         _g: &Tensor,
         _state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Fused GDN decode step with qk_norm absorbed on the input side and
+    /// gated-RMSNorm absorbed on the output side. Single-token only.
+    ///
+    /// `q_raw`, `k_raw`: `[B, H, dk]` bf16 — pre-L2 Q/K (post conv1d + silu).
+    /// `v`: `[B, H, dv]` bf16. `beta`, `g`: `[B, H]` bf16.
+    /// `z`: `[B, H, dv]` bf16 — output gate (pre-silu).
+    /// `gamma`: `[dv]` bf16 — RMSNorm learnable scale.
+    /// `state`: `[B, H, dk, dv]` bf16, mutated in place.
+    ///
+    /// Scalars: `q_scale = 1/sqrt(dk)`, `l2_eps` for qk_norm, `rms_eps` for
+    /// the trailing RMSNorm. Returns `out: [B, H, dv]` bf16 already
+    /// multiplied by `gamma * silu(z)`, so callers skip Steps 5, 7, 8 of
+    /// `gated_deltanet_forward`.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_recurrent_step_fused_norm(
+        &self,
+        _q_raw: &Tensor,
+        _k_raw: &Tensor,
+        _v: &Tensor,
+        _beta: &Tensor,
+        _g: &Tensor,
+        _z: &Tensor,
+        _gamma: &Tensor,
+        _state: &mut Tensor,
+        _q_scale: f32,
+        _l2_eps: f32,
+        _rms_eps: f32,
     ) -> Result<Option<Tensor>> {
         Ok(None)
     }

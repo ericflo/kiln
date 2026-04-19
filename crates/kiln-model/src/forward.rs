@@ -1397,6 +1397,19 @@ pub fn gated_deltanet_forward(
         }
     };
 
+    // Optional: stash raw Q/K (pre-qk_norm) for the fused decode kernel that
+    // absorbs qk_norm + recurrent + gated_norm in a single CUDA block. Only
+    // needed at bf16 seq_len==1 decode with the kernel's env gate on.
+    // `Tensor::clone` is a cheap Arc bump — no device copy.
+    let fused_recurrent_norm_enabled = seq_len == 1
+        && input_dtype == DType::BF16
+        && backend.supports_gdn_recurrent_step_fused_norm();
+    let (q_raw_saved, k_raw_saved) = if fused_recurrent_norm_enabled {
+        (Some(q.clone()), Some(k.clone()))
+    } else {
+        (None, None)
+    };
+
     // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
     //
     // Two paths: the candle-op reference path (default) and a fused CUDA
@@ -1479,7 +1492,8 @@ pub fn gated_deltanet_forward(
         }
     };
 
-    // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---
+    // --- Steps 7 + 8: recurrence + gated_norm ---
+    //
     // The recurrent state is stored in F32 externally (across layers/steps)
     // for accumulator stability, but we run the recurrence in bf16 to reclaim
     // the ~66% of prefill GPU time previously spent in bmul_f32 /
@@ -1489,64 +1503,112 @@ pub fn gated_deltanet_forward(
     //
     // PR #72 introduced the bf16 hot path. PR #74 replaced the read/write
     // broadcast_mul+sum pairs with batched matmuls but left the O(T)
-    // sequential chain. This PR (Phase 6) unrolls the per-chunk recurrence
-    // analytically: within each C = GDN_CHUNK_SIZE chunk we build a
-    // triangular decay matrix and solve for the per-token updates in a small
-    // number of heavy matmuls, cutting the number of GPU kernel launches
-    // from O(T) to O(T / C) per layer.
+    // sequential chain. Phase 6 (PR #80) unrolls the per-chunk recurrence
+    // analytically inside a vendored CUDA kernel.
     //
-    // The within-chunk forward substitution still walks token-by-token, but
-    // each step only does a [1, t] @ [t, dv] matmul over the already-built
-    // prefix — orders of magnitude cheaper than the full [dk, dv] state
-    // update that was previously done per token.
+    // Fused decode path (KILN_ENABLE_FUSED_GDN_RECURRENT_NORM=1, seq_len==1
+    // bf16): one CUDA block per (batch, head) absorbs qk_norm (L2+scale on
+    // Q/K), the single-token recurrent step, and the trailing gated_norm
+    // (RMSNorm + silu-gated weight mul) — eliminating the HBM round-trips
+    // between those three regions. Declines (returns None) at prefill, on
+    // non-bf16, outside the kernel envelope, or when the env gate is off;
+    // those cases fall through to the parity-oracle chunkwise path.
     let state_external_dtype = recurrent_state.dtype();
     if state_external_dtype != input_dtype {
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
-    // Cast v back to input_dtype so the recurrence stays in bf16. After the
-    // causal conv1d + SiLU step above, mixed_qkv (and hence v) is F32;
-    // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
-    // hits a dtype mismatch on bf16 GPU runs, because the state-derived
-    // tensor inherits the (now bf16) state dtype.
-    let (q, k, v, beta, g) = {
-        kiln_nvtx::range!(c"kiln/gdn/recur_prep");
-        let v = v.to_dtype(input_dtype)?;
-
-        // Transpose to [B, nv, T, dim] for per-head processing.
-        let q = q.transpose(1, 2)?; // [B, nv, T, dk]
-        let k = k.transpose(1, 2)?; // [B, nv, T, dk]
-        let v = v.transpose(1, 2)?; // [B, nv, T, dv]
-        let beta = beta.transpose(1, 2)?; // [B, nv, T]
-        let g = g.transpose(1, 2)?; // [B, nv, T]
-        (q, k, v, beta, g)
+    let fused_attn_out: Option<Tensor> = if fused_recurrent_norm_enabled {
+        // Squeeze out the length-1 seq dim and materialise contiguous bf16
+        // views for the kernel. `v` is F32 coming out of conv1d+silu; cast
+        // to bf16 here so the fused kernel's bf16-only envelope is met.
+        let q_raw = q_raw_saved
+            .as_ref()
+            .expect("q_raw_saved must exist when fused_recurrent_norm_enabled")
+            .squeeze(1)?
+            .contiguous()?;
+        let k_raw = k_raw_saved
+            .as_ref()
+            .expect("k_raw_saved must exist when fused_recurrent_norm_enabled")
+            .squeeze(1)?
+            .contiguous()?;
+        let v_bf = v.to_dtype(input_dtype)?;
+        let v_s = v_bf.squeeze(1)?.contiguous()?;
+        let z_s = z.squeeze(1)?.contiguous()?;
+        let beta_s = beta.squeeze(1)?.contiguous()?;
+        let g_s = g.squeeze(1)?.contiguous()?;
+        let q_scale = 1.0 / (dk as f64).sqrt();
+        kiln_nvtx::range!(c"kiln/gdn/fused_recurrent_norm");
+        backend.gdn_recurrent_step_fused_norm(
+            &q_raw,
+            &k_raw,
+            &v_s,
+            &beta_s,
+            &g_s,
+            &z_s,
+            &weights.norm,
+            recurrent_state,
+            q_scale as f32,
+            1e-6,
+            config.rms_norm_eps as f32,
+        )?
+    } else {
+        None
     };
 
-    let attn_out = gdn_chunkwise_recurrence(
-        backend,
-        &q,
-        &k,
-        &v,
-        &beta,
-        &g,
-        recurrent_state,
-        GDN_CHUNK_SIZE,
-    )?; // [B, nv, T, dv]
+    let attn_out = if let Some(fused) = fused_attn_out {
+        // Restore state to its original (typically F32) dtype so the
+        // caller's external invariant holds across layer and step calls.
+        if state_external_dtype != input_dtype {
+            *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
+        }
+        // Fused kernel returns [B, nv, dv] bf16 already multiplied by
+        // gamma * silu(z). Reshape to [B, T=1, v_dim].
+        fused.reshape((batch, seq_len, v_dim))?
+    } else {
+        // Cast v back to input_dtype so the recurrence stays in bf16. After
+        // the causal conv1d + SiLU step above, mixed_qkv (and hence v) is
+        // F32; without this cast the subtract
+        // `(v - exp(G) * (K @ S_entry))` below hits a dtype mismatch on
+        // bf16 GPU runs, because the state-derived tensor inherits the
+        // (now bf16) state dtype.
+        let (q, k, v, beta, g) = {
+            kiln_nvtx::range!(c"kiln/gdn/recur_prep");
+            let v = v.to_dtype(input_dtype)?;
 
-    // Restore state to its original dtype so the caller's F32 invariant holds
-    // across layer calls and across prefill/decode steps.
-    if state_external_dtype != input_dtype {
-        *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
-    }
+            // Transpose to [B, nv, T, dim] for per-head processing.
+            let q = q.transpose(1, 2)?; // [B, nv, T, dk]
+            let k = k.transpose(1, 2)?; // [B, nv, T, dk]
+            let v = v.transpose(1, 2)?; // [B, nv, T, dv]
+            let beta = beta.transpose(1, 2)?; // [B, nv, T]
+            let g = g.transpose(1, 2)?; // [B, nv, T]
+            (q, k, v, beta, g)
+        };
 
-    // Transpose to [B, T, nv, dv]
-    let attn_out = {
-        kiln_nvtx::range!(c"kiln/gdn/post_transpose");
-        attn_out.transpose(1, 2)?
-    };
+        let attn_out = gdn_chunkwise_recurrence(
+            backend,
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            recurrent_state,
+            GDN_CHUNK_SIZE,
+        )?; // [B, nv, T, dv]
 
-    // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
-    let attn_out = {
+        // Restore state to its original dtype so the caller's F32 invariant
+        // holds across layer calls and across prefill/decode steps.
+        if state_external_dtype != input_dtype {
+            *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
+        }
+
+        // Transpose to [B, T, nv, dv]
+        let attn_out = {
+            kiln_nvtx::range!(c"kiln/gdn/post_transpose");
+            attn_out.transpose(1, 2)?
+        };
+
+        // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
         let attn_out = gated_rms_norm(&attn_out, &z, &weights.norm, config.rms_norm_eps)?;
         // Reshape to [B, T, v_dim] and cast back to input dtype

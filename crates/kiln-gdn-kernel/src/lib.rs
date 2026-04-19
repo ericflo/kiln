@@ -91,6 +91,26 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    #[allow(clippy::too_many_arguments)]
+    fn kiln_gdn_recurrent_forward_fused_norm(
+        q_raw: *const core::ffi::c_void,
+        k_raw: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        beta: *const core::ffi::c_void,
+        g: *const core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        gamma: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch_heads: i32,
+        dk: i32,
+        dv: i32,
+        q_scale: f32,
+        l2_eps: f32,
+        rms_eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_gdn_chunk_prep(
         g: *const core::ffi::c_void,
         v: *const core::ffi::c_void,
@@ -411,6 +431,295 @@ pub fn gdn_recurrent_forward(
             if status != 0 {
                 candle_core::bail!(
                     "kiln_gdn_recurrent_forward failed with status {status}"
+                );
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Cheap shape / dtype check for [`gdn_recurrent_forward_fused_norm`].
+///
+/// Returns `true` when the caller-provided shapes/dtypes are inside the
+/// fused kernel's envelope. The fused kernel inherits the non-fused
+/// kernel's envelope (bf16, `dk <= 256`, `dv <= 1024`) plus:
+///
+///   - `z.shape() == v.shape()` — one gate vector per (batch, head)
+///   - `gamma.shape() == [dv]` — learnable RMSNorm scale, shared
+pub fn gdn_recurrent_forward_fused_norm_supports(
+    q_raw: &Tensor,
+    k_raw: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    z: &Tensor,
+    gamma: &Tensor,
+    state: &Tensor,
+) -> bool {
+    if q_raw.dtype() != DType::BF16
+        || k_raw.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+        || g.dtype() != DType::BF16
+        || z.dtype() != DType::BF16
+        || gamma.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((b, h, dk)) = q_raw.dims3() else { return false };
+    let Ok((b_k, h_k, dk_k)) = k_raw.dims3() else { return false };
+    if (b_k, h_k, dk_k) != (b, h, dk) {
+        return false;
+    }
+    let Ok((b_v, h_v, dv)) = v.dims3() else { return false };
+    if (b_v, h_v) != (b, h) {
+        return false;
+    }
+    let Ok((b_z, h_z, dv_z)) = z.dims3() else { return false };
+    if (b_z, h_z, dv_z) != (b, h, dv) {
+        return false;
+    }
+    let Ok((dv_g,)) = gamma.dims1().map(|d| (d,)) else { return false };
+    if dv_g != dv {
+        return false;
+    }
+    let Ok((b_s, h_s, dk_s, dv_s)) = state.dims4() else { return false };
+    if (b_s, h_s, dk_s, dv_s) != (b, h, dk, dv) {
+        return false;
+    }
+    let Ok((b_b, h_b)) = beta.dims2() else { return false };
+    if (b_b, h_b) != (b, h) {
+        return false;
+    }
+    let Ok((b_g, h_g)) = g.dims2() else { return false };
+    if (b_g, h_g) != (b, h) {
+        return false;
+    }
+    dk <= 256 && dv <= 1024
+}
+
+/// Run the fused GDN recurrent-step-with-norms kernel.
+///
+/// Inputs (all bf16, all CUDA; not necessarily contiguous — contiguous
+/// copies are materialised internally):
+///   - `q_raw` : `[B, H, dk]` — pre-L2-norm Q (post conv1d + silu)
+///   - `k_raw` : `[B, H, dk]` — pre-L2-norm K
+///   - `v`     : `[B, H, dv]`
+///   - `beta`  : `[B, H]`
+///   - `g`     : `[B, H]` — gate (kernel applies `exp`)
+///   - `z`     : `[B, H, dv]` — output gate (pre-silu)
+///   - `gamma` : `[dv]` — RMSNorm learnable scale (shared across B, H)
+///   - `state` : `[B, H, dk, dv]` — read-modify-write in place
+///
+/// Scalars:
+///   - `q_scale` — multiplier on Q after L2 norm (typically `1/sqrt(dk)`)
+///   - `l2_eps`  — eps inside sqrt for L2 norm (typically `1e-6`)
+///   - `rms_eps` — eps inside sqrt for RMSNorm (typically `1e-6`)
+///
+/// Returns a freshly allocated bf16 `out` tensor with shape `[B, H, dv]`
+/// already multiplied by `gamma * silu(z)`. Semantics match
+/// `kiln-model::forward::gated_deltanet_forward` when the input to qk_norm,
+/// the recurrent step, and gated_norm is this exact (q_raw, k_raw, v,
+/// beta, g, z, gamma) at `seq_len == 1`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_forward_fused_norm(
+    q_raw: &Tensor,
+    k_raw: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    z: &Tensor,
+    gamma: &Tensor,
+    state: &mut Tensor,
+    q_scale: f32,
+    l2_eps: f32,
+    rms_eps: f32,
+) -> Result<Tensor> {
+    let device = q_raw.device();
+
+    let (b, h, dk) = q_raw.dims3()?;
+    let (b_k, h_k, dk_k) = k_raw.dims3()?;
+    if (b_k, h_k, dk_k) != (b, h, dk) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: k_raw shape [{b_k}, {h_k}, {dk_k}] mismatch with q_raw [{b}, {h}, {dk}]"
+        );
+    }
+
+    let (b_v, h_v, dv) = v.dims3()?;
+    if (b_v, h_v) != (b, h) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: v shape [{b_v}, {h_v}, {dv}] mismatch with q_raw [{b}, {h}, *]"
+        );
+    }
+
+    let (b_b, h_b) = beta.dims2()?;
+    if (b_b, h_b) != (b, h) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: beta shape [{b_b}, {h_b}] mismatch with q_raw [{b}, {h}, *]"
+        );
+    }
+
+    let (b_g, h_g) = g.dims2()?;
+    if (b_g, h_g) != (b, h) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: g shape [{b_g}, {h_g}] mismatch with q_raw [{b}, {h}, *]"
+        );
+    }
+
+    let (b_z, h_z, dv_z) = z.dims3()?;
+    if (b_z, h_z, dv_z) != (b, h, dv) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: z shape [{b_z}, {h_z}, {dv_z}] mismatch with v [{b}, {h}, {dv}]"
+        );
+    }
+
+    let gamma_dims = gamma.dims();
+    if gamma_dims.len() != 1 || gamma_dims[0] != dv {
+        candle_core::bail!(
+            "kiln-gdn-kernel: gamma must have shape [{dv}], got {:?}",
+            gamma_dims
+        );
+    }
+
+    let (b_s, h_s, dk_s, dv_s) = state.dims4()?;
+    if (b_s, h_s, dk_s, dv_s) != (b, h, dk, dv) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: state shape [{b_s}, {h_s}, {dk_s}, {dv_s}] mismatch with [{b}, {h}, {dk}, {dv}]"
+        );
+    }
+
+    if q_raw.dtype() != DType::BF16
+        || k_raw.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+        || g.dtype() != DType::BF16
+        || z.dtype() != DType::BF16
+        || gamma.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+    {
+        candle_core::bail!(
+            "kiln-gdn-kernel: all inputs to fused_norm must be bf16 (got q_raw={:?}, k_raw={:?}, v={:?}, beta={:?}, g={:?}, z={:?}, gamma={:?}, state={:?})",
+            q_raw.dtype(), k_raw.dtype(), v.dtype(), beta.dtype(),
+            g.dtype(), z.dtype(), gamma.dtype(), state.dtype()
+        );
+    }
+
+    if dk > 256 {
+        candle_core::bail!("kiln-gdn-kernel: dk must be <= 256 (got {dk})");
+    }
+    if dv > 1024 {
+        candle_core::bail!("kiln-gdn-kernel: dv must be <= 1024 (got {dv})");
+    }
+
+    let q_raw = q_raw.contiguous()?;
+    let k_raw = k_raw.contiguous()?;
+    let v = v.contiguous()?;
+    let beta = beta.contiguous()?;
+    let g = g.contiguous()?;
+    let z = z.contiguous()?;
+    let gamma = gamma.contiguous()?;
+    if !state.is_contiguous() {
+        *state = state.contiguous()?;
+    }
+
+    let out = Tensor::zeros((b, h, dv), DType::BF16, device)?;
+
+    {
+        let (q_storage, q_layout) = q_raw.storage_and_layout();
+        let (k_storage, k_layout) = k_raw.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (g_storage, g_layout) = g.storage_and_layout();
+        let (z_storage, z_layout) = z.storage_and_layout();
+        let (gamma_storage, gamma_layout) = gamma.storage_and_layout();
+        let (s_storage, s_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_cuda = match &*q_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: q_raw must be on CUDA"),
+        };
+        let k_cuda = match &*k_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: k_raw must be on CUDA"),
+        };
+        let v_cuda = match &*v_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: v must be on CUDA"),
+        };
+        let beta_cuda = match &*beta_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: beta must be on CUDA"),
+        };
+        let g_cuda = match &*g_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: g must be on CUDA"),
+        };
+        let z_cuda = match &*z_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: z must be on CUDA"),
+        };
+        let gamma_cuda = match &*gamma_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: gamma must be on CUDA"),
+        };
+        let s_cuda = match &*s_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: state must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: out must be on CUDA"),
+        };
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let q_slice = q_cuda.as_cuda_slice::<bf16>()?.slice(q_layout.start_offset()..);
+        let k_slice = k_cuda.as_cuda_slice::<bf16>()?.slice(k_layout.start_offset()..);
+        let v_slice = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
+        let beta_slice = beta_cuda.as_cuda_slice::<bf16>()?.slice(beta_layout.start_offset()..);
+        let g_slice = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
+        let z_slice = z_cuda.as_cuda_slice::<bf16>()?.slice(z_layout.start_offset()..);
+        let gamma_slice = gamma_cuda.as_cuda_slice::<bf16>()?.slice(gamma_layout.start_offset()..);
+        let s_slice = s_cuda.as_cuda_slice::<bf16>()?.slice(s_layout.start_offset()..);
+        let out_slice = out_cuda.as_cuda_slice::<bf16>()?.slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+            let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+            let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+            let (beta_ptr, _g4) = beta_slice.device_ptr(&stream);
+            let (g_ptr, _g5) = g_slice.device_ptr(&stream);
+            let (z_ptr, _g6) = z_slice.device_ptr(&stream);
+            let (gamma_ptr, _g7) = gamma_slice.device_ptr(&stream);
+            let (s_ptr, _g8) = s_slice.device_ptr(&stream);
+            let (out_ptr, _g9) = out_slice.device_ptr(&stream);
+
+            let status = kiln_gdn_recurrent_forward_fused_norm(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                beta_ptr as *const _,
+                g_ptr as *const _,
+                z_ptr as *const _,
+                gamma_ptr as *const _,
+                s_ptr as *mut _,
+                out_ptr as *mut _,
+                (b * h) as i32,
+                dk as i32,
+                dv as i32,
+                q_scale,
+                l2_eps,
+                rms_eps,
+                raw_stream,
+            );
+
+            if status != 0 {
+                candle_core::bail!(
+                    "kiln_gdn_recurrent_forward_fused_norm failed with status {status}"
                 );
             }
         }

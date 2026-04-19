@@ -50,6 +50,45 @@ kiln_gdn_recurrent_status_t kiln_gdn_recurrent_forward(
     void *stream
 );
 
+// Fused variant: absorbs qk_norm (L2-norm+scale on Q, L2-norm on K) and
+// gated_norm (RMSNorm + silu-gated weight mul on attn_out) into the same
+// per-(batch,head) block as the recurrent step, keeping normalized Q/K and
+// the pre-norm attn_out in on-chip memory. Eliminates the ~5 bf16↔F32 HBM
+// round-trips that the candle / standalone-kernel path pays at decode.
+//
+// Extra pointer arguments (all bf16, all CUDA, all contiguous):
+//   q_raw    : [B*H, dk]   — pre-L2 Q (replaces q of the non-fused entry)
+//   k_raw    : [B*H, dk]   — pre-L2 K
+//   z        : [B*H, dv]   — output gate (pre silu)
+//   gamma    : [dv]        — RMSNorm learnable scale (shared across B*H)
+//
+// Extra scalar arguments:
+//   q_scale  : f32 — applied to Q after L2 norm (typically 1/sqrt(dk))
+//   l2_eps   : f32 — eps inside sqrt for L2 norm (typically 1e-6)
+//   rms_eps  : f32 — eps inside sqrt for RMSNorm (typically 1e-6)
+//
+// The `out` tensor receives the final gated-rms-normed value in bf16;
+// callers do not need to run qk_norm or gated_norm separately. `state` is
+// updated in place with the post-recurrence F32-stored-as-bf16 state.
+kiln_gdn_recurrent_status_t kiln_gdn_recurrent_forward_fused_norm(
+    const void *q_raw,
+    const void *k_raw,
+    const void *v,
+    const void *beta,
+    const void *g,
+    const void *z,
+    const void *gamma,
+    void *state,
+    void *out,
+    int batch_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float l2_eps,
+    float rms_eps,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -21,6 +21,12 @@ pub struct CudaBackend {
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
+    /// Opt-in for the fused GDN decode kernel that absorbs qk_norm +
+    /// recurrent + gated_norm. When off, forward.rs runs the three stages
+    /// independently (the parity oracle path). Gated via
+    /// `KILN_ENABLE_FUSED_GDN_RECURRENT_NORM=1` so parity tests and cold
+    /// perf runs stay on the reference path.
+    fused_gdn_recurrent_norm_enabled: bool,
 }
 
 impl CudaBackend {
@@ -30,11 +36,14 @@ impl CudaBackend {
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
+        let fused_gdn_recurrent_norm_enabled = gdn_enabled
+            && std::env::var("KILN_ENABLE_FUSED_GDN_RECURRENT_NORM").is_ok();
         Self {
             device,
             gdn_enabled,
             gdn_gates_enabled,
             fused_conv1d_enabled,
+            fused_gdn_recurrent_norm_enabled,
         }
     }
 }
@@ -62,6 +71,10 @@ impl BackendRuntime for CudaBackend {
 
     fn supports_gdn_recurrent_step(&self) -> bool {
         self.gdn_enabled
+    }
+
+    fn supports_gdn_recurrent_step_fused_norm(&self) -> bool {
+        self.fused_gdn_recurrent_norm_enabled
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
@@ -141,6 +154,35 @@ impl BackendRuntime for CudaBackend {
             return Ok(None);
         }
         let out = kiln_gdn_kernel::gdn_recurrent_forward(q, k, v, beta, g, state)?;
+        Ok(Some(out))
+    }
+
+    fn gdn_recurrent_step_fused_norm(
+        &self,
+        q_raw: &Tensor,
+        k_raw: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        z: &Tensor,
+        gamma: &Tensor,
+        state: &mut Tensor,
+        q_scale: f32,
+        l2_eps: f32,
+        rms_eps: f32,
+    ) -> Result<Option<Tensor>> {
+        if !self.fused_gdn_recurrent_norm_enabled {
+            return Ok(None);
+        }
+        if !kiln_gdn_kernel::gdn_recurrent_forward_fused_norm_supports(
+            q_raw, k_raw, v, beta, g, z, gamma, state,
+        ) {
+            return Ok(None);
+        }
+        let out = kiln_gdn_kernel::gdn_recurrent_forward_fused_norm(
+            q_raw, k_raw, v, beta, g, z, gamma, state, q_scale, l2_eps, rms_eps,
+        )
+        .context("gdn_recurrent_forward_fused_norm kernel failed")?;
         Ok(Some(out))
     }
 
