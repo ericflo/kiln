@@ -257,7 +257,7 @@
           <dt>Show this help</dt>
           <dd><kbd>?</kbd> or <kbd>Ctrl</kbd>+<kbd>/</kbd></dd>
           <dt>Close window</dt>
-          <dd><kbd>Esc</kbd> or <kbd>Ctrl</kbd>+<kbd>W</kbd></dd>
+          <dd><kbd>Esc</kbd> or <kbd>Ctrl</kbd>+<kbd>W</kbd> (prompts if unsaved changes)</dd>
           <dt>Save settings</dt>
           <dd><kbd>Ctrl</kbd>+<kbd>S</kbd></dd>
           <dt>Reload settings</dt>
@@ -418,6 +418,9 @@
       formContainer.addEventListener("change", updateDirtyIndicator);
 
       function closeWindow() {
+        if (isDirty() && !window.confirm("You have unsaved changes. Discard them and close?")) {
+          return;
+        }
         // Tauri v2: webview windows expose close() via getCurrentWebviewWindow.
         // Fall back across a couple of namespace shapes since different
         // tauri versions / withGlobalTauri flags expose different globals.
