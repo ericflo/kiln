@@ -411,7 +411,7 @@
       </span>
       <span class="toolbar-divider" aria-hidden="true"></span>
       <button id="copy-url" title="Copy the OpenAI-compatible base URL for this server (Ctrl/Cmd+Shift+C)">Copy OpenAI base URL</button>
-      <button id="stop-server" class="hidden" title="Stop the running kiln server">Stop Server</button>
+      <button id="stop-server" class="hidden" title="Stop the running kiln server (Ctrl/Cmd+Shift+.)">Stop Server</button>
       <button id="restart-server" class="hidden" title="Restart the kiln server (Ctrl/Cmd+Shift+R)">Restart Server</button>
       <button id="open-logs" title="Open the log viewer window (Ctrl/Cmd+L)">View Logs</button>
       <button id="open-settings" title="Open the settings window (Ctrl/Cmd+,)">Settings</button>
@@ -422,7 +422,7 @@
       <h1 id="status-title">Connecting to Kiln server…</h1>
       <p id="status-detail">Looking up the server URL from your settings.</p>
       <div id="status-actions">
-        <button id="start-server" class="hidden">Start Server</button>
+        <button id="start-server" class="hidden" title="Start the kiln server (Ctrl/Cmd+Shift+S)">Start Server</button>
         <button id="retry" class="hidden">Retry</button>
         <button id="open-settings-btn" class="hidden">Open Settings</button>
       </div>
@@ -911,6 +911,16 @@
           e.preventDefault();
           if (RESTART_ACTIVE_STATES.includes(currentKind)) {
             restartServer();
+          }
+        } else if (shift && lower === "s") {
+          e.preventDefault();
+          if (!startBtn.classList.contains("hidden")) {
+            startBtn.click();
+          }
+        } else if (shift && (lower === "." || key === ".")) {
+          e.preventDefault();
+          if (STOP_ACTIVE_STATES.includes(currentKind)) {
+            stopServer();
           }
         }
       });
