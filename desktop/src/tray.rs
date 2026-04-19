@@ -355,6 +355,22 @@ fn spawn_state_watcher(
                             .show();
                     }
                 }
+                if kind == "running" && prev_kind != Some("running") {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Kiln server ready")
+                        .body(ready_notification_body(port))
+                        .show();
+                }
+                if kind == "stopped" && should_notify_stopped(prev_kind) {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Kiln server stopped")
+                        .body("The local kiln server is no longer running.")
+                        .show();
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -405,6 +421,14 @@ pub fn restart_enabled(state: &ServerState) -> bool {
         state,
         ServerState::Running | ServerState::TrainingActive | ServerState::Error(_)
     )
+}
+
+pub fn ready_notification_body(port: u16) -> String {
+    format!("OpenAI base URL: http://localhost:{}/v1", port)
+}
+
+pub fn should_notify_stopped(prev_kind: Option<&str>) -> bool {
+    matches!(prev_kind, Some("running") | Some("training"))
 }
 
 #[cfg(test)]
@@ -571,6 +595,27 @@ mod tests {
             kiln_ui_url(&ServerState::Starting, "127.0.0.1", 8080),
             Some("http://127.0.0.1:8080/ui".to_string())
         );
+    }
+
+    #[test]
+    fn ready_notification_body_contains_openai_base_url() {
+        let body = ready_notification_body(9000);
+        assert!(body.contains("http://localhost:9000/v1"), "body was {}", body);
+        assert!(body.contains("OpenAI base URL"), "body was {}", body);
+        assert_eq!(
+            ready_notification_body(8080),
+            "OpenAI base URL: http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn should_notify_stopped_only_when_previously_up() {
+        assert!(should_notify_stopped(Some("running")));
+        assert!(should_notify_stopped(Some("training")));
+        assert!(!should_notify_stopped(None));
+        assert!(!should_notify_stopped(Some("starting")));
+        assert!(!should_notify_stopped(Some("error")));
+        assert!(!should_notify_stopped(Some("stopped")));
     }
 
     #[test]
