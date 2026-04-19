@@ -118,7 +118,12 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     });
                 }
                 ITEM_QUIT => {
-                    app_handle.exit(0);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = supervisor.stop().await {
+                            eprintln!("[tray] quit: supervisor.stop failed (continuing): {}", e);
+                        }
+                        app_handle.exit(0);
+                    });
                 }
                 ITEM_DASHBOARD => {
                     if let Err(e) = open_dashboard_window(&app_handle) {
