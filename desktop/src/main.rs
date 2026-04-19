@@ -111,6 +111,11 @@ async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, Strin
     Ok(state.read().await.clone())
 }
 
+#[tauri::command]
+async fn default_settings() -> Result<Settings, String> {
+    Ok(Settings::default())
+}
+
 #[derive(serde::Serialize)]
 struct BinaryStatus {
     installed: bool,
@@ -578,6 +583,7 @@ fn main() {
             copy_logs,
             save_logs_to_file,
             get_settings,
+            default_settings,
             set_settings,
             get_kiln_url,
             get_openai_base_url,
