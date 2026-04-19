@@ -261,6 +261,23 @@ fn get_diagnostic_info() -> DiagnosticInfo {
     }
 }
 
+#[tauri::command]
+fn path_info(path: String) -> serde_json::Value {
+    if path.trim().is_empty() {
+        return serde_json::json!({
+            "exists": false,
+            "is_file": false,
+            "is_dir": false,
+        });
+    }
+    let p = std::path::Path::new(&path);
+    serde_json::json!({
+        "exists": p.exists(),
+        "is_file": p.is_file(),
+        "is_dir": p.is_dir(),
+    })
+}
+
 #[derive(serde::Serialize)]
 struct UpdateCheckResult {
     available: bool,
@@ -598,7 +615,8 @@ fn main() {
             install_update,
             get_binary_status,
             download_kiln_server,
-            cancel_kiln_download
+            cancel_kiln_download,
+            path_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");

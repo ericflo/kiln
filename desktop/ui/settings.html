@@ -40,6 +40,16 @@
         font-weight: normal;
         line-height: 1.35;
       }
+      label.row > span.path-warning {
+        display: none;
+        flex-basis: 100%;
+        font-size: 12px;
+        color: #f0b080;
+        margin: 2px 0 0 0;
+        font-weight: normal;
+        line-height: 1.35;
+      }
+      label.row > span.path-warning.visible { display: block; }
       label.row > input[type="text"],
       label.row > input[type="number"] {
         background: #181b21;
@@ -196,6 +206,7 @@
             <button type="button" class="browse" id="pick_kiln_binary">Browse</button>
           </span>
           <span class="hint">Leave blank to use kiln on PATH. Otherwise pick the kiln executable.</span>
+          <span class="path-warning" id="warn_kiln_binary"></span>
         </label>
         <label class="row"><span class="name">Model path</span>
           <span class="path-row">
@@ -203,6 +214,7 @@
             <button type="button" class="browse" id="pick_model_path">Browse</button>
           </span>
           <span class="hint">Directory containing the Qwen3.5-4B weights.</span>
+          <span class="path-warning" id="warn_model_path"></span>
         </label>
         <label class="row"><span class="name">Host</span>
           <input type="text" id="host" />
@@ -218,6 +230,7 @@
             <button type="button" class="browse" id="pick_adapter_dir">Browse</button>
           </span>
           <span class="hint">Where LoRA adapters are saved and loaded from.</span>
+          <span class="path-warning" id="warn_adapter_dir"></span>
         </label>
       </fieldset>
 
@@ -351,10 +364,63 @@
           if (typeof result === "string" && result.length) {
             document.getElementById(inputId).value = result;
             updateDirtyIndicator();
+            validatePath(inputId);
           }
         } catch (e) {
           setStatus("Pick failed: " + e, true);
         }
+      }
+
+      function warnEl(inputId) {
+        return document.getElementById("warn_" + inputId);
+      }
+
+      function showWarn(inputId, msg) {
+        const el = warnEl(inputId);
+        if (!el) return;
+        el.textContent = msg;
+        el.classList.add("visible");
+      }
+
+      function hideWarn(inputId) {
+        const el = warnEl(inputId);
+        if (!el) return;
+        el.textContent = "";
+        el.classList.remove("visible");
+      }
+
+      async function validatePath(inputId) {
+        const value = (document.getElementById(inputId).value || "").trim();
+        if (!value) { hideWarn(inputId); return; }
+        let info;
+        try {
+          info = await invoke("path_info", { path: value });
+        } catch (e) {
+          hideWarn(inputId);
+          return;
+        }
+        if (!info || !info.exists) {
+          showWarn(inputId, "Path does not exist");
+          return;
+        }
+        if (inputId === "kiln_binary") {
+          if (!info.is_file) { showWarn(inputId, "Not a file"); return; }
+        } else if (inputId === "model_path") {
+          if (!info.is_file && !info.is_dir) { showWarn(inputId, "Not a file or directory"); return; }
+        } else if (inputId === "adapter_dir") {
+          if (!info.is_dir) { showWarn(inputId, "Not a directory"); return; }
+        }
+        hideWarn(inputId);
+      }
+
+      const pathFields = ["kiln_binary", "model_path", "adapter_dir"];
+      const pathDebounceTimers = {};
+      function schedulePathValidation(inputId) {
+        clearTimeout(pathDebounceTimers[inputId]);
+        pathDebounceTimers[inputId] = setTimeout(() => validatePath(inputId), 300);
+      }
+      function validateAllPaths() {
+        for (const id of pathFields) validatePath(id);
       }
 
       function isDirty() {
@@ -386,6 +452,7 @@
           lastSavedSnapshot = JSON.stringify(readForm());
           updateDirtyIndicator();
           hideRestart();
+          validateAllPaths();
           setStatus("Loaded.");
         } catch (e) {
           setStatus("Failed to load: " + e, true);
@@ -439,6 +506,7 @@
           const d = await invoke("default_settings");
           writeForm(d);
           updateDirtyIndicator();
+          validateAllPaths();
           setStatus("Defaults loaded. Click Save to persist.");
         } catch (e) {
           setStatus("Restore failed: " + e, true);
@@ -536,6 +604,12 @@
           if (!reloadBtn.disabled) reloadBtn.click();
         }
       });
+      for (const id of pathFields) {
+        const el = document.getElementById(id);
+        if (el) {
+          el.addEventListener("input", () => schedulePathValidation(id));
+        }
+      }
       document.getElementById("pick_kiln_binary").addEventListener("click", () =>
         pickPath("kiln_binary", { multiple: false, directory: false, title: "Select kiln binary" })
       );
