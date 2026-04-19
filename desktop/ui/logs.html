@@ -99,6 +99,15 @@
         color: #6c7280;
         font-style: italic;
       }
+      #log .line {
+        white-space: pre-wrap;
+      }
+      #log .line-stderr {
+        color: #f0a04a;
+      }
+      #log .line-stdout {
+        color: inherit;
+      }
       .modal-overlay {
         position: fixed;
         inset: 0;
@@ -323,7 +332,20 @@
           return;
         }
         logEl.classList.remove("empty");
-        logEl.textContent = visible.join("\n");
+        logEl.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        for (const line of visible) {
+          const div = document.createElement("div");
+          div.className = "line";
+          if (line.startsWith("[stderr] ")) {
+            div.classList.add("line-stderr");
+          } else if (line.startsWith("[stdout] ")) {
+            div.classList.add("line-stdout");
+          }
+          div.textContent = line;
+          frag.appendChild(div);
+        }
+        logEl.appendChild(frag);
         if (autoscrollEl.checked) {
           logEl.scrollTop = logEl.scrollHeight;
         }
