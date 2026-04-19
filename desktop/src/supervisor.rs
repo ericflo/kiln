@@ -19,6 +19,11 @@ pub enum ServerState {
     Running,
     TrainingActive,
     Error(String),
+    /// The configured `kiln` binary is not installed at the expected
+    /// location (and was not found on `PATH`). Distinct from `Error` so
+    /// the desktop can show an onboarding flow instead of a crash
+    /// notification on first run.
+    NoBinary(String),
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +199,21 @@ async fn run_loop(
 ) {
     let mut restarts: u32 = 0;
     loop {
+        // Pre-flight: treat a missing binary as the `NoBinary` onboarding
+        // state, not an Error. This both suppresses the "server crashed"
+        // OS notification on fresh installs and lets the dashboard show a
+        // download prompt instead of a raw spawn error.
+        if crate::installer::resolve_binary(&config.binary_path).is_none() {
+            let msg = config.binary_path.display().to_string();
+            push_log(
+                &logs,
+                format!("[supervisor] kiln binary not found: {}", msg),
+            )
+            .await;
+            *state.lock().await = ServerState::NoBinary(msg);
+            return;
+        }
+
         let spawn_result = Command::new(&config.binary_path)
             .args(&config.args)
             .stdout(Stdio::piped())
@@ -203,6 +223,20 @@ async fn run_loop(
         let mut child = match spawn_result {
             Ok(c) => c,
             Err(e) => {
+                // Treat the specific "NotFound" kind as NoBinary too, in
+                // case the binary disappeared between our pre-flight and
+                // the spawn (race), or the configured path isn't resolvable
+                // by our pre-flight heuristic.
+                if matches!(e.kind(), std::io::ErrorKind::NotFound) {
+                    let msg = config.binary_path.display().to_string();
+                    push_log(
+                        &logs,
+                        format!("[supervisor] kiln binary not found at spawn: {}", msg),
+                    )
+                    .await;
+                    *state.lock().await = ServerState::NoBinary(msg);
+                    return;
+                }
                 let msg = format!(
                     "failed to spawn {}: {}",
                     config.binary_path.display(),
@@ -360,7 +394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_state_when_binary_missing() {
+    async fn no_binary_state_when_binary_missing() {
         let config = SupervisorConfig {
             binary_path: PathBuf::from("/definitely/not/a/binary/kiln-xyz"),
             args: vec![],
@@ -376,7 +410,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
         let s = sup.state().await;
-        assert!(matches!(s, ServerState::Error(_)), "expected Error, got {:?}", s);
+        assert!(
+            matches!(s, ServerState::NoBinary(_)),
+            "expected NoBinary, got {:?}",
+            s
+        );
     }
 
     #[test]

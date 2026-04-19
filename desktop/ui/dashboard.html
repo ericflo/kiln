@@ -69,6 +69,86 @@
         gap: 8px;
         justify-content: center;
       }
+      #install {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+        box-sizing: border-box;
+        text-align: center;
+        background: #0f1115;
+      }
+      #install h1 {
+        font-size: 20px;
+        margin: 0 0 8px 0;
+        font-weight: 600;
+      }
+      #install p {
+        margin: 4px 0 12px 0;
+        color: #a8aeb8;
+        font-size: 14px;
+        max-width: 560px;
+        line-height: 1.5;
+      }
+      #install code {
+        background: #1b1e24;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
+      }
+      #install-progress-wrap {
+        width: 420px;
+        max-width: 80vw;
+        height: 10px;
+        background: #1b1e24;
+        border: 1px solid #2a2f3a;
+        border-radius: 5px;
+        overflow: hidden;
+        margin: 14px 0 6px 0;
+      }
+      #install-progress-bar {
+        height: 100%;
+        width: 0;
+        background: #2a6df4;
+        transition: width 120ms ease;
+      }
+      #install-progress-label {
+        color: #a8aeb8;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        min-height: 16px;
+      }
+      #install-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        margin-top: 18px;
+      }
+      #install-actions button {
+        margin-top: 0;
+      }
+      #install-actions button.secondary {
+        background: #232733;
+        color: #e6e6e6;
+      }
+      #install-actions button.secondary:hover { background: #2c313f; }
+      #install a.doc-link {
+        color: #5f9bff;
+        font-size: 12px;
+        text-decoration: none;
+      }
+      #install a.doc-link:hover { text-decoration: underline; }
+      #install.phase-ready #install-progress-wrap,
+      #install.phase-ready #install-progress-label { visibility: hidden; }
+      #install.phase-active #install-download-btn,
+      #install.phase-active #install-browse-btn { display: none; }
+      #install.phase-ready #install-cancel-btn,
+      #install.phase-done #install-cancel-btn,
+      #install.phase-failed #install-cancel-btn { display: none; }
       #toolbar {
         position: absolute;
         top: 8px;
@@ -347,6 +427,25 @@
         <button id="open-settings-btn" class="hidden">Open Settings</button>
       </div>
     </div>
+    <div id="install" class="phase-ready hidden">
+      <h1 id="install-title">Kiln server isn't installed yet</h1>
+      <p id="install-detail">
+        Kiln Desktop ships as a thin wrapper. Download the signed
+        <code>kiln</code> server binary to finish setup, or point to an
+        existing local build.
+      </p>
+      <div id="install-progress-wrap"><div id="install-progress-bar"></div></div>
+      <div id="install-progress-label">&nbsp;</div>
+      <div id="install-actions">
+        <button id="install-download-btn">Download Kiln Server</button>
+        <button id="install-cancel-btn" class="secondary">Cancel</button>
+        <button id="install-browse-btn" class="secondary">Use a local build…</button>
+      </div>
+      <p id="install-footnote">
+        <a class="doc-link" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md"
+           target="_blank" rel="noopener noreferrer">Prefer to build from source?</a>
+      </p>
+    </div>
     <script>
       const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
         || (window.__TAURI__ && window.__TAURI__.invoke);
@@ -360,10 +459,22 @@
       const settingsNeededBtn = document.getElementById("open-settings-btn");
       const START_LABEL = "Start Server";
 
+      const installPane = document.getElementById("install");
+      const installTitle = document.getElementById("install-title");
+      const installDetail = document.getElementById("install-detail");
+      const installProgressBar = document.getElementById("install-progress-bar");
+      const installProgressLabel = document.getElementById("install-progress-label");
+      const installDownloadBtn = document.getElementById("install-download-btn");
+      const installCancelBtn = document.getElementById("install-cancel-btn");
+      const installBrowseBtn = document.getElementById("install-browse-btn");
+      let installInProgress = false;
+      let installPlatformSupported = false;
+
       function showStatus(titleText, detailText, showRetry, showStart) {
         frame.classList.add("hidden");
         frame.src = "about:blank";
         status.classList.remove("hidden");
+        installPane.classList.add("hidden");
         title.textContent = titleText;
         detail.textContent = detailText;
         retry.classList.toggle("hidden", !showRetry);
@@ -377,6 +488,7 @@
         frame.classList.add("hidden");
         frame.src = "about:blank";
         status.classList.remove("hidden");
+        installPane.classList.add("hidden");
         title.textContent = "Kiln is not configured yet";
         detail.textContent =
           "Set your model path in Settings to get started. Kiln needs to know which model to load.";
@@ -391,6 +503,161 @@
         frame.src = url;
         frame.classList.remove("hidden");
         status.classList.add("hidden");
+        installPane.classList.add("hidden");
+      }
+
+      function hideInstallPane() {
+        installPane.classList.add("hidden");
+      }
+
+      function setInstallPhase(phase) {
+        installPane.classList.remove(
+          "phase-ready",
+          "phase-active",
+          "phase-done",
+          "phase-failed"
+        );
+        installPane.classList.add(`phase-${phase}`);
+      }
+
+      function formatBytes(n) {
+        if (!Number.isFinite(n) || n < 0) return "";
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+        return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+      }
+
+      async function showInstallNeeded(bstatus) {
+        frame.classList.add("hidden");
+        frame.src = "about:blank";
+        status.classList.add("hidden");
+        installPane.classList.remove("hidden");
+        installPlatformSupported = !!(bstatus && bstatus.platform_supported);
+        if (installPlatformSupported) {
+          installTitle.textContent = "Kiln server isn't installed yet";
+          installDetail.innerHTML =
+            "Kiln Desktop ships as a thin wrapper. Download the signed " +
+            "<code>kiln</code> server binary to finish setup, or point to an " +
+            "existing local build.";
+          installDownloadBtn.style.display = "";
+          installDownloadBtn.disabled = false;
+        } else {
+          installTitle.textContent = "This platform needs a manual build";
+          installDetail.innerHTML =
+            "No prebuilt <code>kiln</code> server is published for this " +
+            "platform yet. Build from source and point to the binary below, " +
+            "or see QUICKSTART for setup instructions.";
+          installDownloadBtn.style.display = "none";
+        }
+        setInstallPhase("ready");
+        installProgressBar.style.width = "0%";
+        installProgressLabel.textContent = "\u00a0";
+        installInProgress = false;
+      }
+
+      async function triggerInstall() {
+        if (!invoke || installInProgress) return;
+        installInProgress = true;
+        setInstallPhase("active");
+        installProgressBar.style.width = "0%";
+        installProgressLabel.textContent = "Contacting GitHub…";
+        try {
+          await invoke("download_kiln_server");
+        } catch (err) {
+          installInProgress = false;
+          setInstallPhase("failed");
+          installProgressLabel.textContent = `Install failed: ${err}`;
+          installDownloadBtn.disabled = false;
+        }
+      }
+
+      async function cancelInstall() {
+        if (!invoke) return;
+        try {
+          await invoke("cancel_kiln_download");
+          installProgressLabel.textContent = "Cancelling…";
+        } catch (err) {
+          console.error("cancel_kiln_download failed", err);
+        }
+      }
+
+      async function browseForBinary() {
+        // Surface the existing Settings window where kiln_binary is
+        // already a pickable field — the simplest way to point at a
+        // local build without duplicating the file-picker wiring here.
+        try { await invoke("open_settings"); } catch (e) { console.error(e); }
+      }
+
+      installDownloadBtn.addEventListener("click", triggerInstall);
+      installCancelBtn.addEventListener("click", cancelInstall);
+      installBrowseBtn.addEventListener("click", browseForBinary);
+
+      const tauriEventApi = window.__TAURI__ && window.__TAURI__.event;
+      if (tauriEventApi && typeof tauriEventApi.listen === "function") {
+        tauriEventApi.listen("kiln-install-progress", (evt) => {
+          const p = evt && evt.payload;
+          if (!p) return;
+          if (p.phase === "fetching_manifest") {
+            installProgressLabel.textContent = "Finding latest release…";
+            installProgressBar.style.width = "2%";
+          } else if (p.phase === "downloading") {
+            const total = typeof p.total === "number" ? p.total : null;
+            const received = typeof p.received === "number" ? p.received : 0;
+            if (total && total > 0) {
+              const pct = Math.max(0, Math.min(100, (received / total) * 100));
+              installProgressBar.style.width = `${pct.toFixed(1)}%`;
+              installProgressLabel.textContent = `${formatBytes(received)} / ${formatBytes(total)} (${pct.toFixed(0)}%)`;
+            } else {
+              installProgressLabel.textContent = `${formatBytes(received)} downloaded…`;
+            }
+          } else if (p.phase === "verifying") {
+            installProgressBar.style.width = "96%";
+            installProgressLabel.textContent = "Verifying SHA256…";
+          } else if (p.phase === "extracting") {
+            installProgressBar.style.width = "98%";
+            installProgressLabel.textContent = "Extracting archive…";
+          } else if (p.phase === "finalizing") {
+            installProgressBar.style.width = "99%";
+            installProgressLabel.textContent = "Installing binary…";
+          }
+        }).catch((err) => console.error("listen kiln-install-progress:", err));
+
+        tauriEventApi.listen("kiln-install-done", async (evt) => {
+          installInProgress = false;
+          setInstallPhase("done");
+          installProgressBar.style.width = "100%";
+          const path = evt && evt.payload && evt.payload.path;
+          const version = evt && evt.payload && evt.payload.version;
+          installProgressLabel.textContent = version
+            ? `Installed kiln ${version}.`
+            : "Installed.";
+          // Auto-start the server so the user transitions straight into
+          // the running dashboard without another click. If model_path is
+          // unset the poll loop will route to showSetupNeeded next tick.
+          try { await invoke("start_server"); } catch (_) { /* ignored — poll loop will show error */ }
+          // Give the UI a beat to update, then re-run the load flow.
+          setTimeout(() => { load(); }, 300);
+        }).catch((err) => console.error("listen kiln-install-done:", err));
+
+        tauriEventApi.listen("kiln-install-failed", (evt) => {
+          installInProgress = false;
+          setInstallPhase("failed");
+          installDownloadBtn.disabled = false;
+          const payload = (evt && evt.payload) || {};
+          const msg = payload.error || "Install failed.";
+          if (payload.cancelled) {
+            installProgressLabel.textContent = "Cancelled.";
+            // Snap back to a clean ready state so the user can retry.
+            setTimeout(() => {
+              setInstallPhase("ready");
+              installProgressBar.style.width = "0%";
+              installProgressLabel.textContent = "\u00a0";
+            }, 1000);
+          } else {
+            installProgressLabel.textContent = `Install failed: ${msg}`;
+          }
+        }).catch((err) => console.error("listen kiln-install-failed:", err));
       }
 
       async function load() {
@@ -403,6 +670,18 @@
             false
           );
           return;
+        }
+        // Binary presence takes priority over model-path setup: without a
+        // `kiln` binary we can't start the server even if the model is set.
+        try {
+          const bstatus = await invoke("get_binary_status");
+          if (bstatus && !bstatus.installed) {
+            await showInstallNeeded(bstatus);
+            return;
+          }
+        } catch (_) {
+          // Fall through if the check fails — the server_state poller will
+          // eventually surface whatever the real problem is.
         }
         try {
           const s = await invoke("get_settings");
@@ -652,6 +931,7 @@
         Running: { cls: "state-running", label: "Running" },
         TrainingActive: { cls: "state-training", label: "Training" },
         Error: { cls: "state-error", label: "Error" },
+        NoBinary: { cls: "state-stopped", label: "Not installed" },
         Unknown: { cls: "state-unknown", label: "Unknown" },
       };
       const UPTIME_STATES = ["Running", "TrainingActive"];
@@ -992,7 +1272,16 @@
             : `Kiln server state: ${info.label}`;
           const wasFramed = FRAMED_STATES.includes(lastFramedKind);
           const isFramed = FRAMED_STATES.includes(kind);
-          if (wasFramed && !isFramed) {
+          if (kind === "NoBinary" && !installInProgress) {
+            // Route straight to the install pane (don't let the generic
+            // "stopped" messaging flash first).
+            try {
+              const bstatus = await invoke("get_binary_status");
+              await showInstallNeeded(bstatus);
+            } catch (_) {
+              await showInstallNeeded({ platform_supported: true });
+            }
+          } else if (wasFramed && !isFramed) {
             if (kind === "Error") {
               showStatus(
                 "Kiln server stopped unexpectedly.",

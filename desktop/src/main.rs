@@ -1,15 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod installer;
 mod poller;
 mod settings;
 mod supervisor;
 mod tray;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use settings::{apply_to_supervisor_config, Settings};
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::RwLock;
@@ -38,6 +40,19 @@ fn reconcile_autolaunch(app: &AppHandle, desired: bool) {
 }
 
 type SettingsState = Arc<RwLock<Settings>>;
+
+/// Shared cancel/busy flags for the install pipeline.
+///
+/// `in_progress` guards against parallel downloads from impatient
+/// clicking; `cancel` is flipped by `cancel_kiln_download` and polled
+/// inside the download loop.
+#[derive(Default)]
+struct InstallerState {
+    in_progress: AtomicBool,
+    cancel: Arc<AtomicBool>,
+}
+
+type InstallerHandle = Arc<InstallerState>;
 
 #[tauri::command]
 async fn start_server(sup: State<'_, Arc<Supervisor>>) -> Result<(), String> {
@@ -94,6 +109,120 @@ async fn save_logs_to_file(
 #[tauri::command]
 async fn get_settings(state: State<'_, SettingsState>) -> Result<Settings, String> {
     Ok(state.read().await.clone())
+}
+
+#[derive(serde::Serialize)]
+struct BinaryStatus {
+    installed: bool,
+    resolved_path: Option<String>,
+    configured_path: String,
+    platform_supported: bool,
+    install_target: Option<String>,
+    install_dir: Option<String>,
+}
+
+/// Report whether the `kiln` binary is reachable, whether this platform
+/// has a prebuilt release the desktop can download, and where an
+/// auto-install would place the binary. Used by the dashboard onboarding
+/// screen to decide between "Download" and "Build from source" paths.
+#[tauri::command]
+async fn get_binary_status(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+) -> Result<BinaryStatus, String> {
+    let configured = {
+        let s = state.read().await;
+        s.kiln_binary
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("kiln"))
+    };
+    let resolved = installer::resolve_binary(&configured);
+    let install_dir = installer::install_dir(&app).ok().map(|p| p.display().to_string());
+    Ok(BinaryStatus {
+        installed: resolved.is_some(),
+        resolved_path: resolved.map(|p| p.display().to_string()),
+        configured_path: configured.display().to_string(),
+        platform_supported: installer::supports_auto_install(),
+        install_target: installer::current_target().map(|s| s.to_string()),
+        install_dir,
+    })
+}
+
+/// Download, verify, and install the latest prebuilt `kiln` server binary
+/// for this platform. Emits progress events at `kiln-install-progress` and
+/// a terminal `kiln-install-done` / `kiln-install-failed` event when the
+/// pipeline finishes.
+#[tauri::command]
+async fn download_kiln_server(
+    app: AppHandle,
+    settings_state: State<'_, SettingsState>,
+    sup: State<'_, Arc<Supervisor>>,
+    inst: State<'_, InstallerHandle>,
+) -> Result<(), String> {
+    // Reject overlapping installs rather than racing two downloads into
+    // the same file. The frontend's "Download" button is disabled while
+    // `in_progress` is true, but belt-and-suspenders: we also guard here.
+    if inst.in_progress.swap(true, Ordering::SeqCst) {
+        return Err("an install is already in progress".into());
+    }
+    inst.cancel.store(false, Ordering::SeqCst);
+
+    let app_for_task = app.clone();
+    let settings_state = (*settings_state).clone();
+    let supervisor = (*sup).clone();
+    let inst_for_task = (*inst).clone();
+
+    tauri::async_runtime::spawn(async move {
+        let result = installer::install_latest_server(
+            app_for_task.clone(),
+            Arc::clone(&inst_for_task.cancel),
+        )
+        .await;
+        match result {
+            Ok((path, version)) => {
+                let cfg_update = {
+                    let mut s = settings_state.write().await;
+                    s.kiln_binary = Some(path.clone());
+                    if let Err(e) = s.save(&app_for_task) {
+                        eprintln!("[install] settings.save failed: {}", e);
+                    }
+                    let mut cfg = SupervisorConfig::default();
+                    apply_to_supervisor_config(&s, &mut cfg);
+                    cfg
+                };
+                supervisor.update_config(cfg_update).await;
+                let _ = app_for_task.emit(
+                    installer::INSTALL_DONE_EVENT,
+                    installer::InstallDone {
+                        path: path.display().to_string(),
+                        version,
+                    },
+                );
+            }
+            Err(err) => {
+                let cancelled = inst_for_task.cancel.load(Ordering::SeqCst);
+                let _ = app_for_task.emit(
+                    installer::INSTALL_FAILED_EVENT,
+                    installer::InstallFailed {
+                        error: err,
+                        cancelled,
+                    },
+                );
+            }
+        }
+        inst_for_task.in_progress.store(false, Ordering::SeqCst);
+    });
+
+    Ok(())
+}
+
+/// Signal the currently-running install to abort. The download loop polls
+/// the cancel flag after every chunk; cancellation surfaces as an error
+/// event with `cancelled: true`.
+#[tauri::command]
+async fn cancel_kiln_download(inst: State<'_, InstallerHandle>) -> Result<(), String> {
+    inst.cancel.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -192,7 +321,7 @@ async fn get_kiln_url(
 ) -> Result<String, String> {
     let server_state = sup.state().await;
     match server_state {
-        ServerState::Stopped | ServerState::Error(_) => Ok(String::new()),
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => Ok(String::new()),
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             let s = state.read().await;
             Ok(format!("http://{}:{}/ui", s.host, s.port))
@@ -234,7 +363,7 @@ async fn get_openai_base_url(
 ) -> Result<String, String> {
     let server_state = sup.state().await;
     match server_state {
-        ServerState::Stopped | ServerState::Error(_) => Ok(String::new()),
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => Ok(String::new()),
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             let s = state.read().await;
             Ok(openai_base_url(&s.host, s.port))
@@ -259,7 +388,7 @@ async fn get_active_adapter(
 ) -> Result<ActiveAdapterInfo, String> {
     let server_state = sup.state().await;
     let url = match server_state {
-        ServerState::Stopped | ServerState::Error(_) => {
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => {
             return Ok(ActiveAdapterInfo {
                 active: None,
                 available_count: 0,
@@ -326,7 +455,7 @@ async fn get_training_status(
 ) -> Result<TrainingStatusInfo, String> {
     let server_state = sup.state().await;
     let url = match server_state {
-        ServerState::Stopped | ServerState::Error(_) => {
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => {
             return Ok(TrainingStatusInfo::default());
         }
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
@@ -424,6 +553,7 @@ fn main() {
 
             app.manage(Arc::clone(&supervisor));
             app.manage(Arc::clone(&settings_state));
+            app.manage(Arc::new(InstallerState::default()) as InstallerHandle);
 
             tray::build_tray(app.handle(), Arc::clone(&supervisor))?;
 
@@ -459,7 +589,10 @@ fn main() {
             get_app_version,
             get_diagnostic_info,
             check_for_updates,
-            install_update
+            install_update,
+            get_binary_status,
+            download_kiln_server,
+            cancel_kiln_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running kiln-desktop");

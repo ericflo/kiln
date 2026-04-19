@@ -42,7 +42,11 @@ fn state_icon_bytes(state: &ServerState) -> &'static [u8] {
         ServerState::Starting => ICON_STARTING,
         ServerState::Running => ICON_RUNNING,
         ServerState::TrainingActive => ICON_TRAINING,
+        // NoBinary renders the same as Stopped (neutral gray dot) rather
+        // than Error — it's not a crash, just an uninitialized first-run
+        // state that the dashboard onboarding flow will resolve.
         ServerState::Error(_) => ICON_ERROR,
+        ServerState::NoBinary(_) => ICON_STOPPED,
     }
 }
 
@@ -223,7 +227,7 @@ fn open_dashboard_window(app: &AppHandle) -> tauri::Result<()> {
 /// runtime so it can be unit-tested directly.
 pub(crate) fn kiln_ui_url(state: &ServerState, host: &str, port: u16) -> Option<String> {
     match state {
-        ServerState::Stopped | ServerState::Error(_) => None,
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => None,
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             Some(format!("http://{}:{}/ui", host, port))
         }
@@ -396,6 +400,7 @@ fn state_kind(state: &ServerState) -> &'static str {
         ServerState::Running => "running",
         ServerState::TrainingActive => "training",
         ServerState::Error(_) => "error",
+        ServerState::NoBinary(_) => "no_binary",
     }
 }
 
@@ -406,6 +411,7 @@ pub fn state_label(state: &ServerState) -> String {
         ServerState::Running => "Running".to_string(),
         ServerState::TrainingActive => "Training".to_string(),
         ServerState::Error(msg) => format!("Error: {}", msg),
+        ServerState::NoBinary(_) => "Not installed".to_string(),
     }
 }
 
@@ -457,6 +463,10 @@ mod tests {
             state_label(&ServerState::Error("boom".into())),
             "Error: boom"
         );
+        assert_eq!(
+            state_label(&ServerState::NoBinary("/path/to/kiln".into())),
+            "Not installed"
+        );
     }
 
     #[test]
@@ -473,6 +483,7 @@ mod tests {
             state_kind(&ServerState::Running),
             state_kind(&ServerState::TrainingActive),
             state_kind(&ServerState::Error("x".into())),
+            state_kind(&ServerState::NoBinary("x".into())),
         ];
         let mut sorted = kinds.to_vec();
         sorted.sort_unstable();
