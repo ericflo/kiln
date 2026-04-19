@@ -112,6 +112,22 @@ fn get_app_version() -> String {
 }
 
 #[derive(serde::Serialize)]
+struct DiagnosticInfo {
+    version: String,
+    os: String,
+    arch: String,
+}
+
+#[tauri::command]
+fn get_diagnostic_info() -> DiagnosticInfo {
+    DiagnosticInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+    }
+}
+
+#[derive(serde::Serialize)]
 struct UpdateCheckResult {
     available: bool,
     version: Option<String>,
@@ -441,6 +457,7 @@ fn main() {
             open_settings,
             open_logs,
             get_app_version,
+            get_diagnostic_info,
             check_for_updates,
             install_update
         ])
