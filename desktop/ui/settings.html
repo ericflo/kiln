@@ -25,11 +25,21 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        flex-wrap: wrap;
         gap: 12px;
         padding: 6px 0;
         font-size: 13px;
       }
       label.row > span.name { color: #cfd3da; }
+      label.row > span.hint {
+        display: block;
+        flex-basis: 100%;
+        font-size: 12px;
+        color: #6c7280;
+        margin: 2px 0 0 0;
+        font-weight: normal;
+        line-height: 1.35;
+      }
       label.row > input[type="text"],
       label.row > input[type="number"] {
         background: #181b21;
@@ -185,24 +195,29 @@
             <input type="text" id="kiln_binary" placeholder="(use PATH)" />
             <button type="button" class="browse" id="pick_kiln_binary">Browse</button>
           </span>
+          <span class="hint">Leave blank to use kiln on PATH. Otherwise pick the kiln executable.</span>
         </label>
         <label class="row"><span class="name">Model path</span>
           <span class="path-row">
             <input type="text" id="model_path" placeholder="/path/to/model" />
             <button type="button" class="browse" id="pick_model_path">Browse</button>
           </span>
+          <span class="hint">Directory containing the Qwen3.5-4B weights.</span>
         </label>
         <label class="row"><span class="name">Host</span>
           <input type="text" id="host" />
+          <span class="hint">IP address to bind on. 127.0.0.1 for local only, 0.0.0.0 for LAN.</span>
         </label>
         <label class="row"><span class="name">Port</span>
           <input type="number" class="small" id="port" min="1" max="65535" />
+          <span class="hint">TCP port for the OpenAI-compatible API.</span>
         </label>
         <label class="row"><span class="name">Adapter directory</span>
           <span class="path-row">
             <input type="text" id="adapter_dir" placeholder="/path/to/adapters" />
             <button type="button" class="browse" id="pick_adapter_dir">Browse</button>
           </span>
+          <span class="hint">Where LoRA adapters are saved and loaded from.</span>
         </label>
       </fieldset>
 
@@ -210,18 +225,23 @@
         <legend>Memory &amp; performance</legend>
         <label class="row"><span class="name">Inference fraction (0..1)</span>
           <input type="number" class="small" id="inference_fraction" min="0" max="1" step="0.05" />
+          <span class="hint">Fraction of free VRAM reserved for inference. Rest is available for training.</span>
         </label>
         <label class="row"><span class="name">FP8 KV cache</span>
           <input type="checkbox" id="fp8_kv_cache" />
+          <span class="hint">Halves KV cache VRAM with minor quality impact. Recommended on.</span>
         </label>
         <label class="row"><span class="name">CUDA graphs</span>
           <input type="checkbox" id="cuda_graphs" />
+          <span class="hint">Replays fused GPU ops for faster decode. Recommended on.</span>
         </label>
         <label class="row"><span class="name">Prefix cache</span>
           <input type="checkbox" id="prefix_cache" />
+          <span class="hint">Reuses computation for repeated prompt prefixes. Recommended on.</span>
         </label>
         <label class="row"><span class="name">Speculative decoding</span>
           <input type="checkbox" id="speculative_decoding" />
+          <span class="hint">Uses a draft model to accelerate decoding. Experimental.</span>
         </label>
       </fieldset>
 
@@ -229,12 +249,15 @@
         <legend>Startup</legend>
         <label class="row"><span class="name">Auto-start kiln on app launch</span>
           <input type="checkbox" id="auto_start" />
+          <span class="hint">Starts the kiln server automatically when this app opens.</span>
         </label>
         <label class="row"><span class="name">Auto-restart on crash</span>
           <input type="checkbox" id="auto_restart" />
+          <span class="hint">Relaunches the kiln server with backoff if it exits unexpectedly.</span>
         </label>
         <label class="row"><span class="name">Launch at login</span>
           <input type="checkbox" id="launch_at_login" />
+          <span class="hint">Opens Kiln Desktop automatically when you log in to your OS.</span>
         </label>
       </fieldset>
 
