@@ -263,6 +263,7 @@
 
       <div class="actions">
         <button class="secondary" id="reload" title="Reload (Cmd/Ctrl+R)">Reload</button>
+        <button class="secondary" id="restore-defaults" title="Reset all fields to defaults">Restore defaults</button>
         <button class="secondary" id="restart" hidden>Restart now</button>
         <button id="save" title="Save (Cmd/Ctrl+S)">Save</button>
       </div>
@@ -430,10 +431,26 @@
         }
       }
 
+      async function restoreDefaults() {
+        if (!window.confirm("Reset all settings to defaults? You'll need to click Save to persist.")) {
+          return;
+        }
+        try {
+          const d = await invoke("default_settings");
+          writeForm(d);
+          updateDirtyIndicator();
+          setStatus("Defaults loaded. Click Save to persist.");
+        } catch (e) {
+          setStatus("Restore failed: " + e, true);
+        }
+      }
+
       const reloadBtn = document.getElementById("reload");
       const saveBtn = document.getElementById("save");
+      const restoreBtn = document.getElementById("restore-defaults");
       reloadBtn.addEventListener("click", load);
       saveBtn.addEventListener("click", save);
+      restoreBtn.addEventListener("click", restoreDefaults);
       restartBtn.addEventListener("click", restart);
 
       const formContainer = document.querySelector(".wrap");
