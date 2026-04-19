@@ -1398,16 +1398,49 @@ pub fn gated_deltanet_forward(
     };
 
     // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
-    // Normalize in F32 for numerical stability (sqrt/div), then cast back to
-    // the input dtype so the recurrent loop below runs in bf16 (see Step 7).
+    //
+    // Two paths: a fused CUDA kernel
+    // (`kiln_rmsnorm_kernel::fused_l2_qk_norm`) that collapses the
+    // l2-normalize(Q) + scale(Q) + l2-normalize(K) + dtype-cast chain
+    // (~11 candle launches on tiny per-row tensors at decode shape) into a
+    // single launch, and the candle-op reference path that runs whenever the
+    // kernel is unavailable (CPU, non-bf16, out-of-envelope) or disabled
+    // via `KILN_DISABLE_FUSED_L2_QK_NORM=1`. Both produce bf16 outputs in
+    // `input_dtype`; only the kernel path skips the F32 round-trip through
+    // HBM. The candle path is the parity oracle exercised by
+    // `kiln-rmsnorm-kernel`'s `parity_l2_qk_norm_*` tests.
     let (q, k) = {
         kiln_nvtx::range!(c"kiln/gdn/qk_norm");
-        let q = l2_normalize(&q)?; // F32
-        let k = l2_normalize(&k)?; // F32
         let scale = 1.0 / (dk as f64).sqrt();
-        let q = (q * scale)?.to_dtype(input_dtype)?;
-        let k = k.to_dtype(input_dtype)?;
-        (q, k)
+
+        #[cfg(feature = "cuda")]
+        {
+            let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
+            if !disabled
+                && input_dtype == DType::BF16
+                && kiln_rmsnorm_kernel::supports_l2_qk_norm(&q, &k)
+            {
+                let (q_out, k_out) =
+                    kiln_rmsnorm_kernel::fused_l2_qk_norm(&q, &k, scale as f32, 1e-6)
+                        .context("fused_l2_qk_norm kernel failed")?;
+                (q_out, k_out)
+            } else {
+                let q = l2_normalize(&q)?; // F32
+                let k = l2_normalize(&k)?; // F32
+                let q = (q * scale)?.to_dtype(input_dtype)?;
+                let k = k.to_dtype(input_dtype)?;
+                (q, k)
+            }
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            let q = l2_normalize(&q)?; // F32
+            let k = l2_normalize(&k)?; // F32
+            let q = (q * scale)?.to_dtype(input_dtype)?;
+            let k = k.to_dtype(input_dtype)?;
+            (q, k)
+        }
     };
 
     // --- Step 6: Compute gates ---
