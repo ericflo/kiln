@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod hf_download;
 mod installer;
 mod poller;
 mod settings;
@@ -227,6 +228,46 @@ async fn download_kiln_server(
 #[tauri::command]
 async fn cancel_kiln_download(inst: State<'_, InstallerHandle>) -> Result<(), String> {
     inst.cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Kick off a HuggingFace model download into
+/// `app_data_dir()/models/<sanitized_repo>/`. Progress is streamed via
+/// the `hf-download-progress` event; terminal success / failure arrive as
+/// `hf-download-done` / `hf-download-error`. The returned `Result` only
+/// indicates whether the background task was spawned; the caller should
+/// wait on events for actual completion.
+#[tauri::command]
+async fn download_hf_model(
+    app: AppHandle,
+    repo_id: String,
+    revision: Option<String>,
+    token: Option<String>,
+) -> Result<(), String> {
+    let req = hf_download::HfDownloadRequest {
+        repo_id,
+        revision,
+        token,
+    };
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match hf_download::download_hf_model(app_for_task.clone(), req).await {
+            Ok(path) => {
+                let _ = app_for_task.emit(
+                    hf_download::HF_DOWNLOAD_DONE_EVENT,
+                    hf_download::HfDownloadDone {
+                        path: path.display().to_string(),
+                    },
+                );
+            }
+            Err(err) => {
+                let _ = app_for_task.emit(
+                    hf_download::HF_DOWNLOAD_ERROR_EVENT,
+                    hf_download::HfDownloadError { error: err },
+                );
+            }
+        }
+    });
     Ok(())
 }
 
@@ -617,6 +658,7 @@ fn main() {
             get_binary_status,
             download_kiln_server,
             cancel_kiln_download,
+            download_hf_model,
             path_info
         ])
         .run(tauri::generate_context!())
