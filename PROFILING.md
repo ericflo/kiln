@@ -143,10 +143,21 @@ step kernel) is the concrete target.
 > amortizes most of the candle-launch cost at replay time, leaving only
 > ~6 % of the qk_norm region to recover. **Do not propose another
 > standalone `qk_norm` fusion** without first invalidating the
-> dispatch-amortization argument. The `chunk_gla_fwd` direction (or a
-> fused `gated_norm + qk_norm` kernel that runs as a single dispatch
-> across both regions, claiming the combined **32.4 %**) is the only
-> remaining sensible scope here.
+> dispatch-amortization argument.
+>
+> **Update 2026-04-19 (follow-up):** A second attempt fused
+> `qk_norm + recurrent + gated_norm` (the combined 32.4 % scope
+> recommended above) into a single CUDA kernel that absorbs all three
+> regions in-register. Also a **null result** — see "Phase 6 — fused
+> GDN recurrent + qk_norm + gated_norm decode kernel (NULL RESULT,
+> 2026-04-19)" below. Median speedup 1.0140×, below the 1.05× floor.
+> Same ceiling: graph-replay dispatch-cost amortization dominates,
+> so collapsing candle launches into one fused kernel is not enough
+> to clear the bar even at 32 % of decode. **The `chunk_gla_fwd`
+> direction is no longer recommended** for the same reason. Future
+> decode-side fusion work should target the graph-replay dispatch
+> cost itself (or the HBM round-trips for F32 intermediates) rather
+> than collapsing candle launches further.
 
 Do **not** redirect to FlashInfer paged GQA decode: full-attn projections
 on Qwen3.5-4B (24 GDN + 8 full-attn layers) are still only ~3.5 % of
@@ -332,6 +343,159 @@ non-zero before producing `.nsys-rep`. Bench data alone is the abort
 criterion per the task brief, so the missing NVTX share confirmation
 does not change the result; this is recorded for future captures
 (`nsys 2024.5.1` was used in the post-#166 profile and avoided the bug).
+
+
+## Phase 6 — fused GDN recurrent + qk_norm + gated_norm decode kernel (NULL RESULT, 2026-04-19)
+
+Extended PR #92's `kiln_gdn_recurrent_forward` CUDA kernel to also
+absorb the upstream `:kiln/gdn/qk_norm` (L2 + scale on Q/K) and
+downstream `:kiln/gdn/gated_norm` (RMSNorm + silu-gated weight mul)
+in-register on the decode fast path. This is the **combined 32.4 %**
+scope the Phase 6 NULL section above redirected future work toward
+(see "Update 2026-04-19" on `qk_norm`). The new kernel is
+`recurrent_gdn_fwd_fused_norm_kernel` with C-ABI entry
+`kiln_gdn_recurrent_forward_fused_norm`.
+
+The kernel is **correct** (3 parity tests at decode/small/asymmetric
+shapes pass at tol 1.5e-2 against a candle F32 reference; full
+`kiln-gdn-kernel` test suite green on A6000) but **misses the task's
+1.05× decode tok/s abort floor**. It is shipped **opt-in only** via
+`KILN_ENABLE_FUSED_GDN_RECURRENT_NORM=1` — the three-stage candle /
+PR #92 kernel path remains the production default.
+
+### Bench result (Arm B, RTX A6000, 3 paired runs, 2026-04-19)
+
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, paged 512/128. Baseline runs the
+existing split path (PR #92 recurrent kernel + separate qk_norm /
+gated_norm candle regions). Fused enables the new all-in-one kernel.
+Same binary; same warm-up; 3 paired runs alternating baseline and
+fused.
+
+| run        | decode tok/s | mean ITL ms | p50 ITL ms | p99 ITL ms |
+| ---------- | -----------: | ----------: | ---------: | ---------: |
+| baseline 1 |        50.85 |       19.67 |      19.01 |      23.83 |
+| baseline 2 |        50.38 |       19.85 |      19.84 |      25.55 |
+| baseline 3 |        53.17 |       18.81 |      18.32 |      23.34 |
+| **median** |    **50.85** |   **19.67** |  **19.01** |  **23.83** |
+| fused 1    |        51.64 |       19.36 |      19.09 |      21.38 |
+| fused 2    |        51.56 |       19.39 |      19.14 |      21.20 |
+| fused 3    |        54.93 |       18.20 |      18.13 |      19.45 |
+| **median** |    **51.56** |   **19.39** |  **19.14** |  **21.20** |
+
+| Metric               | Baseline (median) | Fused (median) | Delta                 |
+| -------------------- | ----------------: | -------------: | :-------------------- |
+| decode tok/s         |             50.85 |          51.56 | **+1.40 % (1.0140×)** |
+| mean ITL             |          19.67 ms |       19.39 ms | -0.28 ms (-1.42 %)    |
+| p50 ITL              |          19.01 ms |       19.14 ms | +0.13 ms (+0.68 %)    |
+| p99 ITL              |          23.83 ms |       21.20 ms | -2.63 ms (-11.0 %)    |
+| best-of-3 tok/s      |             53.17 |          54.93 | +3.31 % (1.0331×)     |
+
+**Median speedup = 1.0140× — below the task's 1.05× abort floor.**
+Best-of-3 shows +3.3 %, and p99 ITL tightens by -11.0 %, but median
+decode tok/s does not clear the bar. This matches the shape of the
+PR #173 qk_norm null result almost exactly: small mean improvement,
+real p99 tightening, no clearance of the 1.05× threshold.
+
+### Why the kernel won the math but lost the wallclock
+
+Combined `:kiln/gdn/qk_norm` (14.9 %) + `:kiln/gdn/gated_norm` (17.5 %)
+= **32.4 %** of decode per the post-#166 profile. Even eliminating
+that entire slice would imply at most `1 / (1 - 0.324) ≈ 1.479×`
+decode speedup. The actual 0.28 ms median ITL gain recovers only
+~4 % of the combined region's wallclock — the same
+"CUDA-graph-replay amortizes candle dispatch cost" ceiling that
+bounded PR #173.
+
+Under `KILN_CUDA_GRAPHS=true`, the Q/K/V in-projections, qk_norm
+chain, PR #92 recurrent step, and gated-norm chain are all captured
+once into a single graph that is replayed every decode step. Collapsing
+the recurrent + qk_norm + gated_norm region from ~14 candle launches
+down to 1 shrinks the **captured** graph, but the **replay** cost is
+dominated by HBM traffic and SM occupancy on the replay path, not by
+per-launch host overhead. The fused kernel still saves the F32
+intermediate round-trips (q_f32, q_squared, q_sum_keepdim, rms_sq,
+gate_activated_out, etc.), which shows up as the -11 % p99 ITL and
++3.3 % best-of-3, but the median improvement is in the noise.
+
+### Why ship the kernel as opt-in instead of deleting it
+
+1. **It is correct** — 3/3 parity tests pass at decode (B=1, nv=16,
+   dk=dv=128), small (B=2, nv=4, dk=dv=32), and asymmetric (B=1,
+   nv=8, dk=64, dv=128) shapes. Full `kiln-gdn-kernel` nextest is
+   green.
+2. **Tail-latency improvement is real** — -11.0 % p99 ITL. Workloads
+   sensitive to ITL tail variance (latency-SLO serving, live
+   streaming with strict jitter budgets) may want to opt in.
+3. **Future re-evaluation is cheap** — if a later optimization
+   (graph-replay dispatch-cost reduction, chunked-prefill path with
+   different launch density, or a hypothetical out-of-graph decode
+   mode) shifts the balance, the kernel is already wired and tested.
+   No re-implementation needed.
+
+The kernel sits behind `KILN_ENABLE_FUSED_GDN_RECURRENT_NORM=1` (note:
+enable, not disable). Default decode behavior is unchanged from PR #92.
+
+### Re-visit triggers
+
+A future PR can re-default this kernel to ON only if **all three**
+hold on a fresh `nsys` profile of current `main` using the same
+production path:
+
+1. Combined `:kiln/gdn/qk_norm` + `:kiln/gdn/gated_norm` NVTX share
+   ≥ **25 %** of decode wall-clock (it is 32.4 % today, but
+   graph-replay amortization may have already reduced it; a drop
+   below 25 % would mean the Amdahl ceiling is near 1.03×).
+2. The fused kernel produces a median **≥ 1.04×** decode tok/s
+   speedup on a 3-run paired bench (currently 1.0140×).
+3. There is a documented reason the graph-replay dispatch-cost
+   amortization no longer dominates (e.g. CUDA graphs disabled at
+   this region for a separate correctness reason, or a much wider
+   fused region extending up into the SwiGLU gate projections
+   upstream of qk_norm).
+
+### Code shipped (branch `ce/gdn-recurrent-fused-norm`)
+
+- `crates/kiln-gdn-kernel/csrc/recurrent_gdn_fwd.{h,cu}` —
+  `recurrent_gdn_fwd_fused_norm_kernel<MAX_DK>` template + C-ABI
+  dispatcher `kiln_gdn_recurrent_forward_fused_norm`. Five in-register
+  phases (L2-sumsq/scale on Q/K, recurrent state update, RMS-sumsq,
+  gamma * silu(z) * rms_inv epilogue). F32 accumulators; bf16 in/out;
+  warp-shuffle reductions with 32-warp cap.
+- `crates/kiln-gdn-kernel/src/lib.rs` — FFI decl
+  `kiln_gdn_recurrent_forward_fused_norm`,
+  `gdn_recurrent_forward_fused_norm_supports` capability gate,
+  `gdn_recurrent_forward_fused_norm` candle wrapper.
+- `crates/kiln-gdn-kernel/tests/recurrent_fused_norm_parity.rs` — 3
+  parity tests (Qwen decode shape, small shape, asymmetric shape)
+  against a candle F32 reference.
+- `crates/kiln-model/src/backend/mod.rs` —
+  `supports_gdn_recurrent_step_fused_norm` + `gdn_recurrent_step_fused_norm`
+  default-`Ok(None)` BackendRuntime additions.
+- `crates/kiln-model/src/backend/cuda.rs` —
+  `fused_gdn_recurrent_norm_enabled` field (cached env read) and
+  impl that declines when the kernel envelope is unmet.
+- `crates/kiln-model/src/forward.rs` — GDN decode step-5/7/8
+  short-circuit that stashes raw Q/K and dispatches the fused kernel
+  under the env gate; falls back to the existing PR #92 recurrent
+  path on `Ok(None)`.
+
+### Preflight performed
+
+- HEAD verified `c05b7cc` (post-PR #173, pre-fused-norm branch).
+- `crates/kiln-gdn-kernel/` already exists from PR #92; additive
+  kernel + FFI + wrapper, not a new crate.
+- `gh pr list` showed no overlapping open PR at preflight time.
+- Parity tests passed on A6000 before the bench.
+
+### Pod / cost
+
+- Pod: `yp293s4oqc7gdx` (RunPod NVIDIA RTX A6000 on-demand,
+  $0.79/hr — spot unavailable, on-demand per
+  `runpod-always-on-demand` agent note).
+- Total uptime at capture end: ~90 minutes (image pull + clone +
+  kiln-setup + first release build + parity tests + 3 paired bench
+  runs + result download).
+- Estimated pod cost: **~$1.20**.
 
 
 ## Not next target — fused_recurrent GDN decode vendor (preflight, 2026-04-18)
