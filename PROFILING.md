@@ -133,10 +133,20 @@ groups on our side. Per the `kernel-vendoring-call-pattern-regression` note,
 the scope should be narrowed to the **decode-only (single-token)** call
 pattern so the vendored kernel does not regress prefill / chunk paths — a
 decode-specialized split of `chunk_gla_fwd` (or its underlying block-GLA
-step kernel) is the concrete target. Alternative narrower targets if
-`chunk_gla_fwd` is too broad: a fused `gated_norm`-then-`qk_norm` kernel
-on its own would still claim the **32.4 %** of decode those two regions
-own.
+step kernel) is the concrete target.
+
+> **Update 2026-04-19:** A standalone fused `qk_norm` kernel was attempted
+> as a narrower scope (the 14.9 % `:kiln/gdn/qk_norm` slice in isolation)
+> and produced a **null result** — see "Phase 6 — fused L2-norm Q+K
+> decode kernel (NULL RESULT, 2026-04-19)" below. The kernel is correct
+> but the dispatch overhead under `KILN_CUDA_GRAPHS=true` already
+> amortizes most of the candle-launch cost at replay time, leaving only
+> ~6 % of the qk_norm region to recover. **Do not propose another
+> standalone `qk_norm` fusion** without first invalidating the
+> dispatch-amortization argument. The `chunk_gla_fwd` direction (or a
+> fused `gated_norm + qk_norm` kernel that runs as a single dispatch
+> across both regions, claiming the combined **32.4 %**) is the only
+> remaining sensible scope here.
 
 Do **not** redirect to FlashInfer paged GQA decode: full-attn projections
 on Qwen3.5-4B (24 GDN + 8 full-attn layers) are still only ~3.5 % of
@@ -168,6 +178,160 @@ remains the governing preflight for any future FlashInfer proposal.
 - Total uptime at capture end: ~35 minutes (pull + clone + warmup + 3
   bench runs + 1 nsys capture + stats extraction).
 - Estimated pod cost: **~$0.30** (well under the Phase 6 budget).
+
+
+## Phase 6 — fused L2-norm Q+K decode kernel (NULL RESULT, 2026-04-19)
+
+Vendored a single-launch CUDA kernel that fuses
+`l2_normalize(Q) + scale(Q) + l2_normalize(K) + dtype-cast` (the
+`:kiln/gdn/qk_norm` region) into `kiln-rmsnorm-kernel` as
+`kiln_fused_l2_qk_norm`. The kernel is **correct** (3 parity tests at
+decode/prefill/batch shapes pass; the full 128-test `kiln-model`
+nextest suite passes) but **misses the task's 1.05× decode tok/s abort
+floor**. It is shipped **opt-in only** via
+`KILN_ENABLE_FUSED_L2_QK_NORM=1` — the candle reference path remains the
+production default. See `crates/kiln-model/src/forward.rs` step-5 doc
+comment for the in-tree pointer.
+
+### Bench result (Arm B, RTX A6000, 3 paired runs, 2026-04-19)
+
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, paged 512/128. Baseline disables
+the kernel; fused enables it. Same binary; same warm-up.
+
+| run        | decode tok/s | mean ITL ms | p50 ITL ms | p99 ITL ms |
+| ---------- | -----------: | ----------: | ---------: | ---------: |
+| baseline 1 |        51.67 |       19.35 |      19.12 |      23.85 |
+| baseline 2 |        40.19 |       24.88 |      24.93 |      31.17 |
+| baseline 3 |        50.81 |       19.68 |      19.63 |      24.78 |
+| **median** |    **50.81** |   **19.68** |  **19.63** |  **24.78** |
+| fused 1    |        50.64 |       19.75 |      19.71 |      20.25 |
+| fused 2    |        51.28 |       19.50 |      19.47 |      19.87 |
+| fused 3    |        51.63 |       19.37 |      19.39 |      22.53 |
+| **median** |    **51.28** |   **19.50** |  **19.47** |  **20.25** |
+
+| Metric                     | Baseline (median) | Fused (median) | Delta            |
+| -------------------------- | ----------------: | -------------: | :--------------- |
+| decode tok/s               |             50.81 |          51.28 | **+0.93 % (1.0093×)** |
+| mean ITL                   |          19.68 ms |       19.50 ms | -0.18 ms (-0.92 %) |
+| p50 ITL                    |          19.63 ms |       19.47 ms | -0.16 ms (-0.81 %) |
+| p99 ITL                    |          24.78 ms |       20.25 ms | -4.54 ms (-18.3 %) |
+| best-of-3 decode tok/s     |             51.67 |          51.63 | -0.07 % (0.9994×) |
+| run-to-run range           |   11.48 (40-52)   |   1.00 (50-52) | -10.5 (much tighter) |
+
+**Median speedup = 1.0093× — well below the task's 1.05× hard abort
+floor.** Best-of-3 is actually a hair slower (0.9994×). The only clearly
+positive signal is p99 ITL: tail latency tightens by ~4.5 ms (-18 %),
+and run-to-run variance collapses from an 11 tok/s spread to a 1 tok/s
+spread, suggesting the fused launch removes a small but real source of
+dispatch jitter. That p99 win is not enough to clear the bar.
+
+### Why the kernel won the math but lost the wallclock
+
+Per the post-PR #166 profile above, `:kiln/gdn/qk_norm` was 14.9 % of
+decode = ~2.93 ms of the median 19.68 ms ITL. Even fully eliminating
+that NVTX region would yield at most:
+
+    1 / (1 - 0.149) ≈ **1.175× decode speedup**
+
+The actual 0.18 ms median ITL improvement implies the kernel only
+shaved ~6 % of `:kiln/gdn/qk_norm`'s wallclock — far less than the
+~85 %+ savings that would be needed to land at the 1.05× floor. The
+qk_norm region is dominated not by the per-row arithmetic (rows = 16,
+hidden = 128 — trivially memory-bound at decode shape) but by:
+
+1. **Candle dispatch + graph-replay overhead** that survives the launch
+   collapse. The CUDA-graph capture at decode already amortizes most of
+   the ~11 underlying launches; collapsing them to 1 in the captured
+   graph saves graph nodes but not host-side cost per replay.
+2. **HBM round-trips** for the F32 intermediate buffers (`q_f32`,
+   `k_f32`, `q_squared`, `k_squared`, `q_sum_keepdim`, etc.) that
+   candle materializes. The fused kernel skips those, but the savings
+   per row are tiny relative to the per-block scheduling cost.
+
+The first point is the dominant explanation: under `KILN_CUDA_GRAPHS=true`
+the qk_norm chain is captured once and replayed every decode step, so
+the per-step "11 launches → 1" benefit at host code already mostly
+collapses to a no-op at replay time. That is also why p99 (which
+correlates with off-graph dispatch jitter) shows a clear win while mean
+tok/s does not.
+
+### Why ship the kernel as opt-in instead of deleting it
+
+1. **It is correct** — parity tests pass at decode (16×128), prefill
+   (1×512×128), and small-batch (4×8×128) shapes; the full nextest
+   suite is green. No regression.
+2. **Tail-latency improvement is real** — -18 % p99 ITL and a 10×
+   tighter run-to-run distribution. Workloads sensitive to ITL tail
+   variance (live token streaming, latency-SLO serving) may want to
+   opt in.
+3. **Future re-evaluation is cheap** — if a later optimization (e.g.
+   an opt-out of CUDA graphs at qk_norm, or a wider qk_norm region
+   that includes scale-fused dispatch) shifts the dispatch-overhead
+   balance, the kernel is already wired and tested. No re-implementation
+   needed.
+
+The kernel sits behind `KILN_ENABLE_FUSED_L2_QK_NORM=1` (note: enable,
+not disable). Default decode behavior is unchanged from PR #166.
+
+### Re-visit triggers
+
+A future PR can re-default this kernel to ON only if **all three**
+hold on a fresh `nsys` profile of current `main` using the same
+production path:
+
+1. `:kiln/gdn/qk_norm` NVTX region ≥ **10 %** of decode wall-clock
+   (it is 14.9 % today, but graph-replay amortization may have already
+   reduced it).
+2. The fused kernel produces a median **≥ 1.03×** decode tok/s
+   speedup on a 3-run paired bench (currently 1.0093×).
+3. There is a documented reason the dispatch-overhead amortization
+   no longer dominates (e.g. CUDA graphs disabled at this region for
+   a different reason, or a much wider fused region that includes
+   the upstream `q = a.broadcast_mul(...)` step).
+
+### Code shipped (branch `ce/phase6-qk-norm-fusion`)
+
+- `crates/kiln-rmsnorm-kernel/csrc/fused_l2_qk_norm.{h,cu}` — single-block
+  per-row kernel, two warp-shuffle reductions sharing scratch shmem,
+  bf16 in/out, F32 reductions, hidden ≤ 8192 envelope.
+- `crates/kiln-rmsnorm-kernel/build.rs` — adds the new `.cu` to the cc
+  build.
+- `crates/kiln-rmsnorm-kernel/src/lib.rs` — `kiln_fused_l2_qk_norm` FFI
+  decl (line ~69), `supports_l2_qk_norm` capability gate, candle
+  wrapper `fused_l2_qk_norm`, `reference_l2_qk_norm` parity oracle, 3
+  `parity_l2_qk_norm_*` unit tests.
+- `crates/kiln-model/src/forward.rs` — step-5 region updated with the
+  opt-in dispatch (`KILN_ENABLE_FUSED_L2_QK_NORM`) and an in-tree
+  comment pointing here.
+
+### Preflight performed
+
+- HEAD verified `c2579a1` (post-#166).
+- `crates/kiln-rmsnorm-kernel/` already exists from the earlier RMSNorm
+  vendor; this is an additive `.cu` + extern, not a new crate.
+- `gh pr list` showed no overlapping open PR at preflight time.
+- Nextest suite passed before the bench (128 tests, full kiln-model
+  surface).
+
+### Pod / cost
+
+- Pod: `7s9x0e53pjoglc` (RunPod NVIDIA RTX A6000 on-demand, $0.79/hr —
+  spot was unavailable; on-demand mandated by `runpod-always-on-demand`
+  agent note).
+- Total uptime at capture end: ~75 minutes (image pull + manual clone +
+  `kiln-setup` + first build + 6 paired bench runs + result download).
+- Estimated pod cost: **~$1.00**.
+
+### Note on diagnostic capture
+
+`nsys 2023.4.4` (baked in `ghcr.io/ericflo/kiln-runpod:latest`) hits
+the `EventCollection::CheckOrder` finalization bug on this workload —
+the same bug noted in the earlier post-#158 / post-#166 sections. Both
+captures generated valid `.qdstrm` traces but `QdstrmImporter` exited
+non-zero before producing `.nsys-rep`. Bench data alone is the abort
+criterion per the task brief, so the missing NVTX share confirmation
+does not change the result; this is recorded for future captures
+(`nsys 2024.5.1` was used in the post-#166 profile and avoided the bug).
 
 
 ## Not next target — fused_recurrent GDN decode vendor (preflight, 2026-04-18)

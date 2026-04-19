@@ -1399,24 +1399,36 @@ pub fn gated_deltanet_forward(
 
     // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
     //
-    // Two paths: a fused CUDA kernel
-    // (`kiln_rmsnorm_kernel::fused_l2_qk_norm`) that collapses the
+    // Two paths: the candle-op reference path (default) and a fused CUDA
+    // kernel (`kiln_rmsnorm_kernel::fused_l2_qk_norm`) that collapses the
     // l2-normalize(Q) + scale(Q) + l2-normalize(K) + dtype-cast chain
     // (~11 candle launches on tiny per-row tensors at decode shape) into a
-    // single launch, and the candle-op reference path that runs whenever the
-    // kernel is unavailable (CPU, non-bf16, out-of-envelope) or disabled
-    // via `KILN_DISABLE_FUSED_L2_QK_NORM=1`. Both produce bf16 outputs in
-    // `input_dtype`; only the kernel path skips the F32 round-trip through
-    // HBM. The candle path is the parity oracle exercised by
-    // `kiln-rmsnorm-kernel`'s `parity_l2_qk_norm_*` tests.
+    // single launch.
+    //
+    // The fused kernel is **opt-in via `KILN_ENABLE_FUSED_L2_QK_NORM=1`**.
+    // Phase 6 wallclock validation on Arm B (RTX A6000, KILN_W4A16=1
+    // KILN_CUDA_GRAPHS=true, paged 512/128, 3 paired runs) measured a
+    // median speedup of 1.0093x — well below the task's 1.05x abort floor.
+    // Mean ITL improved by 0.18ms (0.92%); only p99 ITL showed a
+    // meaningful win (24.78ms -> 20.25ms, -18% tail latency) and the
+    // run-to-run variance tightened. The kernel is correct (parity tests
+    // and the full nextest suite pass) but the wallclock impact at the
+    // Qwen3.5-4B GDN decode shape (rows = 16, hidden = 128) does not meet
+    // the bar to engage by default. See PROFILING.md "Phase 6 fused
+    // qk_norm null result" for the full numbers and analysis.
+    //
+    // Both paths produce bf16 outputs in `input_dtype`; only the kernel
+    // path skips the F32 round-trip through HBM. The candle path is the
+    // parity oracle exercised by `kiln-rmsnorm-kernel`'s
+    // `parity_l2_qk_norm_*` tests.
     let (q, k) = {
         kiln_nvtx::range!(c"kiln/gdn/qk_norm");
         let scale = 1.0 / (dk as f64).sqrt();
 
         #[cfg(feature = "cuda")]
         {
-            let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
-            if !disabled
+            let enabled = std::env::var("KILN_ENABLE_FUSED_L2_QK_NORM").is_ok();
+            if enabled
                 && input_dtype == DType::BF16
                 && kiln_rmsnorm_kernel::supports_l2_qk_norm(&q, &k)
             {
