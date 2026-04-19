@@ -173,8 +173,16 @@
 
       const closeBtn = document.getElementById("close");
       function closeWindow() {
-        const win = window.__TAURI__ && window.__TAURI__.window;
-        const cur = win && typeof win.getCurrent === "function" ? win.getCurrent() : null;
+        // Tauri v2: webview windows expose close() via getCurrentWebviewWindow.
+        // Fall back across a couple of namespace shapes since different
+        // tauri versions / withGlobalTauri flags expose different globals.
+        const webview = window.__TAURI__ && window.__TAURI__.webviewWindow;
+        const windowNs = window.__TAURI__ && window.__TAURI__.window;
+        const getter =
+          (webview && typeof webview.getCurrentWebviewWindow === "function" && webview.getCurrentWebviewWindow) ||
+          (windowNs && typeof windowNs.getCurrentWindow === "function" && windowNs.getCurrentWindow) ||
+          null;
+        const cur = getter ? getter() : null;
         if (cur && typeof cur.close === "function") {
           cur.close();
         } else {

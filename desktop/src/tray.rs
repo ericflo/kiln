@@ -244,10 +244,22 @@ async fn open_kiln_ui_in_default_browser(app: &AppHandle, supervisor: Arc<Superv
             }
         }
         None => {
+            // Surface the "server not running" case to the user instead of
+            // silently no-opping: without this the tray item looks broken.
             eprintln!(
                 "[tray] open Kiln UI skipped — server not running (state: {})",
                 state_label(&state)
             );
+            let body = match &state {
+                ServerState::Error(msg) => format!("Server not running ({}).", msg),
+                _ => format!("Server is {}. Start it first.", state_label(&state)),
+            };
+            let _ = app
+                .notification()
+                .builder()
+                .title("Kiln UI unavailable")
+                .body(body)
+                .show();
         }
     }
 }
