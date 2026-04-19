@@ -77,6 +77,7 @@
       }
       button.secondary { background: #2a2f3a; }
       button:disabled { opacity: 0.5; cursor: default; }
+      button#save:disabled { opacity: 0.55; cursor: default; background: #1f3a78; }
       .status { margin-top: 8px; font-size: 12px; color: #7fbf7f; min-height: 16px; }
       .status.error { color: #f08080; }
       .todo { color: #a8aeb8; font-size: 11px; margin-top: 4px; }
@@ -271,6 +272,7 @@
       const dialog = window.__TAURI__.dialog;
       const statusEl = document.getElementById("status");
       const restartBtn = document.getElementById("restart");
+      let lastSavedSnapshot = null;
 
       const fields = [
         "kiln_binary", "model_path", "host", "port",
@@ -324,10 +326,23 @@
           const result = await dialog.open(opts);
           if (typeof result === "string" && result.length) {
             document.getElementById(inputId).value = result;
+            updateDirtyIndicator();
           }
         } catch (e) {
           setStatus("Pick failed: " + e, true);
         }
+      }
+
+      function isDirty() {
+        if (lastSavedSnapshot === null) return false;
+        return JSON.stringify(readForm()) !== lastSavedSnapshot;
+      }
+
+      function updateDirtyIndicator() {
+        const dirty = isDirty();
+        const btn = document.getElementById("save");
+        btn.classList.toggle("dirty", dirty);
+        btn.disabled = !dirty;
       }
 
       function setStatus(msg, err) {
@@ -344,6 +359,8 @@
         try {
           const s = await invoke("get_settings");
           writeForm(s);
+          lastSavedSnapshot = JSON.stringify(readForm());
+          updateDirtyIndicator();
           hideRestart();
           setStatus("Loaded.");
         } catch (e) {
@@ -354,6 +371,8 @@
       async function save() {
         try {
           await invoke("set_settings", { new: readForm() });
+          lastSavedSnapshot = JSON.stringify(readForm());
+          updateDirtyIndicator();
           let running = false;
           try {
             const state = await invoke("server_state");
@@ -393,6 +412,10 @@
       reloadBtn.addEventListener("click", load);
       saveBtn.addEventListener("click", save);
       restartBtn.addEventListener("click", restart);
+
+      const formContainer = document.querySelector(".wrap");
+      formContainer.addEventListener("input", updateDirtyIndicator);
+      formContainer.addEventListener("change", updateDirtyIndicator);
 
       function closeWindow() {
         // Tauri v2: webview windows expose close() via getCurrentWebviewWindow.
