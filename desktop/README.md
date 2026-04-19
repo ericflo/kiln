@@ -21,6 +21,10 @@ in a VM.
 
 The desktop installer bundles only the wrapper — the `kiln` server binary and model weights must be installed separately. See the root [QUICKSTART.md](../QUICKSTART.md) and point the app at the binary and model path from Settings on first launch.
 
+## Model weights
+
+Settings has a **Download from HuggingFace…** button next to the Model Path picker. Enter a repo id (e.g. `Qwen/Qwen3-4B`), optionally a revision and a token for gated repos, and the app will stream the safetensors shards, tokenizer, and config into `app_data_dir/models/<repo>/` and auto-fill the Model Path field. You still need to click Save to apply it. Users who prefer the CLI can keep using `huggingface-cli download …` and point the Model Path picker at the result.
+
 macOS `.dmg` releases are signed with a Developer ID certificate and notarized by Apple. See [docs/desktop/signing.md](../docs/desktop/signing.md) for the CI setup and required secrets.
 
 ## What ships in v0.1.0
