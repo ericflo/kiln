@@ -5536,6 +5536,148 @@ mod tests {
         Ok(())
     }
 
+    /// CUDA parity for streaming/tiled GDN prefill.
+    ///
+    /// Mirrors `test_streaming_matches_monolithic_cpu_mid` but on CUDA at
+    /// T=2048, tile=512 (the configuration the Phase 7 GPU spike validates).
+    /// Asserts (1) full-tile logits match the matching slice of the
+    /// monolithic logits, and (2) `LinearAttentionState.recurrent_states[l]`
+    /// and `state.conv_states[l]` are equal across the two paths after
+    /// prefill — the state hand-off is the load-bearing part of streaming.
+    ///
+    /// Tolerance: 1e-4. The design doc (PROFILING.md §c "CUDA parity")
+    /// argues bit-exactness is achievable because GDN recurrent state stays
+    /// in F32 and the conv1d F32 promotion makes the conv path
+    /// deterministic. In practice, candle CUDA matmul reduction order can
+    /// vary with shape, so we use a small FP32 tolerance rather than
+    /// strict equality.
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_streaming_matches_monolithic_cuda() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_streaming_matches_monolithic_cuda"
+                );
+                return Ok(());
+            }
+        };
+
+        let config = streaming_test_config();
+        let total = 2048usize;
+        let tile = 512usize;
+        let block_size = 64usize; // == GDN_CHUNK_SIZE
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = crate::backend::for_device(&device);
+
+        // Monolithic: single forward pass, full LM head.
+        let (mut mono_cache, mono_bt) =
+            make_paged_setup(&config, total, block_size, &device)?;
+        let mut mono_state = LinearAttentionState::new(&config, &device)?;
+        let mono_logits = model_forward_paged(
+            &*backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut mono_cache,
+            &mono_bt,
+            0,
+            Some(&mut mono_state),
+            None,
+            None,
+        )?;
+
+        // Streaming: tiled prefill, last_token_only=false so we get a full
+        // last-tile logits slice for row-by-row comparison.
+        let (mut stream_cache, stream_bt) =
+            make_paged_setup(&config, total, block_size, &device)?;
+        let mut stream_state = LinearAttentionState::new(&config, &device)?;
+        let stream_logits = model_forward_paged_streaming_with(
+            &*backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut stream_cache,
+            &stream_bt,
+            0,
+            Some(&mut stream_state),
+            None,
+            tile,
+            false,
+        )?;
+
+        assert_eq!(mono_logits.dims(), &[1, total, config.vocab_size]);
+        assert_eq!(stream_logits.dims(), &[1, tile, config.vocab_size]);
+
+        // (1) Last-tile logits parity.
+        assert_last_tile_matches(&mono_logits, &stream_logits, total, tile, 1e-4)?;
+
+        // (2) Per-layer state parity (recurrent + conv).
+        assert_eq!(
+            mono_state.recurrent_states.len(),
+            stream_state.recurrent_states.len(),
+            "recurrent_states layer count mismatch"
+        );
+        assert_eq!(
+            mono_state.conv_states.len(),
+            stream_state.conv_states.len(),
+            "conv_states layer count mismatch"
+        );
+        for (l, (m, s)) in mono_state
+            .recurrent_states
+            .iter()
+            .zip(stream_state.recurrent_states.iter())
+            .enumerate()
+        {
+            let m_v = m.flatten_all()?.to_vec1::<f32>()?;
+            let s_v = s.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(m_v.len(), s_v.len(), "recurrent_states[{l}] length mismatch");
+            let max_abs = m_v
+                .iter()
+                .zip(s_v.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs <= 1e-4,
+                "recurrent_states[{l}] max_abs_diff={max_abs:e} exceeds 1e-4"
+            );
+        }
+        for (l, (m, s)) in mono_state
+            .conv_states
+            .iter()
+            .zip(stream_state.conv_states.iter())
+            .enumerate()
+        {
+            let m_v = m.flatten_all()?.to_vec1::<f32>()?;
+            let s_v = s.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(m_v.len(), s_v.len(), "conv_states[{l}] length mismatch");
+            let max_abs = m_v
+                .iter()
+                .zip(s_v.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs <= 1e-4,
+                "conv_states[{l}] max_abs_diff={max_abs:e} exceeds 1e-4"
+            );
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn test_streaming_prefill_env_helpers() {
         // Each nextest test runs in its own process, so env-var manipulation
