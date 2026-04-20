@@ -1155,13 +1155,100 @@ pub async fn atomic_swap_new_binary(
     Ok(())
 }
 
-/// Updater slice 3b Tauri command: stop the supervisor, promote the
-/// staged `bin/kiln.new` into `bin/kiln`, and start the supervisor
-/// again. Emits [`INSTALL_STAGED_UPDATE_DONE_EVENT`] with
-/// [`InstallStagedUpdateDone`] on success and
-/// [`INSTALL_STAGED_UPDATE_FAILED_EVENT`] with
-/// [`InstallStagedUpdateFailed`] on failure. No health-check polling
-/// or rollback — that is slice 3c.
+/// Poll `url` until it returns a 2xx response or `timeout` elapses.
+/// Polls every 500ms. Returns `true` on the first 2xx, `false` on
+/// timeout. Network errors and non-2xx responses are treated as "not
+/// ready yet" — only the final timeout produces `false`.
+///
+/// Pure HTTP polling — does not touch the supervisor — so the slice-3c
+/// updater can hand it the `/v1/health` URL built from
+/// `Supervisor::config_snapshot()` without coupling the helper to that
+/// type. See `desktop/docs/binary-update.md` "Health check gate".
+pub async fn wait_for_health(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() {
+                return true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Roll back the slice-3b atomic swap by renaming `bin/kiln.bak` over
+/// `bin/kiln`. Used by slice 3c when the post-swap health gate never
+/// goes green: the freshly-promoted binary is broken, the prior binary
+/// is still safe under `.bak`, and the supervisor needs the old path
+/// back before it can restart.
+///
+/// Returns `Err` if no `.bak` exists — the caller is supposed to invoke
+/// this only after a swap that produced one. On Windows
+/// `std::fs::rename` refuses to overwrite an existing destination, so
+/// the broken `bin/kiln` is removed first to make the rename succeed
+/// the same on every platform (mirrors [`swap_new_binary_into_place`]).
+pub fn rollback_to_bak(app_data_dir: &Path) -> Result<(), String> {
+    let installed = installed_binary_path(app_data_dir);
+    let backup = backup_binary_path(app_data_dir);
+
+    if !backup.exists() {
+        return Err(format!(
+            "no backup at {} — nothing to roll back",
+            backup.display()
+        ));
+    }
+
+    if installed.exists() {
+        std::fs::remove_file(&installed).map_err(|e| {
+            format!(
+                "remove broken {} before rollback: {}",
+                installed.display(),
+                e
+            )
+        })?;
+    }
+
+    std::fs::rename(&backup, &installed).map_err(|e| {
+        format!(
+            "rename {} -> {}: {}",
+            backup.display(),
+            installed.display(),
+            e
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Delete `bin/kiln.bak` if present. No-op when absent. Used by slice
+/// 3c on the health-green path: once the new binary is verified
+/// running, the backup is no longer load-bearing and only one `.bak`
+/// is ever kept (see `desktop/docs/binary-update.md` "Rollback").
+pub fn cleanup_bak(app_data_dir: &Path) -> Result<(), String> {
+    let backup = backup_binary_path(app_data_dir);
+    if !backup.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(&backup)
+        .map_err(|e| format!("remove {}: {}", backup.display(), e))
+}
+
+/// Updater slice 3c Tauri command: stop the supervisor, promote the
+/// staged `bin/kiln.new` into `bin/kiln`, restart the supervisor, then
+/// poll `/v1/health` for up to 30s. On a green health response the
+/// retained `bin/kiln.bak` is deleted; on timeout the supervisor is
+/// stopped, `bin/kiln.bak` is renamed back over `bin/kiln`, and the
+/// supervisor is restarted on the prior binary. Emits
+/// [`INSTALL_STAGED_UPDATE_DONE_EVENT`] with [`InstallStagedUpdateDone`]
+/// on success and [`INSTALL_STAGED_UPDATE_FAILED_EVENT`] with
+/// [`InstallStagedUpdateFailed`] on failure.
 #[tauri::command]
 pub async fn install_staged_update(
     app: tauri::AppHandle,
@@ -1175,42 +1262,98 @@ pub async fn install_staged_update(
     let app_for_task = app.clone();
 
     tauri::async_runtime::spawn(async move {
-        let swap = atomic_swap_new_binary(&supervisor, &base).await;
-        match swap {
-            Ok(()) => match supervisor.start().await {
-                Ok(()) => {
-                    let installed = installed_binary_path(&base);
-                    let _ = app_for_task.emit(
-                        INSTALL_STAGED_UPDATE_DONE_EVENT,
-                        InstallStagedUpdateDone {
-                            path: installed.display().to_string(),
-                        },
-                    );
-                }
-                Err(err) => {
-                    let _ = app_for_task.emit(
-                        INSTALL_STAGED_UPDATE_FAILED_EVENT,
-                        InstallStagedUpdateFailed {
-                            error: format!(
-                                "supervisor start after swap failed: {}",
-                                err
-                            ),
-                        },
-                    );
-                }
-            },
+        // Single client for the whole post-swap health-poll loop so
+        // keep-alive amortizes connection setup across the ~60 polls.
+        let client = match reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
             Err(err) => {
-                // Swap failed mid-way; try to restart the prior
-                // supervisor config so the user isn't left with a
-                // dead server just because extract/rename tripped.
-                // The error from the swap is what the UI should see.
-                let _ = supervisor.start().await;
                 let _ = app_for_task.emit(
                     INSTALL_STAGED_UPDATE_FAILED_EVENT,
-                    InstallStagedUpdateFailed { error: err },
+                    InstallStagedUpdateFailed {
+                        error: format!("build reqwest client: {}", err),
+                    },
                 );
+                return;
             }
+        };
+
+        let swap = atomic_swap_new_binary(&supervisor, &base).await;
+        if let Err(err) = swap {
+            // Swap failed mid-way; try to restart the prior
+            // supervisor config so the user isn't left with a
+            // dead server just because extract/rename tripped.
+            // The error from the swap is what the UI should see.
+            let _ = supervisor.start().await;
+            let _ = app_for_task.emit(
+                INSTALL_STAGED_UPDATE_FAILED_EVENT,
+                InstallStagedUpdateFailed { error: err },
+            );
+            return;
         }
+
+        if let Err(err) = supervisor.start().await {
+            let _ = app_for_task.emit(
+                INSTALL_STAGED_UPDATE_FAILED_EVENT,
+                InstallStagedUpdateFailed {
+                    error: format!(
+                        "supervisor start after swap failed: {}",
+                        err
+                    ),
+                },
+            );
+            return;
+        }
+
+        let cfg = supervisor.config_snapshot().await;
+        let url = format!("http://{}:{}/v1/health", cfg.host, cfg.port);
+        let healthy =
+            wait_for_health(&client, &url, std::time::Duration::from_secs(30))
+                .await;
+
+        if healthy {
+            // Best-effort cleanup; a leftover .bak isn't load-bearing
+            // and the next swap will overwrite it (see
+            // `swap_new_binary_into_place`).
+            if let Err(e) = cleanup_bak(&base) {
+                eprintln!("[updater] cleanup_bak: {}", e);
+            }
+            let installed = installed_binary_path(&base);
+            let _ = app_for_task.emit(
+                INSTALL_STAGED_UPDATE_DONE_EVENT,
+                InstallStagedUpdateDone {
+                    path: installed.display().to_string(),
+                },
+            );
+            return;
+        }
+
+        // Health gate timed out — roll back to the prior binary so the
+        // user isn't left on a broken kiln.
+        let _ = supervisor.stop().await;
+        let rollback_err = match rollback_to_bak(&base) {
+            Ok(()) => None,
+            Err(e) => Some(e),
+        };
+        let _ = supervisor.start().await;
+
+        let error = match rollback_err {
+            None => "kiln server did not become healthy within 30s; \
+                     rolled back to previous binary"
+                .to_string(),
+            Some(re) => format!(
+                "kiln server did not become healthy within 30s; \
+                 rollback also failed: {}",
+                re
+            ),
+        };
+        let _ = app_for_task.emit(
+            INSTALL_STAGED_UPDATE_FAILED_EVENT,
+            InstallStagedUpdateFailed { error },
+        );
     });
     Ok(())
 }
@@ -1218,11 +1361,12 @@ pub async fn install_staged_update(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_binary_path, extract_tarball_to, extracted_new_binary_path,
-        installed_binary_path, is_update_available, parse_kiln_version_output,
-        release_archive_ext, release_asset_name, release_download_url,
-        staging_tarball_path, swap_new_binary_into_place, verify_sha256,
-        BACKUP_BINARY_NAME, NEW_BINARY_NAME, UPDATE_STAGING_DIR,
+        backup_binary_path, cleanup_bak, extract_tarball_to,
+        extracted_new_binary_path, installed_binary_path, is_update_available,
+        parse_kiln_version_output, release_archive_ext, release_asset_name,
+        release_download_url, rollback_to_bak, staging_tarball_path,
+        swap_new_binary_into_place, verify_sha256, BACKUP_BINARY_NAME,
+        NEW_BINARY_NAME, UPDATE_STAGING_DIR,
     };
     use std::io::Write;
     use std::path::PathBuf;
@@ -1695,6 +1839,81 @@ mod tests {
         let installed = installed_binary_path(&dir);
         assert!(installed.is_file());
         assert!(!backup_binary_path(&dir).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Slice 3c: rollback_to_bak / cleanup_bak ----
+
+    #[test]
+    fn rollback_to_bak_restores_prior_binary() {
+        let dir = tmp_dir("rollback-restore");
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Stage a "new" (broken) installed binary plus the prior .bak.
+        let installed = installed_binary_path(&dir);
+        let backup = backup_binary_path(&dir);
+        std::fs::write(&installed, b"NEW-BROKEN-BINARY").unwrap();
+        std::fs::write(&backup, b"OLD-WORKING-BINARY").unwrap();
+
+        rollback_to_bak(&dir).expect("rollback should succeed");
+
+        // Installed slot now holds the old bytes; .bak is gone.
+        assert!(installed.is_file(), "installed kiln should exist post-rollback");
+        let got = std::fs::read(&installed).unwrap();
+        assert_eq!(got, b"OLD-WORKING-BINARY");
+        assert!(!backup.exists(), "backup should have been consumed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_to_bak_errors_when_no_bak() {
+        let dir = tmp_dir("rollback-no-bak");
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        // Only the (broken) installed binary exists; no .bak.
+        let installed = installed_binary_path(&dir);
+        std::fs::write(&installed, b"BROKEN-NO-BAK").unwrap();
+
+        let err = rollback_to_bak(&dir).unwrap_err();
+        assert!(
+            err.contains("no backup"),
+            "expected no-backup error, got {}",
+            err
+        );
+        // Installed binary must stay untouched on rollback failure so
+        // the caller can still surface what's there for diagnosis.
+        let got = std::fs::read(&installed).unwrap();
+        assert_eq!(got, b"BROKEN-NO-BAK");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_bak_is_noop_when_no_bak() {
+        let dir = tmp_dir("cleanup-noop");
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        // No .bak — cleanup should still succeed.
+        cleanup_bak(&dir).expect("cleanup should succeed when .bak is absent");
+        assert!(!backup_binary_path(&dir).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_bak_removes_existing_bak() {
+        let dir = tmp_dir("cleanup-remove");
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let backup = backup_binary_path(&dir);
+        std::fs::write(&backup, b"STALE-BAK").unwrap();
+        assert!(backup.is_file());
+
+        cleanup_bak(&dir).expect("cleanup should succeed when .bak exists");
+        assert!(!backup.exists(), "backup should have been removed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

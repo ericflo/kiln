@@ -121,6 +121,13 @@ impl Supervisor {
         *self.config.lock().await = new_cfg;
     }
 
+    /// Clone of the current supervisor config. Used by the updater to
+    /// build the `/v1/health` URL without taking a long-lived lock on
+    /// the inner mutex.
+    pub async fn config_snapshot(&self) -> SupervisorConfig {
+        self.config.lock().await.clone()
+    }
+
     pub async fn start(&self) -> Result<(), String> {
         let mut task_guard = self.task.lock().await;
         if let Some(handle) = task_guard.as_ref() {
