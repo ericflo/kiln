@@ -389,7 +389,7 @@ pub async fn download_hf_model(
 ) -> Result<PathBuf, String> {
     let repo_id = req.repo_id.trim().to_string();
     if repo_id.is_empty() {
-        return Err("Repo id is required (e.g. Qwen/Qwen3-4B).".into());
+        return Err("Repo id is required (e.g. Qwen/Qwen3.5-4B).".into());
     }
     let revision = req
         .revision
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn sanitize_repo_id_replaces_slash() {
-        assert_eq!(sanitize_repo_id("Qwen/Qwen3-4B"), "Qwen__Qwen3-4B");
+        assert_eq!(sanitize_repo_id("Qwen/Qwen3.5-4B"), "Qwen__Qwen3.5-4B");
         assert_eq!(sanitize_repo_id("no-slash"), "no-slash");
         assert_eq!(
             sanitize_repo_id("org/sub/name"),

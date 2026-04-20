@@ -353,8 +353,8 @@
         </header>
         <div class="hf-form">
           <label for="hf_repo_id">Repo ID</label>
-          <input type="text" id="hf_repo_id" placeholder="Qwen/Qwen3-4B" autocomplete="off" spellcheck="false" />
-          <p class="hint">HuggingFace repo id, e.g. Qwen/Qwen3-4B. kiln requires a repo with safetensors weights.</p>
+          <input type="text" id="hf_repo_id" placeholder="Qwen/Qwen3.5-4B" autocomplete="off" spellcheck="false" />
+          <p class="hint">HuggingFace repo id, e.g. Qwen/Qwen3.5-4B. kiln requires a repo with safetensors weights.</p>
 
           <label for="hf_revision">Revision <span style="color:#6c7280;font-weight:normal;">(optional)</span></label>
           <input type="text" id="hf_revision" placeholder="main" autocomplete="off" spellcheck="false" />
@@ -695,7 +695,7 @@
       function openHfModal() {
         resetHfModal();
         if (!hfRepoInput.value) {
-          hfRepoInput.placeholder = "Qwen/Qwen3-4B";
+          hfRepoInput.placeholder = "Qwen/Qwen3.5-4B";
         }
         hfModal.classList.remove("hidden");
         setTimeout(() => hfRepoInput.focus(), 0);
@@ -721,7 +721,7 @@
         if (!repoId) {
           hfProgressWrap.classList.remove("hidden");
           hfProgressSummary.className = "hf-progress-line error";
-          hfProgressSummary.textContent = "Repo id is required (e.g. Qwen/Qwen3-4B).";
+          hfProgressSummary.textContent = "Repo id is required (e.g. Qwen/Qwen3.5-4B).";
           hfProgressDetail.textContent = "";
           return;
         }
