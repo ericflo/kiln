@@ -25,6 +25,14 @@ pub const INSTALL_PROGRESS_EVENT: &str = "kiln-install-progress";
 pub const INSTALL_DONE_EVENT: &str = "kiln-install-done";
 pub const INSTALL_FAILED_EVENT: &str = "kiln-install-failed";
 
+pub const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "download_update_progress";
+pub const UPDATE_DOWNLOAD_DONE_EVENT: &str = "download_update_done";
+pub const UPDATE_DOWNLOAD_FAILED_EVENT: &str = "download_update_failed";
+
+/// Subdirectory under `app_data_dir` where update tarballs are staged
+/// before the slice-3 atomic-swap step promotes them.
+pub const UPDATE_STAGING_DIR: &str = "kiln-updates";
+
 const RELEASES_URL: &str = "https://api.github.com/repos/ericflo/kiln/releases";
 const USER_AGENT: &str = concat!("kiln-desktop/", env!("CARGO_PKG_VERSION"));
 /// Upper bound on release-asset size we're willing to stream. A macOS Metal
@@ -53,6 +61,31 @@ pub struct InstallDone {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallFailed {
+    pub error: String,
+    pub cancelled: bool,
+}
+
+/// Progress payload for the slice-2 "download update tarball to staging"
+/// pipeline. Separate from [`InstallProgress`] because the update flow
+/// is simpler (download-only, no extract/verify yet) and the UI wants to
+/// key progress bars by `version`.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateDownloadProgress {
+    pub version: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateDownloadDone {
+    pub version: String,
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateDownloadFailed {
+    pub version: String,
     pub error: String,
     pub cancelled: bool,
 }
@@ -109,6 +142,54 @@ pub fn install_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| format!("app_data_dir unavailable: {}", e))?;
     Ok(base.join("bin"))
+}
+
+/// File-extension convention for the release tarball/zip for `target`.
+/// Windows releases ship as `.zip`; all other targets ship as `.tar.gz`.
+/// Detected purely by substring match on the target triple to keep this
+/// helper testable without platform cfg gates.
+fn release_archive_ext(target: &str) -> &'static str {
+    if target.contains("windows") {
+        "zip"
+    } else {
+        "tar.gz"
+    }
+}
+
+/// Asset filename for a given kiln release, matching the naming convention
+/// in `.github/workflows/server-release.yml`:
+///     `kiln-<version>-<target>.<ext>`
+///
+/// Pure helper — exposed for unit tests and reused by
+/// [`release_download_url`] and [`staging_tarball_path`].
+pub fn release_asset_name(version: &str, target: &str) -> String {
+    format!(
+        "kiln-{}-{}.{}",
+        version,
+        target,
+        release_archive_ext(target)
+    )
+}
+
+/// Full GitHub Releases download URL for the kiln binary at `version` for
+/// `target`. Uses the existing `kiln-v*` tag convention
+/// (see `.github/workflows/server-release.yml`).
+pub fn release_download_url(version: &str, target: &str) -> String {
+    format!(
+        "https://github.com/ericflo/kiln/releases/download/kiln-v{}/{}",
+        version,
+        release_asset_name(version, target)
+    )
+}
+
+/// Staging path inside `app_data_dir` where the downloaded update tarball
+/// is written before slice 3's atomic-swap step promotes it. Files land
+/// under `<app_data_dir>/kiln-updates/kiln-v<version>.<ext>` so multiple
+/// staged updates can coexist without colliding on filename.
+pub fn staging_tarball_path(app_data_dir: &Path, version: &str, target: &str) -> PathBuf {
+    app_data_dir
+        .join(UPDATE_STAGING_DIR)
+        .join(format!("kiln-v{}.{}", version, release_archive_ext(target)))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -444,6 +525,129 @@ pub fn is_update_available(current: Option<&str>, latest: &str) -> bool {
     }
 }
 
+/// Download the release tarball for `version` to the staging path under
+/// `<app_data_dir>/kiln-updates/`. Does NOT extract, verify sha256, or
+/// touch the running kiln binary — that is slice 3 of
+/// `desktop/docs/binary-update.md`.
+///
+/// Emits [`UPDATE_DOWNLOAD_PROGRESS_EVENT`] with a
+/// [`UpdateDownloadProgress`] payload during streaming. Returns the full
+/// staging file path on success.
+pub async fn download_release_binary(
+    app: &AppHandle,
+    version: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<(PathBuf, u64), String> {
+    let target = current_target().ok_or_else(|| {
+        "No prebuilt kiln release exists for this platform (Windows + Linux \
+         release assets land in a separate build task)."
+            .to_string()
+    })?;
+
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir unavailable: {}", e))?;
+    let dest = staging_tarball_path(&base, version, target);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+    }
+
+    let url = release_download_url(version, target);
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("build reqwest client: {}", e))?;
+
+    let mut resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("download request failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "download from {} returned HTTP {}",
+            url,
+            resp.status()
+        ));
+    }
+    let total_bytes = resp.content_length();
+    if let Some(t) = total_bytes {
+        if t > MAX_ASSET_BYTES {
+            return Err(format!(
+                "asset claims {} bytes, over {}-byte safety limit",
+                t, MAX_ASSET_BYTES
+            ));
+        }
+    }
+
+    let mut file = fs::File::create(&dest)
+        .await
+        .map_err(|e| format!("create {}: {}", dest.display(), e))?;
+    let mut downloaded: u64 = 0;
+    let mut last_reported: u64 = 0;
+
+    let _ = app.emit(
+        UPDATE_DOWNLOAD_PROGRESS_EVENT,
+        UpdateDownloadProgress {
+            version: version.to_string(),
+            downloaded_bytes: 0,
+            total_bytes,
+        },
+    );
+
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            // Best-effort cleanup of partial file on cancel.
+            drop(file);
+            let _ = fs::remove_file(&dest).await;
+            return Err("download cancelled".to_string());
+        }
+        let chunk = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("chunk read failed: {}", e))?;
+        let Some(bytes) = chunk else { break };
+        downloaded = downloaded.saturating_add(bytes.len() as u64);
+        if downloaded > MAX_ASSET_BYTES {
+            return Err(format!(
+                "aborted — received {} bytes past {}-byte safety limit",
+                downloaded, MAX_ASSET_BYTES
+            ));
+        }
+        file.write_all(&bytes)
+            .await
+            .map_err(|e| format!("write chunk: {}", e))?;
+        // Keep IPC cost down — emit at 64KB granularity.
+        if downloaded.saturating_sub(last_reported) >= 64 * 1024 {
+            last_reported = downloaded;
+            let _ = app.emit(
+                UPDATE_DOWNLOAD_PROGRESS_EVENT,
+                UpdateDownloadProgress {
+                    version: version.to_string(),
+                    downloaded_bytes: downloaded,
+                    total_bytes,
+                },
+            );
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush: {}", e))?;
+    let _ = app.emit(
+        UPDATE_DOWNLOAD_PROGRESS_EVENT,
+        UpdateDownloadProgress {
+            version: version.to_string(),
+            downloaded_bytes: downloaded,
+            total_bytes,
+        },
+    );
+    Ok((dest, downloaded))
+}
+
 /// Full install pipeline: discover latest asset, download, verify sha256,
 /// extract, chmod, clear quarantine. Returns the installed binary path.
 pub async fn install_latest_server(
@@ -524,7 +728,106 @@ pub async fn install_latest_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_update_available, parse_kiln_version_output};
+    use super::{
+        is_update_available, parse_kiln_version_output, release_archive_ext,
+        release_asset_name, release_download_url, staging_tarball_path, UPDATE_STAGING_DIR,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn archive_ext_windows_is_zip() {
+        assert_eq!(release_archive_ext("x86_64-pc-windows-msvc-cuda124"), "zip");
+        assert_eq!(release_archive_ext("x86_64-pc-windows-gnu"), "zip");
+    }
+
+    #[test]
+    fn archive_ext_unix_is_tar_gz() {
+        assert_eq!(
+            release_archive_ext("aarch64-apple-darwin-metal"),
+            "tar.gz"
+        );
+        assert_eq!(
+            release_archive_ext("x86_64-unknown-linux-gnu-cuda124"),
+            "tar.gz"
+        );
+        assert_eq!(release_archive_ext("x86_64-apple-darwin"), "tar.gz");
+    }
+
+    #[test]
+    fn asset_name_matches_release_workflow_macos() {
+        assert_eq!(
+            release_asset_name("0.2.0", "aarch64-apple-darwin-metal"),
+            "kiln-0.2.0-aarch64-apple-darwin-metal.tar.gz"
+        );
+    }
+
+    #[test]
+    fn asset_name_matches_release_workflow_linux() {
+        assert_eq!(
+            release_asset_name("0.2.0", "x86_64-unknown-linux-gnu-cuda124"),
+            "kiln-0.2.0-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+        );
+    }
+
+    #[test]
+    fn asset_name_windows_uses_zip() {
+        assert_eq!(
+            release_asset_name("0.2.0", "x86_64-pc-windows-msvc-cuda124"),
+            "kiln-0.2.0-x86_64-pc-windows-msvc-cuda124.zip"
+        );
+    }
+
+    #[test]
+    fn download_url_uses_kiln_v_tag_and_matching_asset() {
+        assert_eq!(
+            release_download_url("0.2.0", "aarch64-apple-darwin-metal"),
+            "https://github.com/ericflo/kiln/releases/download/kiln-v0.2.0/\
+             kiln-0.2.0-aarch64-apple-darwin-metal.tar.gz"
+                .replace(' ', "")
+        );
+        assert_eq!(
+            release_download_url("1.2.3", "x86_64-pc-windows-msvc-cuda124"),
+            "https://github.com/ericflo/kiln/releases/download/kiln-v1.2.3/\
+             kiln-1.2.3-x86_64-pc-windows-msvc-cuda124.zip"
+                .replace(' ', "")
+        );
+        assert_eq!(
+            release_download_url("1.0.0", "x86_64-unknown-linux-gnu-cuda124"),
+            "https://github.com/ericflo/kiln/releases/download/kiln-v1.0.0/\
+             kiln-1.0.0-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+                .replace(' ', "")
+        );
+    }
+
+    #[test]
+    fn staging_path_nests_under_update_staging_dir() {
+        let base = PathBuf::from("/tmp/fake-app-data");
+        let p = staging_tarball_path(&base, "0.2.0", "aarch64-apple-darwin-metal");
+        assert!(
+            p.starts_with(base.join(UPDATE_STAGING_DIR)),
+            "staging path {} should be under {}",
+            p.display(),
+            base.join(UPDATE_STAGING_DIR).display()
+        );
+        assert_eq!(p.file_name().unwrap(), "kiln-v0.2.0.tar.gz");
+    }
+
+    #[test]
+    fn staging_path_windows_uses_zip_extension() {
+        let base = PathBuf::from("C:/fake/AppData");
+        let p = staging_tarball_path(&base, "0.2.0", "x86_64-pc-windows-msvc-cuda124");
+        assert_eq!(p.file_name().unwrap(), "kiln-v0.2.0.zip");
+    }
+
+    #[test]
+    fn staging_path_version_is_embedded_verbatim() {
+        // Version strings are injected from GitHub release tags, so they can
+        // include pre-release / build metadata. The staging helper must not
+        // drop or rewrite them.
+        let base = PathBuf::from("/tmp/x");
+        let p = staging_tarball_path(&base, "0.3.0-rc.1", "aarch64-apple-darwin-metal");
+        assert_eq!(p.file_name().unwrap(), "kiln-v0.3.0-rc.1.tar.gz");
+    }
 
     #[test]
     fn parse_version_plain() {

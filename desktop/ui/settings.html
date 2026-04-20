@@ -107,6 +107,36 @@
       }
       .update-status.available .badge { background: #5a3f1a; color: #f6d3a6; }
       .update-status.up-to-date .badge { background: #1f3a22; color: #b7e3b9; }
+      .update-download {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        flex-basis: 100%;
+        margin-top: 2px;
+      }
+      .update-download.hidden { display: none; }
+      button.browse.hidden { display: none; }
+      .update-download-bar {
+        height: 6px;
+        background: #0f1115;
+        border: 1px solid #2a2f3a;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .update-download-fill {
+        height: 100%;
+        width: 0%;
+        background: #2f66f0;
+        transition: width 120ms linear;
+      }
+      .update-download-line {
+        font-size: 11px;
+        color: #a8aeb8;
+        line-height: 1.4;
+        word-break: break-all;
+      }
+      .update-download-line.error { color: #f08080; }
+      .update-download-line.success { color: #7fbf7f; }
       .actions {
         display: flex;
         gap: 8px;
@@ -298,6 +328,12 @@
         <div class="update-row">
           <button type="button" class="browse" id="check_for_kiln_update">Check for Updates</button>
           <span class="update-status" id="kiln_update_status"></span>
+          <button type="button" class="browse hidden" id="download_kiln_update">Download Update</button>
+          <button type="button" class="browse hidden" id="install_kiln_update" disabled title="Install lands in updater slice 3">Install</button>
+          <div class="update-download hidden" id="kiln_update_download">
+            <div class="update-download-bar"><div class="update-download-fill" id="kiln_update_download_fill"></div></div>
+            <div class="update-download-line" id="kiln_update_download_line"></div>
+          </div>
         </div>
         <label class="row"><span class="name">Model path</span>
           <span class="path-row">
@@ -953,7 +989,15 @@
       // ---------- Check for kiln binary updates (detection only) ----------
       const kilnUpdateBtn = document.getElementById("check_for_kiln_update");
       const kilnUpdateStatusEl = document.getElementById("kiln_update_status");
+      const kilnUpdateDownloadBtn = document.getElementById("download_kiln_update");
+      const kilnUpdateInstallBtn = document.getElementById("install_kiln_update");
+      const kilnUpdateProgressWrap = document.getElementById("kiln_update_download");
+      const kilnUpdateProgressFill = document.getElementById("kiln_update_download_fill");
+      const kilnUpdateProgressLine = document.getElementById("kiln_update_download_line");
       let kilnUpdateChecking = false;
+      let kilnUpdateDownloading = false;
+      let kilnUpdateLatest = null;
+      let kilnUpdateUnlistenFns = [];
 
       function setKilnUpdateStatus(kind, html) {
         kilnUpdateStatusEl.className = "update-status" + (kind ? " " + kind : "");
@@ -966,11 +1010,38 @@
         }[c]));
       }
 
+      function setKilnUpdateProgressLine(kind, text) {
+        kilnUpdateProgressLine.className =
+          "update-download-line" + (kind ? " " + kind : "");
+        kilnUpdateProgressLine.textContent = text;
+      }
+
+      function showKilnUpdateActions(latest) {
+        kilnUpdateLatest = latest || null;
+        if (latest) {
+          kilnUpdateDownloadBtn.classList.remove("hidden");
+          kilnUpdateInstallBtn.classList.add("hidden");
+        } else {
+          kilnUpdateDownloadBtn.classList.add("hidden");
+          kilnUpdateInstallBtn.classList.add("hidden");
+          kilnUpdateProgressWrap.classList.add("hidden");
+        }
+      }
+
+      async function teardownKilnUpdateListeners() {
+        const fns = kilnUpdateUnlistenFns;
+        kilnUpdateUnlistenFns = [];
+        for (const fn of fns) {
+          try { await fn(); } catch (_) {}
+        }
+      }
+
       async function checkForKilnUpdate() {
         if (kilnUpdateChecking) return;
         kilnUpdateChecking = true;
         kilnUpdateBtn.disabled = true;
         setKilnUpdateStatus("checking", "Checking…");
+        showKilnUpdateActions(null);
         try {
           const r = await invoke("check_for_kiln_update");
           if (!r.platform_supported) {
@@ -992,6 +1063,7 @@
               "Current " + current + " → latest " + latest +
                 ' <span class="badge">Update available</span>'
             );
+            showKilnUpdateActions(r.latest);
           } else {
             setKilnUpdateStatus(
               "up-to-date",
@@ -1006,6 +1078,100 @@
         }
       }
       kilnUpdateBtn.addEventListener("click", checkForKilnUpdate);
+
+      // ---------- Download an available kiln update (slice 2) ----------
+      // Streams the release tarball to <app_data_dir>/kiln-updates/. Does NOT
+      // extract or swap the running binary — the Install button is left
+      // disabled until updater slice 3 lands the atomic-swap pipeline.
+      async function startKilnUpdateDownload() {
+        if (kilnUpdateDownloading || !kilnUpdateLatest) return;
+        const version = kilnUpdateLatest;
+        kilnUpdateDownloading = true;
+        kilnUpdateDownloadBtn.disabled = true;
+        kilnUpdateInstallBtn.classList.add("hidden");
+        kilnUpdateInstallBtn.disabled = true;
+        kilnUpdateProgressWrap.classList.remove("hidden");
+        kilnUpdateProgressFill.style.background = "#2f66f0";
+        kilnUpdateProgressFill.style.width = "0%";
+        setKilnUpdateProgressLine("", "Starting download for v" + version + "…");
+
+        const event = window.__TAURI__ && window.__TAURI__.event;
+        if (!event || typeof event.listen !== "function") {
+          setKilnUpdateProgressLine("error", "Tauri event API unavailable.");
+          kilnUpdateDownloading = false;
+          kilnUpdateDownloadBtn.disabled = false;
+          return;
+        }
+
+        await teardownKilnUpdateListeners();
+
+        const unProgress = await event.listen("download_update_progress", (e) => {
+          const p = e && e.payload;
+          if (!p || p.version !== version) return;
+          const total = p.total_bytes;
+          const got = p.downloaded_bytes || 0;
+          if (total && total > 0) {
+            const pct = Math.max(0, Math.min(100, (got / total) * 100));
+            kilnUpdateProgressFill.style.width = pct.toFixed(1) + "%";
+            setKilnUpdateProgressLine(
+              "",
+              formatBytes(got) + " / " + formatBytes(total) +
+                " (" + pct.toFixed(0) + "%) — v" + version
+            );
+          } else {
+            // Server didn't report Content-Length; show indeterminate text.
+            setKilnUpdateProgressLine(
+              "",
+              "Downloaded " + formatBytes(got) + " — v" + version
+            );
+          }
+        });
+        const unDone = await event.listen("download_update_done", (e) => {
+          const p = e && e.payload;
+          if (!p || p.version !== version) return;
+          kilnUpdateProgressFill.style.width = "100%";
+          setKilnUpdateProgressLine(
+            "success",
+            "Downloaded v" + version + " (" + formatBytes(p.bytes || 0) +
+              ") to " + (p.path || "(unknown)") + ". Install lands in updater slice 3."
+          );
+          kilnUpdateDownloading = false;
+          kilnUpdateDownloadBtn.disabled = true;
+          kilnUpdateDownloadBtn.textContent = "Downloaded";
+          // Surface the Install button as a slice-3 placeholder so the user
+          // sees the next step exists; it stays disabled until slice 3.
+          kilnUpdateInstallBtn.classList.remove("hidden");
+          kilnUpdateInstallBtn.disabled = true;
+          teardownKilnUpdateListeners();
+        });
+        const unFailed = await event.listen("download_update_failed", (e) => {
+          const p = e && e.payload;
+          if (!p || p.version !== version) return;
+          const err = p.error || "Unknown error";
+          const cancelled = !!p.cancelled;
+          kilnUpdateProgressFill.style.background = cancelled ? "#3a3a2a" : "#3a2a2a";
+          setKilnUpdateProgressLine(
+            "error",
+            (cancelled ? "Cancelled: " : "Download failed: ") + err
+          );
+          kilnUpdateDownloading = false;
+          kilnUpdateDownloadBtn.disabled = false;
+          kilnUpdateDownloadBtn.textContent = "Retry Download";
+          teardownKilnUpdateListeners();
+        });
+        kilnUpdateUnlistenFns = [unProgress, unDone, unFailed];
+
+        try {
+          await invoke("download_kiln_update", { version: version });
+        } catch (err) {
+          setKilnUpdateProgressLine("error", "Failed to start download: " + err);
+          kilnUpdateDownloading = false;
+          kilnUpdateDownloadBtn.disabled = false;
+          kilnUpdateDownloadBtn.textContent = "Retry Download";
+          await teardownKilnUpdateListeners();
+        }
+      }
+      kilnUpdateDownloadBtn.addEventListener("click", startKilnUpdateDownload);
 
       load();
     </script>
