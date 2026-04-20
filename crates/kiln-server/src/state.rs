@@ -248,17 +248,25 @@ impl AppState {
     ) -> Self {
         let block_size = 16;
 
-        let kv_dtype = if candle_core::utils::cuda_is_available() {
-            DType::BF16
-        } else {
-            DType::F32
+        // KV cache dtype must match the model's activation dtype, otherwise
+        // `paged_cache.write` hits a slice-set dtype mismatch on the first
+        // full-attention layer. The previous `cuda_is_available()` check was
+        // a compile-time cfg(feature = "cuda"), so Metal builds ran the F32
+        // branch even though the Qwen3.5-4B model loads in BF16 — prefill
+        // failed on every request. Key the choice off `model_config.dtype`
+        // instead so tests with F32 tiny configs keep working and any real
+        // BF16 model gets a matching BF16 cache regardless of backend.
+        let kv_dtype = match model_config.dtype {
+            kiln_core::config::DType::BF16 => DType::BF16,
+            kiln_core::config::DType::FP16 => DType::F16,
+            kiln_core::config::DType::FP32 => DType::F32,
         };
 
         let kv_dtype_bytes: usize = if memory_cfg.kv_cache_fp8 {
             1 // FP8: 1 byte per element
         } else {
             match kv_dtype {
-                DType::BF16 => 2,
+                DType::BF16 | DType::F16 => 2,
                 _ => 4,
             }
         };

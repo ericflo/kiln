@@ -60,11 +60,15 @@ impl ApiError {
         }
     }
 
-    pub fn generation_failed(detail: impl std::fmt::Display) -> Self {
+    pub fn generation_failed(detail: anyhow::Error) -> Self {
+        // `{:#}` flattens the anyhow Context chain so the client sees the
+        // root cause, not just the outermost wrapper. Without this, errors
+        // like "prefill forward pass (paged) failed" surface with no hint
+        // about which kernel / op actually failed.
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "generation_error",
-            message: format!("Text generation failed: {detail}"),
+            message: format!("Text generation failed: {detail:#}"),
             hint: "Retry the request. If the error mentions OOM, try reducing max_tokens or freeing GPU memory.",
         }
     }
