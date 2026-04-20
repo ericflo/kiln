@@ -44,6 +44,20 @@ macOS `.dmg` releases are signed with a Developer ID certificate and notarized b
 
 See **[CHANGELOG.md](CHANGELOG.md)** for older versions and full release history.
 
+## Screenshots
+
+**Dashboard** — toolbar pills surface server state, model path, VRAM, active adapter, training status, and the OpenAI base URL (click-to-copy), with the kiln server's `/ui` embedded below.
+
+![Dashboard](../docs/desktop/dashboard.png)
+
+**Settings** — model path picker, HuggingFace downloader, host/port, runtime knobs (FP8 KV cache, CUDA graphs, prefix cache, inference VRAM fraction), and startup options.
+
+![Settings](../docs/desktop/settings.png)
+
+**Logs** — tails kiln's stdout/stderr from the in-process ring buffer.
+
+![Logs](../docs/desktop/logs.png)
+
 ## Architecture
 
 The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight GPU server (CUDA on Linux/Windows, Metal on macOS), and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA/Metal into the Tauri build.
