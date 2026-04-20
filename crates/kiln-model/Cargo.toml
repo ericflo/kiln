@@ -23,6 +23,7 @@ kiln-marlin-gemm = { workspace = true, optional = true }
 kiln-rmsnorm-kernel = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true }
 mlx-rs = { workspace = true, optional = true }
 # Pin to the same major as candle-core and mlx-rs. Only pulled in by the
 # mlx backend for native bf16/f16 conversion at the candle↔mlx boundary.

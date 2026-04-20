@@ -309,6 +309,65 @@ fn marlin_bf16_drop_disabled() -> bool {
     )
 }
 
+/// Sidecar record: which slot in `layers[layer_idx]` a queued Marlin pack
+/// job belongs to. Populated inline with `pack_from_bf16_batch`'s input vec
+/// during the per-layer build loop, then replayed after the batch pack
+/// finishes so the packed `MarlinPackedProj` lands in the right field.
+#[derive(Clone, Copy, Debug)]
+enum MarlinPackKind {
+    QProj,
+    GateProj,
+    UpProj,
+    DownProj,
+}
+
+#[derive(Debug)]
+struct MarlinPackEntry {
+    layer_idx: usize,
+    kind: MarlinPackKind,
+}
+
+/// Install a successfully packed projection into its target layer slot,
+/// and drop the corresponding pre-transposed BF16 copy unless
+/// `KILN_DISABLE_MARLIN_BF16_DROP=1` has preserved it.
+fn install_marlin_packed(
+    layer: &mut GpuLayerWeights,
+    kind: MarlinPackKind,
+    packed: crate::marlin_proj::MarlinPackedProj,
+    device: &Device,
+    drop_disabled: bool,
+) -> Result<()> {
+    match kind {
+        MarlinPackKind::QProj => {
+            if let GpuAttentionWeights::Full(ref mut full) = layer.attention {
+                full.q_proj_marlin = Some(packed);
+                if !drop_disabled {
+                    full.q_proj_t = dropped_bf16_stub(device)?;
+                }
+            }
+        }
+        MarlinPackKind::GateProj => {
+            layer.mlp.gate_proj_marlin = Some(packed);
+            if !drop_disabled {
+                layer.mlp.gate_proj_t = dropped_bf16_stub(device)?;
+            }
+        }
+        MarlinPackKind::UpProj => {
+            layer.mlp.up_proj_marlin = Some(packed);
+            if !drop_disabled {
+                layer.mlp.up_proj_t = dropped_bf16_stub(device)?;
+            }
+        }
+        MarlinPackKind::DownProj => {
+            layer.mlp.down_proj_marlin = Some(packed);
+            if !drop_disabled {
+                layer.mlp.down_proj_t = dropped_bf16_stub(device)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl GpuWeights {
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
     ///
@@ -330,6 +389,16 @@ impl GpuWeights {
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
                 .context("rotary_inv_freq")?;
+
+        // Per-layer `pack_from_bf16` used to run inline during weight load,
+        // serializing ~104 calls (8 × q_proj + 96 × MLP gate/up/down) behind
+        // a single thread. At ~58s cold load on the Qwen3.5-4B A6000 build
+        // this is a significant fraction of server startup. Sidecar the
+        // pack inputs here, batch-pack via rayon after the layer loop, and
+        // install results into the per-layer slots.
+        let w4a16_enabled = crate::marlin_proj::env_enabled();
+        let mut marlin_pack_inputs: Vec<(Tensor, i32)> = Vec::new();
+        let mut marlin_pack_meta: Vec<MarlinPackEntry> = Vec::new();
 
         let mut layers = Vec::with_capacity(weights.layers.len());
         for (i, lw) in weights.layers.iter().enumerate() {
@@ -354,27 +423,18 @@ impl GpuWeights {
                         .contiguous().context(ctx("v_proj.t contiguous"))?;
                     let o_proj_t = o_proj.t().context(ctx("o_proj.t"))?
                         .contiguous().context(ctx("o_proj.t contiguous"))?;
-                    // KILN_W4A16=1 opt-in: pack q_proj into Marlin W4A16 layout
-                    // once, and let the forward path route through the Marlin
-                    // kernel. Skip gracefully if the shape doesn't fit Marlin's
-                    // tile constraints — the forward path will fall back.
-                    let q_proj_marlin = if crate::marlin_proj::env_enabled() {
-                        crate::marlin_proj::pack_from_bf16(&q_proj_t, 128)
-                            .context(ctx("q_proj marlin pack"))?
-                    } else {
-                        None
-                    };
-                    // When Marlin has absorbed q_proj, the BF16 `q_proj_t`
-                    // contiguous copy is no longer touched by the forward
-                    // path (`q_proj_forward` dispatches on `q_proj_marlin`).
-                    // Drop it to reclaim the per-layer BF16 residency.
-                    // `KILN_DISABLE_MARLIN_BF16_DROP=1` preserves the old
-                    // behaviour for A/B measurements.
-                    let q_proj_t = if q_proj_marlin.is_some() && !marlin_bf16_drop_disabled() {
-                        dropped_bf16_stub(device).context(ctx("q_proj_t stub"))?
-                    } else {
-                        q_proj_t
-                    };
+                    // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
+                    // Marlin batch pack. The packed weight (and the BF16
+                    // drop) are installed after the layer loop via
+                    // `install_marlin_packed`, so `q_proj_marlin` starts as
+                    // None and `q_proj_t` keeps the BF16 copy until then.
+                    if w4a16_enabled {
+                        marlin_pack_inputs.push((q_proj_t.clone(), 128));
+                        marlin_pack_meta.push(MarlinPackEntry {
+                            layer_idx: i,
+                            kind: MarlinPackKind::QProj,
+                        });
+                    }
                     GpuAttentionWeights::Full(GpuFullAttentionWeights {
                         q_proj,
                         k_proj,
@@ -386,7 +446,7 @@ impl GpuWeights {
                         k_proj_t,
                         v_proj_t,
                         o_proj_t,
-                        q_proj_marlin,
+                        q_proj_marlin: None,
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
@@ -438,46 +498,28 @@ impl GpuWeights {
                 .contiguous().context(ctx("up_proj.t contiguous"))?;
             let down_proj_t = down_proj.t().context(ctx("down_proj.t"))?
                 .contiguous().context(ctx("down_proj.t contiguous"))?;
-            // KILN_W4A16=1 opt-in: pack each MLP projection into Marlin W4A16
-            // layout once, and let the forward path route through the Marlin
-            // kernel. Skip gracefully per-projection if the shape doesn't fit
-            // Marlin's tile constraints — the forward path falls back to the
-            // BF16 `broadcast_matmul(*_t)` for any projection that returns
-            // None.
-            let (gate_proj_marlin, up_proj_marlin, down_proj_marlin) =
-                if crate::marlin_proj::env_enabled() {
-                    let g = crate::marlin_proj::pack_from_bf16(&gate_proj_t, 128)
-                        .context(ctx("gate_proj marlin pack"))?;
-                    let u = crate::marlin_proj::pack_from_bf16(&up_proj_t, 128)
-                        .context(ctx("up_proj marlin pack"))?;
-                    let d = crate::marlin_proj::pack_from_bf16(&down_proj_t, 128)
-                        .context(ctx("down_proj marlin pack"))?;
-                    (g, u, d)
-                } else {
-                    (None, None, None)
-                };
-            // Per-projection drop of the BF16 contiguous pre-transpose once
-            // Marlin has absorbed it. `mlp_proj_forward` dispatches on the
-            // per-projection `*_marlin` option; when packing succeeds the
-            // corresponding `*_proj_t` is never read again.
-            // `KILN_DISABLE_MARLIN_BF16_DROP=1` preserves the old behaviour
-            // for A/B measurements.
-            let drop_disabled = marlin_bf16_drop_disabled();
-            let gate_proj_t = if gate_proj_marlin.is_some() && !drop_disabled {
-                dropped_bf16_stub(device).context(ctx("gate_proj_t stub"))?
-            } else {
-                gate_proj_t
-            };
-            let up_proj_t = if up_proj_marlin.is_some() && !drop_disabled {
-                dropped_bf16_stub(device).context(ctx("up_proj_t stub"))?
-            } else {
-                up_proj_t
-            };
-            let down_proj_t = if down_proj_marlin.is_some() && !drop_disabled {
-                dropped_bf16_stub(device).context(ctx("down_proj_t stub"))?
-            } else {
-                down_proj_t
-            };
+            // KILN_W4A16=1 opt-in: queue each MLP projection for the
+            // post-loop Marlin batch pack. See the q_proj comment above —
+            // the `*_proj_marlin` fields start as None, and
+            // `install_marlin_packed` drops `*_proj_t` after the batch runs
+            // (unless `KILN_DISABLE_MARLIN_BF16_DROP=1`).
+            if w4a16_enabled {
+                marlin_pack_inputs.push((gate_proj_t.clone(), 128));
+                marlin_pack_meta.push(MarlinPackEntry {
+                    layer_idx: i,
+                    kind: MarlinPackKind::GateProj,
+                });
+                marlin_pack_inputs.push((up_proj_t.clone(), 128));
+                marlin_pack_meta.push(MarlinPackEntry {
+                    layer_idx: i,
+                    kind: MarlinPackKind::UpProj,
+                });
+                marlin_pack_inputs.push((down_proj_t.clone(), 128));
+                marlin_pack_meta.push(MarlinPackEntry {
+                    layer_idx: i,
+                    kind: MarlinPackKind::DownProj,
+                });
+            }
             let mlp = GpuFfnWeights {
                 gate_proj,
                 up_proj,
@@ -485,9 +527,9 @@ impl GpuWeights {
                 gate_proj_t,
                 up_proj_t,
                 down_proj_t,
-                gate_proj_marlin,
-                up_proj_marlin,
-                down_proj_marlin,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
             };
 
             layers.push(GpuLayerWeights {
@@ -496,6 +538,42 @@ impl GpuWeights {
                 attention,
                 mlp,
             });
+        }
+
+        // Batch-pack the queued Marlin projections in parallel. On
+        // Qwen3.5-4B this is 8 × q_proj + 96 × MLP = 104 projections. The
+        // CPU-bound `quantize_and_pack` work now runs across every
+        // available worker thread (rayon's default pool) while the
+        // GPU↔CPU copies stay sequential inside
+        // `pack_from_bf16_batch`. Set `KILN_DISABLE_PARALLEL_PACK=1` to
+        // force the legacy serial pack for A/B measurements or rollback.
+        if w4a16_enabled && !marlin_pack_inputs.is_empty() {
+            let pack_start = std::time::Instant::now();
+            let packed = crate::marlin_proj::pack_from_bf16_batch(&marlin_pack_inputs)
+                .context("marlin batch pack")?;
+            let pack_elapsed_ms = pack_start.elapsed().as_millis();
+            let parallel = !crate::marlin_proj::parallel_pack_disabled();
+            let n_inputs = marlin_pack_inputs.len();
+            let n_packed = packed.iter().filter(|p| p.is_some()).count();
+            tracing::info!(
+                n_inputs,
+                n_packed,
+                pack_elapsed_ms = pack_elapsed_ms as u64,
+                parallel,
+                "marlin batch pack complete"
+            );
+            eprintln!(
+                "[kiln] marlin batch pack: {n_packed}/{n_inputs} projections in {pack_elapsed_ms} ms ({})",
+                if parallel { "parallel" } else { "serial" }
+            );
+
+            let drop_disabled = marlin_bf16_drop_disabled();
+            for (entry, maybe_packed) in marlin_pack_meta.into_iter().zip(packed.into_iter()) {
+                if let Some(p) = maybe_packed {
+                    install_marlin_packed(&mut layers[entry.layer_idx], entry.kind, p, device, drop_disabled)
+                        .with_context(|| format!("install marlin {:?} on layer {}", entry.kind, entry.layer_idx))?;
+                }
+            }
         }
 
         Ok(Self {
