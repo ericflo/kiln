@@ -42,6 +42,8 @@ macOS `.dmg` releases are signed with a Developer ID certificate and notarized b
 - **Real Kiln logo icons** — PNG/ICO/ICNS baked into all platform bundles.
 - **GitHub Actions CI** — builds Windows MSI and NSIS installers and Linux `.deb` / `.AppImage`, attaches artifacts to tag releases.
 
+See **[CHANGELOG.md](CHANGELOG.md)** for older versions and full release history.
+
 ## Architecture
 
 The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight GPU server (CUDA on Linux/Windows, Metal on macOS), and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA/Metal into the Tauri build.
