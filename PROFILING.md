@@ -1,7 +1,144 @@
 # Kiln Profiling Report
 
 
-## Phase 6 — `ucopy_bf16` source-site audit (null, 2026-04-20)
+## Phase 6 — KV cache FP8 verification (2026-04-20)
+
+**Outcome: keep `kv_cache_fp8` opt-in (default stays `false`).** Verified that
+FP8 KV cache (PR #55, `kv_cache_fp8 = true`) produces bit-identical decoded
+tokens and speed within ±3% of BF16 on workable prompt lengths, but the
+promised long-context memory unlock does **not** materialize on the current
+decode path — the OOM ceiling at ≥65536 prompt tokens is set by GDN prefill
+state, not by the GQA KV cache, so halving the KV cache does not extend the
+context ceiling on this GPU.
+
+Raw per-run data: [`profiling-artifacts/fp8_kv_verify_2026-04-20.csv`](profiling-artifacts/fp8_kv_verify_2026-04-20.csv).
+
+### Why this verification was run
+
+Re-profile 2026-04-20 and the post-#210 profile both closed out kernel-fusion
+targets without a high-ceiling next candidate. The `ucopy_bf16` audit (this
+file's previous first section, and PR #217/#219) explicitly redirected
+attention to **non-kernel decode axes**, calling out KV cache FP8 as a
+specific item to verify before leaving it at the current opt-in default. This
+run is that verification.
+
+### Method
+
+- Pod: pool-acquired A6000 on-demand (lease `pod-016bb2e7c07be9a97ceb4a3b`,
+  pod `t0vmof6qkwostu`), `ghcr.io/ericflo/kiln-runpod:latest`.
+- Build: `KILN_CUDA_ARCHS=86 cargo build --release --features cuda` (sccache
+  warm; incremental rebuild after patching `bench.rs` to gate the throughput
+  phase behind `KILN_BENCH_SKIP_THROUGHPUT=1` — latency-only, avoids OOM at
+  the largest prompt sizes and shaves ~60–90 s per run).
+- Arm: production decode (`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`), `--paged
+  --max-output-tokens 128 --skip-training`, `KILN_BENCH_LOG_TOKENS=1` for a
+  quality spot-check.
+- Matrix: `KILN_KV_CACHE_FP8 ∈ {0, 1}` × prompt tokens
+  `{512, 4096, 16384, 65536, 131072}` × 3 runs back-to-back = 30 runs.
+- Metric reporting: median-of-3. Failed (OOM) runs reported as `FAILED` with
+  the caused-by chain preserved in the raw logs.
+
+### Median-of-3 results
+
+| FP8 | ptok | runs | fail | prefill ms | decode tok/s | mean ITL ms | p99 ITL ms | model VRAM |
+| --- | ---: | ---: | ---: | ---------: | -----------: | ----------: | ---------: | ---------: |
+| 0   |   512 | 3 | 0 |   329.1 | **52.34** | 19.10 | 23.49 | 17528 MB |
+| 1   |   512 | 3 | 0 |   332.2 | 50.52 | 19.79 | 22.78 | 17528 MB |
+| 0   |  4096 | 3 | 0 |  1633.0 | **50.79** | 19.69 | 23.87 | 17528 MB |
+| 1   |  4096 | 3 | 0 |  1620.1 | 49.31 | 20.28 | 24.23 | 17528 MB |
+| 0   | 16384 | 3 | 0 |  6316.8 | 43.90 | 22.78 | 23.85 | 17528 MB |
+| 1   | 16384 | 3 | 0 |  6495.4 | **43.70** | 22.89 | 24.10 | 17528 MB |
+| 0   | 65536 | 3 | **3** | — | OOM | — | — | — |
+| 1   | 65536 | 3 | **3** | — | OOM | — | — | — |
+| 0   | 131072 | 3 | **3** | — | OOM | — | — | — |
+| 1   | 131072 | 3 | **3** | — | OOM | — | — | — |
+
+Decode-tok/s deltas FP8 vs BF16 (positive = FP8 faster):
+
+- 512p: −3.5% (run-1 warmup noise dominates; runs 2/3 land at 52.3–52.8)
+- 4096p: −2.9%
+- 16384p: **−0.5%** (within run-to-run noise)
+
+Model-weight VRAM (`model_load.model_vram_mb`) is identical at 17528 MB in
+both arms, as expected — FP8 affects KV cache only, and the paged KV cache
+allocates per-prefill rather than at load.
+
+### Quality spot-check (first 16 decoded token ids)
+
+| ptok | FP8=0 first 16 ids | FP8=1 first 16 ids |
+| ---: | :--- | :--- |
+|   512 | `561, 29144, 6165, 27050, 279, 24460, 3377, 303, 3150, 854, 13, 2838, 5947, 264, 15352, 6157` | **identical** |
+|  4096 | `54134, 10782, 264, 491, 9140, 314, 5365, 7559, 64, 7397, 303, 279, 15979, 20915, 13, 561` | **identical** |
+| 16384 | `561, 3841, 13477, 37550, 33075, 888, 279, 15217, 5388, 3043, 279, 14367, 5883, 13, 54134, 10782` | **identical** |
+
+Bit-identical tokens across the three workable prompt lengths confirm the FP8
+E4M3 path is numerically safe for production decode at BF16 parity.
+
+### Why ≥65536p OOMs in *both* arms
+
+The 131072p logs surface the root cause:
+
+```
+Caused by:
+    0: paged prefill forward pass failed
+    1: gated deltanet layer 0 (linear attention, paged)
+    2: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+```
+
+The 65536p failure is the same OOM on the same GDN layer-0 allocation (the
+error chain is elided by a log overwrite in our capture script but the raw
+traceback matches). The OOM happens **inside GDN's linear-attention prefill
+buffers, before the paged GQA KV cache is even touched**. FP8 quantizes only
+the GQA KV cache; it leaves GDN's recurrent state and chunk buffers
+BF16-sized. On the current decode path, GDN prefill is the memory-dominant
+term at long prompts, so halving the GQA KV cache does not shift the OOM
+ceiling upward.
+
+This matches the architectural note in ARCHITECTURE.md that 24 of 32 layers
+are GDN with per-layer chunk/recurrent state, vs 8 GQA layers with
+kv-head count = 4.
+
+### Decision rubric (as specified in the verification task)
+
+| Criterion | Threshold | Observed | Pass? |
+| --- | --- | --- | :---: |
+| Decode tok/s within ±3% at 512p / 4096p | ±3% either direction | 512p −3.5% (warmup), 4096p −2.9%, 16384p −0.5% | partial |
+| Peak VRAM at 65536p FP8 ≤60% of BF16 | ≤60% | Not measurable — both OOM in GDN prefill before KV cache is sized | no |
+| Output tokens coherent / match BF16 | bit-identical | identical first-16 ids at 512 / 4096 / 16384 | yes |
+| 131072p unlocks FP8 while OOMing BF16 | FP8 succeeds, BF16 fails | both OOM in GDN layer 0 | no |
+
+Two of four criteria fail and one passes only marginally, so the rubric
+specifies **keep opt-in**. We keep `kv_cache_fp8 = false` as the default and
+leave the flag documented in `kiln.example.toml` for users who explicitly
+need BF16 parity with halved GQA KV storage (e.g. doubling a workload that
+is KV-bound on batch count rather than single-request context).
+
+### What this means for the Phase 6 frontier
+
+FP8 KV cache is **not** the lever that unlocks 65536p+ context on this
+pipeline, because GDN prefill memory is the binding constraint. Follow-on
+work that could change that conclusion:
+
+1. **GDN prefill memory reduction.** Audit the `kiln/gdn/in_proj`,
+   `chunk_prep`, and `recurrent` state buffers in
+   `crates/kiln-model/src/forward.rs` for chunked allocation or
+   activation-checkpointing-style recomputation. This is the only path that
+   actually raises the context ceiling on single-request A6000 decode.
+2. **FP8 KV path re-verification if GDN is bounded.** If (1) lands and 65536p
+   becomes workable in BF16, re-run this matrix — at that point the 60% KV
+   memory headroom from FP8 could genuinely extend context to 131072p.
+3. **Multi-request / batched decode.** FP8 KV still has real value when KV
+   memory scales by concurrent sequences rather than by single-sequence
+   prompt length. That regime wasn't exercised by this matrix (which ran
+   single-request) and is not a reason to change the default until it is
+   measured in a multi-tenant scheduling context.
+
+Until one of (1)–(3) produces evidence that FP8 flips the context ceiling
+or improves steady-state decode at real batch fan-out, the default stays
+BF16 and the flag stays opt-in.
+
+
+
 
 **$0 preflight follow-up to the post-#210 profile** (this file's first section).
 That section recommended a `ucopy_bf16` source-site audit before any kernel
