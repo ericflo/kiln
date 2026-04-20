@@ -1077,6 +1077,18 @@
             showKilnUpdateActions(null);
             return;
           }
+          if (r.cuda_driver_too_old != null) {
+            // CUDA driver compat gate (slice 8): the release requires a
+            // newer CUDA driver than the local machine has. Refuse the
+            // offer and explain why. Mirrors gpu_unsupported handling.
+            const reason = escapeHtml(String(r.cuda_driver_too_old));
+            setKilnUpdateStatus(
+              "warn",
+              "CUDA driver too old: " + reason + " <span class=\"badge\">Update blocked</span>"
+            );
+            showKilnUpdateActions(null);
+            return;
+          }
           if (!r.latest) {
             setKilnUpdateStatus(
               "error",
