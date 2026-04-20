@@ -1879,6 +1879,7 @@ dependencies = [
  "memmap2",
  "mlx-rs",
  "rand 0.8.6",
+ "rayon",
  "safetensors 0.5.3",
  "serde",
  "serde_json",
