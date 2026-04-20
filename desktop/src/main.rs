@@ -499,6 +499,13 @@ struct KilnUpdateCheckResult {
     /// unknown (no nvidia-smi, detection failed), or irrelevant (macOS).
     /// See `desktop/docs/binary-update.md` (CUDA / GPU compat).
     gpu_unsupported: Option<u32>,
+    /// `Some(reason)` when the release advertises a `min_cuda:` that
+    /// the local CUDA driver (from `nvidia-smi` header) is older than.
+    /// `None` when the release is CUDA-agnostic, detection failed, or
+    /// the local driver meets the minimum. Mirrors `gpu_unsupported`:
+    /// the UI should surface a warn pill and disable the Download
+    /// button. See `desktop/docs/binary-update.md` (CUDA / GPU compat).
+    cuda_driver_too_old: Option<String>,
 }
 
 /// Detection-only check for a newer kiln binary release. Looks up the
@@ -562,12 +569,39 @@ async fn check_for_kiln_update(
         installer::GpuCompat::Supported(_) | installer::GpuCompat::Unknown => None,
     };
 
+    // CUDA driver compat gate (slice 8): if the release advertises a
+    // `min_cuda:` line in its notes AND we can detect the local driver's
+    // CUDA version via `nvidia-smi`, refuse the update when local < min.
+    // Missing `min_cuda:` (CUDA-agnostic release) or failed detection
+    // (no nvidia-smi, timeout) preserves the no-block policy applied to
+    // `GpuCompat::Unknown`. See `desktop/docs/binary-update.md` (CUDA /
+    // GPU compat).
+    let cuda_driver_too_old = if gpu_unsupported.is_none() && update_available {
+        let local = installer::detect_cuda_driver_version().await;
+        if !installer::is_cuda_compatible_for_release(local, release_body.as_deref()) {
+            let req = installer::min_cuda_for_release(release_body.as_deref())
+                .expect("min_cuda must be Some when compat check failed");
+            let local =
+                local.expect("local driver must be Some when compat check failed");
+            update_available = false;
+            Some(format!(
+                "This kiln release requires CUDA >= {}.{}; local driver supports CUDA {}.{}.",
+                req.0, req.1, local.0, local.1
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(KilnUpdateCheckResult {
         current,
         latest,
         update_available,
         platform_supported,
         gpu_unsupported,
+        cuda_driver_too_old,
     })
 }
 
@@ -645,6 +679,23 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
             );
             return;
         }
+    }
+
+    // CUDA driver compat gate (slice 8): mirror check_for_kiln_update —
+    // skip the banner when the release advertises a `min_cuda:` newer
+    // than the local driver. Missing `min_cuda:` or failed detection
+    // does not block, matching the SM-gate policy on unknown state.
+    let local_cuda = installer::detect_cuda_driver_version().await;
+    if !installer::is_cuda_compatible_for_release(local_cuda, release_body.as_deref()) {
+        let req = installer::min_cuda_for_release(release_body.as_deref())
+            .expect("min_cuda must be Some when compat check failed");
+        let local =
+            local_cuda.expect("local driver must be Some when compat check failed");
+        eprintln!(
+            "[main] auto_update: skipping — release requires CUDA >= {}.{}, local {}.{}",
+            req.0, req.1, local.0, local.1
+        );
+        return;
     }
 
     if let Err(e) = app.emit(
