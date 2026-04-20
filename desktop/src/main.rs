@@ -851,6 +851,7 @@ fn main() {
             download_kiln_update,
             fetch_update_sha256,
             extract_update,
+            installer::install_staged_update,
             download_hf_model,
             path_info
         ])
