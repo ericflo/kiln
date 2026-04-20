@@ -59,6 +59,26 @@ jobs:
         with:
           workspaces: './desktop -> target'
 
+      - name: Extract release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          NOTES=$(awk -v tag="## ${TAG} " '
+            index($0, tag) == 1 { found = 1; print; next }
+            found && /^## desktop-v/ { exit }
+            found { print }
+          ' desktop/CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="See desktop/CHANGELOG.md for changes."
+          fi
+          {
+            echo "RELEASE_BODY<<KILN_EOF"
+            echo "$NOTES"
+            echo "KILN_EOF"
+          } >> "$GITHUB_ENV"
+
       - name: Write App Store Connect API key to disk (macOS)
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/desktop-v')
         env:
@@ -93,6 +113,7 @@ jobs:
           projectPath: desktop
           tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
           releaseName: 'Kiln Desktop ${{ startsWith(github.ref, ''refs/tags/desktop-v'') && github.ref_name || '''' }}'
+          releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
