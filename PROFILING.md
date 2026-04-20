@@ -1,6 +1,255 @@
 # Kiln Profiling Report
 
 
+## GDN prefill memory audit (Phase 7 opener) — 2026-04-20
+
+**Outcome: the GDN recurrent state (the thing FP8 would shrink) is ~48 MiB total across 24 layers — 0.1% of the OOM ceiling. The binding constraint is per-layer prefill activations. At `seq_len=65536` one GDN layer's live tensors sum to roughly 9–10 GiB, which exceeds the ~37 GiB working budget on A6000 (48 GiB − ~8 GiB weights − ~3 GiB CUDA context − carry across 32 layers). Long-context capability is unlocked by streaming/tiled prefill (candidate G below), not by shrinking state.**
+
+This audit is a $0 source-inspection preflight following PRs
+[#131](https://github.com/ericflo/kiln/pull/131),
+[#163](https://github.com/ericflo/kiln/pull/163),
+[#164](https://github.com/ericflo/kiln/pull/164),
+[#170](https://github.com/ericflo/kiln/pull/170),
+[#219](https://github.com/ericflo/kiln/pull/219),
+[#223](https://github.com/ericflo/kiln/pull/223),
+[#225](https://github.com/ericflo/kiln/pull/225). The trigger is PR
+[#222](https://github.com/ericflo/kiln/pull/222)'s FP8 KV cache verification
+matrix: 65536p and 131072p prompts OOM'd in **both** the BF16 and FP8 arms,
+and the failure was localized to **GDN layer 0 prefill** — not the paged GQA
+KV cache. FP8 halves KV bytes but the 24 linear-attention layers dominate
+activation memory before the 8 GQA layers' paged KV is even touched, so
+`KILN_KV_CACHE_FP8` cannot lift the ceiling. The question this audit
+answers: what exactly does GDN prefill allocate, and which reduction opens
+≥65536p on a 48 GiB A6000?
+
+### Config reference (Qwen3.5-4B)
+
+From `crates/kiln-core/src/config.rs:79–101` and
+`crates/kiln-model/src/forward.rs:250–264`, `990`:
+
+| Symbol | Value | Meaning |
+| --- | ---: | --- |
+| `hidden` | 2560 | residual hidden size |
+| `L_total` | 32 | total transformer layers |
+| `L_full` | 8 | full-attention layers (paged GQA KV) |
+| `L_gdn` | 24 | GDN linear-attention layers |
+| `nk` | 16 | GDN key heads |
+| `nv` | 32 | GDN value heads |
+| `dk` | 128 | GDN key head dim |
+| `dv` | 128 | GDN value head dim |
+| `qk_dim` | 2048 | `nk * dk` |
+| `v_dim` | 4096 | `nv * dv` |
+| `qkv_dim` | 8192 | `2 * qk_dim + v_dim` (fused conv channels) |
+| `kernel_size` | 4 | causal depthwise conv |
+| `C` | 64 | `GDN_CHUNK_SIZE` |
+| dtype | BF16 | hot path activation/weight dtype |
+
+For the allocation table below, assume `B = 1`, `T = seq_len = 65536`, `C = 64`, `nc = T / C = 1024 full chunks`. All tensors are live on the CUDA device.
+
+### (a) Source-level allocation table — single GDN layer at `T = 65536`
+
+Byte totals are the product of shape × dtype bytes, on a single GDN layer's
+forward pass through
+`gated_deltanet_forward` and `gdn_chunkwise_recurrence` in
+`crates/kiln-model/src/forward.rs`.
+
+| # | Tensor | File:line | Shape | Dtype | Bytes @ T=65536 |
+| --- | --- | --- | --- | --- | ---: |
+| 1 | hidden `x` input (layer carry) | `forward.rs:~2600` (layer loop) | `[B, T, hidden]` | BF16 | 320 MiB |
+| 2 | `mixed_qkv` after `in_proj_qkv` matmul (Step 1) | `forward.rs:1443` | `[B, T, qkv_dim]` | BF16 | 1.00 GiB |
+| 3 | `z` after `in_proj_z` matmul | `forward.rs:1444` | `[B, T, v_dim]` | BF16 | 512 MiB |
+| 4 | `a`, `b` gate projections | `forward.rs:1445–1446` | `[B, T, nv]` | BF16 | 4 MiB each |
+| 5 | `mixed_qkv_ct` for conv (transpose + contiguous) | `forward.rs:1462` | `[B, qkv_dim, T]` | BF16 | 1.00 GiB |
+| 6a | `x_padded = cat(conv_state, x)` inside `causal_conv1d_prefill` | `forward.rs:915,921` | `[B, qkv_dim, T+3]` | **F32** | 2.00 GiB |
+| 6b | `output` accumulator inside `causal_conv1d_prefill` (kernel_size=4 steps) | `forward.rs:924–928` | `[B, qkv_dim, T]` | **F32** | 2.00 GiB |
+| 7 | `post_silu` = `cuda_silu(.to_dtype(F32))` result | `forward.rs:1488` | `[B, qkv_dim, T]` | **F32** | 2.00 GiB |
+| 8 | `post_silu.transpose(1, 2)` — F32 view/copy | `forward.rs:1499` | `[B, T, qkv_dim]` | **F32** | 2.00 GiB |
+| 9 | `v` cast to input_dtype in `recur_prep` | `forward.rs:1652` | `[B, T, nv, dv]` | BF16 | 512 MiB |
+| 10 | `q` after GQA head_expand contiguous | `forward.rs:1522–1526` | `[B, T, nv, dk]` (F32 through Step 4) | F32 | 1.00 GiB |
+| 11 | `k` after GQA head_expand contiguous | `forward.rs:1527–1531` | `[B, T, nv, dk]` | F32 | 1.00 GiB |
+| 12 | `l2_normalize(q)` F32 output | `forward.rs:1578` / `l2_normalize` at `852–858` | `[B, T, nv, dk]` | F32 | 1.00 GiB |
+| 13 | `l2_normalize(k)` F32 output | `forward.rs:1579` | `[B, T, nv, dk]` | F32 | 1.00 GiB |
+| 14 | `q` cast to BF16 after norm+scale | `forward.rs:1580` | `[B, T, nv, dk]` | BF16 | 512 MiB |
+| 15 | `k` cast to BF16 after norm | `forward.rs:1581` | `[B, T, nv, dk]` | BF16 | 512 MiB |
+| 16 | `q.transpose(1, 2)` for recurrence | `forward.rs:1655` | `[B, nv, T, dk]` | BF16 (view→contig on entry into chunked path) | 512 MiB |
+| 17 | `k.transpose(1, 2)` | `forward.rs:1656` | `[B, nv, T, dk]` | BF16 | 512 MiB |
+| 18 | `v.transpose(1, 2)` | `forward.rs:1657` | `[B, nv, T, dv]` | BF16 | 512 MiB |
+| 19 | `q_pre` pre-permuted `[nc, B, nv, C, dk]` contiguous | `forward.rs:1231` / `preshape_chunked_4d` at `1014–1038` | `[1024, 1, 32, 64, 128]` | BF16 | 512 MiB |
+| 20 | `k_pre` | `forward.rs:1232` | same shape | BF16 | 512 MiB |
+| 21 | `v_pre` | `forward.rs:1233` | `[1024, 1, 32, 64, 128]` | BF16 | 512 MiB |
+| 22 | `beta_pre`, `g_pre` | `forward.rs:1234–1235` | `[1024, 1, 32, 64]` | BF16 | 16 MiB each |
+| 23 | `out_chunks: Vec<Tensor>` accumulated outputs | `forward.rs:1237, 1366` | `nc × [B, nv, C, dv]` | BF16 | 512 MiB (sum) |
+| 24 | `Tensor::cat(&out_chunks, 2)` final recurrence output | `forward.rs:1377` | `[B, nv, T, dv]` | BF16 | 512 MiB (new) |
+| 25 | `attn_out.transpose(1, 2)` | `forward.rs:1683` | `[B, T, nv, dv]` | BF16 | 512 MiB |
+| 26 | `gated_rms_norm` F32 output before reshape/cast | `forward.rs:1689` / `gated_rms_norm` at `885–900` | `[B, T, nv, dv]` | **F32** | 1.00 GiB |
+| 27 | post-`gated_rms_norm` reshape + cast to BF16 | `forward.rs:1691–1693` | `[B, T, v_dim]` | BF16 | 512 MiB |
+| 28 | output of `out_proj` matmul (written back into residual) | `forward.rs:~1700+` | `[B, T, hidden]` | BF16 | 320 MiB |
+| C1 | **O(1) recurrent state** per layer | `forward.rs:262` | `[B, nv, dk, dv]` | F32 | **2 MiB** (constant, not T-scaling) |
+| C2 | **O(1) conv state** per layer | `forward.rs:263` | `[B, qkv_dim, k−1]` | F32 | **96 KiB** (constant, not T-scaling) |
+
+**Note on row 6/7/8 — the F32 conv bubble**. `causal_conv1d_prefill`
+unconditionally promotes the conv input to F32 (line 915
+`x_f32 = x.to_dtype(F32)?`), then SiLU runs on F32, and the result only
+returns to BF16 after Step 5's final cast. Between conv entry and the
+`input_dtype` re-cast at Step 7 (`v.to_dtype(input_dtype)` at line 1652) the
+sequence carries a full `[B, T, qkv_dim]` F32 tensor — 2× the byte cost of
+the BF16 equivalent, and the single largest non-pre-chunk allocation in the
+whole layer.
+
+**Note on row 10/11 — GQA head_expand materialization**. `gqa_ratio =
+nv / nk = 2`, so `q`/`k` are duplicated along a new head axis via
+`unsqueeze(3).expand(...).contiguous().reshape(...)`. The `contiguous()`
+forces a real copy — at T=65536 this is two 1 GiB allocations per layer
+before `l2_normalize` even runs.
+
+**Note on row 19–22 — the pre-permutation tax**. `preshape_chunked_4d`
+calls `.contiguous()` at line 1037 to materialize a new tensor with the
+chunk axis leading, enabling zero-copy chunk slices inside the loop. This
+duplicates q/k/v/beta/g across the full sequence length: **~1.5 GiB of
+extra live BF16** at T=65536 in addition to rows 16–18. The originals
+(16/17/18) are still borrowed through the loop for the tail (`narrow` at
+lines 1246–1250), so both live simultaneously.
+
+### (b) Peak-live-at-once analysis
+
+Not every row is live at the peak; candle releases intermediates as
+their last `&Tensor` borrow ends. The worst moment is immediately before
+the chunk loop begins — after `gdn_chunkwise_recurrence` has materialized
+the five `*_pre` tensors but before `q`, `k`, `v`, `beta`, `g` go out of
+scope (they remain referenced for the tail branch at lines 1246–1250 and
+for the narrow/squeeze/contiguous calls). Hidden-state carry from outside
+the layer also stays live.
+
+| Row | Size | Rationale for being live at peak |
+| ---: | ---: | --- |
+| 1 residual `x` carry | 320 MiB | layer input — still referenced across 32 layers; next-layer residual-add will still read it |
+| 5 `mixed_qkv_ct` (BF16) | 1.00 GiB | may be released before conv returns, but worst-case overlaps with row 6 |
+| 6a `x_padded` F32 inside conv | 2.00 GiB | live during conv loop |
+| 6b conv `output` F32 | 2.00 GiB | live during conv loop (written every kernel_size step) |
+| 8 post-transpose F32 `mixed_qkv` | 2.00 GiB | live from Step 3 narrow/reshape until v/q/k drop their F32 references |
+| 10 q expanded F32 | 1.00 GiB | live through Step 5 |
+| 11 k expanded F32 | 1.00 GiB | live through Step 5 |
+| 12 l2_normalize(q) F32 | 1.00 GiB | brief overlap with row 10 |
+| 13 l2_normalize(k) F32 | 1.00 GiB | brief overlap with row 11 |
+| 16 q transposed BF16 | 512 MiB | live through whole chunk loop (tail fallback) |
+| 17 k transposed BF16 | 512 MiB | live through whole chunk loop |
+| 18 v transposed BF16 | 512 MiB | live through whole chunk loop |
+| 19 q_pre | 512 MiB | live through whole chunk loop |
+| 20 k_pre | 512 MiB | live through whole chunk loop |
+| 21 v_pre | 512 MiB | live through whole chunk loop |
+| 22 beta_pre + g_pre | 32 MiB | live through whole chunk loop |
+| 23 `out_chunks` accumulator | 512 MiB | grows to full size before cat() |
+
+The **conv bubble peak** (rows 6a + 6b + carry from row 1 + 5): ~6.32 GiB.
+
+The **post-l2_normalize peak** (rows 8 + 10 + 11 + 12 + 13 + 1 + 14 + 15):
+~9.0 GiB including residual carry. This is the peak of the F32 phase —
+after the two `.to_dtype(input_dtype)` casts at lines 1580–1581 the F32
+copies of q/k go out of scope and the peak drops.
+
+The **chunk-loop peak** (rows 1 + 16–23): ~3.4 GiB sustained.
+
+The **cat/gated_norm peak** (rows 1 + 24 + 26): ~1.83 GiB. Brief.
+
+**Dominant peak: the post-l2_normalize phase at ~9 GiB per layer.**
+
+Global budget sanity:
+
+- A6000: 48 GiB
+- Weights at `KILN_W4A16=1`: q_proj Marlin packed + MLP Marlin packed ≈ 4.5 GiB (post-PR #206); GDN projections still BF16 (`in_proj_qkv`, `in_proj_z`, `in_proj_a/b`, `out_proj`, `conv1d`, `norm`, `a_log`, `dt_bias`, plus pre-transposed `*_t` copies from PR #128); embeddings + lm_head + full-attn layers. Total resident ≈ **7–9 GiB** on current main.
+- CUDA context, workspace, allocator fragmentation: **~3 GiB**.
+- Per-step carry across 32 layers: residual `[B, T, hidden]` BF16 + any lazy-released activation tails: **320 MiB minimum**, up to **~1 GiB** in practice.
+- Working budget for a single layer's prefill: **~35–37 GiB**.
+
+One GDN layer's ~9 GiB peak fits with margin. But the peak is not the only cost: allocator fragmentation, the `x_padded` F32 bubble reappearing on every layer's conv, and the GQA head_expand copies compound across layers during prefill. The observed OOM at GDN layer 0 suggests either (a) fragmentation from the initial BF16 weight residency is higher than naively budgeted, or (b) the F32 `mixed_qkv` tensor and the dual pre-permutation tensors are alive simultaneously for longer than the static analysis above assumes. Either way, the **per-layer activation footprint is the binding axis**.
+
+At `T = 131072` everything T-scaling doubles: ~18 GiB per-layer peak. No realistic weight-side cleanup gets that under 35 GiB.
+
+### (c) Reduction candidates ranked by impact
+
+All numbers are at `T = 65536`, single layer, relative to the rows in (a).
+
+| Cand. | Description | Bytes saved @ 65k (per-layer peak, approximate) | Complexity | Numerical risk | Upstream precedent |
+| :---: | --- | ---: | --- | --- | --- |
+| **A** | Keep conv output BF16 (drop F32 promotion in `causal_conv1d_prefill` rows 6a/6b/7/8) | ~4.0 GiB | LOW–MEDIUM: requires BF16 depthwise conv that doesn't overflow; use the fused `kiln-conv1d-kernel` path (already BF16-native for decode) or extend it to prefill | LOW: bf16 SiLU is standard in fla/vLLM Mamba paths | flash-linear-attention, vLLM Mamba keep conv in compute dtype end-to-end |
+| **B** | Skip pre-permutation (rows 19–22) at long T; use direct `narrow` per chunk | ~1.5 GiB | MEDIUM: pre-permute was added to kill the `copy2d_bf16` per-chunk hotspot (PROFILING.md history). Replace with (i) gated-on-`seq_len` short-prefill only, or (ii) fused chunk-indexed gather in `kiln-gdn-kernel` | LOW: identical math; only locality changes | fla chunk_gla_fwd slices on the fly without pre-permutation |
+| **C** | Write chunk outputs in-place into a pre-allocated `[B, nv, T, dv]` BF16 buffer; eliminate `Vec<Tensor>` + final `cat` (rows 23 + 24 collapse to one 512 MiB buffer) | ~512 MiB | LOW: pre-allocate once, `slice_assign` per chunk | NONE: bit-identical | vLLM output accumulation pattern |
+| **D** | FP8/FP16 recurrent state (row C1) | ~1 MiB (single layer) / **~24 MiB total across 24 layers** | LOW (E4M3 cast, mirror #222 FP8 KV cache) | MEDIUM: state accumulator precision matters; Phase-6 PR [#72](https://github.com/ericflo/kiln/pull/72)/[#74](https://github.com/ericflo/kiln/pull/74) already moved the *internal* recurrence to BF16 with F32 boundary cast for stability | — (state is already F32 for accumulator stability; reducing it regresses precision without unlocking context) |
+| **E** | Reduce `GDN_CHUNK_SIZE` from 64 to 32 | ≤ 5 MiB (per-chunk scratch shrinks ~75% but chunk count doubles) | LOW (one `const` change + parity tests) | LOW | — |
+| **F** | Checkpoint / stream the full-attention (GQA) KV-cache writes so `mixed_qkv` F32 can be freed earlier in each GDN layer | overlaps with A; no independent savings | MEDIUM | LOW | — |
+| **G** | **Streaming/tiled prefill: split T into super-chunks of `S` tokens (e.g. S=4096), run the full 32-layer stack end-to-end per super-chunk, carrying only the per-layer recurrent state (C1, 2 MiB/layer) + conv state (C2, 96 KiB/layer) between super-chunks.** Activation peak becomes `O(S)` not `O(T)`. | **~9 GiB** at S=4096 for T=65536; **~17 GiB** at S=4096 for T=131072 (the entire T-scaling half of per-layer peak goes away) | **HIGH**: re-architect `model_forward_prefill` to iterate super-chunks, preserve `LinearAttentionState` + paged GQA KV cache across iterations, concatenate output hidden states only at the lm_head boundary (or stream to the final-token path when only the last logits are needed) | LOW: `LinearAttentionState` *already* supports this — it's designed to carry across prefill/decode (see `LinearAttentionState` docstring at `forward.rs:240`, and the decode tests at `forward.rs:4256–4300` that drive prefill-then-decode through the same state). Paged GQA KV cache already appends across calls. | vLLM handles long Mamba/Mamba-2 contexts exactly this way; fla documents super-chunk prefill as the canonical path. See also `flash-linear-attention/fla/layers/gated_deltanet.py` `chunk_size=` / `chunks=` iteration pattern. |
+
+### (d) Recommended Phase 7 opener
+
+**Candidate G (streaming/tiled prefill with O(1) state handover) is the only candidate that both unlocks `T ≥ 65536` on A6000 and extends naturally to `T = 131072`.** Candidates A+B+C together sum to ~6 GiB saved per-layer peak — enough to maybe land 65536p but not 131072p, and fragile under any future model change that extends `v_dim` or adds heads.
+
+Ranked by (unlock × complexity × risk):
+
+1. **G — streaming/tiled prefill (opener).** Unlocks the full 262K native
+   context window on A6000 without quantizing anything. Single largest
+   architectural win available in Phase 7. The `LinearAttentionState` and
+   paged KV cache plumbing is already in place; the work is in
+   `model_forward_prefill` (sequence iteration, state threading, hidden-state
+   concatenation or streaming to lm_head). Gate the streaming path behind a
+   `seq_len > threshold` check (suggest `threshold = 8192`) so short
+   prefills pay zero throughput penalty.
+2. **A — BF16-native conv prefill (follow-up #1).** Orthogonal to G.
+   Even after G drops the per-layer peak, keeping conv output in BF16
+   reclaims ~2× memory on the conv bubble and shrinks the super-chunk
+   floor, which lets G use a larger `S` (higher throughput). Already half
+   done: `kiln-conv1d-kernel` is BF16-native for decode; extend to
+   prefill. Upper-bound on savings independent of G.
+3. **C — in-place chunk accumulator (follow-up #2).** Cheap mechanical
+   win (~512 MiB per layer), strictly additive to G, no risk.
+4. **B — drop pre-permutation at long T (follow-up #3, conditional).**
+   Only worth doing if G + A + C land and 131072p still needs headroom at
+   a desired `S`. Gate on `seq_len` so short prefills retain the
+   pre-permutation locality win.
+
+Items D, E, F do not move the needle on the 65k/131k ceiling.
+
+### (e) Preconditions for re-opening / invalidation
+
+This recommendation should be re-verified before a Phase 7 implementation PR
+if any of the following change:
+
+- **G becomes upstream-obvious or already partially landed.** Check
+  `git log --all --grep='streaming\\|tiled.*prefill\\|super.*chunk'` on
+  kiln and `gh pr list -R ericflo/kiln --state all --limit 50`. The
+  `LinearAttentionState` threading pattern is already there, but no
+  current PR or branch drives it from the model-forward layer.
+- **fla upstream ships a single-kernel long-context GDN prefill** that
+  makes the Rust-side super-chunking unnecessary. If
+  [fla-org/flash-linear-attention](https://github.com/fla-org/flash-linear-attention)
+  adds a fused `chunk_gla_fwd_streaming` or similar, vendor that kernel
+  into `kiln-gdn-kernel` instead (same minimal-scope precedent as
+  [PR #80](https://github.com/ericflo/kiln/pull/80)).
+- **Nsys evidence at 16384p or 32768p shifts the peak away from the
+  post-l2_normalize phase.** The static analysis above assumes the F32
+  inflation is the dominant axis. If a real runtime snapshot at
+  `T = 32768` (the largest size that currently fits) shows the chunk-loop
+  tensors or the output-cat as the dominant mass, re-prioritize C over
+  the others.
+- **Weight residency drops further** (e.g. PR [#206](https://github.com/ericflo/kiln/pull/206) extensions pack more BF16 projections into Marlin). Each GiB freed is a GiB the per-layer peak can grow into — if total weights drop below 5 GiB, candidates A+B+C alone might cross the 65536p line without G. Re-check the working-budget arithmetic in (b) before committing.
+- **A new runtime memory snapshot contradicts the static analysis.**
+  This audit is source-only; it doesn't observe allocator fragmentation
+  or candle's actual release timing. If a minimal GPU
+  instrumentation task (described below) is ever run, its results
+  supersede rows (b) and the dominant peak may shift.
+
+### Follow-up: optional GPU instrumentation task (bounded, not blocking)
+
+If a future planner wants ground truth before committing to G, the
+minimal-cost verification is: run the existing 16384p bench with
+`CUDA_LAUNCH_BLOCKING=1` and `cudaMemGetInfo` polling inside
+`gated_deltanet_forward` (gated behind a `KILN_MEM_TRACE=1` env var),
+capturing free-MiB before/after each numbered step in (a). One A6000 pod,
+~15 minutes of runtime, single run is sufficient (peak memory is
+deterministic at fixed T, not latency-like). Do **not** launch this from
+the current task — this audit is $0 and the static analysis already
+points unambiguously at G.
+
+
 ## Phase 6 preflight 2026-04-20: Marlin wrapper BF16-native I/O epilogue (KILL)
 
 **Outcome: KILL. Phase 6 is complete. Advancing to Phase 7.**
