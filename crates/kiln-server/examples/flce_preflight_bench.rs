@@ -24,8 +24,8 @@ use candle_core::Device;
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
-use kiln_train::trainer::{sft_train, SftConfig};
-use kiln_train::{ChatMessage, SftExample};
+use kiln_train::trainer::sft_train;
+use kiln_train::{ChatMessage, SftConfig, SftExample};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
