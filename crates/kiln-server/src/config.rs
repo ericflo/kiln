@@ -118,18 +118,64 @@ pub struct PrefixCacheConfig {
     pub max_blocks: Option<usize>,
 }
 
+/// Which speculative-decoding method to use when `enabled = true`.
+///
+/// - `Off` — no spec decoding, one token per step.
+/// - `SkipLayer` — self-speculative using the first `draft_layers` of the main
+///   model as a lightweight draft. Works on any checkpoint; kept as fallback
+///   and A/B baseline.
+/// - `Mtp` — native Multi-Token Prediction using the model's pretrained MTP
+///   heads. Requires the checkpoint to contain `mtp.*` tensors (Qwen3.5-4B
+///   has one MTP layer, k=1).
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecMethod {
+    Off,
+    SkipLayer,
+    Mtp,
+}
+
+impl Default for SpecMethod {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl SpecMethod {
+    /// Parse from an env-var string. Case-insensitive; accepts common aliases.
+    /// Returns `None` for unknown values so the caller can warn and fall back.
+    pub fn parse_env(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "0" | "false" => Some(Self::Off),
+            "skip_layer" | "skiplayer" | "skip-layer" | "self" => Some(Self::SkipLayer),
+            "mtp" | "native_mtp" | "native-mtp" => Some(Self::Mtp),
+            _ => None,
+        }
+    }
+}
+
 /// Speculative decoding settings.
-/// Uses self-speculative (skip-layer) approach: the first N layers of the main
-/// model act as a lightweight draft, avoiding the need to load a second model.
+///
+/// Two implementations coexist:
+///   * `SkipLayer` — the first `draft_layers` of the main model act as the
+///     draft. Works on any checkpoint.
+///   * `Mtp` — native MTP heads shipped with the checkpoint (Qwen3.5-4B k=1).
+///     Requires `mtp.*` tensors in the weights.
+///
+/// `method` selects which path is active when `enabled = true`. For backward
+/// compatibility, setting `enabled = true` with `method = Off` falls back to
+/// `SkipLayer`.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct SpeculativeDecodingConfig {
     /// Enable speculative decoding (default: false).
     pub enabled: bool,
+    /// Which speculative-decoding method to use. Default: `Off`.
+    pub method: SpecMethod,
     /// Number of tokens the draft proposes per step (default: 4).
+    /// Ignored by `Mtp` when the checkpoint has fewer MTP layers than this.
     pub num_speculative_tokens: usize,
-    /// Number of layers to use for the draft model (default: 8).
-    /// Uses the first N layers of the main model as the draft.
+    /// Number of layers to use for the `SkipLayer` draft (default: 8).
     pub draft_layers: usize,
 }
 
@@ -244,8 +290,27 @@ impl Default for SpeculativeDecodingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            method: SpecMethod::Off,
             num_speculative_tokens: 4,
             draft_layers: 8,
+        }
+    }
+}
+
+impl SpeculativeDecodingConfig {
+    /// Resolve the effective speculative-decoding method.
+    ///
+    /// Returns `Off` if the feature is disabled; otherwise returns the
+    /// configured `method`, falling back to `SkipLayer` for backward
+    /// compatibility when `enabled = true` but `method = Off` (older configs
+    /// and older env-var usage that predate `KILN_SPEC_METHOD`).
+    pub fn effective_method(&self) -> SpecMethod {
+        if !self.enabled {
+            return SpecMethod::Off;
+        }
+        match self.method {
+            SpecMethod::Off => SpecMethod::SkipLayer,
+            m => m,
         }
     }
 }
@@ -396,6 +461,16 @@ impl KilnConfig {
         // Speculative decoding
         if let Ok(v) = std::env::var("KILN_SPEC_ENABLED") {
             self.speculative.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("KILN_SPEC_METHOD") {
+            if let Some(m) = SpecMethod::parse_env(&v) {
+                self.speculative.method = m;
+            } else {
+                tracing::warn!(
+                    "ignoring unknown KILN_SPEC_METHOD='{}' (expected off|skip_layer|mtp)",
+                    v
+                );
+            }
         }
         if let Ok(v) = std::env::var("KILN_SPEC_NUM_TOKENS") {
             if let Ok(n) = v.parse() {

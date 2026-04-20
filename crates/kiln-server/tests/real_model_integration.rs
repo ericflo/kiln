@@ -115,6 +115,7 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
         layers: vec![layer],
         final_norm,
         rotary_inv_freq,
+        mtp: None,
     }
 }
 

@@ -1167,6 +1167,7 @@ mod tests {
             layers: vec![layer],
             final_norm,
             rotary_inv_freq,
+            mtp: None,
         }
     }
 
