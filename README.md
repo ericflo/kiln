@@ -239,6 +239,8 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 **Download — [Kiln Desktop v0.1.10](https://github.com/ericflo/kiln/releases/tag/desktop-v0.1.10):**
 
+See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
+
 | Platform | Installer | Size |
 |---|---|---|
 | Windows | [Kiln.Desktop_0.1.10_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.10/Kiln.Desktop_0.1.10_x64-setup.exe) (NSIS) | 4.3 MB |
