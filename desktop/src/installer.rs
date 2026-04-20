@@ -33,6 +33,9 @@ pub const EXTRACT_UPDATE_PROGRESS_EVENT: &str = "extract_update_progress";
 pub const EXTRACT_UPDATE_DONE_EVENT: &str = "extract_update_done";
 pub const EXTRACT_UPDATE_FAILED_EVENT: &str = "extract_update_failed";
 
+pub const INSTALL_STAGED_UPDATE_DONE_EVENT: &str = "install_staged_update_done";
+pub const INSTALL_STAGED_UPDATE_FAILED_EVENT: &str = "install_staged_update_failed";
+
 /// Subdirectory under `app_data_dir` where update tarballs are staged
 /// before the slice-3 atomic-swap step promotes them.
 pub const UPDATE_STAGING_DIR: &str = "kiln-updates";
@@ -43,6 +46,13 @@ pub const UPDATE_STAGING_DIR: &str = "kiln-updates";
 /// targets `bin/kiln` on unix and `bin/kiln.exe` on Windows, but the
 /// sibling staging file is always `bin/kiln.new`.
 pub const NEW_BINARY_NAME: &str = "kiln.new";
+
+/// Filename of the single retained backup of the prior `kiln` binary
+/// kept next to `bin/kiln` for the duration of the post-swap health
+/// gate. Only one `.bak` is ever kept — slice 3c promotes the swap to
+/// success by deleting it, or rolls back by renaming it over
+/// `bin/kiln`.
+pub const BACKUP_BINARY_NAME: &str = "kiln.bak";
 
 const RELEASES_URL: &str = "https://api.github.com/repos/ericflo/kiln/releases";
 const USER_AGENT: &str = concat!("kiln-desktop/", env!("CARGO_PKG_VERSION"));
@@ -126,6 +136,20 @@ pub struct ExtractUpdateFailed {
     pub version: String,
     pub error: String,
     pub cancelled: bool,
+}
+
+/// Terminal payload for the slice-3b "atomic swap + restart" pipeline.
+/// `path` is the path that now answers as `bin/kiln` — i.e. the
+/// previously-staged `kiln.new` under its new name. Health-check gating
+/// and rollback are slice 3c and intentionally not represented here.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallStagedUpdateDone {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallStagedUpdateFailed {
+    pub error: String,
 }
 
 /// Release-asset suffix for the current OS+arch+features combination, or
@@ -235,6 +259,30 @@ pub fn staging_tarball_path(app_data_dir: &Path, version: &str, target: &str) ->
 /// on Windows). See `desktop/docs/binary-update.md` "Storage layout".
 pub fn extracted_new_binary_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("bin").join(NEW_BINARY_NAME)
+}
+
+/// Filename the supervisor actually `execve`s on this platform. Always
+/// `kiln.exe` on Windows, plain `kiln` everywhere else. Kept as a
+/// platform-specific constant (rather than `cfg!()` inline at call
+/// sites) so tests can match the same string unambiguously.
+#[cfg(windows)]
+const INSTALLED_BINARY_NAME: &str = "kiln.exe";
+#[cfg(not(windows))]
+const INSTALLED_BINARY_NAME: &str = "kiln";
+
+/// Path of the `kiln` binary the supervisor actually runs —
+/// `<app_data_dir>/bin/kiln` on unix, `<app_data_dir>/bin/kiln.exe` on
+/// Windows.
+pub fn installed_binary_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("bin").join(INSTALLED_BINARY_NAME)
+}
+
+/// Path of the single retained backup of the previous `kiln` binary.
+/// Slice 3b renames the currently-installed binary here before
+/// promoting `kiln.new`; slice 3c removes it on health-gate success or
+/// rolls it back into place on failure.
+pub fn backup_binary_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("bin").join(BACKUP_BINARY_NAME)
 }
 
 /// Verify that the file at `path` matches `expected` (64-char lowercase
@@ -1011,13 +1059,170 @@ pub async fn install_latest_server(
     Ok((installed, pair.version))
 }
 
+/// Pure filesystem half of the slice-3b atomic swap. Promotes
+/// `<app_data_dir>/bin/kiln.new` into `<app_data_dir>/bin/kiln`
+/// (or `kiln.exe` on Windows), moving any currently-installed binary
+/// aside to `bin/kiln.bak`. Caller is responsible for stopping the
+/// supervisor beforehand — see [`atomic_swap_new_binary`] for the
+/// coupled version. Health-check gating and rollback on failed health
+/// are slice 3c (`desktop/docs/binary-update.md`) and intentionally
+/// not handled here.
+///
+/// On any IO failure mid-swap the helper makes a best-effort attempt
+/// to restore the prior `bin/kiln` from the `.bak` it just created so
+/// callers don't hand a half-installed state to the supervisor.
+pub fn swap_new_binary_into_place(app_data_dir: &Path) -> Result<(), String> {
+    let new_path = extracted_new_binary_path(app_data_dir);
+    let installed = installed_binary_path(app_data_dir);
+    let backup = backup_binary_path(app_data_dir);
+
+    if !new_path.is_file() {
+        return Err(format!(
+            "no staged kiln.new at {} — run the extract step first",
+            new_path.display()
+        ));
+    }
+
+    // Move any pre-existing installed binary aside. Remove a stale
+    // `.bak` first so the rename works the same on Windows (which
+    // refuses rename-over-existing via std::fs::rename) as on unix.
+    let had_prior_install = installed.exists();
+    if had_prior_install {
+        if backup.exists() {
+            std::fs::remove_file(&backup).map_err(|e| {
+                format!(
+                    "remove stale backup {}: {}",
+                    backup.display(),
+                    e
+                )
+            })?;
+        }
+        std::fs::rename(&installed, &backup).map_err(|e| {
+            format!(
+                "rename {} -> {}: {}",
+                installed.display(),
+                backup.display(),
+                e
+            )
+        })?;
+    }
+
+    // Promote the staged binary into the installed slot.
+    if let Err(e) = std::fs::rename(&new_path, &installed) {
+        // Best-effort rollback so the prior binary stays usable.
+        if had_prior_install {
+            let _ = std::fs::rename(&backup, &installed);
+        }
+        return Err(format!(
+            "rename {} -> {}: {}",
+            new_path.display(),
+            installed.display(),
+            e
+        ));
+    }
+
+    // chmod +x on unix so the supervisor can `execve` without a
+    // follow-up chmod. No-op on Windows.
+    if let Err(e) = make_executable(&installed) {
+        // Best-effort rollback: drop the just-promoted binary and
+        // restore the .bak over it.
+        if had_prior_install {
+            let _ = std::fs::remove_file(&installed);
+            let _ = std::fs::rename(&backup, &installed);
+        }
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+/// Stop the supervisor (awaiting child shutdown) and promote
+/// `bin/kiln.new` into `bin/kiln` via [`swap_new_binary_into_place`].
+/// Does **not** restart the supervisor — the caller is responsible for
+/// calling `supervisor.start()` afterwards so slice 3c's health-gate
+/// layer can sit between the swap and the "update done" signal.
+pub async fn atomic_swap_new_binary(
+    supervisor: &crate::supervisor::Supervisor,
+    app_data_dir: &Path,
+) -> Result<(), String> {
+    supervisor.stop().await?;
+
+    let dir = app_data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || swap_new_binary_into_place(&dir))
+        .await
+        .map_err(|e| format!("swap task join: {}", e))??;
+
+    Ok(())
+}
+
+/// Updater slice 3b Tauri command: stop the supervisor, promote the
+/// staged `bin/kiln.new` into `bin/kiln`, and start the supervisor
+/// again. Emits [`INSTALL_STAGED_UPDATE_DONE_EVENT`] with
+/// [`InstallStagedUpdateDone`] on success and
+/// [`INSTALL_STAGED_UPDATE_FAILED_EVENT`] with
+/// [`InstallStagedUpdateFailed`] on failure. No health-check polling
+/// or rollback — that is slice 3c.
+#[tauri::command]
+pub async fn install_staged_update(
+    app: tauri::AppHandle,
+    sup: tauri::State<'_, std::sync::Arc<crate::supervisor::Supervisor>>,
+) -> Result<(), String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir unavailable: {}", e))?;
+    let supervisor = sup.inner().clone();
+    let app_for_task = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let swap = atomic_swap_new_binary(&supervisor, &base).await;
+        match swap {
+            Ok(()) => match supervisor.start().await {
+                Ok(()) => {
+                    let installed = installed_binary_path(&base);
+                    let _ = app_for_task.emit(
+                        INSTALL_STAGED_UPDATE_DONE_EVENT,
+                        InstallStagedUpdateDone {
+                            path: installed.display().to_string(),
+                        },
+                    );
+                }
+                Err(err) => {
+                    let _ = app_for_task.emit(
+                        INSTALL_STAGED_UPDATE_FAILED_EVENT,
+                        InstallStagedUpdateFailed {
+                            error: format!(
+                                "supervisor start after swap failed: {}",
+                                err
+                            ),
+                        },
+                    );
+                }
+            },
+            Err(err) => {
+                // Swap failed mid-way; try to restart the prior
+                // supervisor config so the user isn't left with a
+                // dead server just because extract/rename tripped.
+                // The error from the swap is what the UI should see.
+                let _ = supervisor.start().await;
+                let _ = app_for_task.emit(
+                    INSTALL_STAGED_UPDATE_FAILED_EVENT,
+                    InstallStagedUpdateFailed { error: err },
+                );
+            }
+        }
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_tarball_to, extracted_new_binary_path, is_update_available,
-        parse_kiln_version_output, release_archive_ext, release_asset_name,
-        release_download_url, staging_tarball_path, verify_sha256, NEW_BINARY_NAME,
-        UPDATE_STAGING_DIR,
+        backup_binary_path, extract_tarball_to, extracted_new_binary_path,
+        installed_binary_path, is_update_available, parse_kiln_version_output,
+        release_archive_ext, release_asset_name, release_download_url,
+        staging_tarball_path, swap_new_binary_into_place, verify_sha256,
+        BACKUP_BINARY_NAME, NEW_BINARY_NAME, UPDATE_STAGING_DIR,
     };
     use std::io::Write;
     use std::path::PathBuf;
@@ -1334,6 +1539,163 @@ mod tests {
             "expected missing-kiln error, got {}",
             err
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Slice 3b: swap_new_binary_into_place / installed_binary_path / backup_binary_path ----
+
+    #[test]
+    fn installed_binary_path_is_bin_platform_kiln() {
+        let base = PathBuf::from("/tmp/fake-app-data");
+        let p = installed_binary_path(&base);
+        assert!(p.starts_with(base.join("bin")));
+        let expected = if cfg!(windows) { "kiln.exe" } else { "kiln" };
+        assert_eq!(p.file_name().unwrap(), expected);
+    }
+
+    #[test]
+    fn backup_binary_path_is_bin_kiln_bak() {
+        let base = PathBuf::from("/tmp/fake-app-data");
+        let p = backup_binary_path(&base);
+        assert_eq!(p, base.join("bin").join(BACKUP_BINARY_NAME));
+        assert_eq!(p.file_name().unwrap(), "kiln.bak");
+    }
+
+    /// Seed `<app_data_dir>/bin/` with a stand-in kiln binary (optional)
+    /// and a fresh `kiln.new`. Returns the two paths the test will
+    /// assert against after the swap.
+    fn seed_swap_dir(
+        app_data: &std::path::Path,
+        prior: Option<&[u8]>,
+        new_contents: &[u8],
+    ) -> (PathBuf, PathBuf) {
+        let bin_dir = app_data.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let installed = installed_binary_path(app_data);
+        if let Some(bytes) = prior {
+            std::fs::write(&installed, bytes).unwrap();
+        }
+        let new_path = extracted_new_binary_path(app_data);
+        std::fs::write(&new_path, new_contents).unwrap();
+        (installed, new_path)
+    }
+
+    #[test]
+    fn swap_promotes_new_and_preserves_prior_as_bak() {
+        let dir = tmp_dir("swap-happy");
+        let (installed, new_path) =
+            seed_swap_dir(&dir, Some(b"OLD-kiln-binary"), b"NEW-kiln-binary");
+
+        swap_new_binary_into_place(&dir).expect("swap should succeed");
+
+        // kiln.new is gone; installed kiln has the new bytes.
+        assert!(!new_path.exists(), "kiln.new should have been consumed");
+        assert!(installed.is_file(), "installed kiln should exist");
+        let got = std::fs::read(&installed).unwrap();
+        assert_eq!(got, b"NEW-kiln-binary");
+
+        // Backup holds the old bytes.
+        let backup = backup_binary_path(&dir);
+        assert!(backup.is_file(), "backup should exist");
+        let bak = std::fs::read(&backup).unwrap();
+        assert_eq!(bak, b"OLD-kiln-binary");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swap_sets_executable_bit_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir("swap-chmod");
+        let (installed, _) =
+            seed_swap_dir(&dir, Some(b"OLD"), b"NEW");
+
+        // Make kiln.new deliberately non-executable to prove the swap
+        // restores +x rather than inheriting whatever mode extract
+        // left it in.
+        let new_path = extracted_new_binary_path(&dir);
+        let mut perms = std::fs::metadata(&new_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&new_path, perms).unwrap();
+
+        swap_new_binary_into_place(&dir).expect("swap should succeed");
+
+        let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "installed kiln should be executable (mode = {:o})",
+            mode
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_fresh_install_creates_no_bak() {
+        let dir = tmp_dir("swap-fresh");
+        // No prior binary — simulate first-run install.
+        let (installed, new_path) =
+            seed_swap_dir(&dir, None, b"FRESH-kiln-binary");
+        assert!(!installed.exists());
+
+        swap_new_binary_into_place(&dir).expect("swap should succeed");
+
+        assert!(!new_path.exists(), "kiln.new should be consumed");
+        let got = std::fs::read(&installed).unwrap();
+        assert_eq!(got, b"FRESH-kiln-binary");
+
+        let backup = backup_binary_path(&dir);
+        assert!(
+            !backup.exists(),
+            "no .bak should be created on a fresh install"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_overwrites_stale_bak_from_a_previous_swap() {
+        let dir = tmp_dir("swap-stale-bak");
+        let (_, _) = seed_swap_dir(&dir, Some(b"CURRENT"), b"NEXT");
+
+        // Pretend a previous aborted swap left a stale .bak lying
+        // around. The new swap should overwrite it with the current
+        // installed binary rather than refusing to rename.
+        let backup = backup_binary_path(&dir);
+        std::fs::write(&backup, b"STALE-previous-bak").unwrap();
+
+        swap_new_binary_into_place(&dir).expect("swap should succeed");
+
+        let bak = std::fs::read(&backup).unwrap();
+        assert_eq!(bak, b"CURRENT", "stale bak should be replaced");
+
+        let installed = installed_binary_path(&dir);
+        let got = std::fs::read(&installed).unwrap();
+        assert_eq!(got, b"NEXT");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_errors_when_no_kiln_new_present() {
+        let dir = tmp_dir("swap-no-staged");
+        // Only a prior installed binary, no kiln.new.
+        let bin_dir = dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(installed_binary_path(&dir), b"IRRELEVANT").unwrap();
+
+        let err = swap_new_binary_into_place(&dir).unwrap_err();
+        assert!(
+            err.contains("no staged kiln.new"),
+            "expected missing-staged error, got {}",
+            err
+        );
+
+        // Installed binary stays untouched; no .bak was created.
+        let installed = installed_binary_path(&dir);
+        assert!(installed.is_file());
+        assert!(!backup_binary_path(&dir).exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
