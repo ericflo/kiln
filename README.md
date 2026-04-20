@@ -246,7 +246,7 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 | Linux | [Kiln.Desktop_0.1.0_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.0/Kiln.Desktop_0.1.0_amd64.deb) | 5.5 MB |
 | Linux | [Kiln.Desktop_0.1.0_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.0/Kiln.Desktop_0.1.0_amd64.AppImage) | 79 MB |
 
-The installer bundles the desktop wrapper only. You still need to install the `kiln` server binary and download model weights separately — see [QUICKSTART.md](QUICKSTART.md). Point the app at the `kiln` binary and model path from Settings on first launch.
+The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
 
 **Dashboard** — toolbar shows server state, model path, VRAM budget, active LoRA adapter, training status, and the OpenAI base URL with a one-click copy. The kiln server's `/ui` is embedded below.
 

@@ -19,7 +19,7 @@ in a VM.
 - `Kiln.Desktop_0.1.0_amd64.deb` (Debian/Ubuntu, 5.5 MB)
 - `Kiln.Desktop_0.1.0_amd64.AppImage` (portable Linux, 79 MB)
 
-The desktop installer bundles only the wrapper — the `kiln` server binary and model weights must be installed separately. See the root [QUICKSTART.md](../QUICKSTART.md) and point the app at the binary and model path from Settings on first launch.
+The desktop installer bundles only the wrapper. On first launch the app offers to auto-download the prebuilt `kiln` server binary from the latest `kiln-v*` GitHub release — `aarch64-apple-darwin-metal` on macOS, `x86_64-unknown-linux-gnu-cuda124` on Linux x86_64, `x86_64-pc-windows-msvc-cuda124` on Windows x86_64 — and verifies it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be installed separately; see the root [QUICKSTART.md](../QUICKSTART.md) or use the HuggingFace downloader in Settings.
 
 ## Model weights
 
