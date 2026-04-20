@@ -147,6 +147,108 @@ pub struct LayerWeights {
     pub mlp: FfnWeights,
 }
 
+/// Native MTP (Multi-Token Prediction) head weights for Qwen3.5-4B.
+///
+/// The pretrained Qwen3.5-4B checkpoint ships 15 MTP-prefixed tensors
+/// (`num_nextn_predict_layers = 1` → `k=1` draft depth). The MTP head
+/// lets us draft one token per decode step using the model's own
+/// distilled head instead of a skip-layer self-spec approximation.
+///
+/// Forward shape (vLLM `qwen3_next_mtp.py` reference):
+/// `concat(pre_fc_norm_embedding(embed(t)), pre_fc_norm_hidden(h)) → fc (2H→H)
+///  → layer (GQA + SwiGLU MLP) → final_layernorm → tied lm_head (= embed_tokens.t())`
+///
+/// `lm_head` is tied to the base model's `embed_tokens`, so we do NOT
+/// store a separate `lm_head` tensor — the spec-decode forward path
+/// reuses `GpuWeights::embed_tokens_t`.
+#[derive(Debug)]
+pub struct MtpWeights {
+    /// Concat-then-project: `[hidden_size, 2 * hidden_size]`.
+    /// Ingests `concat(norm_embed, norm_hidden)` and produces `[seq, hidden_size]`.
+    pub fc: WeightTensor,
+    /// RMSNorm applied to the draft-candidate's token embedding before concat. `[hidden_size]`.
+    pub pre_fc_norm_embedding: WeightTensor,
+    /// RMSNorm applied to the base model's last hidden state before concat. `[hidden_size]`.
+    pub pre_fc_norm_hidden: WeightTensor,
+    /// Single MTP transformer layer (full GQA attention + SwiGLU MLP + input/post
+    /// layernorms). Shape matches the main model's full-attention layer.
+    pub layer: LayerWeights,
+    /// Final RMSNorm before the tied lm_head. `[hidden_size]`.
+    pub final_layernorm: WeightTensor,
+}
+
+impl MtpWeights {
+    /// Total size of all MTP tensors in bytes.
+    pub fn total_bytes(&self) -> usize {
+        let mut total = self.fc.size_bytes();
+        total += self.pre_fc_norm_embedding.size_bytes();
+        total += self.pre_fc_norm_hidden.size_bytes();
+        total += self.final_layernorm.size_bytes();
+        total += self.layer.input_layernorm.size_bytes();
+        total += self.layer.post_attention_layernorm.size_bytes();
+        total += self.layer.mlp.gate_proj.size_bytes();
+        total += self.layer.mlp.up_proj.size_bytes();
+        total += self.layer.mlp.down_proj.size_bytes();
+        match &self.layer.attention {
+            AttentionWeights::Full(attn) => {
+                total += attn.q_proj.size_bytes();
+                total += attn.k_proj.size_bytes();
+                total += attn.v_proj.size_bytes();
+                total += attn.o_proj.size_bytes();
+                total += attn.q_norm.size_bytes();
+                total += attn.k_norm.size_bytes();
+            }
+            AttentionWeights::Linear(attn) => {
+                total += attn.in_proj_qkv.size_bytes();
+                total += attn.in_proj_z.size_bytes();
+                total += attn.out_proj.size_bytes();
+                total += attn.in_proj_a.size_bytes();
+                total += attn.in_proj_b.size_bytes();
+                total += attn.conv1d.size_bytes();
+                total += attn.norm.size_bytes();
+                total += attn.a_log.size_bytes();
+                total += attn.dt_bias.size_bytes();
+            }
+        }
+        total
+    }
+
+    /// Total parameter count across all MTP tensors.
+    pub fn total_params(&self) -> usize {
+        let mut total = self.fc.numel();
+        total += self.pre_fc_norm_embedding.numel();
+        total += self.pre_fc_norm_hidden.numel();
+        total += self.final_layernorm.numel();
+        total += self.layer.input_layernorm.numel();
+        total += self.layer.post_attention_layernorm.numel();
+        total += self.layer.mlp.gate_proj.numel();
+        total += self.layer.mlp.up_proj.numel();
+        total += self.layer.mlp.down_proj.numel();
+        match &self.layer.attention {
+            AttentionWeights::Full(attn) => {
+                total += attn.q_proj.numel();
+                total += attn.k_proj.numel();
+                total += attn.v_proj.numel();
+                total += attn.o_proj.numel();
+                total += attn.q_norm.numel();
+                total += attn.k_norm.numel();
+            }
+            AttentionWeights::Linear(attn) => {
+                total += attn.in_proj_qkv.numel();
+                total += attn.in_proj_z.numel();
+                total += attn.out_proj.numel();
+                total += attn.in_proj_a.numel();
+                total += attn.in_proj_b.numel();
+                total += attn.conv1d.numel();
+                total += attn.norm.numel();
+                total += attn.a_log.numel();
+                total += attn.dt_bias.numel();
+            }
+        }
+        total
+    }
+}
+
 /// Complete Qwen3.5-4B language model weights.
 ///
 /// Note: lm_head is tied to embed_tokens (shared weight matrix),
@@ -157,6 +259,11 @@ pub struct ModelWeights {
     pub layers: Vec<LayerWeights>,
     /// Final RMSNorm. [hidden_size]
     pub final_norm: WeightTensor,
+    /// Optional native MTP head (Qwen3.5-4B ships one, other variants may not).
+    /// Populated when `num_nextn_predict_layers > 0` in the model config AND the
+    /// `mtp.*` tensors are present in the checkpoint. Consumed by
+    /// `KILN_SPEC_METHOD=mtp` at serve time.
+    pub mtp: Option<MtpWeights>,
 }
 
 impl ModelWeights {
@@ -164,6 +271,9 @@ impl ModelWeights {
     pub fn total_bytes(&self) -> usize {
         let mut total = self.embedding.embed_tokens.size_bytes();
         total += self.final_norm.size_bytes();
+        if let Some(mtp) = &self.mtp {
+            total += mtp.total_bytes();
+        }
         for layer in &self.layers {
             total += layer.input_layernorm.size_bytes();
             total += layer.post_attention_layernorm.size_bytes();
@@ -199,6 +309,9 @@ impl ModelWeights {
     pub fn total_params(&self) -> usize {
         let mut total = self.embedding.embed_tokens.numel();
         total += self.final_norm.numel();
+        if let Some(mtp) = &self.mtp {
+            total += mtp.total_params();
+        }
         for layer in &self.layers {
             total += layer.input_layernorm.numel();
             total += layer.post_attention_layernorm.numel();

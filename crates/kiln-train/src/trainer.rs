@@ -1544,6 +1544,7 @@ mod tests {
             layers,
             final_norm,
             rotary_inv_freq,
+            mtp: None,
         })
     }
 

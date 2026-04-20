@@ -94,10 +94,21 @@ fn load_model_dense(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeigh
     let final_norm = extract_tensor(&tensor_map, &format!("{prefix}norm.weight"))?;
     validate_shape(&final_norm, &[config.hidden_size], "final_norm")?;
 
+    // Optional: load native MTP head when the checkpoint ships it.
+    // Qwen3.5-4B has `num_nextn_predict_layers = 1` (k=1 draft depth) and
+    // stores 15 `mtp.*` tensors. We detect purely by tensor presence rather
+    // than adding a new config field — if the checkpoint has MTP tensors,
+    // load them; if not, leave `ModelWeights.mtp` as None.
+    let mtp = load_mtp_if_present(&tensor_map, &prefix, config)?;
+    if mtp.is_some() {
+        tracing::info!("Native MTP head detected and loaded (k=1 draft depth)");
+    }
+
     let weights = ModelWeights {
         embedding: EmbeddingWeights { embed_tokens },
         layers,
         final_norm,
+        mtp,
     };
 
     let total_mb = weights.total_bytes() as f64 / (1024.0 * 1024.0);
@@ -172,10 +183,21 @@ fn load_model_gptq(
     let final_norm = extract_tensor(&tensor_map, &format!("{prefix}norm.weight"))?;
     validate_shape(&final_norm, &[config.hidden_size], "final_norm")?;
 
+    // GPTQ MTP is not yet supported — the MTP layer projections would need
+    // a separate GPTQ dequant path. For now we simply log and skip.
+    if tensor_map.contains_key("mtp.fc.weight")
+        || tensor_map.contains_key(&format!("{prefix}mtp.fc.weight") as &str)
+    {
+        tracing::warn!(
+            "MTP tensors present in GPTQ checkpoint but GPTQ MTP loading is not yet implemented — skipping"
+        );
+    }
+
     let weights = ModelWeights {
         embedding: EmbeddingWeights { embed_tokens },
         layers,
         final_norm,
+        mtp: None,
     };
 
     let total_mb = weights.total_bytes() as f64 / (1024.0 * 1024.0);
@@ -463,6 +485,100 @@ fn load_ffn(
         up_proj,
         down_proj,
     })
+}
+
+/// Detect and load the native MTP head if present in the checkpoint.
+///
+/// Qwen3.5-4B ships 15 MTP-prefixed tensors under `<prefix>mtp.*`:
+/// - `mtp.fc.weight` `[hidden, 2*hidden]`
+/// - `mtp.pre_fc_norm_embedding.weight` `[hidden]`
+/// - `mtp.pre_fc_norm_hidden.weight` `[hidden]`
+/// - `mtp.layers.0.*` — one full GQA transformer layer (shape identical to a
+///   main-model full-attention layer including `attn_output_gate`)
+/// - `mtp.final_layernorm.weight` `[hidden]`
+///
+/// The MTP head ties its `lm_head` to the base model's `embed_tokens`, so we
+/// do NOT load a separate `mtp.lm_head` tensor. The spec-decode forward
+/// path reuses `GpuWeights::embed_tokens_t`.
+///
+/// Returns `Ok(Some(..))` when detected, `Ok(None)` when absent (so older
+/// or MTP-less checkpoints continue to load unchanged).
+fn load_mtp_if_present(
+    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    prefix: &str,
+    config: &ModelConfig,
+) -> Result<Option<MtpWeights>> {
+    // Probe: is the MTP fc projection present? (Single-file and VL-prefixed
+    // checkpoints both land at `{prefix}mtp.fc.weight`.)
+    let mtp_prefix = format!("{prefix}mtp.");
+    let fc_key = format!("{mtp_prefix}fc.weight");
+    if !tensor_map.contains_key(fc_key.as_str()) {
+        return Ok(None);
+    }
+
+    let ctx = |name: &str| format!("mtp.{name}");
+
+    let fc = extract_tensor(tensor_map, &fc_key)?;
+    // fc maps concat(embed, hidden) → hidden, so shape is [hidden, 2*hidden].
+    validate_shape(&fc, &[config.hidden_size, 2 * config.hidden_size], &ctx("fc"))?;
+
+    let pre_fc_norm_embedding = extract_tensor(
+        tensor_map,
+        &format!("{mtp_prefix}pre_fc_norm_embedding.weight"),
+    )?;
+    validate_shape(
+        &pre_fc_norm_embedding,
+        &[config.hidden_size],
+        &ctx("pre_fc_norm_embedding"),
+    )?;
+
+    let pre_fc_norm_hidden = extract_tensor(
+        tensor_map,
+        &format!("{mtp_prefix}pre_fc_norm_hidden.weight"),
+    )?;
+    validate_shape(
+        &pre_fc_norm_hidden,
+        &[config.hidden_size],
+        &ctx("pre_fc_norm_hidden"),
+    )?;
+
+    let final_layernorm =
+        extract_tensor(tensor_map, &format!("{mtp_prefix}final_layernorm.weight"))?;
+    validate_shape(
+        &final_layernorm,
+        &[config.hidden_size],
+        &ctx("final_layernorm"),
+    )?;
+
+    // The MTP layer uses the same full-attention shape as the main-model
+    // full-attention layers (GQA + output gate + SwiGLU MLP). We reuse
+    // `load_layer` with a synthetic prefix that points at `mtp.layers.0.`
+    // and an index (3) whose residue class `(i + 1) % 4 == 0` makes
+    // `is_full_attention_layer` return true. The layer_idx argument is only
+    // used for error context strings, not for dispatch.
+    let mtp_layer_prefix = format!("{mtp_prefix}layers.0.");
+    let layer = load_layer(tensor_map, &mtp_layer_prefix, 3, config)
+        .context("mtp layer 0")?;
+    // Defensive: MTP layer must be full attention. If this ever fires the
+    // checkpoint is shipping a linear-attention MTP head and the forward
+    // pass below won't match.
+    match &layer.attention {
+        AttentionWeights::Full(_) => {}
+        AttentionWeights::Linear(_) => {
+            bail!(
+                "MTP layer loaded as linear attention — expected full GQA attention. \
+                 Checkpoint schema change?"
+            );
+        }
+    }
+
+    Ok(Some(MtpWeights {
+        fc,
+        pre_fc_norm_embedding,
+        pre_fc_norm_hidden,
+        layer,
+        final_layernorm,
+    }))
 }
 
 /// Extract a tensor by name from the unified tensor map.

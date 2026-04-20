@@ -129,6 +129,45 @@ pub struct GpuWeights {
     /// so the RoPE hot path can reuse it instead of rebuilding a fresh `Vec<f32>` +
     /// HtoD upload on every layer's attention call (~8 × per token in prefill).
     pub rotary_inv_freq: Tensor,
+    /// Native MTP (Multi-Token Prediction) head tensors on device, when the
+    /// checkpoint shipped them and the loader surfaced a `ModelWeights.mtp`.
+    /// `None` for checkpoints without MTP support; the `KILN_SPEC_METHOD=mtp`
+    /// code path must bail with an error and fall back to `SkipLayer` or
+    /// single-token decode when this is `None`.
+    pub mtp: Option<MtpGpuWeights>,
+}
+
+/// GPU-ready native MTP head tensors.
+///
+/// Mirrors [`crate::weights::MtpWeights`] after upload. The `lm_head` is tied
+/// to the base model's token embedding, so this struct intentionally does NOT
+/// carry its own `lm_head` tensor — the spec-decode forward pass reuses
+/// [`GpuWeights::embed_tokens_t`] for the final projection.
+///
+/// The inner [`GpuLayerWeights`] is re-used for the MTP transformer layer so
+/// the forward pass can dispatch through the same full-attention kernels
+/// (q/k/v/o_proj, q_norm, k_norm, input/post_attention_layernorm, SwiGLU MLP)
+/// that it uses for the base model's eight full-attention layers. The loader
+/// already rejects any MTP checkpoint that resolves as linear attention, so
+/// the inner `attention` field is always `GpuAttentionWeights::Full(_)`.
+pub struct MtpGpuWeights {
+    /// Concat-then-project: `[hidden_size, 2 * hidden_size]`, BF16 on device.
+    /// Ingests `concat(norm_embed, norm_hidden)` → produces `[seq, hidden_size]`.
+    pub fc: Tensor,
+    /// Pre-transposed `fc` for the forward hot path: `[2 * hidden_size, hidden_size]`, contiguous.
+    /// Same transpose-caching pattern as the base model's `*_proj_t` fields
+    /// (PRs #117/#124/#128) — eliminates a per-draft-step `.t().contiguous()`
+    /// on a 26 MiB bf16 matrix when drafting.
+    pub fc_t: Tensor,
+    /// RMSNorm weight for the draft-candidate's token embedding. `[hidden_size]`.
+    pub pre_fc_norm_embedding: Tensor,
+    /// RMSNorm weight for the base model's last hidden state. `[hidden_size]`.
+    pub pre_fc_norm_hidden: Tensor,
+    /// Single MTP transformer layer. The loader validates this is always a
+    /// full-attention layer, so `layer.attention` is `Full(...)` at runtime.
+    pub layer: GpuLayerWeights,
+    /// Final RMSNorm weight before the tied lm_head. `[hidden_size]`.
+    pub final_layernorm: Tensor,
 }
 
 /// Compute the rotary-embedding `inv_freq` tensor once and upload it to `device`.
@@ -267,6 +306,69 @@ impl LinearAttentionState {
             recurrent_states,
             conv_states,
         })
+    }
+
+    /// Capture the current GDN recurrent + conv state into a fresh shadow
+    /// `LinearAttentionState`. Used by speculative decoding to preserve the
+    /// base model's O(1) GDN state before advancing into a draft: if any
+    /// proposed token is rejected, [`Self::restore_from`] puts it back.
+    ///
+    /// This snapshot allocates new device tensors and issues a
+    /// `cudaMemcpyDeviceToDevice` per layer. For Qwen3.5-4B that is
+    /// 24 × (recurrent ≈ 2 MiB + conv ≈ 24 KiB) ≈ 49 MiB per snapshot, which
+    /// is acceptable for WIP scaffolding. The follow-up PR replaces this with
+    /// the ping-pong shadow-slot pattern from the existing KV-cache draft
+    /// code path (no per-step alloc, two pre-allocated slots swapped via
+    /// index) to bring overhead to zero.
+    pub fn snapshot(&self) -> Result<Self> {
+        let mut recurrent_states = Vec::with_capacity(self.recurrent_states.len());
+        for t in &self.recurrent_states {
+            recurrent_states.push(t.copy().context("snapshot recurrent state")?);
+        }
+        let mut conv_states = Vec::with_capacity(self.conv_states.len());
+        for t in &self.conv_states {
+            conv_states.push(t.copy().context("snapshot conv state")?);
+        }
+        Ok(Self {
+            recurrent_states,
+            conv_states,
+        })
+    }
+
+    /// Restore this state from a previously captured [`Self::snapshot`].
+    ///
+    /// Checks that the shapes/counts match — a mismatch indicates the caller
+    /// mixed up snapshots from different sessions, which would be a logic bug
+    /// in the spec-decode loop. Overwrites the current tensors in place so
+    /// downstream GPU pointers (e.g. those captured inside a CUDA graph) stay
+    /// valid. The follow-up ping-pong rewrite folds this into a zero-copy
+    /// slot swap; this correctness-first copy implementation is the scaffold.
+    pub fn restore_from(&mut self, snapshot: &Self) -> Result<()> {
+        if self.recurrent_states.len() != snapshot.recurrent_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState::restore_from: recurrent_states len mismatch ({} vs {})",
+                self.recurrent_states.len(),
+                snapshot.recurrent_states.len()
+            );
+        }
+        if self.conv_states.len() != snapshot.conv_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState::restore_from: conv_states len mismatch ({} vs {})",
+                self.conv_states.len(),
+                snapshot.conv_states.len()
+            );
+        }
+        for (dst, src) in self
+            .recurrent_states
+            .iter_mut()
+            .zip(snapshot.recurrent_states.iter())
+        {
+            *dst = src.copy().context("restore recurrent state")?;
+        }
+        for (dst, src) in self.conv_states.iter_mut().zip(snapshot.conv_states.iter()) {
+            *dst = src.copy().context("restore conv state")?;
+        }
+        Ok(())
     }
 }
 
@@ -628,12 +730,146 @@ impl GpuWeights {
             }
         }
 
+        // Upload native MTP head tensors when the checkpoint shipped them.
+        // For WIP scaffolding the MTP transformer layer is kept in BF16 and
+        // is NOT queued for Marlin batch packing: the MTP layer is a single
+        // layer whose projections account for ~3% of total model memory, so
+        // deferring W4A16 coverage costs little and keeps the scaffold
+        // simple. The follow-up PR extends `marlin_pack_inputs` to include
+        // the MTP layer's q_proj + MLP trio.
+        let mtp = if let Some(mtp_w) = &weights.mtp {
+            let fc = weight_to_tensor(&mtp_w.fc, device).context("mtp.fc")?;
+            let fc_t = fc
+                .t()
+                .context("mtp.fc.t")?
+                .contiguous()
+                .context("mtp.fc.t contiguous")?;
+            let pre_fc_norm_embedding = weight_to_tensor(&mtp_w.pre_fc_norm_embedding, device)
+                .context("mtp.pre_fc_norm_embedding")?;
+            let pre_fc_norm_hidden = weight_to_tensor(&mtp_w.pre_fc_norm_hidden, device)
+                .context("mtp.pre_fc_norm_hidden")?;
+            let final_layernorm = weight_to_tensor(&mtp_w.final_layernorm, device)
+                .context("mtp.final_layernorm")?;
+
+            // The MTP inner transformer layer. Loader guarantees this is a
+            // full-attention layer (bails otherwise). Keep the upload inline
+            // — duplicating the ~70-line layer-upload block here is a
+            // deliberate scaffolding shortcut; the follow-up PR factors this
+            // and the main per-layer upload into a shared helper.
+            let mtp_layer = {
+                let lw = &mtp_w.layer;
+                let ctx = |name: &str| format!("mtp.layer {name}");
+
+                let input_layernorm =
+                    weight_to_tensor(&lw.input_layernorm, device).context(ctx("input_layernorm"))?;
+                let post_attention_layernorm = weight_to_tensor(&lw.post_attention_layernorm, device)
+                    .context(ctx("post_attention_layernorm"))?;
+
+                let attention = match &lw.attention {
+                    crate::weights::AttentionWeights::Full(attn) => {
+                        let q_proj = weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?;
+                        let k_proj = weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
+                        let v_proj = weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
+                        let o_proj = weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
+                        let q_proj_t = q_proj
+                            .t()
+                            .context(ctx("q_proj.t"))?
+                            .contiguous()
+                            .context(ctx("q_proj.t contiguous"))?;
+                        let k_proj_t = k_proj
+                            .t()
+                            .context(ctx("k_proj.t"))?
+                            .contiguous()
+                            .context(ctx("k_proj.t contiguous"))?;
+                        let v_proj_t = v_proj
+                            .t()
+                            .context(ctx("v_proj.t"))?
+                            .contiguous()
+                            .context(ctx("v_proj.t contiguous"))?;
+                        let o_proj_t = o_proj
+                            .t()
+                            .context(ctx("o_proj.t"))?
+                            .contiguous()
+                            .context(ctx("o_proj.t contiguous"))?;
+                        GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                            q_proj,
+                            k_proj,
+                            v_proj,
+                            o_proj,
+                            q_norm: weight_to_tensor(&attn.q_norm, device).context(ctx("q_norm"))?,
+                            k_norm: weight_to_tensor(&attn.k_norm, device).context(ctx("k_norm"))?,
+                            q_proj_t,
+                            k_proj_t,
+                            v_proj_t,
+                            o_proj_t,
+                            q_proj_marlin: None,
+                        })
+                    }
+                    crate::weights::AttentionWeights::Linear(_) => {
+                        anyhow::bail!(
+                            "MTP layer resolved as linear attention — loader should have caught this"
+                        );
+                    }
+                };
+
+                let gate_proj =
+                    weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?;
+                let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
+                let down_proj =
+                    weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
+                let gate_proj_t = gate_proj
+                    .t()
+                    .context(ctx("gate_proj.t"))?
+                    .contiguous()
+                    .context(ctx("gate_proj.t contiguous"))?;
+                let up_proj_t = up_proj
+                    .t()
+                    .context(ctx("up_proj.t"))?
+                    .contiguous()
+                    .context(ctx("up_proj.t contiguous"))?;
+                let down_proj_t = down_proj
+                    .t()
+                    .context(ctx("down_proj.t"))?
+                    .contiguous()
+                    .context(ctx("down_proj.t contiguous"))?;
+
+                GpuLayerWeights {
+                    input_layernorm,
+                    post_attention_layernorm,
+                    attention,
+                    mlp: GpuFfnWeights {
+                        gate_proj,
+                        up_proj,
+                        down_proj,
+                        gate_proj_t,
+                        up_proj_t,
+                        down_proj_t,
+                        gate_proj_marlin: None,
+                        up_proj_marlin: None,
+                        down_proj_marlin: None,
+                    },
+                }
+            };
+
+            Some(MtpGpuWeights {
+                fc,
+                fc_t,
+                pre_fc_norm_embedding,
+                pre_fc_norm_hidden,
+                layer: mtp_layer,
+                final_layernorm,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             embed_tokens,
             embed_tokens_t,
             layers,
             final_norm,
             rotary_inv_freq,
+            mtp,
         })
     }
 }
@@ -3893,6 +4129,7 @@ mod tests {
             layers,
             final_norm,
             rotary_inv_freq,
+            mtp: None,
         })
     }
 
@@ -4290,6 +4527,7 @@ mod tests {
             layers,
             final_norm,
             rotary_inv_freq,
+            mtp: None,
         })
     }
 
