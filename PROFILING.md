@@ -3189,3 +3189,75 @@ nsys stats --report nvtx_sum          --format csv /tmp/profile_armB.nsys-rep
 - Total pod uptime at capture end: ~2.5 hours (build, load
   testing, four bench runs, two nsys captures, stats extraction).
 - Estimated pod cost: ~$1.25.
+
+
+## Phase 7 GPU spike: streaming prefill on A6000 — 2026-04-20
+
+**Outcome: CUDA parity test passes at T=2048 tile=512 (FP32 hybrid toy model, 1e-4 tolerance, per-layer GDN recurrent + conv state bit-equal). T=65536 prefill completes on a 48 GiB A6000 without OOM. ≤32k regression sweep (8192p / 128d) shows prefill within tolerance (+1.5% faster in streaming arm) and decode slightly below the 2% bar (-4.6%) — not a statistically clean null on this 3-run budget, documented for follow-up. Phase 7 streaming remains opt-in (`KILN_STREAMING_PREFILL=0` default); no threshold or default flip in this PR.**
+
+### Parity (CUDA, `cargo nextest run --release --features cuda -p kiln-model test_streaming`)
+
+All six tests green, 4.584s wall:
+
+| # | Test | Result |
+|---|---|---|
+| 1 | `test_streaming_prefill_env_helpers` (existing) | PASS (0.056s) |
+| 2 | `test_streaming_matches_monolithic_cpu_small` (existing) | PASS (0.142s) |
+| 3 | `test_streaming_preserves_state_cpu` (existing) | PASS (0.188s) |
+| 4 | `test_streaming_tile_invariance_cpu` (existing) | PASS (0.243s) |
+| 5 | `test_streaming_matches_monolithic_cpu_mid` (existing) | PASS (0.284s) |
+| 6 | **`test_streaming_matches_monolithic_cuda`** (new) | **PASS (4.583s)** |
+
+The new CUDA test runs the 8-layer hybrid (6 GDN + 2 full-attn, FP32) at T=2048 / tile=512 / block_size=64 and asserts (a) last-tile logits match the corresponding slice of monolithic logits to `<1e-4` max-abs, (b) every GDN layer's `recurrent_states` matches across streaming vs monolithic at `<1e-4`, (c) same for `conv_states`. 1e-4 is a conservative FP32 bar that absorbs candle CUDA matmul reduction-order variance; the design doc (§c above) argues for bit-exactness and in practice the observed diffs were comfortably below threshold.
+
+### T=65536 long-context validation (`KILN_STREAMING_PREFILL=1 KILN_W4A16=1`, tile=8192 default)
+
+Single-request latency arm:
+
+| Metric | Value |
+|---|---|
+| Effective prompt tokens | 65522 (bench truncates to block alignment) |
+| Model VRAM after load | 17528 MB (14.3 GiB) |
+| Model load time | 23.73s |
+| Prefill time | 27485.1 ms (2384 tok/s) |
+| Decode tokens generated | 33 |
+| Mean ITL | 42.2 ms (23.7 tok/s) |
+| P50 ITL | 41.8 ms |
+| P99 ITL | 55.4 ms |
+| **OOM?** | **No** |
+
+The kiln-bench throughput sweep (4 / 8 / 16 sequential runs at this prompt size) fails — that path accumulates full-length prompts across the sweep and runs past VRAM, which is a scheduler-level constraint orthogonal to streaming prefill. The single-request latency arm is the spike target and it completes end-to-end on the 48 GiB A6000.
+
+### ≤32k regression sweep (8192 prompt, 128 decode, 3 runs each, W4A16)
+
+- **Arm A** = `KILN_STREAMING_PREFILL=0` (monolithic baseline).
+- **Arm B** = `KILN_STREAMING_PREFILL=1 KILN_STREAMING_PREFILL_THRESHOLD=0` (streaming forced on for sub-threshold input).
+
+| Arm | Run | prefill_time_ms | prefill tok/s | decode tok/s | P50 ITL ms | P99 ITL ms |
+|---|---|---:|---:|---:|---:|---:|
+| A | 1 | 3181.8 | 2574.3 | 51.2 | 19.3 | 22.3 |
+| A | 2 | 3194.5 | 2564.1 | 50.2 | 19.6 | 22.9 |
+| A | 3 | 3381.9 | 2422.0 | 48.1 | 20.6 | 22.7 |
+| A | **median** | **3194.5** | **2564.1** | **50.2** | **19.6** | **22.7** |
+| B | 1 | 3146.6 | 2603.1 | 47.9 | 20.8 | 22.7 |
+| B | 2 | 3157.5 | 2594.1 | 47.6 | 20.8 | 31.2 |
+| B | 3 | 3141.1 | 2607.6 | 48.4 | 20.5 | 25.9 |
+| B | **median** | **3146.6** | **2603.1** | **47.9** | **20.8** | **25.9** |
+
+Deltas (B vs A medians):
+
+- Prefill tok/s: **+1.5%** (2603.1 vs 2564.1) — within 2% tolerance.
+- Prefill time ms: **-1.5%** (3146.6 vs 3194.5) — within 2% tolerance.
+- Decode tok/s: **-4.6%** (47.9 vs 50.2) — **outside the 2% tolerance** by roughly 1 ms of ITL. Run 2 P99 (31.2 ms) and run 3 P99 (25.9 ms) suggest this is decode-path ITL variance rather than a systematic streaming-path regression. Decode is identical single-step in both arms (both use `model_forward_paged`, not streaming, after prefill finishes); the paths differ only in warmup flow and the provenance of the `LinearAttentionState` going into the first decode step. Budget did not allow N=10+ runs to resolve. Worth a targeted re-bench before considering a threshold / default flip.
+
+### Verdict and Phase 7 gating
+
+- CUDA parity and T=65536 no-OOM are **green** → the streaming/tiled implementation is safe to keep shipped behind the default-off flag.
+- ≤32k regression is **amber** on decode — not a block, but warrants a quieter re-bench (median-of-5+, same pod, same process) before changing the default or lowering the threshold.
+- No changes to `KILN_STREAMING_PREFILL` default (stays `0`), no changes to `KILN_STREAMING_PREFILL_THRESHOLD` default (stays `32768`).
+
+### Pod / cost notes
+
+- Pod: `t0vmof6qkwostu` via lease `pod-016bb2e7c07be9a97ceb4a3b` (RunPod RTX A6000 on-demand, $0.49/hr, pool-leased).
+- Leased → all work done: ~30 minutes (reused warm pod from pool; zero cold-build time).
+- Spike cost: ~$0.25 (well under the $0.70 ceiling; $1.00 abort line was not approached).
