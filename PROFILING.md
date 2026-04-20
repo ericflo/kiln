@@ -1,6 +1,89 @@
 # Kiln Profiling Report
 
 
+## Re-profile 2026-04-20 (pool-verification baseline)
+
+Bench-only re-run on a fresh pod acquired through the new Cloud Eric kiln pod
+pool (`ce kiln-pod-acquire` / `ce kiln-pod-release`). Purpose:
+
+1. Verify the pool path produces results materially identical to the
+   direct-RunPod path (post-PR #166 baseline).
+2. Validate the new long-running bench supervision pattern in
+   `skills/kiln/resources/runpod-workflow.md` (sentinel-file polling via
+   `runpod_api.py wait-file`, no ad-hoc `until ssh ... kill -0` loops). The
+   prior attempt at this re-profile (task `c8a18546…`) burned $13.76 in a
+   silent SSH-polling deadlock — see agent note `kiln-ssh-polling-deadlock`.
+
+No code changes between this run and the post-PR #166 baseline, so the NVTX
+top-10 and CUDA-kernel top-10 from the
+[Post-PR #166 section](#phase-6--post-pr-166-decode-profile-2026-04-18) below
+remain canonical. This section adds only fresh bench numbers from the
+pool-verification run.
+
+**Hardware:** Pool-acquired RunPod NVIDIA RTX A6000 on-demand (pod
+`t0vmof6qkwostu`, $0.49/hr), Driver 580.95.05, CUDA 12.8,
+`ghcr.io/ericflo/kiln-runpod:latest`.
+
+**Build:** release, `--features cuda,nvtx`, `KILN_CUDA_ARCHS=86`,
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, sccache ON (Backblaze B2 bucket).
+Cold first-clone build on the freshly-spawned pool pod (sccache hit rate
+low on first build; not a hot cache).
+
+**Bench:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+--prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
+runs in a single nohup'd shell script with sentinel-file completion
+signaling. NVTX-feature build but no nsys capture this run (pool-verification
+scope only).
+
+### Decode tok/s — 512-prompt × 128-decode (Arm B, 3 runs, pool path)
+
+| run    | decode tok/s | mean ITL ms | p50 ITL ms | p99 ITL ms |
+| ------ | -----------: | ----------: | ---------: | ---------: |
+| 1      |        49.15 |       20.35 |      20.12 |      24.19 |
+| 2      |        51.37 |       19.47 |      19.38 |      22.39 |
+| 3      |        52.39 |       19.09 |      18.83 |      22.40 |
+| mean   |    **50.97** |   **19.64** |  **19.44** |  **23.00** |
+| median |    **51.37** |   **19.47** |  **19.38** |  **22.40** |
+
+Run 1 here is the slowest (cold prefill: 7540 ms, 67 tok/s for the first
+single-shot prefill — pure CUDA-graph capture + JIT + page-in warmup; runs
+2–3 settle to 327–337 ms / ~1500 tok/s). The decode tok/s ordering is
+inverted vs the post-#166 baseline where run 1 was fastest; this is exactly
+the run-to-run variance the `kiln-bench-prefill-warmup-required` note
+warns about. Decode tok/s + ITL averages over many tokens so all three runs
+are individually trustworthy, but single-shot TTFT is not.
+
+### Δ vs post-#166 direct-RunPod baseline (median)
+
+| metric            | post-#166 direct | 2026-04-20 pool | Δ        |
+| ----------------- | ---------------: | --------------: | -------: |
+| decode tok/s      |            49.76 |           51.37 |   +3.2 % |
+| mean ITL ms       |            20.10 |           19.47 |   −3.1 % |
+| p50 ITL ms        |            19.91 |           19.38 |   −2.7 % |
+| p99 ITL ms        |            25.46 |           22.40 |  −12.0 % |
+
+Within run-to-run variance — the post-#166 mean was 51.15 tok/s, this run's
+mean is 50.97 tok/s (a 0.4% delta). The pool path produces equivalent
+decode performance to the direct-launch path. **No regression.** Pool
+verification: passed.
+
+### Pool-path operational metrics
+
+- Pool acquire → SSH ready: ~6 min (fresh spawn, not a warm reuse — pool
+  was empty for A6000 at acquire time).
+- Cold build (`cargo build --release --features cuda,nvtx --bin kiln-bench`):
+  ~22 min (sccache cold, full ~330-crate build).
+- Model download (Qwen/Qwen3.5-4B, ~8.8 GB) ran in parallel with build,
+  finished before build completed.
+- Bench (3× back-to-back, sentinel-driven): ~7 min.
+- Total wall-clock from acquire to PR-ready: ~36 min.
+- Bench supervision pattern (sentinel + `runpod_api.py wait-file`) worked
+  cleanly — no SSH wedging, no silent polling stalls, no $13+ surprise.
+
+Subsequent re-profiles on a warm pool pod (or a hibernated-then-resumed
+pod) should hit ~10 min total wall-clock by skipping the cold build.
+
+
 ## Phase 6 — Post-PR #166 decode profile (2026-04-18)
 
 Fresh nsys capture on current `main` (HEAD `c2579a1`, PR #166 vendored
