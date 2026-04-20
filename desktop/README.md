@@ -148,3 +148,23 @@ desktop/
 ## CI
 
 Release workflow lives in `.github/workflows/desktop-build.yml`. On `desktop-v*` tag push it builds the Tauri bundle on `ubuntu-22.04`, `windows-latest`, and `macos-14` and publishes the artifacts to the matching GitHub Release. The macOS job runs `--target aarch64-apple-darwin` to produce an Apple Silicon `.dmg` + `.app`.
+
+## Troubleshooting
+
+Common first-run issues and how to recover.
+
+- **Kiln server binary failed to download on first launch.** The desktop app fetches the matching `kiln` server binary from GitHub Releases on first run. If the download fails, check your network/firewall (especially proxies blocking `github.com` or `objects.githubusercontent.com`), then retry from Settings → "Check for updates / Re-download". As a manual fallback, grab the binary from <https://github.com/ericflo/kiln/releases/latest> and point Settings → "Kiln binary path" at the unpacked file.
+
+- **"Model path not set" on the Dashboard.** No weights are bundled. Open Settings, then either use the HuggingFace downloader (default `Qwen/Qwen3.5-4B`) or point the Model path picker at an existing safetensors directory and click Save. The Dashboard will pick up the change once the server restarts.
+
+- **CUDA driver too old.** Settings shows the detected NVIDIA driver and the minimum required by the selected kiln release. If the gate trips ("CUDA driver too old: …  Update blocked"), update your NVIDIA driver to at least the version shown — see <https://www.nvidia.com/drivers> — then restart the desktop app. The same gate blocks in-app server-binary updates until the driver is current.
+
+- **Port already in use.** Default server port is `8080`. If another process is bound, open Settings, change "Port" to a free port (e.g. `8090`), and Save. Then restart the server from the tray menu and update any OpenAI-compatible client to the new `http://localhost:<port>/v1` base URL.
+
+- **Server keeps crashing or restarts in a loop.** Open the Logs window (Ctrl/Cmd+L) to inspect the captured stderr. The most common causes are: corrupt or partial model weights (re-download), insufficient VRAM for the model + KV cache (lower the inference memory fraction in Settings, or enable FP8 KV cache), and a CUDA runtime/driver mismatch (see above). The supervisor backs off exponentially between restart attempts; "Stop server" from the tray will halt the loop.
+
+- **How to uninstall.**
+  - **Windows:** Settings → Apps → "Kiln Desktop" → Uninstall (or rerun the original `.exe` installer and choose Remove).
+  - **Linux (.deb):** `sudo dpkg -r kiln-desktop`. For the AppImage, just delete the `.AppImage` file.
+  - **macOS:** drag `Kiln Desktop.app` from `/Applications` to the Trash.
+  - App data (settings, downloaded kiln binary, logs) lives in the OS-specific app data directory — `%APPDATA%\com.kiln.desktop` on Windows, `~/.local/share/com.kiln.desktop` on Linux, `~/Library/Application Support/com.kiln.desktop` on macOS. Remove it manually for a clean reinstall.
