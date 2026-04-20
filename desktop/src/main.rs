@@ -539,6 +539,73 @@ async fn check_for_kiln_update(
     })
 }
 
+/// Event emitted when the launch-time check discovers a newer kiln binary.
+/// Payload matches `KilnUpdateAvailablePayload` (current + latest version).
+const KILN_UPDATE_AVAILABLE_EVENT: &str = "kiln-update-available";
+
+#[derive(serde::Serialize, Clone)]
+struct KilnUpdateAvailablePayload {
+    current: Option<String>,
+    latest: String,
+}
+
+/// Launch-time auto-check for a newer kiln binary. Non-blocking, fails
+/// silently on any error, never panics. Runs once per launch: no periodic
+/// polling (per `desktop/docs/binary-update.md` open question #4 — stay
+/// within the 60/hr anonymous GitHub rate limit). Emits
+/// `kiln-update-available` so the dashboard can surface a banner and
+/// settings can pre-populate the status pill.
+async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
+    // Give the supervisor ~10s to stabilize before we make a network call.
+    // Keeps the launch path fast and avoids racing with auto_start.
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    if !installer::supports_auto_install() {
+        return;
+    }
+
+    let configured = {
+        let s = settings.read().await;
+        s.kiln_binary
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("kiln"))
+    };
+    let current = match installer::resolve_binary(&configured) {
+        Some(p) => installer::current_kiln_version(&p).await,
+        None => None,
+    };
+
+    let client = match reqwest::Client::builder()
+        .user_agent(concat!("kiln-desktop/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[main] auto_update check: build reqwest client failed: {}", e);
+            return;
+        }
+    };
+
+    let Some(latest) = installer::discover_latest_version(&client).await else {
+        return;
+    };
+
+    if !installer::is_update_available(current.as_deref(), &latest) {
+        return;
+    }
+
+    if let Err(e) = app.emit(
+        KILN_UPDATE_AVAILABLE_EVENT,
+        KilnUpdateAvailablePayload {
+            current: current.clone(),
+            latest: latest.clone(),
+        },
+    ) {
+        eprintln!("[main] emit kiln-update-available failed: {}", e);
+    }
+}
+
 /// Re-check, then download and install the available update, then restart the
 /// app. We re-check rather than caching an `Update` handle because Tauri
 /// commands are stateless and the small race window is acceptable.
@@ -820,6 +887,19 @@ fn main() {
                     }
                 });
             }
+
+            // Non-blocking auto-check for a newer kiln binary. Runs once per
+            // launch after a short delay so the supervisor can stabilize.
+            // Emits `kiln-update-available` on success; failures are logged
+            // and swallowed so a flaky GitHub API call never blocks startup.
+            // Per `desktop/docs/binary-update.md` this is launch-only — no
+            // periodic polling, to stay under the anonymous GitHub rate limit.
+            let app_for_update = handle.clone();
+            let settings_for_update: SettingsState = Arc::clone(&settings_state);
+            tauri::async_runtime::spawn(async move {
+                check_kiln_update_on_launch(app_for_update, settings_for_update).await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

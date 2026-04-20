@@ -174,6 +174,42 @@
         font-size: 12px;
       }
       #toolbar button:hover { background: #232831; }
+      #update-banner {
+        position: absolute;
+        top: 58px;
+        left: 12px;
+        right: 12px;
+        max-width: calc(100vw - 24px);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        z-index: 9;
+        background: rgba(90, 51, 36, 0.95);
+        border: 1px solid #7a432f;
+        color: #f2ddd6;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      #update-banner-text { flex: 1; }
+      #update-banner button {
+        margin-top: 0;
+        background: #7a432f;
+        color: #f2ddd6;
+        border: 1px solid #a05a3f;
+        padding: 4px 10px;
+        font-size: 12px;
+      }
+      #update-banner button:hover { background: #a05a3f; }
+      #update-banner button.secondary {
+        background: transparent;
+        color: #f2ddd6;
+        border: 1px solid transparent;
+        padding: 2px 8px;
+        font-size: 16px;
+        line-height: 1;
+      }
+      #update-banner button.secondary:hover { background: rgba(255, 255, 255, 0.08); }
       #toolbar button#stop-server:hover { background: #5a2424; border-color: #7a3232; color: #f2d6d6; }
       #toolbar button#stop-server:disabled { background: #2a2f3a; color: #6c7280; cursor: default; }
       #toolbar button#restart-server:hover { background: #3a4a6a; border-color: #4a5a7a; color: #d6e0f2; }
@@ -521,6 +557,11 @@
       <button id="open-settings" title="Open the settings window (Ctrl/Cmd+,)">Settings</button>
       <button id="check-updates-btn" title="Check for an updated version of Kiln Desktop">Check for Updates</button>
     </div>
+    <div id="update-banner" class="hidden" role="status" aria-live="polite">
+      <span id="update-banner-text">A newer kiln server is available.</span>
+      <button id="update-banner-open-settings" title="Open settings to review and install">Open Settings</button>
+      <button id="update-banner-dismiss" class="secondary" title="Dismiss this banner for this session" aria-label="Dismiss">×</button>
+    </div>
     <iframe id="frame" class="hidden" title="Kiln UI"></iframe>
     <div id="status">
       <h1 id="status-title">Connecting to Kiln server…</h1>
@@ -787,6 +828,32 @@
             installProgressLabel.textContent = `Install failed: ${msg}`;
           }
         }).catch((err) => console.error("listen kiln-install-failed:", err));
+
+        tauriEventApi.listen("kiln-update-available", (evt) => {
+          const p = (evt && evt.payload) || {};
+          const latest = p.latest || "";
+          const banner = document.getElementById("update-banner");
+          const text = document.getElementById("update-banner-text");
+          if (!banner || !text) return;
+          text.textContent = latest
+            ? `Kiln ${latest} is available. Open Settings to install.`
+            : "A newer kiln server is available. Open Settings to install.";
+          banner.classList.remove("hidden");
+        }).catch((err) => console.error("listen kiln-update-available:", err));
+      }
+
+      const updateBannerOpenSettings = document.getElementById("update-banner-open-settings");
+      const updateBannerDismiss = document.getElementById("update-banner-dismiss");
+      const updateBanner = document.getElementById("update-banner");
+      if (updateBannerOpenSettings) {
+        updateBannerOpenSettings.addEventListener("click", async () => {
+          try { await invoke("open_settings"); } catch (e) { console.error(e); }
+        });
+      }
+      if (updateBannerDismiss && updateBanner) {
+        updateBannerDismiss.addEventListener("click", () => {
+          updateBanner.classList.add("hidden");
+        });
       }
 
       async function load() {

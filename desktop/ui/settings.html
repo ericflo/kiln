@@ -1092,6 +1092,29 @@
       }
       kilnUpdateBtn.addEventListener("click", checkForKilnUpdate);
 
+      // Pre-populate the status pill when the launch-time auto-check
+      // discovers an update before the user clicks the button. We surface
+      // the result and wire up the Download action so the user can install
+      // without triggering a second network call. Clicking the button
+      // afterwards still runs a fresh check.
+      (() => {
+        const event = window.__TAURI__ && window.__TAURI__.event;
+        if (!event || typeof event.listen !== "function") return;
+        event.listen("kiln-update-available", (evt) => {
+          if (kilnUpdateChecking || kilnUpdateDownloading) return;
+          const p = (evt && evt.payload) || {};
+          if (!p.latest) return;
+          const current = p.current ? escapeHtml(p.current) : "unknown";
+          const latest = escapeHtml(p.latest);
+          setKilnUpdateStatus(
+            "available",
+            "Current " + current + " → latest " + latest +
+              ' <span class="badge">Update available</span>'
+          );
+          showKilnUpdateActions(p.latest);
+        }).catch((err) => console.error("listen kiln-update-available:", err));
+      })();
+
       // ---------- Download an available kiln update (slice 2) ----------
       // Streams the release tarball to <app_data_dir>/kiln-updates/. Does NOT
       // extract or swap the running binary — that is the Extract & Verify
