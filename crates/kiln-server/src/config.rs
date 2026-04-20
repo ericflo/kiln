@@ -27,6 +27,7 @@ pub struct KilnConfig {
     pub logging: LoggingConfig,
     pub prefix_cache: PrefixCacheConfig,
     pub speculative: SpeculativeDecodingConfig,
+    pub streaming_prefill: StreamingPrefillConfig,
 }
 
 /// HTTP server settings.
@@ -132,6 +133,32 @@ pub struct SpeculativeDecodingConfig {
     pub draft_layers: usize,
 }
 
+/// Streaming/tiled prefill settings.
+///
+/// When enabled, long-context prefill iterates over the sequence in tiles of
+/// `tile_tokens` tokens, carrying O(1) GDN recurrent state across tile
+/// boundaries and writing full-attention K/V into the paged cache per tile.
+/// This caps peak activation memory so that ≥65k-token prefill fits on a
+/// 48 GiB A6000.
+///
+/// `tile_tokens` must be a positive multiple of 64 (the GDN chunk size).
+///
+/// Dispatch is driven by reading these environment variables directly from
+/// `kiln-model` helpers; this struct is the documentation / TOML-config
+/// mirror. Defaults keep streaming OFF.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct StreamingPrefillConfig {
+    /// Enable tiled/streaming prefill (default: false).
+    pub enabled: bool,
+    /// Tile size in tokens (default: 8192). Must be a positive multiple of 64.
+    pub tile_tokens: usize,
+    /// On the final tile, compute the LM head only for the last row instead
+    /// of the full hidden state. Safe for inference because RMSNorm is
+    /// per-position. Default: true.
+    pub last_token_lm_head: bool,
+}
+
 // --- Defaults ---
 
 impl Default for KilnConfig {
@@ -144,6 +171,7 @@ impl Default for KilnConfig {
             logging: LoggingConfig::default(),
             prefix_cache: PrefixCacheConfig::default(),
             speculative: SpeculativeDecodingConfig::default(),
+            streaming_prefill: StreamingPrefillConfig::default(),
         }
     }
 }
@@ -218,6 +246,16 @@ impl Default for SpeculativeDecodingConfig {
             enabled: false,
             num_speculative_tokens: 4,
             draft_layers: 8,
+        }
+    }
+}
+
+impl Default for StreamingPrefillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tile_tokens: 8192,
+            last_token_lm_head: true,
         }
     }
 }
@@ -369,6 +407,20 @@ impl KilnConfig {
                 self.speculative.draft_layers = n;
             }
         }
+
+        // Streaming/tiled prefill
+        if let Ok(v) = std::env::var("KILN_STREAMING_PREFILL") {
+            self.streaming_prefill.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("KILN_STREAMING_TILE_TOKENS") {
+            if let Ok(n) = v.parse() {
+                self.streaming_prefill.tile_tokens = n;
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_STREAMING_LAST_TOKEN_LM_HEAD") {
+            self.streaming_prefill.last_token_lm_head =
+                !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no");
+        }
     }
 
     /// Validate configuration values. Returns an error describing the first invalid value.
@@ -409,6 +461,15 @@ impl KilnConfig {
             }
         }
 
+        if self.streaming_prefill.tile_tokens == 0
+            || self.streaming_prefill.tile_tokens % 64 != 0
+        {
+            anyhow::bail!(
+                "streaming_prefill.tile_tokens must be a positive multiple of 64, got {}",
+                self.streaming_prefill.tile_tokens
+            );
+        }
+
         Ok(())
     }
 }
@@ -441,6 +502,9 @@ mod tests {
         assert!(!config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 4);
         assert_eq!(config.speculative.draft_layers, 8);
+        assert!(!config.streaming_prefill.enabled);
+        assert_eq!(config.streaming_prefill.tile_tokens, 8192);
+        assert!(config.streaming_prefill.last_token_lm_head);
     }
 
     #[test]
@@ -483,6 +547,11 @@ max_blocks = 32
 enabled = true
 num_speculative_tokens = 6
 draft_layers = 10
+
+[streaming_prefill]
+enabled = true
+tile_tokens = 4096
+last_token_lm_head = false
 "#;
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
@@ -505,6 +574,9 @@ draft_layers = 10
         assert!(config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 6);
         assert_eq!(config.speculative.draft_layers, 10);
+        assert!(config.streaming_prefill.enabled);
+        assert_eq!(config.streaming_prefill.tile_tokens, 4096);
+        assert!(!config.streaming_prefill.last_token_lm_head);
     }
 
     #[test]
@@ -558,6 +630,21 @@ port = 3000
     }
 
     #[test]
+    fn test_validation_rejects_bad_streaming_tile_tokens() {
+        let mut config = KilnConfig::default();
+        config.streaming_prefill.tile_tokens = 0;
+        assert!(config.validate().is_err());
+
+        let mut config2 = KilnConfig::default();
+        config2.streaming_prefill.tile_tokens = 100; // not a multiple of 64
+        assert!(config2.validate().is_err());
+
+        let mut config3 = KilnConfig::default();
+        config3.streaming_prefill.tile_tokens = 64;
+        assert!(config3.validate().is_ok());
+    }
+
+    #[test]
     fn test_validation_rejects_zero_timeout() {
         let mut config = KilnConfig::default();
         config.server.request_timeout_secs = 0;
@@ -587,6 +674,9 @@ port = 3000
             std::env::set_var("KILN_SPEC_ENABLED", "1");
             std::env::set_var("KILN_SPEC_NUM_TOKENS", "6");
             std::env::set_var("KILN_SPEC_DRAFT_LAYERS", "10");
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "2048");
+            std::env::set_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "0");
         }
 
         let mut config = KilnConfig::default();
@@ -606,6 +696,9 @@ port = 3000
         assert!(config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 6);
         assert_eq!(config.speculative.draft_layers, 10);
+        assert!(config.streaming_prefill.enabled);
+        assert_eq!(config.streaming_prefill.tile_tokens, 2048);
+        assert!(!config.streaming_prefill.last_token_lm_head);
 
         // Clean up
         unsafe {
@@ -623,6 +716,9 @@ port = 3000
             std::env::remove_var("KILN_SPEC_ENABLED");
             std::env::remove_var("KILN_SPEC_NUM_TOKENS");
             std::env::remove_var("KILN_SPEC_DRAFT_LAYERS");
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
     }
 

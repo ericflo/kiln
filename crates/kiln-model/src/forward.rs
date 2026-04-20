@@ -309,6 +309,58 @@ fn marlin_bf16_drop_disabled() -> bool {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7: streaming/tiled GDN prefill — env-derived configuration.
+//
+// Dispatch is opt-in via `KILN_STREAMING_PREFILL=1`. When enabled, prefill is
+// performed as a sequence of fixed-size tiles (default 8192 tokens) so the
+// per-layer materialized GDN intermediates only ever cover one tile at a time.
+// The recurrent state in `LinearAttentionState` already provides the O(1)
+// hand-off required for bit-exact agreement with the monolithic path.
+// ---------------------------------------------------------------------------
+
+/// Default tile size for streaming prefill, in tokens. Must be a multiple of
+/// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
+/// chunk from a tile boundary.
+pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
+
+/// Read `KILN_STREAMING_PREFILL` and return whether the streaming prefill
+/// dispatch should be used at all. Defaults to false.
+pub fn streaming_prefill_enabled() -> bool {
+    matches!(
+        std::env::var("KILN_STREAMING_PREFILL")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Read `KILN_STREAMING_TILE_TOKENS` (positive multiple of `GDN_CHUNK_SIZE`).
+/// Falls back to `STREAMING_PREFILL_DEFAULT_TILE` when unset, malformed, zero,
+/// or not a multiple of 64. The fallback path matches the documented default
+/// so misconfiguration cannot silently change the tile boundary.
+pub fn streaming_tile_tokens() -> usize {
+    match std::env::var("KILN_STREAMING_TILE_TOKENS").ok().and_then(|s| s.parse::<usize>().ok()) {
+        Some(n) if n > 0 && n % GDN_CHUNK_SIZE == 0 => n,
+        _ => STREAMING_PREFILL_DEFAULT_TILE,
+    }
+}
+
+/// Read `KILN_STREAMING_LAST_TOKEN_LM_HEAD`. Defaults to true: in streaming
+/// mode only the final token's logits are needed for sampling, so the LM head
+/// projection is collapsed to a single row per prefill. Set to `0` to compute
+/// full per-tile logits (still throwing them away for non-final tiles, but
+/// useful for parity tests against the monolithic path).
+pub fn streaming_last_token_lm_head() -> bool {
+    match std::env::var("KILN_STREAMING_LAST_TOKEN_LM_HEAD").ok().as_deref() {
+        Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
+        None => true,
+    }
+}
+
 /// Sidecar record: which slot in `layers[layer_idx]` a queued Marlin pack
 /// job belongs to. Populated inline with `pack_from_bf16_batch`'s input vec
 /// during the per-layer build loop, then replayed after the batch pack
@@ -2849,10 +2901,73 @@ pub fn model_forward_paged(
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
     start_pos: usize,
-    mut linear_state: Option<&mut LinearAttentionState>,
+    linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
+    let logits = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+        LmHeadMode::Full,
+    )?;
+    // `LmHeadMode::Full` always returns Some.
+    Ok(logits.expect("LmHeadMode::Full always produces logits"))
+}
+
+/// Controls the LM head behaviour at the end of a paged forward pass.
+///
+/// The streaming/tiled prefill path needs to skip the LM head entirely on
+/// every non-final tile (its outputs are discarded by the caller) and
+/// optionally collapse the final tile's projection to a single row, since
+/// only the last token's logits feed sampling. Both shortcuts preserve
+/// bit-exact agreement with the monolithic path on the values that are
+/// actually consumed downstream.
+#[derive(Clone, Copy, Debug)]
+enum LmHeadMode {
+    /// Compute the LM head over every position. Result has shape
+    /// `[1, seq_len, vocab_size]`. This is the legacy `model_forward_paged`
+    /// behaviour and the only mode used by training / parity verification.
+    Full,
+    /// Compute the LM head over the final token only. Result has shape
+    /// `[1, 1, vocab_size]`. Numerically identical to slicing the last row
+    /// of `Full` because RMSNorm is per-position and the matmul reduces
+    /// along `hidden_size` only.
+    LastRowOnly,
+    /// Skip RMSNorm + LM head entirely and return `None`. Used for non-final
+    /// tiles where the caller throws away the logits.
+    Skip,
+}
+
+/// Internal per-tile forward pass shared by `model_forward_paged` and
+/// `model_forward_paged_streaming`. `lm_head_mode` controls whether the
+/// final RMSNorm + LM head projection runs and over how many positions.
+///
+/// Pure code motion from the original `model_forward_paged` — the layer
+/// loop, RoPE position tensor handling, and per-layer dispatch are unchanged.
+/// The only difference is the LM head section at the bottom, which becomes
+/// a `match` over `lm_head_mode`.
+#[allow(clippy::too_many_arguments)]
+fn model_forward_paged_inner(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+    lm_head_mode: LmHeadMode,
+) -> Result<Option<Tensor>> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
 
@@ -2943,13 +3058,157 @@ pub fn model_forward_paged(
     }
 
     // 3. Final RMSNorm + 4. LM head projection (weight-tied)
-    let logits = {
-        kiln_nvtx::range!(c"kiln/lm_head");
-        hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        hidden.broadcast_matmul(&weights.embed_tokens_t)?
-    };
+    //
+    // `Full` matches the legacy code path exactly. `LastRowOnly` slices the
+    // hidden tensor to the last position before the projection so we only
+    // do `vocab_size * hidden_size` MACs instead of `seq_len * vocab_size *
+    // hidden_size` — bit-exact with `Full`'s last row because RMSNorm is
+    // per-position and the matmul reduces along `hidden_size` only. `Skip`
+    // returns `None` and is used by the streaming dispatcher for every tile
+    // whose logits the caller will throw away.
+    match lm_head_mode {
+        LmHeadMode::Full => {
+            let logits = {
+                kiln_nvtx::range!(c"kiln/lm_head");
+                hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+                hidden.broadcast_matmul(&weights.embed_tokens_t)?
+            };
+            Ok(Some(logits))
+        }
+        LmHeadMode::LastRowOnly => {
+            let logits = {
+                kiln_nvtx::range!(c"kiln/lm_head");
+                let last = hidden.narrow(1, seq_len - 1, 1)?;
+                let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
+                normed.broadcast_matmul(&weights.embed_tokens_t)?
+            };
+            Ok(Some(logits))
+        }
+        LmHeadMode::Skip => Ok(None),
+    }
+}
 
-    Ok(logits)
+/// Streaming/tiled paged prefill — the Phase 7 long-context entry point.
+///
+/// Iterates `token_ids` in fixed-size tiles (default 8192 tokens, configurable
+/// via `KILN_STREAMING_TILE_TOKENS`, must be a multiple of `GDN_CHUNK_SIZE`)
+/// and dispatches each tile through `model_forward_paged_inner`. The
+/// `LinearAttentionState` carries GDN recurrent + conv state across tile
+/// boundaries; the paged KV cache is filled tile-by-tile via `start_pos +
+/// cursor`. Only the final tile runs the LM head — non-final tiles use
+/// `LmHeadMode::Skip`. When `KILN_STREAMING_LAST_TOKEN_LM_HEAD=0` the final
+/// tile uses `LmHeadMode::Full` instead so callers can compare per-position
+/// logits against the monolithic path.
+///
+/// Returns logits with shape `[1, 1, vocab_size]` (last-token only) or
+/// `[1, last_tile_len, vocab_size]` when full LM head is requested.
+///
+/// `positions_gpu` is intentionally not threaded through to per-tile calls —
+/// each tile builds its own per-tile position vector inside the inner fn.
+/// Streaming prefill is incompatible with CUDA graph replay (which requires
+/// a stable shape per call) and is only used outside of graph-captured paths.
+pub fn model_forward_paged_streaming(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    model_forward_paged_streaming_with(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        streaming_tile_tokens(),
+        streaming_last_token_lm_head(),
+    )
+}
+
+/// Explicit-parameter variant of [`model_forward_paged_streaming`] used by
+/// tests that need to exercise specific tile sizes without manipulating
+/// process-wide env vars (which would race under parallel test runners).
+///
+/// `tile_size` must be a positive multiple of `GDN_CHUNK_SIZE`.
+pub fn model_forward_paged_streaming_with(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    tile_size: usize,
+    last_token_only: bool,
+) -> Result<Tensor> {
+    let total = token_ids.len();
+    if total == 0 {
+        anyhow::bail!("model_forward_paged_streaming requires at least one token");
+    }
+    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+        anyhow::bail!(
+            "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
+            GDN_CHUNK_SIZE
+        );
+    }
+
+    let mut last_logits: Option<Tensor> = None;
+    let mut cursor = 0usize;
+    while cursor < total {
+        let end = (cursor + tile_size).min(total);
+        let is_last_tile = end == total;
+        let mode = if is_last_tile {
+            if last_token_only {
+                LmHeadMode::LastRowOnly
+            } else {
+                LmHeadMode::Full
+            }
+        } else {
+            LmHeadMode::Skip
+        };
+
+        // Re-borrow the optional `&mut LinearAttentionState` for this tile.
+        // `Option<&mut T>::as_deref_mut()` produces `Option<&mut T>` again.
+        let state_for_tile: Option<&mut LinearAttentionState> = linear_state.as_deref_mut();
+
+        let tile_logits = model_forward_paged_inner(
+            backend,
+            &token_ids[cursor..end],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            start_pos + cursor,
+            state_for_tile,
+            lora,
+            None,
+            mode,
+        )
+        .with_context(|| {
+            format!(
+                "streaming prefill tile [{cursor}, {end}) of {total} (start_pos={})",
+                start_pos + cursor
+            )
+        })?;
+
+        if is_last_tile {
+            last_logits = tile_logits;
+        }
+
+        cursor = end;
+    }
+
+    last_logits.context("streaming prefill produced no logits (empty token_ids)")
 }
 
 #[cfg(test)]
@@ -4937,5 +5196,382 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7: streaming/tiled GDN prefill — CPU parity tests.
+    //
+    // Each test compares the monolithic `model_forward_paged` against
+    // `model_forward_paged_streaming_with` running multiple tiles. Both runs
+    // start from fresh `LinearAttentionState` + `PagedKvCache` so the
+    // recurrent state hand-off and per-tile paged writes are exercised end
+    // to end. Tests use `last_token_only=false` so we can compare the full
+    // last-tile logits row-by-row against the matching slice of the
+    // monolithic logits.
+    // -----------------------------------------------------------------------
+
+    /// Shared config for all streaming parity tests. Picks a hybrid layer
+    /// stack (3 GDN + 1 full attention with `full_attention_interval=4`,
+    /// scaled to 8 layers so we get 6 GDN layers exercising the recurrent
+    /// hand-off across tile boundaries).
+    fn streaming_test_config() -> kiln_core::config::ModelConfig {
+        let num_layers = 8;
+        let full_attention_interval = 4; // layers 3, 7 are full → 2 full + 6 linear
+        kiln_core::config::ModelConfig {
+            hidden_size: 16,
+            num_layers,
+            num_attention_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            vocab_size: 32,
+            max_position_embeddings: 4096,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 2,
+            full_attention_interval,
+            attn_output_gate: false,
+            linear_num_key_heads: 2,
+            linear_key_head_dim: 4,
+            linear_num_value_heads: 4,
+            linear_value_head_dim: 4,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        }
+    }
+
+    /// Build a paged cache + sequential block table sized for `seq_len` tokens
+    /// with `block_size`-token blocks (block_size = GDN_CHUNK_SIZE so block
+    /// boundaries coincide with the smallest legal tile boundary).
+    fn make_paged_setup(
+        config: &kiln_core::config::ModelConfig,
+        seq_len: usize,
+        block_size: usize,
+        device: &Device,
+    ) -> Result<(PagedKvCache, BlockTable)> {
+        let num_blocks = (seq_len + block_size - 1) / block_size;
+        let cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::F32,
+            device,
+        )?;
+        let mut block_table = BlockTable::new();
+        for i in 0..num_blocks as u32 {
+            block_table.push(i);
+        }
+        Ok((cache, block_table))
+    }
+
+    /// Deterministic token sequence for parity testing. Stays inside vocab.
+    fn deterministic_tokens(seq_len: usize, vocab_size: u32) -> Vec<u32> {
+        (0..seq_len)
+            .map(|i| ((i as u32 * 13 + 7) % vocab_size).max(1))
+            .collect()
+    }
+
+    /// Run monolithic vs streaming on the same config + tokens, return
+    /// `(monolithic_full_logits[1, T, V], streaming_full_last_tile_logits[1, last_tile_len, V])`
+    /// where the streaming pass uses `tile_size` and `last_token_only=false`.
+    fn run_parity(
+        config: &kiln_core::config::ModelConfig,
+        token_ids: &[u32],
+        tile_size: usize,
+        block_size: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+
+        // Monolithic: single forward pass, full LM head.
+        let (mut mono_cache, mono_bt) =
+            make_paged_setup(config, token_ids.len(), block_size, &device)?;
+        let mut mono_state = LinearAttentionState::new(config, &device)?;
+        let mono_logits = model_forward_paged(
+            &backend,
+            token_ids,
+            &weights,
+            config,
+            &mut mono_cache,
+            &mono_bt,
+            0,
+            Some(&mut mono_state),
+            None,
+            None,
+        )?;
+
+        // Streaming: tiled prefill with last_token_only=false so the final
+        // tile produces a full per-position logits slice we can compare
+        // against the matching window of the monolithic output.
+        let (mut stream_cache, stream_bt) =
+            make_paged_setup(config, token_ids.len(), block_size, &device)?;
+        let mut stream_state = LinearAttentionState::new(config, &device)?;
+        let stream_logits = model_forward_paged_streaming_with(
+            &backend,
+            token_ids,
+            &weights,
+            config,
+            &mut stream_cache,
+            &stream_bt,
+            0,
+            Some(&mut stream_state),
+            None,
+            tile_size,
+            false,
+        )?;
+
+        Ok((mono_logits, stream_logits))
+    }
+
+    /// Compare the streaming last-tile full logits against the matching
+    /// slice of the monolithic logits.
+    fn assert_last_tile_matches(
+        mono_logits: &Tensor,
+        stream_logits: &Tensor,
+        total_len: usize,
+        tile_size: usize,
+        tol: f32,
+    ) -> Result<()> {
+        // Last tile spans [last_start, total_len).
+        let last_start = total_len - ((total_len - 1) % tile_size + 1);
+        let last_len = total_len - last_start;
+        let mono_slice = mono_logits
+            .narrow(1, last_start, last_len)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let stream_slice = stream_logits.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(mono_slice.len(), stream_slice.len(), "last tile length mismatch");
+        let mut max_abs = 0f32;
+        for (a, b) in mono_slice.iter().zip(stream_slice.iter()) {
+            let d = (a - b).abs();
+            if d > max_abs {
+                max_abs = d;
+            }
+        }
+        assert!(
+            max_abs <= tol,
+            "streaming vs monolithic max_abs_diff={max_abs:e} exceeds {tol:e}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_matches_monolithic_cpu_small() -> Result<()> {
+        let config = streaming_test_config();
+        let total = 128;
+        let tile = 64;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+        let (mono, stream) = run_parity(&config, &tokens, tile, 64)?;
+        assert_eq!(mono.dims(), &[1, total, config.vocab_size]);
+        assert_eq!(stream.dims(), &[1, tile, config.vocab_size]);
+        assert_last_tile_matches(&mono, &stream, total, tile, 1e-5)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_matches_monolithic_cpu_mid() -> Result<()> {
+        let config = streaming_test_config();
+        let total = 512;
+        let tile = 128;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+        let (mono, stream) = run_parity(&config, &tokens, tile, 64)?;
+        assert_eq!(mono.dims(), &[1, total, config.vocab_size]);
+        assert_eq!(stream.dims(), &[1, tile, config.vocab_size]);
+        assert_last_tile_matches(&mono, &stream, total, tile, 1e-5)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_tile_invariance_cpu() -> Result<()> {
+        // For a fixed token sequence, the last token's logits must agree
+        // across every legal tile size (multiples of GDN_CHUNK_SIZE that
+        // divide or partition `total`). The monolithic run is the reference;
+        // every tile size collapses to the same final-token logits.
+        let config = streaming_test_config();
+        let total = 256;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+
+        // Monolithic reference: take the last row of [1, total, V] logits.
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+        let (mut mono_cache, mono_bt) = make_paged_setup(&config, total, 64, &device)?;
+        let mut mono_state = LinearAttentionState::new(&config, &device)?;
+        let mono_logits = model_forward_paged(
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut mono_cache,
+            &mono_bt,
+            0,
+            Some(&mut mono_state),
+            None,
+            None,
+        )?;
+        let reference_last = mono_logits
+            .narrow(1, total - 1, 1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        for tile in [64usize, 128, 256] {
+            let (mut cache, bt) = make_paged_setup(&config, total, 64, &device)?;
+            let mut state = LinearAttentionState::new(&config, &device)?;
+            let logits = model_forward_paged_streaming_with(
+                &backend,
+                &tokens,
+                &weights,
+                &config,
+                &mut cache,
+                &bt,
+                0,
+                Some(&mut state),
+                None,
+                tile,
+                true, // last_token_only — matches production dispatch
+            )?;
+            assert_eq!(logits.dims(), &[1, 1, config.vocab_size]);
+            let last = logits.flatten_all()?.to_vec1::<f32>()?;
+            let max_abs = reference_last
+                .iter()
+                .zip(last.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs <= 1e-5,
+                "tile={tile} last-token max_abs_diff={max_abs:e} exceeds 1e-5"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_preserves_state_cpu() -> Result<()> {
+        // After prefill, run a single decode step on top of the resulting
+        // (paged_cache, linear_state). If state was preserved bit-exact
+        // across tile boundaries, the decode-token logits must agree with
+        // the monolithic reference.
+        let config = streaming_test_config();
+        let total = 192;
+        let tile = 64;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+        let next_token: u32 = 11;
+
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+
+        // Monolithic prefill, then 1 decode step.
+        let (mut mono_cache, mono_bt) = make_paged_setup(&config, total + 1, 64, &device)?;
+        let mut mono_state = LinearAttentionState::new(&config, &device)?;
+        let _ = model_forward_paged(
+            &backend, &tokens, &weights, &config,
+            &mut mono_cache, &mono_bt, 0,
+            Some(&mut mono_state), None, None,
+        )?;
+        let mono_decode = model_forward_paged(
+            &backend, &[next_token], &weights, &config,
+            &mut mono_cache, &mono_bt, total,
+            Some(&mut mono_state), None, None,
+        )?;
+
+        // Streaming prefill, then 1 decode step.
+        let (mut stream_cache, stream_bt) = make_paged_setup(&config, total + 1, 64, &device)?;
+        let mut stream_state = LinearAttentionState::new(&config, &device)?;
+        let _ = model_forward_paged_streaming_with(
+            &backend, &tokens, &weights, &config,
+            &mut stream_cache, &stream_bt, 0,
+            Some(&mut stream_state), None,
+            tile, true,
+        )?;
+        let stream_decode = model_forward_paged(
+            &backend, &[next_token], &weights, &config,
+            &mut stream_cache, &stream_bt, total,
+            Some(&mut stream_state), None, None,
+        )?;
+
+        let a = mono_decode.flatten_all()?.to_vec1::<f32>()?;
+        let b = stream_decode.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(a.len(), b.len());
+        let max_abs = a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        assert!(
+            max_abs <= 1e-5,
+            "decode-after-streaming max_abs_diff={max_abs:e} exceeds 1e-5 \
+             (state was not bit-exact preserved across tile boundaries)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_prefill_env_helpers() {
+        // Each nextest test runs in its own process, so env-var manipulation
+        // here is safe. We verify the dispatch helpers return what
+        // `model_forward_paged_streaming` reads from the environment.
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
+        }
+        assert!(!streaming_prefill_enabled(), "default must be disabled");
+        assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
+        assert!(streaming_last_token_lm_head(), "default must be true");
+
+        unsafe { std::env::set_var("KILN_STREAMING_PREFILL", "1"); }
+        assert!(streaming_prefill_enabled());
+
+        unsafe { std::env::set_var("KILN_STREAMING_PREFILL", "0"); }
+        assert!(!streaming_prefill_enabled());
+
+        unsafe { std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256"); }
+        assert_eq!(streaming_tile_tokens(), 256);
+
+        // Bad value (not a multiple of GDN_CHUNK_SIZE) falls back to default.
+        unsafe { std::env::set_var("KILN_STREAMING_TILE_TOKENS", "65"); }
+        assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
+
+        unsafe { std::env::set_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "0"); }
+        assert!(!streaming_last_token_lm_head());
+
+        // Cleanup so this test does not leak state to peers (defensive even
+        // though nextest isolates by process).
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
+        }
     }
 }

@@ -16,7 +16,10 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_core::vram::detect_vram;
 use kiln_model::backend as runtime_backend;
-use kiln_model::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
+use kiln_model::forward::{
+    model_forward, model_forward_paged, model_forward_paged_streaming,
+    streaming_prefill_enabled, GpuWeights, LinearAttentionState,
+};
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
@@ -479,21 +482,38 @@ fn bench_latency_paged(
          ({actual_prompt_tokens} prompt tokens)..."
     );
 
-    // Prefill: forward pass on all prompt tokens via paged path
+    // Prefill: forward pass on all prompt tokens via paged path.
+    // KILN_STREAMING_PREFILL=1 opts into the tiled path that caps peak
+    // activation memory for long contexts.
     let prefill_start = Instant::now();
-    let logits = model_forward_paged(
-        &*backend,
-        &prompt_token_ids,
-        weights,
-        config,
-        &mut paged_cache,
-        &block_table,
-        0,
-        Some(&mut linear_state),
-        None,
-        None,
-    )
-    .context("paged prefill forward pass failed")?;
+    let logits = if streaming_prefill_enabled() {
+        model_forward_paged_streaming(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+        )
+        .context("paged prefill forward pass (streaming) failed")?
+    } else {
+        model_forward_paged(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            None,
+        )
+        .context("paged prefill forward pass failed")?
+    };
 
     // Sample first token
     let mut next_token = greedy_sample(&logits)?;

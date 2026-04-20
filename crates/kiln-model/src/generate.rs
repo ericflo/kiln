@@ -15,7 +15,10 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
-use crate::forward::{model_forward, model_forward_paged, GpuWeights, LinearAttentionState};
+use crate::forward::{
+    model_forward, model_forward_paged, model_forward_paged_streaming,
+    streaming_prefill_enabled, GpuWeights, LinearAttentionState,
+};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
@@ -521,20 +524,37 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         let mut linear_state = self.new_linear_state()?;
 
-        // Prefill: forward pass on all prompt tokens (never uses CUDA graphs)
-        let logits = model_forward_paged(
-            &*self.backend,
-            prompt_tokens,
-            &self.weights,
-            &self.config,
-            paged_cache,
-            block_table,
-            0,
-            Some(&mut linear_state),
-            self.active_lora.as_ref(),
-            None,
-        )
-        .context("prefill forward pass (paged) failed")?;
+        // Prefill: forward pass on all prompt tokens (never uses CUDA graphs).
+        // When KILN_STREAMING_PREFILL=1, iterate in tiles to cap peak activation
+        // memory for long contexts; otherwise use the monolithic path.
+        let logits = if streaming_prefill_enabled() {
+            model_forward_paged_streaming(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+            .context("prefill forward pass (paged, streaming) failed")?
+        } else {
+            model_forward_paged(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("prefill forward pass (paged) failed")?
+        };
 
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -892,19 +912,35 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        // Prefill
-        let logits = match model_forward_paged(
-            &*self.backend,
-            &prompt_tokens,
-            &self.weights,
-            &self.config,
-            paged_cache,
-            &block_table,
-            0,
-            Some(&mut linear_state),
-            self.active_lora.as_ref(),
-            None,
-        ) {
+        // Prefill. When KILN_STREAMING_PREFILL=1, use the tiled streaming path
+        // to cap peak activation memory for long contexts.
+        let prefill_result = if streaming_prefill_enabled() {
+            model_forward_paged_streaming(
+                &*self.backend,
+                &prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                &block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+        } else {
+            model_forward_paged(
+                &*self.backend,
+                &prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                &block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+        };
+        let logits = match prefill_result {
             Ok(l) => l,
             Err(e) => {
                 block_manager.free_all(&allocated_blocks);
