@@ -201,6 +201,11 @@
       #adapter-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #adapter-pill.flash #adapter-name,
       #adapter-pill.flash-warn #adapter-name { color: inherit; }
+      #vram-pill.copyable { cursor: pointer; }
+      #vram-pill.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
+      #vram-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
+      #vram-pill.flash #vram-value,
+      #vram-pill.flash-warn #vram-value { color: inherit; }
       #base-url.copyable { cursor: pointer; }
       #base-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
       #base-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
@@ -1255,10 +1260,12 @@
         if (text) {
           vramValueEl.textContent = text;
           vramValueEl.classList.remove("empty");
-          vramPill.title = tooltip || `Model / Total VRAM: ${text}`;
+          vramPill.classList.add("copyable");
+          vramPill.title = `${tooltip || `Model / Total VRAM: ${text}`} (click to copy)`;
         } else {
           vramValueEl.textContent = VRAM_EMPTY_LABEL;
           vramValueEl.classList.add("empty");
+          vramPill.classList.remove("copyable");
           vramPill.title = VRAM_EMPTY_TITLE;
         }
       }
@@ -1644,6 +1651,36 @@
       }
 
       adapterPill.addEventListener("click", copyAdapter);
+
+      let vramPillResetTimer = null;
+      function flashVramPill(cls) {
+        if (vramPillResetTimer) {
+          clearTimeout(vramPillResetTimer);
+          vramPillResetTimer = null;
+        }
+        vramPill.classList.remove("flash", "flash-warn");
+        if (cls) vramPill.classList.add(cls);
+        vramPillResetTimer = setTimeout(() => {
+          vramPill.classList.remove("flash", "flash-warn");
+          vramPillResetTimer = null;
+        }, 1200);
+      }
+
+      async function copyVramValue() {
+        if (!cachedVramText) {
+          flashVramPill("flash-warn");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(cachedVramText);
+          flashVramPill("flash");
+        } catch (err) {
+          flashVramPill("flash-warn");
+          console.error("clipboard.writeText failed", err);
+        }
+      }
+
+      vramPill.addEventListener("click", copyVramValue);
 
       const checkUpdatesBtn = document.getElementById("check-updates-btn");
       const CHECK_UPDATES_LABEL = "Check for Updates";
