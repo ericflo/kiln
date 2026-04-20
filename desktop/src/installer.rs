@@ -393,6 +393,57 @@ fn clear_quarantine(path: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn clear_quarantine(_path: &Path) {}
 
+/// Parse the second whitespace-separated token from `kiln --version`
+/// output. Returns `None` when the output is empty or has only one token.
+/// `kiln --version` prints either `kiln <semver>` or
+/// `kiln <semver> (<git-sha>)`; we take the `<semver>` token.
+fn parse_kiln_version_output(stdout: &str) -> Option<String> {
+    stdout.split_whitespace().nth(1).map(|s| s.to_string())
+}
+
+/// Run `bin --version` and return the reported semver, or `None` if the
+/// command fails, exits non-zero, or produces unparseable output.
+pub async fn current_kiln_version(bin: &Path) -> Option<String> {
+    let out = tokio::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_kiln_version_output(&stdout)
+}
+
+/// Fetch the newest release version for the current target. Returns
+/// `None` when the platform has no prebuilt asset or when the GitHub
+/// releases listing fails. Callers should separately check
+/// [`supports_auto_install`] to distinguish those two cases.
+pub async fn discover_latest_version(client: &reqwest::Client) -> Option<String> {
+    let target = current_target()?;
+    discover_asset(client, target).await.ok().map(|p| p.version)
+}
+
+/// Decide whether `latest` is newer than `current` using semver.
+///
+/// Per design doc (`desktop/docs/binary-update.md`): fall back to string
+/// inequality when either side fails to parse as semver, never suggest a
+/// downgrade, and treat "unknown current version" as "offer latest".
+pub fn is_update_available(current: Option<&str>, latest: &str) -> bool {
+    let Some(current) = current else { return true; };
+    match (
+        semver::Version::parse(current),
+        semver::Version::parse(latest),
+    ) {
+        (Ok(c), Ok(l)) => c < l,
+        // One side isn't valid semver — best we can do is say "offer when
+        // strings differ" so a genuine mismatch surfaces without claiming
+        // a downgrade-as-update when parsing succeeds on both sides.
+        _ => current != latest,
+    }
+}
+
 /// Full install pipeline: discover latest asset, download, verify sha256,
 /// extract, chmod, clear quarantine. Returns the installed binary path.
 pub async fn install_latest_server(
@@ -469,4 +520,60 @@ pub async fn install_latest_server(
     clear_quarantine(&installed);
 
     Ok((installed, pair.version))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_update_available, parse_kiln_version_output};
+
+    #[test]
+    fn parse_version_plain() {
+        assert_eq!(
+            parse_kiln_version_output("kiln 0.1.7\n"),
+            Some("0.1.7".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_version_with_git_sha() {
+        assert_eq!(
+            parse_kiln_version_output("kiln 0.2.0 (abc1234)\n"),
+            Some("0.2.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_version_handles_empty_and_single_token() {
+        assert_eq!(parse_kiln_version_output(""), None);
+        assert_eq!(parse_kiln_version_output("kiln"), None);
+        assert_eq!(parse_kiln_version_output("\n"), None);
+    }
+
+    #[test]
+    fn update_available_when_current_unknown() {
+        assert!(is_update_available(None, "0.2.0"));
+    }
+
+    #[test]
+    fn update_available_for_newer_semver() {
+        assert!(is_update_available(Some("0.1.7"), "0.2.0"));
+        assert!(is_update_available(Some("0.1.7"), "0.1.8"));
+        assert!(is_update_available(Some("0.1.0-rc.1"), "0.1.0"));
+    }
+
+    #[test]
+    fn no_update_when_equal_or_newer() {
+        assert!(!is_update_available(Some("0.2.0"), "0.2.0"));
+        assert!(!is_update_available(Some("0.3.0"), "0.2.0"));
+        assert!(!is_update_available(Some("0.1.0"), "0.1.0-rc.1"));
+    }
+
+    #[test]
+    fn non_semver_falls_back_to_string_inequality() {
+        // Only current is unparseable: offer when strings differ.
+        assert!(is_update_available(Some("not-semver"), "0.2.0"));
+        assert!(!is_update_available(Some("not-semver"), "not-semver"));
+        // Only latest is unparseable: same rule.
+        assert!(is_update_available(Some("0.1.0"), "not-semver"));
+    }
 }
