@@ -3117,6 +3117,58 @@ pub fn model_forward_head(
     Ok(logits)
 }
 
+/// Apply only the final RMSNorm (no LM head projection).
+///
+/// Used by the FLCE training path to produce the post-final-RMSNorm hidden
+/// state that `fused_linear_cross_entropy` consumes. Mirrors the RMSNorm
+/// step inside [`model_forward_head`] without the vocab-dim matmul.
+pub fn model_forward_final_norm(
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    kiln_nvtx::range!(c"kiln/final_rmsnorm");
+    rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)
+}
+
+/// Full training-path forward WITHOUT the LM head projection.
+///
+/// Runs embedding -> transformer layers -> final RMSNorm, returning the
+/// post-final-RMSNorm hidden state `[1, seq_len, hidden_size]`. This is the
+/// input the Fused Linear Cross-Entropy path consumes, avoiding the
+/// `[1, seq_len, vocab_size]` logits materialization that dominates peak
+/// VRAM at long context on the Qwen3.5-4B head (V=151936).
+///
+/// Call site is the trainer (SFT and GRPO) behind the `KILN_USE_FLCE`
+/// environment flag. No KV cache is used (matches `standard_forward_backward`).
+pub fn model_forward_no_head(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let (hidden, positions) = model_forward_embed(token_ids, weights)?;
+    let num_layers = weights.layers.len();
+    let hidden = model_forward_segment(
+        backend,
+        hidden,
+        weights,
+        config,
+        &positions,
+        0,
+        num_layers,
+        linear_state,
+        lora,
+    )?;
+    let normed = {
+        kiln_nvtx::range!(c"kiln/final_rmsnorm");
+        rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
+    };
+    Ok(normed)
+}
+
 /// Full model forward pass using paged KV cache.
 ///
 /// Same as [`model_forward`] but uses a [`PagedKvCache`] and [`BlockTable`]
