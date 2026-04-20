@@ -18,12 +18,17 @@ use kiln_core::vram::detect_vram;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     model_forward, model_forward_paged, model_forward_paged_streaming,
-    streaming_prefill_enabled, GpuWeights, LinearAttentionState,
+    model_forward_paged_with_last_hidden, streaming_prefill_enabled, GpuWeights,
+    LinearAttentionState,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
+use kiln_model::speculative::{
+    speculative_decode_step, speculative_mtp_decode_step, SpeculativeConfig,
+};
 use kiln_model::ModelRunner;
+use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the kiln-core default.
 const PAGED_BLOCK_SIZE: usize = 16;
@@ -76,6 +81,15 @@ struct LatencyResult {
     p99_inter_token_ms: f64,
     num_tokens_generated: usize,
     decode_tokens_per_sec: f64,
+    /// Which speculative decoding arm produced this result. Lowercase string
+    /// — "off" / "skip_layer" / "mtp" — emitted on every run so downstream
+    /// comparison scripts can split by arm without reparsing env state.
+    spec_method: String,
+    /// MTP draft acceptance rate α = `draft_accepted / total_draft_attempts`.
+    /// Populated only by the MTP arm (`spec_method = "mtp"`); `None` for
+    /// `off` and `skip_layer` since those have no comparable single-α metric.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acceptance_rate: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -419,6 +433,8 @@ fn bench_latency(
         p99_inter_token_ms: p99,
         num_tokens_generated: num_tokens,
         decode_tokens_per_sec: decode_tok_per_sec,
+        spec_method: "off".to_string(),
+        acceptance_rate: None,
     })
 }
 
@@ -619,6 +635,472 @@ fn bench_latency_paged(
         p99_inter_token_ms: p99,
         num_tokens_generated: num_tokens,
         decode_tokens_per_sec: decode_tok_per_sec,
+        spec_method: "off".to_string(),
+        acceptance_rate: None,
+    })
+}
+
+/// Read `KILN_SPEC_METHOD` from the environment and resolve it to a
+/// `SpecMethod`. Defaults to `Off` when unset; warns and falls back to `Off`
+/// when set to an unrecognised string. `KILN_SPEC_ENABLED=0` (or `false`)
+/// forces `Off` even when a method is set, mirroring `effective_method()`
+/// in the runtime config so bench / serve agree on dispatch.
+fn read_spec_method_from_env() -> SpecMethod {
+    let enabled = std::env::var("KILN_SPEC_ENABLED")
+        .ok()
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true);
+    if !enabled {
+        return SpecMethod::Off;
+    }
+    match std::env::var("KILN_SPEC_METHOD") {
+        Ok(v) => match SpecMethod::parse_env(&v) {
+            Some(m) => m,
+            None => {
+                eprintln!(
+                    "  WARN: ignoring unknown KILN_SPEC_METHOD='{}' (expected off|skip_layer|mtp)",
+                    v
+                );
+                SpecMethod::Off
+            }
+        },
+        Err(_) => SpecMethod::Off,
+    }
+}
+
+/// Benchmark latency along the SKIP-LAYER speculative path.
+///
+/// Uses the same flat `KvCache` + `model_forward` path as the existing
+/// `generate_from_tokens_speculative` in `kiln-model::generate` (skip-layer was
+/// never paged). Drives `speculative_decode_step` directly per iteration so
+/// each step's wall time is divided across the tokens emitted that step,
+/// giving a per-emitted-token ITL distribution comparable to the `Off` arm.
+///
+/// Reads `KILN_SPEC_NUM_TOKENS` (default 4) and `KILN_SPEC_DRAFT_LAYERS`
+/// (default 8). Greedy-only (`temperature = 0`) since the bench harness is
+/// deterministic.
+fn bench_latency_skiplayer(
+    weights: &GpuWeights,
+    config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    prompt_tokens: usize,
+    max_output_tokens: usize,
+) -> Result<LatencyResult> {
+    use rand::SeedableRng;
+
+    let num_speculative_tokens = std::env::var("KILN_SPEC_NUM_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4usize);
+    let draft_layers = std::env::var("KILN_SPEC_DRAFT_LAYERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8usize);
+
+    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt_token_ids = tokenizer
+        .encode(&prompt)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let actual_prompt_tokens = prompt_token_ids.len();
+
+    let device = weights.embed_tokens.device();
+    let dtype = match config.dtype {
+        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+        kiln_core::config::DType::FP16 => candle_core::DType::F16,
+        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+    };
+
+    let max_total = actual_prompt_tokens + max_output_tokens;
+    let mut kv_cache = KvCache::new(
+        config.num_full_attention_layers,
+        config.num_kv_heads,
+        config.head_dim,
+        max_total,
+        dtype,
+        device,
+    )?;
+    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut draft_linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
+
+    let eos_token_ids = tokenizer.eos_token_ids();
+
+    eprintln!(
+        "  Measuring latency [SKIP-LAYER, k={num_speculative_tokens}, draft_layers={draft_layers}] \
+         ({actual_prompt_tokens} prompt tokens)..."
+    );
+
+    // Prefill: full forward pass, no speculative draft yet.
+    let prefill_start = Instant::now();
+    let logits = model_forward(
+        &*backend,
+        &prompt_token_ids,
+        weights,
+        config,
+        Some(&mut kv_cache),
+        Some(&mut linear_state),
+        None,
+    )
+    .context("skip-layer prefill forward pass failed")?;
+    kv_cache.advance(actual_prompt_tokens);
+
+    // Initialize draft linear state from the prompt (mirrors generate.rs).
+    let _ = kiln_model::speculative::draft_forward_for_state_init(
+        &*backend,
+        &prompt_token_ids,
+        weights,
+        config,
+        draft_layers,
+        &mut draft_linear_state,
+    );
+
+    let mut last_token = greedy_sample(&logits)?;
+    let prefill_time = prefill_start.elapsed();
+
+    eprintln!(
+        "    Prefill (skip-layer): {:.1}ms ({:.0} tok/s)",
+        prefill_time.as_secs_f64() * 1000.0,
+        actual_prompt_tokens as f64 / prefill_time.as_secs_f64()
+    );
+
+    // Decode: each speculative step produces 1..=k+1 tokens; per-emitted-token
+    // ITL is `step_time / accepted_count` so the resulting distribution is
+    // comparable to the Off arm's per-token ITL.
+    let mut inter_token_ms: Vec<f64> = Vec::new();
+    let mut num_tokens = 1usize; // counting the first token from prefill
+    let mut emitted: Vec<u32> = vec![last_token];
+    let params = SamplingParams {
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        max_tokens: max_output_tokens,
+        repetition_penalty: 1.0,
+        stop: vec![],
+        seed: Some(42),
+    };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+    while num_tokens < max_output_tokens {
+        if eos_token_ids.contains(&last_token) {
+            break;
+        }
+
+        let remaining = max_output_tokens - num_tokens;
+        let effective_k = num_speculative_tokens.min(remaining.max(1));
+        let effective_config = SpeculativeConfig {
+            num_speculative_tokens: effective_k,
+            draft_layers,
+        };
+
+        let step_start = Instant::now();
+        let step = speculative_decode_step(
+            &*backend,
+            last_token,
+            weights,
+            config,
+            &mut kv_cache,
+            &mut linear_state,
+            &mut draft_linear_state,
+            &effective_config,
+            &params,
+            &eos_token_ids,
+            &mut rng,
+            None,
+        )
+        .context("skip-layer speculative_decode_step failed")?;
+        let step_time = step_start.elapsed();
+
+        if step.accepted_tokens.is_empty() {
+            break;
+        }
+
+        let per_token_ms =
+            (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
+        for &tok in &step.accepted_tokens {
+            inter_token_ms.push(per_token_ms);
+            emitted.push(tok);
+            num_tokens += 1;
+            if num_tokens >= max_output_tokens {
+                break;
+            }
+        }
+
+        last_token = *step.accepted_tokens.last().unwrap();
+        if step.hit_eos {
+            break;
+        }
+    }
+
+    let mean_itl = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        inter_token_ms.iter().sum::<f64>() / inter_token_ms.len() as f64
+    };
+    let mut sorted = inter_token_ms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p50 = if sorted.is_empty() {
+        0.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+    let p99 = if sorted.is_empty() {
+        0.0
+    } else {
+        let idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
+        sorted[idx]
+    };
+    let decode_tok_per_sec = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        let total_decode_ms: f64 = inter_token_ms.iter().sum();
+        inter_token_ms.len() as f64 / (total_decode_ms / 1000.0)
+    };
+
+    eprintln!(
+        "    Decode (skip-layer): {num_tokens} tokens, mean ITL {:.1}ms ({:.1} tok/s)",
+        mean_itl, decode_tok_per_sec
+    );
+
+    Ok(LatencyResult {
+        prompt_tokens: actual_prompt_tokens,
+        prefill_time_ms: prefill_time.as_secs_f64() * 1000.0,
+        prefill_tokens_per_sec: actual_prompt_tokens as f64 / prefill_time.as_secs_f64(),
+        time_to_first_token_ms: prefill_time.as_secs_f64() * 1000.0,
+        mean_inter_token_ms: mean_itl,
+        p50_inter_token_ms: p50,
+        p99_inter_token_ms: p99,
+        num_tokens_generated: num_tokens,
+        decode_tokens_per_sec: decode_tok_per_sec,
+        spec_method: "skip_layer".to_string(),
+        acceptance_rate: None,
+    })
+}
+
+/// Benchmark latency along the NATIVE-MTP speculative path.
+///
+/// Uses two `PagedKvCache` instances (base + 1-layer MTP), threads `h_prev`
+/// across iterations, and drives `speculative_mtp_decode_step` per step.
+/// Reports α = `draft_accepted / total_draft_attempts`.
+///
+/// Greedy-only (k=1 native MTP for Qwen3.5-4B).
+fn bench_latency_paged_mtp(
+    weights: &GpuWeights,
+    config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    prompt_tokens: usize,
+    max_output_tokens: usize,
+) -> Result<LatencyResult> {
+    use rand::SeedableRng;
+
+    anyhow::ensure!(
+        weights.mtp.is_some(),
+        "KILN_SPEC_METHOD=mtp requires the loaded checkpoint to ship MTP weights \
+         (Qwen3.5-4B includes them)"
+    );
+
+    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt_token_ids = tokenizer
+        .encode(&prompt)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let actual_prompt_tokens = prompt_token_ids.len();
+
+    let device = weights.embed_tokens.device();
+    let dtype = match config.dtype {
+        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+        kiln_core::config::DType::FP16 => candle_core::DType::F16,
+        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+    };
+
+    // Reserve enough blocks to cover prompt + 2*max_output_tokens (each MTP
+    // step writes up to 2 base-cache slots: [last_token, draft_token]).
+    let max_total_base = actual_prompt_tokens + 2 * max_output_tokens;
+    let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
+
+    let mut base_cache = PagedKvCache::new(
+        config.num_full_attention_layers,
+        num_blocks,
+        PAGED_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        dtype,
+        device,
+    )?;
+    let mut mtp_cache = PagedKvCache::new(
+        1,
+        num_blocks,
+        PAGED_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        dtype,
+        device,
+    )?;
+    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
+
+    let mut base_block_table = BlockTable::new();
+    let mut mtp_block_table = BlockTable::new();
+    for i in 0..num_blocks as u32 {
+        base_block_table.push(i);
+        mtp_block_table.push(i);
+    }
+
+    let eos_token_ids = tokenizer.eos_token_ids();
+
+    eprintln!(
+        "  Measuring latency [MTP, paged, blocks={num_blocks}] \
+         ({actual_prompt_tokens} prompt tokens)..."
+    );
+
+    // Prefill: paged forward returning (logits, last-position hidden state)
+    // so we can seed h_prev for the first MTP draft step.
+    let prefill_start = Instant::now();
+    let (prefill_logits, mut h_prev) = model_forward_paged_with_last_hidden(
+        &*backend,
+        &prompt_token_ids,
+        weights,
+        config,
+        &mut base_cache,
+        &base_block_table,
+        0,
+        Some(&mut linear_state),
+        None,
+    )
+    .context("MTP prefill (paged with last-hidden) failed")?;
+
+    // prefill_logits is [1, seq_len, V]; slice the last row before sampling.
+    let prefill_last = prefill_logits
+        .narrow(1, prompt_token_ids.len() - 1, 1)?
+        .squeeze(1)?;
+    let mut last_token = greedy_sample(&prefill_last)?;
+    let prefill_time = prefill_start.elapsed();
+
+    eprintln!(
+        "    Prefill (MTP): {:.1}ms ({:.0} tok/s)",
+        prefill_time.as_secs_f64() * 1000.0,
+        actual_prompt_tokens as f64 / prefill_time.as_secs_f64()
+    );
+
+    // Decode loop. Each MTP step emits 1 or 2 tokens; per-token ITL =
+    // step_time / accepted_count (matching the skip-layer arm).
+    let mut inter_token_ms: Vec<f64> = Vec::new();
+    let mut num_tokens = 1usize; // counting the first token from prefill
+    let mut base_pos = actual_prompt_tokens;
+    let mut mtp_pos = 0usize;
+    let mut draft_accepted_count = 0usize;
+    let mut total_draft_attempts = 0usize;
+    let params = SamplingParams {
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        max_tokens: max_output_tokens,
+        repetition_penalty: 1.0,
+        stop: vec![],
+        seed: Some(42),
+    };
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+    while num_tokens < max_output_tokens {
+        if eos_token_ids.contains(&last_token) {
+            break;
+        }
+
+        let step_start = Instant::now();
+        let step = speculative_mtp_decode_step(
+            &*backend,
+            last_token,
+            &h_prev,
+            weights,
+            config,
+            &mut base_cache,
+            &base_block_table,
+            base_pos,
+            &mut mtp_cache,
+            &mtp_block_table,
+            mtp_pos,
+            &params,
+            &eos_token_ids,
+            &mut rng,
+        )
+        .context("speculative_mtp_decode_step failed")?;
+        let step_time = step_start.elapsed();
+
+        if step.accepted_tokens.is_empty() {
+            break;
+        }
+
+        total_draft_attempts += 1;
+        if step.draft_accepted {
+            draft_accepted_count += 1;
+        }
+
+        let per_token_ms =
+            (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
+        for &tok in &step.accepted_tokens {
+            inter_token_ms.push(per_token_ms);
+            num_tokens += 1;
+            if num_tokens >= max_output_tokens {
+                break;
+            }
+        }
+
+        last_token = *step.accepted_tokens.last().unwrap();
+        base_pos += step.base_advance;
+        mtp_pos += step.mtp_advance;
+        h_prev = step.new_h_prev;
+
+        if step.hit_eos {
+            break;
+        }
+    }
+
+    let mean_itl = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        inter_token_ms.iter().sum::<f64>() / inter_token_ms.len() as f64
+    };
+    let mut sorted = inter_token_ms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p50 = if sorted.is_empty() {
+        0.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+    let p99 = if sorted.is_empty() {
+        0.0
+    } else {
+        let idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
+        sorted[idx]
+    };
+    let decode_tok_per_sec = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        let total_decode_ms: f64 = inter_token_ms.iter().sum();
+        inter_token_ms.len() as f64 / (total_decode_ms / 1000.0)
+    };
+    let alpha = if total_draft_attempts == 0 {
+        0.0
+    } else {
+        draft_accepted_count as f64 / total_draft_attempts as f64
+    };
+
+    eprintln!(
+        "    Decode (MTP): {num_tokens} tokens, mean ITL {:.1}ms ({:.1} tok/s), \
+         α = {:.3} ({}/{})",
+        mean_itl, decode_tok_per_sec, alpha, draft_accepted_count, total_draft_attempts
+    );
+
+    Ok(LatencyResult {
+        prompt_tokens: actual_prompt_tokens,
+        prefill_time_ms: prefill_time.as_secs_f64() * 1000.0,
+        prefill_tokens_per_sec: actual_prompt_tokens as f64 / prefill_time.as_secs_f64(),
+        time_to_first_token_ms: prefill_time.as_secs_f64() * 1000.0,
+        mean_inter_token_ms: mean_itl,
+        p50_inter_token_ms: p50,
+        p99_inter_token_ms: p99,
+        num_tokens_generated: num_tokens,
+        decode_tokens_per_sec: decode_tok_per_sec,
+        spec_method: "mtp".to_string(),
+        acceptance_rate: Some(alpha),
     })
 }
 
@@ -769,6 +1251,13 @@ fn print_summary(results: &BenchmarkResults) {
         "Tokens generated:      {}",
         results.latency.num_tokens_generated
     );
+    eprintln!(
+        "Spec method:           {}",
+        results.latency.spec_method
+    );
+    if let Some(alpha) = results.latency.acceptance_rate {
+        eprintln!("Draft acceptance α:    {:.3}", alpha);
+    }
 
     if let Some(t) = &results.training {
         eprintln!("\n--- SFT Training ---");
@@ -850,27 +1339,58 @@ fn main() -> Result<()> {
     };
 
     // Latency benchmark (uses model_forward directly — must run before runner takes ownership).
-    // When --paged is set, route through PagedKvCache + model_forward_paged (the production path).
-    let latency = if args.paged {
-        eprintln!("--- Latency Benchmark (PAGED — production path) ---");
-        bench_latency_paged(
-            &gpu_weights,
-            &model_config,
-            &tokenizer,
-            args.prompt_tokens,
-            args.max_output_tokens,
-        )
-        .context("paged latency benchmark failed")?
-    } else {
-        eprintln!("--- Latency Benchmark ---");
-        bench_latency(
-            &gpu_weights,
-            &model_config,
-            &tokenizer,
-            args.prompt_tokens,
-            args.max_output_tokens,
-        )
-        .context("latency benchmark failed")?
+    // Dispatch order:
+    //   * KILN_SPEC_METHOD=mtp        → bench_latency_paged_mtp (paged + MTP)
+    //   * KILN_SPEC_METHOD=skip_layer → bench_latency_skiplayer (flat KV + skip-layer)
+    //   * default / off               → bench_latency_paged (paged Off) when
+    //                                   --paged, else bench_latency (flat Off).
+    let spec_method = read_spec_method_from_env();
+    let latency = match spec_method {
+        SpecMethod::Mtp => {
+            eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
+            bench_latency_paged_mtp(
+                &gpu_weights,
+                &model_config,
+                &tokenizer,
+                args.prompt_tokens,
+                args.max_output_tokens,
+            )
+            .context("MTP latency benchmark failed")?
+        }
+        SpecMethod::SkipLayer => {
+            eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
+            bench_latency_skiplayer(
+                &gpu_weights,
+                &model_config,
+                &tokenizer,
+                args.prompt_tokens,
+                args.max_output_tokens,
+            )
+            .context("skip-layer latency benchmark failed")?
+        }
+        SpecMethod::Off => {
+            if args.paged {
+                eprintln!("--- Latency Benchmark (PAGED — production path) ---");
+                bench_latency_paged(
+                    &gpu_weights,
+                    &model_config,
+                    &tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                )
+                .context("paged latency benchmark failed")?
+            } else {
+                eprintln!("--- Latency Benchmark ---");
+                bench_latency(
+                    &gpu_weights,
+                    &model_config,
+                    &tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                )
+                .context("latency benchmark failed")?
+            }
+        }
     };
 
     // Training benchmark (borrows gpu_weights — must run before runner takes ownership)
