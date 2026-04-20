@@ -282,6 +282,33 @@ fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     Ok(t)
 }
 
+/// Tiny BF16 placeholder that replaces a projection's pre-transposed
+/// contiguous copy (`*_proj_t`) once Marlin has absorbed it. Dropping the
+/// original `Tensor` field releases the underlying CUDA buffer (the
+/// refcounted `Arc<Storage>` hits zero), reclaiming the per-layer BF16
+/// residency. The struct layout is preserved so every existing construction
+/// site (tests, loaders) continues to compile unchanged.
+fn dropped_bf16_stub(device: &Device) -> Result<Tensor> {
+    Ok(Tensor::zeros((1usize,), DType::BF16, device)?)
+}
+
+/// Kill switch for the Marlin BF16 residency cleanup. Setting
+/// `KILN_DISABLE_MARLIN_BF16_DROP=1` keeps the full-size `*_proj_t`
+/// contiguous copies resident alongside the packed Marlin weights so the
+/// previous behaviour can be reproduced for A/B measurements or parity
+/// debugging. Any unset value leaves the drop enabled.
+fn marlin_bf16_drop_disabled() -> bool {
+    matches!(
+        std::env::var("KILN_DISABLE_MARLIN_BF16_DROP")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 impl GpuWeights {
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
     ///
@@ -336,6 +363,17 @@ impl GpuWeights {
                             .context(ctx("q_proj marlin pack"))?
                     } else {
                         None
+                    };
+                    // When Marlin has absorbed q_proj, the BF16 `q_proj_t`
+                    // contiguous copy is no longer touched by the forward
+                    // path (`q_proj_forward` dispatches on `q_proj_marlin`).
+                    // Drop it to reclaim the per-layer BF16 residency.
+                    // `KILN_DISABLE_MARLIN_BF16_DROP=1` preserves the old
+                    // behaviour for A/B measurements.
+                    let q_proj_t = if q_proj_marlin.is_some() && !marlin_bf16_drop_disabled() {
+                        dropped_bf16_stub(device).context(ctx("q_proj_t stub"))?
+                    } else {
+                        q_proj_t
                     };
                     GpuAttentionWeights::Full(GpuFullAttentionWeights {
                         q_proj,
@@ -418,6 +456,28 @@ impl GpuWeights {
                 } else {
                     (None, None, None)
                 };
+            // Per-projection drop of the BF16 contiguous pre-transpose once
+            // Marlin has absorbed it. `mlp_proj_forward` dispatches on the
+            // per-projection `*_marlin` option; when packing succeeds the
+            // corresponding `*_proj_t` is never read again.
+            // `KILN_DISABLE_MARLIN_BF16_DROP=1` preserves the old behaviour
+            // for A/B measurements.
+            let drop_disabled = marlin_bf16_drop_disabled();
+            let gate_proj_t = if gate_proj_marlin.is_some() && !drop_disabled {
+                dropped_bf16_stub(device).context(ctx("gate_proj_t stub"))?
+            } else {
+                gate_proj_t
+            };
+            let up_proj_t = if up_proj_marlin.is_some() && !drop_disabled {
+                dropped_bf16_stub(device).context(ctx("up_proj_t stub"))?
+            } else {
+                up_proj_t
+            };
+            let down_proj_t = if down_proj_marlin.is_some() && !drop_disabled {
+                dropped_bf16_stub(device).context(ctx("down_proj_t stub"))?
+            } else {
+                down_proj_t
+            };
             let mlp = GpuFfnWeights {
                 gate_proj,
                 up_proj,
