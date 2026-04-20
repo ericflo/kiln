@@ -18,6 +18,7 @@ pub struct Settings {
     pub prefix_cache: bool,
     pub speculative_decoding: bool,
     pub adapter_dir: Option<PathBuf>,
+    pub served_model_id: Option<String>,
     pub auto_start: bool,
     pub auto_restart: bool,
     pub launch_at_login: bool,
@@ -36,6 +37,7 @@ impl Default for Settings {
             prefix_cache: true,
             speculative_decoding: false,
             adapter_dir: None,
+            served_model_id: None,
             auto_start: true,
             auto_restart: true,
             launch_at_login: false,
@@ -113,6 +115,12 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
     if let Some(model) = &s.model_path {
         envs.push(("KILN_MODEL_PATH".to_string(), model.display().to_string()));
     }
+    if let Some(id) = &s.served_model_id {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            envs.push(("KILN_SERVED_MODEL_ID".to_string(), trimmed.to_string()));
+        }
+    }
 
     cfg.args = Vec::new();
     cfg.envs = envs;
@@ -156,6 +164,7 @@ mod tests {
         s.fp8_kv_cache = true;
         s.model_path = Some(PathBuf::from("/models/foo"));
         s.adapter_dir = Some(PathBuf::from("/adapters"));
+        s.served_model_id = Some("custom-id".to_string());
         s.auto_restart = false;
 
         let mut cfg = SupervisorConfig::default();
@@ -176,6 +185,7 @@ mod tests {
         assert_eq!(env_get("KILN_SPEC_ENABLED"), Some("0")); // default false
         assert_eq!(env_get("KILN_MODEL_PATH"), Some("/models/foo"));
         assert_eq!(env_get("KILN_ADAPTER_DIR"), Some("/adapters"));
+        assert_eq!(env_get("KILN_SERVED_MODEL_ID"), Some("custom-id"));
 
         // Host/port also propagated as structured fields for the poller.
         assert_eq!(cfg.host, "0.0.0.0");

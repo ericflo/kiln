@@ -879,6 +879,17 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
 // --- Chat ---
 const chatMessages = [];
 let chatAbort = null;
+let servedModelId = null;
+
+async function loadServedModelId() {
+  try {
+    const res = await fetch('/v1/models');
+    if (!res.ok) return;
+    const data = await res.json();
+    servedModelId = data?.data?.[0]?.id || null;
+  } catch {}
+}
+loadServedModelId();
 
 function renderChat() {
   const el = document.getElementById('chat-messages');
@@ -913,12 +924,12 @@ async function sendChat() {
   const temp = parseFloat(document.getElementById('chat-temp').value) || 0.7;
 
   const body = {
-    model: 'qwen3.5-4b',
     messages: chatMessages.filter(m => m.content).map(m => ({ role: m.role, content: m.content })),
     stream: true,
     temperature: temp,
     max_tokens: 1024,
   };
+  if (servedModelId) body.model = servedModelId;
   if (adapter) body.adapter = adapter;
 
   try {

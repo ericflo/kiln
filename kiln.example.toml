@@ -18,6 +18,13 @@ shutdown_timeout_secs = 30
 model_id = "Qwen/Qwen3.5-4B"
 # tokenizer_path = "/path/to/tokenizer.json"
 # adapter_dir = "/path/to/adapters"  # Default: <model_path>/adapters
+# served_model_id = "qwen3.5-4b-kiln" # ID exposed at /v1/models and echoed in chat completion
+                                      # responses. Default: derived from `model_id` by stripping
+                                      # everything up to and including the last "/", lowercasing,
+                                      # and appending "-kiln" (so "Qwen/Qwen3.5-4B" becomes
+                                      # "qwen3.5-4b-kiln"). Override precedence:
+                                      #   --served-model-id flag > KILN_SERVED_MODEL_ID env >
+                                      #   this TOML value > derived default.
                                       #
                                       # GPTQ INT4 quantization: point `path` at a GPTQ model directory
                                       # containing quantize_config.json. Kiln auto-detects GPTQ and

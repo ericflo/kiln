@@ -24,8 +24,9 @@ use crate::state::{AppState, ModelBackend};
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
-    #[serde(default = "default_model")]
-    pub model: String,
+    /// When omitted, the server falls back to its configured `served_model_id`.
+    #[serde(default)]
+    pub model: Option<String>,
     pub messages: Vec<Message>,
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -44,10 +45,6 @@ pub struct ChatCompletionRequest {
     /// Kiln extension: which LoRA adapter to use for this request.
     #[serde(default)]
     pub adapter: Option<String>,
-}
-
-fn default_model() -> String {
-    "qwen3.5-4b".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -382,7 +379,10 @@ async fn generate_real(
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         created: now,
-        model: req.model.clone(),
+        model: req
+            .model
+            .clone()
+            .unwrap_or_else(|| state.served_model_id.clone()),
         choices: vec![Choice {
             index: 0,
             message: Message {
@@ -409,7 +409,7 @@ async fn generate_real(
 ///    forwarding loop. On timeout, the task drops `sync_rx`, stopping generation,
 ///    and sends an error event to the client.
 async fn generate_real_streaming(
-    _state: &AppState,
+    state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
@@ -422,11 +422,14 @@ async fn generate_real_streaming(
     let pc = paged_cache.clone();
     let prompt = prompt_text.to_owned();
     let params = sampling.clone();
-    let model = req.model.clone();
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = now_epoch();
-    let gpu_lock = _state.gpu_lock.clone();
-    let timeout = _state.request_timeout;
+    let gpu_lock = state.gpu_lock.clone();
+    let timeout = state.request_timeout;
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -716,7 +719,10 @@ async fn generate_mock(
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion",
         created: now,
-        model: req.model.clone(),
+        model: req
+            .model
+            .clone()
+            .unwrap_or_else(|| state.served_model_id.clone()),
         choices: vec![Choice {
             index: 0,
             message: Message {

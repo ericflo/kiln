@@ -360,6 +360,10 @@
           <span class="hint">Where LoRA adapters are saved and loaded from.</span>
           <span class="path-warning" id="warn_adapter_dir"></span>
         </label>
+        <label class="row"><span class="name">Served model ID</span>
+          <input type="text" id="served_model_id" placeholder="(auto-derived from model_id)" />
+          <span class="hint">Identifier returned by /v1/models and echoed in chat completion responses. Leave blank to use the kiln default (model_id stripped to its last path segment, lowercased, with "-kiln" appended).</span>
+        </label>
       </fieldset>
 
       <fieldset>
@@ -473,6 +477,7 @@
         "kiln_binary", "model_path", "host", "port",
         "inference_fraction", "fp8_kv_cache", "cuda_graphs",
         "prefix_cache", "speculative_decoding", "adapter_dir",
+        "served_model_id",
         "auto_start", "auto_restart", "launch_at_login",
       ];
 
@@ -493,6 +498,7 @@
           prefix_cache: n("prefix_cache").checked,
           speculative_decoding: n("speculative_decoding").checked,
           adapter_dir: strOrNull("adapter_dir"),
+          served_model_id: strOrNull("served_model_id"),
           auto_start: n("auto_start").checked,
           auto_restart: n("auto_restart").checked,
           launch_at_login: n("launch_at_login").checked,
@@ -511,6 +517,7 @@
         n("prefix_cache").checked = !!s.prefix_cache;
         n("speculative_decoding").checked = !!s.speculative_decoding;
         n("adapter_dir").value = s.adapter_dir || "";
+        n("served_model_id").value = s.served_model_id || "";
         n("auto_start").checked = !!s.auto_start;
         n("auto_restart").checked = !!s.auto_restart;
         n("launch_at_login").checked = !!s.launch_at_login;

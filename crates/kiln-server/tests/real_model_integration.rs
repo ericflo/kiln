@@ -192,7 +192,7 @@ async fn test_real_model_chat_completion() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300);
+    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300, "qwen3.5-4b-kiln".to_string());
 
     let app = api::router(state);
 
@@ -257,7 +257,7 @@ async fn test_real_model_streaming_chat_completion() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300);
+    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300, "qwen3.5-4b-kiln".to_string());
 
     let app = api::router(state);
 
@@ -372,6 +372,7 @@ async fn test_request_timeout_configurable() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         42,
+        "qwen3.5-4b-kiln".to_string(),
     );
 
     assert_eq!(state.request_timeout.as_secs(), 42);
@@ -396,6 +397,7 @@ async fn test_default_request_timeout() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         300,
+        "qwen3.5-4b-kiln".to_string(),
     );
 
     assert_eq!(state.request_timeout.as_secs(), 300);
@@ -411,7 +413,7 @@ async fn test_health_with_real_backend() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300);
+    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300, "qwen3.5-4b-kiln".to_string());
 
     let app = api::router(state);
 
@@ -465,6 +467,7 @@ async fn test_real_model_chat_completion_metal() {
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         300,
+        "qwen3.5-4b-kiln".to_string(),
     );
 
     let app = api::router(state);

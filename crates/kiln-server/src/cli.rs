@@ -25,7 +25,12 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Start the inference server (default when no subcommand given)
-    Serve,
+    Serve {
+        /// Override the served model identifier exposed at /v1/models.
+        /// Wins over KILN_SERVED_MODEL_ID env and TOML `model.served_model_id`.
+        #[arg(long, value_name = "ID")]
+        served_model_id: Option<String>,
+    },
 
     /// Submit training data to a running server
     #[command(subcommand)]
@@ -252,6 +257,11 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 "  {} {}",
                 style("Model ID:").dim(),
                 config.model.model_id
+            );
+            println!(
+                "  {} {}",
+                style("Served as:").dim(),
+                config.model.effective_served_model_id()
             );
             if let Some(ref p) = config.model.path {
                 println!("  {} {}", style("Model path:").dim(), p);

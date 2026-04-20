@@ -187,6 +187,8 @@ pub struct AppState {
     /// Server-level default for adapter checkpoint interval during training.
     /// Per-job config overrides this. None = only save at the end.
     pub checkpoint_interval: Option<usize>,
+    /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
+    pub served_model_id: String,
 }
 
 impl AppState {
@@ -197,6 +199,7 @@ impl AppState {
         engine: Arc<dyn Engine>,
         tokenizer: KilnTokenizer,
         request_timeout_secs: u64,
+        served_model_id: String,
     ) -> Self {
         Self {
             model_config,
@@ -220,6 +223,7 @@ impl AppState {
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
             checkpoint_interval: None,
+            served_model_id,
         }
     }
 
@@ -240,6 +244,7 @@ impl AppState {
         adapter_dir: PathBuf,
         memory_cfg: &crate::config::MemoryConfig,
         request_timeout_secs: u64,
+        served_model_id: String,
     ) -> Self {
         let block_size = 16;
 
@@ -385,6 +390,7 @@ impl AppState {
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
             checkpoint_interval: None,
+            served_model_id,
         }
     }
 }
