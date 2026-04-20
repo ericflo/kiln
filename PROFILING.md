@@ -1,6 +1,217 @@
 # Kiln Profiling Report
 
 
+## Phase 7 design: streaming/tiled GDN prefill — 2026-04-20
+
+**Outcome: long-context prefill (≥65k tokens) fits on a 48 GiB A6000 by iterating the prompt in 8192-token tiles, reusing the already-existing `LinearAttentionState` as the O(1) state carrier across tile boundaries. Peak working set shrinks from ~9 GiB per-layer-full-prompt to ~1.1 GiB per-layer-per-tile. No GDN kernel changes, no state struct changes, no paged-cache changes; a single new `model_forward_paged_streaming` wrapper plus three config flags. $0 doc-only PR; implementation spike is one ~30-minute A6000 run.**
+
+This design is a $0 source-inspection follow-on to the PR #226 audit
+([#131](https://github.com/ericflo/kiln/pull/131),
+[#163](https://github.com/ericflo/kiln/pull/163),
+[#164](https://github.com/ericflo/kiln/pull/164),
+[#170](https://github.com/ericflo/kiln/pull/170),
+[#219](https://github.com/ericflo/kiln/pull/219),
+[#223](https://github.com/ericflo/kiln/pull/223),
+[#224](https://github.com/ericflo/kiln/pull/224),
+[#225](https://github.com/ericflo/kiln/pull/225),
+[#226](https://github.com/ericflo/kiln/pull/226)
+pattern: inspect, decide, defer pod $ until the design is pinned down).
+
+**Why append to PROFILING.md rather than a new `DESIGN-streaming-prefill.md`:** the Phase 7 audit already lives here, and candidate G ("streaming prefill") is explicitly the thing this section lands. Future re-profiles will extend the same file with post-implementation deltas. Keeping audit + design + measurement in one place avoids the "where did we decide this?" cross-file hunt that earlier phases produced. If this section grows past ~500 lines we revisit, but today the signal is stronger as one continuous document.
+
+### (a) Tile size choice — 8192 tokens
+
+- **Chosen: `KILN_STREAMING_PREFILL_TILE=8192` (default).** Rationale below; the flag is tunable for measurement.
+- **Hard constraint: tile size must be a multiple of `GDN_CHUNK_SIZE = 64`.** `gdn_chunkwise_recurrence` (forward.rs:1173–1378) already handles a tail chunk smaller than 64 — but only *once per call*. Letting tile boundaries land mid-chunk would repeatedly force the tail path and also splinter the recurrence into unequal chunks, which complicates state handover (see §c). `8192 = 128 × 64` is chunk-aligned.
+- **Lower bound (2k, 4k):** too small. Per-tile kernel-launch overhead (conv1d_prefill + chunk_prep + fused_recurrent + gates + norms × 32 layers × ceil(seq_len / tile)) starts to dominate wall-clock below ~4k. At 2k across T=65536 that is 32 tiles × 32 layers = 1,024 layer invocations vs 8 × 32 = 256 at tile=8192. Marlin GEMM and paged-decode fusion are also tuned for larger M.
+- **Upper bound (16k, 32k):** fits comfortably in budget (per-layer peak scales roughly linearly in tile size → ~2.2 GiB and ~4.4 GiB respectively), but the audit's 9 GiB-per-layer at T=65536 is the monolithic full-prompt peak. Picking tile=8192 leaves ~35 GiB of headroom for the LM-head tail (§d) and keeps Marlin activations well inside SM resident budgets.
+- **Sweet spot math** (Candidate G in the audit, extrapolated to the activation graph from §3–§6 of the PR #226 audit):
+
+  | tile | per-layer peak act | 32-layer working budget fit | tile count at T=65536 | relative kernel-launch overhead |
+  |------|-------------------:|:---------------------------:|----------------------:|--------------------------------:|
+  | 2048 | ~0.28 GiB          | trivial                     | 32                    | 4× vs 8192                      |
+  | 4096 | ~0.55 GiB          | trivial                     | 16                    | 2× vs 8192                      |
+  | **8192** | **~1.10 GiB**  | **trivial (<1.5 GiB carry)**| **8**                 | **1× (baseline)**               |
+  | 16384 | ~2.2 GiB          | fits (~5 GiB carry)          | 4                     | 0.5× vs 8192                    |
+  | 32768 | ~4.4 GiB          | fits (~10 GiB carry)         | 2                     | 0.25× vs 8192                   |
+  | 65536 (monolithic) | ~9 GiB | **OOM** (≥28 GiB carry on A6000) | 1 | — |
+
+  (Per-layer-peak figures derive from scaling the PR #226 audit's post-`l2_normalize` live set linearly in `seq_len`; the O(1) state carry is negligible — 48 MiB across all GDN layers.)
+- **8192 is the smallest tile at which kernel-launch overhead is not the limiting cost AND peak per-tile per-layer activations fit comfortably on an A5000-class 24 GiB GPU too** (so the same default works for smaller GPUs once Phase 7 lands there).
+
+### (b) Iteration order — layer-by-tile (outer tile, inner layer)
+
+Two orderings exist; only one is viable:
+
+- **Option 1 (CHOSEN): outer loop = tile, inner loop = layer.** For each tile, run all 32 layers, handing `hidden` from layer to layer as today; threading `LinearAttentionState` *across tiles* at the model level, threading paged KV cache / `start_pos` as today. Working set per step ≈ activations of one layer of one tile ≈ ~1.1 GiB (at tile=8192), plus the `hidden` tensor `[1, tile, 2560]` ≈ 40 MiB handed between layers.
+- **Option 2 (REJECTED): outer loop = layer, inner loop = tile.** Would need to hold the *full* `[1, seq_len, hidden=2560]` intermediate between layers — at T=65536 that is 320 MiB × (one live copy per layer-boundary hand-off) ≈ unbounded without additional buffering, or an explicit ~320 MiB-per-layer streaming scratchpad. This does not reduce the per-layer per-tile peak; it just rearranges the storage of inter-layer hidden. And it breaks the existing `model_forward_paged` contract of "feed one call, get logits out" — forcing a much larger refactor.
+
+Layer-by-tile is also the pattern used by flash-linear-attention for chunked prefill (see §h) and by vLLM's Mamba-2 prefill streaming. Conceptually: each tile is a complete "mini forward pass" whose only linkage to the prior tile is the GDN state and the paged KV cache.
+
+Pseudocode (layer-by-tile, per-prompt):
+
+```
+fn model_forward_paged_streaming(tokens, ..., state, ...) -> Tensor {
+    let tile_size = env("KILN_STREAMING_PREFILL_TILE", 8192);
+    let mut last_logits = None;
+    let mut cursor = 0;
+    while cursor < tokens.len() {
+        let end = (cursor + tile_size).min(tokens.len());
+        let is_last = end == tokens.len();
+        let tile_tokens = &tokens[cursor..end];
+        let tile_logits = model_forward_paged(
+            tile_tokens,            // embedding + all 32 layers on this tile
+            ...,
+            start_pos = cursor,     // paged KV cache threads via existing start_pos
+            Some(&mut state),       // GDN state threads via existing LinearAttentionState
+            ...,
+            // INTERNAL knob (see §d): skip LM head unless is_last, and only emit
+            // the final token's row when is_last
+        )?;
+        if is_last { last_logits = Some(tile_logits); }
+        cursor = end;
+    }
+    last_logits.expect("at least one tile")
+}
+```
+
+### (c) State handover contract
+
+Three pieces of state cross tile boundaries; two already work, one needs alignment discipline:
+
+1. **`LinearAttentionState` (GDN recurrent + conv states).** Already defined at `forward.rs:241-270` with the docstring "This state is O(1) in sequence length — it does not grow with the number of tokens processed." Threading is already implemented: `gated_deltanet_forward` takes `&mut recurrent_states[i]` and `&mut conv_states[i]` (forward.rs:2911–2925), and `causal_conv1d_prefill` already threads `conv_state` correctly (forward.rs:907–946, writes the final `k-1` cols back to `conv_state` at 931–943). Per-layer: `recurrent_states[1, nv=32, dk=128, dv=128] F32` = 2 MiB; `conv_states[1, qkv_dim, k-1=3] F32` < 100 KiB. **Total across 24 GDN layers: 48 MiB.** No changes to the struct, no changes to the kernels — we just hand the same `&mut state` into each tile's `model_forward_paged` call.
+2. **Paged KV cache + `start_pos` (full-attn / GQA layers).** Already threaded. The 8 full-attention layers read prior tile KV pages via `block_table` indexing during the current tile's attention; `start_pos = cursor` threads correctly (forward.rs:2872, 2905). No new state. This is why full-attn layers are "tile-oblivious" — they see the same prefix attention semantics whether invoked monolithically or tiled.
+3. **Chunk alignment (the one real constraint).** Because `gdn_chunkwise_recurrence` handles the tail-chunk path only *once per call* (the last partial chunk flushes into the state at function exit), we require `tile_size % GDN_CHUNK_SIZE == 0` for all non-final tiles so that within a tile the recurrence processes only full 64-token chunks and the state is clean at the tile boundary. The *final* tile (which covers the prompt remainder) is allowed to have a tail chunk — this is exactly the behavior `gdn_chunkwise_recurrence` already supports when the monolithic path runs with a non-multiple-of-64 prompt length.
+
+**Contract summary:** for a tile `[cursor, cursor+N)` with `N % 64 == 0` (except the last tile), after `model_forward_paged(tokens[cursor..cursor+N], ..., start_pos=cursor, state)`:
+- `state.recurrent_states[l]` for each GDN layer `l` holds the post-N recurrence state for that layer.
+- `state.conv_states[l]` for each GDN layer `l` holds the last `k-1=3` input columns of that layer's conv1d input.
+- Paged KV cache blocks `[cursor .. cursor+N)` are populated for all 8 full-attn layers.
+- No other mutation persists between calls.
+
+This is byte-identical to the monolithic contract because the operations within each tile are bit-for-bit the same ops that the monolithic path would execute on the same token range.
+
+### (d) Output accumulation — last-tile-last-token only (inference)
+
+The LM head is `[hidden=2560, vocab=151936]` matmulled against `hidden: [1, seq_len, 2560]` → `logits: [1, seq_len, vocab=151936]`. At T=65536 the full logits tensor is **~19 GiB F32** (or ~9.5 GiB BF16 if we downcast — still a huge sink). The audit (Candidate C) called this out as the dominant post-norm allocation.
+
+For **inference**, we only need the last row. `generate_from_tokens_paged_inner` at `generate.rs:547` samples from `logits` using `greedy_sample`/`sample_with_params`, which already operate on the last time-step. We therefore:
+
+- On **non-last tiles:** skip the LM head entirely. Return `None` (or a cheap sentinel tensor) and drop the tile's `hidden` on function exit. Memory is reclaimed before the next tile starts.
+- On **the last tile:** compute `rms_norm` + LM-head matmul, but optionally restrict to the final token's row — `hidden[.., -1:, ..]` of shape `[1, 1, 2560]` against `embed_tokens_t`, producing `[1, 1, vocab]` (~300 KiB BF16). Samplers are already last-token-indexed; this just lets us avoid materializing the full `[1, tile_size, vocab]` row even on the last tile.
+
+Savings at T=65536 with tile=8192: LM-head output shrinks from ~19 GiB to ~300 KiB, a 60,000× cut on the final spike. Additionally, Candidate C ("lm_head output full-tensor sink") is mostly obviated — we never hold more than one tile's LM-head output, and on the critical last tile we only hold one row.
+
+**Training (forward+backward) needs full logits** for the CE loss; streaming training prefill is explicitly deferred (§i). The `model_forward_paged_streaming` entrypoint is therefore **inference-only** in Phase 7; the existing `model_forward` remains the training path.
+
+### (e) Integration surface
+
+Minimal additive surface. No refactor of existing call sites beyond the dispatch point.
+
+- **New function in `crates/kiln-model/src/forward.rs`:**
+  ```rust
+  pub fn model_forward_paged_streaming(
+      backend: &dyn BackendRuntime,
+      token_ids: &[u32],
+      weights: &GpuWeights,
+      config: &kiln_core::config::ModelConfig,
+      paged_cache: &mut PagedKvCache,
+      block_table: &BlockTable,
+      start_pos: usize,
+      mut linear_state: Option<&mut LinearAttentionState>,
+      lora: Option<&LoraWeights>,
+      positions_gpu: Option<&Tensor>,
+  ) -> Result<Tensor> {
+      // Same signature as model_forward_paged. Iterates tiles, delegates
+      // per-tile work to model_forward_paged with the "skip LM head on
+      // non-last tiles" knob (internal, not exposed as a pub API).
+  }
+  ```
+  Same signature as `model_forward_paged` so the dispatch wrapper is a drop-in.
+- **Internal knob in `model_forward_paged` (or a sibling `model_forward_paged_tile`):** an `is_last_tile: bool` param (crate-private) that short-circuits the LM-head section (forward.rs:2944–2950). On non-last tiles it returns a 1-byte placeholder tensor and the caller discards it.
+- **Dispatch at two call sites** (`generate.rs:525`, `bench.rs:484`):
+  ```rust
+  let prefill_fn = if streaming_prefill_enabled(seq_len) {
+      model_forward_paged_streaming
+  } else {
+      model_forward_paged
+  };
+  let logits = prefill_fn(backend, prompt_tokens, ...)?;
+  ```
+- **Config flags (parsed in `crates/kiln-server/src/config.rs`):**
+  - `KILN_STREAMING_PREFILL` — `0|1` (default `0`). Master opt-in.
+  - `KILN_STREAMING_PREFILL_TILE` — integer (default `8192`). Tile size in tokens; must be multiple of 64 (validated on parse; falls back to 8192 with a warning otherwise).
+  - `KILN_STREAMING_PREFILL_THRESHOLD` — integer (default `32768`). Only stream when `seq_len >` this threshold; short prompts take the monolithic fast path. Setting to `0` forces streaming for all prefills (used by parity tests).
+- **Kill switch:** `KILN_STREAMING_PREFILL=0` restores byte-identical behaviour. This is the default for Phase 7 ship; we gate on measurement before flipping the default.
+- **Zero changes to:** `LinearAttentionState` struct, GDN kernels (`kiln-gdn-kernel`), conv1d kernel (`kiln-conv1d-kernel`), `gdn_chunkwise_recurrence`, `gated_deltanet_forward`, `causal_conv1d_prefill`, paged KV cache, `transformer_block_paged`, `model_forward` (training), `generate_from_tokens` (non-paged path).
+- **CUDA graph interaction:** none. Prefill never uses CUDA graphs (`generate.rs:524` comment: "Prefill: forward pass on all prompt tokens (never uses CUDA graphs)"). Decode path is untouched; the decode-time CUDA graph replay (`crates/kiln-model/src/cuda_graph.rs:300,358`) continues to call `model_forward_paged` for single-token steps after streaming prefill completes.
+
+### (f) Correctness strategy — bitwise parity
+
+Streaming is a pure code-motion refactor: the kernel invocations, their inputs, and their outputs on each token range are identical to the monolithic path. Correctness is provable by parity tests, not by eyeballing tolerances.
+
+Tests (CPU backend, add to `crates/kiln-model/src/forward.rs` `#[cfg(test)]` module):
+
+1. **`test_streaming_matches_monolithic_cpu_small`**: T=128, tile=64. Build a tiny model via existing test scaffolding (the GDN decode tests at forward.rs:4256–4300 are the template), run both `model_forward_paged` and `model_forward_paged_streaming` from zero-state, assert `logits_mono == logits_stream` **bit-exact** (`to_vec1::<f32>()` equality).
+2. **`test_streaming_matches_monolithic_cpu_mid`**: T=2048, tile=512. Same assertion.
+3. **`test_streaming_tile_invariance_cpu`**: T=1024, loop `tile ∈ {64, 128, 256, 512, 1024}`; assert all five runs produce bit-equal logits.
+4. **`test_streaming_preserves_state_cpu`**: after streaming T=2048 with tile=512, assert `state.recurrent_states[l]` and `state.conv_states[l]` are bit-equal to the monolithic run's state.
+5. **`test_streaming_disabled_is_byte_identical`**: with `KILN_STREAMING_PREFILL=0`, assert dispatch goes through `model_forward_paged` unchanged (regression guard for the `≤32k` fast path).
+
+**CUDA parity** (run on the spike pod, §g): `test_streaming_matches_monolithic_cuda` — same as #2 above but on CUDA device. F32 recurrent state means GDN is reproducible across tilings; the conv1d F32 promotion we already do (Candidate A future work) keeps conv1d deterministic too. Paged attention is tile-oblivious by construction.
+
+**Why this is tractable:** the operations in each tile are the *same* ops in the *same* order on the *same* memory; we are just not holding intermediate activations from tile N-1 when tile N runs. State threading is already a tested code path (decode uses it token-by-token — forward.rs:4256–4300, `test_paged_single_token_forward` and related). This is prefix-block aggregation at a larger granularity.
+
+### (g) Spike scope — one pod, ~30 min, <$0.70
+
+- **Goal:** land `KILN_STREAMING_PREFILL=1` behind a flag; prove parity on CPU + CUDA; prove T=65536 prefill completes on A6000; prove ≤32k fast path is untouched.
+- **Pod:** acquire via `ce kiln-pod-acquire --gpu-type 'NVIDIA RTX A6000'`. Fallback to direct RunPod if pool is capped.
+- **Runtime:** single session.
+- **Steps:**
+  1. Implement `model_forward_paged_streaming` + dispatch + config flags. (~1 hr local, no pod.)
+  2. Add 5 CPU parity tests. Iterate on CPU until green. (local, no pod.)
+  3. Open PR in draft. Wake pod.
+  4. On pod: `cargo nextest run --features cuda` — all existing tests green + CUDA parity test.
+  5. On pod: `KILN_STREAMING_PREFILL=1 KILN_W4A16=1 ./target/release/kiln-bench --paged --prompt-tokens 65536 --max-output-tokens 32 --skip-training`. Confirm no OOM; record prefill latency + decode tok/s.
+  6. On pod: ≤32k regression. `KILN_STREAMING_PREFILL=0 KILN_W4A16=1 ./target/release/kiln-bench --paged --prompt-tokens 8192 --max-output-tokens 128` and same with `KILN_STREAMING_PREFILL=1 KILN_STREAMING_PREFILL_THRESHOLD=0` (force streaming on a short prompt); 3× each, confirm medians are within noise (≤2% variance).
+  7. Capture nsys NVTX trace of one streaming prefill for PROFILING.md re-profile attachment. Optional.
+  8. Release the lease.
+- **Success criteria:**
+  - All parity tests green.
+  - T=65536 prefill + T=32 decode completes without OOM on 48 GiB A6000.
+  - ≤32k fast path unchanged (median prefill/decode within noise vs pre-PR main).
+  - No regression on the existing bench harness.
+- **Cost ceiling:** ~0.5 h × A6000 on-demand (~$0.79/hr) ≈ $0.40. Budget cap $0.70 including warm-up and nsys attribution run. If the spike trips anything unexpected, ship the doc-only design (this PR), redirect with a null-finding PR, and re-plan.
+
+### (h) flash-linear-attention precedent
+
+The `flash-linear-attention` (fla) repo (https://github.com/sustcsonglin/flash-linear-attention) — which is where kiln's `kiln-gdn-kernel` ultimately derives from (PR #80) — ships its linear-attention ops with an explicit `chunks=` / `chunk_size=` knob and a paired `initial_state=` / `final_state=` contract. Representative APIs:
+
+- `fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule(q, k, v, g, beta, scale=..., initial_state=None, output_final_state=True, cu_seqlens=None)` — the chunkwise Gated DeltaNet forward. `initial_state` and `output_final_state` are the fla equivalent of our `LinearAttentionState` threading. `cu_seqlens` supports variable-length batches in the same kernel invocation.
+- `fla.ops.delta_rule.chunk.chunk_delta_rule(..., initial_state=..., output_final_state=...)` — same pattern on the ungated variant.
+- fla's chunk size is a kernel-internal constant (64 — matches `GDN_CHUNK_SIZE` in `kiln-gdn-kernel`). fla does not stream across *kernel calls*; streaming is left to the caller, using `initial_state` / `final_state`.
+
+kiln's streaming prefill is therefore a *model-level* analog of the pattern fla already encodes at the op level. We reuse the vendored chunk kernel unchanged (the "compute per-chunk recurrence, fold into state" contract is identical), and layer tiling outside it. This is precisely what vLLM does for its Mamba-2 streaming prefill (https://github.com/vllm-project/vllm/pull/12093 and siblings): the mamba kernel stays fla-derived; tiling is orchestrated at the model-forward level with explicit state threading.
+
+We are not inventing a new streaming algorithm. We are picking up the state-threading contract fla has always shipped and wiring it into our paged forward.
+
+### (i) What is deliberately deferred
+
+- **Training (backward) streaming.** CE loss needs full logits and the gradient of the full hidden sequence; streaming backward needs tile-boundary state checkpointing + a compatible reverse-recurrence path. Phase 7.x, not Phase 7.0.
+- **Async tile pipelining.** Overlap tile-N compute with tile-(N+1) embedding lookup + positions_gpu build. Useful but orthogonal — costs CUDA stream plumbing and a second `hidden` buffer. Phase 7.2.
+- **Dynamic tile sizing.** Measure free VRAM at runtime and adjust `KILN_STREAMING_PREFILL_TILE` per-prompt. Useful for mixed-GPU fleets and varying LoRA footprints. Phase 7.3.
+- **FP8 KV cache × streaming prefill interaction.** Already composes cleanly at the design level (prefill populates FP8 KV blocks tile-by-tile exactly as it does monolithically), but empirical re-verification at T ≥ 32k is deferred until both features are on simultaneously in one bench.
+- **Candidate A (F32 → BF16 `causal_conv1d_prefill`).** Independent of streaming; shrinks conv bubble by ~2× inside each tile. Still queued from the PR #226 audit; orthogonal to this PR.
+- **Candidate B (l2_normalize in-place).** Independent; smaller peak within GDN. Still queued.
+- **Candidate C (LM-head full-tensor sink).** *Partially subsumed* by §d — we only ever hold one tile's logits, and only the last token on the last tile. The remaining Candidate-C opportunity (chunked softmax inside the sampler) is unchanged but now off the critical OOM path.
+- **Dispatching streaming on the non-paged `model_forward` path.** Non-paged is the training path; inference uses paged. If someone introduces long-context non-paged inference we revisit; today no call site needs it.
+- **Flipping `KILN_STREAMING_PREFILL` default to `1`.** Ship behind a flag in Phase 7.0; flip the default only after the spike parity + bench + nsys data land and a re-profile confirms no silent regression on short prompts.
+
+---
+
+TL;DR: tile-oblivious full-attn + existing O(1) `LinearAttentionState` + chunk-aligned tile size = long-context prefill with zero kernel changes and a surgically small forward-path patch. The next PR implements this behind `KILN_STREAMING_PREFILL=1` and measures it in a single ~30-min A6000 spike.
+
+
 ## GDN prefill memory audit (Phase 7 opener) — 2026-04-20
 
 **Outcome: the GDN recurrent state (the thing FP8 would shrink) is ~48 MiB total across 24 layers — 0.1% of the OOM ceiling. The binding constraint is per-layer prefill activations. At `seq_len=65536` one GDN layer's live tensors sum to roughly 9–10 GiB, which exceeds the ~37 GiB working budget on A6000 (48 GiB − ~8 GiB weights − ~3 GiB CUDA context − carry across 32 layers). Long-context capability is unlocked by streaming/tiled prefill (candidate G below), not by shrinking state.**
