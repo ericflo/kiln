@@ -59,6 +59,11 @@ jobs:
         with:
           workspaces: './desktop -> target'
 
+      - name: Run desktop unit tests (Linux only)
+        if: matrix.platform == 'ubuntu-22.04'
+        working-directory: desktop
+        run: cargo test --locked
+
       - name: Extract release notes from CHANGELOG.md
         if: startsWith(github.ref, 'refs/tags/desktop-v')
         shell: bash
