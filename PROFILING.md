@@ -1,6 +1,140 @@
 # Kiln Profiling Report
 
 
+## Phase 6 — `ucopy_bf16` source-site audit (null, 2026-04-20)
+
+**$0 preflight follow-up to the post-#210 profile** (this file's first section).
+That section recommended a `ucopy_bf16` source-site audit before any kernel
+work; this is the audit. It is a **null result**: every remaining
+`ucopy_bf16`-emitting site in the decode hot path is either already addressed
+by a prior PR, sits below the 1.05× decode-floor on its own (even at infinite
+local speedup), or is required by a downstream kernel ABI that cannot be
+relaxed without redesigning the kernel itself. **Do not queue a `ucopy_bf16`
+fusion task.** Phase 6 should move to KV cache FP8 next; the MLP gate/up
+Marlin-merge speculation needs a separate activation-load profile before it
+can be sized.
+
+### Inputs
+
+- Source: `crates/kiln-model/src/forward.rs` (read in full at this audit's
+  branch point, c480886) plus `crates/kiln-model/src/marlin_proj.rs`,
+  `crates/kiln-model/src/lora_loader.rs`.
+- Wall-clock attribution: `profiling-artifacts/post210_nvtx.csv` and
+  `profiling-artifacts/post210_kern.csv` (the post-#210 capture). Note: the
+  post-#210 capture intentionally omitted `--cuda-graph-trace=node` (it
+  corrupted event ordering), so per-region kernel attribution is not
+  available — region totals and kernel totals are correlated below by
+  reading the source.
+- Prior PR scope: `git log --all --oneline | grep -iE
+  "ucopy|transpose|cast_bf16|in_proj|qkv|recurrent|gates|gated|qk_norm"`.
+
+### Per-site enumeration
+
+For each `ucopy_bf16`-emitting site in the decode hot path: NVTX region,
+prior-PR coverage, why it remains, and the per-site math-ceiling at a
+generous 1.5× local speedup (`p · (1 − 1/1.5)`).
+
+| # | site (file:line)                                     | NVTX region              | region % | prior PR coverage                       | why it remains                                                | local 1.5× ceiling |
+| - | ---------------------------------------------------- | ------------------------ | -------: | --------------------------------------- | ------------------------------------------------------------- | -----------------: |
+| 1 | `forward.rs:1462` `mixed_qkv.transpose(1,2).contiguous()` | `:kiln/gdn/conv`         |      1.8 | none                                    | required input layout for `causal_conv1d_update` kernel ABI   |              0.006 |
+| 2 | `forward.rs:1521-1535` `.unsqueeze().expand().contiguous()` (q,k) and `q.contiguous()`/`k.contiguous()` fallback | `:kiln/gdn/head_expand`  |      3.4 | none                                    | downstream matmul cannot operate on broadcast-strided tensor  |              0.011 |
+| 3 | `forward.rs:1655-1659` 5× `.transpose(1,2)` (q,k,v,beta,g) | `:kiln/gdn/recur_prep`   |      0.8 | none                                    | lazy strides; downstream `gdn_chunkwise_recurrence` consumer materializes | 0.003 |
+| 4 | `forward.rs` chunkwise recurrence interior `.contiguous()` | `:kiln/attn/gdn/recurrent` |    2.0 | PR #80 (vendored chunkwise GDN), PR #74 (matmul readout), PR #75 (analytical recurrence) | internal compute layout for the vendored recurrence kernel    |              0.007 |
+| 5 | `forward.rs:1580-1581` `(q*scale).to_dtype()`, `k.to_dtype()` | `:kiln/gdn/qk_norm`      |     14.7 | **PR #173** opt-in fused L2-QK norm; null median 1.0093× | already attempted; null. The fused kernel exists behind `KILN_ENABLE_FUSED_L2_QK_NORM`. | (see PR #173)      |
+| 6 | `forward.rs:1693` `attn_out.reshape().to_dtype()`    | `:kiln/gdn/gated_norm`   |     17.6 | **PR #141** closed null                 | already attempted; null. Future re-visit needs new memory-reducing approach | (see PR #141)      |
+| 7 | `forward.rs:1844-1846,1862-1873,1895-1898` Q/K/V/output `transpose().contiguous()` | `:kiln/attn/full/*` slow path | ≤3.8 | **PR #100** fused paged-decode (skipped on hot path) | only fires on FA2 fallback (rare); paged-decode kernel never materializes these | ~0 on hot path     |
+| 8 | `marlin_proj.rs:296,315` `x.contiguous()`            | callsite-attributed to `:kiln/gdn/in_proj`, MLP `gate/up/down`, full-attn `qkv` | (covered by callsites) | required by `marlin_w4a16_gemm` kernel ABI | kernel reads contiguous strides; cannot be relaxed without redesigning Marlin | sub-floor |
+| 9 | GDN linear projections (in_proj_qkv/z/a/b, out_proj) | `:kiln/gdn/in_proj`, `:kiln/gdn/out_proj` |     10.5 (combined) | **PR #130** pre-transposed `*_t` cache  | already eliminated at load time (`weights.in_proj_*_t`)        | already addressed  |
+| 10 | MLP / full-attn projections (gate/up/down, q/k/v/o) | `:kiln/mlp/*`, `:kiln/proj/*` |    22.6 (combined) | **PR #128** pre-transposed `*_t` cache  | already eliminated at load time                                | already addressed  |
+| 11 | lm_head                                             | `:kiln/lm_head` 0.2%     |      0.2 | **PR #117** precompute `embed_tokens.t()` once at load | already eliminated                                            | already addressed  |
+| 12 | `linear_with_lora` (non-`_t` variant)               | n/a (tests only)         |        0 | PR #128/#130 hot-path migration to `_t` | only used in `lora_loader.rs` tests; no decode callsite        | already addressed  |
+
+(Sites 9–12 confirm the historical wins from PRs #117/#128/#130 are still in
+place on current `main`; the residual 8.6% kernel-level `ucopy_bf16` is the
+sum of the un-cached layout transforms in sites 1–7.)
+
+### Combined math-ceiling
+
+Sum of un-addressed, un-attempted, in-hot-path sites (1 + 2 + 3 + 4):
+`1.8% + 3.4% + 0.8% + 2.0% = 8.0%` of decode wall-clock time. At a generous
+1.5× local speedup applied to **all four sites simultaneously**:
+
+```
+combined contribution = 0.080 · (1 − 1/1.5) = 0.027
+```
+
+Even **fully eliminating every un-addressed site at infinite local speedup**:
+
+```
+combined contribution = 0.080 · (1 − 1/∞) = 0.080
+```
+
+Both are below the project's 0.05 (i.e. ≥1.05×) decode-speedup queue floor.
+The "infinite" case is also unrealistic — `ucopy_bf16` is memory-bound, not
+launch-bound, so the local speedup ceiling is set by HBM bandwidth, not by
+launch dispatch. Under CUDA graph replay (production decode path), launch
+amortization further compresses the achievable win toward the conservative
+end of this range. The same lesson applies as in #141, #173, #176, and #164.
+
+Sites 5 and 6 are also above the floor on paper (14.7% + 17.6% = 32.3%), but
+they have already been attempted (#173 opt-in null median 1.0093×; #141
+closed null). They are listed for completeness, not as queueable targets.
+
+### Why "consolidating call sites" does not help
+
+The `ucopy_bf16` kernel total (8.6% / 4164 invocations) looks consolidatable
+but in fact splits cleanly by tensor shape and dtype across the seven hot-path
+sites above. The four un-addressed sites (1, 2, 3, 4) operate on different
+ranks ([B,T,qkv_dim] vs [B,T,nv,dk] vs [B,nv,T,*]) and cannot share a fused
+kernel: each one is a layout transform that exists because the *next* kernel
+in the chain (`causal_conv1d_update`, the GQA matmul, the chunkwise GDN
+recurrence) requires that specific stride pattern. Removing the layout
+transform requires changing the downstream kernel's input contract — which
+is exactly what PR #128 and PR #130 already did for the projection weights
+(by caching the pre-transposed weight tensor at load time so the per-step
+transpose disappears).
+
+There is no equivalent "cache it at load time" trick available for sites 1–4
+because they operate on per-step *activations*, not per-load *weights*. An
+`ucopy_bf16`-eliminating fix at site 2 (head_expand) would need to be a
+custom CUDA matmul kernel that accepts broadcast-strided K/V inputs — which
+is the same class of work as #100 (fused paged decode FA2 hot path), and at
+3.4% region-share it does not clear the floor.
+
+### Recommendation
+
+This audit closes the post-#210 PROFILING.md follow-up #1
+(`ucopy_bf16` audit). Proceed with the post-#210 follow-up #2 instead:
+
+- **KV cache FP8 (`KILN_KV_CACHE_FP8=1`)** is the qualified next slice. It
+  is already wired (`kiln-server/src/config.rs`); needs a correctness +
+  quality benchmark, not a fusion. Distinct win category from the
+  decode-kernel work, not gated by the math-ceiling floor (context-length
+  is a product feature, not a decode-speed metric).
+
+The post-#210 follow-up #3 (MLP gate/up Marlin merge) remains marked "needs
+further math" — needs a profile that separates activation-load time from
+GEMM time on the MLP trio before pod $ can be queued.
+
+### Marlin BF16 residency cleanup — not a `ucopy_bf16` lever
+
+PR #206 already dropped the redundant BF16 `*_proj_t` tensors after Marlin
+packing, reclaiming the +1.3 GB VRAM that the post-#166 baseline reported.
+There is no further BF16-residency-related `ucopy_bf16` work pending — the
+remaining decode-path BF16 weight tensors (GDN `*_t` projections, attention
+`*_t` projections kept around for non-Marlin builds, and embeddings) are
+either consumed by `broadcast_matmul` directly (no `ucopy_bf16` emitted) or
+gated on `*_marlin.is_some()` to skip the BF16 path entirely.
+
+### Artifacts
+
+This is a doc-only PR. No bench was run; no pod was acquired. Total compute
+cost: $0. The audit relied entirely on the existing post-#210 profile
+(`profiling-artifacts/post210_*.csv`) and a source read of
+`crates/kiln-model/src/{forward,marlin_proj,lora_loader}.rs` at commit
+c480886.
+
+
 ## Phase 6 — Post-PR #210 decode profile (2026-04-20)
 
 Fresh nsys capture on current `main` after the post-#166 cluster of Marlin /
