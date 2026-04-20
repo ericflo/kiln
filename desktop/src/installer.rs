@@ -156,10 +156,24 @@ pub struct InstallStagedUpdateFailed {
 /// `None` when no prebuilt release exists for this platform. The suffix
 /// matches the naming convention in `.github/workflows/server-release.yml`
 /// (e.g. `aarch64-apple-darwin-metal`).
+///
+/// The CUDA 12.4 suffix on Linux/Windows isn't the Rust target triple —
+/// it's the triple plus a `-cuda124` feature tag that the release
+/// workflow bakes into the archive filename so the desktop app can tell
+/// a CUDA 12.4 build apart from a future CUDA 13 build without a
+/// manifest lookup.
 pub fn current_target() -> Option<&'static str> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         return Some("aarch64-apple-darwin-metal");
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Some("x86_64-unknown-linux-gnu-cuda124");
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return Some("x86_64-pc-windows-msvc-cuda124");
     }
     #[allow(unreachable_code)]
     None
@@ -1361,12 +1375,12 @@ pub async fn install_staged_update(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_binary_path, cleanup_bak, extract_tarball_to,
+        backup_binary_path, cleanup_bak, current_target, extract_tarball_to,
         extracted_new_binary_path, installed_binary_path, is_update_available,
         parse_kiln_version_output, release_archive_ext, release_asset_name,
         release_download_url, rollback_to_bak, staging_tarball_path,
-        swap_new_binary_into_place, verify_sha256, BACKUP_BINARY_NAME,
-        NEW_BINARY_NAME, UPDATE_STAGING_DIR,
+        supports_auto_install, swap_new_binary_into_place, verify_sha256,
+        BACKUP_BINARY_NAME, NEW_BINARY_NAME, UPDATE_STAGING_DIR,
     };
     use std::io::Write;
     use std::path::PathBuf;
@@ -1434,6 +1448,34 @@ mod tests {
              kiln-1.0.0-x86_64-unknown-linux-gnu-cuda124.tar.gz"
                 .replace(' ', "")
         );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn current_target_on_macos_aarch64_is_metal() {
+        assert_eq!(current_target(), Some("aarch64-apple-darwin-metal"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn current_target_on_linux_x86_64_is_cuda124() {
+        assert_eq!(current_target(), Some("x86_64-unknown-linux-gnu-cuda124"));
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn current_target_on_windows_x86_64_is_cuda124() {
+        assert_eq!(current_target(), Some("x86_64-pc-windows-msvc-cuda124"));
+    }
+
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+    ))]
+    #[test]
+    fn supports_auto_install_on_supported_platforms() {
+        assert!(supports_auto_install());
     }
 
     #[test]
