@@ -58,7 +58,67 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,prefix=sha-
 
-      - name: Build and push
+      - name: Build (load locally, no push) — smoke-test stage
+        # First build pass: load the image into the local docker daemon so we
+        # can `docker run` it for runtime checks BEFORE publishing. The second
+        # pass (below) reuses the GHA cache and pushes — near-instant because
+        # every layer is cache-hit.
+        id: build_local
+        uses: docker/build-push-action@v5
+        with:
+          context: deploy/runpod
+          load: true
+          push: false
+          tags: kiln-runpod-smoketest:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+      - name: Runtime smoke test — kiln-heartbeat must appear within 60s
+        # Phase A pod-wedge watchdog: launch the freshly-built image, wait
+        # ~40s for the first heartbeat write, and assert the file exists with
+        # a fresh `timestamp_iso:` value. If this fails the publish step is
+        # skipped — protects RunPod pods from a broken heartbeat regression.
+        run: |
+          set -euo pipefail
+          CID=$(docker run -d --rm kiln-runpod-smoketest:latest)
+          trap 'docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+          # Heartbeat writes every 30s; wait 40s for the first cycle.
+          sleep 40
+          if ! docker exec "$CID" test -f /workspace/heartbeat.txt; then
+              echo "FAIL: /workspace/heartbeat.txt missing after 40s" >&2
+              echo "--- /tmp/kiln-heartbeat.stderr (if any) ---" >&2
+              docker exec "$CID" sh -c 'cat /tmp/kiln-heartbeat.stderr 2>/dev/null || echo "(no stderr file)"' >&2
+              echo "--- container processes ---" >&2
+              docker exec "$CID" ps -ef >&2 || true
+              exit 1
+          fi
+          HB="$(docker exec "$CID" cat /workspace/heartbeat.txt)"
+          echo "--- heartbeat.txt ---"
+          echo "$HB"
+          echo "---"
+          if ! echo "$HB" | grep -q '^timestamp_iso:'; then
+              echo "FAIL: heartbeat missing 'timestamp_iso:' line" >&2
+              exit 1
+          fi
+          # Verify the timestamp is fresh (within 60s of now).
+          TS="$(echo "$HB" | awk -F': ' '/^timestamp_iso:/ {print $2; exit}')"
+          HB_EPOCH="$(date -u -d "$TS" +%s 2>/dev/null || echo 0)"
+          NOW_EPOCH="$(date -u +%s)"
+          AGE=$(( NOW_EPOCH - HB_EPOCH ))
+          if [ "$HB_EPOCH" -le 0 ] || [ "$AGE" -lt 0 ] || [ "$AGE" -gt 60 ]; then
+              echo "FAIL: heartbeat timestamp age ${AGE}s outside 0-60s window (parsed=${HB_EPOCH}, now=${NOW_EPOCH})" >&2
+              exit 1
+          fi
+          # Spot-check the contract keys Phase B parsers depend on.
+          for key in uptime_s load_1m gpu0_util_pct workspace_target_mtime build_logs; do
+              echo "$HB" | grep -q "^${key}:" \
+                  || { echo "FAIL: heartbeat missing required key '${key}:'" >&2; exit 1; }
+          done
+          echo "OK: kiln-heartbeat live; timestamp ${AGE}s fresh; all contract keys present"
+
+      - name: Build and push (uses cache from smoke-test stage)
         id: build
         uses: docker/build-push-action@v5
         with:

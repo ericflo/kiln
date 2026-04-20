@@ -123,6 +123,15 @@ RUN chmod +x /etc/profile.d/kiln-motd.sh
 COPY kiln-setup.sh /usr/local/bin/kiln-setup
 RUN chmod +x /usr/local/bin/kiln-setup
 
+# --- kiln-heartbeat: pod-wedge watchdog (Phase A) ---
+# Writes /workspace/heartbeat.txt atomically every 30s with GPU util, load,
+# top procs, build-tree mtime, and build log sizes. Started by entrypoint.sh
+# before the sshd exec; orchestrator-side watchdog (Phase B) parses the file
+# to distinguish wedged sshd from genuinely-working workload. Output schema
+# is an API contract — see deploy/runpod/kiln-heartbeat.sh for the keys.
+COPY kiln-heartbeat.sh /usr/local/bin/kiln-heartbeat
+RUN chmod +x /usr/local/bin/kiln-heartbeat
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
@@ -136,7 +145,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 #      missing PATH, missing RUSTUP_HOME/CARGO_HOME (rustup default won't
 #      resolve), etc.
 RUN set -e; \
-    TOOLS="nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3"; \
+    TOOLS="nvcc rustc cargo cargo-nextest sccache nsys gh git curl jq cmake ninja protoc clang rg tmux b2 huggingface-cli python3 kiln-heartbeat"; \
     for bin in $TOOLS; do \
         if ! command -v "$bin" >/dev/null 2>&1; then \
             echo "FAIL (interactive env): '$bin' not on PATH" >&2; exit 1; \
