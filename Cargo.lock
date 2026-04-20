@@ -1842,6 +1842,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-flce-kernel"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "tracing",
+]
+
+[[package]]
 name = "kiln-gdn-kernel"
 version = "0.1.2"
 dependencies = [
@@ -1951,6 +1960,7 @@ dependencies = [
  "candle-nn",
  "chrono",
  "kiln-core",
+ "kiln-flce-kernel",
  "kiln-model",
  "safetensors 0.5.3",
  "serde",

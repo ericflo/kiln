@@ -1,0 +1,16 @@
+[package]
+name = "kiln-flce-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fused Linear Cross-Entropy (FLCE) — chunked-vocab loss that never materializes the [T, V] logits tensor. Phase 10."
+
+[dependencies]
+candle-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+cuda = ["candle-core/cuda"]

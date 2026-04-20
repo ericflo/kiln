@@ -13,8 +13,8 @@ use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
-    model_forward, model_forward_embed, model_forward_head, model_forward_segment,
-    GpuWeights, LinearAttentionState,
+    model_forward, model_forward_embed, model_forward_final_norm, model_forward_head,
+    model_forward_no_head, model_forward_segment, GpuWeights, LinearAttentionState,
 };
 use kiln_model::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights,
@@ -976,6 +976,77 @@ fn cross_entropy_loss(
     Ok(loss)
 }
 
+/// Returns true when the FLCE fused-linear cross-entropy path should be used.
+/// Kill switch: set `KILN_DISABLE_FLCE=1` to force the legacy
+/// `cross_entropy_loss` path for parity testing.
+fn flce_enabled() -> bool {
+    std::env::var("KILN_DISABLE_FLCE")
+        .map(|v| v.is_empty() || v == "0")
+        .unwrap_or(true)
+}
+
+/// Fused linear cross-entropy loss.
+///
+/// Equivalent to `cross_entropy_loss(logits, ...)` where
+/// `logits = normed_hidden @ embed_tokens.T`, but never materializes the
+/// `[T_active, V]` logits tensor — the LM head matmul is fused with the
+/// softmax+NLL reduction inside `kiln-flce-kernel`.
+///
+/// `normed_hidden`: `[1, seq_len, hidden_size]` bf16 — output of
+/// `model_forward_no_head` (or `model_forward_final_norm` applied to the
+/// checkpointed path's pre-head hidden).
+fn cross_entropy_loss_flce(
+    normed_hidden: &Tensor,
+    weights: &GpuWeights,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    device: &Device,
+) -> Result<Tensor> {
+    let seq_len = input_ids.len();
+
+    // Squeeze batch dimension: [seq_len, hidden_size]
+    let hidden = normed_hidden.squeeze(0)?;
+
+    // Shift for next-token prediction: predict token[i+1] from hidden[i]
+    let shift_hidden = hidden.narrow(0, 0, seq_len - 1)?;
+    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
+    let shift_mask: Vec<bool> = label_mask[1..].to_vec();
+
+    let active_positions: Vec<usize> = shift_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i) } else { None })
+        .collect();
+
+    if active_positions.is_empty() {
+        return Tensor::new(0.0f32, device).map_err(Into::into);
+    }
+
+    let indices = Tensor::new(
+        active_positions.iter().map(|&i| i as u32).collect::<Vec<_>>().as_slice(),
+        device,
+    )?;
+    let active_hidden = shift_hidden.index_select(&indices, 0)?; // [N, H] bf16
+
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| shift_labels[i])
+        .collect();
+    let labels_tensor = Tensor::new(active_labels.as_slice(), device)?
+        .to_dtype(DType::U32)?;
+
+    // `embed_tokens` is `[V, H]` bf16 — directly usable as FLCE's weight arg.
+    // `embed_tokens_t` (pre-transposed for the classic matmul path) is NOT what
+    // FLCE wants.
+    kiln_flce_kernel::flce_cross_entropy_loss_mean(
+        &active_hidden,
+        &weights.embed_tokens,
+        &labels_tensor,
+        0, // default chunk size
+    )
+    .map_err(Into::into)
+}
+
 /// SGD update: param = param - lr * grad
 fn sgd_step(
     params: &TrainableLoraParams,
@@ -1202,11 +1273,16 @@ fn checkpointed_forward_backward(
             )?;
         }
 
-        // LM head
-        let logits = model_forward_head(&hidden, weights, model_config)?;
-
-        // Loss (only on assistant tokens)
-        let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
+        // LM head + loss. FLCE fuses matmul + softmax + NLL into one reduction
+        // that never materializes [T_active, V] logits. Falls back to the
+        // legacy path if `KILN_DISABLE_FLCE` is set.
+        let loss = if flce_enabled() {
+            let normed = model_forward_final_norm(&hidden, weights, model_config)?;
+            cross_entropy_loss_flce(&normed, weights, input_ids, label_mask, device)?
+        } else {
+            let logits = model_forward_head(&hidden, weights, model_config)?;
+            cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        };
         let loss_val = loss.to_scalar::<f32>()? as f64;
         total_loss += loss_val;
 
@@ -1234,17 +1310,29 @@ fn standard_forward_backward(
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
-    let logits = model_forward(
-        backend,
-        input_ids,
-        weights,
-        model_config,
-        None,
-        Some(&mut linear_state),
-        Some(&lora_weights),
-    ).context("training forward pass")?;
-
-    let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
+    let loss = if flce_enabled() {
+        let normed = model_forward_no_head(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            None,
+            Some(&mut linear_state),
+            Some(&lora_weights),
+        ).context("training forward pass (no head)")?;
+        cross_entropy_loss_flce(&normed, weights, input_ids, label_mask, device)?
+    } else {
+        let logits = model_forward(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            None,
+            Some(&mut linear_state),
+            Some(&lora_weights),
+        ).context("training forward pass")?;
+        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+    };
     let loss_val = loss.to_scalar::<f32>()? as f64;
     let grads = loss.backward().context("backward pass")?;
 
@@ -1577,6 +1665,88 @@ mod tests {
         assert!((loss_val - 1.50).abs() < 0.1, "loss = {loss_val}");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_cross_entropy_loss_flce_matches_legacy() -> Result<()> {
+        // Fake GpuWeights with only the fields the FLCE helper touches
+        // (`embed_tokens`). Build a small [V, H] table and a matching
+        // [1, T, H] hidden state, then compare FLCE loss against the
+        // classic `logits = hidden @ embed_tokens.T; cross_entropy_loss(logits)` path.
+        let device = Device::Cpu;
+        let h = 48usize;
+        let v = 256usize;
+        let seq_len = 12usize;
+
+        let hidden_f32 = Tensor::randn(0.0f32, 0.02, (1, seq_len, h), &device)?;
+        let hidden_bf16 = hidden_f32.to_dtype(DType::BF16)?;
+        let embed = Tensor::randn(0.0f32, 0.02, (v, h), &device)?.to_dtype(DType::BF16)?;
+        let embed_t = embed.t()?.contiguous()?;
+
+        // Build a minimal GpuWeights by reusing `tiny_weights` shape isn't
+        // necessary — we call the inner FLCE helper directly to avoid the
+        // `weights.final_norm` path.
+        let input_ids: Vec<u32> = (0..seq_len).map(|i| ((i * 7) % v) as u32).collect();
+        let mut label_mask = vec![true; seq_len];
+        // Leave position 0 as a padding-style position that still gets shifted in.
+        label_mask[0] = false;
+
+        // Legacy: compute logits explicitly, run cross_entropy_loss.
+        let logits_bf16 = hidden_bf16.broadcast_matmul(&embed_t)?;
+        let legacy_loss = cross_entropy_loss(&logits_bf16, &input_ids, &label_mask, &device)?
+            .to_scalar::<f32>()?;
+
+        // FLCE: mimic `cross_entropy_loss_flce` but substitute `embed` directly.
+        let hidden_sq = hidden_bf16.squeeze(0)?;
+        let shift_hidden = hidden_sq.narrow(0, 0, seq_len - 1)?;
+        let shift_labels: Vec<u32> = input_ids[1..].to_vec();
+        let shift_mask: Vec<bool> = label_mask[1..].to_vec();
+        let active: Vec<usize> = shift_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m { Some(i) } else { None })
+            .collect();
+        let indices = Tensor::new(
+            active.iter().map(|&i| i as u32).collect::<Vec<_>>().as_slice(),
+            &device,
+        )?;
+        let active_hidden = shift_hidden.index_select(&indices, 0)?;
+        let active_labels: Vec<u32> = active.iter().map(|&i| shift_labels[i]).collect();
+        let labels_t = Tensor::new(active_labels.as_slice(), &device)?.to_dtype(DType::U32)?;
+
+        let flce_loss = kiln_flce_kernel::flce_cross_entropy_loss_mean(
+            &active_hidden,
+            &embed,
+            &labels_t,
+            64,
+        )?
+        .to_scalar::<f32>()?;
+
+        assert!(
+            (legacy_loss - flce_loss).abs() < 1e-3,
+            "legacy={legacy_loss} flce={flce_loss}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_flce_enabled_kill_switch() {
+        // Safe-ish — these tests don't run in parallel with training code that
+        // reads the var. Reset to the absent state at the end.
+        // SAFETY: test thread owns env mutation; no other reader in this test.
+        unsafe { std::env::remove_var("KILN_DISABLE_FLCE") };
+        assert!(flce_enabled(), "default should enable FLCE");
+
+        unsafe { std::env::set_var("KILN_DISABLE_FLCE", "1") };
+        assert!(!flce_enabled(), "KILN_DISABLE_FLCE=1 should disable");
+
+        unsafe { std::env::set_var("KILN_DISABLE_FLCE", "0") };
+        assert!(flce_enabled(), "KILN_DISABLE_FLCE=0 should enable");
+
+        unsafe { std::env::set_var("KILN_DISABLE_FLCE", "") };
+        assert!(flce_enabled(), "empty KILN_DISABLE_FLCE should enable");
+
+        unsafe { std::env::remove_var("KILN_DISABLE_FLCE") };
     }
 
     #[test]

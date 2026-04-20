@@ -2881,6 +2881,110 @@ pub fn model_forward_head(
     Ok(logits)
 }
 
+/// Apply final RMSNorm only, without the LM head matmul.
+///
+/// Used by the FLCE training path, which fuses the matmul with the
+/// cross-entropy reduction to avoid materializing the `[1, seq_len, vocab_size]`
+/// logits tensor. See `kiln-flce-kernel`.
+pub fn model_forward_final_norm(
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)
+}
+
+/// Full model forward pass that returns post-final-RMSNorm hidden states
+/// instead of logits. Mirrors [`model_forward`] but skips the LM head matmul.
+///
+/// Used by the FLCE training path in `standard_forward_backward` so the loss
+/// kernel can fuse the LM head matmul with the cross-entropy reduction.
+///
+/// Returns `[1, seq_len, hidden_size]` bf16.
+pub fn model_forward_no_head(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    mut kv_cache: Option<&mut KvCache>,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let seq_len = token_ids.len();
+
+    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+    hidden = hidden.unsqueeze(0)?;
+
+    let offset = kv_cache.as_ref().map_or(0, |c| c.seq_len());
+    let positions: Vec<u32> = (offset..offset + seq_len).map(|p| p as u32).collect();
+
+    let mut full_attn_idx: usize = 0;
+    let mut linear_attn_idx: usize = 0;
+    for (i, layer) in weights.layers.iter().enumerate() {
+        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
+            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                let cache_ref = kv_cache.as_mut().map(|c| &mut **c);
+                hidden = transformer_block(
+                    backend,
+                    &hidden,
+                    layer,
+                    config,
+                    &positions,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.rotary_dim(),
+                    &weights.rotary_inv_freq,
+                    config.rms_norm_eps,
+                    cache_ref,
+                    full_attn_idx,
+                    layer_lora,
+                )
+                .with_context(|| format!("transformer block {i} (full attention)"))?;
+                full_attn_idx += 1;
+            }
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
+                let attn_out = gated_deltanet_forward(
+                    backend,
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                )
+                .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                };
+                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + ffn_out)?
+                };
+                linear_attn_idx += 1;
+            }
+        }
+    }
+
+    // Final RMSNorm only — caller fuses the LM head matmul with the loss.
+    let hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+    Ok(hidden)
+}
+
 /// Full model forward pass using paged KV cache.
 ///
 /// Same as [`model_forward`] but uses a [`PagedKvCache`] and [`BlockTable`]
