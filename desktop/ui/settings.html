@@ -80,6 +80,33 @@
         cursor: pointer;
       }
       button.browse:hover { background: #343a46; }
+      .update-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 0 2px 0;
+        flex-wrap: wrap;
+      }
+      .update-status {
+        font-size: 12px;
+        color: #a8aeb8;
+        line-height: 1.35;
+      }
+      .update-status.checking { color: #a8aeb8; }
+      .update-status.up-to-date { color: #7fbf7f; }
+      .update-status.available { color: #f0b080; }
+      .update-status.error { color: #f08080; }
+      .update-status .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: #2a2f3a;
+        color: #e6e6e6;
+        font-size: 11px;
+        margin-left: 4px;
+      }
+      .update-status.available .badge { background: #5a3f1a; color: #f6d3a6; }
+      .update-status.up-to-date .badge { background: #1f3a22; color: #b7e3b9; }
       .actions {
         display: flex;
         gap: 8px;
@@ -268,6 +295,10 @@
           <span class="hint">Leave blank to use kiln on PATH. Otherwise pick the kiln executable.</span>
           <span class="path-warning" id="warn_kiln_binary"></span>
         </label>
+        <div class="update-row">
+          <button type="button" class="browse" id="check_for_kiln_update">Check for Updates</button>
+          <span class="update-status" id="kiln_update_status"></span>
+        </div>
         <label class="row"><span class="name">Model path</span>
           <span class="path-row">
             <input type="text" id="model_path" placeholder="/path/to/model" />
@@ -918,6 +949,64 @@
       invoke("get_app_version").then(v => {
         document.getElementById("app-version").textContent = v;
       }).catch(() => {});
+
+      // ---------- Check for kiln binary updates (detection only) ----------
+      const kilnUpdateBtn = document.getElementById("check_for_kiln_update");
+      const kilnUpdateStatusEl = document.getElementById("kiln_update_status");
+      let kilnUpdateChecking = false;
+
+      function setKilnUpdateStatus(kind, html) {
+        kilnUpdateStatusEl.className = "update-status" + (kind ? " " + kind : "");
+        kilnUpdateStatusEl.innerHTML = html;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        }[c]));
+      }
+
+      async function checkForKilnUpdate() {
+        if (kilnUpdateChecking) return;
+        kilnUpdateChecking = true;
+        kilnUpdateBtn.disabled = true;
+        setKilnUpdateStatus("checking", "Checking…");
+        try {
+          const r = await invoke("check_for_kiln_update");
+          if (!r.platform_supported) {
+            setKilnUpdateStatus("", "Not available on this platform");
+            return;
+          }
+          const current = r.current ? escapeHtml(r.current) : "unknown";
+          if (!r.latest) {
+            setKilnUpdateStatus(
+              "error",
+              "Could not reach GitHub releases. Current: " + current + "."
+            );
+            return;
+          }
+          const latest = escapeHtml(r.latest);
+          if (r.update_available) {
+            setKilnUpdateStatus(
+              "available",
+              "Current " + current + " → latest " + latest +
+                ' <span class="badge">Update available</span>'
+            );
+          } else {
+            setKilnUpdateStatus(
+              "up-to-date",
+              "Current " + current + " <span class=\"badge\">Up to date</span>"
+            );
+          }
+        } catch (e) {
+          setKilnUpdateStatus("error", "Check failed: " + escapeHtml(e));
+        } finally {
+          kilnUpdateChecking = false;
+          kilnUpdateBtn.disabled = false;
+        }
+      }
+      kilnUpdateBtn.addEventListener("click", checkForKilnUpdate);
+
       load();
     </script>
   </body>

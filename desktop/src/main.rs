@@ -350,6 +350,58 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateCheckResult, String> 
     }
 }
 
+#[derive(serde::Serialize)]
+struct KilnUpdateCheckResult {
+    current: Option<String>,
+    latest: Option<String>,
+    update_available: bool,
+    platform_supported: bool,
+}
+
+/// Detection-only check for a newer kiln binary release. Looks up the
+/// currently-installed version by invoking `kiln --version`, queries the
+/// latest `kiln-v*` GitHub release for this platform, and compares via
+/// semver. No download or swap here — that lands in slice 2 of
+/// `desktop/docs/binary-update.md`.
+#[tauri::command]
+async fn check_for_kiln_update(
+    state: State<'_, SettingsState>,
+) -> Result<KilnUpdateCheckResult, String> {
+    let configured = {
+        let s = state.read().await;
+        s.kiln_binary
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("kiln"))
+    };
+    let current = match installer::resolve_binary(&configured) {
+        Some(p) => installer::current_kiln_version(&p).await,
+        None => None,
+    };
+
+    let platform_supported = installer::supports_auto_install();
+    let latest = if platform_supported {
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("kiln-desktop/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| format!("build reqwest client: {}", e))?;
+        installer::discover_latest_version(&client).await
+    } else {
+        None
+    };
+
+    let update_available = match &latest {
+        Some(l) => installer::is_update_available(current.as_deref(), l),
+        None => false,
+    };
+    Ok(KilnUpdateCheckResult {
+        current,
+        latest,
+        update_available,
+        platform_supported,
+    })
+}
+
 /// Re-check, then download and install the available update, then restart the
 /// app. We re-check rather than caching an `Update` handle because Tauri
 /// commands are stateless and the small race window is acceptable.
@@ -655,6 +707,7 @@ fn main() {
             get_diagnostic_info,
             check_for_updates,
             install_update,
+            check_for_kiln_update,
             get_binary_status,
             download_kiln_server,
             cancel_kiln_download,
