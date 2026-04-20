@@ -330,7 +330,7 @@
           <span class="update-status" id="kiln_update_status"></span>
           <button type="button" class="browse hidden" id="download_kiln_update">Download Update</button>
           <button type="button" class="browse hidden" id="extract_kiln_update">Extract &amp; Verify</button>
-          <button type="button" class="browse hidden" id="install_kiln_update" disabled title="Atomic swap lands in updater slice 3b">Install</button>
+          <button type="button" class="browse hidden" id="install_kiln_update" disabled>Install</button>
           <div class="update-download hidden" id="kiln_update_download">
             <div class="update-download-bar"><div class="update-download-fill" id="kiln_update_download_fill"></div></div>
             <div class="update-download-line" id="kiln_update_download_line"></div>
@@ -1006,6 +1006,7 @@
       let kilnUpdateChecking = false;
       let kilnUpdateDownloading = false;
       let kilnUpdateExtracting = false;
+      let kilnUpdateInstalling = false;
       let kilnUpdateLatest = null;
       let kilnUpdateUnlistenFns = [];
 
@@ -1093,8 +1094,8 @@
 
       // ---------- Download an available kiln update (slice 2) ----------
       // Streams the release tarball to <app_data_dir>/kiln-updates/. Does NOT
-      // extract or swap the running binary — the Install button is left
-      // disabled until updater slice 3 lands the atomic-swap pipeline.
+      // extract or swap the running binary — that is the Extract & Verify
+      // and Install steps.
       async function startKilnUpdateDownload() {
         if (kilnUpdateDownloading || !kilnUpdateLatest) return;
         const version = kilnUpdateLatest;
@@ -1150,13 +1151,14 @@
           kilnUpdateDownloading = false;
           kilnUpdateDownloadBtn.disabled = true;
           kilnUpdateDownloadBtn.textContent = "Downloaded";
-          // Slice 3a: offer Extract & Verify. The Install button stays
-          // disabled — atomic swap lands in updater slice 3b.
+          // Slice 3a: offer Extract & Verify next. Install is wired in
+          // slice 4 and stays hidden until extract succeeds.
           kilnUpdateExtractBtn.classList.remove("hidden");
           kilnUpdateExtractBtn.disabled = false;
           kilnUpdateExtractBtn.textContent = "Extract & Verify";
-          kilnUpdateInstallBtn.classList.remove("hidden");
+          kilnUpdateInstallBtn.classList.add("hidden");
           kilnUpdateInstallBtn.disabled = true;
+          kilnUpdateInstallBtn.textContent = "Install";
           teardownKilnUpdateListeners();
         });
         const unFailed = await event.listen("download_update_failed", (e) => {
@@ -1191,8 +1193,8 @@
       // ---------- Extract & verify the staged update tarball (slice 3a) ----------
       // Verifies the staged tarball's sha256 against the release manifest,
       // then extracts the `kiln` binary to <app_data_dir>/bin/kiln.new. Does
-      // NOT swap bin/kiln, stop the supervisor, or restart — atomic swap
-      // lands in updater slice 3b.
+      // NOT swap bin/kiln, stop the supervisor, or restart — that is the
+      // Install button (atomic swap + health gate).
       async function startKilnUpdateExtract() {
         if (kilnUpdateExtracting || !kilnUpdateLatest) return;
         const version = kilnUpdateLatest;
@@ -1248,13 +1250,14 @@
             "success",
             "Extracted v" + version + " (" + formatBytes(p.bytes || 0) +
               ", sha256 OK) to " + (p.path || "(unknown)") +
-              ". Atomic swap lands in updater slice 3b."
+              ". Click Install to swap and restart kiln."
           );
           kilnUpdateExtracting = false;
           kilnUpdateExtractBtn.disabled = true;
           kilnUpdateExtractBtn.textContent = "Extracted";
           kilnUpdateInstallBtn.classList.remove("hidden");
-          kilnUpdateInstallBtn.disabled = true;
+          kilnUpdateInstallBtn.disabled = false;
+          kilnUpdateInstallBtn.textContent = "Install";
           teardownKilnUpdateListeners();
         });
         const unFailed = await event.listen("extract_update_failed", (e) => {
@@ -1294,6 +1297,82 @@
         }
       }
       kilnUpdateExtractBtn.addEventListener("click", startKilnUpdateExtract);
+
+      // ---------- Install the staged update (atomic swap + health gate) ----------
+      // Stops the supervisor, atomically swaps bin/kiln.new into bin/kiln
+      // (retaining the previous binary as bin/kiln.bak), restarts the
+      // supervisor, then polls /v1/health for up to 30s. On a green health
+      // response the .bak is cleaned up; on timeout the swap is rolled back
+      // to the previous binary so the user is never left on a broken kiln.
+      async function startKilnUpdateInstall() {
+        if (kilnUpdateInstalling || !kilnUpdateLatest) return;
+        const version = kilnUpdateLatest;
+        kilnUpdateInstalling = true;
+        kilnUpdateInstallBtn.disabled = true;
+        kilnUpdateInstallBtn.textContent = "Installing…";
+        kilnUpdateProgressWrap.classList.remove("hidden");
+        kilnUpdateProgressFill.style.background = "#2f66f0";
+        kilnUpdateProgressFill.style.width = "50%";
+        setKilnUpdateProgressLine(
+          "",
+          "Stopping kiln, swapping binary, restarting…"
+        );
+
+        const event = window.__TAURI__ && window.__TAURI__.event;
+        if (!event || typeof event.listen !== "function") {
+          setKilnUpdateProgressLine("error", "Tauri event API unavailable.");
+          kilnUpdateInstalling = false;
+          kilnUpdateInstallBtn.disabled = false;
+          kilnUpdateInstallBtn.textContent = "Install";
+          return;
+        }
+
+        await teardownKilnUpdateListeners();
+
+        const unDone = await event.listen("install_staged_update_done", (e) => {
+          const p = (e && e.payload) || {};
+          kilnUpdateProgressFill.style.width = "100%";
+          setKilnUpdateProgressLine(
+            "success",
+            "Installed v" + version + " at " + (p.path || "(unknown)") +
+              ". Kiln restarted."
+          );
+          kilnUpdateInstalling = false;
+          kilnUpdateInstallBtn.disabled = true;
+          kilnUpdateInstallBtn.textContent = "Installed";
+          teardownKilnUpdateListeners();
+        });
+        const unFailed = await event.listen("install_staged_update_failed", (e) => {
+          const p = (e && e.payload) || {};
+          const err = p.error || "Unknown error";
+          kilnUpdateProgressFill.style.background = "#3a2a2a";
+          setKilnUpdateProgressLine(
+            "error",
+            "Install failed: " + err + " Previous binary restored."
+          );
+          kilnUpdateInstalling = false;
+          kilnUpdateInstallBtn.disabled = false;
+          kilnUpdateInstallBtn.textContent = "Retry Install";
+          teardownKilnUpdateListeners();
+        });
+        kilnUpdateUnlistenFns = [unDone, unFailed];
+
+        try {
+          await invoke("install_staged_update");
+        } catch (err) {
+          kilnUpdateProgressFill.style.background = "#3a2a2a";
+          setKilnUpdateProgressLine(
+            "error",
+            "Install failed: " + escapeHtml(String(err)) +
+              " Previous binary restored."
+          );
+          kilnUpdateInstalling = false;
+          kilnUpdateInstallBtn.disabled = false;
+          kilnUpdateInstallBtn.textContent = "Retry Install";
+          await teardownKilnUpdateListeners();
+        }
+      }
+      kilnUpdateInstallBtn.addEventListener("click", startKilnUpdateInstall);
 
       load();
     </script>
