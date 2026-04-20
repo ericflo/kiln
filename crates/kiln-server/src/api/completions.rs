@@ -53,7 +53,40 @@ fn default_model() -> String {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
+    #[serde(deserialize_with = "deserialize_content")]
     pub content: String,
+}
+
+/// Accept `content` as either a plain string or an OpenAI-style array of
+/// content parts (`[{"type": "text", "text": "..."}, ...]`). Text parts are
+/// concatenated in order; non-text parts are ignored since kiln is text-only.
+fn deserialize_content<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Content {
+        Text(String),
+        Parts(Vec<serde_json::Value>),
+    }
+
+    match Content::deserialize(deserializer)? {
+        Content::Text(s) => Ok(s),
+        Content::Parts(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                let Some(obj) = part.as_object() else { continue };
+                let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if ty == "text" {
+                    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                        out.push_str(text);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 /// OpenAI-compatible chat completion response.
@@ -709,4 +742,54 @@ fn now_epoch() -> u64 {
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/v1/chat/completions", post(chat_completions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_request(json: &str) -> ChatCompletionRequest {
+        serde_json::from_str(json).expect("request should deserialize")
+    }
+
+    #[test]
+    fn content_accepts_plain_string() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+        );
+        assert_eq!(req.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn content_accepts_text_parts_array() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}]}]}"#,
+        );
+        assert_eq!(req.messages[0].content, "hello world");
+    }
+
+    #[test]
+    fn content_ignores_non_text_parts() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":[{"type":"text","text":"describe: "},{"type":"image_url","image_url":{"url":"https://example.com/a.png"}},{"type":"text","text":"done"}]}]}"#,
+        );
+        assert_eq!(req.messages[0].content, "describe: done");
+    }
+
+    #[test]
+    fn content_empty_array_is_empty_string() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"user","content":[]}]}"#,
+        );
+        assert_eq!(req.messages[0].content, "");
+    }
+
+    #[test]
+    fn content_mixed_messages_in_same_request() {
+        let req = parse_request(
+            r#"{"messages":[{"role":"system","content":"be nice"},{"role":"user","content":[{"type":"text","text":"hi"}]}]}"#,
+        );
+        assert_eq!(req.messages[0].content, "be nice");
+        assert_eq!(req.messages[1].content, "hi");
+    }
 }
