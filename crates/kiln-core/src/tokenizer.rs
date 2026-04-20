@@ -91,7 +91,10 @@ impl KilnTokenizer {
     /// Apply the chat template to format messages into a prompt string.
     ///
     /// If a Jinja2 template was set via [`with_chat_template`], renders it with
-    /// minijinja. Otherwise uses Qwen3's ChatML format as the default.
+    /// minijinja. Otherwise falls back to plain ChatML framing — a minimal
+    /// subset that omits Qwen3.5's XML `<function=...>` tool calls, `<think>`
+    /// reasoning, and `<tool_response>` handling. Load the model's real
+    /// `chat_template` via `with_chat_template` for production use.
     pub fn apply_chat_template(&self, messages: &[ChatMessage]) -> Result<String, TokenizerError> {
         match &self.chat_template {
             Some(template) => self.render_jinja_template(template, messages),
@@ -142,7 +145,10 @@ impl KilnTokenizer {
         .map_err(|e| TokenizerError::ChatTemplate(e.to_string()))
     }
 
-    /// Format messages using ChatML (the format used by Qwen3 and many other models).
+    /// Plain ChatML framing fallback: `<|im_start|>role\n...<|im_end|>\n`.
+    /// Qwen3.5's real template adds XML `<function=...>` tool calls, `<think>`
+    /// reasoning, and `<tool_response>` wrapping on top of this — none of
+    /// which is implemented here.
     fn apply_chatml(messages: &[ChatMessage]) -> String {
         let mut prompt = String::new();
         for msg in messages {
