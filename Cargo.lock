@@ -1842,6 +1842,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-flce-kernel"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+]
+
+[[package]]
 name = "kiln-gdn-kernel"
 version = "0.1.2"
 dependencies = [

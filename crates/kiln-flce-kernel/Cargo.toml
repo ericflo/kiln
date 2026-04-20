@@ -1,0 +1,14 @@
+[package]
+name = "kiln-flce-kernel"
+description = "Fused Linear Cross-Entropy (FLCE) — chunked cross-entropy over vocab without materializing the full [T, V] logits tensor. Phase A: pure-candle implementation; Phase B will replace the forward kernel with raw CUDA."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+candle-core = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+candle-nn = { workspace = true }
