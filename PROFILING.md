@@ -3261,3 +3261,64 @@ Deltas (B vs A medians):
 - Pod: `t0vmof6qkwostu` via lease `pod-016bb2e7c07be9a97ceb4a3b` (RunPod RTX A6000 on-demand, $0.49/hr, pool-leased).
 - Leased → all work done: ~30 minutes (reused warm pod from pool; zero cold-build time).
 - Spike cost: ~$0.25 (well under the $0.70 ceiling; $1.00 abort line was not approached).
+
+## Phase 7 decode re-bench: resolving amber from PR #231 — 2026-04-20
+
+**Outcome: median-of-5 interleaved A/B on the same warm A6000 pod / process lineage closes the amber. Arm A (monolithic) and Arm B (streaming) decode medians are 48.2 vs 48.1 tok/s — delta −0.21% (well inside the ±2% tolerance). The −4.6% gap reported in PR #231's 3-run regression sweep was ITL variance, not a streaming-path decode regression. No code or default flips from this re-bench; `KILN_STREAMING_PREFILL` stays default-off and `KILN_STREAMING_PREFILL_THRESHOLD` keeps its 32768 default.**
+
+### Protocol
+
+- Same warm pod / process lineage as the original GPU spike: pod `t0vmof6qkwostu` via lease `pod-016bb2e7c07be9a97ceb4a3b` (RunPod RTX A6000 on-demand, $0.49/hr). Reused the `target/release/kiln-bench` binary and Marlin pack cache produced by the PR #231 spike — controls for build-time / sccache / pack-cache drift that a fresh pod would reintroduce.
+- Interleaved A, B, A, B, … for 5 rounds (10 kiln-bench invocations total). Each invocation is a fresh process, but all share the same pre-warmed binary and packed-weight cache on the pod. Interleaving controls for slow process-age / thermal drift that pure-sequential (5A then 5B) would fold into the arm delta.
+- Both arms identical except for `KILN_STREAMING_PREFILL`:
+  - Arm A: `KILN_STREAMING_PREFILL=0 KILN_W4A16=1 ./kiln-bench --paged --prompt-tokens 8192 --max-output-tokens 128 --skip-training` (monolithic baseline).
+  - Arm B: `KILN_STREAMING_PREFILL=1` + same flags (streaming/tiled prefill). `streaming_prefill_enabled` in `crates/kiln-model/src/forward.rs` is a binary read of that env var; there is no active `KILN_STREAMING_PREFILL_THRESHOLD` env plumbing in the decode path — at `seq_len=8192` below the 32768 default threshold, `KILN_STREAMING_PREFILL=1` is what actually flips the path for this bench.
+- Reported numbers are the final `--- Latency (single request) ---` summary each run prints to stderr. kiln-bench's paged-latency measurement populates that summary when `--paged` is set, so the P50 / P99 ITL and decode tok/s are the paged-path measurements.
+
+### Results (5 rounds × 2 arms, same warm A6000 pod / process)
+
+| Round | Arm | prefill tok/s | decode tok/s | mean ITL ms | P50 ITL ms | P99 ITL ms | TTFT ms |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1 | A | 2540 | 47.7 | 21.0 | 20.8 | 23.2 | 3225.2 |
+| 1 | B | 2589 | 48.0 | 20.8 | 20.7 | 22.8 | 3163.2 |
+| 2 | A | 2542 | 47.9 | 20.9 | 20.7 | 22.9 | 3222.9 |
+| 2 | B | 2603 | 48.1 | 20.8 | 20.6 | 23.9 | 3146.7 |
+| 3 | A | 2559 | 49.7 | 20.1 | 19.8 | 22.9 | 3201.0 |
+| 3 | B | 2646 | 50.6 | 19.8 | 19.6 | 21.9 | 3096.0 |
+| 4 | A | 2523 | 50.2 | 19.9 | 19.7 | 22.4 | 3245.9 |
+| 4 | B | 2600 | 47.7 | 21.0 | 20.7 | 25.2 | 3150.4 |
+| 5 | A | 2444 | 48.2 | 20.7 | 20.6 | 23.8 | 3351.7 |
+| 5 | B | 2613 | 50.7 | 19.7 | 19.6 | 22.0 | 3134.4 |
+
+### Per-arm stats (n=5)
+
+| Metric | Arm A median | Arm A stddev (% of median) | Arm B median | Arm B stddev (% of median) |
+|---|---:|---:|---:|---:|
+| prefill tok/s | 2540.0 | 1.59% | **2603.0** | 0.75% |
+| decode tok/s | **48.2** | 2.10% | **48.1** | 2.78% |
+| mean ITL ms | 20.7 | 2.13% | 20.8 | 2.66% |
+| P50 ITL ms | 20.6 | 2.29% | 20.6 | 2.54% |
+| P99 ITL ms | 22.9 | 2.00% | 22.8 | 5.47% |
+
+Decode stddev is 2.1% (A) and 2.78% (B) of the median — both under the 3% variance guard from the task spec, so no additional rounds were triggered. Arm B's P99 ITL has a wider spread (5.47%) driven by round 4's 25.2 ms tail; that's isolated tail variance, not a systematic regression (median P99 is 22.8 ms, better than Arm A's 22.9 ms).
+
+### Decision (decode tok/s medians)
+
+- Arm A median: **48.2 tok/s**
+- Arm B median: **48.1 tok/s**
+- Delta: **−0.1 tok/s (−0.21%) vs Arm A** — well inside the ±2% tolerance.
+- Prefill medians: Arm B 2603 vs Arm A 2540 tok/s = **+2.5% prefill** in the streaming arm, consistent with the +1.5% prefill seen in the PR #231 spike.
+
+**Verdict: PR #231 amber is ITL variance. RESOLVED.** The streaming/tiled prefill path does not regress decode throughput at 8192p / 128d on A6000 once n≥5 rounds are collected on a warm process lineage. The −4.6% from the 3-run spike was inside the normal decode-tok/s noise floor (roughly 2–3% stddev on this workload/pod).
+
+### What this changes
+
+Nothing in shipped code: Phase 7 streaming remains opt-in (`KILN_STREAMING_PREFILL=0` by default), and `KILN_STREAMING_PREFILL_THRESHOLD` keeps its 32768 default. This re-bench only resolves the outstanding amber flag from the PR #231 write-up; no gating decision downstream is waiting on it.
+
+If a future planner considers flipping `KILN_STREAMING_PREFILL` on by default or lowering the threshold, the data point to anchor on is: on A6000 at 8192p / 128d with W4A16, the two paths are **statistically indistinguishable on decode** (−0.21% ≪ noise floor) and the streaming path is **+2.5% on prefill tok/s**. Any default flip still needs the ≥32k / OOM-risk arm reconsidered separately; this re-bench only covers the ≤32k amber.
+
+### Pod / cost notes (re-bench)
+
+- Same pod as the spike (`t0vmof6qkwostu`, lease `pod-016bb2e7c07be9a97ceb4a3b`) — warm, with the release binary and packed weights already resident. No rebuild.
+- 10 kiln-bench runs × ~6 min = ~60 minutes wall time. Pod at $0.49/hr → ~$0.49.
+- Total re-bench spend: ~$0.50 (well under the $1.50 ceiling for this task).
