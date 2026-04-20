@@ -196,6 +196,11 @@
       #model-path-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #model-path-pill.flash #model-path,
       #model-path-pill.flash-warn #model-path { color: inherit; }
+      #adapter-pill.copyable { cursor: pointer; }
+      #adapter-pill.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
+      #adapter-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
+      #adapter-pill.flash #adapter-name,
+      #adapter-pill.flash-warn #adapter-name { color: inherit; }
       #base-url.copyable { cursor: pointer; }
       #base-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
       #base-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
@@ -1307,7 +1312,14 @@
         } else {
           adapterNameEl.classList.remove("empty");
         }
-        adapterPill.title = tooltip;
+        const copyable = !isEmptyStyle && text !== "none";
+        if (copyable) {
+          adapterPill.classList.add("copyable");
+          adapterPill.title = `${tooltip} (click to copy)`;
+        } else {
+          adapterPill.classList.remove("copyable");
+          adapterPill.title = tooltip;
+        }
       }
 
       function clearAdapterDisplay() {
@@ -1601,6 +1613,37 @@
       }
 
       modelPathPill.addEventListener("click", copyModelPath);
+
+      let adapterPillResetTimer = null;
+      function flashAdapterPill(cls) {
+        if (adapterPillResetTimer) {
+          clearTimeout(adapterPillResetTimer);
+          adapterPillResetTimer = null;
+        }
+        adapterPill.classList.remove("flash", "flash-warn");
+        if (cls) adapterPill.classList.add(cls);
+        adapterPillResetTimer = setTimeout(() => {
+          adapterPill.classList.remove("flash", "flash-warn");
+          adapterPillResetTimer = null;
+        }, 1200);
+      }
+
+      async function copyAdapter() {
+        const text = adapterNameEl.textContent;
+        if (!text || text === "none" || text === ADAPTER_EMPTY_LABEL) {
+          flashAdapterPill("flash-warn");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(text);
+          flashAdapterPill("flash");
+        } catch (err) {
+          flashAdapterPill("flash-warn");
+          console.error("clipboard.writeText failed", err);
+        }
+      }
+
+      adapterPill.addEventListener("click", copyAdapter);
 
       const checkUpdatesBtn = document.getElementById("check-updates-btn");
       const CHECK_UPDATES_LABEL = "Check for Updates";
