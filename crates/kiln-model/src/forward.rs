@@ -3193,7 +3193,7 @@ pub fn model_forward_paged(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
-    let logits = model_forward_paged_inner(
+    let (logits, _hidden) = model_forward_paged_inner(
         backend,
         token_ids,
         weights,
@@ -3208,6 +3208,161 @@ pub fn model_forward_paged(
     )?;
     // `LmHeadMode::Full` always returns Some.
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
+}
+
+/// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
+///
+/// Same semantics as [`model_forward_paged`] (identical layer loop, RoPE,
+/// paged KV writes), but extracts the last token's hidden state BEFORE
+/// `final_norm` is applied. This is the `h_prev` input the native MTP head
+/// consumes for speculative decoding: see [`mtp_forward_step`].
+///
+/// Returns `(logits[1, seq_len, V], hidden_last[1, 1, H])`. Logits are
+/// returned per-position so MTP speculative verification can compare the
+/// draft token against position 0 (`logits[:, 0, :]` predicts what should
+/// follow the last committed token) and sample a bonus token from position
+/// `seq_len - 1` on full acceptance.
+pub fn model_forward_paged_with_last_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+) -> Result<(Tensor, Tensor)> {
+    let (logits, hidden) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+        LmHeadMode::FullWithLastHidden,
+    )?;
+    Ok((
+        logits.expect("LmHeadMode::FullWithLastHidden always produces logits"),
+        hidden.expect("LmHeadMode::FullWithLastHidden always produces hidden"),
+    ))
+}
+
+/// Single-step native MTP (Multi-Token Prediction) forward pass.
+///
+/// Implements the Qwen3-Next-style MTP head described in the vLLM reference
+/// (`qwen3_next_mtp.py`): given the previously generated token and the base
+/// model's pre-final-norm hidden state, project them through the MTP fusion
+/// layer and a single full-attention transformer block to produce logits for
+/// the NEXT token, plus an updated hidden state that can be fed back for
+/// multi-step drafting (when `num_nextn_predict_layers > 1`; Qwen3.5-4B ships
+/// `k=1` so drafts are exactly one token deep).
+///
+/// Fusion pipeline:
+///
+/// 1. `token_emb  = embed_tokens[draft_token_id]`   # [1, 1, H]
+/// 2. `norm_emb   = rms_norm(token_emb, pre_fc_norm_embedding)`
+/// 3. `norm_h     = rms_norm(h_prev,    pre_fc_norm_hidden)`
+/// 4. `fused      = concat([norm_emb, norm_h], dim=-1) @ fc_t`   # [1,1,2H]→[1,1,H]
+/// 5. `hidden     = transformer_block_paged(mtp_layer, fused, mtp_cache, mtp_pos)`
+/// 6. `logits     = rms_norm(hidden, final_layernorm) @ embed_tokens_t`  # tied head
+///
+/// Returns `(logits[1,1,V], new_hidden[1,1,H])`. `new_hidden` is the
+/// pre-final-norm output of the MTP transformer block and is the `h_prev`
+/// input for the next MTP step (unused when k=1).
+///
+/// ## KV cache discipline
+///
+/// The MTP layer maintains its own `PagedKvCache` with exactly ONE full-attn
+/// layer slot. `mtp_pos` is the absolute position at which to write this
+/// step's KV. Callers advance `mtp_pos` by +1 ONLY when the draft token is
+/// accepted; on rejection `mtp_pos` stays unchanged and the next call
+/// overwrites the just-written KV slot (the paged writes are idempotent at a
+/// given position, so rejection is implicit — no explicit rollback needed).
+///
+/// ## Marlin / LoRA
+///
+/// The MTP layer is NOT currently Marlin-packed (deferred to a follow-up PR —
+/// Marlin adds substantial pack latency at model load and the MTP layer is a
+/// small fraction of per-step cost). LoRA is not applied to MTP.
+#[allow(clippy::too_many_arguments)]
+pub fn mtp_forward_step(
+    backend: &dyn BackendRuntime,
+    draft_token_id: u32,
+    h_prev: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    mtp_cache: &mut PagedKvCache,
+    mtp_block_table: &BlockTable,
+    mtp_pos: usize,
+) -> Result<(Tensor, Tensor)> {
+    kiln_nvtx::range!(c"kiln/mtp/step");
+    let mtp = weights.mtp.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "mtp_forward_step called on GpuWeights without native MTP head (checkpoint missing num_nextn_predict_layers)"
+        )
+    })?;
+    let device = weights.embed_tokens.device();
+
+    // 1. Token embedding for the draft token. `embedding_lookup` returns
+    //    shape [1, H]; unsqueeze to [1, 1, H] to match transformer-block I/O.
+    let token_ids = [draft_token_id];
+    let token_emb = embedding_lookup(&token_ids, &weights.embed_tokens)?; // [1, H]
+    let token_emb = token_emb.unsqueeze(0)?; // [1, 1, H]
+
+    // 2-3. Dual RMSNorms. `h_prev` is [1, 1, H] pre-final-norm.
+    let norm_emb = {
+        kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_emb");
+        rms_norm(&token_emb, &mtp.pre_fc_norm_embedding, config.rms_norm_eps)?
+    };
+    let norm_h = {
+        kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_hidden");
+        rms_norm(h_prev, &mtp.pre_fc_norm_hidden, config.rms_norm_eps)?
+    };
+
+    // 4. Concat along the hidden dim and fuse: [1, 1, 2H] @ fc_t[2H, H] -> [1, 1, H]
+    let fused = {
+        kiln_nvtx::range!(c"kiln/mtp/fc");
+        let concat = Tensor::cat(&[&norm_emb, &norm_h], 2)?.contiguous()?;
+        concat.broadcast_matmul(&mtp.fc_t)?
+    };
+
+    // 5. Single full-attention transformer block with its own paged cache.
+    //    Build a one-element position tensor since MTP has its own position
+    //    space (distinct from the base model's) and is not CUDA-graph-captured.
+    let positions = Tensor::new(&[mtp_pos as f32][..], device)?;
+    let mtp_hidden = transformer_block_paged(
+        backend,
+        &fused,
+        &mtp.layer,
+        config,
+        &positions,
+        mtp_pos,
+        config.num_attention_heads,
+        config.num_kv_heads,
+        config.head_dim,
+        config.rotary_dim(),
+        &weights.rotary_inv_freq,
+        config.rms_norm_eps,
+        mtp_cache,
+        mtp_block_table,
+        /* full_attn_layer_idx = */ 0,
+        /* lora = */ None,
+    )
+    .context("mtp transformer block")?;
+
+    // 6. Final RMSNorm + weight-tied LM head (reuses base embed_tokens_t).
+    let logits = {
+        kiln_nvtx::range!(c"kiln/mtp/lm_head");
+        let normed = rms_norm(&mtp_hidden, &mtp.final_layernorm, config.rms_norm_eps)?;
+        normed.broadcast_matmul(&weights.embed_tokens_t)?
+    };
+    Ok((logits, mtp_hidden))
 }
 
 /// Controls the LM head behaviour at the end of a paged forward pass.
@@ -3229,6 +3384,12 @@ enum LmHeadMode {
     /// of `Full` because RMSNorm is per-position and the matmul reduces
     /// along `hidden_size` only.
     LastRowOnly,
+    /// Compute the LM head over every position AND return the last-row
+    /// pre-final-norm hidden state. Used by
+    /// [`model_forward_paged_with_last_hidden`] to surface per-position logits
+    /// for MTP speculative verification at position 0 (draft comparison) and
+    /// position 1 (bonus), plus `h_prev` for the next MTP step.
+    FullWithLastHidden,
     /// Skip RMSNorm + LM head entirely and return `None`. Used for non-final
     /// tiles where the caller throws away the logits.
     Skip,
@@ -3255,7 +3416,7 @@ fn model_forward_paged_inner(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
     lm_head_mode: LmHeadMode,
-) -> Result<Option<Tensor>> {
+) -> Result<(Option<Tensor>, Option<Tensor>)> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
 
@@ -3361,7 +3522,7 @@ fn model_forward_paged_inner(
                 hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
                 hidden.broadcast_matmul(&weights.embed_tokens_t)?
             };
-            Ok(Some(logits))
+            Ok((Some(logits), None))
         }
         LmHeadMode::LastRowOnly => {
             let logits = {
@@ -3370,9 +3531,26 @@ fn model_forward_paged_inner(
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
                 normed.broadcast_matmul(&weights.embed_tokens_t)?
             };
-            Ok(Some(logits))
+            Ok((Some(logits), None))
         }
-        LmHeadMode::Skip => Ok(None),
+        LmHeadMode::FullWithLastHidden => {
+            // Extract the last-row pre-final-norm hidden BEFORE normalising.
+            // MTP needs `h_prev` as the base model's output between the final
+            // transformer block and the final RMSNorm (matches vLLM's
+            // Qwen3-Next reference where `previous_hidden_states` is passed
+            // into the MTP head before `final_layernorm`). Logits are
+            // produced over every position so speculative verification can
+            // compare draft predictions at position 0 and sample a bonus at
+            // position 1 in a single pass.
+            let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
+            let logits = {
+                kiln_nvtx::range!(c"kiln/lm_head");
+                let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+                normed.broadcast_matmul(&weights.embed_tokens_t)?
+            };
+            Ok((Some(logits), Some(last_hidden)))
+        }
+        LmHeadMode::Skip => Ok((None, None)),
     }
 }
 
@@ -3469,7 +3647,7 @@ pub fn model_forward_paged_streaming_with(
         // `Option<&mut T>::as_deref_mut()` produces `Option<&mut T>` again.
         let state_for_tile: Option<&mut LinearAttentionState> = linear_state.as_deref_mut();
 
-        let tile_logits = model_forward_paged_inner(
+        let (tile_logits, _tile_hidden) = model_forward_paged_inner(
             backend,
             &token_ids[cursor..end],
             weights,
