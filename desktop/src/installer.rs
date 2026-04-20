@@ -949,6 +949,135 @@ pub async fn gpu_compat() -> GpuCompat {
     }
 }
 
+/// Parse `min_cuda: 12.4` (or `min_cuda: 12`) from release-notes body.
+/// Returns `Some((major, minor))` when the key is present and parseable,
+/// `None` when the key is absent, empty, or unparseable. A bare major
+/// (`min_cuda: 12`) is normalized to `(12, 0)`.
+///
+/// Mirrors [`parse_supported_sm`] for line-terminator handling: `gh
+/// release create --notes "..."` passes the string verbatim without
+/// escape-sequence processing, so bodies emitted by CI may contain
+/// literal `\n` (two characters) between fields rather than real
+/// newlines. Both forms are normalized before key scanning.
+pub fn parse_min_cuda(body: &str) -> Option<(u32, u32)> {
+    let normalized = body.replace("\\n", "\n");
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("min_cuda:") else {
+            continue;
+        };
+        let token = rest.trim();
+        if token.is_empty() {
+            return None;
+        }
+        return match token.split_once('.') {
+            Some((major_s, minor_s)) => {
+                let major: u32 = major_s.trim().parse().ok()?;
+                let minor: u32 = minor_s.trim().parse().ok()?;
+                Some((major, minor))
+            }
+            None => {
+                let major: u32 = token.parse().ok()?;
+                Some((major, 0))
+            }
+        };
+    }
+    None
+}
+
+/// Pick the minimum-CUDA requirement for a release from its notes body.
+/// Passes through to [`parse_min_cuda`]; returns `None` when no
+/// `min_cuda:` line is present so callers treat the release as
+/// CUDA-agnostic (no gate).
+pub fn min_cuda_for_release(body: Option<&str>) -> Option<(u32, u32)> {
+    body.and_then(parse_min_cuda)
+}
+
+/// Whether the local CUDA driver version `local` satisfies the release's
+/// `min_cuda:` requirement parsed from `body`. Returns `true` when:
+/// - `body` has no `min_cuda:` line (CUDA-agnostic release, no gate), or
+/// - `local` is `None` (detection failed — preserve the no-block policy
+///   applied to [`GpuCompat::Unknown`] so systems without `nvidia-smi`
+///   are not locked out), or
+/// - `local >= required` by lexicographic `(major, minor)` comparison.
+///
+/// Returns `false` only when the release advertises a `min_cuda:` AND
+/// the local driver was detected AND the local version is strictly
+/// older.
+pub fn is_cuda_compatible_for_release(
+    local: Option<(u32, u32)>,
+    body: Option<&str>,
+) -> bool {
+    let Some(required) = min_cuda_for_release(body) else {
+        return true;
+    };
+    let Some(local) = local else {
+        return true;
+    };
+    local >= required
+}
+
+/// Parse `nvidia-smi` stdout (plain invocation, no args) for the
+/// "CUDA Version: X.Y" token in the header line. Returns
+/// `Some((major, minor))` on success, `None` when the line is absent or
+/// unparseable. Tolerates arbitrary whitespace around the token.
+///
+/// Typical header shape:
+/// `| NVIDIA-SMI 535.86.10   Driver Version: 535.86.10   CUDA Version: 12.2     |`
+pub fn parse_cuda_driver_version(stdout: &str) -> Option<(u32, u32)> {
+    for line in stdout.lines() {
+        let Some(idx) = line.find("CUDA Version:") else {
+            continue;
+        };
+        let after = &line[idx + "CUDA Version:".len()..];
+        // The next whitespace-delimited token is the version. Strip any
+        // trailing `|` or other table-border punctuation before parsing.
+        let token = after.split_whitespace().next()?;
+        let cleaned: String = token
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if cleaned.is_empty() {
+            return None;
+        }
+        return match cleaned.split_once('.') {
+            Some((major_s, minor_s)) => {
+                let major: u32 = major_s.parse().ok()?;
+                let minor: u32 = minor_s.parse().ok()?;
+                Some((major, minor))
+            }
+            None => {
+                let major: u32 = cleaned.parse().ok()?;
+                Some((major, 0))
+            }
+        };
+    }
+    None
+}
+
+/// Invoke plain `nvidia-smi` (no args) and parse the CUDA driver version
+/// from its header. Returns `None` when the command fails to spawn,
+/// exits non-zero, times out (5s), or produces unparseable output. On
+/// macOS this always returns `None` — no nvidia-smi, no CUDA.
+#[cfg(not(target_os = "macos"))]
+pub async fn detect_cuda_driver_version() -> Option<(u32, u32)> {
+    let fut = tokio::process::Command::new("nvidia-smi").output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_cuda_driver_version(&stdout)
+}
+
+#[cfg(target_os = "macos")]
+pub async fn detect_cuda_driver_version() -> Option<(u32, u32)> {
+    None
+}
+
 /// Download the release tarball for `version` to the staging path under
 /// `<app_data_dir>/kiln-updates/`. Does NOT extract, verify sha256, or
 /// touch the running kiln binary — that is slice 3 of
@@ -1569,9 +1698,11 @@ pub async fn install_staged_update(
 mod tests {
     use super::{
         backup_binary_path, cleanup_bak, current_target, extract_tarball_to,
-        extracted_new_binary_path, installed_binary_path, is_supported_sm,
-        is_supported_sm_for_release, is_update_available, parse_compute_cap,
-        parse_kiln_version_output, parse_supported_sm, release_archive_ext,
+        extracted_new_binary_path, installed_binary_path,
+        is_cuda_compatible_for_release, is_supported_sm,
+        is_supported_sm_for_release, is_update_available, min_cuda_for_release,
+        parse_compute_cap, parse_cuda_driver_version, parse_kiln_version_output,
+        parse_min_cuda, parse_supported_sm, release_archive_ext,
         release_asset_name, release_download_url, rollback_to_bak,
         staging_tarball_path, supports_auto_install, swap_new_binary_into_place,
         verify_sha256, BACKUP_BINARY_NAME, NEW_BINARY_NAME, SUPPORTED_SM_ARCHS,
@@ -2286,5 +2417,131 @@ mod tests {
     fn is_supported_sm_for_release_falls_back() {
         assert!(is_supported_sm_for_release(86, None));
         assert!(!is_supported_sm_for_release(75, None));
+    }
+
+    #[test]
+    fn parse_min_cuda_basic() {
+        assert_eq!(parse_min_cuda("min_cuda: 12.4"), Some((12, 4)));
+    }
+
+    #[test]
+    fn parse_min_cuda_bare_major() {
+        assert_eq!(parse_min_cuda("min_cuda: 12"), Some((12, 0)));
+    }
+
+    #[test]
+    fn parse_min_cuda_literal_backslash_n() {
+        let body =
+            "Prebuilt kiln binaries for kiln-v1.0.0. See README.\\n\\nsupported_sm: [80, 86, 89, 90]\\nmin_cuda: 12.4";
+        assert_eq!(parse_min_cuda(body), Some((12, 4)));
+    }
+
+    #[test]
+    fn parse_min_cuda_absent() {
+        assert_eq!(parse_min_cuda("any text without the key"), None);
+    }
+
+    #[test]
+    fn parse_min_cuda_malformed() {
+        assert_eq!(parse_min_cuda("min_cuda: abc"), None);
+        assert_eq!(parse_min_cuda("min_cuda: 12.abc"), None);
+        assert_eq!(parse_min_cuda("min_cuda:"), None);
+    }
+
+    #[test]
+    fn parse_min_cuda_extra_whitespace() {
+        assert_eq!(parse_min_cuda("  min_cuda:   12.4  "), Some((12, 4)));
+    }
+
+    #[test]
+    fn min_cuda_for_release_passthrough() {
+        assert_eq!(
+            min_cuda_for_release(Some("notes\nmin_cuda: 12.4\n")),
+            Some((12, 4))
+        );
+        assert_eq!(min_cuda_for_release(Some("no key")), None);
+        assert_eq!(min_cuda_for_release(None), None);
+    }
+
+    #[test]
+    fn parse_cuda_driver_version_smi_header() {
+        let out = "+-----------------------------------------------------------------------------------------+\n\
+                   | NVIDIA-SMI 535.86.10   Driver Version: 535.86.10   CUDA Version: 12.2     |\n\
+                   |-----------------------------------------+------------------------+----------------------+";
+        assert_eq!(parse_cuda_driver_version(out), Some((12, 2)));
+    }
+
+    #[test]
+    fn parse_cuda_driver_version_bare_major() {
+        let out = "| Driver Version: 550.00   CUDA Version: 12     |";
+        assert_eq!(parse_cuda_driver_version(out), Some((12, 0)));
+    }
+
+    #[test]
+    fn parse_cuda_driver_version_missing() {
+        let out = "+---------+\n| no cuda token here |\n+---------+";
+        assert_eq!(parse_cuda_driver_version(out), None);
+    }
+
+    #[test]
+    fn parse_cuda_driver_version_malformed() {
+        let out = "| CUDA Version: abc |";
+        assert_eq!(parse_cuda_driver_version(out), None);
+    }
+
+    #[test]
+    fn is_cuda_compatible_for_release_no_body() {
+        assert!(is_cuda_compatible_for_release(Some((11, 8)), None));
+        assert!(is_cuda_compatible_for_release(None, None));
+    }
+
+    #[test]
+    fn is_cuda_compatible_for_release_no_local() {
+        // Detection failed → do not block the update.
+        assert!(is_cuda_compatible_for_release(
+            None,
+            Some("min_cuda: 12.4"),
+        ));
+    }
+
+    #[test]
+    fn is_cuda_compatible_for_release_older_local() {
+        assert!(!is_cuda_compatible_for_release(
+            Some((11, 8)),
+            Some("min_cuda: 12.4"),
+        ));
+        assert!(!is_cuda_compatible_for_release(
+            Some((12, 3)),
+            Some("min_cuda: 12.4"),
+        ));
+    }
+
+    #[test]
+    fn is_cuda_compatible_for_release_newer_local() {
+        assert!(is_cuda_compatible_for_release(
+            Some((12, 6)),
+            Some("min_cuda: 12.4"),
+        ));
+        assert!(is_cuda_compatible_for_release(
+            Some((13, 0)),
+            Some("min_cuda: 12.4"),
+        ));
+    }
+
+    #[test]
+    fn is_cuda_compatible_for_release_equal() {
+        assert!(is_cuda_compatible_for_release(
+            Some((12, 4)),
+            Some("min_cuda: 12.4"),
+        ));
+    }
+
+    #[test]
+    fn is_cuda_compatible_for_release_body_without_key() {
+        // Release without a min_cuda: line is treated as CUDA-agnostic.
+        assert!(is_cuda_compatible_for_release(
+            Some((11, 0)),
+            Some("supported_sm: [80, 86]"),
+        ));
     }
 }
