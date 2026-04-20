@@ -95,6 +95,7 @@
       .update-status.checking { color: #a8aeb8; }
       .update-status.up-to-date { color: #7fbf7f; }
       .update-status.available { color: #f0b080; }
+      .update-status.warn { color: #e6c070; }
       .update-status.error { color: #f08080; }
       .update-status .badge {
         display: inline-block;
@@ -107,6 +108,7 @@
       }
       .update-status.available .badge { background: #5a3f1a; color: #f6d3a6; }
       .update-status.up-to-date .badge { background: #1f3a22; color: #b7e3b9; }
+      .update-status.warn .badge { background: #4a3a1a; color: #f0d98a; }
       .update-download {
         display: flex;
         flex-direction: column;
@@ -1062,6 +1064,19 @@
             return;
           }
           const current = r.current ? escapeHtml(r.current) : "unknown";
+          if (r.gpu_unsupported != null) {
+            // GPU arch compat gate (slice 6): the local GPU's SM arch
+            // isn't in kiln's SUPPORTED_SM_ARCHS — refuse to offer the
+            // update. Keep Download hidden; user sees why.
+            const sm = escapeHtml(String(r.gpu_unsupported));
+            setKilnUpdateStatus(
+              "warn",
+              "GPU not supported (SM " + sm + "). Kiln releases require SM 80, 86, 89, or 90. " +
+                '<span class="badge">Update blocked</span>'
+            );
+            showKilnUpdateActions(null);
+            return;
+          }
           if (!r.latest) {
             setKilnUpdateStatus(
               "error",
