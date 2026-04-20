@@ -756,6 +756,109 @@ pub fn is_update_available(current: Option<&str>, latest: &str) -> bool {
     }
 }
 
+// ---------- GPU arch compat gate (slice 6) ----------
+//
+// Before offering a kiln update on Linux/Windows, the desktop app detects
+// the local GPU's SM arch via `nvidia-smi --query-gpu=compute_cap` and
+// refuses to suggest a binary compiled for an unsupported arch. macOS
+// has no SM arch concept (single release target), so the check
+// short-circuits to `Supported`. Detection failure (no nvidia-smi,
+// non-zero exit, timeout, unparseable output) is reported as `Unknown`
+// and is treated as "don't block" by callers — preserving existing
+// behavior on systems without nvidia-smi.
+//
+// See `desktop/docs/binary-update.md` (CUDA / GPU compat, lines 260-280).
+
+/// SM arches that the current kiln release series supports. Hardcoded
+/// here until a later slice parses `supported_sm` out of the GitHub
+/// release notes (design doc lines 266-268).
+pub const SUPPORTED_SM_ARCHS: &[u32] = &[80, 86, 89, 90];
+
+/// Outcome of the local GPU arch compatibility check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuCompat {
+    /// The detected SM arch is in [`SUPPORTED_SM_ARCHS`].
+    Supported(u32),
+    /// The detected SM arch is NOT in [`SUPPORTED_SM_ARCHS`]. Callers
+    /// should refuse to offer an update and surface the SM number to the
+    /// user.
+    Unsupported(u32),
+    /// Detection failed (no nvidia-smi, non-zero exit, timeout, or
+    /// unparseable output). Callers should NOT block the update offer —
+    /// this preserves existing behavior on systems without nvidia-smi,
+    /// which includes macOS and any non-CUDA host.
+    Unknown,
+}
+
+/// Whether `arch` is in [`SUPPORTED_SM_ARCHS`].
+pub fn is_supported_sm(arch: u32) -> bool {
+    SUPPORTED_SM_ARCHS.contains(&arch)
+}
+
+/// Parse the first non-empty line of `nvidia-smi --query-gpu=compute_cap
+/// --format=csv,noheader` output into an integer SM arch number (e.g.
+/// `"8.6"` -> `Some(86)`, `"12.0"` -> `Some(120)`). Ignores trailing
+/// whitespace and subsequent GPU lines (take the first GPU). Returns
+/// `None` when the input is empty, unparseable, or has an unexpected
+/// shape.
+pub fn parse_compute_cap(output: &str) -> Option<u32> {
+    let first = output.lines().find(|line| !line.trim().is_empty())?;
+    let trimmed = first.trim();
+    let (major_s, minor_s) = trimmed.split_once('.')?;
+    let major: u32 = major_s.trim().parse().ok()?;
+    let minor: u32 = minor_s.trim().parse().ok()?;
+    // `compute_cap` minor digit is always a single decimal; multiplying
+    // the major by 10 matches the SM arch numbering used elsewhere in
+    // this file (sm_86, sm_120, etc.).
+    Some(major * 10 + minor)
+}
+
+/// Invoke `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` and
+/// parse the first GPU's compute capability. Returns `None` when the
+/// command fails to spawn, exits non-zero, times out (5s), or produces
+/// unparseable output.
+#[cfg(not(target_os = "macos"))]
+pub async fn detect_gpu_compute_cap() -> Option<u32> {
+    let fut = tokio::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_compute_cap(&stdout)
+}
+
+/// macOS has no SM arch concept — detection is never attempted.
+#[cfg(target_os = "macos")]
+pub async fn detect_gpu_compute_cap() -> Option<u32> {
+    None
+}
+
+/// GPU arch compatibility check for the current host. On macOS this
+/// always returns [`GpuCompat::Supported`] with a sentinel arch of `0`
+/// (macOS has a single release target — SM arch doesn't apply). On
+/// Linux/Windows this shells out to `nvidia-smi`; detection failure is
+/// reported as [`GpuCompat::Unknown`] so callers don't block the update
+/// on systems without nvidia-smi.
+#[cfg(target_os = "macos")]
+pub async fn gpu_compat() -> GpuCompat {
+    GpuCompat::Supported(0)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn gpu_compat() -> GpuCompat {
+    match detect_gpu_compute_cap().await {
+        Some(arch) if is_supported_sm(arch) => GpuCompat::Supported(arch),
+        Some(arch) => GpuCompat::Unsupported(arch),
+        None => GpuCompat::Unknown,
+    }
+}
+
 /// Download the release tarball for `version` to the staging path under
 /// `<app_data_dir>/kiln-updates/`. Does NOT extract, verify sha256, or
 /// touch the running kiln binary — that is slice 3 of
@@ -1376,11 +1479,12 @@ pub async fn install_staged_update(
 mod tests {
     use super::{
         backup_binary_path, cleanup_bak, current_target, extract_tarball_to,
-        extracted_new_binary_path, installed_binary_path, is_update_available,
-        parse_kiln_version_output, release_archive_ext, release_asset_name,
-        release_download_url, rollback_to_bak, staging_tarball_path,
-        supports_auto_install, swap_new_binary_into_place, verify_sha256,
-        BACKUP_BINARY_NAME, NEW_BINARY_NAME, UPDATE_STAGING_DIR,
+        extracted_new_binary_path, installed_binary_path, is_supported_sm,
+        is_update_available, parse_compute_cap, parse_kiln_version_output,
+        release_archive_ext, release_asset_name, release_download_url,
+        rollback_to_bak, staging_tarball_path, supports_auto_install,
+        swap_new_binary_into_place, verify_sha256, BACKUP_BINARY_NAME,
+        NEW_BINARY_NAME, SUPPORTED_SM_ARCHS, UPDATE_STAGING_DIR,
     };
     use std::io::Write;
     use std::path::PathBuf;
@@ -1958,5 +2062,72 @@ mod tests {
         assert!(!backup.exists(), "backup should have been removed");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- GPU arch compat gate (slice 6) ----------
+
+    #[test]
+    fn parse_compute_cap_ampere() {
+        assert_eq!(parse_compute_cap("8.6\n"), Some(86));
+    }
+
+    #[test]
+    fn parse_compute_cap_blackwell() {
+        assert_eq!(parse_compute_cap("12.0\n"), Some(120));
+    }
+
+    #[test]
+    fn parse_compute_cap_first_of_multiple() {
+        // Multi-GPU hosts emit one line per GPU; take the first.
+        assert_eq!(parse_compute_cap("8.0\n9.0\n"), Some(80));
+    }
+
+    #[test]
+    fn parse_compute_cap_empty_is_none() {
+        assert_eq!(parse_compute_cap(""), None);
+    }
+
+    #[test]
+    fn parse_compute_cap_whitespace_only_is_none() {
+        assert_eq!(parse_compute_cap("   \n\n"), None);
+    }
+
+    #[test]
+    fn parse_compute_cap_garbage_is_none() {
+        assert_eq!(parse_compute_cap("bad"), None);
+    }
+
+    #[test]
+    fn parse_compute_cap_no_trailing_newline() {
+        assert_eq!(parse_compute_cap("7.5"), Some(75));
+    }
+
+    #[test]
+    fn parse_compute_cap_missing_minor_is_none() {
+        // `compute_cap` always emits `major.minor`; anything else is a
+        // shape we don't know how to interpret.
+        assert_eq!(parse_compute_cap("8\n"), None);
+    }
+
+    #[test]
+    fn is_supported_sm_table() {
+        // SUPPORTED list from the design doc.
+        for &arch in SUPPORTED_SM_ARCHS {
+            assert!(is_supported_sm(arch), "SM {} should be supported", arch);
+        }
+        // Blackwell (SM 120) is NOT supported under CUDA 12.4.
+        assert!(!is_supported_sm(120));
+        // Older Turing / Volta are out of scope for kiln releases.
+        assert!(!is_supported_sm(75));
+        assert!(!is_supported_sm(70));
+    }
+
+    #[test]
+    fn parse_compute_cap_supported_check_is_separate() {
+        // parse_compute_cap should succeed on ANY `major.minor` input —
+        // the SUPPORTED_SM_ARCHS check lives in is_supported_sm so an
+        // unknown-but-parseable arch still surfaces to the caller.
+        assert_eq!(parse_compute_cap("7.5\n"), Some(75));
+        assert!(!is_supported_sm(75));
     }
 }

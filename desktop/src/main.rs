@@ -493,6 +493,12 @@ struct KilnUpdateCheckResult {
     latest: Option<String>,
     update_available: bool,
     platform_supported: bool,
+    /// `Some(sm)` when the local GPU's SM arch is NOT in
+    /// `installer::SUPPORTED_SM_ARCHS` — the UI should surface a warn
+    /// pill and disable the Download button. `None` when supported,
+    /// unknown (no nvidia-smi, detection failed), or irrelevant (macOS).
+    /// See `desktop/docs/binary-update.md` (CUDA / GPU compat).
+    gpu_unsupported: Option<u32>,
 }
 
 /// Detection-only check for a newer kiln binary release. Looks up the
@@ -527,15 +533,30 @@ async fn check_for_kiln_update(
         None
     };
 
-    let update_available = match &latest {
+    let mut update_available = match &latest {
         Some(l) => installer::is_update_available(current.as_deref(), l),
         None => false,
     };
+
+    // GPU arch compat gate (slice 6): if nvidia-smi reports a compute
+    // capability outside `installer::SUPPORTED_SM_ARCHS`, refuse to offer
+    // the update. Unknown detection (no nvidia-smi, timeout, etc.) is
+    // NOT a block — preserve existing behavior on systems without
+    // nvidia-smi. See `desktop/docs/binary-update.md` (CUDA / GPU compat).
+    let gpu_unsupported = match installer::gpu_compat().await {
+        installer::GpuCompat::Unsupported(sm) => {
+            update_available = false;
+            Some(sm)
+        }
+        installer::GpuCompat::Supported(_) | installer::GpuCompat::Unknown => None,
+    };
+
     Ok(KilnUpdateCheckResult {
         current,
         latest,
         update_available,
         platform_supported,
+        gpu_unsupported,
     })
 }
 
@@ -592,6 +613,19 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
     };
 
     if !installer::is_update_available(current.as_deref(), &latest) {
+        return;
+    }
+
+    // GPU arch compat gate (slice 6): silently skip the banner when the
+    // local GPU's SM arch is outside `installer::SUPPORTED_SM_ARCHS`.
+    // Unknown detection is treated as supported — the check_for_kiln_update
+    // command path still surfaces the compat state to the settings UI when
+    // the user clicks "Check for Updates".
+    if let installer::GpuCompat::Unsupported(sm) = installer::gpu_compat().await {
+        eprintln!(
+            "[main] auto_update: skipping — GPU SM {} not supported",
+            sm
+        );
         return;
     }
 
