@@ -964,6 +964,7 @@ fn bench_latency_paged_mtp(
         0,
         Some(&mut linear_state),
         None,
+        None,
     )
     .context("MTP prefill (paged with last-hidden) failed")?;
 
