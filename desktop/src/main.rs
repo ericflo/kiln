@@ -428,15 +428,58 @@ struct DiagnosticInfo {
     version: String,
     os: String,
     arch: String,
+    kiln_binary: Option<String>,
+    model_path: Option<String>,
+    server_state: String,
 }
 
 #[tauri::command]
-fn get_diagnostic_info() -> DiagnosticInfo {
-    DiagnosticInfo {
+async fn get_diagnostic_info(
+    sup: State<'_, Arc<Supervisor>>,
+    state: State<'_, SettingsState>,
+) -> Result<DiagnosticInfo, String> {
+    let (configured_binary, model_path) = {
+        let s = state.read().await;
+        (s.kiln_binary.clone(), s.model_path.clone())
+    };
+    let kiln_binary = {
+        let configured = configured_binary
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("kiln"));
+        let resolved = installer::resolve_binary(&configured);
+        let display = resolved
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| configured.display().to_string());
+        if display.is_empty() {
+            None
+        } else {
+            Some(display)
+        }
+    };
+    let model_path = model_path.and_then(|p| {
+        let s = p.display().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    });
+    let server_state = match sup.state().await {
+        ServerState::Stopped => "stopped".to_string(),
+        ServerState::Starting => "starting".to_string(),
+        ServerState::Running => "running".to_string(),
+        ServerState::TrainingActive => "training-active".to_string(),
+        ServerState::Error(msg) => format!("error: {}", msg),
+        ServerState::NoBinary(msg) => format!("no-binary: {}", msg),
+    };
+    Ok(DiagnosticInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-    }
+        kiln_binary,
+        model_path,
+        server_state,
+    })
 }
 
 #[tauri::command]

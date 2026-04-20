@@ -115,7 +115,14 @@
 
       const versionEl = document.getElementById("version");
       const platformEl = document.getElementById("platform");
-      const diag = { version: "unknown", os: "unknown", arch: "unknown" };
+      const diag = {
+        version: "unknown",
+        os: "unknown",
+        arch: "unknown",
+        kiln_binary: "",
+        model_path: "",
+        server_state: "",
+      };
 
       function renderDiag() {
         versionEl.textContent = diag.version;
@@ -128,6 +135,9 @@
             if (d.version) diag.version = d.version;
             if (d.os) diag.os = d.os;
             if (d.arch) diag.arch = d.arch;
+            if (d.kiln_binary) diag.kiln_binary = d.kiln_binary;
+            if (d.model_path) diag.model_path = d.model_path;
+            if (d.server_state) diag.server_state = d.server_state;
           }
           renderDiag();
         }).catch(() => {
@@ -161,7 +171,13 @@
         }, 1200);
       }
       copyBtn.addEventListener("click", async () => {
-        const text = `Kiln Desktop v${diag.version}\nOS: ${diag.os} (${diag.arch})`;
+        const text = [
+          `Kiln Desktop v${diag.version}`,
+          `OS: ${diag.os} (${diag.arch})`,
+          `Server: ${diag.server_state || "unknown"}`,
+          `Kiln binary: ${diag.kiln_binary || "(not resolved)"}`,
+          `Model path: ${diag.model_path || "(not set)"}`,
+        ].join("\n");
         try {
           await navigator.clipboard.writeText(text);
           flashCopy("Copied!");
