@@ -29,9 +29,20 @@ pub const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "download_update_progress";
 pub const UPDATE_DOWNLOAD_DONE_EVENT: &str = "download_update_done";
 pub const UPDATE_DOWNLOAD_FAILED_EVENT: &str = "download_update_failed";
 
+pub const EXTRACT_UPDATE_PROGRESS_EVENT: &str = "extract_update_progress";
+pub const EXTRACT_UPDATE_DONE_EVENT: &str = "extract_update_done";
+pub const EXTRACT_UPDATE_FAILED_EVENT: &str = "extract_update_failed";
+
 /// Subdirectory under `app_data_dir` where update tarballs are staged
 /// before the slice-3 atomic-swap step promotes them.
 pub const UPDATE_STAGING_DIR: &str = "kiln-updates";
+
+/// Filename of the staged extracted binary produced by slice 3a. Lives
+/// next to `bin/kiln` so slice 3b's atomic rename stays inside the same
+/// filesystem. Platform-independent on purpose: the atomic-swap step
+/// targets `bin/kiln` on unix and `bin/kiln.exe` on Windows, but the
+/// sibling staging file is always `bin/kiln.new`.
+pub const NEW_BINARY_NAME: &str = "kiln.new";
 
 const RELEASES_URL: &str = "https://api.github.com/repos/ericflo/kiln/releases";
 const USER_AGENT: &str = concat!("kiln-desktop/", env!("CARGO_PKG_VERSION"));
@@ -85,6 +96,33 @@ pub struct UpdateDownloadDone {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateDownloadFailed {
+    pub version: String,
+    pub error: String,
+    pub cancelled: bool,
+}
+
+/// Progress payload for the slice-3a "extract + verify" pipeline. The
+/// `total_bytes` field is `None` until extraction completes because the
+/// tar entry's header-declared size is read lazily; a later slice may
+/// pre-scan the archive to report total up front if the UX wants a smooth
+/// progress bar instead of a two-step animation.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtractUpdateProgress {
+    pub version: String,
+    pub extracted_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtractUpdateDone {
+    pub version: String,
+    pub path: String,
+    pub bytes: u64,
+    pub sha256_ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtractUpdateFailed {
     pub version: String,
     pub error: String,
     pub cancelled: bool,
@@ -190,6 +228,137 @@ pub fn staging_tarball_path(app_data_dir: &Path, version: &str, target: &str) ->
     app_data_dir
         .join(UPDATE_STAGING_DIR)
         .join(format!("kiln-v{}.{}", version, release_archive_ext(target)))
+}
+
+/// Path where slice 3a writes the extracted `kiln` binary before the
+/// slice-3b atomic rename promotes it to `bin/kiln` (or `bin/kiln.exe`
+/// on Windows). See `desktop/docs/binary-update.md` "Storage layout".
+pub fn extracted_new_binary_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("bin").join(NEW_BINARY_NAME)
+}
+
+/// Verify that the file at `path` matches `expected` (64-char lowercase
+/// hex sha256). Streams the file in 64 KiB chunks so large tarballs and
+/// extracted binaries don't balloon memory.
+pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
+    use std::io::Read;
+    let expected = expected.trim().to_lowercase();
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("expected sha256 is not 64-char hex: {}", expected));
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("read {}: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual = hex_lower(hasher.finalize().as_slice());
+    if actual != expected {
+        return Err(format!(
+            "sha256 mismatch: expected {}, got {}",
+            expected, actual
+        ));
+    }
+    Ok(())
+}
+
+/// Extract the `kiln` (or `kiln.exe`) binary from a release archive into
+/// `target_binary_path`, overwriting any existing file at that path.
+/// Returns the number of bytes written.
+///
+/// tar.gz only today — Windows `.zip` support lands alongside the Windows
+/// release asset build. Detection is purely on the archive filename so
+/// this helper stays testable without platform cfg gates.
+pub fn extract_tarball_to(
+    tarball: &Path,
+    target_binary_path: &Path,
+) -> Result<u64, String> {
+    let fname = tarball
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if fname.ends_with(".zip") {
+        return Err(
+            "windows .zip extraction lands alongside Windows release asset support"
+                .to_string(),
+        );
+    }
+    if !(fname.ends_with(".tar.gz") || fname.ends_with(".tgz")) {
+        return Err(format!(
+            "unsupported archive extension for {} — expected .tar.gz or .zip",
+            tarball.display()
+        ));
+    }
+
+    if let Some(parent) = target_binary_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+    }
+    if target_binary_path.exists() {
+        std::fs::remove_file(target_binary_path).map_err(|e| {
+            format!(
+                "remove stale {}: {}",
+                target_binary_path.display(),
+                e
+            )
+        })?;
+    }
+
+    let file = std::fs::File::open(tarball)
+        .map_err(|e| format!("open {}: {}", tarball.display(), e))?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("read tar entries: {}", e))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("tar entry: {}", e))?;
+        let rel = entry
+            .path()
+            .map_err(|e| format!("tar entry path: {}", e))?
+            .into_owned();
+        // Reject absolute paths and `..` traversal the same way the
+        // first-install extractor does (installer.rs `extract_tarball`).
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "tar entry {} escapes archive root",
+                rel.display()
+            ));
+        }
+        let name = match rel.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name != "kiln" && name != "kiln.exe" {
+            continue;
+        }
+        entry.unpack(target_binary_path).map_err(|e| {
+            format!("unpack {}: {}", target_binary_path.display(), e)
+        })?;
+        let size = std::fs::metadata(target_binary_path)
+            .map(|m| m.len())
+            .map_err(|e| {
+                format!("stat {}: {}", target_binary_path.display(), e)
+            })?;
+        return Ok(size);
+    }
+
+    Err(format!(
+        "tarball {} did not contain a `kiln` (or `kiln.exe`) binary",
+        tarball.display()
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -648,6 +817,122 @@ pub async fn download_release_binary(
     Ok((dest, downloaded))
 }
 
+/// Fetch the sha256 digest for the tarball published alongside `version`
+/// on the current target, by re-discovering the release asset pair and
+/// downloading the companion `.sha256` file. Returned as a 64-char
+/// lowercase hex digest.
+///
+/// Exposed as its own helper (vs. baking it into
+/// [`extract_and_verify_update`]) so the UI can fetch the digest once
+/// when the user clicks "Extract & Verify" and hand it to the
+/// orchestrator — keeping slice 3a self-contained without forcing slice
+/// 2's download step to persist the digest to disk.
+pub async fn fetch_release_sha256(version: &str) -> Result<String, String> {
+    let target = current_target().ok_or_else(|| {
+        "No prebuilt kiln release exists for this platform.".to_string()
+    })?;
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("build reqwest client: {}", e))?;
+    let pair = discover_asset(&client, target).await?;
+    if pair.version != version {
+        return Err(format!(
+            "latest published release is {}, not {} — asset discovery drift",
+            pair.version, version
+        ));
+    }
+    let sha_asset = pair.sha256.ok_or_else(|| {
+        format!(
+            "release {} has no {}.sha256 asset — cannot verify",
+            pair.version, pair.tarball.name
+        )
+    })?;
+    fetch_expected_sha256(&client, &sha_asset).await
+}
+
+/// Slice 3a orchestrator: verify the staged tarball written by slice 2 at
+/// [`staging_tarball_path`] against `expected_sha256`, then extract the
+/// `kiln` binary to `<app_data_dir>/bin/kiln.new`. Does NOT swap
+/// `bin/kiln`, stop the supervisor, or restart — that is slice 3b.
+///
+/// Sha256 verification runs BEFORE extraction so a corrupted download
+/// never produces a garbage `kiln.new` on disk. Both the verify and the
+/// extract run inside [`tokio::task::spawn_blocking`] so the reads don't
+/// block the runtime. Emits [`EXTRACT_UPDATE_PROGRESS_EVENT`] at start
+/// and finish with [`ExtractUpdateProgress`]; terminal `done`/`failed`
+/// events are emitted by the Tauri command layer so cancellation state
+/// lives with the cancel flag there.
+pub async fn extract_and_verify_update(
+    app: &AppHandle,
+    version: &str,
+    expected_sha256: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<(PathBuf, u64), String> {
+    let target = current_target().ok_or_else(|| {
+        "No prebuilt kiln release exists for this platform.".to_string()
+    })?;
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir unavailable: {}", e))?;
+    let tarball = staging_tarball_path(&base, version, target);
+    if !tarball.is_file() {
+        return Err(format!(
+            "no staged update tarball at {} — run the download step first",
+            tarball.display()
+        ));
+    }
+    let new_path = extracted_new_binary_path(&base);
+
+    let _ = app.emit(
+        EXTRACT_UPDATE_PROGRESS_EVENT,
+        ExtractUpdateProgress {
+            version: version.to_string(),
+            extracted_bytes: 0,
+            total_bytes: None,
+        },
+    );
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("extract cancelled".to_string());
+    }
+
+    let tarball_for_verify = tarball.clone();
+    let expected = expected_sha256.to_string();
+    tokio::task::spawn_blocking(move || verify_sha256(&tarball_for_verify, &expected))
+        .await
+        .map_err(|e| format!("verify task join: {}", e))??;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("extract cancelled".to_string());
+    }
+
+    let tarball_for_extract = tarball.clone();
+    let new_path_for_extract = new_path.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        extract_tarball_to(&tarball_for_extract, &new_path_for_extract)
+    })
+    .await
+    .map_err(|e| format!("extract task join: {}", e))??;
+
+    // Unix: chmod 0755 so slice 3b's atomic rename hands the supervisor a
+    // runnable file without a follow-up chmod. No-op on Windows.
+    make_executable(&new_path)?;
+
+    let _ = app.emit(
+        EXTRACT_UPDATE_PROGRESS_EVENT,
+        ExtractUpdateProgress {
+            version: version.to_string(),
+            extracted_bytes: bytes,
+            total_bytes: Some(bytes),
+        },
+    );
+
+    Ok((new_path, bytes))
+}
+
 /// Full install pipeline: discover latest asset, download, verify sha256,
 /// extract, chmod, clear quarantine. Returns the installed binary path.
 pub async fn install_latest_server(
@@ -729,9 +1014,12 @@ pub async fn install_latest_server(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_update_available, parse_kiln_version_output, release_archive_ext,
-        release_asset_name, release_download_url, staging_tarball_path, UPDATE_STAGING_DIR,
+        extract_tarball_to, extracted_new_binary_path, is_update_available,
+        parse_kiln_version_output, release_archive_ext, release_asset_name,
+        release_download_url, staging_tarball_path, verify_sha256, NEW_BINARY_NAME,
+        UPDATE_STAGING_DIR,
     };
+    use std::io::Write;
     use std::path::PathBuf;
 
     #[test]
@@ -878,5 +1166,174 @@ mod tests {
         assert!(!is_update_available(Some("not-semver"), "not-semver"));
         // Only latest is unparseable: same rule.
         assert!(is_update_available(Some("0.1.0"), "not-semver"));
+    }
+
+    // ---- Slice 3a: extracted_new_binary_path / verify_sha256 / extract_tarball_to ----
+
+    #[test]
+    fn new_binary_path_is_bin_kiln_new() {
+        let base = PathBuf::from("/tmp/fake-app-data");
+        let p = extracted_new_binary_path(&base);
+        assert_eq!(p, base.join("bin").join(NEW_BINARY_NAME));
+        assert_eq!(p.file_name().unwrap(), "kiln.new");
+        assert!(p.starts_with(base.join("bin")));
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "kiln-installer-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            // nanos since UNIX_EPOCH; good enough to avoid collisions
+            // across parallel tests inside the same process.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn verify_sha256_matches_known_digest() {
+        // sha256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        let dir = tmp_dir("verify-match");
+        let path = dir.join("hello.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+        verify_sha256(
+            &path,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        )
+        .expect("sha256 should match");
+        // Also accepts uppercase + surrounding whitespace.
+        verify_sha256(
+            &path,
+            "  B94D27B9934D3E08A52E52D7DA7DABFAC484EFE37A5380EE9088F7ACE2EFCDE9  ",
+        )
+        .expect("sha256 should be case/whitespace tolerant");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_sha256_rejects_mismatch() {
+        let dir = tmp_dir("verify-mismatch");
+        let path = dir.join("hello.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+        let err = verify_sha256(&path, &"0".repeat(64)).unwrap_err();
+        assert!(err.contains("sha256 mismatch"), "got {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_sha256_rejects_non_hex_expected() {
+        let dir = tmp_dir("verify-nonhex");
+        let path = dir.join("hello.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+        // Wrong length.
+        let err = verify_sha256(&path, "abc123").unwrap_err();
+        assert!(err.contains("64-char hex"), "got {}", err);
+        // Right length but contains a non-hex char.
+        let mut bad = "a".repeat(63);
+        bad.push('z');
+        let err = verify_sha256(&path, &bad).unwrap_err();
+        assert!(err.contains("64-char hex"), "got {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a gzipped tar archive containing a single `kiln` entry with
+    /// `contents`, returning the tarball path.
+    fn write_fake_tarball(dir: &std::path::Path, contents: &[u8]) -> PathBuf {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let tar_path = dir.join("kiln-fake.tar.gz");
+        let file = std::fs::File::create(&tar_path).unwrap();
+        let gz = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "kiln", contents)
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        tar_path
+    }
+
+    #[test]
+    fn extract_tarball_to_writes_kiln_binary() {
+        let dir = tmp_dir("extract-happy");
+        let tar_path = write_fake_tarball(&dir, b"fake-kiln-binary-contents");
+        let target = dir.join("bin").join("kiln.new");
+        let bytes = extract_tarball_to(&tar_path, &target)
+            .expect("extract should succeed");
+        assert!(target.is_file(), "target binary should exist");
+        assert_eq!(bytes, std::fs::metadata(&target).unwrap().len());
+        let got = std::fs::read(&target).unwrap();
+        assert_eq!(got, b"fake-kiln-binary-contents");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_tarball_to_overwrites_existing_target() {
+        let dir = tmp_dir("extract-overwrite");
+        let tar_path = write_fake_tarball(&dir, b"new-contents");
+        let target = dir.join("bin").join("kiln.new");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let mut stale = std::fs::File::create(&target).unwrap();
+        stale.write_all(b"OLD-CONTENTS-that-should-be-replaced").unwrap();
+        drop(stale);
+
+        extract_tarball_to(&tar_path, &target).expect("extract should succeed");
+        let got = std::fs::read(&target).unwrap();
+        assert_eq!(got, b"new-contents");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_tarball_to_rejects_zip_archive() {
+        let dir = tmp_dir("extract-zip");
+        let zip_path = dir.join("kiln-fake.zip");
+        std::fs::write(&zip_path, b"PK\x03\x04-not-a-real-zip").unwrap();
+        let target = dir.join("bin").join("kiln.new");
+        let err = extract_tarball_to(&zip_path, &target).unwrap_err();
+        assert!(
+            err.contains("windows .zip extraction"),
+            "expected zip-not-supported error, got {}",
+            err
+        );
+        assert!(!target.exists(), "no binary should be written on error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_tarball_to_rejects_archive_without_kiln_entry() {
+        let dir = tmp_dir("extract-missing-kiln");
+        // Build a tar.gz that contains a `README` entry but no `kiln` entry.
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let tar_path = dir.join("kiln-nokiln.tar.gz");
+        let file = std::fs::File::create(&tar_path).unwrap();
+        let gz = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(gz);
+        let body = b"just a readme";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "README", &body[..]).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let target = dir.join("bin").join("kiln.new");
+        let err = extract_tarball_to(&tar_path, &target).unwrap_err();
+        assert!(
+            err.contains("did not contain a `kiln`"),
+            "expected missing-kiln error, got {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
