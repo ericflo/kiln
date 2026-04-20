@@ -11,10 +11,11 @@ use candle_core::{DType, Device, Tensor, Var};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
+use kiln_flce_kernel::{fused_linear_cross_entropy, DEFAULT_CHUNK_SIZE};
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
-    model_forward, model_forward_embed, model_forward_head, model_forward_segment,
-    GpuWeights, LinearAttentionState,
+    model_forward, model_forward_embed, model_forward_final_norm, model_forward_head,
+    model_forward_no_head, model_forward_segment, GpuWeights, LinearAttentionState,
 };
 use kiln_model::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights,
@@ -976,6 +977,22 @@ fn cross_entropy_loss(
     Ok(loss)
 }
 
+/// Read `KILN_USE_FLCE` env var. When set (`1`, `true`, `yes`), SFT training
+/// takes the Fused Linear Cross-Entropy path: the LM head matmul is fused
+/// into a chunked log-sum-exp + gather reduction so the `[T, V]` logits
+/// tensor is never materialized. Required to keep long-context SFT
+/// (T >= 8192) under the A6000 VRAM budget on Qwen3.5-4B (V=151936).
+///
+/// Default: disabled. Opt-in while the path is being validated.
+fn use_flce() -> bool {
+    std::env::var("KILN_USE_FLCE")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
 /// SGD update: param = param - lr * grad
 fn sgd_step(
     params: &TrainableLoraParams,
@@ -1202,11 +1219,22 @@ fn checkpointed_forward_backward(
             )?;
         }
 
-        // LM head
-        let logits = model_forward_head(&hidden, weights, model_config)?;
-
-        // Loss (only on assistant tokens)
-        let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
+        // LM head + loss (or fused LCE when KILN_USE_FLCE=1).
+        let loss = if use_flce() {
+            let normed = model_forward_final_norm(&hidden, weights, model_config)?;
+            fused_linear_cross_entropy(
+                &normed,
+                &weights.embed_tokens_t,
+                input_ids,
+                label_mask,
+                device,
+                DEFAULT_CHUNK_SIZE,
+            )
+            .context("fused linear cross-entropy (checkpointed)")?
+        } else {
+            let logits = model_forward_head(&hidden, weights, model_config)?;
+            cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        };
         let loss_val = loss.to_scalar::<f32>()? as f64;
         total_loss += loss_val;
 
@@ -1234,17 +1262,35 @@ fn standard_forward_backward(
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
-    let logits = model_forward(
-        backend,
-        input_ids,
-        weights,
-        model_config,
-        None,
-        Some(&mut linear_state),
-        Some(&lora_weights),
-    ).context("training forward pass")?;
-
-    let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
+    let loss = if use_flce() {
+        let hidden = model_forward_no_head(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            Some(&mut linear_state),
+            Some(&lora_weights),
+        ).context("training forward pass (FLCE)")?;
+        fused_linear_cross_entropy(
+            &hidden,
+            &weights.embed_tokens_t,
+            input_ids,
+            label_mask,
+            device,
+            DEFAULT_CHUNK_SIZE,
+        ).context("fused linear cross-entropy")?
+    } else {
+        let logits = model_forward(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            None,
+            Some(&mut linear_state),
+            Some(&lora_weights),
+        ).context("training forward pass")?;
+        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+    };
     let loss_val = loss.to_scalar::<f32>()? as f64;
     let grads = loss.backward().context("backward pass")?;
 
@@ -1694,6 +1740,76 @@ mod tests {
         // Cross-entropy on random logits over vocab=32 should be ~ln(32) ≈ 3.47
         assert!(loss_std > 1.0 && loss_std < 10.0, "standard loss out of range: {loss_std}");
         assert!(loss_ckpt > 1.0 && loss_ckpt < 10.0, "checkpointed loss out of range: {loss_ckpt}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_flce_parity_vs_naive_loss() -> Result<()> {
+        // Kill-switch parity: naive `model_forward_head` + `cross_entropy_loss`
+        // must match `model_forward_no_head` + `fused_linear_cross_entropy`
+        // on the same weights and inputs, up to floating-point associativity
+        // in the chunked vocab reduction.
+        //
+        // This is the trainer-integration equivalent of the CPU parity tests
+        // inside `kiln-flce-kernel`: those validate the kernel in isolation,
+        // this validates the wiring end-to-end through the real transformer
+        // stack so enabling `KILN_USE_FLCE` for SFT is a no-op on the loss.
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+
+        let backend = backend::for_device(&device);
+
+        // Naive path: full forward → logits → cross_entropy_loss.
+        let mut linear_state_naive = LinearAttentionState::new(&config, &device)?;
+        let logits = model_forward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            None,
+            Some(&mut linear_state_naive),
+            None,
+        )?;
+        let loss_naive = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?
+            .to_scalar::<f32>()?;
+
+        // FLCE path: no-head forward → fused LCE (small chunk to exercise the
+        // chunked reduction on a modest vocab size).
+        let mut linear_state_flce = LinearAttentionState::new(&config, &device)?;
+        let hidden = model_forward_no_head(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            Some(&mut linear_state_flce),
+            None,
+        )?;
+        let loss_flce = fused_linear_cross_entropy(
+            &hidden,
+            &weights.embed_tokens_t,
+            &input_ids,
+            &label_mask,
+            &device,
+            8, // small chunk to exercise uneven-chunk path
+        )?
+        .to_scalar::<f32>()?;
+
+        let abs_err = (loss_naive - loss_flce).abs();
+        let rel_err = if loss_naive.abs() > 1e-6 {
+            abs_err / loss_naive.abs()
+        } else {
+            abs_err
+        };
+        assert!(
+            abs_err < 1e-4 || rel_err < 1e-4,
+            "FLCE trainer parity failed: naive={loss_naive:.6} flce={loss_flce:.6} \
+             abs_err={abs_err:.2e} rel_err={rel_err:.2e}",
+        );
 
         Ok(())
     }

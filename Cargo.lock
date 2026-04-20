@@ -1960,6 +1960,7 @@ dependencies = [
  "candle-nn",
  "chrono",
  "kiln-core",
+ "kiln-flce-kernel",
  "kiln-model",
  "safetensors 0.5.3",
  "serde",
