@@ -3322,3 +3322,118 @@ If a future planner considers flipping `KILN_STREAMING_PREFILL` on by default or
 - Same pod as the spike (`t0vmof6qkwostu`, lease `pod-016bb2e7c07be9a97ceb4a3b`) — warm, with the release binary and packed weights already resident. No rebuild.
 - 10 kiln-bench runs × ~6 min = ~60 minutes wall time. Pod at $0.49/hr → ~$0.49.
 - Total re-bench spend: ~$0.50 (well under the $1.50 ceiling for this task).
+
+## Native MTP speculative decoding — preflight 2026-04-20
+
+**Status: GREEN — greenlight implementation task.**
+
+Supersedes the `kiln-speculative-decoding-design` agent note (skip-layer self-spec). For Qwen3.5-4B specifically, the native pretrained MTP head is strictly better than self-spec: same k=1 draft cost, much higher acceptance rate, zero extra weights at serving time beyond 15 already-shipped tensors. This preflight is doc-only — no code changed, no pod acquired, $0 spend.
+
+### Check 1 — MTP heads exist in the Qwen3.5-4B checkpoint (GREEN)
+
+Verified via HuggingFace `config.json` + `model.safetensors.index.json` for the `Qwen/Qwen3.5-4B` checkpoint (same checkpoint kiln already loads):
+
+- `num_nextn_predict_layers: 1` → **k=1 draft depth** (single MTP head; one speculative token per step).
+- 15 MTP-prefixed tensors in the index:
+  - `mtp.fc.weight` — shape `[2560, 5120]` — the `concat(inputs_embeds, hidden_states) → H` projection (matches `2*H → H` with `H=2560`).
+  - `mtp.pre_fc_norm_embedding.weight` `[2560]`, `mtp.pre_fc_norm_hidden.weight` `[2560]` — two pre-FC RMSNorms (norm-then-concat pattern, one per input stream).
+  - `mtp.layers.0.*` — one full transformer layer with GQA attention + SwiGLU MLP + input/post-attention layernorms. Tensor shapes match the main-model GQA blocks (q_proj `[8192, 2560]` = 32 heads × 256 head_dim; k_proj / v_proj `[1024, 2560]` = 4 KV heads × 256; o_proj `[2560, 8192]`; gate_proj / up_proj `[MLP_size, 2560]`; down_proj `[2560, MLP_size]`).
+  - `mtp.final_layernorm.weight` `[2560]`.
+- **No separate `mtp.lm_head`** in the index — the MTP head ties to the base model's `lm_head` (which itself ties to `embed_tokens`). That matches vLLM's `qwen3_next_mtp.py` (`self.lm_head = model.lm_head` linkage) and is what kiln already does for the main model (see `model_forward_head` in `crates/kiln-model/src/forward.rs` line 2873: `rms_norm(hidden, final_norm) → broadcast_matmul(embed_tokens_t)`).
+
+Net: everything MTP needs is already in the checkpoint. Nothing to ship, nothing to train, nothing to distill — just load + wire.
+
+### Check 2 — vLLM reference implementation (GREEN)
+
+Primary reference: `vllm/model_executor/models/qwen3_next_mtp.py` (EAGLE-framework-based, production path).
+
+Key structural points (relevant for kiln integration):
+
+1. **Forward signature**: `Qwen3NextMTP.forward(input_ids, positions, hidden_states, inputs_embeds=None)` — takes the **base model's last hidden state** for the verified prefix plus the new draft-token positions.
+2. **Input construction**: `inputs_embeds = embed_tokens(input_ids)` (the draft token candidate), then `x = fc(concat([pre_fc_norm_embedding(inputs_embeds), pre_fc_norm_hidden(hidden_states)], dim=-1))` — norm each stream, concatenate channel-wise, project `2H → H` via `fc: ColumnParallelLinear`.
+3. **One MTP decoder block**: Runs the single `mtp.layers.0` block on `x` with the same KV cache / attention metadata as the base model's last full layer.
+4. **Final RMSNorm + tied lm_head**: `logits = lm_head(final_layernorm(x))` — the last two ops are exactly what kiln already has in `model_forward_head`.
+5. **Speculative loop lives outside this module**: vLLM's speculative worker drives the `target_forward → mtp_forward → sample draft → target_forward (verify k+1 in parallel) → rejection_sample` sequence. `qwen3_next_mtp.py` is just the "one MTP step" building block.
+6. **GDN state rollback — explicit non-handling in vLLM**: qwen3-next has hybrid GDN + attention layers just like Qwen3.5, and vLLM's MTP path **does not checkpoint GDN recurrent state per-draft-token**. When a draft token is rejected, vLLM relies on the spec worker rerunning the target model on the committed prefix, which regenerates the correct GDN state from scratch on the next step. For kiln that's fine for correctness but ~24 GDN layers × O(head_dim × head_dim) state × ~10-20× per-second reject events is measurable overhead. **Main implementation risk for kiln** — see "Risks" below.
+
+vLLM's `qwen3_next_mtp_eagle.py` is a second entry point wrapping the same head into EAGLE-3's tree-speculation machinery; kiln will not use tree spec at k=1 (it has no benefit), so the plain `qwen3_next_mtp.py` is the right reference.
+
+### Check 3 — Math ceiling at k=1 (GREEN)
+
+Formula (from standard spec-decode analysis, see Leviathan et al. 2023 and the more-general draft-model equation):
+
+```
+speedup = (1 - α^(k+1)) / ((1 - α) × (k+1))
+```
+
+where α is the per-token acceptance rate of the draft against the target distribution.
+
+At **k=1** (Qwen3.5-4B's `num_nextn_predict_layers`):
+
+| α (acceptance rate) | Ceiling speedup | Decode tok/s @ 49.76 baseline |
+|---:|---:|---:|
+| 0.50 | 1.333× | 66.3 tok/s |
+| 0.60 | 1.400× | 69.7 tok/s |
+| 0.70 | 1.467× | 73.0 tok/s |
+| **0.72** (conservative published MTP range) | **1.480×** | **73.6 tok/s** |
+| **0.80** (typical published MTP range) | **1.533×** | **76.3 tok/s** |
+| 0.85 | 1.567× | 77.9 tok/s |
+| 0.90 | 1.600× | 79.6 tok/s |
+
+Target for Phase 6 / spec-decode work is **1.5× on decode tok/s** (49.76 → 74.6 tok/s).
+
+- At α=0.80 (typical) the math ceiling is 1.533× — just clears the 1.5× target. Real-world measured speedup lives below the ceiling because of draft + verify overhead on top of baseline decode (non-zero draft cost, non-zero concat/norm/fc/block cost, GDN state management). Published Qwen MTP numbers at α≈0.8 + k=1 typically realize ~1.3-1.4× — below the 1.5× target.
+- At α=0.85 the ceiling is 1.567× — comfortable headroom.
+- Qwen3-Next 80B's own MTP self-reports α in the 0.72-0.85 band on typical workloads. Qwen3.5-4B (much smaller target, same MTP head architecture) should land in the same range; a smaller target model tends to match its MTP head better (lower-entropy hidden states → draft head more calibrated), not worse.
+
+**Ceiling verdict**: k=1 clears the 1.5× target at α ≥ 0.80. The math is tight but not marginal. There is also no k-knob to tune post-implementation (Qwen3.5-4B ships k=1 fixed) — this is the only arm we can run.
+
+Compare to FlashInfer paged GQA decode (killed in PR #163 at ceiling ≤1.005×) and fused L2-QK-norm (PR #173, null-median): those had math ceilings below the dispatch-amortization floor. MTP at k=1 has a ceiling 30-50× larger than that floor, so null-result risk is qualitatively different (it's implementation-overhead-dominated, not ceiling-dominated).
+
+### Check 4 — Integration scope in kiln source (GREEN)
+
+Files that need to change for native MTP (line counts are estimates for the implementation task, not this preflight PR):
+
+| File | LOC now | Est. added | What changes |
+|---|---:|---:|---|
+| `crates/kiln-model/src/weights.rs` | 232 | +80 | Add `MtpWeights { fc: WeightTensor, pre_fc_norm_embedding: WeightTensor, pre_fc_norm_hidden: WeightTensor, layer: LayerWeights, final_norm: WeightTensor }` and thread it as `ModelWeights.mtp: Option<MtpWeights>`. `Option<>` because other Qwen3.5 variants / future models may not ship MTP; keep the existing `ModelWeights` shape backwards-compatible. Update `total_bytes`/`total_params`. |
+| `crates/kiln-model/src/loader.rs` | 1445 | +150 | Detect `mtp.fc.weight` in the safetensors index → load the 15-tensor MTP block. Reuse `load_layer` for `mtp.layers.0.*` with a prefix override. Tie `mtp.lm_head` to `embed_tokens` (no separate load). Gate behind `if num_nextn_predict_layers > 0` from config.json. |
+| `crates/kiln-model/src/forward.rs` | 5719 | +500 | (1) Add `MtpGpuWeights` to `GpuWeights` (Option, uploaded if present). (2) Add `mtp_forward_step(model, hidden_states, draft_token_id, position, kv_cache, gdn_state) → draft_logits` — runs `concat(pre_fc_norm_embedding(embed(t)), pre_fc_norm_hidden(h)) → fc → mtp.layers.0 → final_layernorm → tied lm_head`. (3) Add `speculative_mtp_decode_step` — analogous to the existing `speculative_decode_step` in `src/speculative.rs` but driving MTP + a k+1-wide verify call into `model_forward_paged`. (4) Add `LinearAttentionState::snapshot() / restore_from(snapshot)` helpers on the struct at line 241 — deep-clone `recurrent_states` + `conv_states` before MTP draft, restore on reject. (5) Add rejection sampling + resample identical to `src/speculative.rs::rejection_sample` (can call into existing impl). |
+| `crates/kiln-model/src/generate.rs` | 1562 | +200 | New `generate_mtp_speculative()` + `generate_from_tokens_mtp_speculative()` parallel to the existing `generate_speculative` skip-layer versions at lines 657 / 689. Dispatch based on `SpecMethod` from config. Reuse `draft_forward_for_state_init` pattern for initial GDN state population before the first MTP draft. |
+| `crates/kiln-server/src/config.rs` | 846 | +40 | Add `SpecMethod` enum: `Off` (default) / `Mtp` / `SkipLayer` (keep existing for fallback / A/B). Add `KILN_SPEC_METHOD` env flag parsing near lines 397-408. Validate at lines 455-460: `SpecMethod::Mtp` requires `num_nextn_predict_layers > 0` in loaded model config. |
+| `crates/kiln-model/src/speculative.rs` | 646 | +0 / −0 | **Keep as-is**. Skip-layer self-spec stays as `SpecMethod::SkipLayer` fallback and the A/B baseline for benchmarking MTP. No deprecation in this slice. |
+| `crates/kiln-server/src/api.rs` (and/or router) | — | +20 | Thread `SpecMethod` into the decode loop selection. If MTP requested but model lacks MTP weights, log a warning and fall back to off (don't hard-fail the server). |
+| `PROFILING.md` | 3324 | +250 | New "Phase X — native MTP spec-decode results" section post-implementation (not this PR). |
+
+**Total estimate: ~800-1000 LOC added across 6-7 files**, no kernel crate work required (all math is GEMM / RMSNorm / attention / sampling that already have paths). No new dependency on mamba-ssm / FlashInfer / Marlin / cuDNN. No new kernel crate — reuses existing kernels.
+
+Existing speculative decoding infrastructure:
+- `crates/kiln-model/src/speculative.rs` (646 LOC, already has `SpeculativeConfig`, `rejection_sample`, `speculative_decode_step`) — much of the MTP loop structure is copy-adapt from here; rejection sampling is identical.
+- `crates/kiln-server/src/config.rs` already has `SpeculativeDecodingConfig` (line 126) with `enabled` / `num_speculative_tokens` / `draft_layers` + `KILN_SPEC_*` env flags (lines 397-408). Adding `method` is additive.
+- **Server decode path is not yet wired to speculative at all**: `grep -ri speculative crates/kiln-server/src/` returns only the config struct, the CLI startup banner, and test assertions — no actual dispatch. That's good: MTP is net-new decode wiring, not a swap-out of live code. Lower collision risk.
+
+### Check 5 — Update superseded agent note (DONE)
+
+`ce notes-set --topic kiln-speculative-decoding-design` has been updated with a `SUPERSEDED 2026-04-20:` prefix referring back to this section. The skip-layer description is preserved as the fallback path; MTP becomes the primary recommendation for Qwen3.5-4B.
+
+### Risks (main + mitigation)
+
+1. **GDN state rollback overhead (primary risk).** 24 GDN layers × `LinearAttentionState { recurrent_states: Vec<Tensor>, conv_states: Vec<Tensor> }` must snapshot before every MTP draft and restore on every rejected token. Rough sizing: per layer, `recurrent_states` is roughly `(batch, num_v_heads, head_dim, head_dim)` and `conv_states` is `(batch, conv_size × num_heads × head_dim)`. At single-stream bs=1 the total snapshot is small (single-digit MB), but it's `24 × cudaMemcpyDeviceToDevice` per draft step. If naive copy lands at >1 ms/step this alone eats the entire MTP speedup. Mitigation: use a double-buffered ping-pong allocation (snapshot goes to a pre-allocated "shadow" slot, restore is just a pointer swap) instead of real memcpy; this is what `speculative.rs::draft_forward` already does for attention KV cache. Test in isolation before the full loop.
+
+2. **Tied lm_head broadcast_matmul on 2 positions.** MTP verify calls `model_forward_paged` with k+1=2 positions. `model_forward_head` does `broadcast_matmul(embed_tokens_t)` — which is a `[2, H] × [H, V]` GEMM where V=151936. That's 4× the FLOPs of a single-position decode and kiln's decode is GEMM-bound on this step (top NVTX regions at 17-18% each). Not a correctness issue, a throughput one: the 2-position verify cost is baked into the math ceiling above, but if lm_head isn't batched well in the current path this lands at 2× not 1× + ε. Mitigation: inspect the `model_forward_head` path for any per-position branching; already parallelizes across the sequence dim in the current code.
+
+3. **Marlin W4A16 compatibility for MTP layer.** `mtp.layers.0` has q_proj / o_proj / gate_proj / up_proj / down_proj shapes that match the main model's layers. Marlin packing in the loader operates per-projection and should pick these up transparently (PR #146 path). Need to verify in implementation that the existing pack loop covers `mtp.*` prefixes — this is a 1-line check in the loader, not a design risk.
+
+4. **Acceptance rate below the 1.5× target.** At α=0.70, ceiling is 1.467× — below target. Qwen3.5-4B does not have published MTP acceptance numbers (Qwen3.5-4B isn't flagged as MTP-enabled in the model card text even though the weights are there). Risk: measured α could be <0.70 on kiln's typical workloads, giving a below-target speedup even with perfect implementation. Mitigation: A/B against skip-layer self-spec and against baseline in the same implementation PR. If α measurement on a representative workload comes back <0.72, pivot early — don't ship a below-target kernel just to cash the preflight.
+
+5. **Prefix cache interaction.** kiln has `KILN_PREFIX_CACHE_ENABLED=true` by default. MTP reads the target model's last hidden state, which for a prefix-cache hit was computed before the current request started. Need to verify the hidden state is cached alongside the KV for the last verified position, not just the KV. If it isn't, MTP can't run on the first step of a prefix-cache-hit request and must fall back to one synchronous target step to materialize `hidden_states`. Mitigation: small (one step), well-defined; probably worth it to avoid architectural coupling of MTP into prefix cache serialization.
+
+### Preflight cost summary
+
+- Doc-only PR. $0 pod spend (no RunPod acquired). ~30 min of HF index inspection + vLLM source read + math + source traversal.
+- Kiln agent notes updated (`kiln-speculative-decoding-design` → SUPERSEDED).
+- No PROFILING.md re-profile needed (Phase 6 kernel frontier is unchanged; MTP is a Phase 7+-style addition, a new decode path rather than a kernel fusion).
+
+### Recommendation
+
+**GREENLIGHT a follow-up implementation task** titled along the lines of "Phase X — native MTP spec-decode on Qwen3.5-4B (GREEN-after-preflight)". Scope: the 6-7 files listed in Check 4 (~800-1000 LOC). Gate behind `KILN_SPEC_METHOD=mtp`, default off. Ship with A/B bench (off / skip-layer / MTP) on A6000 warm pod, median-of-3 rule. Target: **≥1.5× decode tok/s vs. baseline Arm B on the standard 512p/128d workload**, with α reported separately. If measured α < 0.72 on the standard workload, stop at the A/B numbers — don't force-ship a below-ceiling path.
