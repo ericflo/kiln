@@ -1,6 +1,238 @@
 # Kiln Profiling Report
 
 
+## Phase 6 — Post-#222 preflight: MLP gate/up Marlin fusion math-ceiling audit (2026-04-20)
+
+**Outcome: KILL.** Fusing the MLP `gate_proj` and `up_proj` Marlin W4A16
+GEMMs into a single stacked-n projection (the vLLM
+`MergedColumnParallelLinear` / `gate_up_proj` pattern) cannot clear the
+Phase 6 ≥1.05× end-to-end decode speedup floor on Qwen3.5-4B under CUDA
+graph replay. Math-ceiling fails by a wide margin even under heroic
+assumptions. This preflight is doc-only; no pod spent, no code changed.
+Redirects below.
+
+Precedent for doc-only redirect PRs: [#131](https://github.com/ericflo/kiln/pull/131)
+(chunk_gla_fwd already vendored), [#163](https://github.com/ericflo/kiln/pull/163)
+(FlashInfer paged GQA decode redirect), [#164](https://github.com/ericflo/kiln/pull/164)
+(GDN gate-path fusion architecturally infeasible),
+[#170](https://github.com/ericflo/kiln/pull/170) (fused_recurrent already done),
+[#219](https://github.com/ericflo/kiln/pull/219) (ucopy_bf16 null).
+
+### Source sites (current, untouched)
+
+The current MLP forward path, `crates/kiln-model/src/forward.rs` lines
+770–817 (`swiglu_ffn`), issues **two independent Marlin calls on the same
+activation `x`** inside separately-named NVTX regions:
+
+```
+gate = mlp_proj_forward(x, gate_proj_t, gate_proj_marlin, ...)   // :kiln/mlp/gate
+gate = cuda_silu(gate)
+up   = mlp_proj_forward(x, up_proj_t,   up_proj_marlin,   ...)   // :kiln/mlp/up
+hidden = gate * up
+out  = mlp_proj_forward(hidden, down_proj_t, down_proj_marlin, ...) // :kiln/mlp/down
+```
+
+`mlp_proj_forward` dispatches to `marlin_proj::matmul_bf16`
+(`crates/kiln-model/src/marlin_proj.rs`), whose per-call wrapper is:
+
+1. `a.to_dtype(DType::F16).contiguous()` — BF16→FP16 activation cast.
+2. Allocate FP16 output `Tensor::zeros((m, n), DType::F16)`.
+3. Allocate workspace zeros.
+4. Kernel launch (`Marlin<256,1,8,8,4,8>` at m=1 decode).
+5. `c_fp16.to_dtype(DType::BF16)` — FP16→BF16 output cast.
+
+The Marlin kernel itself (`crates/kiln-marlin-gemm/src/lib.rs`) is
+**FP16-only, single-input, single-output** with constraints `k % 128 == 0`,
+`n % 256 == 0`, `groupsize ∈ {-1, 128}`. A fused "gate+up" stacked-n
+projection would need either (a) kernel-surface changes to accept a single
+weight of width `2 × intermediate_size` and emit two halves, or (b) an
+epilogue-split variant that splits the m=1 output into two n-tiles. Both
+fit Marlin's tile structure (n=256 tiles; `2 × 9216 = 18432` is a multiple
+of 256) but both require non-trivial kernel work.
+
+### Profile extract (post-#210 steady-state decode)
+
+From the most recent re-profile in this file (section "Post-#210 re-profile,
+decode hot regions"), Arm B `KILN_W4A16=1` production decode on A6000,
+512-prompt × 128-decode, median of 3:
+
+| NVTX region          | % decode |   median ns | calls  |
+|----------------------|---------:|------------:|-------:|
+| `:kiln/mlp/gate`     |   6.6%   |    52 591   |    ... |
+| `:kiln/mlp/up`       |   6.2%   |    50 035   |    ... |
+| `:kiln/mlp/down`     |   6.0%   |      ...    |    ... |
+| **gate + up (sum)**  | **12.8%**|             |        |
+
+Combined CUDA-kernel attribution for the Marlin kernel (all six W4A16
+projections per layer — q/gate/up/down + GDN in_proj × 2 — over 32 layers ×
+128 decode steps) is 15.7% of decode at ~20.3 μs × 13 527 invocations. The
+gate+up slice of that is **2/6 × 15.7% ≈ 5.2% of decode** spent inside the
+Marlin kernel body itself for gate+up.
+
+### Math-ceiling closed form
+
+For a fusion that touches `region_pct` of decode and achieves speedup `s`
+on that region under CUDA graph replay (launch-amortization ≈ 0 —
+confirmed by the null results in PRs [#141](https://github.com/ericflo/kiln/pull/141),
+[#173](https://github.com/ericflo/kiln/pull/173), [#176](https://github.com/ericflo/kiln/pull/176),
+[#164](https://github.com/ericflo/kiln/pull/164)):
+
+```
+end_to_end_speedup = 1 / (1 − region_pct × (1 − 1/s))
+```
+
+To clear the Phase 6 ≥1.05× decode floor with `region_pct = 0.128`:
+
+```
+1 − 1/s ≥ 0.05 / 0.128           (approx, 1/(1-0.05 × ...))
+1 − 1/s ≥ 0.391
+1/s     ≤ 0.609
+s       ≥ 1.642×
+```
+
+**Gate+up region must get ≥1.64× faster** in median wall-clock under
+graph replay to move the end-to-end decode needle by 5%. (The exact Amdahl
+form gives s ≥ 1.641×; the inequality above is the algebra check.)
+
+### Bandwidth / arithmetic intensity at m=1 decode
+
+Qwen3.5-4B: `hidden_size = 2560`, `intermediate_size = 9216`
+(`crates/kiln-core/src/config.rs:86`), W4A16 packed weights, BF16
+activations.
+
+Per `gate_proj` or `up_proj` call at m=1:
+
+- **Weight bytes (the dominant term):** W4A16 packed = 4 bits/weight
+  + scales (group 128) ≈ `2560 × 9216 × 4/8 = 11 796 480` bytes
+  ≈ **11.25 MiB / call** of weight traffic from GDDR6X. Plus scales,
+  roughly 11.8 MB total.
+- **Activation bytes (per call):** `x` is `[1, 2560]` BF16 = 5 120 bytes
+  ≈ **5 KB / call**. Negligible vs weights (0.04% of the transfer).
+- **Output bytes:** `[1, 9216]` FP16 = 18 432 bytes ≈ **18 KB / call**.
+- **Arithmetic:** `2 × 2560 × 9216 × 1 = 47.2 MFLOPs / call`.
+
+At ~384 GB/s HBM-equivalent effective bandwidth observable to a single
+SM cluster on A6000, 11.8 MB takes ~31 μs in pure-streaming limit. The
+measured median is ~52 μs, i.e. ~60% of time is weight-streaming and the
+remainder is cast/alloc/launch-overhead + tile scheduling.
+
+**Fusion savings ceiling (what fusion can plausibly remove):**
+
+1. **One BF16→FP16 activation cast.** Both current calls cast the *same*
+   `x`. A fused path casts once. Saves ~`5 KB / 384 GB/s ≈ 13 ns` of bandwidth
+   — but the cast kernel's fixed cost (launch, RMS of a separate kernel) is
+   what actually hurts; nsys shows `cast_bf16_f16` at ~1–2 μs amortized per
+   invocation. Call it **~1–2 μs saved** across the two current calls.
+2. **One workspace alloc + one output alloc.** Under graph replay these
+   allocs are captured once, so savings ≈ 0 on the replayed-graph decode
+   path. On the first (non-graph) step, savings are tens of μs, but that
+   step is already outside the decode-steady measurement window.
+3. **Marlin kernel tile reuse (the only real win).** A single stacked-n
+   GEMM of width `2 × 9216 = 18432` streams `x` (5 KB) *once* across shared
+   memory for both outputs, and reuses the same tile of activation across
+   more n-tiles before needing a new one. At m=1 this changes ~nothing
+   because `x` already fits in a single activation tile and stays resident;
+   the kernel is **weight-bandwidth-bound, not activation-bandwidth-bound**.
+   Tile fusion at m=1 saves ≈ 0 of the weight-streaming term — the
+   dominant 60% of the region time.
+
+**Upper-bound achievable s on gate+up at m=1 decode:**
+
+- Remove activation cast + consolidate FP16 output alloc: **1.04–1.08×**.
+- Add any Marlin kernel tile-level savings at m=1: another **0–0.03×**
+  (bounded by the ~40% non-weight-streaming portion of the region time,
+  most of which is launch + epilogue, not tile-reuse).
+- **Realistic s ≤ 1.12× on region.** Plugged into the Amdahl form:
+
+```
+decode_speedup ≤ 1 / (1 − 0.128 × (1 − 1/1.12))
+              = 1 / (1 − 0.128 × 0.107)
+              = 1 / (1 − 0.0137)
+              ≈ 1.0139×                         (well below 1.05× floor)
+```
+
+Even under heroic-and-wrong assumptions the ceiling fails:
+
+| Assumed s on region | End-to-end decode speedup | vs 1.05× floor |
+|--------------------:|--------------------------:|:---------------|
+| 1.12×               | 1.014×                    | **FAIL (−0.036)** |
+| 1.30×               | 1.030×                    | **FAIL (−0.020)** |
+| 1.50×               | 1.045×                    | **FAIL (−0.005)** |
+| 1.60×               | 1.048×                    | **FAIL (−0.002)** |
+| 1.70×               | 1.053×                    | barely clears |
+| 2.00×               | 1.068×                    | clears |
+
+The weight-bandwidth argument puts the honest ceiling around 1.10×. The
+1.70× needed to barely clear the floor would require either (a) m=1
+arithmetic intensity that doesn't exist on W4A16 decode, or (b) a radically
+different kernel (not a merge) that also changes the dequant or output dtype.
+
+### External prior art
+
+- **vLLM `MergedColumnParallelLinear` / `gate_up_proj`:** merges gate and
+  up into a single stacked weight `[2 × intermediate, hidden]`. Reported
+  wins at tensor-parallel batch=1 decode are typically **single-digit %
+  on the MLP region**, i.e. 1.03–1.07× on region only — and tensor-parallel
+  decode has higher all-reduce overhead that this also collapses, which
+  kiln does not pay (single-GPU).
+- **SGLang** adopts the same stacked pattern; same magnitude of win; wins
+  are larger at prefill (where the region is compute-bound and activation
+  tile reuse matters), not at m=1 decode.
+- **In-kiln precedent:** GDN `in_proj_qkv` is already stacked across its
+  three heads (the standard "QKV merge" pattern). That merge *was* worth it
+  because at prefill time the region is compute-bound, and because the
+  three sub-projections share gate/up/down's hidden dim but have different
+  downstream consumers (saving the activation load pattern is meaningful).
+  At m=1 decode, the same merge would show ≈ 0 win by the same
+  weight-bandwidth argument used above — and indeed `:kiln/gdn/in_proj` at
+  7.7% of decode has not been targeted for further merge work.
+
+### Decision: KILL
+
+Gate+up Marlin fusion is weight-bandwidth-bound at m=1 decode, fits
+kiln's Marlin tile geometry but requires non-trivial kernel-surface work
+(either width-`2n` weight or epilogue-split), and under CUDA graph replay
+the only first-order savings (cast consolidation + alloc reuse) are
+≈1–2 μs on a ~100 μs combined region. The math-ceiling floor (s ≥ 1.64×
+on region for 1.05× end-to-end) is a factor of ~15× further than the
+bandwidth-bound ceiling allows. Ship no code; no pod spent.
+
+### Redirects (higher-ceiling next candidates)
+
+1. **GDN prefill memory reduction.** The "KV cache FP8 verification"
+   section below established that the OOM ceiling at ≥65536 prompt tokens
+   is set by **GDN prefill state, not the GQA KV cache**. Shrinking GDN
+   prefill state (via chunked streaming, state recompute on checkpoint,
+   or reduced-precision state) unlocks the long-context memory story that
+   FP8 KV cache did not deliver. High ceiling on capability; ceiling on
+   decode-speed unclear but unimportant — this is a capability fix, not a
+   decode-speed fix.
+
+2. **Marlin wrapper → BF16-native I/O epilogue.** The per-call
+   `a.to_dtype(DType::F16).contiguous()` + `c_fp16.to_dtype(DType::BF16)`
+   pair in `marlin_proj::matmul_bf16` (`crates/kiln-model/src/marlin_proj.rs`)
+   is applied on **every** Marlin call — q_proj + gate + up + down + GDN
+   in_proj × 2, over 32 layers × 128 decode steps. Nsys post-#210 shows
+   `cast_f32_bf16` at 2.5% of decode and `ucopy_bf16` at 8.6% of decode,
+   both partially attributable to these wrappers. A Marlin-kernel
+   epilogue that emits BF16 directly (and reads BF16 activations in the
+   prologue) removes two cast kernels per projection call, addressing a
+   larger slice of decode than gate/up merge and with a clearer
+   bandwidth story. Requires kernel work but math-ceiling plausibly
+   clears 1.05× on combined cast eliminations. **Preflight recommended
+   before pod spend** — the same math-ceiling audit applied to the
+   cast-elimination path.
+
+3. **Marlin packing latency cleanup (~58 s at load)** and **Marlin BF16
+   weight residency cleanup (+1.3 GB VRAM)** — both previously flagged in
+   this file; neither is a decode-speed item but both are ship-ready
+   low-risk cleanups that clear VRAM for the GDN prefill work in (1).
+
+Do not re-queue the gate+up merge idea without a new profile that
+materially changes the 12.8% region share or shows m=1 decode exiting
+the weight-bandwidth-bound regime.
+
+
 ## Phase 6 — KV cache FP8 verification (2026-04-20)
 
 **Outcome: keep `kv_cache_fp8` opt-in (default stays `false`).** Verified that
