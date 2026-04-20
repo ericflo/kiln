@@ -1,0 +1,25 @@
+Generating SQLite file kiln-decode5.sqlite from kiln-decode5.nsys-rep
+Processing [kiln-decode5.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/nvtx_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
+18.5,624723075,3120,200231.8,198347.0,184678,658745,17148.5,PushPop,:kiln/gdn/gates
+17.6,594606390,3120,190579.0,188730.0,177631,649793,16757.4,PushPop,:kiln/gdn/gated_norm
+14.7,496610183,3120,159169.9,157994.5,147813,395041,8329.7,PushPop,:kiln/gdn/qk_norm
+7.7,259444843,3120,83155.4,81101.0,74308,2288330,50225.8,PushPop,:kiln/gdn/in_proj
+6.6,224613669,4160,53993.7,52591.0,48626,3100830,47931.7,PushPop,:kiln/mlp/gate
+6.2,211024353,4161,50714.8,50035.0,44996,488744,7277.0,PushPop,:kiln/mlp/up
+6.0,202086909,4161,48566.9,47815.0,43664,436534,8999.8,PushPop,:kiln/mlp/down
+3.4,116427829,3120,37316.6,36926.5,33463,67546,2224.8,PushPop,:kiln/gdn/head_expand
+3.4,114074246,8321,13709.2,13636.0,10168,117470,2050.2,PushPop,:kiln/residual
+3.0,102696170,1041,98651.5,97379.0,92805,332199,8497.6,PushPop,:kiln/proj/qkv
+2.8,94945599,3120,30431.3,29791.0,26613,438090,9755.4,PushPop,:kiln/gdn/out_proj
+2.2,72766276,4160,17491.9,16943.5,14900,622357,11546.6,PushPop,:kiln/norm/pre_mlp
+2.0,68534571,3120,21966.2,20382.5,17882,3780420,67591.0,PushPop,:kiln/attn/gdn/recurrent
+1.9,64350200,4161,15465.1,14976.0,13443,547544,8364.7,PushPop,:kiln/norm/pre_attn
+1.8,59667443,3120,19124.2,18450.5,15928,346071,10122.8,PushPop,:kiln/gdn/conv
+0.8,28381539,1040,27289.9,26314.0,23841,656152,19598.7,PushPop,:kiln/proj/o
+0.8,28233000,3120,9049.0,8625.0,7892,371665,6557.1,PushPop,:kiln/gdn/recur_prep
+0.2,6225837,130,47891.1,47230.5,41500,84421,3979.3,PushPop,:kiln/lm_head
+0.2,5815418,3120,1863.9,1747.0,1506,7918,566.3,PushPop,:kiln/gdn/qkv_split
+0.1,4576171,3120,1466.7,1363.0,933,9623,587.6,PushPop,:kiln/attn/gdn/precopy
+0.0,1609792,3120,516.0,446.0,260,6377,445.2,PushPop,:kiln/gdn/post_transpose
+
