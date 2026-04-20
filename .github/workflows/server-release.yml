@@ -6,11 +6,17 @@ name: Kiln server release
 #
 # Platform matrix today:
 #   - macOS aarch64 (Apple Silicon) + Metal feature — signed + notarized
+#   - Linux x86_64 + CUDA 12.4 — unsigned prebuilt for NVIDIA GPUs
 #
-# Linux/Windows CUDA builds require an NVIDIA toolchain on the runner and
-# are a separate project (see deploy/runpod/ for a Docker-based approach);
-# until they land, the desktop onboarding falls back to "build from source"
-# on those platforms.
+# The Linux job installs the CUDA 12.4 toolkit on the runner via
+# Jimver/cuda-toolkit and compiles for SM 80/86/89/90 (Ampere → Hopper).
+# Blackwell (SM 120) is not emitted because CUDA 12.4's nvcc does not
+# support it; a CUDA 13 release will be needed once Blackwell GPUs are
+# common enough in the user base to justify the extra build time.
+#
+# A Windows CUDA job is planned as the next slice and will ship the
+# `kiln-{version}-x86_64-pc-windows-msvc-cuda124.zip` asset that
+# desktop/src/installer.rs already matches on.
 
 on:
   push:
@@ -145,4 +151,102 @@ jobs:
         with:
           name: kiln-macos-aarch64-metal-unsigned
           path: target/aarch64-apple-darwin/release/kiln
+          retention-days: 7
+
+  linux-cuda:
+    name: Linux / x86_64 / CUDA 12.4
+    runs-on: ubuntu-22.04
+    # Restrict nvcc to the GPU architectures we actually target: Ampere
+    # (A100=80, A6000/RTX3090=86), Ada (RTX4090=89), and Hopper (H100=90).
+    # Each extra arch adds a full compile pass per .cu file across the
+    # flash-attn / marlin / gdn / rmsnorm / conv1d kernel crates, so
+    # trimming the list to 4 arches keeps CI under ~30 min.
+    env:
+      KILN_CUDA_ARCHS: '80;86;89;90'
+    steps:
+      - name: Free disk space
+        # The CUDA 12.4 toolkit (~5 GB installed) plus the cargo target dir
+        # (~5 GB of CUDA kernel .so/.rlib artifacts) push up against the
+        # default ~14 GB free on ubuntu-22.04 runners. Reclaim ~30 GB by
+        # removing preinstalled toolchains we don't use (Android, .NET,
+        # Haskell, CodeQL cache). Mirrors deploy/runpod/ runner hygiene.
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install CUDA 12.4 toolkit
+        # `method: network` downloads only the subpackages we ask for from
+        # NVIDIA's apt repo (faster than the 4 GB local installer). The
+        # -dev variants bring headers and import libs that kiln-flash-attn
+        # / kiln-marlin-gemm / kiln-gdn-kernel need at link time.
+        uses: Jimver/cuda-toolkit@v0.2.19
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cublas", "cublas-dev", "curand", "curand-dev", "cccl", "profiler-api"]'
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: kiln-server-linux-cuda
+
+      - name: Build kiln (CUDA)
+        run: cargo build --release --locked --features cuda --bin kiln --target x86_64-unknown-linux-gnu
+
+      - name: Package tarball
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          BIN="target/x86_64-unknown-linux-gnu/release/kiln"
+          test -x "$BIN"
+          VERSION="${TAG#kiln-v}"
+          ARTIFACT="kiln-${VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+          STAGE="$RUNNER_TEMP/stage"
+          mkdir -p "$STAGE"
+          cp "$BIN" "$STAGE/kiln"
+          tar -czf "$ARTIFACT" -C "$STAGE" kiln
+          sha256sum "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha256"
+          echo "Produced $ARTIFACT ($(wc -c < "$ARTIFACT") bytes, sha256=$(cat "$ARTIFACT.sha256"))"
+          echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          ARTIFACT: ${{ env.ARTIFACT }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "Kiln server $TAG" \
+              --notes "Prebuilt \`kiln\` server binaries for $TAG. See the repository README for supported platforms."
+          fi
+          gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload artifact (non-tag)
+        if: "!startsWith(github.ref, 'refs/tags/kiln-v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiln-linux-x86_64-cuda124-unsigned
+          path: target/x86_64-unknown-linux-gnu/release/kiln
           retention-days: 7
