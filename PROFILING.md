@@ -1,6 +1,233 @@
 # Kiln Profiling Report
 
 
+## Phase 6 — Post-PR #210 decode profile (2026-04-20)
+
+Fresh nsys capture on current `main` after the post-#166 cluster of Marlin /
+load-time / VRAM / bench-infra changes. Supersedes the post-#166 breakdown as
+the canonical "next target" reference. This is the first profile since #173
+(opt-in fused L2-QK norm, null median) and #176 (closed-null big-fusion) were
+resolved, so it is also the first profile that lets us re-check whether any
+GDN gate-path fusion has meaningfully shifted proportions at the
+graph-replay layer.
+
+**Preflight** (kernel-vendor-precondition-check, before pod $):
+
+- Recent PRs reviewed:
+  - #204 bench-only pool verification (no code delta vs #166 NVTX snapshot)
+  - #206 drop BF16 MLP weights when Marlin is resident (VRAM cleanup; no
+    decode-path compute delta)
+  - #210 parallelize Marlin pack loop (load-time only; no forward-path
+    compute delta)
+  - #211–#215 desktop / CI / docs (no runtime impact)
+- Net: no forward-path code deltas since the post-#166 NVTX snapshot. The
+  NVTX composition is expected to be within run-to-run variance of post-#166,
+  and this capture confirms that — top-3 region ordering is unchanged
+  (gates → gated_norm → qk_norm) and their summed share moves from 50.4% →
+  50.8% (within noise). **The profile's job is not to find a shifted
+  hotspot — it is to rule out new candidates before we consider re-opening
+  any closed-null kernel work.**
+- Not-a-target list (verified against `gh pr list --repo ericflo/kiln
+  --state all`): qk_norm standalone (#173 null 1.0093×), gated_norm
+  standalone (#141 null), big-fusion qk_norm+gated_norm+recurrent (#176
+  null, $14.99 burn), FlashInfer paged GQA decode (#163 math-ceiling
+  ≤1.005×), gate-path fusion across Step 7 recurrence (#164 architecturally
+  infeasible — two halves already shipped/closed independently).
+
+**Hardware:** Pool-acquired RunPod NVIDIA RTX A6000 on-demand (pod
+`t0vmof6qkwostu`, $0.49/hr), Driver 580.95.05, CUDA 12.8,
+`ghcr.io/ericflo/kiln-runpod:latest`.
+
+**Build:** release, `--features cuda,nvtx`, `KILN_CUDA_ARCHS=86`,
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true`, sccache ON (Backblaze B2 bucket).
+
+**Bench & profile:** `kiln-bench --model-path /workspace/qwen3.5-4b --paged
+--prompt-tokens 512 --max-output-tokens 128 --skip-training`, 3 back-to-back
+clean bench runs (no nsys) followed by a single nsys capture run. nsys
+2024.6.2 with `--trace=cuda,nvtx` (NO `--cuda-graph-trace=node` — that flag
+previously corrupted event ordering and produced an
+`EventCollection::CheckOrder` finalization failure; CUDA-graph attribution
+is intentionally sacrificed so we get a valid trace at all).
+
+### Decode bench — 512-prompt × 128-decode (Arm B, 3 clean runs)
+
+| run    | decode tok/s | mean ITL ms | prefill (ms) | model load (s) |
+| ------ | -----------: | ----------: | -----------: | -------------: |
+| 1      |        52.29 |       19.13 |        324.3 |          23.76 |
+| 2      |        50.92 |       19.65 |        329.6 |          22.75 |
+| 3      |        52.88 |       18.90 |        327.7 |          22.90 |
+| median |    **52.29** |   **19.13** |    **327.7** |      **22.90** |
+
+Resident VRAM: 17528 MB (post-#206 drop; matches the expected −1.3 GB vs
+pre-#206). Marlin pack latency at load: ~22.9 s (post-#210 parallelized;
+was ~58 s on the pre-#210 baseline — confirms the load-time win landed).
+
+### Δ vs post-#166 direct-RunPod baseline (median)
+
+| metric            | post-#166 direct | 2026-04-20 post-#210 | Δ         |
+| ----------------- | ---------------: | -------------------: | --------: |
+| decode tok/s      |            49.76 |                52.29 |    +5.1 % |
+| mean ITL ms       |            20.10 |                19.13 |    −4.8 % |
+| model load s      |             ~50+ |                22.90 | ~ −54 %   |
+| resident VRAM MB  |           ~18800 |                17528 |    −6.8 % |
+
+The decode tok/s uplift is within run-to-run variance (post-#204 pool re-run
+also saw a median of 51.37 tok/s on identical code — variance band is ~±3%
+across sessions). Model-load and VRAM deltas are real and attributable to
+#210 and #206 respectively. **Decode hotspots are materially unchanged.**
+
+### NVTX region top-10 (decode, wall-clock %, post-#210 nsys capture)
+
+Source: `profiling-artifacts/post210_nvtx.csv` (130 decode iterations
+captured, 3120 GDN instances = 130 × 24 GDN layers, 4160 MLP instances =
+130 × 32 MLP layers, 1041 full-attn `qkv` instances ≈ 130 × 8 GQA layers +
+1 prefill).
+
+| %        | region                          | med (ns) | notes                      |
+| -------: | ------------------------------- | -------: | -------------------------- |
+| **18.5** | `:kiln/gdn/gates`               |  198,347 | GDN Step 6 (fused in #158) |
+| **17.6** | `:kiln/gdn/gated_norm`          |  188,730 | #141 closed null           |
+| **14.7** | `:kiln/gdn/qk_norm`             |  157,995 | #173 opt-in only (null)    |
+|      7.7 | `:kiln/gdn/in_proj`             |   81,101 | Marlin GEMM                |
+|      6.6 | `:kiln/mlp/gate`                |   52,591 | Marlin GEMM                |
+|      6.2 | `:kiln/mlp/up`                  |   50,035 | Marlin GEMM                |
+|      6.0 | `:kiln/mlp/down`                |   47,815 | Marlin GEMM                |
+|      3.4 | `:kiln/gdn/head_expand`         |   36,927 | reshape/broadcast          |
+|      3.4 | `:kiln/residual`                |   13,636 | 8321 instances             |
+|      3.0 | `:kiln/proj/qkv`                |   97,379 | full-attn Marlin (8 lyrs)  |
+
+Sub-10 regions worth noting: `gdn/out_proj` 2.8%, `norm/pre_mlp` 2.2%,
+`attn/gdn/recurrent` 2.0%, `norm/pre_attn` 1.9%, `gdn/conv` 1.8%,
+`proj/o` 0.8%, `gdn/recur_prep` 0.8%.
+
+**Aggregates:**
+- **GDN total:** ~68.5% (`gates` 18.5 + `gated_norm` 17.6 + `qk_norm` 14.7
+  + `in_proj` 7.7 + `head_expand` 3.4 + `out_proj` 2.8 + `recurrent` 2.0 +
+  `conv` 1.8 + `recur_prep` 0.8)
+- **MLP trio:** 18.8% (`gate` 6.6 + `up` 6.2 + `down` 6.0)
+- **Full-attn projections:** ~3.8% (`qkv` 3.0 + `o` 0.8) — **still below
+  the 10% FlashInfer threshold** (this re-confirms the #163 preflight).
+
+### CUDA kernel top-10 (`--trace=cuda,nvtx`, post-#210)
+
+Source: `profiling-artifacts/post210_kern.csv` (nsys `cuda_gpu_kern_sum`).
+
+| %        | kernel                                                           | med (ns) | notes                                |
+| -------: | ---------------------------------------------------------------- | -------: | ------------------------------------ |
+| **15.7** | `Marlin<256,1,8,8,4,8>`                                          |   20,288 | 13527 invocations                    |
+| **12.6** | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn`   | 1,715,259 | 130 invocations = **lm_head** |
+|     10.5 | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn`     |   60,000 | 3121 invocations                     |
+|      9.8 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn`    |   36,208 | 6244 invocations                     |
+|  **8.6** | `ucopy_bf16`                                                     |   32,897 | 4164 invocations — cross-cutting     |
+|      5.7 | `ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn` | 32,480 | 3121 invocations                 |
+|      3.4 | `bmul_f32`                                                       |    2,784 | 24979 invocations (elementwise zoo)  |
+|      3.2 | `fused_rmsnorm_kernel`                                           |    6,176 | 10536 invocations (PR #133 kernel)   |
+|      2.7 | `recurrent_gdn_fwd_kernel<128>`                                  |   15,360 | 3122 invocations (PR #80 kernel)     |
+|      2.5 | `cast_f32_bf16`                                                  |    1,312 | 20814 invocations                    |
+
+Sub-top-10 notable: `ucopy_f32` 2.1%, `cast_bf16_f32` 1.8%, `affine_f32`
+1.6%, `fast_sum_f32` 1.3%, `bmul_bf16` 0.8%, `badd_bf16` 0.8%. Together the
+elementwise zoo (casts + ucopy + affine + sum + mul) accounts for ~20% of
+kernel time, scattered across the GDN + norm + residual paths.
+
+### Graph-replay-aware analysis (per region)
+
+The dispatch-amortization lesson from #141, #173, #176, and #164 applies
+with full force: under CUDA graph replay the per-iteration kernel-launch
+cost goes to near-zero, so a fusion that only collapses launches shows up
+as a null delta. **For a fusion to clear the 1.05× decode floor, it must
+reduce real compute or memory traffic, not just dispatch cost.** The
+math-ceiling check below uses the decode-level Amdahl bound: a fusion
+eliminating fraction *p* of decode time at speedup *s* yields a total
+speedup of `1 / (1 - p·(1 - 1/s))`, and the win-contribution is
+`p · (1 - 1/s)`. We require that contribution ≥ 0.05 (i.e. ≥5% decode
+speedup) to even queue a pod-$ attempt.
+
+| region                           | % | already attempted?                   | realistic compute-reducing fusion? | win contribution if 1.10× | queue?     |
+| -------------------------------- | -: | ------------------------------------ | :--------------------------------: | ------------------------: | ---------- |
+| `:kiln/gdn/gates`                | 18.5 | fused in #158 (merged)             | already fused                      |                         — | **no**     |
+| `:kiln/gdn/gated_norm`           | 17.6 | #141 closed null                   | would need new memory-reducing approach | 0.016                | **no** (re-visit needs new idea, not new attempt) |
+| `:kiln/gdn/qk_norm`              | 14.7 | #173 opt-in, null median           | already tried and null             |                     0.013 | **no** |
+| `:kiln/gdn/in_proj`              |  7.7 | Marlin GEMM (already quantized)    | GEMM shape change, not fusion      |                     0.007 | **no**     |
+| MLP trio (gate+up+down)          | 18.8 | none                               | partial fusion (swiglu gate/up merge into a single Marlin call) plausible | 0.017 | **no** (sub-floor) |
+| `:kiln/gdn/in_proj` + `out_proj` | 10.5 | none                               | share layout work, potential combined load  | 0.009        | **no** (sub-floor) |
+| `ucopy_bf16` (kernel-level)      |  8.6 kernel-% | none                    | many sites (residual, reshape, cast-adjacent); consolidation could pay if source sites are identified | depends on which sites | **investigate** |
+| elementwise zoo (aggregate)      | ~20 kernel-% | none                     | cross-cutting; no single natural fusion site | depends on grouping | **investigate** |
+| `:kiln/residual`                 |  3.4 | none                               | potential in-place ADD into RMSNorm epilogue | 0.003            | **no**     |
+| full-attn `:kiln/proj/qkv`       |  3.0 | FlashInfer #163 ruled null         | already quantized (Marlin)         |                     0.003 | **no**     |
+
+None of the "queue?" column says **yes**. Every standalone region either
+already has a shipped fusion, has a closed-null attempt on record, or sits
+below the 1.10× × region-% floor of 0.05 decode speedup.
+
+### Next target — recommendation
+
+**Do not queue another standalone decode-kernel fusion.** The top three
+GDN regions (gates / gated_norm / qk_norm, summed 50.8%) have all been
+attacked and each either shipped (#158) or closed null (#141, #173, #176).
+The MLP trio is the only sizable region that has not been touched, but at
+18.8% it requires a 1.362× per-region speedup to clear the 5% decode floor,
+and that's the theoretical ceiling — real speedups under graph replay fall
+well below the nominal kernel-level number.
+
+Three qualified candidates for the next Phase 6 slice, in priority order:
+
+1. **`ucopy_bf16` source-site audit (investigate-only, $0 preflight
+   follow-up).** `ucopy_bf16` is 8.6% of kernel time spread across 4164
+   invocations per decode step. If the source sites (candle's transpose /
+   contiguous / cast-adjacent copies) can be identified and consolidated,
+   the math-ceiling case is: 8.6% × (1 − 1/1.5) ≈ 0.029, still sub-floor
+   *if we only save kernel time*, but attacking it means reducing memory
+   traffic which *does* compound under graph replay. This needs an
+   instrumentation pass first — add `NVTX_RANGE!` around each call site —
+   before any kernel work.
+
+2. **KV cache FP8 (`KILN_KV_CACHE_FP8=1`).** Non-kernel axis; not about
+   decode tok/s, about doubling effective context. Already wired
+   (`KILN_KV_CACHE_FP8` in `kiln-server/src/config.rs`). Needs a
+   correctness + quality benchmark, not a fusion. Distinct win category
+   from the decode-kernel work; would not be starved by the math-ceiling
+   floor because context-length is a product feature, not a decode-speed
+   metric.
+
+3. **MLP gate/up Marlin merge (speculative).** `:kiln/mlp/gate` (6.6%) and
+   `:kiln/mlp/up` (6.2%) run on the same input activation and are
+   immediately fused by a SwiGLU elementwise op. A single Marlin call
+   producing both outputs in parallel should halve the activation load
+   cost. Math-ceiling: 12.8% × (1 − 1/1.5) = 0.043 — still sub-floor, so
+   **not a queued task yet**. Flag it as "needs further math" — specifically
+   needs a profile that separates activation-load time from GEMM time on
+   the MLP trio. Do that profiling before committing pod $.
+
+### Do NOT target (restated)
+
+- **`:kiln/gdn/qk_norm`** standalone — PR #173 shipped opt-in, null median
+  (1.0093× point estimate, variance-reducing only). Do not re-queue without
+  new evidence of a memory-reducing approach that wasn't tried in #173.
+- **`:kiln/gdn/gated_norm`** standalone — PR #141 closed null. Do not
+  re-queue.
+- **Big-fusion (`qk_norm` + `gated_norm` + `recurrent`)** — PR #176 closed
+  null, $14.99 burn. Step 7 (recurrent) is architecturally separated from
+  Steps 6 and 8 and cannot be single-kernel fused. Do not re-queue.
+- **FlashInfer paged GQA decode** — PR #163 preflight: full-attn total is
+  3.8% of decode this capture (was 3.5% post-#166), math ceiling ≤1.038×
+  even at infinite speedup on that region. Not viable on Qwen3.5-4B's
+  24 GDN + 8 GQA architecture.
+- **Gate-path fusion across Step 7 recurrence** — PR #164 preflight
+  concluded architecturally infeasible; the two halves (Step 6 gates, Step
+  8 gated_norm) are separated by the recurrent scan and cannot share a
+  kernel. Both halves are already addressed independently (#158 merged,
+  #141 closed null). Do not re-queue as a combined task.
+
+### Artifacts
+
+- `profiling-artifacts/post210_nvtx.csv` — full NVTX region table
+  (24 rows).
+- `profiling-artifacts/post210_kern.csv` — full CUDA kernel table
+  (52 rows).
+- Raw `.nsys-rep` (112 MB) retained on pod only (too large to commit).
+
+
 ## Re-profile 2026-04-20 (pool-verification baseline)
 
 Bench-only re-run on a fresh pod acquired through the new Cloud Eric kiln pod
