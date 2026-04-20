@@ -7,16 +7,13 @@ name: Kiln server release
 # Platform matrix today:
 #   - macOS aarch64 (Apple Silicon) + Metal feature — signed + notarized
 #   - Linux x86_64 + CUDA 12.4 — unsigned prebuilt for NVIDIA GPUs
+#   - Windows x86_64 + CUDA 12.4 — unsigned prebuilt for NVIDIA GPUs
 #
-# The Linux job installs the CUDA 12.4 toolkit on the runner via
-# Jimver/cuda-toolkit and compiles for SM 80/86/89/90 (Ampere → Hopper).
+# Linux + Windows jobs install the CUDA 12.4 toolkit on the runner via
+# Jimver/cuda-toolkit and compile for SM 80/86/89/90 (Ampere → Hopper).
 # Blackwell (SM 120) is not emitted because CUDA 12.4's nvcc does not
 # support it; a CUDA 13 release will be needed once Blackwell GPUs are
 # common enough in the user base to justify the extra build time.
-#
-# A Windows CUDA job is planned as the next slice and will ship the
-# `kiln-{version}-x86_64-pc-windows-msvc-cuda124.zip` asset that
-# desktop/src/installer.rs already matches on.
 
 on:
   push:
@@ -249,4 +246,92 @@ jobs:
         with:
           name: kiln-linux-x86_64-cuda124-unsigned
           path: target/x86_64-unknown-linux-gnu/release/kiln
+          retention-days: 7
+
+  windows-cuda:
+    name: Windows / x86_64 / CUDA 12.4
+    runs-on: windows-latest
+    # See linux-cuda for the rationale on the arch list. Blackwell (SM 120)
+    # is excluded because CUDA 12.4's nvcc can't emit it.
+    env:
+      KILN_CUDA_ARCHS: '80;86;89;90'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install CUDA 12.4 toolkit
+        # Same sub-package set as the Linux job. Jimver/cuda-toolkit
+        # normalizes the hyphen/underscore naming across platforms, so
+        # `cudart-dev` resolves to `cudart_dev` on the Windows network
+        # installer automatically.
+        uses: Jimver/cuda-toolkit@v0.2.19
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cublas", "cublas-dev", "curand", "curand-dev", "cccl", "profiler-api"]'
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: kiln-server-windows-cuda
+
+      - name: Build kiln (CUDA)
+        shell: cmd
+        run: |
+          cargo build --release --locked --features cuda --bin kiln --target x86_64-pc-windows-msvc
+
+      - name: Package zip
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "target/x86_64-pc-windows-msvc/release/kiln.exe"
+          if (!(Test-Path $bin)) { throw "Missing $bin" }
+          $version = "$env:TAG".TrimStart("kiln-v")
+          $artifact = "kiln-$version-x86_64-pc-windows-msvc-cuda124.zip"
+          $stage = Join-Path $env:RUNNER_TEMP "stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath $bin -Destination (Join-Path $stage "kiln.exe") -Force
+          # -CompressionLevel Optimal for the smallest tarball; Windows
+          # users download these over potentially flaky networks.
+          Compress-Archive -Path (Join-Path $stage "kiln.exe") -DestinationPath $artifact -CompressionLevel Optimal -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $artifact).Hash.ToLower()
+          $hash | Out-File -FilePath "$artifact.sha256" -Encoding ascii -NoNewline
+          $size = (Get-Item $artifact).Length
+          Write-Host "Produced $artifact ($size bytes, sha256=$hash)"
+          "ARTIFACT=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          ARTIFACT: ${{ env.ARTIFACT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release view "$env:TAG" --repo "$env:GITHUB_REPOSITORY" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:TAG" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --draft `
+              --title "Kiln server $env:TAG" `
+              --notes "Prebuilt ``kiln`` server binaries for $env:TAG. See the repository README for supported platforms."
+          }
+          gh release upload "$env:TAG" "$env:ARTIFACT" "$env:ARTIFACT.sha256" `
+            --repo "$env:GITHUB_REPOSITORY" --clobber
+
+      - name: Upload artifact (non-tag)
+        if: "!startsWith(github.ref, 'refs/tags/kiln-v')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: kiln-windows-x86_64-cuda124-unsigned
+          path: target/x86_64-pc-windows-msvc/release/kiln.exe
           retention-days: 7
