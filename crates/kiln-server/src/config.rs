@@ -47,6 +47,24 @@ pub struct ModelConfig {
     pub model_id: String,
     pub tokenizer_path: Option<String>,
     pub adapter_dir: Option<String>,
+    /// Override the string exposed at `/v1/models` and echoed in chat completion responses.
+    /// When `None`, derived from `model_id` (strip up to last `/`, lowercase, append `-kiln`).
+    pub served_model_id: Option<String>,
+}
+
+impl ModelConfig {
+    /// Resolve the served model identifier.
+    ///
+    /// Returns the explicit `served_model_id` override when set; otherwise derives
+    /// it from `model_id` by stripping everything up to and including the last `/`,
+    /// lowercasing the remainder, and appending `-kiln`.
+    pub fn effective_served_model_id(&self) -> String {
+        if let Some(ref id) = self.served_model_id {
+            return id.clone();
+        }
+        let base = self.model_id.rsplit('/').next().unwrap_or(&self.model_id);
+        format!("{}-kiln", base.to_lowercase())
+    }
 }
 
 /// GPU memory allocation settings.
@@ -148,6 +166,7 @@ impl Default for ModelConfig {
             model_id: "Qwen/Qwen3.5-4B".into(),
             tokenizer_path: None,
             adapter_dir: None,
+            served_model_id: None,
         }
     }
 }
@@ -270,6 +289,9 @@ impl KilnConfig {
         }
         if let Ok(v) = std::env::var("KILN_ADAPTER_DIR") {
             self.model.adapter_dir = Some(v);
+        }
+        if let Ok(v) = std::env::var("KILN_SERVED_MODEL_ID") {
+            self.model.served_model_id = Some(v);
         }
 
         // Memory
@@ -667,5 +689,62 @@ level = "warn"
     fn test_load_nonexistent_explicit_path_errors() {
         let result = KilnConfig::load(Some("/no/such/file.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_served_model_id_default_derivation() {
+        let config = ModelConfig::default();
+        assert_eq!(config.effective_served_model_id(), "qwen3.5-4b-kiln");
+    }
+
+    #[test]
+    fn test_served_model_id_derives_from_lowercase_no_slash() {
+        let config = ModelConfig {
+            model_id: "qwen3.5-4b".into(),
+            ..ModelConfig::default()
+        };
+        assert_eq!(config.effective_served_model_id(), "qwen3.5-4b-kiln");
+    }
+
+    #[test]
+    fn test_served_model_id_derives_from_nested_path() {
+        let config = ModelConfig {
+            model_id: "Org/Subdir/Model-Foo_7B".into(),
+            ..ModelConfig::default()
+        };
+        assert_eq!(config.effective_served_model_id(), "model-foo_7b-kiln");
+    }
+
+    #[test]
+    fn test_served_model_id_explicit_override_passes_through() {
+        let config = ModelConfig {
+            model_id: "Qwen/Qwen3.5-4B".into(),
+            served_model_id: Some("My-Custom_Name".into()),
+            ..ModelConfig::default()
+        };
+        assert_eq!(config.effective_served_model_id(), "My-Custom_Name");
+    }
+
+    #[test]
+    fn test_served_model_id_env_var_overrides_toml() {
+        let toml_str = r#"
+[model]
+served_model_id = "from-toml"
+"#;
+        let mut config: KilnConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.served_model_id.as_deref(), Some("from-toml"));
+
+        unsafe {
+            std::env::set_var("KILN_SERVED_MODEL_ID", "from-env");
+        }
+        config.apply_env_overrides();
+        assert_eq!(
+            config.model.effective_served_model_id(),
+            "from-env",
+            "env var should override TOML value"
+        );
+        unsafe {
+            std::env::remove_var("KILN_SERVED_MODEL_ID");
+        }
     }
 }

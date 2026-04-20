@@ -165,7 +165,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         version: env!("CARGO_PKG_VERSION"),
         uptime_seconds,
         model: format!(
-            "qwen3.5-4b ({}L, {}H, {}KV)",
+            "{} ({}L, {}H, {}KV)",
+            state.served_model_id,
             state.model_config.num_layers,
             state.model_config.num_attention_heads,
             state.model_config.num_kv_heads,
@@ -217,7 +218,14 @@ mod tests {
         let engine = MockEngine::new(config.clone());
         let tokenizer =
             kiln_core::tokenizer::KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B").unwrap();
-        AppState::new_mock(config, scheduler, Arc::new(engine), tokenizer, 300)
+        AppState::new_mock(
+            config,
+            scheduler,
+            Arc::new(engine),
+            tokenizer,
+            300,
+            "qwen3.5-4b-kiln".to_string(),
+        )
     }
 
     #[tokio::test]
@@ -239,7 +247,7 @@ mod tests {
 
         assert_eq!(json["status"], "ok");
         assert!(json["uptime_seconds"].is_number());
-        assert!(json["model"].as_str().unwrap().contains("qwen3.5-4b"));
+        assert!(json["model"].as_str().unwrap().contains("qwen3.5-4b-kiln"));
         assert_eq!(json["backend"], "mock");
         assert!(json["active_adapter"].is_null());
         assert_eq!(json["adapters_loaded"], 0);

@@ -61,7 +61,17 @@ async fn main() -> Result<()> {
             }
         },
         // Serve mode (default)
-        Some(Commands::Serve) | None => {}
+        Some(Commands::Serve { ref served_model_id }) => {
+            // CLI flag wins over env/TOML; surface it via env var so the
+            // config loader picks it up uniformly.
+            if let Some(v) = served_model_id {
+                // Safety: argv parsing happens before any threads are spawned.
+                unsafe {
+                    std::env::set_var("KILN_SERVED_MODEL_ID", v);
+                }
+            }
+        }
+        None => {}
     }
 
     // --- Server startup ---
@@ -74,6 +84,8 @@ async fn main() -> Result<()> {
 
     let model_config = ModelConfig::qwen3_5_4b();
     let model_path = config.model.path.as_deref();
+    let served_model_id = config.model.effective_served_model_id();
+    tracing::info!(served_model_id = %served_model_id, "served model identifier");
 
     // Print startup banner to stderr (doesn't interfere with structured logs)
     cli::print_banner(host, port, model_path, args.config.as_deref());
@@ -153,6 +165,7 @@ async fn main() -> Result<()> {
             adapter_dir,
             &config.memory,
             config.server.request_timeout_secs,
+            served_model_id,
         )
     } else {
         // Mock mode: use scheduler + mock engine.
@@ -174,6 +187,7 @@ async fn main() -> Result<()> {
             Arc::new(engine),
             tokenizer,
             config.server.request_timeout_secs,
+            served_model_id,
         )
     };
 
