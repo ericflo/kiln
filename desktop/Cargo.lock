@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-desktop"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "dirs 5.0.1",
  "flate2",
