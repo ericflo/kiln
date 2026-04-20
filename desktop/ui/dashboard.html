@@ -196,6 +196,9 @@
       #model-path-pill.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #model-path-pill.flash #model-path,
       #model-path-pill.flash-warn #model-path { color: inherit; }
+      #base-url.copyable { cursor: pointer; }
+      #base-url.flash { background: #245a32; border-color: #2f7a43; color: #d6f2dd; }
+      #base-url.flash-warn { background: #5a3324; border-color: #7a432f; color: #f2ddd6; }
       #status-badge {
         display: inline-flex;
         align-items: center;
@@ -1160,14 +1163,57 @@
       function setBaseUrl(url) {
         if (url) {
           baseUrlEl.textContent = url;
-          baseUrlEl.title = url;
+          baseUrlEl.title = `${url} (click to copy)`;
           baseUrlEl.classList.remove("empty");
+          baseUrlEl.classList.add("copyable");
         } else {
           baseUrlEl.textContent = BASE_URL_EMPTY_LABEL;
           baseUrlEl.title = BASE_URL_EMPTY_TITLE;
           baseUrlEl.classList.add("empty");
+          baseUrlEl.classList.remove("copyable");
         }
       }
+
+      let baseUrlResetTimer = null;
+      function flashBaseUrl(cls) {
+        if (baseUrlResetTimer) {
+          clearTimeout(baseUrlResetTimer);
+          baseUrlResetTimer = null;
+        }
+        baseUrlEl.classList.remove("flash", "flash-warn");
+        if (cls) baseUrlEl.classList.add(cls);
+        baseUrlResetTimer = setTimeout(() => {
+          baseUrlEl.classList.remove("flash", "flash-warn");
+          baseUrlResetTimer = null;
+        }, 1200);
+      }
+
+      async function copyBaseUrl() {
+        if (baseUrlEl.classList.contains("empty")) return;
+        if (!invoke) {
+          flashBaseUrl("flash-warn");
+          return;
+        }
+        try {
+          const url = await invoke("get_openai_base_url");
+          if (!url) {
+            flashBaseUrl("flash-warn");
+            return;
+          }
+          try {
+            await navigator.clipboard.writeText(url);
+            flashBaseUrl("flash");
+          } catch (err) {
+            flashBaseUrl("flash-warn");
+            console.error("clipboard.writeText failed", err);
+          }
+        } catch (err) {
+          flashBaseUrl("flash-warn");
+          console.error("get_openai_base_url failed", err);
+        }
+      }
+
+      baseUrlEl.addEventListener("click", copyBaseUrl);
 
       async function refreshBaseUrl(kind) {
         if (!invoke || kind !== "Running") {
