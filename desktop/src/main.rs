@@ -522,15 +522,18 @@ async fn check_for_kiln_update(
     };
 
     let platform_supported = installer::supports_auto_install();
-    let latest = if platform_supported {
+    let (latest, release_body) = if platform_supported {
         let client = reqwest::Client::builder()
             .user_agent(concat!("kiln-desktop/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|e| format!("build reqwest client: {}", e))?;
-        installer::discover_latest_version(&client).await
+        match installer::discover_latest_version_and_body(&client).await {
+            Some((v, b)) => (Some(v), b),
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
 
     let mut update_available = match &latest {
@@ -538,15 +541,23 @@ async fn check_for_kiln_update(
         None => false,
     };
 
-    // GPU arch compat gate (slice 6): if nvidia-smi reports a compute
-    // capability outside `installer::SUPPORTED_SM_ARCHS`, refuse to offer
-    // the update. Unknown detection (no nvidia-smi, timeout, etc.) is
-    // NOT a block — preserve existing behavior on systems without
-    // nvidia-smi. See `desktop/docs/binary-update.md` (CUDA / GPU compat).
+    // GPU arch compat gate (slices 6 + 7): `gpu_compat` rejects arches
+    // outside the compiled-in `SUPPORTED_SM_ARCHS`, but slice 7 lets
+    // each release widen that list via a machine-readable
+    // `supported_sm: [...]` line in its notes. Reclassify an
+    // `Unsupported` verdict to `Supported` when the release-specific
+    // list includes the detected arch. Unknown detection (no nvidia-smi,
+    // timeout, etc.) is NOT a block — preserve existing behavior on
+    // systems without nvidia-smi. See
+    // `desktop/docs/binary-update.md` (CUDA / GPU compat).
     let gpu_unsupported = match installer::gpu_compat().await {
         installer::GpuCompat::Unsupported(sm) => {
-            update_available = false;
-            Some(sm)
+            if installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
+                None
+            } else {
+                update_available = false;
+                Some(sm)
+            }
         }
         installer::GpuCompat::Supported(_) | installer::GpuCompat::Unknown => None,
     };
@@ -608,7 +619,9 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
         }
     };
 
-    let Some(latest) = installer::discover_latest_version(&client).await else {
+    let Some((latest, release_body)) =
+        installer::discover_latest_version_and_body(&client).await
+    else {
         return;
     };
 
@@ -616,17 +629,22 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
         return;
     }
 
-    // GPU arch compat gate (slice 6): silently skip the banner when the
-    // local GPU's SM arch is outside `installer::SUPPORTED_SM_ARCHS`.
-    // Unknown detection is treated as supported — the check_for_kiln_update
-    // command path still surfaces the compat state to the settings UI when
-    // the user clicks "Check for Updates".
+    // GPU arch compat gate (slices 6 + 7): silently skip the banner when
+    // the local GPU's SM arch is outside the supported list for this
+    // release. The list comes from the release-notes `supported_sm:`
+    // line when present, otherwise falls back to
+    // `installer::SUPPORTED_SM_ARCHS`. Unknown detection is treated as
+    // supported — the check_for_kiln_update command path still surfaces
+    // the compat state to the settings UI when the user clicks "Check
+    // for Updates".
     if let installer::GpuCompat::Unsupported(sm) = installer::gpu_compat().await {
-        eprintln!(
-            "[main] auto_update: skipping — GPU SM {} not supported",
-            sm
-        );
-        return;
+        if !installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
+            eprintln!(
+                "[main] auto_update: skipping — GPU SM {} not supported",
+                sm
+            );
+            return;
+        }
     }
 
     if let Err(e) = app.emit(

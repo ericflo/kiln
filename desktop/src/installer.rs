@@ -437,12 +437,22 @@ struct Release {
     tag_name: String,
     #[serde(default)]
     assets: Vec<ReleaseAsset>,
+    /// Full release-notes body (markdown). Parsed by
+    /// [`parse_supported_sm`] so the per-release supported-SM list can
+    /// move with the release rather than being hardcoded in the desktop
+    /// app. `None` when the field is absent (older releases predating the
+    /// `supported_sm:` convention).
+    #[serde(default)]
+    body: Option<String>,
 }
 
 struct AssetPair {
     version: String,
     tarball: ReleaseAsset,
     sha256: Option<ReleaseAsset>,
+    /// Release-notes body carried forward so callers can feed it to
+    /// [`is_supported_sm_for_release`] / [`supported_sm_for_release`].
+    release_body: Option<String>,
 }
 
 /// Fetch the newest `kiln-v*` release and find the asset pair matching
@@ -495,6 +505,7 @@ async fn discover_asset(
             version,
             tarball: tar,
             sha256: sha,
+            release_body: release.body.clone(),
         });
     }
     Err(format!(
@@ -737,6 +748,20 @@ pub async fn discover_latest_version(client: &reqwest::Client) -> Option<String>
     discover_asset(client, target).await.ok().map(|p| p.version)
 }
 
+/// Fetch the newest release's version + notes body for the current
+/// target. Feeds [`is_supported_sm_for_release`] so callers can apply the
+/// per-release supported-SM list. Returns `None` under the same
+/// conditions as [`discover_latest_version`].
+pub async fn discover_latest_version_and_body(
+    client: &reqwest::Client,
+) -> Option<(String, Option<String>)> {
+    let target = current_target()?;
+    discover_asset(client, target)
+        .await
+        .ok()
+        .map(|p| (p.version, p.release_body))
+}
+
 /// Decide whether `latest` is newer than `current` using semver.
 ///
 /// Per design doc (`desktop/docs/binary-update.md`): fall back to string
@@ -793,6 +818,71 @@ pub enum GpuCompat {
 /// Whether `arch` is in [`SUPPORTED_SM_ARCHS`].
 pub fn is_supported_sm(arch: u32) -> bool {
     SUPPORTED_SM_ARCHS.contains(&arch)
+}
+
+/// Parse `supported_sm: [80, 86, 89, 90]` (or `supported_sm: 80, 86, 89, 90`)
+/// from release-notes body. Returns `None` when the line is absent or
+/// unparseable so callers fall back to [`SUPPORTED_SM_ARCHS`].
+///
+/// The key match is strict (lowercase `supported_sm`). Brackets are
+/// optional; whitespace inside the list is tolerated. Any unparseable
+/// element or an empty list returns `None` so the caller falls back to
+/// the compiled-in default rather than silently locking out every arch.
+///
+/// Note on line terminators: `gh release create --notes "..."` passes
+/// the string verbatim (no escape-sequence processing), so release
+/// bodies emitted by the CI workflow may contain literal `\n` (two
+/// characters) between fields rather than real newlines. We normalize
+/// both forms before scanning for the key so either style works.
+pub fn parse_supported_sm(body: &str) -> Option<Vec<u32>> {
+    let normalized = body.replace("\\n", "\n");
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("supported_sm:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        let inner = rest
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(rest);
+        let parts: Vec<&str> = inner
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(parts.len());
+        for p in parts {
+            let n: u32 = p.parse().ok()?;
+            out.push(n);
+        }
+        if out.is_empty() {
+            return None;
+        }
+        return Some(out);
+    }
+    None
+}
+
+/// Pick the supported-SM list for a release: prefer the parsed list from
+/// its notes body, fall back to [`SUPPORTED_SM_ARCHS`] when the body is
+/// missing, malformed, or empty.
+pub fn supported_sm_for_release(body: Option<&str>) -> Vec<u32> {
+    body.and_then(parse_supported_sm)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| SUPPORTED_SM_ARCHS.to_vec())
+}
+
+/// Whether `arch` is supported by the release whose notes body is
+/// `body`. Per-release list takes precedence over [`SUPPORTED_SM_ARCHS`]
+/// so a newer release can widen support (e.g. add Blackwell SM 120) by
+/// publishing `supported_sm: [80, 86, 89, 90, 120]` in its notes without
+/// waiting for a desktop update.
+pub fn is_supported_sm_for_release(arch: u32, body: Option<&str>) -> bool {
+    supported_sm_for_release(body).contains(&arch)
 }
 
 /// Parse the first non-empty line of `nvidia-smi --query-gpu=compute_cap
@@ -1480,11 +1570,12 @@ mod tests {
     use super::{
         backup_binary_path, cleanup_bak, current_target, extract_tarball_to,
         extracted_new_binary_path, installed_binary_path, is_supported_sm,
-        is_update_available, parse_compute_cap, parse_kiln_version_output,
-        release_archive_ext, release_asset_name, release_download_url,
-        rollback_to_bak, staging_tarball_path, supports_auto_install,
-        swap_new_binary_into_place, verify_sha256, BACKUP_BINARY_NAME,
-        NEW_BINARY_NAME, SUPPORTED_SM_ARCHS, UPDATE_STAGING_DIR,
+        is_supported_sm_for_release, is_update_available, parse_compute_cap,
+        parse_kiln_version_output, parse_supported_sm, release_archive_ext,
+        release_asset_name, release_download_url, rollback_to_bak,
+        staging_tarball_path, supports_auto_install, swap_new_binary_into_place,
+        verify_sha256, BACKUP_BINARY_NAME, NEW_BINARY_NAME, SUPPORTED_SM_ARCHS,
+        UPDATE_STAGING_DIR,
     };
     use std::io::Write;
     use std::path::PathBuf;
@@ -2129,5 +2220,71 @@ mod tests {
         // unknown-but-parseable arch still surfaces to the caller.
         assert_eq!(parse_compute_cap("7.5\n"), Some(75));
         assert!(!is_supported_sm(75));
+    }
+
+    #[test]
+    fn parse_supported_sm_bracketed() {
+        assert_eq!(
+            parse_supported_sm("foo\nsupported_sm: [80, 86, 89, 90]\nbar"),
+            Some(vec![80, 86, 89, 90]),
+        );
+    }
+
+    #[test]
+    fn parse_supported_sm_unbracketed() {
+        assert_eq!(
+            parse_supported_sm("supported_sm: 80, 86"),
+            Some(vec![80, 86]),
+        );
+    }
+
+    #[test]
+    fn parse_supported_sm_literal_backslash_n() {
+        // `gh release create --notes "..."` passes its argument verbatim,
+        // so workflow-emitted bodies may contain literal `\n` (two
+        // characters: backslash + n) between fields instead of real
+        // newlines. Normalization must handle that form too.
+        let body =
+            "Prebuilt kiln binaries for kiln-v1.0.0. See README for platforms.\\n\\nsupported_sm: [80, 86, 89, 90]";
+        assert_eq!(
+            parse_supported_sm(body),
+            Some(vec![80, 86, 89, 90]),
+        );
+    }
+
+    #[test]
+    fn parse_supported_sm_extra_whitespace() {
+        assert_eq!(
+            parse_supported_sm("  supported_sm:   [ 80 , 89 ]  "),
+            Some(vec![80, 89]),
+        );
+    }
+
+    #[test]
+    fn parse_supported_sm_missing_returns_none() {
+        assert_eq!(parse_supported_sm("any text"), None);
+    }
+
+    #[test]
+    fn parse_supported_sm_unparseable_element_returns_none() {
+        assert_eq!(parse_supported_sm("supported_sm: [80, abc]"), None);
+    }
+
+    #[test]
+    fn parse_supported_sm_empty_list_returns_none() {
+        assert_eq!(parse_supported_sm("supported_sm: []"), None);
+    }
+
+    #[test]
+    fn is_supported_sm_for_release_uses_parsed() {
+        let body = "notes\nsupported_sm: [120]\n";
+        assert!(is_supported_sm_for_release(120, Some(body)));
+        assert!(!is_supported_sm_for_release(86, Some(body)));
+    }
+
+    #[test]
+    fn is_supported_sm_for_release_falls_back() {
+        assert!(is_supported_sm_for_release(86, None));
+        assert!(!is_supported_sm_for_release(75, None));
     }
 }
