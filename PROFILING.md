@@ -1,6 +1,320 @@
 # Kiln Profiling Report
 
 
+## Phase 6 preflight 2026-04-20: Marlin wrapper BF16-native I/O epilogue (KILL)
+
+**Outcome: KILL. Phase 6 is complete. Advancing to Phase 7.**
+
+This preflight gates the final un-attempted Phase 6 decode lever surfaced
+by the [#224](https://github.com/ericflo/kiln/pull/224) frontier audit:
+eliminating the per-call BF16↔FP16 cast pair and FP16 intermediate buffer
+around every Marlin W4A16 GEMM call in the decode path. The audit
+projected region-local speedups in the 1.05–1.10× range with a
+contribution of 0.017–0.033 (plausibly clearing the 0.05 floor under two
+compounding assumptions). This preflight, $0 and doc-only, tests both
+assumptions against the post-#210 direct nsys evidence and kills on two of
+the three required checks.
+
+No pod spent. No code changed. Precedent for doc-only redirect: PRs
+[#131](https://github.com/ericflo/kiln/pull/131),
+[#163](https://github.com/ericflo/kiln/pull/163),
+[#164](https://github.com/ericflo/kiln/pull/164),
+[#170](https://github.com/ericflo/kiln/pull/170),
+[#219](https://github.com/ericflo/kiln/pull/219),
+[#223](https://github.com/ericflo/kiln/pull/223).
+
+### Check 1 — BF16-native Marlin tile exists upstream: **PASS**
+
+vLLM's templated Marlin (`csrc/quantization/marlin/`, the successor to the
+IST-DASLab FP16-only kernel that kiln currently vendors via PR #146)
+carries a full BF16 dtype specialization:
+
+- `csrc/quantization/marlin/marlin_dtypes.cuh`: defines
+  `MarlinScalarType<vllm::kBFloat16.id()>` with `nv_bfloat16` /
+  `nv_bfloat162` `FragA` / `FragB` / `FragS` types (lines 54–92). Aligned
+  on the same 16-lane fragment structure as the FP16 specialization, so
+  the tile shape (`Marlin<256,1,8,8,4,8>`) is compatible with the BF16
+  variant without geometric changes.
+- `csrc/quantization/marlin/marlin_mma.h` lines 66–75: emits
+  `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` under
+  `__CUDA_ARCH__ >= 800`. RTX A6000 is sm_86 — supported. H100 (sm_90) and
+  A100 (sm_80) are supported. Blackwell (sm_120a) is not the target arch
+  for kiln under CUDA 12.4.
+- `csrc/quantization/marlin/dequant.h` lines 174–193: provides
+  `dequant<nv_bfloat162, vllm::kU4B8.id(), true/false>` specializations
+  for both symmetric and asymmetric 4-bit dequant.
+
+Vendoring path is precedented: PR [#80](https://github.com/ericflo/kiln/pull/80)
+pulled `chunk_gla_fwd` from fla upstream into `kiln-gdn-kernel` with a
+similar scope (several hundred lines of templated CUDA + dtype
+specializations). A BF16 port would fork
+`crates/kiln-marlin-gemm/csrc/marlin_kernel.cu` and add a parallel
+`marlin_bf16_kernel.cu` with the dequant and mma branches swapped out.
+
+**Check 1 is not the blocker.**
+
+### Check 2 — wrapper cast+alloc ≥5% of each Marlin region wall-clock: **PARTIAL**
+
+The direct evidence that exists is kernel-level, not NVTX sub-range. From
+`profiling-artifacts/post210_kern.csv`:
+
+```
+%  total_ns     instances  avg_ns  name
+15.7  279,139,141  13,527  20,636  void Marlin<(int)256,(int)1,(int)8,(int)8,(int)4,(int)8>(...)
+ 1.0   17,877,596  13,527   1,322  cast_bf16_f16
+ 1.0   17,695,841  13,527   1,308  cast_f16_bf16
+```
+
+The 13,527-instance count matches exactly across all three rows — every
+Marlin call on the decode path is bracketed by one `cast_bf16_f16` on the
+input side and one `cast_f16_bf16` on the output side, confirming the
+wrapper structure at `crates/kiln-marlin-gemm/src/lib.rs` (the actual cast
+pair lives one crate below `kiln-model/src/marlin_proj.rs`: lines 168
+`a.to_dtype(DType::F16)?.contiguous()?`, 173
+`Tensor::zeros((m,n), DType::F16, ...)`, 268
+`c_fp16.to_dtype(DType::BF16)?`).
+
+Cast-pair wall-clock is 35.57 ms vs Marlin kernel body 279.14 ms, so the
+cast pair alone is **12.74% of the Marlin kernel body time**. Taken at face
+value, this clears the 5% threshold for the **cast pair**.
+
+However, the claim under evaluation is broader: "wrapper **cast + alloc**
+overhead". Aggregate Marlin NVTX regions sum to 33.1% of decode, Marlin
+kernel body is 15.7%, leaving 17.4 pp "outside the kernel" inside Marlin
+regions. Of that 17.4 pp:
+
+- 2.0 pp is the cast pair (direct kernel attribution above).
+- The remaining **~15.4 pp is not broken down** at sub-range granularity
+  in any current artifact. It is plausibly `ucopy_bf16` (8.6% total, but
+  Marlin regions are not the only ucopy_bf16 callsite — PR #219 already
+  ruled out per-site ucopy_bf16 fusion), `contiguous()` copies, the FP16
+  output buffer `Tensor::zeros` alloc, workspace zeros, Candle stream
+  sync, or dispatch launch overhead amortized by CUDA graph replay.
+
+No NVTX sub-range capture (`:kiln/marlin/cast_in`, `:kiln/marlin/alloc`,
+`:kiln/marlin/kernel`, `:kiln/marlin/cast_out`) exists in the
+`profiling-artifacts/` archive. `grep -rn "cast_bf16_f16|cast_f16_bf16"
+PROFILING.md` returns two references to the kernel-level attribution, and
+no sub-range wrapper breakdown. The **15.4 pp of overhead that PR #224
+attributed to "allocation, casts, layout, and stream sync"** is therefore
+an arithmetic derivation (region total − kernel body), not a measurement.
+
+Per this preflight's own acceptance rule (any of the three checks fails →
+KILL), this ambiguity alone does not kill — the cast-pair fraction clears
+5%. But it caps the honest math-ceiling to 2.0 pp definitely-eliminable,
+not 17.4 pp speculatively-eliminable. **This becomes decisive in Check 3.**
+
+Noting for the queue: a minimal nsys re-capture on a warm pod with NVTX
+sub-ranges in `kiln-marlin-gemm/src/lib.rs` around the `to_dtype` /
+`Tensor::zeros` / `kiln_marlin_w4a16_gemm` call edges would close this gap
+permanently, but the Check 3 result below makes that re-capture not worth
+a pod idle slot — the HBM analysis settles the question from the other
+side.
+
+### Check 3 — HBM-traffic reduction compounds under CUDA graph replay: **FAIL**
+
+This is the decisive check. kiln runs with `KILN_CUDA_GRAPHS=true` by
+default — decode-step kernel dispatch is captured into a graph and
+replayed, so launch-dispatch savings amortize to near-zero and only HBM
+traffic matters. This is the exact failure mode of null PRs
+[#141](https://github.com/ericflo/kiln/pull/141) (gated_rms_norm),
+[#173](https://github.com/ericflo/kiln/pull/173) (fused L2 qk_norm),
+[#176](https://github.com/ericflo/kiln/pull/176) (big-fusion across
+recurrent + qk_norm + gated_norm).
+
+HBM-traffic arithmetic at m=1 decode for a representative Marlin call
+(hidden_dim=2560, one of the 4-bit MLP / GDN projections with k=n=2560):
+
+```
+cast activation tensor (BF16 → FP16):
+  read:  2560 × 2 B = 5,120 B
+  write: 2560 × 2 B = 5,120 B
+  per cast:          10,240 B
+  both casts:        20,480 B per Marlin call
+
+quantized weight read inside Marlin kernel:
+  2560 × 2560 × 0.5 B (4-bit packed) ≈ 3,276,800 B ≈ 3.2 MB per call
+
+activation read inside Marlin kernel (k=2560 BF16 / FP16):
+  ≈ 5,120 B per call
+
+wrapper HBM / total Marlin HBM per call:
+  20,480 / (3,276,800 + 5,120) ≈ 0.62 %
+```
+
+Aggregate across all 13,527 Marlin invocations per decode run:
+
+```
+cast HBM traffic:    13,527 × 20,480 B ≈  277 MB
+Marlin weight read:  13,527 × 3.28 MB  ≈ 44.4 GB
+cast share of Marlin HBM:   0.62 %
+```
+
+At 2.0 pp of total decode attributable to the cast pair and dispatch-free
+graph replay, the **HBM-only saving is ≤0.62% of Marlin traffic × 33.1%
+aggregate Marlin region share = 0.21% of decode HBM budget.** The 2.0 pp
+cast kernel wall-clock is dominated by per-launch setup cost that graph
+replay already amortizes, not by the HBM traffic the epilogue would
+eliminate. Under graph replay, the steady-state gain collapses from "2.0
+pp removable" to "≤0.2 pp HBM-attributable" — **below measurement noise on
+the ±3-run median.**
+
+The FP16 intermediate output buffer alloc (`Tensor::zeros((m,n), DType::F16)`
+at `kiln-marlin-gemm/src/lib.rs:173`) is also not HBM work — it is CUDA
+malloc from Candle's caching allocator and is already amortized across
+graph replay. Eliminating it removes allocator pressure, not HBM traffic.
+
+This is the same structural failure that killed the last three big-fusion
+attempts. **Check 3 fails.** The BF16-native epilogue's HBM contribution
+does not compound; it evaporates.
+
+### Math-ceiling re-derivation — all scenarios below 1.05× floor
+
+| scenario | eliminated pp of decode | end-to-end speedup |
+| --- | ---: | ---: |
+| cast pair only (kernel wall-clock) | 2.0 | 1.020× |
+| cast pair + FP16 alloc (speculative, no sub-range evidence) | ~3.0 | 1.031× |
+| PROFILING.md #224 optimistic: 10% of 33.1% region | 3.3 | 1.034× |
+| honest HBM-only under graph replay | ≤0.2 | ≤1.002× |
+
+The 1.05× Phase 6 decode-speedup floor requires ≥4.76 pp of decode
+time eliminated. **No scenario with honest evidence reaches that
+threshold.** The most generous paper-math number from the #224 audit
+(3.3 pp) still sits 30% below the floor, and that number collapses further
+under graph replay.
+
+### Decision: **KILL. Phase 6 is complete.**
+
+The Marlin wrapper → BF16-native I/O epilogue has been vetted against the
+three preflight checks and fails on Check 3 decisively. The
+math-ceiling under honest assumptions is 1.02–1.03× end-to-end — below the
+Phase 6 1.05× queue gate — and the HBM-traffic analysis confirms this is
+not a graph-replay artifact but a structural ceiling set by activation
+tensor size (5 KB BF16) vs weight tensor size (3.2 MB packed 4-bit).
+
+With this KILL, the exhaustion matrix from PR #224 is now fully closed:
+every standalone region in the post-#210 NVTX top-10 either has a shipped
+fusion, a closed-null attempt, an architectural rejection with full
+rationale, or a preflight KILL with math-ceiling documented. **No
+remaining standalone decode-kernel lever above the 1.05× floor exists.**
+
+### Phase 6 closure — shipped and closed-null inventory
+
+Landed fused kernels (decode path):
+
+- [PR #80](https://github.com/ericflo/kiln/pull/80) `kiln-gdn-kernel` —
+  `chunk_gla_fwd` + recurrent GDN fwd vendored.
+- [PR #92](https://github.com/ericflo/kiln/pull/92) GDN fused forward
+  dispatch.
+- [PR #133](https://github.com/ericflo/kiln/pull/133) `kiln-rmsnorm-kernel`
+  — fused pre-norm RMSNorm.
+- [PR #146](https://github.com/ericflo/kiln/pull/146) `kiln-marlin-gemm` —
+  Marlin W4A16 vendored (FP16-only, where this preflight KILL leaves it).
+- [PR #158](https://github.com/ericflo/kiln/pull/158) GDN gate fusion.
+- [PR #166](https://github.com/ericflo/kiln/pull/166) `kiln-conv1d-kernel`
+  — `causal_conv1d_update` vendored.
+
+Closed-null / doc-only redirects:
+
+- [PR #131](https://github.com/ericflo/kiln/pull/131) — `chunk_gla_fwd`
+  already vendored (redirect).
+- [PR #141](https://github.com/ericflo/kiln/pull/141) — `gated_rms_norm`
+  fusion null under graph replay.
+- [PR #163](https://github.com/ericflo/kiln/pull/163) — FlashInfer paged
+  GQA decode, math-ceiling ≤1.005× redirect.
+- [PR #164](https://github.com/ericflo/kiln/pull/164) — GDN gate-path
+  single-kernel fusion architecturally infeasible.
+- [PR #170](https://github.com/ericflo/kiln/pull/170) — `fused_recurrent`
+  already done.
+- [PR #173](https://github.com/ericflo/kiln/pull/173) — fused L2 qk_norm,
+  null median, shipped opt-in for variance reduction.
+- [PR #176](https://github.com/ericflo/kiln/pull/176) — big-fusion across
+  recurrent + qk_norm + gated_norm, null ($14.99 burn).
+- [PR #219](https://github.com/ericflo/kiln/pull/219) — `ucopy_bf16`
+  per-site audit null.
+- [PR #222](https://github.com/ericflo/kiln/pull/222) — FP8 KV cache
+  verified, opt-in.
+- [PR #223](https://github.com/ericflo/kiln/pull/223) — MLP gate/up Marlin
+  fusion math-ceiling KILL.
+- [PR #224](https://github.com/ericflo/kiln/pull/224) — Phase 6 frontier
+  audit, identified this preflight as the last candidate.
+- **This PR** — Marlin wrapper BF16-native I/O epilogue KILL.
+
+Phase 6 final decode bench baseline (post-#166, A6000, `KILN_W4A16=1`,
+CUDA graphs ON, 512-prompt × 128-decode, median of 3): **49.76 tok/s,
+20.10 ms mean ITL, 25.46 ms p99 ITL.** This is the Phase 7 starting
+baseline — any Phase 7 work that unintentionally regresses decode tok/s
+below this median should be flagged.
+
+### Phase 7 transition — two well-defined starting candidates
+
+With Phase 6 closed, two Phase 7 work items are ready to pick up. They are
+**capability / DX** levers, not decode-kernel levers — Phase 7 is a
+deliberate shift away from the raw tok/s axis that Phase 6 nearly
+exhausted.
+
+**Phase 7 candidate A — GDN prefill memory reduction (long-context
+capability).** The redirect destination from PR #222. FP8 KV cache
+verification showed long-context OOM is set by the GDN prefill-state
+allocation, not the GQA KV cache. Relevant regions:
+`:kiln/gdn/recur_prep` (0.8 % of decode, prefill-dominant),
+`:kiln/gdn/head_expand` (3.4 % of decode), plus prefill-only state
+materialization. Target capability: unlock ≥65,536 prompt tokens on a
+single A6000 with `KILN_W4A16=1` + `KILN_KV_CACHE_FP8=1`. Preflight work:
+measure current GDN prefill peak memory via `nvidia-smi dmon` during a
+32k-prompt eval, identify the specific tensor residencies that force the
+OOM ceiling, and propose a streaming / chunked prefill-state computation
+that bounds peak memory. This is not a decode-speed lever and should not
+be measured on decode tok/s.
+
+**Phase 7 candidate B — self-speculative decode end-to-end bench + server
+flag.** Per agent note `kiln-speculative-decoding-design`, self-spec
+decoding is already implemented via the skip-layer approach (no separate
+draft model required — the same Qwen3.5-4B weights serve both draft and
+verify paths at different layer depths). The remaining work is
+benchmarking it end-to-end on the canonical 512-prompt × 128-decode bench
+and exposing it as a server runtime flag. This **is** a decode-speed lever
+(potentially 1.5–2× on tok/s if acceptance rates hold above ~70%), but it
+is algorithmic rather than kernel-fusion — it belongs in Phase 7 because
+it changes the scheduler / generation loop, not a kernel crate. Preflight
+work: acceptance-rate sweep across canonical prompts, pick a skip depth,
+queue a pod for the bench. This candidate may reopen the raw-tok/s axis
+that Phase 6 retired, but under a different set of architectural
+assumptions (speculation-friendly prompts, configurable trade-off at
+serving time).
+
+**Recommendation:** pick Candidate A as the Phase 7 opener. It is the
+capability-side unlock that FP8 KV cache (PR #222) explicitly redirected
+to, it has no overlap with any Phase 6 kernel work, and it directly
+addresses a customer-visible ceiling (context length) rather than a
+benchmark-visible metric (tok/s at 128 decode). Candidate B is
+reasonable to queue in parallel as a second-track preflight, but its
+payoff depends on acceptance-rate measurement that has not been done yet,
+whereas Candidate A's payoff is bounded by the GDN prefill allocation
+size, which is measurable on the next pod acquisition.
+
+### Preconditions for reopening Phase 6
+
+Should this KILL be revisited, the bar to re-queue any Marlin wrapper /
+BF16 epilogue work is:
+
+1. A new nsys capture with NVTX sub-ranges **inside the Marlin wrapper**
+   that breaks out per-call cast, alloc, contiguous, kernel, and dispatch
+   stages, producing a real sub-range wall-clock attribution for the 17.4
+   pp "outside kernel" bucket.
+2. Evidence that at least one sub-range stage (a) exceeds 5 % of the
+   region's wall-clock **and** (b) represents actual HBM traffic rather
+   than launch-dispatch cost that graph replay amortizes.
+3. An m > 1 decode scenario (continuous batching, speculative decoding
+   verify pass) where the wrapper cast amortizes differently. All Phase 6
+   work to date was m = 1 single-stream decode; at m = 8+ the activation
+   tensor scales linearly and the HBM share of the cast pair could rise
+   above the 0.62 % per-call threshold that killed this preflight.
+
+Absent new evidence meeting those conditions, do not re-queue this
+candidate. Phase 6 is closed.
+
+
 ## Phase 6 — Frontier audit post-#223 (2026-04-20)
 
 **Outcome: Phase 6 decode-kernel frontier is nearly exhausted.** Every
