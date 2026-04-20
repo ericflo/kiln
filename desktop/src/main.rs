@@ -231,6 +231,66 @@ async fn cancel_kiln_download(inst: State<'_, InstallerHandle>) -> Result<(), St
     Ok(())
 }
 
+/// Updater slice 2: download a newer kiln release tarball into the staging
+/// directory under `app_data_dir/kiln-updates/`. **Does not** extract, swap
+/// the live binary, or restart the supervisor — those steps land in slice 3
+/// (see `desktop/docs/binary-update.md`).
+///
+/// Progress is streamed as `download_update_progress`; terminal events are
+/// `download_update_done` (success) and `download_update_failed` (error or
+/// cancelled). Reuses [`InstallerState`] so a fresh-install and an update
+/// download can't race the same on-disk file or cancel flag.
+#[tauri::command]
+async fn download_kiln_update(
+    app: AppHandle,
+    version: String,
+    inst: State<'_, InstallerHandle>,
+) -> Result<(), String> {
+    if inst.in_progress.swap(true, Ordering::SeqCst) {
+        return Err("an install or update download is already in progress".into());
+    }
+    inst.cancel.store(false, Ordering::SeqCst);
+
+    let app_for_task = app.clone();
+    let inst_for_task = (*inst).clone();
+    let version_for_task = version.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let result = installer::download_release_binary(
+            &app_for_task,
+            &version_for_task,
+            Arc::clone(&inst_for_task.cancel),
+        )
+        .await;
+        match result {
+            Ok((path, bytes)) => {
+                let _ = app_for_task.emit(
+                    installer::UPDATE_DOWNLOAD_DONE_EVENT,
+                    installer::UpdateDownloadDone {
+                        version: version_for_task,
+                        path: path.display().to_string(),
+                        bytes,
+                    },
+                );
+            }
+            Err(err) => {
+                let cancelled = inst_for_task.cancel.load(Ordering::SeqCst);
+                let _ = app_for_task.emit(
+                    installer::UPDATE_DOWNLOAD_FAILED_EVENT,
+                    installer::UpdateDownloadFailed {
+                        version: version_for_task,
+                        error: err,
+                        cancelled,
+                    },
+                );
+            }
+        }
+        inst_for_task.in_progress.store(false, Ordering::SeqCst);
+    });
+
+    Ok(())
+}
+
 /// Kick off a HuggingFace model download into
 /// `app_data_dir()/models/<sanitized_repo>/`. Progress is streamed via
 /// the `hf-download-progress` event; terminal success / failure arrive as
@@ -711,6 +771,7 @@ fn main() {
             get_binary_status,
             download_kiln_server,
             cancel_kiln_download,
+            download_kiln_update,
             download_hf_model,
             path_info
         ])
