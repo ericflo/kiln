@@ -101,7 +101,28 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
             let supervisor = Arc::clone(&supervisor_for_events);
             match event.id().as_ref() {
                 ITEM_START => {
+                    let app_for_spawn = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        let has_model_path = {
+                            let settings_state = app_for_spawn.state::<Arc<RwLock<Settings>>>();
+                            let s = settings_state.read().await;
+                            is_model_path_set(&s)
+                        };
+                        if !has_model_path {
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Model path not set")
+                                .body(
+                                    "Open Settings and select a model before starting the Kiln server.",
+                                )
+                                .show();
+                            if let Err(e) = open_settings_window(&app_for_spawn) {
+                                eprintln!("[tray] open_settings_window failed: {}", e);
+                            }
+                            let _ = app_for_spawn.emit("menu://open-settings", ());
+                            return;
+                        }
                         if let Err(e) = supervisor.start().await {
                             eprintln!("[tray] start_server failed: {}", e);
                         }
@@ -449,6 +470,16 @@ pub fn should_notify_stopped(prev_kind: Option<&str>) -> bool {
     matches!(prev_kind, Some("running") | Some("training"))
 }
 
+/// Return true when `settings.model_path` is set to a non-empty, non-whitespace
+/// value. Pure predicate kept out of the Tauri runtime so the tray Start
+/// preflight can be unit-tested without GTK/webkit2gtk.
+pub fn is_model_path_set(settings: &Settings) -> bool {
+    match &settings.model_path {
+        None => false,
+        Some(p) => !p.to_string_lossy().trim().is_empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +670,34 @@ mod tests {
         assert!(!should_notify_stopped(Some("starting")));
         assert!(!should_notify_stopped(Some("error")));
         assert!(!should_notify_stopped(Some("stopped")));
+    }
+
+    #[test]
+    fn is_model_path_set_none_returns_false() {
+        let mut s = Settings::default();
+        s.model_path = None;
+        assert!(!is_model_path_set(&s));
+    }
+
+    #[test]
+    fn is_model_path_set_empty_returns_false() {
+        let mut s = Settings::default();
+        s.model_path = Some(std::path::PathBuf::from(""));
+        assert!(!is_model_path_set(&s));
+    }
+
+    #[test]
+    fn is_model_path_set_whitespace_returns_false() {
+        let mut s = Settings::default();
+        s.model_path = Some(std::path::PathBuf::from("   "));
+        assert!(!is_model_path_set(&s));
+    }
+
+    #[test]
+    fn is_model_path_set_valid_returns_true() {
+        let mut s = Settings::default();
+        s.model_path = Some(std::path::PathBuf::from("/models/qwen3.5-4b"));
+        assert!(is_model_path_set(&s));
     }
 
     #[test]
