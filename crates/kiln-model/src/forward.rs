@@ -2343,11 +2343,12 @@ pub fn gated_deltanet_forward(
 
     // --- Step 6: Compute gates ---
     //
-    // Two paths: a fused CUDA kernel (\`backend.gdn_gates\`) that collapses
+    // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
     // the sigmoid + softplus + exp + mul chain into one launch, and the
     // candle-op reference path for everything outside the kernel's
-    // envelope (non-CUDA, non-bf16, nv > 256, or the kill switch
-    // \`KILN_DISABLE_FUSED_GDN_GATES=1\`). The two are algorithmically
+    // envelope (unsupported backend, non-bf16, nv > 256, or kill switches
+    // like `KILN_DISABLE_FUSED_GDN_GATES=1` /
+    // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
     // identical — the reference path is the original Phase-6 implementation
     // and remains the parity oracle.
     let (beta, g) = {
