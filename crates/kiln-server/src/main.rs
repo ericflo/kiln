@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use clap::Parser;
@@ -252,33 +251,16 @@ fn spawn_backend_prewarm(state: AppState) {
     }
 
     let runner = runner.clone();
-    let metrics = state.metrics.clone();
+    let gpu_lock = state.gpu_lock.clone();
 
     tokio::spawn(async move {
-        // Give immediately-started desktop traffic a chance to claim the GPU
-        // before background warmup begins compiling kernels.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        if metrics.request_duration_count.load(Ordering::Relaxed) > 0 {
-            tracing::info!(
-                "skipping background inference prewarm because the server has already handled live traffic"
-            );
-            return;
-        }
-        if metrics.active_requests.load(Ordering::Relaxed) > 0 {
-            tracing::info!(
-                "skipping background inference prewarm because a request is already active"
-            );
-            return;
-        }
-
         tracing::info!("starting background inference prewarm");
-        let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            if metrics.request_duration_count.load(Ordering::Relaxed) > 0
-                || metrics.active_requests.load(Ordering::Relaxed) > 0
-            {
-                return Ok(false);
-            }
+        let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            // Hold the exclusive GPU lock so prewarm never races real
+            // generation. If a request starts first, this blocks until that
+            // request is done, then still warms the backend for the next one.
+            let _gpu_guard = gpu_lock.write().unwrap();
+
             let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
                 temperature: 0.0,
@@ -292,11 +274,16 @@ fn spawn_backend_prewarm(state: AppState) {
                 stop: Vec::new(),
                 seed: Some(42),
             };
-            let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8];
-            let mut block_manager = BlockManager::new(1, 16);
+            // Warm one full paged block plus a decode step. The previous
+            // 8-token prompt missed first-block prompt shapes that desktop
+            // traffic commonly hits, leaving Metal/Candle kernels to compile
+            // on the first live request.
+            let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            let num_blocks = 2;
+            let mut block_manager = BlockManager::new(num_blocks, 16);
             let mut paged_cache = PagedKvCache::new(
                 runner_guard.config.num_full_attention_layers,
-                1,
+                num_blocks,
                 16,
                 runner_guard.config.num_kv_heads,
                 runner_guard.config.head_dim,
@@ -309,17 +296,12 @@ fn spawn_backend_prewarm(state: AppState) {
                 &mut block_manager,
                 &mut paged_cache,
             )?;
-            Ok(true)
+            Ok(())
         })
         .await;
 
         match prewarm {
-            Ok(Ok(true)) => tracing::info!("background inference prewarm complete"),
-            Ok(Ok(false)) => {
-                tracing::info!(
-                    "skipping background inference prewarm because a request became active"
-                );
-            }
+            Ok(Ok(())) => tracing::info!("background inference prewarm complete"),
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
