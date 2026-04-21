@@ -396,6 +396,8 @@ def mtp_inner_block(
     _capture(capture_subops, "post_q_proj_raw", q_raw)
     _capture(capture_subops, "post_k_proj", k)
     _capture(capture_subops, "post_v_proj", v)
+    # Phase B9 H3 alias: pre_gated_attn_split = q_raw before per-head narrow.
+    _capture(capture_subops, "pre_gated_attn_split", q_raw)
 
     # Per-head Q/gate split — must mirror kiln's narrow exactly. Kiln does:
     #   q_pair = q_raw.reshape((batch, seq_len, num_heads, head_dim*2))
@@ -416,17 +418,30 @@ def mtp_inner_block(
         q = q_raw.view(1, 1, num_heads, head_dim)                           # [1, 1, num_heads, head_dim]
         gate = None
     _capture(capture_subops, "post_q_split", q)
+    # Phase B9 H3 alias: post_gated_attn_split_value mirrors post_q_split.
+    _capture(capture_subops, "post_gated_attn_split_value", q)
     if gate is not None:
         _capture(capture_subops, "post_gate_split", gate)
+        # Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
+        _capture(capture_subops, "post_gated_attn_split_gate", gate)
 
     k = k.view(1, 1, num_kv_heads, head_dim)  # [1, 1, num_kv_heads, head_dim]
     v = v.view(1, 1, num_kv_heads, head_dim)  # [1, 1, num_kv_heads, head_dim]
+
+    # Phase B9 H2 taps: pre_qk_norm_{q,k} are per-head reshaped tensors
+    # immediately before per-head RMSNorm. pre_qk_norm_q is alias of
+    # post_q_split; pre_qk_norm_k is genuinely new (post_k_proj is pre-reshape).
+    _capture(capture_subops, "pre_qk_norm_q", q)
+    _capture(capture_subops, "pre_qk_norm_k", k)
 
     # Per-head RMSNorm on Q and K (Qwen3-Next style). Same shape in/out.
     q = rms_norm(q, w.q_norm_weight, eps)
     k = rms_norm(k, w.k_norm_weight, eps)
     _capture(capture_subops, "post_q_norm", q)
     _capture(capture_subops, "post_k_norm", k)
+    # Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
+    _capture(capture_subops, "post_qk_norm_q", q)
+    _capture(capture_subops, "post_qk_norm_k", k)
 
     # RoPE on rotary_dim prefix in the [B, S, H, D] layout — matches kiln's
     # `rotary_embedding_from_tensor` call site in forward.rs:2661-2666 (both

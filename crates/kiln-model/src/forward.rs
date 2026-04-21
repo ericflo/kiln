@@ -2920,6 +2920,10 @@ pub fn gqa_attention_paged(
     let _ = crate::mtp_debug::capture_subop("post_q_proj_raw", &q_raw);
     let _ = crate::mtp_debug::capture_subop("post_k_proj", &k);
     let _ = crate::mtp_debug::capture_subop("post_v_proj", &v);
+    // Phase B9 H3 alias: pre_gated_attn_split is the q_raw tensor before the
+    // (q, gate) narrow split. Captured as alias of post_q_proj_raw so the
+    // comparator can locate H3 zone divergence by name.
+    let _ = crate::mtp_debug::capture_subop("pre_gated_attn_split", &q_raw);
 
     let (q, gate) = {
         kiln_nvtx::range!(c"kiln/proj/qkv_split");
@@ -2938,12 +2942,22 @@ pub fn gqa_attention_paged(
     };
     // After the gate split, q is the rotation target.
     let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
+    // Phase B9 H3 alias: post_gated_attn_split_value mirrors post_q_split.
+    let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_value", &q);
     if let Some(ref g) = gate {
         let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
+        // Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
+        let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_gate", g);
     }
 
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
     let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+    // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
+    // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
+    // post_q_split; pre_qk_norm_k is genuinely new (post_k_proj is pre-reshape).
+    let _ = crate::mtp_debug::capture_subop("pre_qk_norm_q", &q);
+    let _ = crate::mtp_debug::capture_subop("pre_qk_norm_k", &k);
 
     // QK-norm
     let (q, k) = {
@@ -2954,6 +2968,9 @@ pub fn gqa_attention_paged(
     };
     let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
     let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
+    // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
+    let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
+    let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
 
     // RoPE — only rotate first rotary_dim dimensions
     // Use the GPU tensor variant so positions remain at a stable GPU address
