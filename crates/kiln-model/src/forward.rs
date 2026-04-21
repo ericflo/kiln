@@ -4367,8 +4367,25 @@ pub fn mtp_forward_step(
     // the dump block below without being re-consumed. When
     // `KILN_MTP_DUMP_PRE_ROPE` is unset the arm is a no-op and the per-tap
     // `capture_pre_rope_tap` calls short-circuit on a closed TLS window.
-    let should_dump = crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos);
-    let dump_pre_rope = should_dump && crate::mtp_debug::is_dump_pre_rope_enabled();
+    // Phase C13: `KILN_MTP_DUMP_SPLICE=1` is a meta-flag that fires up to N=8
+    // (configurable) dumps per targeted position (default `{0, 2}`) instead of
+    // the one-shot latch used by earlier phases. When the splice lane takes a
+    // slot, `splice_step` is `Some(step)` and the dump path can substitute
+    // `{step}` alongside `{pos}`. When splice is disabled we fall through to
+    // the existing one-shot latch so prior flows (B6/B7/C6/C7) behave
+    // unchanged.
+    let splice_step = crate::mtp_debug::try_consume_splice_slot(mtp_pos);
+    let should_dump = if splice_step.is_some() {
+        true
+    } else if crate::mtp_debug::is_dump_splice_enabled() {
+        // Splice is on but this position/step is not eligible — suppress the
+        // legacy one-shot latch so only the splice lane controls dumping.
+        false
+    } else {
+        crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos)
+    };
+    let dump_pre_rope =
+        should_dump && crate::mtp_debug::is_dump_pre_rope_effectively_enabled();
     if dump_pre_rope {
         crate::mtp_debug::arm_pre_rope_capture();
     }
@@ -4591,7 +4608,12 @@ pub fn mtp_forward_step(
     // Failure to dump is logged but non-fatal — we never want an
     // instrumentation bug to break decode.
     if should_dump {
-        let dump_path_opt = crate::mtp_debug::dump_path_for_pos(mtp_pos);
+        // Phase C13: when the splice meta-flag is driving this step, the path
+        // can substitute `{step}` alongside `{pos}` so each of the up-to-8
+        // per-position dumps lands in its own file. Falls back to the legacy
+        // `{pos}`-only substitution when splice is off.
+        let dump_path_opt =
+            crate::mtp_debug::dump_path_for_pos_and_step(mtp_pos, splice_step);
         // Always drain the C7 TLS slot before returning. If we entered the
         // armed C7 path above but `dump_path_for_pos` returned None (pos not
         // listed in `KILN_MTP_DUMP_POS`), the slot would otherwise leak
@@ -4656,6 +4678,7 @@ pub fn mtp_forward_step(
                     path = %path,
                     draft_token_id,
                     mtp_pos,
+                    splice_step = ?splice_step,
                     subops = extra_subops.len(),
                     prompt_tokens_len = prompt_tokens.len(),
                     b11_taps = b11_taps.len(),

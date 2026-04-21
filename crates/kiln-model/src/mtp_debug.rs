@@ -23,7 +23,7 @@
 //! diagnostic update to `PROFILING.md`.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -815,7 +815,10 @@ pub fn is_pre_rope_capture_armed() -> bool {
 /// [`is_dump_pre_rope_enabled`] is false — so callers can invoke this
 /// unconditionally around the MTP inner-block path.
 pub fn arm_pre_rope_capture() {
-    if !is_dump_pre_rope_enabled() {
+    // Phase C13: the splice meta-flag also drives pre-RoPE capture. Using the
+    // effective check here lets callers invoke this unconditionally without
+    // needing to set `KILN_MTP_DUMP_PRE_ROPE=1` when splice is on.
+    if !is_dump_pre_rope_effectively_enabled() {
         return;
     }
     PRE_ROPE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
@@ -845,6 +848,115 @@ pub fn capture_pre_rope_tap(name: &str, t: &Tensor) -> Result<()> {
         }
     });
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Phase C13: pre-projection splice dump meta-flag
+// -----------------------------------------------------------------------------
+//
+// `KILN_MTP_DUMP_SPLICE=1` is a convenience meta-flag that composes over the
+// existing `write_mtp_dump` pipeline. It does three things:
+//
+//   1. Forces pre-RoPE capture on (so `c6__*` taps are emitted without
+//      requiring `KILN_MTP_DUMP_PRE_ROPE=1` to also be set).
+//   2. Replaces the one-shot (per process, per `mtp_pos`) latch with an
+//      N-step counter (`KILN_MTP_DUMP_SPLICE_MAX_STEPS`, default 8) so up
+//      to N draft steps per targeted position land in their own files.
+//   3. Defaults `mtp_pos` targets to `{0, 2}` when `KILN_MTP_DUMP_SPLICE_POS`
+//      is unset (largest-`n` MTP positions from C5 attribution data).
+//
+// The dump path accepts `{pos}` and `{step}` placeholders; the pair uniquely
+// identifies each file. No behavior change when the flag is unset.
+
+/// True when `KILN_MTP_DUMP_SPLICE=1` (or `true`) is set.
+pub fn is_dump_splice_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_SPLICE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Maximum number of splice-dump steps captured per targeted position.
+/// Defaults to 8. Set `KILN_MTP_DUMP_SPLICE_MAX_STEPS=N` to override.
+pub fn splice_max_steps() -> usize {
+    std::env::var("KILN_MTP_DUMP_SPLICE_MAX_STEPS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(8)
+}
+
+/// Set of `mtp_pos` values for which the splice dump should fire. Defaults
+/// to `{0, 2}` when `KILN_MTP_DUMP_SPLICE_POS` is unset. Parses
+/// `KILN_MTP_DUMP_SPLICE_POS=0,1,2` as a comma-separated list.
+pub fn splice_target_positions() -> HashSet<usize> {
+    let raw = std::env::var("KILN_MTP_DUMP_SPLICE_POS").unwrap_or_default();
+    if raw.trim().is_empty() {
+        let mut s = HashSet::new();
+        s.insert(0);
+        s.insert(2);
+        return s;
+    }
+    raw.split(',')
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+        .collect()
+}
+
+/// Per-position step counters. `None` until the first splice slot is taken.
+static SPLICE_STEP_COUNTS: Mutex<Option<HashMap<usize, usize>>> = Mutex::new(None);
+
+/// Returns `Some(step)` (0-indexed) when the splice lane is enabled, a
+/// `KILN_MTP_DUMP_PATH` is set, `mtp_pos` is targeted, and the per-position
+/// counter has not yet reached [`splice_max_steps`]. Advances the counter.
+/// Returns `None` in any other case (splice disabled, position not targeted,
+/// cap reached, env unset, mutex poisoned).
+pub fn try_consume_splice_slot(mtp_pos: usize) -> Option<usize> {
+    if !is_dump_splice_enabled() {
+        return None;
+    }
+    if dump_path().is_none() {
+        return None;
+    }
+    if !splice_target_positions().contains(&mtp_pos) {
+        return None;
+    }
+    let max = splice_max_steps();
+    let mut guard = SPLICE_STEP_COUNTS.lock().ok()?;
+    let map = guard.get_or_insert_with(HashMap::new);
+    let count = map.entry(mtp_pos).or_insert(0);
+    if *count >= max {
+        return None;
+    }
+    let idx = *count;
+    *count += 1;
+    Some(idx)
+}
+
+/// Dump path with `{pos}` and optional `{step}` substituted. Falls back to
+/// [`dump_path_for_pos`] when `step` is `None`. Callers targeting multiple
+/// steps per position should include `{step}` in the template to avoid
+/// later steps overwriting earlier ones.
+pub fn dump_path_for_pos_and_step(mtp_pos: usize, step: Option<usize>) -> Option<String> {
+    let raw = dump_path()?;
+    let mut path = raw.replace("{pos}", &mtp_pos.to_string());
+    if let Some(s) = step {
+        path = path.replace("{step}", &s.to_string());
+    }
+    Some(path)
+}
+
+/// OR-composition: pre-RoPE capture should fire when either the explicit
+/// `KILN_MTP_DUMP_PRE_ROPE=1` flag is set or the C13 splice meta-flag is
+/// set. Use this in the forward dump wiring so splice mode does not need
+/// callers to set both env vars.
+pub fn is_dump_pre_rope_effectively_enabled() -> bool {
+    is_dump_pre_rope_enabled() || is_dump_splice_enabled()
+}
+
+/// Test-only: reset the splice step counters between unit tests.
+#[cfg(test)]
+fn reset_splice_counters() {
+    let mut guard = SPLICE_STEP_COUNTS.lock().unwrap();
+    *guard = None;
 }
 
 // -----------------------------------------------------------------------------
@@ -1364,6 +1476,140 @@ mod tests {
         assert_eq!(
             dump_path_for_pos(1).as_deref(),
             Some("/tmp/dump.safetensors")
+        );
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+        }
+    }
+
+    // ---- Phase C13 splice meta-flag ---------------------------------------
+
+    #[test]
+    fn splice_disabled_by_default_and_consumes_no_slot() {
+        // SAFETY: single-test scoped env mutation; callers downstream remove
+        // vars on success.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE");
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_POS");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_MAX_STEPS");
+        }
+        reset_splice_counters();
+        assert!(!is_dump_splice_enabled());
+        assert_eq!(try_consume_splice_slot(0), None);
+        assert_eq!(try_consume_splice_slot(2), None);
+        assert!(!is_dump_pre_rope_effectively_enabled());
+    }
+
+    #[test]
+    fn splice_defaults_to_positions_0_and_2_with_8_steps() {
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
+            std::env::set_var(
+                "KILN_MTP_DUMP_PATH",
+                "/tmp/c13_splice_pos{pos}_step{step}.safetensors",
+            );
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_POS");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_MAX_STEPS");
+        }
+        reset_splice_counters();
+
+        assert!(is_dump_splice_enabled());
+        assert!(is_dump_pre_rope_effectively_enabled());
+        let targets = splice_target_positions();
+        assert!(targets.contains(&0));
+        assert!(targets.contains(&2));
+        assert!(!targets.contains(&1));
+        assert_eq!(splice_max_steps(), 8);
+
+        // Eight slots fire per targeted position, then stop.
+        for step in 0..8 {
+            assert_eq!(try_consume_splice_slot(0), Some(step));
+        }
+        assert_eq!(try_consume_splice_slot(0), None);
+        // Position 2 is independent and also gets 8 slots.
+        for step in 0..8 {
+            assert_eq!(try_consume_splice_slot(2), Some(step));
+        }
+        assert_eq!(try_consume_splice_slot(2), None);
+        // Position 1 is never targeted under defaults.
+        assert_eq!(try_consume_splice_slot(1), None);
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE");
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+        }
+    }
+
+    #[test]
+    fn splice_respects_custom_positions_and_max_steps() {
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
+            std::env::set_var("KILN_MTP_DUMP_PATH", "/tmp/c13_custom.safetensors");
+            std::env::set_var("KILN_MTP_DUMP_SPLICE_POS", "3,5");
+            std::env::set_var("KILN_MTP_DUMP_SPLICE_MAX_STEPS", "2");
+        }
+        reset_splice_counters();
+
+        let targets = splice_target_positions();
+        assert!(targets.contains(&3));
+        assert!(targets.contains(&5));
+        assert!(!targets.contains(&0));
+        assert!(!targets.contains(&2));
+        assert_eq!(splice_max_steps(), 2);
+
+        assert_eq!(try_consume_splice_slot(3), Some(0));
+        assert_eq!(try_consume_splice_slot(3), Some(1));
+        assert_eq!(try_consume_splice_slot(3), None);
+        assert_eq!(try_consume_splice_slot(0), None);
+        assert_eq!(try_consume_splice_slot(5), Some(0));
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE");
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_POS");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_MAX_STEPS");
+        }
+    }
+
+    #[test]
+    fn splice_requires_dump_path_to_fire() {
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_POS");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE_MAX_STEPS");
+        }
+        reset_splice_counters();
+        assert!(is_dump_splice_enabled());
+        // No DUMP_PATH → no slot, even when the meta-flag is on.
+        assert_eq!(try_consume_splice_slot(0), None);
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE");
+        }
+    }
+
+    #[test]
+    fn dump_path_for_pos_and_step_substitutes_both_placeholders() {
+        unsafe {
+            std::env::set_var(
+                "KILN_MTP_DUMP_PATH",
+                "/tmp/c13/mtp_pos-{pos}/step-{step}.safetensors",
+            );
+        }
+        assert_eq!(
+            dump_path_for_pos_and_step(0, Some(3)).as_deref(),
+            Some("/tmp/c13/mtp_pos-0/step-3.safetensors")
+        );
+        assert_eq!(
+            dump_path_for_pos_and_step(2, Some(7)).as_deref(),
+            Some("/tmp/c13/mtp_pos-2/step-7.safetensors")
+        );
+        // With step=None the `{step}` placeholder is left alone (callers
+        // that don't know their step should not use `{step}`).
+        assert_eq!(
+            dump_path_for_pos_and_step(0, None).as_deref(),
+            Some("/tmp/c13/mtp_pos-0/step-{step}.safetensors")
         );
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_PATH");
