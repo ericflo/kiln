@@ -383,14 +383,122 @@ impl LinearAttentionState {
 
 /// Convert a `WeightTensor` (raw bytes + shape + dtype) to a candle `Tensor` on `device`.
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let dtype = match w.dtype {
-        TensorDType::F16 => DType::F16,
-        TensorDType::BF16 => DType::BF16,
-        TensorDType::F32 => DType::F32,
-    };
+    let dtype = weight_dtype(w);
     let t = Tensor::from_raw_buffer(&w.data, dtype, &w.shape, device)
         .context("failed to create tensor from raw buffer")?;
     Ok(t)
+}
+
+fn weight_dtype(w: &WeightTensor) -> DType {
+    match w.dtype {
+        TensorDType::F16 => DType::F16,
+        TensorDType::BF16 => DType::BF16,
+        TensorDType::F32 => DType::F32,
+    }
+}
+
+fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])> {
+    anyhow::ensure!(
+        w.shape.len() == 2,
+        "direct transposed weight upload requires a rank-2 tensor, got shape {:?}",
+        w.shape
+    );
+    let rows = w.shape[0];
+    let cols = w.shape[1];
+    let elem_size = w.dtype.size_bytes();
+    let expected_len = rows
+        .checked_mul(cols)
+        .and_then(|n| n.checked_mul(elem_size))
+        .context("weight tensor byte size overflow")?;
+    anyhow::ensure!(
+        w.data.len() == expected_len,
+        "weight tensor data length mismatch: got {} bytes, expected {} bytes for shape {:?} and dtype {}",
+        w.data.len(),
+        expected_len,
+        w.shape,
+        w.dtype
+    );
+
+    let mut out = vec![0u8; w.data.len()];
+    const ROW_TILE: usize = 32;
+    const COL_TILE: usize = 32;
+    const PARALLEL_TRANSPOSE_MIN_BYTES: usize = 1 << 20;
+
+    if w.data.len() < PARALLEL_TRANSPOSE_MIN_BYTES {
+        for row0 in (0..rows).step_by(ROW_TILE) {
+            let row_end = (row0 + ROW_TILE).min(rows);
+            for col0 in (0..cols).step_by(COL_TILE) {
+                let col_end = (col0 + COL_TILE).min(cols);
+                for row in row0..row_end {
+                    for col in col0..col_end {
+                        let src = (row * cols + col) * elem_size;
+                        let dst = (col * rows + row) * elem_size;
+                        out[dst..dst + elem_size].copy_from_slice(&w.data[src..src + elem_size]);
+                    }
+                }
+            }
+        }
+    } else {
+        use rayon::prelude::*;
+
+        let out_col_stride = rows * elem_size;
+        let out_block_stride = out_col_stride * COL_TILE;
+        out.par_chunks_mut(out_block_stride)
+            .enumerate()
+            .for_each(|(block_idx, out_block)| {
+                let col0 = block_idx * COL_TILE;
+                let col_end = (col0 + (out_block.len() / out_col_stride)).min(cols);
+                for row0 in (0..rows).step_by(ROW_TILE) {
+                    let row_end = (row0 + ROW_TILE).min(rows);
+                    for col in col0..col_end {
+                        let out_col = col - col0;
+                        let out_base = out_col * out_col_stride;
+                        for row in row0..row_end {
+                            let src = (row * cols + col) * elem_size;
+                            let dst = out_base + row * elem_size;
+                            out_block[dst..dst + elem_size]
+                                .copy_from_slice(&w.data[src..src + elem_size]);
+                        }
+                    }
+                }
+            });
+    }
+
+    Ok((out, [cols, rows]))
+}
+
+fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
+    let (data, shape) = transposed_weight_bytes_2d(w)?;
+    Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, device)
+        .context("failed to create transposed tensor from raw buffer")
+}
+
+fn cached_transpose_for_weight(
+    w: &WeightTensor,
+    materialized: &Tensor,
+    device: &Device,
+) -> Result<Tensor> {
+    if matches!(device, Device::Metal(_)) {
+        weight_to_transposed_tensor_2d(w, device)
+    } else {
+        cached_transpose(materialized)
+    }
+}
+
+fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
+    Ok(Tensor::zeros((1usize,), weight_dtype(w), device)?)
+}
+
+fn projection_tensors_for_load(w: &WeightTensor, device: &Device) -> Result<(Tensor, Tensor)> {
+    if matches!(device, Device::Metal(_)) {
+        let transposed = weight_to_transposed_tensor_2d(w, device)?;
+        let original_stub = dropped_weight_stub(w, device)?;
+        Ok((original_stub, transposed))
+    } else {
+        let materialized = weight_to_tensor(w, device)?;
+        let transposed = cached_transpose(&materialized)?;
+        Ok((materialized, transposed))
+    }
 }
 
 /// Cache a transpose for repeated GEMMs.
@@ -559,7 +667,8 @@ impl GpuWeights {
         let embed_tokens =
             weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
         let embed_tokens_t =
-            cached_transpose(&embed_tokens).context("embed_tokens cached transpose")?;
+            cached_transpose_for_weight(&weights.embedding.embed_tokens, &embed_tokens, device)
+                .context("embed_tokens cached transpose")?;
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
@@ -586,18 +695,14 @@ impl GpuWeights {
 
             let attention = match &lw.attention {
                 crate::weights::AttentionWeights::Full(attn) => {
-                    let q_proj = weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?;
-                    let k_proj = weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
-                    let v_proj = weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
-                    let o_proj = weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
-                    let q_proj_t =
-                        cached_transpose(&q_proj).context(ctx("q_proj cached transpose"))?;
-                    let k_proj_t =
-                        cached_transpose(&k_proj).context(ctx("k_proj cached transpose"))?;
-                    let v_proj_t =
-                        cached_transpose(&v_proj).context(ctx("v_proj cached transpose"))?;
-                    let o_proj_t =
-                        cached_transpose(&o_proj).context(ctx("o_proj cached transpose"))?;
+                    let (q_proj, q_proj_t) = projection_tensors_for_load(&attn.q_proj, device)
+                        .context(ctx("q_proj projection tensors"))?;
+                    let (k_proj, k_proj_t) = projection_tensors_for_load(&attn.k_proj, device)
+                        .context(ctx("k_proj projection tensors"))?;
+                    let (v_proj, v_proj_t) = projection_tensors_for_load(&attn.v_proj, device)
+                        .context(ctx("v_proj projection tensors"))?;
+                    let (o_proj, o_proj_t) = projection_tensors_for_load(&attn.o_proj, device)
+                        .context(ctx("o_proj projection tensors"))?;
                     // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
                     // Marlin batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
@@ -625,26 +730,21 @@ impl GpuWeights {
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
-                    let in_proj_qkv =
-                        weight_to_tensor(&attn.in_proj_qkv, device).context(ctx("in_proj_qkv"))?;
-                    let in_proj_z =
-                        weight_to_tensor(&attn.in_proj_z, device).context(ctx("in_proj_z"))?;
-                    let out_proj =
-                        weight_to_tensor(&attn.out_proj, device).context(ctx("out_proj"))?;
-                    let in_proj_a =
-                        weight_to_tensor(&attn.in_proj_a, device).context(ctx("in_proj_a"))?;
-                    let in_proj_b =
-                        weight_to_tensor(&attn.in_proj_b, device).context(ctx("in_proj_b"))?;
-                    let in_proj_qkv_t = cached_transpose(&in_proj_qkv)
-                        .context(ctx("in_proj_qkv cached transpose"))?;
-                    let in_proj_z_t =
-                        cached_transpose(&in_proj_z).context(ctx("in_proj_z cached transpose"))?;
-                    let in_proj_a_t =
-                        cached_transpose(&in_proj_a).context(ctx("in_proj_a cached transpose"))?;
-                    let in_proj_b_t =
-                        cached_transpose(&in_proj_b).context(ctx("in_proj_b cached transpose"))?;
-                    let out_proj_t =
-                        cached_transpose(&out_proj).context(ctx("out_proj cached transpose"))?;
+                    let (in_proj_qkv, in_proj_qkv_t) =
+                        projection_tensors_for_load(&attn.in_proj_qkv, device)
+                            .context(ctx("in_proj_qkv projection tensors"))?;
+                    let (in_proj_z, in_proj_z_t) =
+                        projection_tensors_for_load(&attn.in_proj_z, device)
+                            .context(ctx("in_proj_z projection tensors"))?;
+                    let (out_proj, out_proj_t) =
+                        projection_tensors_for_load(&attn.out_proj, device)
+                            .context(ctx("out_proj projection tensors"))?;
+                    let (in_proj_a, in_proj_a_t) =
+                        projection_tensors_for_load(&attn.in_proj_a, device)
+                            .context(ctx("in_proj_a projection tensors"))?;
+                    let (in_proj_b, in_proj_b_t) =
+                        projection_tensors_for_load(&attn.in_proj_b, device)
+                            .context(ctx("in_proj_b projection tensors"))?;
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                         in_proj_qkv,
                         in_proj_z,
@@ -664,16 +764,12 @@ impl GpuWeights {
                 }
             };
 
-            let gate_proj =
-                weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?;
-            let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
-            let down_proj =
-                weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
-            let gate_proj_t =
-                cached_transpose(&gate_proj).context(ctx("gate_proj cached transpose"))?;
-            let up_proj_t = cached_transpose(&up_proj).context(ctx("up_proj cached transpose"))?;
-            let down_proj_t =
-                cached_transpose(&down_proj).context(ctx("down_proj cached transpose"))?;
+            let (gate_proj, gate_proj_t) = projection_tensors_for_load(&lw.mlp.gate_proj, device)
+                .context(ctx("gate_proj projection tensors"))?;
+            let (up_proj, up_proj_t) = projection_tensors_for_load(&lw.mlp.up_proj, device)
+                .context(ctx("up_proj projection tensors"))?;
+            let (down_proj, down_proj_t) = projection_tensors_for_load(&lw.mlp.down_proj, device)
+                .context(ctx("down_proj projection tensors"))?;
             // KILN_W4A16=1 opt-in: queue each MLP projection for the
             // post-loop Marlin batch pack. See the q_proj comment above —
             // the `*_proj_marlin` fields start as None, and
@@ -771,8 +867,8 @@ impl GpuWeights {
         // simple. The follow-up PR extends `marlin_pack_inputs` to include
         // the MTP layer's q_proj + MLP trio.
         let mtp = if let Some(mtp_w) = &weights.mtp {
-            let fc = weight_to_tensor(&mtp_w.fc, device).context("mtp.fc")?;
-            let fc_t = cached_transpose(&fc).context("mtp.fc cached transpose")?;
+            let (fc, fc_t) = projection_tensors_for_load(&mtp_w.fc, device)
+                .context("mtp.fc projection tensors")?;
             let pre_fc_norm_embedding = weight_to_tensor(&mtp_w.pre_fc_norm_embedding, device)
                 .context("mtp.pre_fc_norm_embedding")?;
             let pre_fc_norm_hidden = weight_to_tensor(&mtp_w.pre_fc_norm_hidden, device)
@@ -797,22 +893,14 @@ impl GpuWeights {
 
                 let attention = match &lw.attention {
                     crate::weights::AttentionWeights::Full(attn) => {
-                        let q_proj =
-                            weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?;
-                        let k_proj =
-                            weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
-                        let v_proj =
-                            weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
-                        let o_proj =
-                            weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
-                        let q_proj_t =
-                            cached_transpose(&q_proj).context(ctx("q_proj cached transpose"))?;
-                        let k_proj_t =
-                            cached_transpose(&k_proj).context(ctx("k_proj cached transpose"))?;
-                        let v_proj_t =
-                            cached_transpose(&v_proj).context(ctx("v_proj cached transpose"))?;
-                        let o_proj_t =
-                            cached_transpose(&o_proj).context(ctx("o_proj cached transpose"))?;
+                        let (q_proj, q_proj_t) = projection_tensors_for_load(&attn.q_proj, device)
+                            .context(ctx("q_proj projection tensors"))?;
+                        let (k_proj, k_proj_t) = projection_tensors_for_load(&attn.k_proj, device)
+                            .context(ctx("k_proj projection tensors"))?;
+                        let (v_proj, v_proj_t) = projection_tensors_for_load(&attn.v_proj, device)
+                            .context(ctx("v_proj projection tensors"))?;
+                        let (o_proj, o_proj_t) = projection_tensors_for_load(&attn.o_proj, device)
+                            .context(ctx("o_proj projection tensors"))?;
                         GpuAttentionWeights::Full(GpuFullAttentionWeights {
                             q_proj,
                             k_proj,
@@ -836,17 +924,14 @@ impl GpuWeights {
                     }
                 };
 
-                let gate_proj =
-                    weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?;
-                let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
-                let down_proj =
-                    weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
-                let gate_proj_t =
-                    cached_transpose(&gate_proj).context(ctx("gate_proj cached transpose"))?;
-                let up_proj_t =
-                    cached_transpose(&up_proj).context(ctx("up_proj cached transpose"))?;
-                let down_proj_t =
-                    cached_transpose(&down_proj).context(ctx("down_proj cached transpose"))?;
+                let (gate_proj, gate_proj_t) =
+                    projection_tensors_for_load(&lw.mlp.gate_proj, device)
+                        .context(ctx("gate_proj projection tensors"))?;
+                let (up_proj, up_proj_t) = projection_tensors_for_load(&lw.mlp.up_proj, device)
+                    .context(ctx("up_proj projection tensors"))?;
+                let (down_proj, down_proj_t) =
+                    projection_tensors_for_load(&lw.mlp.down_proj, device)
+                        .context(ctx("down_proj projection tensors"))?;
 
                 GpuLayerWeights {
                     input_layernorm,
@@ -4648,6 +4733,75 @@ mod tests {
         assert!((vals[0][0] - 1.0).abs() < 1e-6);
         assert!((vals[1][2] - 6.0).abs() < 1e-6);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_weight_to_transposed_tensor_2d_f32_matches_cached_transpose() -> Result<()> {
+        let device = Device::Cpu;
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let wt = WeightTensor {
+            data: bytes,
+            shape: vec![2, 3],
+            dtype: TensorDType::F32,
+        };
+
+        let direct = weight_to_transposed_tensor_2d(&wt, &device)?;
+        let baseline = cached_transpose(&weight_to_tensor(&wt, &device)?)?;
+
+        assert!(direct.is_contiguous());
+        assert_eq!(direct.dims(), &[3, 2]);
+        assert_eq!(direct.to_vec2::<f32>()?, baseline.to_vec2::<f32>()?);
+        assert_eq!(
+            direct.to_vec2::<f32>()?,
+            vec![vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_transposed_weight_bytes_2d_preserves_two_byte_elements() -> Result<()> {
+        let values: Vec<u16> = vec![1, 2, 3, 4, 5, 6];
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let wt = WeightTensor {
+            data: bytes,
+            shape: vec![2, 3],
+            dtype: TensorDType::BF16,
+        };
+
+        let (transposed, shape) = transposed_weight_bytes_2d(&wt)?;
+        let got: Vec<u16> = transposed
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        assert_eq!(shape, [3, 2]);
+        assert_eq!(got, vec![1, 4, 2, 5, 3, 6]);
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_weight_to_transposed_tensor_2d_metal_matches_cpu_cached_transpose() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let data: Vec<f32> = vec![1.0, -2.0, 3.5, 4.25, 5.0, -6.75];
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let wt = WeightTensor {
+            data: bytes,
+            shape: vec![2, 3],
+            dtype: TensorDType::F32,
+        };
+
+        let direct = weight_to_transposed_tensor_2d(&wt, &device)?.to_device(&cpu)?;
+        let baseline = cached_transpose(&weight_to_tensor(&wt, &cpu)?)?;
+
+        assert!(direct.is_contiguous());
+        assert_eq!(direct.dims(), &[3, 2]);
+        assert_eq!(direct.to_vec2::<f32>()?, baseline.to_vec2::<f32>()?);
         Ok(())
     }
 
