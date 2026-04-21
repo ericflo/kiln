@@ -57,6 +57,18 @@ thread_local! {
     /// [`capture_h_main_tap`].
     static H_MAIN_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
+
+    /// Phase B11: thread-local slot for the base-model input token ids that
+    /// fed the forward pass which produced the currently-armed h_main
+    /// capture. Populated in `model_forward_paged_with_last_hidden` right
+    /// after [`arm_h_main_capture`] via [`stash_h_main_prompt_tokens`], and
+    /// drained in `mtp_forward_step`'s dump block so the tokens can be
+    /// serialized alongside the taps (see [`write_mtp_dump`]). The HF
+    /// reference (`scripts/mtp_h_main_reference_dump.py`) prefers these
+    /// tokens over its canonical greeting, guaranteeing both sides replay
+    /// the exact same prompt during the per-tap bisect.
+    static H_MAIN_PROMPT_TOKENS: RefCell<Option<Vec<u32>>> =
+        const { RefCell::new(None) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -327,6 +339,24 @@ pub fn capture_h_main_tap(name: &str, t: &Tensor) -> Result<()> {
     Ok(())
 }
 
+/// Phase B11: stash the base-model prompt tokens for the currently-armed
+/// h_main capture. No-op when the capture window is closed (matches the
+/// semantics of [`arm_h_main_capture`] — callers can invoke unconditionally).
+pub fn stash_h_main_prompt_tokens(tokens: &[u32]) {
+    if !is_h_main_capture_armed() {
+        return;
+    }
+    H_MAIN_PROMPT_TOKENS.with(|c| *c.borrow_mut() = Some(tokens.to_vec()));
+}
+
+/// Phase B11: drain the stashed prompt tokens. Returns an empty vector when
+/// nothing was stashed (e.g. h_main capture never armed, or the prior dump
+/// pass already drained). The empty-case is what `write_mtp_dump` passes on
+/// to skip serializing a `prompt_tokens` tensor.
+pub fn drain_h_main_prompt_tokens() -> Vec<u32> {
+    H_MAIN_PROMPT_TOKENS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
 /// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
 /// whether the source is BF16 on CUDA or F32 on CPU.
@@ -363,6 +393,16 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// the [`arm_subop_capture`] / [`drain_subop_capture`] / [`capture_subop`]
 /// trio. These are written under their captured names alongside the
 /// static taps; an empty slice makes this behave identically to Phase B6.
+///
+/// Phase B11: `prompt_tokens` carries the base-model input token ids from
+/// the forward pass that produced the h_main value (see
+/// [`stash_h_main_prompt_tokens`] / [`drain_h_main_prompt_tokens`]). When
+/// non-empty, it is serialized as a flat I32 tensor named `prompt_tokens`
+/// plus a 1-element I32 scalar `meta__prompt_tokens_len`. The HF reference
+/// (`scripts/mtp_h_main_reference_dump.py`) prefers these tokens over its
+/// canonical greeting so both sides replay the exact same prompt during
+/// the per-tap bisect. Pass `&[]` (or legacy callers using `&extra_subops`
+/// before this param) to skip the prompt-tokens emission.
 pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
@@ -370,13 +410,16 @@ pub fn write_mtp_dump(
     swap_fc_norms: bool,
     taps: &[(&str, &Tensor)],
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
+    prompt_tokens: &[u32],
 ) -> Result<()> {
     use safetensors::tensor::{Dtype, TensorView};
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
+    // Capacity: 8 named taps + subops + 3 meta + optional (prompt_tokens, len).
+    let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> =
-        Vec::with_capacity(taps.len() + extra_subops.len() + 3);
+        Vec::with_capacity(taps.len() + extra_subops.len() + 3 + prompt_reserve);
     for (name, t) in taps {
         let (shape, flat) = tensor_to_f32_host(t)
             .with_context(|| format!("dump tap `{name}`: tensor→f32 host copy"))?;
@@ -418,6 +461,29 @@ pub fn write_mtp_dump(
         Dtype::I32,
         swf.to_le_bytes().to_vec(),
     ));
+
+    // Phase B11: serialize the base-model prompt tokens so the HF reference
+    // can replay the exact same input instead of its canonical fallback.
+    if !prompt_tokens.is_empty() {
+        let len_i32 = prompt_tokens.len() as i32;
+        backings.push((
+            "meta__prompt_tokens_len".into(),
+            vec![1],
+            Dtype::I32,
+            len_i32.to_le_bytes().to_vec(),
+        ));
+        let mut pt_bytes = Vec::with_capacity(prompt_tokens.len() * 4);
+        for &tok in prompt_tokens {
+            let as_i32 = tok as i32;
+            pt_bytes.extend_from_slice(&as_i32.to_le_bytes());
+        }
+        backings.push((
+            "prompt_tokens".into(),
+            vec![prompt_tokens.len()],
+            Dtype::I32,
+            pt_bytes,
+        ));
+    }
 
     let mut views: Vec<(String, TensorView)> = Vec::with_capacity(backings.len());
     for (name, shape, dtype, bytes) in &backings {
@@ -625,6 +691,75 @@ mod tests {
     }
 
     #[test]
+    fn stash_h_main_prompt_tokens_requires_armed_capture() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
+        }
+        // Disarmed: stash is a silent no-op.
+        stash_h_main_prompt_tokens(&[1, 2, 3]);
+        assert!(drain_h_main_prompt_tokens().is_empty());
+
+        // Armed: stash round-trips through drain.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
+        }
+        arm_h_main_capture();
+        stash_h_main_prompt_tokens(&[10, 20, 30, 40]);
+        let drained = drain_h_main_prompt_tokens();
+        assert_eq!(drained, vec![10, 20, 30, 40]);
+        // Second drain returns empty (moved out).
+        assert!(drain_h_main_prompt_tokens().is_empty());
+        // Clean up capture state.
+        let _ = drain_h_main_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
+        }
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_prompt_tokens_when_provided() {
+        use safetensors::SafeTensors;
+
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_prompt.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let prompt = [7u32, 11, 13, 17, 19];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 42,
+            /* mtp_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            &[("h_main", &a)],
+            &[],
+            &prompt,
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"prompt_tokens"));
+        assert!(names.contains(&"meta__prompt_tokens_len"));
+
+        let pt = st.tensor("prompt_tokens").unwrap();
+        assert_eq!(pt.dtype(), safetensors::Dtype::I32);
+        assert_eq!(pt.shape(), &[prompt.len()]);
+        let data = pt.data();
+        for (i, &tok) in prompt.iter().enumerate() {
+            let slice: [u8; 4] = data[i * 4..(i + 1) * 4].try_into().unwrap();
+            assert_eq!(i32::from_le_bytes(slice), tok as i32);
+        }
+
+        let len_meta = st.tensor("meta__prompt_tokens_len").unwrap();
+        assert_eq!(len_meta.dtype(), safetensors::Dtype::I32);
+        let len_val = i32::from_le_bytes(len_meta.data()[0..4].try_into().unwrap());
+        assert_eq!(len_val, prompt.len() as i32);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
     fn b10_boundary_layers_span_full_stack() {
         // Guardrail against accidental future edits that would narrow the
         // bisect span. Order matters only for the comparator output, but
@@ -650,6 +785,7 @@ mod tests {
             /* swap_fc_norms = */ false,
             &[("h_main", &a), ("mtp_logits", &b)],
             &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
+            /* prompt_tokens = */ &[],
         )
         .unwrap();
 
@@ -661,6 +797,10 @@ mod tests {
         assert!(names.contains(&"meta__draft_token_id"));
         assert!(names.contains(&"meta__mtp_pos"));
         assert!(names.contains(&"meta__swap_fc_norms"));
+        // With prompt_tokens = &[], neither the tensor nor its length meta
+        // should be serialized.
+        assert!(!names.contains(&"prompt_tokens"));
+        assert!(!names.contains(&"meta__prompt_tokens_len"));
 
         let h = st.tensor("h_main").unwrap();
         assert_eq!(h.dtype(), safetensors::Dtype::F32);

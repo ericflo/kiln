@@ -3941,6 +3941,11 @@ pub fn model_forward_paged_with_last_hidden(
     // this function re-arms the window, overwriting any stale buffer from
     // a prior call whose dump did not fire (e.g. non-targeted `mtp_pos`).
     crate::mtp_debug::arm_h_main_capture();
+    // Phase B11: stash the exact input tokens that fed this forward pass so
+    // the MTP dump can serialize them, letting the HF reference replay the
+    // same prompt instead of its canonical fallback greeting. No-op when
+    // h_main capture is disarmed.
+    crate::mtp_debug::stash_h_main_prompt_tokens(token_ids);
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -4175,6 +4180,11 @@ pub fn mtp_forward_step(
                 ("post_final_ln", &normed),
                 ("mtp_logits", &logits),
             ];
+            // Phase B11: drain any prompt tokens stashed by the preceding
+            // `model_forward_paged_with_last_hidden` call. Empty on legacy
+            // paths / when h_main capture was never armed, which matches
+            // the pre-B11 dump format (no `prompt_tokens` tensor emitted).
+            let prompt_tokens = crate::mtp_debug::drain_h_main_prompt_tokens();
             match crate::mtp_debug::write_mtp_dump(
                 &path,
                 draft_token_id,
@@ -4182,6 +4192,7 @@ pub fn mtp_forward_step(
                 swap_fc_norms,
                 &taps,
                 &extra_subops,
+                &prompt_tokens,
             ) {
                 Ok(()) => tracing::info!(
                     target: "kiln::mtp_debug",
@@ -4189,6 +4200,7 @@ pub fn mtp_forward_step(
                     draft_token_id,
                     mtp_pos,
                     subops = extra_subops.len(),
+                    prompt_tokens_len = prompt_tokens.len(),
                     "mtp_b7_dump_written"
                 ),
                 Err(e) => tracing::warn!(
