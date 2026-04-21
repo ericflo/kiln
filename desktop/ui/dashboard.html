@@ -784,7 +784,12 @@
         // Surface the existing Settings window where kiln_binary is
         // already a pickable field — the simplest way to point at a
         // local build without duplicating the file-picker wiring here.
-        try { await invoke("open_settings"); } catch (e) { console.error(e); }
+        try {
+          await invoke("open_settings");
+        } catch (e) {
+          console.error(e);
+          notifyError("Open Settings failed", String(e || "Unknown error"));
+        }
       }
 
       installDownloadBtn.addEventListener("click", triggerInstall);
@@ -875,7 +880,12 @@
       const updateBanner = document.getElementById("update-banner");
       if (updateBannerOpenSettings) {
         updateBannerOpenSettings.addEventListener("click", async () => {
-          try { await invoke("open_settings"); } catch (e) { console.error(e); }
+          try {
+            await invoke("open_settings");
+          } catch (e) {
+            console.error(e);
+            notifyError("Open Settings failed", String(e || "Unknown error"));
+          }
         });
       }
       if (updateBannerDismiss && updateBanner) {
@@ -1027,13 +1037,28 @@
       const logsBtn = document.getElementById("open-logs");
       const settingsBtn = document.getElementById("open-settings");
       logsBtn.addEventListener("click", async () => {
-        try { await invoke("open_logs"); } catch (e) { console.error("open_logs failed", e); }
+        try {
+          await invoke("open_logs");
+        } catch (e) {
+          console.error("open_logs failed", e);
+          notifyError("Open Logs failed", String(e || "Unknown error"));
+        }
       });
       settingsBtn.addEventListener("click", async () => {
-        try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
+        try {
+          await invoke("open_settings");
+        } catch (e) {
+          console.error("open_settings failed", e);
+          notifyError("Open Settings failed", String(e || "Unknown error"));
+        }
       });
       settingsNeededBtn.addEventListener("click", async () => {
-        try { await invoke("open_settings"); } catch (e) { console.error("open_settings failed", e); }
+        try {
+          await invoke("open_settings");
+        } catch (e) {
+          console.error("open_settings failed", e);
+          notifyError("Open Settings failed", String(e || "Unknown error"));
+        }
       });
 
       const stopBtn = document.getElementById("stop-server");
@@ -1156,10 +1181,16 @@
         if (!mod) return;
         if (!shift && lower === "l") {
           e.preventDefault();
-          invoke("open_logs").catch((err) => console.error("open_logs failed", err));
+          invoke("open_logs").catch((err) => {
+            console.error("open_logs failed", err);
+            notifyError("Open Logs failed", String(err || "Unknown error"));
+          });
         } else if (!shift && key === ",") {
           e.preventDefault();
-          invoke("open_settings").catch((err) => console.error("open_settings failed", err));
+          invoke("open_settings").catch((err) => {
+            console.error("open_settings failed", err);
+            notifyError("Open Settings failed", String(err || "Unknown error"));
+          });
         } else if (shift && lower === "c") {
           e.preventDefault();
           copyOpenAiBaseUrl();
