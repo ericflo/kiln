@@ -130,13 +130,15 @@ async fn main() -> Result<()> {
             config.speculative.effective_method(),
             kiln_server::config::SpecMethod::Mtp
         );
+        let device = select_device()?;
+        let metal_kernel_precompile = spawn_metal_kernel_precompile(&device);
         let model_weights = kiln_model::load_model_with_options(
             Path::new(mp),
             &model_config,
             kiln_model::LoadModelOptions { load_mtp },
         )?;
-        let device = select_device()?;
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
+        finish_metal_kernel_precompile(metal_kernel_precompile);
 
         let runner = ModelRunner::new_with_options(
             gpu_weights,
@@ -306,6 +308,51 @@ fn spawn_backend_prewarm(state: AppState) {
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
     });
+}
+
+#[cfg(feature = "metal")]
+fn spawn_metal_kernel_precompile(
+    device: &candle_core::Device,
+) -> Option<std::thread::JoinHandle<anyhow::Result<std::time::Duration>>> {
+    if !matches!(device, candle_core::Device::Metal(_)) {
+        return None;
+    }
+
+    let device = device.clone();
+    Some(std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        kiln_model::backend::metal::precompile_custom_kernels(&device)?;
+        Ok(start.elapsed())
+    }))
+}
+
+#[cfg(not(feature = "metal"))]
+fn spawn_metal_kernel_precompile(
+    _device: &candle_core::Device,
+) -> Option<std::thread::JoinHandle<anyhow::Result<std::time::Duration>>> {
+    None
+}
+
+fn finish_metal_kernel_precompile(
+    handle: Option<std::thread::JoinHandle<anyhow::Result<std::time::Duration>>>,
+) {
+    let Some(handle) = handle else {
+        return;
+    };
+
+    match handle.join() {
+        Ok(Ok(elapsed)) => tracing::info!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            "Metal custom kernels precompiled"
+        ),
+        Ok(Err(err)) => tracing::warn!(
+            error = %err,
+            "Metal custom kernel precompile failed; falling back to lazy compilation"
+        ),
+        Err(_) => tracing::warn!(
+            "Metal custom kernel precompile thread panicked; falling back to lazy compilation"
+        ),
+    }
 }
 
 fn prewarm_kv_dtype(config: &ModelConfig) -> candle_core::DType {
