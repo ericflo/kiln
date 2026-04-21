@@ -287,7 +287,10 @@ fn spawn_backend_prewarm(state: AppState) {
                 temperature: 0.0,
                 top_p: 1.0,
                 top_k: 0,
-                max_tokens: 1,
+                // `max_tokens = 1` only runs prefill and samples the first
+                // token. Use two tokens so Metal also compiles the decode path
+                // before the first live request reaches it.
+                max_tokens: 2,
                 repetition_penalty: 1.0,
                 stop: Vec::new(),
                 seed: Some(42),
