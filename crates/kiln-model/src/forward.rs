@@ -1495,36 +1495,69 @@ fn causal_conv1d_prefill(
     conv_state: &mut Tensor,
     kernel_size: usize,
 ) -> Result<Tensor> {
+    let compute_dtype = causal_conv1d_prefill_compute_dtype(x, weight, conv_state, kernel_size);
+    causal_conv1d_prefill_with_dtype(x, weight, conv_state, kernel_size, compute_dtype)
+}
+
+fn causal_conv1d_prefill_compute_dtype(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &Tensor,
+    kernel_size: usize,
+) -> DType {
+    if matches!(x.device(), Device::Metal(_))
+        && x.dtype() == DType::BF16
+        && weight.dtype() == DType::BF16
+        && conv_state.dtype() == DType::F32
+        && kernel_size == 4
+    {
+        DType::BF16
+    } else {
+        DType::F32
+    }
+}
+
+fn causal_conv1d_prefill_with_dtype(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &mut Tensor,
+    kernel_size: usize,
+    compute_dtype: DType,
+) -> Result<Tensor> {
     let (_batch, channels, seq_len) = x.dims3()?;
-    let _device = x.device();
-    let x_f32 = x.to_dtype(DType::F32)?;
+    let x_compute = x.to_dtype(compute_dtype)?;
+    let x_state_f32 = if compute_dtype == DType::F32 {
+        x_compute.clone()
+    } else {
+        x.to_dtype(DType::F32)?
+    };
     // Squeeze [channels, 1, kernel_size] -> [channels, kernel_size]
-    let w_f32 = weight
-        .to_dtype(DType::F32)?
+    let w_compute = weight
+        .to_dtype(compute_dtype)?
         .reshape((channels, kernel_size))?;
     let k_minus_1 = kernel_size - 1;
 
     // Left-pad with conv_state (previous K-1 inputs, or zeros for fresh state)
-    let x_padded = Tensor::cat(&[&conv_state.to_dtype(DType::F32)?, &x_f32], 2)?;
+    let x_padded = Tensor::cat(&[&conv_state.to_dtype(compute_dtype)?, &x_compute], 2)?;
 
     // Depthwise conv: output[t] = sum_{j=0}^{K-1} weight[j] * x_padded[t+j]
-    let mut output = Tensor::zeros_like(&x_f32)?;
+    let mut output = Tensor::zeros_like(&x_compute)?;
     for j in 0..kernel_size {
         let x_slice = x_padded.narrow(2, j, seq_len)?;
-        let w_j = w_f32.narrow(1, j, 1)?.unsqueeze(0)?; // [1, channels, 1]
+        let w_j = w_compute.narrow(1, j, 1)?.unsqueeze(0)?; // [1, channels, 1]
         output = (output + x_slice.broadcast_mul(&w_j)?)?;
     }
 
     // Update conv_state to the last K-1 input positions
     if seq_len >= k_minus_1 {
-        *conv_state = x_f32
+        *conv_state = x_state_f32
             .narrow(2, seq_len - k_minus_1, k_minus_1)?
             .contiguous()?;
     } else {
         // Fewer new tokens than buffer size: shift old state and append new
         let keep = k_minus_1 - seq_len;
-        let old_part = conv_state.to_dtype(DType::F32)?.narrow(2, seq_len, keep)?;
-        *conv_state = Tensor::cat(&[&old_part, &x_f32], 2)?.contiguous()?;
+        let old_part = conv_state.narrow(2, seq_len, keep)?;
+        *conv_state = Tensor::cat(&[&old_part, &x_state_f32], 2)?.contiguous()?;
     }
 
     Ok(output)
@@ -2104,7 +2137,7 @@ pub fn gated_deltanet_forward(
             }
         } else if seq_len > 1 {
             let y = causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
-            cuda_silu(&y.to_dtype(DType::F32)?)?
+            cuda_silu(&y)?
         } else {
             let y = causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
             cuda_silu(&y.to_dtype(DType::F32)?)?
@@ -2254,8 +2287,8 @@ pub fn gated_deltanet_forward(
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
-    // Cast v back to input_dtype so the recurrence stays in bf16. After the
-    // causal conv1d + SiLU step above, mixed_qkv (and hence v) is F32;
+    // Cast v back to input_dtype so the recurrence stays in bf16. The
+    // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
     // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
     // hits a dtype mismatch on bf16 GPU runs, because the state-derived
     // tensor inherits the (now bf16) state dtype.
@@ -6813,6 +6846,79 @@ mod tests {
         assert!(
             smax < 1e-5,
             "fused conv1d_update state max_abs_diff={smax:e} exceeds 1e-5"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_causal_conv1d_prefill_bf16_parity_on_metal() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal not available, skipping test_causal_conv1d_prefill_bf16_parity_on_metal"
+            );
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
+        let seq_len = 16usize;
+        let kernel_size = 4usize;
+
+        let mut rng = StdRng::seed_from_u64(0xBF16_C0DE);
+        let n_x = batch * channels * seq_len;
+        let n_w = channels * kernel_size;
+        let n_s = batch * channels * (kernel_size - 1);
+
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+            .to_dtype(DType::BF16)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+
+        let mut s_ref = s_init.clone();
+        let out_ref =
+            causal_conv1d_prefill_with_dtype(&x, &w, &mut s_ref, kernel_size, DType::F32)?;
+        let out_ref = cuda_silu(&out_ref)?;
+
+        let mut s_bf16 = s_init.clone();
+        assert_eq!(
+            causal_conv1d_prefill_compute_dtype(&x, &w, &s_bf16, kernel_size),
+            DType::BF16
+        );
+        let out_bf16 = causal_conv1d_prefill(&x, &w, &mut s_bf16, kernel_size)?;
+        assert_eq!(out_bf16.dtype(), DType::BF16);
+        assert_eq!(s_bf16.dtype(), DType::F32);
+        let out_bf16 = cuda_silu(&out_bf16)?;
+
+        let diff = (out_bf16.to_dtype(DType::F32)? - out_ref.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("conv1d_prefill bf16 vs f32: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 2e-2,
+            "bf16 prefill output max_abs_diff={max:e} exceeds 2e-2"
+        );
+        assert!(
+            mean < 2e-3,
+            "bf16 prefill output mean_abs_diff={mean:e} exceeds 2e-3"
+        );
+
+        let sdiff = (s_bf16.to_dtype(DType::F32)? - s_ref.to_dtype(DType::F32)?)?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        eprintln!("conv1d_prefill bf16 state parity: max_abs_diff={smax:e}");
+        assert!(
+            smax < 1e-6,
+            "bf16 prefill state max_abs_diff={smax:e} exceeds 1e-6"
         );
 
         Ok(())
