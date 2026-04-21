@@ -6745,6 +6745,99 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the single-token recurrent Metal kernel.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_gdn_recurrent_kernel_matches_reference() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal not available, skipping test_metal_gdn_recurrent_kernel_matches_reference"
+            );
+            return Ok(());
+        };
+
+        let b = 1usize;
+        let nv = 16usize;
+        let t = 1usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xBEEFu64);
+
+        let n_qk = b * nv * t * dk;
+        let n_v = b * nv * t * dv;
+        let n_b = b * nv * t;
+        let n_s = b * nv * dk * dv;
+
+        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.3f32..1.2f32)).collect();
+        let g_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(-0.2f32..0.0f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+
+        let q = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, t, dv), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, t), &device)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (b, nv, t), &device)?.to_dtype(DType::BF16)?;
+        let state_bf16 =
+            Tensor::from_slice(&s_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+
+        let q_ref = q.to_dtype(DType::F32)?;
+        let k_ref = k.to_dtype(DType::F32)?;
+        let v_ref = v.to_dtype(DType::F32)?;
+        let beta_ref = beta.to_dtype(DType::F32)?;
+        let g_ref = g.to_dtype(DType::F32)?;
+        let mut state_ref = state_bf16.to_dtype(DType::F32)?;
+        let out_ref =
+            gdn_sequential_reference(&q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref)?;
+
+        let backend = crate::backend::for_device(&device);
+        if !backend.supports_gdn_recurrent_step() {
+            eprintln!("Metal recurrent kernel disabled, skipping parity test");
+            return Ok(());
+        }
+        let mut state_kernel = state_bf16.clone();
+        let out_kernel =
+            gdn_chunkwise_recurrence(&*backend, &q, &k, &v, &beta, &g, &mut state_kernel, 1)?;
+
+        let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
+        let abs = out_diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let s_diff = (state_kernel.to_dtype(DType::F32)? - &state_ref)?;
+        let s_abs = s_diff.abs()?;
+        let s_max = s_abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let s_mean = s_abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+
+        eprintln!(
+            "metal gdn-recurrent vs reference: out max={max:e} mean={mean:e}, state max={s_max:e} mean={s_mean:e}"
+        );
+
+        assert!(
+            max < 1e-2,
+            "metal recurrent kernel output exceeds tolerance: max_abs_diff = {max:e}"
+        );
+        assert!(
+            mean < 1e-3,
+            "metal recurrent kernel mean drift exceeds tolerance: mean_abs_diff = {mean:e}"
+        );
+        assert!(
+            s_max < 1e-2,
+            "metal recurrent kernel state exceeds tolerance: max_abs_diff = {s_max:e}"
+        );
+        assert!(
+            s_mean < 1e-3,
+            "metal recurrent kernel state mean drift exceeds tolerance: mean_abs_diff = {s_mean:e}"
+        );
+
+        Ok(())
+    }
+
     /// Parity check for the fused chunk-prep CUDA kernel.
     ///
     /// Generates random bf16 `kkt`, `qkt`, `ks_entry`, `q_s`, `v`, `g` at

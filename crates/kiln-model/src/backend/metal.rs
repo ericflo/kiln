@@ -12,6 +12,8 @@ use candle_core::{DType, Device, Tensor};
 use super::BackendRuntime;
 
 const DISABLE_METAL_CONV1D_PREFILL: &str = "KILN_DISABLE_METAL_CONV1D_PREFILL";
+const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
+const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
 
 #[derive(Debug)]
 pub struct MetalBackend {
@@ -51,6 +53,10 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
         !metal_conv1d_prefill_disabled()
+    }
+
+    fn supports_gdn_recurrent_step(&self) -> bool {
+        !metal_gdn_recurrent_disabled()
     }
 
     fn flash_attn_prefill(
@@ -199,6 +205,24 @@ impl BackendRuntime for MetalBackend {
             .context("metal causal_conv1d_prefill kernel failed")?;
         Ok(Some(out))
     }
+
+    fn gdn_recurrent_step(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        if metal_gdn_recurrent_disabled() || !metal_gdn_recurrent_supports(q, k, v, beta, g, state)
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_recurrent_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_step kernel failed")?;
+        Ok(Some(out))
+    }
 }
 
 /// Mirrors the head-dim whitelist in candle-nn 0.10.2's
@@ -210,8 +234,16 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
 }
 
 fn metal_conv1d_prefill_disabled() -> bool {
+    env_truthy(DISABLE_METAL_CONV1D_PREFILL)
+}
+
+fn metal_gdn_recurrent_disabled() -> bool {
+    env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
+}
+
+fn env_truthy(var: &str) -> bool {
     matches!(
-        std::env::var(DISABLE_METAL_CONV1D_PREFILL)
+        std::env::var(var)
             .ok()
             .as_deref()
             .map(str::trim)
@@ -258,6 +290,264 @@ fn metal_conv1d_prefill_supports(
     conv_state
         .dims3()
         .is_ok_and(|(b, c, k)| (b, c, k) == (batch, channels, kernel_size - 1))
+}
+
+fn metal_gdn_recurrent_supports(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+) -> bool {
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+        || !matches!(beta.device(), Device::Metal(_))
+        || !matches!(g.device(), Device::Metal(_))
+        || !matches!(state.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+        || g.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((batch, heads, dk)) = q.dims3() else {
+        return false;
+    };
+    let Ok((b_k, h_k, dk_k)) = k.dims3() else {
+        return false;
+    };
+    let Ok((b_v, h_v, dv)) = v.dims3() else {
+        return false;
+    };
+    let Ok((b_b, h_b)) = beta.dims2() else {
+        return false;
+    };
+    let Ok((b_g, h_g)) = g.dims2() else {
+        return false;
+    };
+    let Ok((b_s, h_s, dk_s, dv_s)) = state.dims4() else {
+        return false;
+    };
+    (b_k, h_k, dk_k) == (batch, heads, dk)
+        && (b_v, h_v) == (batch, heads)
+        && (b_b, h_b) == (batch, heads)
+        && (b_g, h_g) == (batch, heads)
+        && (b_s, h_s, dk_s, dv_s) == (batch, heads, dk, dv)
+        && dk <= 256
+        && dv <= 1024
+}
+
+const METAL_GDN_RECURRENT_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_recurrent_bf16(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k [[buffer(1)]],
+    device const bfloat* v [[buffer(2)]],
+    device const bfloat* beta [[buffer(3)]],
+    device const bfloat* g [[buffer(4)]],
+    device bfloat* state [[buffer(5)]],
+    device bfloat* out [[buffer(6)]],
+    constant uint& batch_heads [[buffer(7)]],
+    constant uint& dk [[buffer(8)]],
+    constant uint& dv [[buffer(9)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = batch_heads * dv;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint bh = gid / dv;
+    const uint col = gid - bh * dv;
+    const uint qk_base = bh * dk;
+    const uint v_base = bh * dv;
+    const uint state_base = bh * dk * dv;
+
+    const float decay = exp(static_cast<float>(g[bh]));
+    const float beta_t = static_cast<float>(beta[bh]);
+
+    float v_pred = 0.0f;
+    for (uint i = 0; i < dk; ++i) {
+        const float k_i = static_cast<float>(k[qk_base + i]);
+        const float s_i = static_cast<float>(state[state_base + i * dv + col]);
+        v_pred += k_i * (decay * s_i);
+    }
+
+    const float v_t = static_cast<float>(v[v_base + col]);
+    const float delta = beta_t * (v_t - v_pred);
+
+    float out_acc = 0.0f;
+    for (uint i = 0; i < dk; ++i) {
+        const float q_i = static_cast<float>(q[qk_base + i]);
+        const float k_i = static_cast<float>(k[qk_base + i]);
+        const uint state_idx = state_base + i * dv + col;
+        const float old_s = static_cast<float>(state[state_idx]);
+        const float new_s = decay * old_s + k_i * delta;
+        state[state_idx] = static_cast<bfloat>(new_s);
+        out_acc += q_i * new_s;
+    }
+
+    out[v_base + col] = static_cast<bfloat>(out_acc);
+}
+"#;
+
+fn metal_gdn_recurrent_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn recurrent pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = device
+        .device()
+        .new_library_with_source(METAL_GDN_RECURRENT_KERNEL, None)
+        .map_err(|e| anyhow::anyhow!("compile metal gdn recurrent library: {e:?}"))?;
+    let function = library
+        .get_function("kiln_gdn_recurrent_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn recurrent function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn recurrent pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_recurrent_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &mut Tensor,
+) -> Result<Tensor> {
+    let (batch, heads, dk) = q.dims3()?;
+    let dv = v.dim(2)?;
+    let batch_heads = batch * heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize && dk <= u32::MAX as usize && dv <= u32::MAX as usize,
+        "metal gdn recurrent shape too large"
+    );
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let beta = beta.contiguous()?;
+    let g = g.contiguous()?;
+    if !state.is_contiguous() {
+        *state = state.contiguous()?;
+    }
+    let out = Tensor::zeros((batch, heads, dv), DType::BF16, q.device())?;
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal gdn recurrent requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_recurrent_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_recurrent_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (g_storage, g_layout) = g.storage_and_layout();
+        let (state_storage, state_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent k must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent v must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent beta must be on Metal"),
+        };
+        let g_metal = match &*g_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent g must be on Metal"),
+        };
+        let state_metal = match &*state_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent state must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let state_buf = candle_core::metal_backend::buffer_o(
+            state_metal.buffer(),
+            &state_layout,
+            state.dtype(),
+        );
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(g_buf.buffer), g_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(state_buf.buffer), state_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let dk_u32 = dk as u32;
+        let dv_u32 = dv as u32;
+        encoder.set_bytes(7, &batch_heads_u32);
+        encoder.set_bytes(8, &dk_u32);
+        encoder.set_bytes(9, &dv_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: batch_heads * dv,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 const METAL_CONV1D_PREFILL_KERNEL: &str = r#"
