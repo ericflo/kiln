@@ -1,0 +1,119 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA A40, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+[c11] checkpoint prefix = `model.language_model.`
+[c11] layer= 0 gate_proj 2560x9216 cos_min=0.984473 rel_l2_max=0.176431 n_out_band=9216
+[c11] layer= 0 up_proj   2560x9216 cos_min=0.986298 rel_l2_max=0.166409 n_out_band=9216
+[c11] layer= 0 down_proj 9216x2560 cos_min=0.982854 rel_l2_max=0.185579 n_out_band=2560
+[c11] layer= 1 gate_proj 2560x9216 cos_min=0.974488 rel_l2_max=0.224792 n_out_band=9216
+[c11] layer= 1 up_proj   2560x9216 cos_min=0.975772 rel_l2_max=0.221978 n_out_band=9216
+[c11] layer= 1 down_proj 9216x2560 cos_min=0.977635 rel_l2_max=0.212881 n_out_band=2560
+[c11] layer= 2 gate_proj 2560x9216 cos_min=0.979335 rel_l2_max=0.204900 n_out_band=9216
+[c11] layer= 2 up_proj   2560x9216 cos_min=0.984971 rel_l2_max=0.177943 n_out_band=9216
+[c11] layer= 2 down_proj 9216x2560 cos_min=0.980878 rel_l2_max=0.195390 n_out_band=2560
+[c11] layer= 3 q_proj    2560x8192 cos_min=0.972643 rel_l2_max=0.232748 n_out_band=8192
+[c11] layer= 3 gate_proj 2560x9216 cos_min=0.984592 rel_l2_max=0.179714 n_out_band=9216
+[c11] layer= 3 up_proj   2560x9216 cos_min=0.987392 rel_l2_max=0.159895 n_out_band=9216
+[c11] layer= 3 down_proj 9216x2560 cos_min=0.979033 rel_l2_max=0.205349 n_out_band=2560
+[c11] layer= 4 gate_proj 2560x9216 cos_min=0.980400 rel_l2_max=0.198908 n_out_band=9216
+[c11] layer= 4 up_proj   2560x9216 cos_min=0.984910 rel_l2_max=0.174479 n_out_band=9216
+[c11] layer= 4 down_proj 9216x2560 cos_min=0.978779 rel_l2_max=0.206555 n_out_band=2560
+[c11] layer= 5 gate_proj 2560x9216 cos_min=0.985659 rel_l2_max=0.170702 n_out_band=9216
+[c11] layer= 5 up_proj   2560x9216 cos_min=0.985911 rel_l2_max=0.168385 n_out_band=9216
+[c11] layer= 5 down_proj 9216x2560 cos_min=0.978226 rel_l2_max=0.210930 n_out_band=2560
+[c11] layer= 6 gate_proj 2560x9216 cos_min=0.977445 rel_l2_max=0.211559 n_out_band=9216
+[c11] layer= 6 up_proj   2560x9216 cos_min=0.979188 rel_l2_max=0.206327 n_out_band=9216
+[c11] layer= 6 down_proj 9216x2560 cos_min=0.976893 rel_l2_max=0.217385 n_out_band=2560
+[c11] layer= 7 q_proj    2560x8192 cos_min=0.980026 rel_l2_max=0.201822 n_out_band=8192
+[c11] layer= 7 gate_proj 2560x9216 cos_min=0.984539 rel_l2_max=0.177084 n_out_band=9216
+[c11] layer= 7 up_proj   2560x9216 cos_min=0.988791 rel_l2_max=0.151817 n_out_band=9216
+[c11] layer= 7 down_proj 9216x2560 cos_min=0.981743 rel_l2_max=0.192414 n_out_band=2560
+[c11] layer= 8 gate_proj 2560x9216 cos_min=0.986173 rel_l2_max=0.168317 n_out_band=9216
+[c11] layer= 8 up_proj   2560x9216 cos_min=0.985622 rel_l2_max=0.170121 n_out_band=9216
+[c11] layer= 8 down_proj 9216x2560 cos_min=0.984407 rel_l2_max=0.177329 n_out_band=2560
+[c11] layer= 9 gate_proj 2560x9216 cos_min=0.981297 rel_l2_max=0.193703 n_out_band=9216
+[c11] layer= 9 up_proj   2560x9216 cos_min=0.982497 rel_l2_max=0.188149 n_out_band=9216
+[c11] layer= 9 down_proj 9216x2560 cos_min=0.985306 rel_l2_max=0.173205 n_out_band=2560
+[c11] layer=10 gate_proj 2560x9216 cos_min=0.979332 rel_l2_max=0.205149 n_out_band=9216
+[c11] layer=10 up_proj   2560x9216 cos_min=0.984464 rel_l2_max=0.181113 n_out_band=9216
+[c11] layer=10 down_proj 9216x2560 cos_min=0.982282 rel_l2_max=0.188533 n_out_band=2560
+[c11] layer=11 q_proj    2560x8192 cos_min=0.980782 rel_l2_max=0.197009 n_out_band=8192
+[c11] layer=11 gate_proj 2560x9216 cos_min=0.985255 rel_l2_max=0.172490 n_out_band=9216
+[c11] layer=11 up_proj   2560x9216 cos_min=0.986034 rel_l2_max=0.167316 n_out_band=9216
+[c11] layer=11 down_proj 9216x2560 cos_min=0.986332 rel_l2_max=0.165647 n_out_band=2560
+[c11] layer=12 gate_proj 2560x9216 cos_min=0.979092 rel_l2_max=0.205114 n_out_band=9216
+[c11] layer=12 up_proj   2560x9216 cos_min=0.986014 rel_l2_max=0.167953 n_out_band=9216
+[c11] layer=12 down_proj 9216x2560 cos_min=0.984524 rel_l2_max=0.177103 n_out_band=2560
+[c11] layer=13 gate_proj 2560x9216 cos_min=0.985510 rel_l2_max=0.170727 n_out_band=9216
+[c11] layer=13 up_proj   2560x9216 cos_min=0.985478 rel_l2_max=0.170934 n_out_band=9216
+[c11] layer=13 down_proj 9216x2560 cos_min=0.978630 rel_l2_max=0.208547 n_out_band=2560
+[c11] layer=14 gate_proj 2560x9216 cos_min=0.985241 rel_l2_max=0.172565 n_out_band=9216
+[c11] layer=14 up_proj   2560x9216 cos_min=0.983503 rel_l2_max=0.182994 n_out_band=9216
+[c11] layer=14 down_proj 9216x2560 cos_min=0.978474 rel_l2_max=0.209394 n_out_band=2560
+[c11] layer=15 q_proj    2560x8192 cos_min=0.977566 rel_l2_max=0.215935 n_out_band=8192
+[c11] layer=15 gate_proj 2560x9216 cos_min=0.984870 rel_l2_max=0.174358 n_out_band=9216
+[c11] layer=15 up_proj   2560x9216 cos_min=0.983282 rel_l2_max=0.182760 n_out_band=9216
+[c11] layer=15 down_proj 9216x2560 cos_min=0.981594 rel_l2_max=0.192794 n_out_band=2560
+[c11] layer=16 gate_proj 2560x9216 cos_min=0.977448 rel_l2_max=0.212585 n_out_band=9216
+[c11] layer=16 up_proj   2560x9216 cos_min=0.979169 rel_l2_max=0.206300 n_out_band=9216
+[c11] layer=16 down_proj 9216x2560 cos_min=0.982402 rel_l2_max=0.188684 n_out_band=2560
+[c11] layer=17 gate_proj 2560x9216 cos_min=0.977255 rel_l2_max=0.213703 n_out_band=9216
+[c11] layer=17 up_proj   2560x9216 cos_min=0.964366 rel_l2_max=0.265271 n_out_band=9216
+[c11] layer=17 down_proj 9216x2560 cos_min=0.980248 rel_l2_max=0.200106 n_out_band=2560
+[c11] layer=18 gate_proj 2560x9216 cos_min=0.976883 rel_l2_max=0.215514 n_out_band=9216
+[c11] layer=18 up_proj   2560x9216 cos_min=0.974625 rel_l2_max=0.224024 n_out_band=9216
+[c11] layer=18 down_proj 9216x2560 cos_min=0.970255 rel_l2_max=0.244523 n_out_band=2560
+[c11] layer=19 q_proj    2560x8192 cos_min=0.988129 rel_l2_max=0.155496 n_out_band=8192
+[c11] layer=19 gate_proj 2560x9216 cos_min=0.978687 rel_l2_max=0.206911 n_out_band=9216
+[c11] layer=19 up_proj   2560x9216 cos_min=0.971183 rel_l2_max=0.247198 n_out_band=9216
+[c11] layer=19 down_proj 9216x2560 cos_min=0.973482 rel_l2_max=0.232205 n_out_band=2560
+[c11] layer=20 gate_proj 2560x9216 cos_min=0.970374 rel_l2_max=0.242777 n_out_band=9216
+[c11] layer=20 up_proj   2560x9216 cos_min=0.979194 rel_l2_max=0.204010 n_out_band=9216
+[c11] layer=20 down_proj 9216x2560 cos_min=0.977555 rel_l2_max=0.214233 n_out_band=2560
+[c11] layer=21 gate_proj 2560x9216 cos_min=0.973444 rel_l2_max=0.229311 n_out_band=9216
+[c11] layer=21 up_proj   2560x9216 cos_min=0.976522 rel_l2_max=0.215738 n_out_band=9216
+[c11] layer=21 down_proj 9216x2560 cos_min=0.978868 rel_l2_max=0.206237 n_out_band=2560
+[c11] layer=22 gate_proj 2560x9216 cos_min=0.971737 rel_l2_max=0.239805 n_out_band=9216
+[c11] layer=22 up_proj   2560x9216 cos_min=0.974813 rel_l2_max=0.224281 n_out_band=9216
+[c11] layer=22 down_proj 9216x2560 cos_min=0.975230 rel_l2_max=0.224983 n_out_band=2560
+[c11] layer=23 q_proj    2560x8192 cos_min=0.982055 rel_l2_max=0.191282 n_out_band=8192
+[c11] layer=23 gate_proj 2560x9216 cos_min=0.972294 rel_l2_max=0.235151 n_out_band=9216
+[c11] layer=23 up_proj   2560x9216 cos_min=0.968947 rel_l2_max=0.248469 n_out_band=9216
+[c11] layer=23 down_proj 9216x2560 cos_min=0.976044 rel_l2_max=0.219232 n_out_band=2560
+[c11] layer=24 gate_proj 2560x9216 cos_min=0.974971 rel_l2_max=0.222315 n_out_band=9216
+[c11] layer=24 up_proj   2560x9216 cos_min=0.979090 rel_l2_max=0.206516 n_out_band=9216
+[c11] layer=24 down_proj 9216x2560 cos_min=0.980406 rel_l2_max=0.198208 n_out_band=2560
+[c11] layer=25 gate_proj 2560x9216 cos_min=0.977770 rel_l2_max=0.212015 n_out_band=9216
+[c11] layer=25 up_proj   2560x9216 cos_min=0.977460 rel_l2_max=0.213990 n_out_band=9216
+[c11] layer=25 down_proj 9216x2560 cos_min=0.984183 rel_l2_max=0.177634 n_out_band=2560
+[c11] layer=26 gate_proj 2560x9216 cos_min=0.973414 rel_l2_max=0.231939 n_out_band=9216
+[c11] layer=26 up_proj   2560x9216 cos_min=0.978857 rel_l2_max=0.206588 n_out_band=9216
+[c11] layer=26 down_proj 9216x2560 cos_min=0.985531 rel_l2_max=0.170662 n_out_band=2560
+[c11] layer=27 q_proj    2560x8192 cos_min=0.977580 rel_l2_max=0.212831 n_out_band=8192
+[c11] layer=27 gate_proj 2560x9216 cos_min=0.971815 rel_l2_max=0.237106 n_out_band=9216
+[c11] layer=27 up_proj   2560x9216 cos_min=0.971462 rel_l2_max=0.241064 n_out_band=9216
+[c11] layer=27 down_proj 9216x2560 cos_min=0.981689 rel_l2_max=0.191556 n_out_band=2560
+[c11] layer=28 gate_proj 2560x9216 cos_min=0.967815 rel_l2_max=0.253091 n_out_band=9216
+[c11] layer=28 up_proj   2560x9216 cos_min=0.971761 rel_l2_max=0.236297 n_out_band=9216
+[c11] layer=28 down_proj 9216x2560 cos_min=0.981430 rel_l2_max=0.195297 n_out_band=2560
+[c11] layer=29 gate_proj 2560x9216 cos_min=0.974437 rel_l2_max=0.225788 n_out_band=9216
+[c11] layer=29 up_proj   2560x9216 cos_min=0.976045 rel_l2_max=0.217912 n_out_band=9216
+[c11] layer=29 down_proj 9216x2560 cos_min=0.980555 rel_l2_max=0.198056 n_out_band=2560
+[c11] layer=30 gate_proj 2560x9216 cos_min=0.971541 rel_l2_max=0.242084 n_out_band=9216
+[c11] layer=30 up_proj   2560x9216 cos_min=0.975084 rel_l2_max=0.224297 n_out_band=9216
+[c11] layer=30 down_proj 9216x2560 cos_min=0.976770 rel_l2_max=0.217590 n_out_band=2560
+[c11] layer=31 q_proj    2560x8192 cos_min=0.969336 rel_l2_max=0.249531 n_out_band=8192
+[c11] layer=31 gate_proj 2560x9216 cos_min=0.974571 rel_l2_max=0.227274 n_out_band=9216
+[c11] layer=31 up_proj   2560x9216 cos_min=0.971665 rel_l2_max=0.238731 n_out_band=9216
+[c11] layer=31 down_proj 9216x2560 cos_min=0.979366 rel_l2_max=0.203807 n_out_band=2560
+[c11] audited 104 projections in 80.0s
+[c11] wrote out/c11-marlin-audit.md
+[c11] wrote out/c11-marlin-audit.json
+AUDIT_EXIT=1
