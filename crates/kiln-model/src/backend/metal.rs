@@ -17,6 +17,7 @@ const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
 const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
 const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
+const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
 const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 
@@ -296,6 +297,10 @@ fn metal_gated_rms_norm_disabled() -> bool {
     env_truthy(DISABLE_METAL_GATED_RMSNORM)
 }
 
+fn metal_gdn_qk_norm_disabled() -> bool {
+    env_truthy(DISABLE_METAL_GDN_QK_NORM)
+}
+
 fn metal_rms_norm_disabled() -> bool {
     std::env::var(DISABLE_RMSNORM_KERNEL).is_ok() || env_truthy(DISABLE_METAL_RMSNORM)
 }
@@ -481,6 +486,22 @@ pub(crate) fn metal_rms_norm_supports(x: &Tensor, weight: &Tensor) -> bool {
     x.rank() >= 1 && weight.dims() == &[hidden] && hidden <= 8192
 }
 
+pub(crate) fn metal_gdn_qk_norm_supports(q: &Tensor, k: &Tensor) -> bool {
+    if metal_gdn_qk_norm_disabled() {
+        return false;
+    }
+    if !matches!(q.device(), Device::Metal(_)) || !matches!(k.device(), Device::Metal(_)) {
+        return false;
+    }
+    if q.dtype() != DType::F32 || k.dtype() != DType::F32 {
+        return false;
+    }
+    let Some(hidden) = q.dims().last().copied() else {
+        return false;
+    };
+    q.rank() >= 1 && q.dims() == k.dims() && hidden <= 8192
+}
+
 const METAL_RMSNORM_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -528,6 +549,62 @@ kernel void kiln_rmsnorm_bf16(
 }
 "#;
 
+const METAL_GDN_QK_NORM_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_qk_norm_f32_bf16(
+    device const float* q [[buffer(0)]],
+    device const float* k [[buffer(1)]],
+    device bfloat* q_out [[buffer(2)]],
+    device bfloat* k_out [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& q_scale [[buffer(6)]],
+    constant float& eps [[buffer(7)]],
+    constant uint& threadgroup_width [[buffer(8)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    threadgroup float q_scratch[1024];
+    threadgroup float k_scratch[1024];
+
+    const uint row = gid.y;
+    if (row >= rows) {
+        return;
+    }
+
+    const uint base = row * hidden;
+    float q_sum_sq = 0.0f;
+    float k_sum_sq = 0.0f;
+    for (uint col = tid; col < hidden; col += threadgroup_width) {
+        const float qv = q[base + col];
+        const float kv = k[base + col];
+        q_sum_sq += qv * qv;
+        k_sum_sq += kv * kv;
+    }
+    q_scratch[tid] = q_sum_sq;
+    k_scratch[tid] = k_sum_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = threadgroup_width / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            q_scratch[tid] += q_scratch[tid + stride];
+            k_scratch[tid] += k_scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float q_inv = rsqrt(q_scratch[0] + eps);
+    const float k_inv = rsqrt(k_scratch[0] + eps);
+    for (uint col = tid; col < hidden; col += threadgroup_width) {
+        const uint idx = base + col;
+        q_out[idx] = static_cast<bfloat>(q[idx] * q_inv * q_scale);
+        k_out[idx] = static_cast<bfloat>(k[idx] * k_inv);
+    }
+}
+"#;
+
 fn metal_rms_norm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -556,6 +633,38 @@ fn metal_rms_norm_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal rmsnorm pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_qk_norm_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn qk norm pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = device
+        .device()
+        .new_library_with_source(METAL_GDN_QK_NORM_KERNEL, None)
+        .map_err(|e| anyhow::anyhow!("compile metal gdn qk norm library: {e:?}"))?;
+    let function = library
+        .get_function("kiln_gdn_qk_norm_f32_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn qk norm function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn qk norm pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -639,6 +748,102 @@ pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Resu
     }
 
     Ok(out)
+}
+
+pub(crate) fn metal_gdn_qk_norm_f32_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    q_scale: f32,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
+    let dims = q.dims().to_vec();
+    let hidden = *dims
+        .last()
+        .context("metal gdn qk norm requires rank >= 1 input")?;
+    anyhow::ensure!(q.dims() == k.dims(), "metal gdn qk norm shape mismatch");
+    anyhow::ensure!(hidden <= 8192, "metal gdn qk norm hidden dim > 8192");
+    let rows: usize = dims[..dims.len() - 1].iter().product();
+    anyhow::ensure!(
+        rows <= u32::MAX as usize && hidden <= u32::MAX as usize,
+        "metal gdn qk norm shape too large"
+    );
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let q_out = Tensor::zeros(dims.as_slice(), DType::BF16, q.device())?;
+    let k_out = Tensor::zeros(dims.as_slice(), DType::BF16, q.device())?;
+
+    if rows == 0 {
+        return Ok((q_out, k_out));
+    }
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal gdn qk norm requires Metal tensors");
+    };
+    let pipeline = metal_gdn_qk_norm_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_qk_norm_f32_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (qo_storage, qo_layout) = q_out.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn qk norm q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn qk norm k must be on Metal"),
+        };
+        let qo_metal = match &*qo_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn qk norm q_out must be on Metal"),
+        };
+        let ko_metal = match &*ko_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn qk norm k_out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let qo_buf =
+            candle_core::metal_backend::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
+        let ko_buf =
+            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(qo_buf.buffer), qo_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(ko_buf.buffer), ko_buf.offset_in_bytes);
+
+        let rows_u32 = rows as u32;
+        let hidden_u32 = hidden as u32;
+        let threads = hidden.next_power_of_two().clamp(32, 1024);
+        let threads_u32 = threads as u32;
+        encoder.set_bytes(4, &rows_u32);
+        encoder.set_bytes(5, &hidden_u32);
+        encoder.set_bytes(6, &q_scale);
+        encoder.set_bytes(7, &eps);
+        encoder.set_bytes(8, &threads_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: threads,
+            height: rows,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((q_out, k_out))
 }
 
 const METAL_GATED_RMSNORM_KERNEL: &str = r#"
@@ -1374,6 +1579,164 @@ pub fn try_new_metal() -> Option<Device> {
 mod tests {
     use super::*;
     use candle_core::D;
+
+    fn gdn_qk_norm_reference(
+        q: &Tensor,
+        k: &Tensor,
+        q_scale: f64,
+        eps: f64,
+    ) -> Result<(Tensor, Tensor)> {
+        let q_sum = q.sqr()?.sum_keepdim(D::Minus1)?;
+        let q_norm = (q_sum + eps)?.sqrt()?;
+        let q_out = (q.broadcast_div(&q_norm)? * q_scale)?.to_dtype(DType::BF16)?;
+
+        let k_sum = k.sqr()?.sum_keepdim(D::Minus1)?;
+        let k_norm = (k_sum + eps)?.sqrt()?;
+        let k_out = k.broadcast_div(&k_norm)?.to_dtype(DType::BF16)?;
+
+        Ok((q_out, k_out))
+    }
+
+    fn max_abs_diff(a: &Tensor, b: &Tensor) -> Result<f32> {
+        Ok((a.to_dtype(DType::F32)? - b.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(D::Minus1)?
+            .to_scalar::<f32>()?)
+    }
+
+    fn mean_abs_diff(a: &Tensor, b: &Tensor) -> Result<f32> {
+        Ok((a.to_dtype(DType::F32)? - b.to_dtype(DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .mean(D::Minus1)?
+            .to_scalar::<f32>()?)
+    }
+
+    #[test]
+    fn test_gdn_qk_norm_matches_fallback_decode_shape() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let heads = 32usize;
+        let hidden = 128usize;
+        let q_scale = 1.0 / (hidden as f64).sqrt();
+        let eps = 1e-6;
+
+        let q = Tensor::randn(0.0f32, 0.5, (batch, seq_len, heads, hidden), &device)?;
+        let k = Tensor::randn(0.0f32, 0.5, (batch, seq_len, heads, hidden), &device)?;
+        assert!(metal_gdn_qk_norm_supports(&q, &k));
+
+        let (q_ref, k_ref) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
+        let (q_fused, k_fused) = metal_gdn_qk_norm_f32_bf16(&q, &k, q_scale as f32, eps as f32)?;
+
+        assert_eq!(q_fused.dims(), &[batch, seq_len, heads, hidden]);
+        assert_eq!(k_fused.dims(), &[batch, seq_len, heads, hidden]);
+
+        let q_diff = max_abs_diff(&q_ref, &q_fused)?;
+        let k_diff = max_abs_diff(&k_ref, &k_fused)?;
+        let q_mean = mean_abs_diff(&q_ref, &q_fused)?;
+        let k_mean = mean_abs_diff(&k_ref, &k_fused)?;
+        assert!(
+            q_diff < 1e-2,
+            "GDN Q norm parity failed: max_abs_diff={q_diff}"
+        );
+        assert!(
+            k_diff < 1e-2,
+            "GDN K norm parity failed: max_abs_diff={k_diff}"
+        );
+        assert!(
+            q_mean < 1e-3,
+            "GDN Q norm parity failed: mean_abs_diff={q_mean}"
+        );
+        assert!(
+            k_mean < 1e-3,
+            "GDN K norm parity failed: mean_abs_diff={k_mean}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_qk_norm_matches_fallback_prefill_shape() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let seq_len = 512usize;
+        let heads = 32usize;
+        let hidden = 128usize;
+        let q_scale = 1.0 / (hidden as f64).sqrt();
+        let eps = 1e-6;
+
+        let q = Tensor::randn(0.0f32, 0.7, (batch, seq_len, heads, hidden), &device)?;
+        let k = Tensor::randn(0.0f32, 0.7, (batch, seq_len, heads, hidden), &device)?;
+
+        let (q_ref, k_ref) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
+        let (q_fused, k_fused) = metal_gdn_qk_norm_f32_bf16(&q, &k, q_scale as f32, eps as f32)?;
+
+        let q_diff = max_abs_diff(&q_ref, &q_fused)?;
+        let k_diff = max_abs_diff(&k_ref, &k_fused)?;
+        let q_mean = mean_abs_diff(&q_ref, &q_fused)?;
+        let k_mean = mean_abs_diff(&k_ref, &k_fused)?;
+        assert!(
+            q_diff < 1e-2,
+            "prefill GDN Q norm parity failed: max_abs_diff={q_diff}"
+        );
+        assert!(
+            k_diff < 1e-2,
+            "prefill GDN K norm parity failed: max_abs_diff={k_diff}"
+        );
+        assert!(
+            q_mean < 1e-3,
+            "prefill GDN Q norm parity failed: mean_abs_diff={q_mean}"
+        );
+        assert!(
+            k_mean < 1e-3,
+            "prefill GDN K norm parity failed: mean_abs_diff={k_mean}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_qk_norm_known_values_and_zeros() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let hidden = 128usize;
+        let q_scale = 1.0 / (hidden as f32).sqrt();
+        let eps = 1e-6f32;
+
+        let ones = Tensor::ones((1usize, 1usize, 1usize, hidden), DType::F32, &device)?;
+        let (q_ones, k_ones) = metal_gdn_qk_norm_f32_bf16(&ones, &ones, q_scale, eps)?;
+        let q_expected = Tensor::new(
+            &[1.0f32 / hidden as f32],
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .broadcast_as((1usize, 1usize, 1usize, hidden))?;
+        let k_expected = Tensor::new(
+            &[1.0f32 / ((hidden as f32) + eps).sqrt()],
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .broadcast_as((1usize, 1usize, 1usize, hidden))?;
+        assert!(max_abs_diff(&q_ones, &q_expected)? < 1e-4);
+        assert!(max_abs_diff(&k_ones, &k_expected)? < 1e-4);
+
+        let zeros = Tensor::zeros((1usize, 1usize, 1usize, hidden), DType::F32, &device)?;
+        let (q_zero, k_zero) = metal_gdn_qk_norm_f32_bf16(&zeros, &zeros, q_scale, eps)?;
+        assert_eq!(q_zero.to_dtype(DType::F32)?.max_all()?.to_scalar::<f32>()?, 0.0);
+        assert_eq!(k_zero.to_dtype(DType::F32)?.max_all()?.to_scalar::<f32>()?, 0.0);
+
+        Ok(())
+    }
 
     /// Parity: `MetalBackend::flash_attn_paged_decode` output matches a
     /// direct materialize+SDPA reference computation on the same inputs.
