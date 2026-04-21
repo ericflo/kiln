@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
@@ -85,7 +86,7 @@ fn load_model_dense(
     let mmaps = mmap_shards(&shards)?;
     let parsed: Vec<SafeTensors<'_>> = mmaps
         .iter()
-        .map(|mmap| SafeTensors::deserialize(mmap).context("Failed to parse safetensors file"))
+        .map(|mmap| SafeTensors::deserialize(&mmap[..]).context("Failed to parse safetensors file"))
         .collect::<Result<Vec<_>>>()?;
 
     // Build a unified name -> (shard_idx, tensor_view) lookup.
@@ -96,10 +97,10 @@ fn load_model_dense(
             all_tensors.push((name, shard_idx, view));
         }
     }
-    let mut tensor_map: HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)> =
+    let mut tensor_map: HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)> =
         HashMap::new();
     for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(name.as_str(), (*shard_idx, view));
+        tensor_map.insert(name.as_str(), (Arc::clone(&mmaps[*shard_idx]), view));
     }
 
     // Auto-detect prefix: try "model.language_model." first, fall back to "model.".
@@ -186,7 +187,7 @@ fn load_model_gptq(
     let mmaps = mmap_shards(&shards)?;
     let parsed: Vec<SafeTensors<'_>> = mmaps
         .iter()
-        .map(|mmap| SafeTensors::deserialize(mmap).context("Failed to parse safetensors file"))
+        .map(|mmap| SafeTensors::deserialize(&mmap[..]).context("Failed to parse safetensors file"))
         .collect::<Result<Vec<_>>>()?;
 
     let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
@@ -195,10 +196,10 @@ fn load_model_gptq(
             all_tensors.push((name, shard_idx, view));
         }
     }
-    let mut tensor_map: HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)> =
+    let mut tensor_map: HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)> =
         HashMap::new();
     for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(name.as_str(), (*shard_idx, view));
+        tensor_map.insert(name.as_str(), (Arc::clone(&mmaps[*shard_idx]), view));
     }
 
     let prefix = detect_prefix(&tensor_map);
@@ -317,7 +318,7 @@ fn discover_shards(model_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
 }
 
 /// Memory-map all shard files.
-fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<Mmap>> {
+fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<Arc<Mmap>>> {
     paths
         .iter()
         .map(|path| {
@@ -325,15 +326,16 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<Mmap>> {
                 .with_context(|| format!("Failed to open {}", path.display()))?;
             // SAFETY: We assume the file is not modified while mapped.
             // This is standard practice for model weight loading.
-            unsafe { Mmap::map(&file) }
-                .with_context(|| format!("Failed to mmap {}", path.display()))
+            let mmap = unsafe { Mmap::map(&file) }
+                .with_context(|| format!("Failed to mmap {}", path.display()))?;
+            Ok(Arc::new(mmap))
         })
         .collect()
 }
 
 /// Detect the weight name prefix by checking which keys exist.
 fn detect_prefix(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
 ) -> String {
     // Try the VL model prefix first (Qwen3.5-4B ships as VL).
     if tensor_map.contains_key(&format!("{LM_PREFIX}embed_tokens.weight") as &str) {
@@ -353,7 +355,7 @@ fn detect_prefix(
 
 /// Load one transformer layer's weights.
 fn load_layer(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -395,7 +397,7 @@ fn load_layer(
 
 /// Load full GQA attention weights.
 fn load_full_attention(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -437,7 +439,7 @@ fn load_full_attention(
 
 /// Load Gated DeltaNet linear attention weights.
 fn load_linear_attention(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -526,7 +528,7 @@ fn load_linear_attention(
 
 /// Load FFN/MLP weights.
 fn load_ffn(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -570,7 +572,7 @@ fn load_ffn(
 /// `{candidate}fc.weight`, which is always present when MTP is shipped.
 /// Returns `None` if no MTP tensors are present (checkpoint is MTP-less).
 fn detect_mtp_prefix(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     base_prefix: &str,
 ) -> Option<String> {
     let prefixed = format!("{base_prefix}mtp.");
@@ -608,7 +610,7 @@ fn detect_mtp_prefix(
 /// Returns `Ok(Some(..))` when detected, `Ok(None)` when absent (so older
 /// or MTP-less checkpoints continue to load unchanged).
 fn load_mtp_if_present(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     config: &ModelConfig,
 ) -> Result<Option<MtpWeights>> {
@@ -705,10 +707,10 @@ fn load_mtp_if_present(
 
 /// Extract a tensor by name from the unified tensor map.
 fn extract_tensor(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     name: &str,
 ) -> Result<WeightTensor> {
-    let (_shard_idx, view) = tensor_map
+    let (mmap, view) = tensor_map
         .get(name)
         .with_context(|| format!("Weight tensor not found: {name}"))?;
 
@@ -716,7 +718,16 @@ fn extract_tensor(
         .with_context(|| format!("Unsupported dtype {:?} for tensor {name}", view.dtype()))?;
 
     let shape: Vec<usize> = view.shape().to_vec();
-    let data = view.data().to_vec();
+    let view_data = view.data();
+    let mmap_start = mmap.as_ptr() as usize;
+    let mmap_end = mmap_start + mmap.len();
+    let data_start = view_data.as_ptr() as usize;
+    let data_end = data_start + view_data.len();
+    anyhow::ensure!(
+        data_start >= mmap_start && data_end <= mmap_end,
+        "tensor {name} data does not point into its safetensors mmap"
+    );
+    let data = WeightData::mmap_slice(Arc::clone(mmap), data_start - mmap_start, view_data.len());
 
     Ok(WeightTensor { data, shape, dtype })
 }
@@ -752,7 +763,7 @@ fn validate_shape(tensor: &WeightTensor, expected: &[usize], name: &str) -> Resu
 /// loaded from packed INT4 (qweight + scales + qzeros) and dequantized to BF16.
 /// Non-linear weights (norms, conv1d, a_log, dt_bias) are loaded as-is.
 fn load_layer_gptq(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -808,7 +819,7 @@ fn load_layer_gptq(
 /// Looks for `{name}.qweight`, `{name}.scales`, `{name}.qzeros` in the tensor map.
 /// Returns a dense BF16 `WeightTensor` with shape `[out_features, in_features]`.
 fn load_gptq_linear(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     name: &str,
     gptq_config: &GptqConfig,
     ctx: &str,
@@ -840,10 +851,10 @@ fn load_gptq_linear(
 /// Extract raw tensor data (bytes, shape, dtype) without dtype conversion.
 /// Used for GPTQ tensors which may be I32 (not supported by our TensorDType).
 fn extract_raw_tensor(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     name: &str,
 ) -> Result<(Vec<u8>, Vec<usize>, safetensors::Dtype)> {
-    let (_shard_idx, view) = tensor_map
+    let (_mmap, view) = tensor_map
         .get(name)
         .with_context(|| format!("Weight tensor not found: {name}"))?;
     Ok((view.data().to_vec(), view.shape().to_vec(), view.dtype()))
@@ -851,7 +862,7 @@ fn extract_raw_tensor(
 
 /// Load GPTQ-quantized full GQA attention weights.
 fn load_full_attention_gptq(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -915,7 +926,7 @@ fn load_full_attention_gptq(
 
 /// Load GPTQ-quantized Gated DeltaNet linear attention weights.
 fn load_linear_attention_gptq(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -1031,7 +1042,7 @@ fn load_linear_attention_gptq(
 
 /// Load GPTQ-quantized FFN/MLP weights.
 fn load_ffn_gptq(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -1088,7 +1099,7 @@ fn load_ffn_gptq(
 /// Some small projections (e.g., GDN's in_proj_a/b) may not be quantized
 /// in certain GPTQ models. This function handles both cases gracefully.
 fn load_gptq_or_dense(
-    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
     name: &str,
     gptq_config: &GptqConfig,
     ctx: &str,
@@ -1491,24 +1502,80 @@ mod tests {
         let bf16 = StDtype::BF16;
 
         let mut tensors: Vec<(String, Vec<usize>, StDtype)> = Vec::new();
-        tensors.push((format!("{mtp_prefix}fc.weight"), vec![hidden, 2 * hidden], bf16));
-        tensors.push((format!("{mtp_prefix}pre_fc_norm_embedding.weight"), vec![hidden], bf16));
-        tensors.push((format!("{mtp_prefix}pre_fc_norm_hidden.weight"), vec![hidden], bf16));
-        tensors.push((format!("{mtp_prefix}{final_ln_name}.weight"), vec![hidden], bf16));
+        tensors.push((
+            format!("{mtp_prefix}fc.weight"),
+            vec![hidden, 2 * hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{mtp_prefix}pre_fc_norm_embedding.weight"),
+            vec![hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{mtp_prefix}pre_fc_norm_hidden.weight"),
+            vec![hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{mtp_prefix}{final_ln_name}.weight"),
+            vec![hidden],
+            bf16,
+        ));
 
         // One full-attention transformer layer at mtp.layers.0.*
         let lp = format!("{mtp_prefix}layers.0.");
         tensors.push((format!("{lp}input_layernorm.weight"), vec![hidden], bf16));
-        tensors.push((format!("{lp}post_attention_layernorm.weight"), vec![hidden], bf16));
-        tensors.push((format!("{lp}mlp.gate_proj.weight"), vec![intermediate, hidden], bf16));
-        tensors.push((format!("{lp}mlp.up_proj.weight"), vec![intermediate, hidden], bf16));
-        tensors.push((format!("{lp}mlp.down_proj.weight"), vec![hidden, intermediate], bf16));
-        tensors.push((format!("{lp}self_attn.q_proj.weight"), vec![q_proj_dim, hidden], bf16));
-        tensors.push((format!("{lp}self_attn.k_proj.weight"), vec![kv_dim, hidden], bf16));
-        tensors.push((format!("{lp}self_attn.v_proj.weight"), vec![kv_dim, hidden], bf16));
-        tensors.push((format!("{lp}self_attn.o_proj.weight"), vec![hidden, q_out_dim], bf16));
-        tensors.push((format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim], bf16));
-        tensors.push((format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim], bf16));
+        tensors.push((
+            format!("{lp}post_attention_layernorm.weight"),
+            vec![hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}mlp.gate_proj.weight"),
+            vec![intermediate, hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}mlp.up_proj.weight"),
+            vec![intermediate, hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}mlp.down_proj.weight"),
+            vec![hidden, intermediate],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}self_attn.q_proj.weight"),
+            vec![q_proj_dim, hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}self_attn.k_proj.weight"),
+            vec![kv_dim, hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}self_attn.v_proj.weight"),
+            vec![kv_dim, hidden],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}self_attn.o_proj.weight"),
+            vec![hidden, q_out_dim],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}self_attn.q_norm.weight"),
+            vec![config.head_dim],
+            bf16,
+        ));
+        tensors.push((
+            format!("{lp}self_attn.k_norm.weight"),
+            vec![config.head_dim],
+            bf16,
+        ));
         tensors
     }
 
@@ -1539,11 +1606,8 @@ mod tests {
     fn test_load_mtp_vl_prefix_with_norm() {
         // VL-wrapped layout: mtp tensors nested under the LM prefix,
         // final RMSNorm is `norm.weight`.
-        let weights = load_tiny_with_mtp(
-            "model.language_model.",
-            "model.language_model.mtp.",
-            "norm",
-        );
+        let weights =
+            load_tiny_with_mtp("model.language_model.", "model.language_model.mtp.", "norm");
         let mtp = weights.mtp.expect("MTP weights should have loaded");
         assert_eq!(mtp.fc.shape, vec![64, 128]);
         assert_eq!(mtp.final_layernorm.shape, vec![64]);
@@ -1554,12 +1618,10 @@ mod tests {
     fn test_load_mtp_bare_prefix_qwen35() {
         // Qwen3.5-4B stock layout: LM under `model.language_model.` prefix
         // but MTP tensors at bare `mtp.*` with `norm.weight` head norm.
-        let weights = load_tiny_with_mtp(
-            "model.language_model.",
-            "mtp.",
-            "norm",
-        );
-        let mtp = weights.mtp.expect("MTP weights should have loaded (bare prefix)");
+        let weights = load_tiny_with_mtp("model.language_model.", "mtp.", "norm");
+        let mtp = weights
+            .mtp
+            .expect("MTP weights should have loaded (bare prefix)");
         assert_eq!(mtp.fc.shape, vec![64, 128]);
         assert_eq!(mtp.final_layernorm.shape, vec![64]);
         assert!(matches!(mtp.layer.attention, AttentionWeights::Full(_)));
@@ -1569,12 +1631,10 @@ mod tests {
     fn test_load_mtp_final_layernorm_alias() {
         // Older convention / vLLM naming: final RMSNorm is
         // `final_layernorm.weight`. Must still load.
-        let weights = load_tiny_with_mtp(
-            "model.language_model.",
-            "mtp.",
-            "final_layernorm",
-        );
-        let mtp = weights.mtp.expect("MTP weights should have loaded with final_layernorm alias");
+        let weights = load_tiny_with_mtp("model.language_model.", "mtp.", "final_layernorm");
+        let mtp = weights
+            .mtp
+            .expect("MTP weights should have loaded with final_layernorm alias");
         assert_eq!(mtp.final_layernorm.shape, vec![64]);
     }
 
@@ -1593,7 +1653,10 @@ mod tests {
 
         let config = tiny_model_config();
         let weights = load_model(dir.path(), &config).unwrap();
-        assert!(weights.mtp.is_none(), "MTP should be None when tensors are absent");
+        assert!(
+            weights.mtp.is_none(),
+            "MTP should be None when tensors are absent"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1956,7 +2019,7 @@ mod tests {
 
         // Verify dequantized values are reasonable.
         // With weight=5, zero=8, scale=1.0: expected = (5-8)*1.0 = -3.0
-        let gate_data = &weights.layers[0].mlp.gate_proj.data;
+        let gate_data = weights.layers[0].mlp.gate_proj.as_bytes();
         let first_bf16 = u16::from_le_bytes([gate_data[0], gate_data[1]]);
         let first_val = f32::from_bits((first_bf16 as u32) << 16);
         assert!(

@@ -18,7 +18,7 @@
 //! A future follow-up will add GPU-native INT4 storage with a custom CUDA
 //! dequantization kernel for ~50% GPU memory savings.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -80,10 +80,7 @@ pub fn dequantize_gptq_weight(
     let pack_factor = 8usize; // 32 / 4 bits
 
     if qweight_shape.len() != 2 {
-        bail!(
-            "qweight must be 2-D, got shape {:?}",
-            qweight_shape
-        );
+        bail!("qweight must be 2-D, got shape {:?}", qweight_shape);
     }
 
     let in_features_packed = qweight_shape[0];
@@ -106,10 +103,8 @@ pub fn dequantize_gptq_weight(
     }
 
     // Interpret raw bytes as u32 slices (GPTQ stores as I32 but bit patterns are the same).
-    let qweight = bytes_as_u32(qweight_data)
-        .context("qweight byte alignment")?;
-    let qzeros = bytes_as_u32(qzeros_data)
-        .context("qzeros byte alignment")?;
+    let qweight = bytes_as_u32(qweight_data).context("qweight byte alignment")?;
+    let qzeros = bytes_as_u32(qzeros_data).context("qzeros byte alignment")?;
 
     if qweight.len() < in_features_packed * out_features {
         bail!(
@@ -156,13 +151,10 @@ pub fn dequantize_gptq_weight(
     }
 
     // Convert u16 slice to bytes
-    let output_bytes: Vec<u8> = output_bf16
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect();
+    let output_bytes: Vec<u8> = output_bf16.iter().flat_map(|v| v.to_le_bytes()).collect();
 
     Ok(WeightTensor {
-        data: output_bytes,
+        data: crate::weights::WeightData::owned(output_bytes),
         shape: vec![out_features, in_features],
         dtype: TensorDType::BF16,
     })
@@ -175,10 +167,7 @@ pub fn dequantize_gptq_weight(
 /// Reinterpret a byte slice as a u32 slice (little-endian assumed).
 fn bytes_as_u32(data: &[u8]) -> Result<Vec<u32>> {
     if data.len() % 4 != 0 {
-        bail!(
-            "byte slice length {} is not a multiple of 4",
-            data.len()
-        );
+        bail!("byte slice length {} is not a multiple of 4", data.len());
     }
     Ok(data
         .chunks_exact(4)
@@ -329,9 +318,7 @@ mod tests {
 
         // Pack weight values: all 5s (INT4 value = 5)
         // u32 with 8 copies of 5: 5 | (5<<4) | (5<<8) | ... | (5<<28)
-        let packed_5: u32 = (0..pack_factor)
-            .map(|i| 5u32 << (i * 4))
-            .sum();
+        let packed_5: u32 = (0..pack_factor).map(|i| 5u32 << (i * 4)).sum();
 
         // qweight: [2, 2] flattened row-major
         let qweight: Vec<u32> = vec![packed_5; (in_features / pack_factor) * out_features];
@@ -339,9 +326,7 @@ mod tests {
 
         // qzeros: all 8s (midpoint for symmetric INT4)
         // [2, 1] = 2 u32 values, each packing 8 zero points
-        let packed_8: u32 = (0..pack_factor)
-            .map(|i| 8u32 << (i * 4))
-            .sum();
+        let packed_8: u32 = (0..pack_factor).map(|i| 8u32 << (i * 4)).sum();
         let qzeros: Vec<u32> = vec![packed_8; 2];
         let qzeros_bytes: Vec<u8> = qzeros.iter().flat_map(|v| v.to_le_bytes()).collect();
 
@@ -369,7 +354,7 @@ mod tests {
         // Expected: (5 - 8) * 0.5 = -1.5 for all elements
         let expected_bf16 = f32_to_bf16(-1.5);
         let result_u16: Vec<u16> = result
-            .data
+            .as_bytes()
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
@@ -415,7 +400,7 @@ mod tests {
         assert_eq!(result.shape, vec![1, 8]);
 
         let result_values: Vec<f32> = result
-            .data
+            .as_bytes()
             .chunks_exact(2)
             .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
             .collect();
