@@ -783,7 +783,11 @@ fn bench_latency_skiplayer(
         kiln_core::config::DType::FP32 => candle_core::DType::F32,
     };
 
-    let max_total = actual_prompt_tokens + max_output_tokens;
+    // Skip-layer verifies `[last_token, draft_0, ..., draft_k-1]` in one
+    // forward pass. Near the end of generation those speculative KV writes can
+    // extend past the committed token budget before stale slots are overwritten
+    // or ignored, so reserve headroom for the verify window.
+    let max_total = actual_prompt_tokens + max_output_tokens + num_speculative_tokens + 1;
     let mut kv_cache = KvCache::new(
         config.num_full_attention_layers,
         config.num_kv_heads,

@@ -81,6 +81,14 @@ pub fn sample_with_params(
     // Apply temperature on-device; result stays on the original device.
     let scaled = flat.to_dtype(DType::F32)?.affine(1.0 / temperature as f64, 0.0)?;
 
+    // The default sampling shape is full-vocab temperature sampling
+    // (`top_k=0`, `top_p=1`). It still needs one host transfer for categorical
+    // RNG, but it does not need an O(V log V) sort because no rank-based
+    // filtering is requested.
+    if top_p >= 1.0 && (top_k == 0 || top_k as usize >= vocab_size) {
+        return sample_full_distribution_unsorted(&scaled, seed);
+    }
+
     // Fetch a descending (index, logit) list, truncated to top_k when active.
     // When top_k selects a real subset of the vocab, we try to sort on-device and
     // transfer only the top_k pairs (e.g. 50 floats + 50 u32 indices = 400 B vs
@@ -148,6 +156,55 @@ pub fn sample_with_params(
 
     // Numerical edge case: cumsum < r due to rounding. Return the last candidate.
     Ok(probs.last().context("no candidates after filtering")?.0)
+}
+
+/// Sample from the full temperature-scaled distribution without sorting.
+///
+/// This is the fast path for the API/UI defaults: `temperature > 0`,
+/// `top_p = 1`, and `top_k = 0`.
+fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Result<u32> {
+    let values: Vec<f32> = scaled.to_vec1()?;
+    if values.is_empty() {
+        anyhow::bail!("empty logits distribution");
+    }
+
+    let max_logit = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f32::NEG_INFINITY, |acc, v| acc.max(v));
+    if !max_logit.is_finite() {
+        return Ok((values.len() - 1) as u32);
+    }
+    let mut sum = 0.0_f32;
+    let mut probs = Vec::with_capacity(values.len());
+    for &logit in &values {
+        let p = if logit.is_finite() {
+            (logit - max_logit).exp()
+        } else {
+            0.0
+        };
+        sum += p;
+        probs.push(p);
+    }
+    if !sum.is_finite() || sum <= 0.0 {
+        return Ok((values.len() - 1) as u32);
+    }
+
+    let mut rng: StdRng = match seed {
+        Some(s) => StdRng::seed_from_u64(s),
+        None => StdRng::from_entropy(),
+    };
+    let threshold = rng.r#gen::<f32>() * sum;
+    let mut cumsum = 0.0_f32;
+    for (idx, p) in probs.into_iter().enumerate() {
+        cumsum += p;
+        if threshold < cumsum {
+            return Ok(idx as u32);
+        }
+    }
+
+    Ok((values.len() - 1) as u32)
 }
 
 /// Sort `scaled` descending on-device, transfer only the top-k `(index, value)`
@@ -338,6 +395,15 @@ mod tests {
         let t1 = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         let t2 = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(t1, t2, "same seed should produce same result");
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_distribution_sampling_tolerates_non_finite_logits() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[f32::NAN, f32::NEG_INFINITY, f32::NAN], &device)?;
+        let token = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
+        assert_eq!(token, 2);
         Ok(())
     }
 

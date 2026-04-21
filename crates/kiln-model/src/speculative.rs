@@ -453,12 +453,12 @@ pub fn speculative_decode_step(
         }
     }
 
-    // Advance KV cache by the number of tokens we verified (K+1),
-    // but we'll need to roll back to only the accepted count.
-    // Actually, model_forward already wrote all K+1 positions into the cache.
-    // We need to advance by only the accepted count + 1 (for last_token).
-    // The KV cache advance is handled by the caller based on accepted_tokens.len().
-    kv_cache.advance(1 + accepted_tokens.len());
+    // `model_forward` wrote the whole verification window, but only the
+    // committed prefix is valid for the next step. `accepted_tokens` includes
+    // the target/bonus token that will be fed as `last_token` next time, so
+    // advancing by exactly this count keeps the cache aligned while leaving
+    // rejected/stale slots to be overwritten.
+    kv_cache.advance(accepted_tokens.len());
 
     Ok(SpeculativeStepResult {
         accepted_tokens,
