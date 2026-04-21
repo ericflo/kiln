@@ -1096,7 +1096,11 @@ impl ModelRunner {
             .validate(&self.config)
             .context("invalid speculative config")?;
 
-        let max_total = prompt_tokens.len() + params.max_tokens;
+        // Verification writes the full speculative window (`last_token + k`)
+        // before the loop commits accepted tokens, so flat KV needs temporary
+        // headroom beyond the user-visible max token budget.
+        let max_total =
+            prompt_tokens.len() + params.max_tokens + spec_config.num_speculative_tokens + 1;
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
         let mut draft_linear_state = self.new_linear_state()?;
@@ -1587,7 +1591,11 @@ impl ModelRunner {
             .context("invalid speculative config")?;
 
         let (tx, rx) = mpsc::channel();
-        let max_total = prompt_tokens.len() + params.max_tokens;
+        // Verification writes the full speculative window (`last_token + k`)
+        // before the loop commits accepted tokens, so flat KV needs temporary
+        // headroom beyond the user-visible max token budget.
+        let max_total =
+            prompt_tokens.len() + params.max_tokens + spec_config.num_speculative_tokens + 1;
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
         let mut draft_linear_state = self.new_linear_state()?;
