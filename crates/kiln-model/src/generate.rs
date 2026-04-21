@@ -17,13 +17,16 @@ use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     model_forward, model_forward_paged, model_forward_paged_streaming,
-    streaming_prefill_enabled, GpuWeights, LinearAttentionState,
+    model_forward_paged_with_last_hidden, streaming_prefill_enabled, GpuWeights,
+    LinearAttentionState,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
-use crate::speculative::{speculative_decode_step, SpeculativeConfig};
+use crate::speculative::{
+    speculative_decode_step, speculative_mtp_decode_step, SpeculativeConfig,
+};
 
 use kiln_core::block::{BlockManager, BlockTable};
 
@@ -51,6 +54,25 @@ pub struct GenerationOutput {
     pub token_ids: Vec<TokenId>,
     /// Why generation stopped.
     pub finish_reason: FinishReason,
+}
+
+/// Output from a native MTP speculative generation call.
+///
+/// Carries everything [`GenerationOutput`] does plus the per-call MTP draft
+/// accept/reject counters used by bench reporting to compute α (acceptance
+/// rate = `draft_accepted_count / total_draft_attempts`).
+#[derive(Debug)]
+pub struct MtpGenerationOutput {
+    /// The generated text (not including the prompt).
+    pub text: String,
+    /// The generated token IDs (not including prompt tokens).
+    pub token_ids: Vec<TokenId>,
+    /// Why generation stopped.
+    pub finish_reason: FinishReason,
+    /// How many MTP draft tokens were accepted across the decode loop.
+    pub draft_accepted_count: usize,
+    /// How many MTP draft attempts were made (one per [`speculative_mtp_decode_step`] call).
+    pub total_draft_attempts: usize,
 }
 
 /// A single token emitted during streaming generation.
@@ -874,6 +896,295 @@ impl ModelRunner {
             text: String::new(),
             token_ids: generated_tokens,
             finish_reason: FinishReason::MaxTokens,
+        })
+    }
+
+    /// Generate text using native MTP (Multi-Token Prediction) speculative decoding.
+    ///
+    /// Uses the model's pretrained MTP head to draft a single candidate token per
+    /// step (Qwen3.5-4B ships `num_nextn_predict_layers=1`), which the base model
+    /// then verifies in a fused forward pass that emits both the draft-position
+    /// target and a bonus token for the accept case.
+    ///
+    /// Requires the checkpoint to carry `mtp.*` tensors; returns an error
+    /// otherwise. Greedy-only (temperature == 0); the stochastic
+    /// rejection-sampling variant is a follow-up.
+    ///
+    /// Reports α (acceptance rate) via the returned [`MtpGenerationOutput`] so
+    /// bench callers can publish it alongside throughput numbers.
+    pub fn generate_mtp_speculative(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+    ) -> Result<MtpGenerationOutput> {
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        let output = self.generate_from_tokens_mtp_speculative(&prompt_tokens, params)?;
+
+        let text = self
+            .tokenizer
+            .decode(&output.token_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(MtpGenerationOutput {
+            text,
+            token_ids: output.token_ids,
+            finish_reason: output.finish_reason,
+            draft_accepted_count: output.draft_accepted_count,
+            total_draft_attempts: output.total_draft_attempts,
+        })
+    }
+
+    /// Native MTP speculative generation operating on token IDs.
+    ///
+    /// 1. Prefill: paged forward pass on the prompt that returns both logits and
+    ///    the last-row pre-final-norm hidden state (`h_prev`).
+    /// 2. Decode: per iteration, call [`speculative_mtp_decode_step`] which
+    ///    drafts via the MTP head, verifies via the base model, and reports the
+    ///    accepted tokens plus advanced positions for the next call.
+    ///
+    /// Two paged caches are used: the base cache (sized for the model's
+    /// full-attention layers) and a 1-layer MTP cache. They have independent
+    /// position counters because the MTP layer only commits a slot on accept.
+    pub fn generate_from_tokens_mtp_speculative(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+    ) -> Result<MtpGenerationOutput> {
+        use rand::SeedableRng;
+
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+        anyhow::ensure!(
+            self.weights.mtp.is_some(),
+            "generate_mtp_speculative requires the checkpoint to carry mtp.* tensors \
+             (Qwen3.5-4B native MTP head)"
+        );
+        anyhow::ensure!(
+            params.temperature == 0.0,
+            "generate_mtp_speculative currently only supports greedy decoding (temperature == 0)"
+        );
+
+        // Block size matches the kiln-core default + the bench convention.
+        const BLOCK_SIZE: usize = 16;
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let device = self.weights.embed_tokens.device();
+        let dtype = match self.config.dtype {
+            kiln_core::config::DType::BF16 => DType::BF16,
+            kiln_core::config::DType::FP16 => DType::F16,
+            kiln_core::config::DType::FP32 => DType::F32,
+        };
+
+        // Two independent paged caches:
+        //   * `base_cache` covers the model's full-attention layers.
+        //   * `mtp_cache` is a single-layer cache for the MTP block.
+        // Each gets its own block table mapping logical block i -> physical i.
+        let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
+        let mut base_cache = PagedKvCache::new(
+            self.config.num_full_attention_layers,
+            num_blocks,
+            BLOCK_SIZE,
+            self.config.num_kv_heads,
+            self.config.head_dim,
+            dtype,
+            device,
+        )?;
+        let mut mtp_cache = PagedKvCache::new(
+            1,
+            num_blocks,
+            BLOCK_SIZE,
+            self.config.num_kv_heads,
+            self.config.head_dim,
+            dtype,
+            device,
+        )?;
+        let mut base_block_table = BlockTable::new();
+        let mut mtp_block_table = BlockTable::new();
+        for i in 0..num_blocks as u32 {
+            base_block_table.push(i);
+            mtp_block_table.push(i);
+        }
+
+        let mut linear_state = self.new_linear_state()?;
+
+        // Prefill: feed the entire prompt through the base model and capture
+        // the last-row pre-final-norm hidden as the seed `h_prev`. Streaming
+        // prefill returns logits only, so MTP needs the dedicated path that
+        // also yields hidden state.
+        let (prefill_logits, mut h_prev) = model_forward_paged_with_last_hidden(
+            &*self.backend,
+            prompt_tokens,
+            &self.weights,
+            &self.config,
+            &mut base_cache,
+            &base_block_table,
+            0,
+            Some(&mut linear_state),
+            self.active_lora.as_ref(),
+            None,
+        )
+        .context("mtp prefill forward pass failed")?;
+
+        // The last-row logits drive the first emitted token (same as the
+        // skip-layer path); slice to [1, V] for greedy_sample.
+        let prefill_last = prefill_logits
+            .narrow(1, prompt_tokens.len() - 1, 1)?
+            .squeeze(1)?;
+        let mut last_token = greedy_sample(&prefill_last)?;
+
+        let mut base_pos = prompt_tokens.len();
+        let mut mtp_pos = 0usize;
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut draft_accepted_count: usize = 0;
+        let mut total_draft_attempts: usize = 0;
+
+        let mut rng = match params.seed {
+            Some(s) => rand::rngs::StdRng::seed_from_u64(s),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+
+        loop {
+            if generated_tokens.len() >= params.max_tokens {
+                return Ok(MtpGenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::MaxTokens,
+                    draft_accepted_count,
+                    total_draft_attempts,
+                });
+            }
+
+            if self.eos_token_ids.contains(&last_token) {
+                return Ok(MtpGenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                    draft_accepted_count,
+                    total_draft_attempts,
+                });
+            }
+
+            generated_tokens.push(last_token);
+
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            return Ok(MtpGenerationOutput {
+                                text: String::new(),
+                                token_ids: generated_tokens,
+                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                                draft_accepted_count,
+                                total_draft_attempts,
+                            });
+                        }
+                    }
+                }
+            }
+
+            total_draft_attempts += 1;
+            let result = speculative_mtp_decode_step(
+                &*self.backend,
+                last_token,
+                &h_prev,
+                &self.weights,
+                &self.config,
+                &mut base_cache,
+                &base_block_table,
+                base_pos,
+                &mut mtp_cache,
+                &mtp_block_table,
+                mtp_pos,
+                params,
+                &self.eos_token_ids,
+                &mut rng,
+            )
+            .context("mtp speculative decode step failed")?;
+
+            if result.draft_accepted {
+                draft_accepted_count += 1;
+            }
+            base_pos += result.base_advance;
+            mtp_pos += result.mtp_advance;
+            h_prev = result.new_h_prev;
+
+            if result.accepted_tokens.is_empty() {
+                if result.hit_eos {
+                    return Ok(MtpGenerationOutput {
+                        text: String::new(),
+                        token_ids: generated_tokens,
+                        finish_reason: FinishReason::Eos,
+                        draft_accepted_count,
+                        total_draft_attempts,
+                    });
+                }
+                break;
+            }
+
+            for &token in &result.accepted_tokens[..result.accepted_tokens.len() - 1] {
+                generated_tokens.push(token);
+
+                if !params.stop.is_empty() {
+                    let decoded_so_far = self
+                        .tokenizer
+                        .decode(&generated_tokens)
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                        .ok();
+                    if let Some(text) = &decoded_so_far {
+                        for stop_seq in &params.stop {
+                            if text.contains(stop_seq.as_str()) {
+                                return Ok(MtpGenerationOutput {
+                                    text: String::new(),
+                                    token_ids: generated_tokens,
+                                    finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                                    draft_accepted_count,
+                                    total_draft_attempts,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    return Ok(MtpGenerationOutput {
+                        text: String::new(),
+                        token_ids: generated_tokens,
+                        finish_reason: FinishReason::MaxTokens,
+                        draft_accepted_count,
+                        total_draft_attempts,
+                    });
+                }
+            }
+
+            last_token = *result.accepted_tokens.last().unwrap();
+
+            if result.hit_eos {
+                return Ok(MtpGenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                    draft_accepted_count,
+                    total_draft_attempts,
+                });
+            }
+        }
+
+        Ok(MtpGenerationOutput {
+            text: String::new(),
+            token_ids: generated_tokens,
+            finish_reason: FinishReason::MaxTokens,
+            draft_accepted_count,
+            total_draft_attempts,
         })
     }
 

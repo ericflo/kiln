@@ -1935,6 +1935,7 @@ dependencies = [
  "kiln-model",
  "kiln-scheduler",
  "kiln-train",
+ "rand 0.8.6",
  "reqwest",
  "safetensors 0.5.3",
  "serde",
