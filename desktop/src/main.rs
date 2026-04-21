@@ -16,30 +16,45 @@ use settings::{
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::RwLock;
 
 /// Reconcile the OS autostart registration with the desired `launch_at_login`
-/// setting. Errors are logged but never propagated — a broken autostart
-/// registration must not crash the app or block settings persistence.
-fn reconcile_autolaunch(app: &AppHandle, desired: bool) {
+/// setting. Errors are logged and also returned so explicit user-driven
+/// toggle paths can surface them; the startup path ignores the Result because
+/// no window is open yet to notify into.
+fn reconcile_autolaunch(app: &AppHandle, desired: bool) -> Result<(), String> {
     let manager = app.autolaunch();
     let enabled = match manager.is_enabled() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[main] autolaunch is_enabled failed: {}", e);
-            return;
+            return Err(autolaunch_failure_body(desired, &e.to_string()));
         }
     };
     if desired && !enabled {
         if let Err(e) = manager.enable() {
             eprintln!("[main] autolaunch enable failed: {}", e);
+            return Err(autolaunch_failure_body(true, &e.to_string()));
         }
     } else if !desired && enabled {
         if let Err(e) = manager.disable() {
             eprintln!("[main] autolaunch disable failed: {}", e);
+            return Err(autolaunch_failure_body(false, &e.to_string()));
         }
     }
+    Ok(())
+}
+
+/// Format the body of a "Launch at login not applied" notification. Kept as a
+/// pure helper so it can be unit-tested without GTK/webkit2gtk.
+fn autolaunch_failure_body(desired: bool, err: &str) -> String {
+    let action = if desired { "enable" } else { "disable" };
+    format!(
+        "Failed to {} launch at login: {}. The setting was saved but the OS autostart registration was not updated.",
+        action, err
+    )
 }
 
 fn build_supervisor_config(
@@ -1015,7 +1030,14 @@ async fn set_settings(
     }
     let cfg = build_supervisor_config(&app, &new)?;
     sup.update_config(cfg).await;
-    reconcile_autolaunch(&app, new.launch_at_login);
+    if let Err(body) = reconcile_autolaunch(&app, new.launch_at_login) {
+        let _ = app
+            .notification()
+            .builder()
+            .title("Launch at login not applied")
+            .body(body)
+            .show();
+    }
     Ok(())
 }
 
@@ -1046,7 +1068,7 @@ fn main() {
 
             tray::build_tray(app.handle(), Arc::clone(&supervisor))?;
 
-            reconcile_autolaunch(&handle, settings.launch_at_login);
+            let _ = reconcile_autolaunch(&handle, settings.launch_at_login);
 
             let configured_binary = settings
                 .kiln_binary
@@ -1122,7 +1144,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::openai_base_url;
+    use super::{autolaunch_failure_body, openai_base_url};
 
     #[test]
     fn default_loopback() {
@@ -1136,5 +1158,20 @@ mod tests {
     fn alternate_host_and_port() {
         assert_eq!(openai_base_url("0.0.0.0", 9001), "http://0.0.0.0:9001/v1");
         assert_eq!(openai_base_url("localhost", 80), "http://localhost:80/v1");
+    }
+
+    #[test]
+    fn autolaunch_failure_body_enable() {
+        let s = autolaunch_failure_body(true, "permission denied");
+        assert!(s.contains("enable launch at login"));
+        assert!(s.contains("permission denied"));
+        assert!(s.contains("setting was saved"));
+    }
+
+    #[test]
+    fn autolaunch_failure_body_disable() {
+        let s = autolaunch_failure_body(false, "registry write failed");
+        assert!(s.contains("disable launch at login"));
+        assert!(s.contains("registry write failed"));
     }
 }
