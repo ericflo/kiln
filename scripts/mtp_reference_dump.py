@@ -732,6 +732,14 @@ def main() -> int:
         key = f"c7__{name}"
         assert key not in out_dict, f"c7 tap name `{key}` collides with existing tap"
         out_dict[key] = t.detach().clone().contiguous()
+    # Phase C14: emit the 3 post-MTP-transformer-block taps under a `c14__`
+    # prefix so the C14 comparator can diff kiln's post-block capture window
+    # (`c14__post_block`, `c14__post_norm`, `c14__logits` in kiln's dump)
+    # against the fp32 reference without colliding with the legacy `post_layer`
+    # / `post_final_ln` / `mtp_logits` tap names (kept for back-compat).
+    out_dict["c14__post_block"] = post_layer.detach().clone().contiguous()
+    out_dict["c14__post_norm"] = post_final_ln.detach().clone().contiguous()
+    out_dict["c14__logits"] = mtp_logits.detach().clone().contiguous()
     save_file(out_dict, args.out)
     print(f"[mtp_ref] wrote {args.out} ({sum(t.numel()*t.element_size() for t in out_dict.values())} bytes)", file=sys.stderr)
     return 0
