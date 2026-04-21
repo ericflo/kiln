@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use candle_core::DType;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -16,17 +16,14 @@ use kiln_core::tokenizer::KilnTokenizer;
 use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
-    model_forward, model_forward_paged, model_forward_paged_streaming,
-    model_forward_paged_with_last_hidden, streaming_prefill_enabled, GpuWeights,
-    LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
+    model_forward_paged_streaming, model_forward_paged_with_last_hidden, streaming_prefill_enabled,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
-use crate::speculative::{
-    speculative_decode_step, speculative_mtp_decode_step, SpeculativeConfig,
-};
+use crate::speculative::{SpeculativeConfig, speculative_decode_step, speculative_mtp_decode_step};
 
 use kiln_core::block::{BlockManager, BlockTable};
 
@@ -102,6 +99,80 @@ pub enum StreamEvent {
     Done(StreamDone),
 }
 
+enum StreamTokenDisposition {
+    Continue,
+    Finished(FinishReason),
+    ReceiverDropped,
+}
+
+struct SharedBlockReservation<'a> {
+    block_manager: &'a Mutex<BlockManager>,
+    block_ids: Vec<u32>,
+}
+
+impl Drop for SharedBlockReservation<'_> {
+    fn drop(&mut self) {
+        if self.block_ids.is_empty() {
+            return;
+        }
+        match self.block_manager.lock() {
+            Ok(mut guard) => guard.free_all(&self.block_ids),
+            Err(e) => tracing::error!("failed to lock block manager to free blocks: {e}"),
+        }
+    }
+}
+
+fn lock_block_manager(
+    block_manager: &Mutex<BlockManager>,
+) -> Result<std::sync::MutexGuard<'_, BlockManager>> {
+    block_manager
+        .lock()
+        .map_err(|e| anyhow::anyhow!("failed to lock block manager: {e}"))
+}
+
+fn lock_paged_cache(
+    paged_cache: &Mutex<PagedKvCache>,
+) -> Result<std::sync::MutexGuard<'_, PagedKvCache>> {
+    paged_cache
+        .lock()
+        .map_err(|e| anyhow::anyhow!("failed to lock paged KV cache: {e}"))
+}
+
+fn emit_stream_token(
+    tx: &mpsc::Sender<StreamEvent>,
+    tokenizer: &KilnTokenizer,
+    generated_tokens: &mut Vec<TokenId>,
+    token: TokenId,
+    stop_sequences: &[String],
+) -> StreamTokenDisposition {
+    generated_tokens.push(token);
+
+    let token_text = tokenizer.decode(&[token]).unwrap_or_default();
+    if tx
+        .send(StreamEvent::Token(StreamToken {
+            token_id: token,
+            text: token_text,
+        }))
+        .is_err()
+    {
+        return StreamTokenDisposition::ReceiverDropped;
+    }
+
+    if !stop_sequences.is_empty() {
+        if let Ok(text) = tokenizer.decode(generated_tokens) {
+            for stop_seq in stop_sequences {
+                if text.contains(stop_seq.as_str()) {
+                    return StreamTokenDisposition::Finished(FinishReason::StopSequence(
+                        stop_seq.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    StreamTokenDisposition::Continue
+}
+
 /// Why generation stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
@@ -151,8 +222,8 @@ impl ModelRunner {
     pub fn load_adapter(&mut self, path: &Path) -> Result<()> {
         let device = self.weights.embed_tokens.device().clone();
         let num_layers = self.config.num_layers;
-        let lora = LoraWeights::load(path, num_layers, &device)
-            .context("failed to load LoRA adapter")?;
+        let lora =
+            LoraWeights::load(path, num_layers, &device).context("failed to load LoRA adapter")?;
         self.active_lora = Some(lora);
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
@@ -263,8 +334,16 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(&*self.backend, &prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
-            .context("prefill forward pass failed")?;
+        let logits = model_forward(
+            &*self.backend,
+            &prompt_tokens,
+            &self.weights,
+            &self.config,
+            Some(&mut kv_cache),
+            Some(&mut linear_state),
+            self.active_lora.as_ref(),
+        )
+        .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
         // Sample first token from the last position's logits
@@ -298,10 +377,7 @@ impl ModelRunner {
             generated_tokens.push(next_token);
 
             // Decode this token's text
-            let token_text = self
-                .tokenizer
-                .decode(&[next_token])
-                .unwrap_or_default();
+            let token_text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
 
             // Send token event; if receiver dropped, stop early
             if tx
@@ -324,8 +400,7 @@ impl ModelRunner {
                 if let Some(text) = &decoded_so_far {
                     for stop_seq in &params.stop {
                         if text.contains(stop_seq.as_str()) {
-                            finish_reason =
-                                FinishReason::StopSequence(stop_seq.clone());
+                            finish_reason = FinishReason::StopSequence(stop_seq.clone());
                             let _ = tx.send(StreamEvent::Done(StreamDone {
                                 finish_reason,
                                 completion_tokens: generated_tokens.len(),
@@ -337,8 +412,16 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token
-            let logits = model_forward(&*self.backend, &[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
-                .context("decode forward pass failed")?;
+            let logits = model_forward(
+                &*self.backend,
+                &[next_token],
+                &self.weights,
+                &self.config,
+                Some(&mut kv_cache),
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+            .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
             next_token = if params.temperature == 0.0 {
@@ -379,8 +462,16 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(&*self.backend, prompt_tokens, &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
-            .context("prefill forward pass failed")?;
+        let logits = model_forward(
+            &*self.backend,
+            prompt_tokens,
+            &self.weights,
+            &self.config,
+            Some(&mut kv_cache),
+            Some(&mut linear_state),
+            self.active_lora.as_ref(),
+        )
+        .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -437,8 +528,16 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
-            let logits = model_forward(&*self.backend, &[next_token], &self.weights, &self.config, Some(&mut kv_cache), Some(&mut linear_state), self.active_lora.as_ref())
-                .context("decode forward pass failed")?;
+            let logits = model_forward(
+                &*self.backend,
+                &[next_token],
+                &self.weights,
+                &self.config,
+                Some(&mut kv_cache),
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+            .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
             // Sample next token from the new logits
@@ -484,7 +583,8 @@ impl ModelRunner {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to tokenize prompt")?;
 
-        let output = self.generate_from_tokens_paged(&prompt_tokens, params, block_manager, paged_cache)?;
+        let output =
+            self.generate_from_tokens_paged(&prompt_tokens, params, block_manager, paged_cache)?;
 
         let text = self
             .tokenizer
@@ -526,14 +626,241 @@ impl ModelRunner {
         }
 
         // Run generation with paged cache; free blocks on completion (or error)
-        let result = self.generate_from_tokens_paged_inner(
-            prompt_tokens, params, paged_cache, &block_table,
-        );
+        let result =
+            self.generate_from_tokens_paged_inner(prompt_tokens, params, paged_cache, &block_table);
 
         // Always free allocated blocks
         block_manager.free_all(&allocated_blocks);
 
         result
+    }
+
+    /// Generate text from a prompt using shared paged-cache state protected by
+    /// short-lived mutexes.
+    ///
+    /// On backends with CUDA graph replay enabled we preserve the existing
+    /// whole-request lock scope because the graph state is runner-global.
+    /// On non-CUDA desktop paths (Metal / CPU), blocks are reserved up front,
+    /// the block manager is released immediately, and the paged cache is locked
+    /// only around prefill / decode forward passes so concurrent requests can
+    /// interleave between decode steps.
+    pub fn generate_paged_shared(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<GenerationOutput> {
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        let output = self.generate_from_tokens_paged_shared(
+            &prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+        )?;
+
+        let text = self
+            .tokenizer
+            .decode(&output.token_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(GenerationOutput {
+            text,
+            token_ids: output.token_ids,
+            finish_reason: output.finish_reason,
+        })
+    }
+
+    fn generate_from_tokens_paged_shared(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<GenerationOutput> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let cuda_graph_enabled = self
+            .cuda_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
+            .is_enabled();
+        if cuda_graph_enabled {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            return self.generate_from_tokens_paged(
+                prompt_tokens,
+                params,
+                &mut bm_guard,
+                &mut pc_guard,
+            );
+        }
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let (reservation, block_table) = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let block_size = bm_guard.block_size();
+            let num_blocks = Self::blocks_needed(max_total, block_size);
+            let block_ids = bm_guard
+                .allocate(num_blocks)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut block_table = BlockTable::new();
+            for &block_id in &block_ids {
+                block_table.push(block_id);
+            }
+            (
+                SharedBlockReservation {
+                    block_manager,
+                    block_ids,
+                },
+                block_table,
+            )
+        };
+
+        let result = self.generate_from_tokens_paged_interleaved(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+        );
+
+        drop(reservation);
+        result
+    }
+
+    fn generate_from_tokens_paged_interleaved(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+    ) -> Result<GenerationOutput> {
+        let mut linear_state = self.new_linear_state()?;
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill_enabled() {
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+                .context("prefill forward pass (paged, streaming) failed")?
+            } else {
+                model_forward_paged(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged) failed")?
+            }
+        };
+
+        let mut seq_len = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
+
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
+        for _step in 0..params.max_tokens {
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            if self.eos_token_ids.contains(&next_token) {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                });
+            }
+
+            generated_tokens.push(next_token);
+
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            return Ok(GenerationOutput {
+                                text: String::new(),
+                                token_ids: generated_tokens,
+                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            let logits = {
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                model_forward_paged(
+                    &*self.backend,
+                    &[next_token],
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    seq_len,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("decode forward pass (paged) failed")?
+            };
+            seq_len += 1;
+
+            next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
+        }
+
+        Ok(GenerationOutput {
+            text: String::new(),
+            token_ids: generated_tokens,
+            finish_reason: FinishReason::MaxTokens,
+        })
     }
 
     /// Inner generation loop using paged KV cache (blocks already allocated).
@@ -583,7 +910,9 @@ impl ModelRunner {
         let mut step_seed = params.seed;
 
         // Acquire the CUDA graph runner for decode steps
-        let mut graph_runner = self.cuda_graph.lock()
+        let mut graph_runner = self
+            .cuda_graph
+            .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
 
         // Sample first token
@@ -1189,6 +1518,596 @@ impl ModelRunner {
         })
     }
 
+    /// Streaming self-speculative decoding (skip-layer draft).
+    ///
+    /// Mirrors [`generate_from_tokens_speculative`] but emits committed tokens
+    /// incrementally through the returned channel so the SSE desktop path can
+    /// benefit from the existing speculative setting.
+    pub fn generate_streaming_speculative(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+        spec_config: &SpeculativeConfig,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        use rand::SeedableRng;
+
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+        spec_config
+            .validate(&self.config)
+            .context("invalid speculative config")?;
+
+        let (tx, rx) = mpsc::channel();
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let mut kv_cache = self.new_kv_cache(max_total)?;
+        let mut linear_state = self.new_linear_state()?;
+        let mut draft_linear_state = self.new_linear_state()?;
+
+        let logits = model_forward(
+            &*self.backend,
+            &prompt_tokens,
+            &self.weights,
+            &self.config,
+            Some(&mut kv_cache),
+            Some(&mut linear_state),
+            self.active_lora.as_ref(),
+        )
+        .context("prefill forward pass failed")?;
+        kv_cache.advance(prompt_tokens.len());
+
+        let _ = crate::speculative::draft_forward_for_state_init(
+            &*self.backend,
+            &prompt_tokens,
+            &self.weights,
+            &self.config,
+            spec_config.draft_layers,
+            &mut draft_linear_state,
+        );
+
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut finish_reason = FinishReason::MaxTokens;
+        let mut rng = match params.seed {
+            Some(s) => rand::rngs::StdRng::seed_from_u64(s),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+
+        let mut last_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                params.seed,
+            )?
+        };
+
+        loop {
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            if self.eos_token_ids.contains(&last_token) {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+
+            match emit_stream_token(
+                &tx,
+                &self.tokenizer,
+                &mut generated_tokens,
+                last_token,
+                &params.stop,
+            ) {
+                StreamTokenDisposition::Continue => {}
+                StreamTokenDisposition::Finished(reason) => {
+                    let completion_tokens = generated_tokens.len();
+                    let _ = tx.send(StreamEvent::Done(StreamDone {
+                        finish_reason: reason,
+                        completion_tokens,
+                    }));
+                    return Ok(rx);
+                }
+                StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            let remaining = params.max_tokens - generated_tokens.len();
+            let effective_k = spec_config.num_speculative_tokens.min(remaining);
+            let effective_config = SpeculativeConfig {
+                num_speculative_tokens: effective_k,
+                draft_layers: spec_config.draft_layers,
+            };
+
+            let result = speculative_decode_step(
+                &*self.backend,
+                last_token,
+                &self.weights,
+                &self.config,
+                &mut kv_cache,
+                &mut linear_state,
+                &mut draft_linear_state,
+                &effective_config,
+                params,
+                &self.eos_token_ids,
+                &mut rng,
+                self.active_lora.as_ref(),
+            )
+            .context("speculative decode step failed")?;
+
+            if result.accepted_tokens.is_empty() {
+                if result.hit_eos {
+                    finish_reason = FinishReason::Eos;
+                }
+                break;
+            }
+
+            for &token in &result.accepted_tokens[..result.accepted_tokens.len() - 1] {
+                match emit_stream_token(
+                    &tx,
+                    &self.tokenizer,
+                    &mut generated_tokens,
+                    token,
+                    &params.stop,
+                ) {
+                    StreamTokenDisposition::Continue => {}
+                    StreamTokenDisposition::Finished(reason) => {
+                        let completion_tokens = generated_tokens.len();
+                        let _ = tx.send(StreamEvent::Done(StreamDone {
+                            finish_reason: reason,
+                            completion_tokens,
+                        }));
+                        return Ok(rx);
+                    }
+                    StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+                }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    break;
+                }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            last_token = *result.accepted_tokens.last().unwrap();
+
+            if result.hit_eos {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+        }
+
+        let _ = tx.send(StreamEvent::Done(StreamDone {
+            finish_reason,
+            completion_tokens: generated_tokens.len(),
+        }));
+
+        Ok(rx)
+    }
+
+    /// Streaming native-MTP speculative decoding.
+    ///
+    /// Mirrors [`generate_from_tokens_mtp_speculative`] but emits committed
+    /// tokens as they are accepted so the desktop streaming path can use MTP
+    /// when the checkpoint and request settings allow it.
+    pub fn generate_streaming_mtp_speculative(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        use rand::SeedableRng;
+
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+        anyhow::ensure!(
+            self.weights.mtp.is_some(),
+            "generate_streaming_mtp_speculative requires the checkpoint to carry mtp.* tensors \
+             (Qwen3.5-4B native MTP head)"
+        );
+        anyhow::ensure!(
+            params.temperature == 0.0,
+            "generate_streaming_mtp_speculative currently only supports greedy decoding \
+             (temperature == 0)"
+        );
+
+        const BLOCK_SIZE: usize = 16;
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let device = self.weights.embed_tokens.device();
+        let dtype = match self.config.dtype {
+            kiln_core::config::DType::BF16 => DType::BF16,
+            kiln_core::config::DType::FP16 => DType::F16,
+            kiln_core::config::DType::FP32 => DType::F32,
+        };
+
+        let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
+        let mut base_cache = PagedKvCache::new(
+            self.config.num_full_attention_layers,
+            num_blocks,
+            BLOCK_SIZE,
+            self.config.num_kv_heads,
+            self.config.head_dim,
+            dtype,
+            device,
+        )?;
+        let mut mtp_cache = PagedKvCache::new(
+            1,
+            num_blocks,
+            BLOCK_SIZE,
+            self.config.num_kv_heads,
+            self.config.head_dim,
+            dtype,
+            device,
+        )?;
+        let mut base_block_table = BlockTable::new();
+        let mut mtp_block_table = BlockTable::new();
+        for i in 0..num_blocks as u32 {
+            base_block_table.push(i);
+            mtp_block_table.push(i);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let mut linear_state = self.new_linear_state()?;
+
+        let (prefill_logits, mut h_prev) = model_forward_paged_with_last_hidden(
+            &*self.backend,
+            &prompt_tokens,
+            &self.weights,
+            &self.config,
+            &mut base_cache,
+            &base_block_table,
+            0,
+            Some(&mut linear_state),
+            self.active_lora.as_ref(),
+            None,
+        )
+        .context("mtp prefill forward pass failed")?;
+
+        let prefill_last = prefill_logits
+            .narrow(1, prompt_tokens.len() - 1, 1)?
+            .squeeze(1)?;
+        let mut last_token = greedy_sample(&prefill_last)?;
+
+        let mut base_pos = prompt_tokens.len();
+        let mut mtp_pos = 0usize;
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut finish_reason = FinishReason::MaxTokens;
+        let mut rng = match params.seed {
+            Some(s) => rand::rngs::StdRng::seed_from_u64(s),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+
+        loop {
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            if self.eos_token_ids.contains(&last_token) {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+
+            match emit_stream_token(
+                &tx,
+                &self.tokenizer,
+                &mut generated_tokens,
+                last_token,
+                &params.stop,
+            ) {
+                StreamTokenDisposition::Continue => {}
+                StreamTokenDisposition::Finished(reason) => {
+                    let completion_tokens = generated_tokens.len();
+                    let _ = tx.send(StreamEvent::Done(StreamDone {
+                        finish_reason: reason,
+                        completion_tokens,
+                    }));
+                    return Ok(rx);
+                }
+                StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            let result = speculative_mtp_decode_step(
+                &*self.backend,
+                last_token,
+                &h_prev,
+                &self.weights,
+                &self.config,
+                &mut base_cache,
+                &base_block_table,
+                base_pos,
+                &mut mtp_cache,
+                &mtp_block_table,
+                mtp_pos,
+                params,
+                &self.eos_token_ids,
+                &mut rng,
+            )
+            .context("mtp speculative decode step failed")?;
+
+            base_pos += result.base_advance;
+            mtp_pos += result.mtp_advance;
+            h_prev = result.new_h_prev;
+
+            if result.accepted_tokens.is_empty() {
+                if result.hit_eos {
+                    finish_reason = FinishReason::Eos;
+                }
+                break;
+            }
+
+            for &token in &result.accepted_tokens[..result.accepted_tokens.len() - 1] {
+                match emit_stream_token(
+                    &tx,
+                    &self.tokenizer,
+                    &mut generated_tokens,
+                    token,
+                    &params.stop,
+                ) {
+                    StreamTokenDisposition::Continue => {}
+                    StreamTokenDisposition::Finished(reason) => {
+                        let completion_tokens = generated_tokens.len();
+                        let _ = tx.send(StreamEvent::Done(StreamDone {
+                            finish_reason: reason,
+                            completion_tokens,
+                        }));
+                        return Ok(rx);
+                    }
+                    StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+                }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    break;
+                }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            last_token = *result.accepted_tokens.last().unwrap();
+
+            if result.hit_eos {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+        }
+
+        let _ = tx.send(StreamEvent::Done(StreamDone {
+            finish_reason,
+            completion_tokens: generated_tokens.len(),
+        }));
+
+        Ok(rx)
+    }
+
+    /// Streaming generation using shared paged-cache state protected by
+    /// short-lived mutexes.
+    ///
+    /// Mirrors [`generate_paged_shared`]: CUDA graph-enabled runtimes keep the
+    /// existing whole-request lock scope, while non-CUDA desktop paths reserve
+    /// blocks up front and lock the paged cache only around prefill / decode
+    /// forward passes.
+    pub fn generate_streaming_paged_shared(
+        &self,
+        prompt: &str,
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let prompt_tokens = self
+            .tokenizer
+            .encode(prompt)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to tokenize prompt")?;
+
+        self.generate_from_tokens_streaming_paged_shared(
+            &prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+        )
+    }
+
+    fn generate_from_tokens_streaming_paged_shared(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let cuda_graph_enabled = self
+            .cuda_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
+            .is_enabled();
+        if cuda_graph_enabled {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            return self.generate_from_tokens_streaming_paged_locked(
+                prompt_tokens,
+                params,
+                &mut bm_guard,
+                &mut pc_guard,
+            );
+        }
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let (reservation, block_table) = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let block_size = bm_guard.block_size();
+            let num_blocks = Self::blocks_needed(max_total, block_size);
+            let block_ids = bm_guard
+                .allocate(num_blocks)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut block_table = BlockTable::new();
+            for &block_id in &block_ids {
+                block_table.push(block_id);
+            }
+            (
+                SharedBlockReservation {
+                    block_manager,
+                    block_ids,
+                },
+                block_table,
+            )
+        };
+
+        let result = self.generate_from_tokens_streaming_paged_interleaved(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+        );
+
+        drop(reservation);
+        result
+    }
+
+    fn generate_from_tokens_streaming_paged_interleaved(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let (tx, rx) = mpsc::channel();
+        let mut linear_state = self.new_linear_state()?;
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill_enabled() {
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+                .context("prefill forward pass (paged, streaming) failed")?
+            } else {
+                model_forward_paged(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged) failed")?
+            }
+        };
+
+        let mut seq_len = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
+        let mut finish_reason = FinishReason::MaxTokens;
+
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
+        for _step in 0..params.max_tokens {
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            if self.eos_token_ids.contains(&next_token) {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+
+            match emit_stream_token(
+                &tx,
+                &self.tokenizer,
+                &mut generated_tokens,
+                next_token,
+                &params.stop,
+            ) {
+                StreamTokenDisposition::Continue => {}
+                StreamTokenDisposition::Finished(reason) => {
+                    finish_reason = reason;
+                    break;
+                }
+                StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+            }
+
+            let logits = {
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                model_forward_paged(
+                    &*self.backend,
+                    &[next_token],
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    seq_len,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("decode forward pass (paged) failed")?
+            };
+            seq_len += 1;
+
+            next_token = if params.temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
+        }
+
+        let _ = tx.send(StreamEvent::Done(StreamDone {
+            finish_reason,
+            completion_tokens: generated_tokens.len(),
+        }));
+
+        Ok(rx)
+    }
+
     /// Streaming generation using paged KV cache.
     ///
     /// Same as [`generate_streaming`] but uses paged KV cache for memory-efficient
@@ -1206,6 +2125,21 @@ impl ModelRunner {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to tokenize prompt")?;
 
+        self.generate_from_tokens_streaming_paged_locked(
+            &prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+        )
+    }
+
+    fn generate_from_tokens_streaming_paged_locked(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &mut BlockManager,
+        paged_cache: &mut PagedKvCache,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
         let block_size = block_manager.block_size();
@@ -1266,7 +2200,9 @@ impl ModelRunner {
         let mut finish_reason = FinishReason::MaxTokens;
 
         // Acquire CUDA graph runner for decode steps
-        let mut graph_runner = self.cuda_graph.lock()
+        let mut graph_runner = self
+            .cuda_graph
+            .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
 
         let mut next_token = if params.temperature == 0.0 {
@@ -1293,10 +2229,7 @@ impl ModelRunner {
 
             generated_tokens.push(next_token);
 
-            let token_text = self
-                .tokenizer
-                .decode(&[next_token])
-                .unwrap_or_default();
+            let token_text = self.tokenizer.decode(&[next_token]).unwrap_or_default();
 
             if tx
                 .send(StreamEvent::Token(StreamToken {
@@ -1466,12 +2399,9 @@ mod tests {
             },
         };
 
-        let rotary_inv_freq = crate::forward::compute_rotary_inv_freq(
-            config.rotary_dim(),
-            config.rope_theta,
-            device,
-        )
-        .unwrap();
+        let rotary_inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
+                .unwrap();
 
         GpuWeights {
             embed_tokens: embed,
@@ -1634,7 +2564,10 @@ mod tests {
         let out2 = runner.generate_from_tokens(&[1, 2], &params)?;
 
         // Same seed should give same results
-        assert_eq!(out1.token_ids, out2.token_ids, "same seed should be deterministic");
+        assert_eq!(
+            out1.token_ids, out2.token_ids,
+            "same seed should be deterministic"
+        );
         assert_eq!(out1.token_ids.len(), 5);
 
         Ok(())
@@ -1726,6 +2659,48 @@ mod tests {
 
         // Blocks should be freed after generation
         assert_eq!(block_manager.num_free(), num_blocks);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_paged_shared_max_tokens() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?);
+
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 5,
+            ..Default::default()
+        };
+
+        let output = runner.generate_from_tokens_paged_shared(
+            &[1, 2, 3],
+            &params,
+            &block_manager,
+            &paged_cache,
+        )?;
+
+        assert_eq!(output.token_ids.len(), 5);
+        assert_eq!(output.finish_reason, FinishReason::MaxTokens);
+        assert_eq!(block_manager.lock().unwrap().num_free(), num_blocks);
 
         Ok(())
     }
@@ -1826,6 +2801,73 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_paged_shared_concurrent_requests_complete() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = std::sync::Arc::new(ModelRunner::new(weights, tokenizer, config.clone()));
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager =
+            std::sync::Arc::new(Mutex::new(BlockManager::new(num_blocks, block_size)));
+        let paged_cache = std::sync::Arc::new(Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?));
+
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 3,
+            ..Default::default()
+        };
+
+        let handle_a = {
+            let runner = runner.clone();
+            let block_manager = block_manager.clone();
+            let paged_cache = paged_cache.clone();
+            let params = params.clone();
+            std::thread::spawn(move || {
+                runner.generate_from_tokens_paged_shared(
+                    &[1, 2, 3],
+                    &params,
+                    block_manager.as_ref(),
+                    paged_cache.as_ref(),
+                )
+            })
+        };
+        let handle_b = {
+            let runner = runner.clone();
+            let block_manager = block_manager.clone();
+            let paged_cache = paged_cache.clone();
+            let params = params.clone();
+            std::thread::spawn(move || {
+                runner.generate_from_tokens_paged_shared(
+                    &[4, 5, 6],
+                    &params,
+                    block_manager.as_ref(),
+                    paged_cache.as_ref(),
+                )
+            })
+        };
+
+        let output_a = handle_a.join().unwrap()?;
+        let output_b = handle_b.join().unwrap()?;
+
+        assert_eq!(output_a.token_ids.len(), 3);
+        assert_eq!(output_b.token_ids.len(), 3);
+        assert_eq!(block_manager.lock().unwrap().num_free(), num_blocks);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_paged_eos_detection() -> Result<()> {
         let config = tiny_config();
         let device = Device::Cpu;
@@ -1865,7 +2907,10 @@ mod tests {
         )?;
 
         assert_eq!(output.finish_reason, FinishReason::Eos);
-        assert!(output.token_ids.is_empty(), "all tokens are EOS, should stop immediately");
+        assert!(
+            output.token_ids.is_empty(),
+            "all tokens are EOS, should stop immediately"
+        );
 
         // Blocks freed
         assert_eq!(block_manager.num_free(), num_blocks);
