@@ -47,6 +47,24 @@ Layer-0 GDN sub-op bisect (Phase B11b — per-sub-op divergence):
     first sub-op whose median cos_sim across positions falls below 0.95,
     which becomes the B12 recommendation for targeted investigation.
 
+Layer-31 GQA sub-op bisect (Phase B12 — per-layer + per-sub-op drift):
+    python3 scripts/mtp_compare.py --b12 \\
+        --pair 0:/tmp/h-kiln-p0.safetensors,/tmp/h-ref-p0.safetensors \\
+        --pair 1:/tmp/h-kiln-p1.safetensors,/tmp/h-ref-p1.safetensors \\
+        --pair 2:/tmp/h-kiln-p2.safetensors,/tmp/h-ref-p2.safetensors
+
+    --b12 defaults atol=1e-2, rtol=1e-1 (bf16-appropriate) and emits TWO
+    tables per run: (1) per-layer cos_sim + max|Δ| for h_layer_24..31 and
+    h_pre_final_norm, and (2) per-sub-op cos_sim + max|Δ| + mean|Δ| + rel_l2
+    for the 14 `b12__<name>` GQA taps captured inside layer 31 by kiln
+    (KILN_MTP_DUMP_B12_GQA_TAPS=1) and mtp_h_main_reference_dump.py
+    --b12-taps. The verdict identifies the first layer where median cos_sim
+    across positions drops below 0.995 (a tight bar chosen so bf16
+    accumulation noise does not mask a real bug) and, if that first layer is
+    31, the first sub-op below the same bar. Run twice — once with bf16 HF
+    refs and once with fp32 HF refs (--b12-taps --fp32) — to tell whether
+    residual drift at layer 31 exceeds bf16 accumulation noise or is benign.
+
 Exit code:
     0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
@@ -170,6 +188,69 @@ B11_HYPOTHESIS: Dict[str, str] = {
     "gdn_gated_norm": "GatedRMSNorm(core_attn_out, z): gate-modulated RMSNorm weight/eps",
     "gdn_out_proj": "out_proj weight layout, transpose, or residual dtype",
 }
+
+# Phase B12 — per-layer taps covering the GQA tail (24..31) + the final-norm
+# handoff. B10 already captures layer 0/8/16/23/31; B12 fills in 24..30 so the
+# comparator can pinpoint whether the 0.97-0.98 cos_sim drift visible at
+# h_layer_31 is introduced by a specific GQA layer or accumulates gradually
+# across the 8-layer tail. `h_pre_final_norm` mirrors the B10 meaning (last-row
+# hidden feeding model.norm).
+B12_LAYER_TAPS: List[str] = [
+    "h_layer_24",
+    "h_layer_25",
+    "h_layer_26",
+    "h_layer_27",
+    "h_layer_28",
+    "h_layer_29",
+    "h_layer_30",
+    "h_layer_31",
+    "h_pre_final_norm",
+]
+
+# Phase B12 — layer-31 GQA sub-op taps, in forward-graph order. Must stay in
+# lock-step with `B12_GQA_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs`
+# and `B12_LAYER31_GQA_TAP_NAMES` in `scripts/mtp_h_main_reference_dump.py`.
+# Both dumps write these under a `b12__` prefix.
+B12_LAYER31_GQA_TAP_NAMES: Tuple[str, ...] = (
+    "post_input_norm",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "qk_norm_q",
+    "qk_norm_k",
+    "rope_q",
+    "rope_k",
+    "attn_out",
+    "o_proj",
+    "post_attn_norm",
+    "mlp_gate",
+    "mlp_up",
+    "mlp_down",
+)
+
+# One-line hypotheses for each B12 layer-31 GQA sub-op, used in verdict output.
+B12_HYPOTHESIS: Dict[str, str] = {
+    "post_input_norm": "layer 31 input_layernorm weight/eps mismatch",
+    "q_proj": "q_proj weight layout, transpose, or Marlin packing",
+    "k_proj": "k_proj weight layout, transpose, or Marlin packing",
+    "v_proj": "v_proj weight layout, transpose, or Marlin packing",
+    "qk_norm_q": "q_norm per-head RMSNorm weight or eps",
+    "qk_norm_k": "k_norm per-head RMSNorm weight or eps",
+    "rope_q": "RoPE on Q: partial_rotary_factor, rotary theta 10M, half-rotate vs interleaved, position threading",
+    "rope_k": "RoPE on K: partial_rotary_factor, rotary theta 10M, half-rotate vs interleaved, position threading",
+    "attn_out": "softmax(QK^T)V GQA attention mechanics or FA kernel divergence vs reference",
+    "o_proj": "o_proj weight layout, transpose, or residual dtype",
+    "post_attn_norm": "layer 31 post_attention_layernorm weight or eps",
+    "mlp_gate": "MLP gate_proj weight/transpose or pre-SiLU bf16 accumulation",
+    "mlp_up": "MLP up_proj weight layout or elementwise SiLU(gate)*up path",
+    "mlp_down": "MLP down_proj weight layout or bf16 GEMM epilogue cast",
+}
+
+# Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
+# residual drift is small (0.97-0.98) and the goal is to localize it. A
+# per-layer median below this threshold marks the first layer of interest; if
+# that layer is 31, the sub-op table identifies the specific op.
+B12_COS_SIM_BAR = 0.995
 
 META_KEYS = (
     "meta__draft_token_id",
@@ -311,6 +392,13 @@ def _ordered_taps(
             out.append(name)
     for name in B11_LAYER0_TAP_NAMES:
         key = f"b11__{name}"
+        if key in common and key not in out:
+            out.append(key)
+    for name in B12_LAYER_TAPS:
+        if name in common and name not in out:
+            out.append(name)
+    for name in B12_LAYER31_GQA_TAP_NAMES:
+        key = f"b12__{name}"
         if key in common and key not in out:
             out.append(key)
     extras = sorted(common - set(out))
@@ -846,6 +934,222 @@ def _emit_b11_summary(
         emit("     (GDN stack) before committing to a B12 target.")
 
 
+def _emit_b12_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase B12 — layer-31 drift bisect.
+
+    Walks `B12_LAYER_TAPS` (h_layer_24..31 + h_pre_final_norm) across every
+    pair and prints a per-layer cos_sim + max|Δ| table. Then, if any b12__
+    sub-op taps are present, walks `B12_LAYER31_GQA_TAP_NAMES` and prints a
+    per-sub-op cos_sim / max|Δ| / mean|Δ| / rel_l2 table.
+
+    Verdict:
+      - If every layer's MEDIAN cos_sim across positions is >= `B12_COS_SIM_BAR`
+        (0.995), the drift is within the tight bar and no specific layer is
+        called out — compare against fp32 HF to decide if bf16 accumulation is
+        the sole explanation.
+      - Otherwise, the first layer whose median falls below the bar is
+        reported as the first divergent layer. If that layer is 31 AND b12__
+        sub-op taps are present, the sub-op table is used to recommend the
+        first sub-op (in forward-graph order) with median cos_sim below the
+        bar as the localized B12 target.
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase B12 layer-31 drift bisect — per-layer cos_sim + max|Δ|")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+
+    # Layer table: tap -> {label: (cos_sim, max|Δ|, allclose)}
+    layer_cell: Dict[str, Dict[str, Tuple[float, float, bool]]] = {
+        n: {} for n in B12_LAYER_TAPS
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if isinstance(n, str) and n in layer_cell:
+                layer_cell[n][label] = (
+                    float(r["cos_sim"]),
+                    float(r["max_abs_diff"]),
+                    bool(r["allclose"]),
+                )
+
+    header = "  " + "tap".ljust(22) + " ".join(
+        f"pos={lab:<28}" for lab in labels
+    )
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any_layer = False
+    for tap in B12_LAYER_TAPS:
+        cells = []
+        for lab in labels:
+            entry = layer_cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<32}")
+            else:
+                cs, mxd, ok = entry
+                captured_any_layer = True
+                tag = "ok" if cs >= B12_COS_SIM_BAR else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} {tag:<3}  "
+                )
+        emit(f"  {tap:<22}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any_layer:
+        emit("Phase B12 verdict: no B12 layer taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_HIDDEN_STATES=1 AND")
+        emit("     KILN_MTP_DUMP_B12_GQA_TAPS=1, then re-run mtp_h_main_reference_dump.py")
+        emit("     --b12-taps against the same kiln dump.")
+        return
+
+    def _median(xs: List[float]) -> float:
+        finite = sorted(v for v in xs if np.isfinite(v))
+        if not finite:
+            return float("nan")
+        n = len(finite)
+        mid = n // 2
+        if n % 2 == 1:
+            return finite[mid]
+        return 0.5 * (finite[mid - 1] + finite[mid])
+
+    # Per-layer medians — find the first layer whose median falls below the bar.
+    first_layer_below: Optional[str] = None
+    first_layer_median: float = float("nan")
+    layer_medians: List[Tuple[str, float]] = []
+    for tap in B12_LAYER_TAPS:
+        per_pos = [layer_cell[tap][lab][0] for lab in labels if lab in layer_cell[tap]]
+        if not per_pos:
+            continue
+        med = _median(per_pos)
+        layer_medians.append((tap, med))
+        if first_layer_below is None and np.isfinite(med) and med < B12_COS_SIM_BAR:
+            first_layer_below = tap
+            first_layer_median = med
+
+    emit("  per-layer median cos_sim across positions:")
+    for tap, med in layer_medians:
+        bar = "ok" if np.isfinite(med) and med >= B12_COS_SIM_BAR else "DIV"
+        emit(f"    {tap:<22} median={_fmt_sci(med):<12} {bar}")
+
+    # Sub-op table: only if b12__ taps are present.
+    subop_cell: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
+        n: {} for n in B12_LAYER31_GQA_TAP_NAMES
+    }
+    captured_any_subop = False
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("b12__"):
+                continue
+            short = n[len("b12__"):]
+            if short not in subop_cell:
+                continue
+            captured_any_subop = True
+            subop_cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+            )
+
+    first_subop_below: Optional[str] = None
+    first_subop_median: float = float("nan")
+    if captured_any_subop:
+        emit("")
+        emit("=" * 78)
+        emit("Phase B12 layer-31 GQA sub-op bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+        emit("=" * 78)
+        subop_header = "  " + "tap".ljust(20) + " ".join(
+            f"pos={lab:<48}" for lab in labels
+        )
+        emit(subop_header)
+        emit("  " + "-" * (len(subop_header) - 2))
+        for tap in B12_LAYER31_GQA_TAP_NAMES:
+            cells = []
+            for lab in labels:
+                entry = subop_cell[tap].get(lab)
+                if entry is None:
+                    cells.append(f"{'<missing>':<52}")
+                else:
+                    cs, mxd, mnd, rl2 = entry
+                    tag = "ok" if cs >= B12_COS_SIM_BAR else "DIV"
+                    cells.append(
+                        f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                        f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                    )
+            emit(f"  {tap:<20}{' '.join(cells)}")
+
+        emit("")
+        emit("  per-sub-op median cos_sim across positions:")
+        for tap in B12_LAYER31_GQA_TAP_NAMES:
+            per_pos = [subop_cell[tap][lab][0] for lab in labels if lab in subop_cell[tap]]
+            if not per_pos:
+                continue
+            med = _median(per_pos)
+            bar = "ok" if np.isfinite(med) and med >= B12_COS_SIM_BAR else "DIV"
+            emit(f"    {tap:<20} median={_fmt_sci(med):<12} {bar}")
+            if first_subop_below is None and np.isfinite(med) and med < B12_COS_SIM_BAR:
+                first_subop_below = tap
+                first_subop_median = med
+
+    emit("")
+    if first_layer_below is None:
+        emit(
+            f"Phase B12 verdict: all layers in 24..31 + h_pre_final_norm have median "
+            f"cos_sim >= {B12_COS_SIM_BAR}."
+        )
+        emit("  -> No layer-localized drift at this bar. Compare this run against a")
+        emit("     fp32 HF reference too (re-run the Python dumper with --fp32).")
+        emit("     If fp32 HF also clears this bar, the drift was benign bf16")
+        emit("     accumulation. If fp32 HF drops below it, a real bug remains.")
+        return
+
+    emit(
+        f"  first layer with MEDIAN cos_sim < {B12_COS_SIM_BAR}: "
+        f"'{first_layer_below}' (median = {first_layer_median:.6f})"
+    )
+
+    if first_layer_below != "h_layer_31":
+        emit(
+            f"Phase B12 verdict: DRIFT FIRST APPEARS AT '{first_layer_below}' "
+            f"(not layer 31)."
+        )
+        emit("  -> The sub-op table for layer 31 localizes only layer-31 drift, so")
+        emit(f"     instrument sub-ops inside '{first_layer_below}' on the next pass.")
+        emit("     Compare against fp32 HF to rule out bf16 accumulation before")
+        emit("     committing more capture budget.")
+        return
+
+    if not captured_any_subop:
+        emit("Phase B12 verdict: LAYER 31 IS THE FIRST DIVERGENT LAYER, but no b12__")
+        emit("  sub-op taps were captured, so no localized target is available.")
+        emit("  -> Re-run both dumps with the b12__ sub-op tap env flags set.")
+        return
+
+    if first_subop_below is not None:
+        hypo = B12_HYPOTHESIS.get(first_subop_below, "<unknown sub-op>")
+        emit(
+            f"  first sub-op with MEDIAN cos_sim < {B12_COS_SIM_BAR}: "
+            f"'{first_subop_below}' (median = {first_subop_median:.6f})"
+        )
+        emit(f"Phase B12 verdict: B12 TARGET = layer 31 / '{first_subop_below}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Compare this run against fp32 HF next. If the same sub-op is")
+        emit("     still the first below-bar entry, queue a targeted B13 fix task.")
+        emit("     If fp32 HF clears the bar, the drift is benign bf16 accumulation.")
+    else:
+        emit("Phase B12 verdict: LAYER 31 median is below-bar, but NO individual sub-op")
+        emit(f"  at layer 31 has median cos_sim < {B12_COS_SIM_BAR}.")
+        emit("  -> Drift is spread across multiple sub-ops (accumulation pattern).")
+        emit("     Strong signal for benign bf16 accumulation. Confirm against fp32 HF.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -878,14 +1182,28 @@ def main() -> int:
             "0.95 as the B12 target."
         ),
     )
+    ap.add_argument(
+        "--b12",
+        action="store_true",
+        help=(
+            "Phase B12 mode: emit layer-31 drift bisect. Prints a per-layer "
+            "cos_sim table for h_layer_24..31 + h_pre_final_norm and, if "
+            "b12__<name> sub-op taps are present, a per-sub-op table over the "
+            "14 layer-31 GQA taps. Defaults atol=1e-2, rtol=1e-1 "
+            "(bf16-appropriate). Verdict identifies the first layer and (if "
+            "that layer is 31) the first sub-op whose median cos_sim falls "
+            "below 0.995. Run once against a bf16 HF ref and once against a "
+            "fp32 HF ref to separate real bugs from benign bf16 accumulation."
+        ),
+    )
     ap.add_argument("--out", default=None, help="Optional path to write report text")
     args = ap.parse_args()
 
-    # Default tolerances depend on mode. B10/B11 compare bf16 base-model hidden
-    # states end-to-end through 32 transformer blocks; the accumulated
+    # Default tolerances depend on mode. B10/B11/B12 compare bf16 base-model
+    # hidden states end-to-end through 32 transformer blocks; the accumulated
     # arithmetic noise across that many ops means a strict 1e-3/1e-2 bar
     # flags semantically-identical tensors as divergent.
-    bf16_mode = args.b10 or args.b11
+    bf16_mode = args.b10 or args.b11 or args.b12
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
     if args.rtol is None:
@@ -911,7 +1229,9 @@ def main() -> int:
         lines.append(s)
 
     multi = len(pairs) > 1
-    if args.b11:
+    if args.b12:
+        mode = "layer-31 drift bisect (B12)"
+    elif args.b11:
         mode = "layer-0 GDN sub-op bisect (B11b)"
     elif args.b10:
         mode = "base-model h_main bisect (B10)"
@@ -933,7 +1253,9 @@ def main() -> int:
         if not ok:
             overall_ok = False
 
-    if args.b11:
+    if args.b12:
+        _emit_b12_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.b11:
         _emit_b11_summary(pair_results, args.atol, args.rtol, emit)
     elif args.b10:
         _emit_b10_summary(pair_results, args.atol, args.rtol, emit)
@@ -943,9 +1265,9 @@ def main() -> int:
     # B9 sub-op zone bisect — emitted whenever any pair captured zone taps,
     # whether single- or multi-pair. Exits cleanly with a "no zone taps
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
-    # legacy dumps from before this PR). Skipped in explicit --b10/--b11 mode
-    # so the B10/B11 report isn't cluttered by unrelated sub-op tables.
-    if not args.b10 and not args.b11:
+    # legacy dumps from before this PR). Skipped in explicit --b10/--b11/--b12
+    # mode so the per-phase report isn't cluttered by unrelated sub-op tables.
+    if not args.b10 and not args.b11 and not args.b12:
         have_b9_taps = any(
             any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
             for pr in pair_results

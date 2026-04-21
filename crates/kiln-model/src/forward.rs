@@ -1481,6 +1481,66 @@ pub fn swiglu_ffn(
     Ok(out)
 }
 
+/// Phase B12: sub-op-tapping variant of [`swiglu_ffn`]. Structurally
+/// identical — same projections, same SiLU, same `gate * up` elementwise,
+/// same down projection — but with three [`capture_b12_gqa_tap`] calls so
+/// the HF comparator can localize drift to one of mlp_gate / mlp_up /
+/// mlp_down on layer 31.
+///
+/// Called from [`transformer_block_paged`] only when
+/// [`crate::mtp_debug::current_b12_layer_is_31`] is true, so the hot
+/// production path continues to go through `swiglu_ffn` untouched.
+fn swiglu_ffn_b12_tapped(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    // mlp_gate: output of the gate projection BEFORE SiLU. This matches the
+    // HF reference which taps `self.gate_proj(x)` pre-activation.
+    let gate = {
+        kiln_nvtx::range!(c"kiln/mlp/gate");
+        mlp_proj_forward(
+            x,
+            &mlp.gate_proj_t,
+            mlp.gate_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.gate_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    crate::mtp_debug::capture_b12_gqa_tap("mlp_gate", &gate)?;
+    let gate = cuda_silu(&gate)?;
+    // mlp_up: output of the up projection.
+    let up = {
+        kiln_nvtx::range!(c"kiln/mlp/up");
+        mlp_proj_forward(
+            x,
+            &mlp.up_proj_t,
+            mlp.up_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.up_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    crate::mtp_debug::capture_b12_gqa_tap("mlp_up", &up)?;
+    let hidden = (gate * up)?;
+    // mlp_down: final hidden-size output after the down projection.
+    let out = {
+        kiln_nvtx::range!(c"kiln/mlp/down");
+        mlp_proj_forward(
+            &hidden,
+            &mlp.down_proj_t,
+            mlp.down_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.down_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    crate::mtp_debug::capture_b12_gqa_tap("mlp_down", &out)?;
+    Ok(out)
+}
+
 /// Route a single MLP projection through Marlin W4A16 when packed weights are
 /// present, else fall back to the BF16 `linear_with_lora_t` path. LoRA deltas
 /// are added on top of either base matmul. Mirrors `q_proj_forward`'s routing.
@@ -3029,6 +3089,14 @@ pub fn gqa_attention_paged(
     // (q, gate) narrow split. Captured as alias of post_q_proj_raw so the
     // comparator can locate H3 zone divergence by name.
     let _ = crate::mtp_debug::capture_subop("pre_gated_attn_split", &q_raw);
+    // Phase B12 layer-31 GQA taps: q_proj / k_proj / v_proj. These are
+    // the post-projection tensors before the gate split. No-op unless
+    // layer 31 is executing with B12 capture armed.
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("q_proj", &q_raw)?;
+        crate::mtp_debug::capture_b12_gqa_tap("k_proj", &k)?;
+        crate::mtp_debug::capture_b12_gqa_tap("v_proj", &v)?;
+    }
 
     let (q, gate) = {
         kiln_nvtx::range!(c"kiln/proj/qkv_split");
@@ -3076,6 +3144,13 @@ pub fn gqa_attention_paged(
     // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
     let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
     let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
+    // Phase B12 layer-31 GQA taps: qk_norm_q / qk_norm_k. Post per-head
+    // RMSNorm, pre-RoPE. Shape [B, T, num_heads, head_dim] /
+    // [B, T, num_kv_heads, head_dim].
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("qk_norm_q", &q)?;
+        crate::mtp_debug::capture_b12_gqa_tap("qk_norm_k", &k)?;
+    }
 
     // RoPE — only rotate first rotary_dim dimensions
     // Use the GPU tensor variant so positions remain at a stable GPU address
@@ -3086,6 +3161,15 @@ pub fn gqa_attention_paged(
     };
     let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
     let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
+    // Phase B12 layer-31 GQA taps: rope_q / rope_k. Post-RoPE, pre-transpose.
+    // These are intermediates that HF can only expose via a forward hook on
+    // the attention module's q_proj/k_proj output + manual re-run of the
+    // rotary function in the comparator — the Python dump script emits a
+    // NOTE rather than failing when these HF taps are absent.
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("rope_q", &q)?;
+        crate::mtp_debug::capture_b12_gqa_tap("rope_k", &k)?;
+    }
 
     // Transpose to [batch, heads, seq_len, head_dim]
     let (q, k, v) = {
@@ -3139,12 +3223,19 @@ pub fn gqa_attention_paged(
                     .context("paged KV cache write failed")?;
             }
 
+            // Phase B12 layer-31 GQA tap: attn_out. Captured AFTER the gate
+            // multiply (if `attn_output_gate`) and BEFORE o_proj, so it
+            // matches the HF reference's `attn_output = ... * sigmoid_gate`
+            // tap point. Shape: [B, T, num_heads * head_dim].
             let attn_output = if let Some(ref gate) = gate {
                 let sigmoid_gate = cuda_sigmoid(gate)?;
                 (attn_output * sigmoid_gate)?
             } else {
                 attn_output
             };
+            if crate::mtp_debug::current_b12_layer_is_31() {
+                crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
+            }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
@@ -3154,6 +3245,10 @@ pub fn gqa_attention_paged(
                     lora_scale,
                 )?
             };
+            // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
+            if crate::mtp_debug::current_b12_layer_is_31() {
+                crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
+            }
             return Ok(out);
         }
     }
@@ -3248,6 +3343,10 @@ pub fn gqa_attention_paged(
             } else {
                 attn_output
             };
+            // Phase B12 layer-31 GQA tap (secondary prefill path).
+            if crate::mtp_debug::current_b12_layer_is_31() {
+                crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
+            }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
@@ -3257,6 +3356,9 @@ pub fn gqa_attention_paged(
                     lora_scale,
                 )?
             };
+            if crate::mtp_debug::current_b12_layer_is_31() {
+                crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
+            }
             return Ok(out);
         }
     }
@@ -3322,6 +3424,10 @@ pub fn gqa_attention_paged(
             attn_output
         };
         let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
+        // Phase B12 layer-31 GQA tap (grouped decode path).
+        if crate::mtp_debug::current_b12_layer_is_31() {
+            crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
+        }
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
             linear_with_lora_t(
@@ -3332,6 +3438,9 @@ pub fn gqa_attention_paged(
             )?
         };
         let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
+        if crate::mtp_debug::current_b12_layer_is_31() {
+            crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
+        }
         return Ok(out);
     }
 
@@ -3378,6 +3487,10 @@ pub fn gqa_attention_paged(
         attn_output
     };
     let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
+    // Phase B12 layer-31 GQA tap (standard fallback path).
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
+    }
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
@@ -3389,6 +3502,9 @@ pub fn gqa_attention_paged(
         )?
     };
     let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
+    }
     Ok(out)
 }
 
@@ -3560,6 +3676,12 @@ pub fn transformer_block_paged(
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
     let _ = crate::mtp_debug::capture_subop("post_pre_attn_norm", &normed);
+    // Phase B12: layer-31 GQA sub-op tap #1. Named `post_input_norm` to
+    // match the HF reference-dump naming. No-op unless we are on base-model
+    // layer 31 with the B12 capture window armed.
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("post_input_norm", &normed)?;
+    }
 
     // Self-attention with paged cache
     let attn_out = gqa_attention_paged(
@@ -3595,9 +3717,20 @@ pub fn transformer_block_paged(
         rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
     };
     let _ = crate::mtp_debug::capture_subop("post_pre_mlp_norm", &normed);
+    // Phase B12: layer-31 GQA sub-op tap — post_attn_norm. Named to match
+    // the HF reference. No-op unless layer 31 + armed.
+    if crate::mtp_debug::current_b12_layer_is_31() {
+        crate::mtp_debug::capture_b12_gqa_tap("post_attn_norm", &normed)?;
+    }
 
-    // Feed-forward network
-    let ffn_out = swiglu_ffn(&normed, &layer.mlp, lora)?;
+    // Feed-forward network. For layer 31 with B12 armed, route through a
+    // sub-op-tapping path that exposes mlp_gate / mlp_up / mlp_down; the
+    // standard `swiglu_ffn` fuses those and is fine for everyone else.
+    let ffn_out = if crate::mtp_debug::current_b12_layer_is_31() {
+        swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
+    } else {
+        swiglu_ffn(&normed, &layer.mlp, lora)?
+    };
     let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
 
     // Residual connection
@@ -4033,6 +4166,12 @@ pub fn model_forward_paged_with_last_hidden(
     // dump block. No-op unless `KILN_MTP_DUMP_B11_TAPS=1`, so production
     // decode pays only a single TLS borrow + env-var lookup.
     crate::mtp_debug::arm_b11_layer0_capture();
+    // Phase B12: arm the layer-31 GQA sub-op capture window. Same pattern
+    // as B11 — no-op unless `KILN_MTP_DUMP_B12_GQA_TAPS=1`. The h_main
+    // capture is gated to also include layers 24..30 when this flag is on,
+    // giving the comparator both per-layer h_layer_<idx> taps for the GQA
+    // tail and per-sub-op taps inside layer 31.
+    crate::mtp_debug::arm_b12_gqa_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -4276,6 +4415,11 @@ pub fn mtp_forward_step(
             // the base-model forward. Empty when `KILN_MTP_DUMP_B11_TAPS`
             // is unset, which keeps the dump format bit-identical to B11.
             let b11_taps = crate::mtp_debug::drain_b11_layer0_capture();
+            // Phase B12: drain any layer-31 GQA sub-op taps stashed during
+            // the base-model forward. Empty when
+            // `KILN_MTP_DUMP_B12_GQA_TAPS` is unset, which keeps the dump
+            // format bit-identical to the pre-B12 layout.
+            let b12_taps = crate::mtp_debug::drain_b12_gqa_capture();
             match crate::mtp_debug::write_mtp_dump(
                 &path,
                 draft_token_id,
@@ -4285,6 +4429,7 @@ pub fn mtp_forward_step(
                 &extra_subops,
                 &prompt_tokens,
                 &b11_taps,
+                &b12_taps,
             ) {
                 Ok(()) => tracing::info!(
                     target: "kiln::mtp_debug",
@@ -4294,6 +4439,7 @@ pub fn mtp_forward_step(
                     subops = extra_subops.len(),
                     prompt_tokens_len = prompt_tokens.len(),
                     b11_taps = b11_taps.len(),
+                    b12_taps = b12_taps.len(),
                     "mtp_b7_dump_written"
                 ),
                 Err(e) => tracing::warn!(
@@ -4436,7 +4582,13 @@ fn model_forward_paged_inner(
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
-                hidden = transformer_block_paged(
+                // Phase B12: tell the capture layer that we are entering the
+                // base-model layer `i`. `capture_b12_gqa_tap` call sites inside
+                // `gqa_attention_paged` / `transformer_block_paged` gate on
+                // this TLS slot + the armed capture window so that only
+                // layer 31 emits sub-op taps. No-op on the production path.
+                crate::mtp_debug::enter_b12_layer_scope(i);
+                let block_result = transformer_block_paged(
                     backend,
                     &hidden,
                     layer,
@@ -4453,8 +4605,10 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
-                )
-                .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
+                );
+                crate::mtp_debug::exit_b12_layer_scope();
+                hidden = block_result
+                    .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
             }
             GpuAttentionWeights::Linear(lin_weights) => {
