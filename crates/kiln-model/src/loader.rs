@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use safetensors::SafeTensors;
 
@@ -18,6 +18,23 @@ const LM_PREFIX: &str = "model.language_model.";
 /// Safetensors index file for sharded checkpoints.
 const INDEX_FILENAME: &str = "model.safetensors.index.json";
 
+/// Optional loader toggles for startup-sensitive callers.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadModelOptions {
+    /// Load the checkpoint's native MTP head when present.
+    ///
+    /// Desktop macOS defaults keep speculative decoding off, so skipping this
+    /// avoids extra CPU allocations and GPU upload/transposes for weights that
+    /// the default serve path will never touch.
+    pub load_mtp: bool,
+}
+
+impl Default for LoadModelOptions {
+    fn default() -> Self {
+        Self { load_mtp: true }
+    }
+}
+
 /// Load Qwen3.5-4B language model weights from a directory of safetensors files.
 ///
 /// Handles both single-file (`model.safetensors`) and sharded checkpoints
@@ -27,6 +44,15 @@ const INDEX_FILENAME: &str = "model.safetensors.index.json";
 /// the safetensors files. Only language model weights (prefixed with
 /// `model.language_model.`) are loaded; vision encoder weights are skipped.
 pub fn load_model(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeights> {
+    load_model_with_options(model_dir, config, LoadModelOptions::default())
+}
+
+/// Variant of [`load_model`] with explicit startup-path options.
+pub fn load_model_with_options(
+    model_dir: &Path,
+    config: &ModelConfig,
+    options: LoadModelOptions,
+) -> Result<ModelWeights> {
     // Auto-detect GPTQ quantization.
     if let Some(gptq_config) = quantized::load_gptq_config(model_dir)? {
         tracing::info!(
@@ -35,14 +61,18 @@ pub fn load_model(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeights
             sym = gptq_config.sym,
             "Detected GPTQ quantization — loading quantized weights"
         );
-        return load_model_gptq(model_dir, config, &gptq_config);
+        return load_model_gptq(model_dir, config, &gptq_config, options);
     }
 
-    load_model_dense(model_dir, config)
+    load_model_dense(model_dir, config, options)
 }
 
 /// Load dense (unquantized) BF16/FP16 model weights.
-fn load_model_dense(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeights> {
+fn load_model_dense(
+    model_dir: &Path,
+    config: &ModelConfig,
+    options: LoadModelOptions,
+) -> Result<ModelWeights> {
     let shards = discover_shards(model_dir)?;
     tracing::info!(
         "Loading model from {} ({} shard{})",
@@ -55,10 +85,7 @@ fn load_model_dense(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeigh
     let mmaps = mmap_shards(&shards)?;
     let parsed: Vec<SafeTensors<'_>> = mmaps
         .iter()
-        .map(|mmap| {
-            SafeTensors::deserialize(mmap)
-                .context("Failed to parse safetensors file")
-        })
+        .map(|mmap| SafeTensors::deserialize(mmap).context("Failed to parse safetensors file"))
         .collect::<Result<Vec<_>>>()?;
 
     // Build a unified name -> (shard_idx, tensor_view) lookup.
@@ -69,7 +96,8 @@ fn load_model_dense(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeigh
             all_tensors.push((name, shard_idx, view));
         }
     }
-    let mut tensor_map: HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)> = HashMap::new();
+    let mut tensor_map: HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)> =
+        HashMap::new();
     for (name, shard_idx, view) in &all_tensors {
         tensor_map.insert(name.as_str(), (*shard_idx, view));
     }
@@ -80,7 +108,11 @@ fn load_model_dense(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeigh
 
     // Load embedding.
     let embed_tokens = extract_tensor(&tensor_map, &format!("{prefix}embed_tokens.weight"))?;
-    validate_shape(&embed_tokens, &[config.vocab_size, config.hidden_size], "embed_tokens")?;
+    validate_shape(
+        &embed_tokens,
+        &[config.vocab_size, config.hidden_size],
+        "embed_tokens",
+    )?;
 
     // Load layers.
     let mut layers = Vec::with_capacity(config.num_layers);
@@ -99,9 +131,15 @@ fn load_model_dense(model_dir: &Path, config: &ModelConfig) -> Result<ModelWeigh
     // stores 15 `mtp.*` tensors. We detect purely by tensor presence rather
     // than adding a new config field — if the checkpoint has MTP tensors,
     // load them; if not, leave `ModelWeights.mtp` as None.
-    let mtp = load_mtp_if_present(&tensor_map, &prefix, config)?;
+    let mtp = if options.load_mtp {
+        load_mtp_if_present(&tensor_map, &prefix, config)?
+    } else {
+        None
+    };
     if mtp.is_some() {
         tracing::info!("Native MTP head detected and loaded (k=1 draft depth)");
+    } else if !options.load_mtp {
+        tracing::info!("Skipping native MTP head load");
     }
 
     let weights = ModelWeights {
@@ -135,6 +173,7 @@ fn load_model_gptq(
     model_dir: &Path,
     config: &ModelConfig,
     gptq_config: &GptqConfig,
+    _options: LoadModelOptions,
 ) -> Result<ModelWeights> {
     let shards = discover_shards(model_dir)?;
     tracing::info!(
@@ -147,10 +186,7 @@ fn load_model_gptq(
     let mmaps = mmap_shards(&shards)?;
     let parsed: Vec<SafeTensors<'_>> = mmaps
         .iter()
-        .map(|mmap| {
-            SafeTensors::deserialize(mmap)
-                .context("Failed to parse safetensors file")
-        })
+        .map(|mmap| SafeTensors::deserialize(mmap).context("Failed to parse safetensors file"))
         .collect::<Result<Vec<_>>>()?;
 
     let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
@@ -159,7 +195,8 @@ fn load_model_gptq(
             all_tensors.push((name, shard_idx, view));
         }
     }
-    let mut tensor_map: HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)> = HashMap::new();
+    let mut tensor_map: HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)> =
+        HashMap::new();
     for (name, shard_idx, view) in &all_tensors {
         tensor_map.insert(name.as_str(), (*shard_idx, view));
     }
@@ -169,7 +206,11 @@ fn load_model_gptq(
 
     // Embedding — stored in original precision even in GPTQ models.
     let embed_tokens = extract_tensor(&tensor_map, &format!("{prefix}embed_tokens.weight"))?;
-    validate_shape(&embed_tokens, &[config.vocab_size, config.hidden_size], "embed_tokens")?;
+    validate_shape(
+        &embed_tokens,
+        &[config.vocab_size, config.hidden_size],
+        "embed_tokens",
+    )?;
 
     // Load layers — linear projections are GPTQ-quantized, norms are dense.
     let mut layers = Vec::with_capacity(config.num_layers);
@@ -263,17 +304,12 @@ fn discover_shards(model_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
             let mut shards: Vec<_> = fs::read_dir(model_dir)?
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| {
-                    p.extension().is_some_and(|ext| ext == "safetensors")
-                })
+                .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
                 .collect();
             shards.sort();
 
             if shards.is_empty() {
-                bail!(
-                    "No .safetensors files found in {}",
-                    model_dir.display()
-                );
+                bail!("No .safetensors files found in {}", model_dir.display());
             }
             Ok(shards)
         }
@@ -296,7 +332,9 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<Mmap>> {
 }
 
 /// Detect the weight name prefix by checking which keys exist.
-fn detect_prefix(tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>) -> String {
+fn detect_prefix(
+    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+) -> String {
     // Try the VL model prefix first (Qwen3.5-4B ships as VL).
     if tensor_map.contains_key(&format!("{LM_PREFIX}embed_tokens.weight") as &str) {
         return LM_PREFIX.to_string();
@@ -321,17 +359,30 @@ fn load_layer(
     config: &ModelConfig,
 ) -> Result<LayerWeights> {
     let input_layernorm = extract_tensor(tensor_map, &format!("{prefix}input_layernorm.weight"))?;
-    validate_shape(&input_layernorm, &[config.hidden_size], &format!("layer {layer_idx} input_layernorm"))?;
+    validate_shape(
+        &input_layernorm,
+        &[config.hidden_size],
+        &format!("layer {layer_idx} input_layernorm"),
+    )?;
 
-    let post_attention_layernorm = extract_tensor(tensor_map, &format!("{prefix}post_attention_layernorm.weight"))?;
-    validate_shape(&post_attention_layernorm, &[config.hidden_size], &format!("layer {layer_idx} post_attn_layernorm"))?;
+    let post_attention_layernorm = extract_tensor(
+        tensor_map,
+        &format!("{prefix}post_attention_layernorm.weight"),
+    )?;
+    validate_shape(
+        &post_attention_layernorm,
+        &[config.hidden_size],
+        &format!("layer {layer_idx} post_attn_layernorm"),
+    )?;
 
     let mlp = load_ffn(tensor_map, prefix, layer_idx, config)?;
 
     let attention = if config.is_full_attention_layer(layer_idx) {
         AttentionWeights::Full(load_full_attention(tensor_map, prefix, layer_idx, config)?)
     } else {
-        AttentionWeights::Linear(load_linear_attention(tensor_map, prefix, layer_idx, config)?)
+        AttentionWeights::Linear(load_linear_attention(
+            tensor_map, prefix, layer_idx, config,
+        )?)
     };
 
     Ok(LayerWeights {
@@ -400,7 +451,11 @@ fn load_linear_attention(
     let num_heads = config.linear_num_value_heads;
 
     let in_proj_qkv = extract_tensor(tensor_map, &format!("{attn}in_proj_qkv.weight"))?;
-    validate_shape(&in_proj_qkv, &[fused_qkv_dim, config.hidden_size], &ctx("in_proj_qkv"))?;
+    validate_shape(
+        &in_proj_qkv,
+        &[fused_qkv_dim, config.hidden_size],
+        &ctx("in_proj_qkv"),
+    )?;
 
     let in_proj_z = extract_tensor(tensor_map, &format!("{attn}in_proj_z.weight"))?;
     validate_shape(&in_proj_z, &[v_dim, config.hidden_size], &ctx("in_proj_z"))?;
@@ -409,10 +464,18 @@ fn load_linear_attention(
     validate_shape(&out_proj, &[config.hidden_size, v_dim], &ctx("out_proj"))?;
 
     let in_proj_a = extract_tensor(tensor_map, &format!("{attn}in_proj_a.weight"))?;
-    validate_shape(&in_proj_a, &[num_heads, config.hidden_size], &ctx("in_proj_a"))?;
+    validate_shape(
+        &in_proj_a,
+        &[num_heads, config.hidden_size],
+        &ctx("in_proj_a"),
+    )?;
 
     let in_proj_b = extract_tensor(tensor_map, &format!("{attn}in_proj_b.weight"))?;
-    validate_shape(&in_proj_b, &[num_heads, config.hidden_size], &ctx("in_proj_b"))?;
+    validate_shape(
+        &in_proj_b,
+        &[num_heads, config.hidden_size],
+        &ctx("in_proj_b"),
+    )?;
 
     // conv1d shape is [channels, 1, kernel_size] — channels = fused QKV dim.
     let conv1d = extract_tensor(tensor_map, &format!("{attn}conv1d.weight"))?;
@@ -472,13 +535,25 @@ fn load_ffn(
     let ctx = |name: &str| format!("layer {layer_idx} mlp.{name}");
 
     let gate_proj = extract_tensor(tensor_map, &format!("{mlp}gate_proj.weight"))?;
-    validate_shape(&gate_proj, &[config.intermediate_size, config.hidden_size], &ctx("gate_proj"))?;
+    validate_shape(
+        &gate_proj,
+        &[config.intermediate_size, config.hidden_size],
+        &ctx("gate_proj"),
+    )?;
 
     let up_proj = extract_tensor(tensor_map, &format!("{mlp}up_proj.weight"))?;
-    validate_shape(&up_proj, &[config.intermediate_size, config.hidden_size], &ctx("up_proj"))?;
+    validate_shape(
+        &up_proj,
+        &[config.intermediate_size, config.hidden_size],
+        &ctx("up_proj"),
+    )?;
 
     let down_proj = extract_tensor(tensor_map, &format!("{mlp}down_proj.weight"))?;
-    validate_shape(&down_proj, &[config.hidden_size, config.intermediate_size], &ctx("down_proj"))?;
+    validate_shape(
+        &down_proj,
+        &[config.hidden_size, config.intermediate_size],
+        &ctx("down_proj"),
+    )?;
 
     Ok(FfnWeights {
         gate_proj,
@@ -520,7 +595,11 @@ fn load_mtp_if_present(
 
     let fc = extract_tensor(tensor_map, &fc_key)?;
     // fc maps concat(embed, hidden) → hidden, so shape is [hidden, 2*hidden].
-    validate_shape(&fc, &[config.hidden_size, 2 * config.hidden_size], &ctx("fc"))?;
+    validate_shape(
+        &fc,
+        &[config.hidden_size, 2 * config.hidden_size],
+        &ctx("fc"),
+    )?;
 
     let pre_fc_norm_embedding = extract_tensor(
         tensor_map,
@@ -557,8 +636,7 @@ fn load_mtp_if_present(
     // `is_full_attention_layer` return true. The layer_idx argument is only
     // used for error context strings, not for dispatch.
     let mtp_layer_prefix = format!("{mtp_prefix}layers.0.");
-    let layer = load_layer(tensor_map, &mtp_layer_prefix, 3, config)
-        .context("mtp layer 0")?;
+    let layer = load_layer(tensor_map, &mtp_layer_prefix, 3, config).context("mtp layer 0")?;
     // Defensive: MTP layer must be full attention. If this ever fires the
     // checkpoint is shipping a linear-attention MTP head and the forward
     // pass below won't match.
@@ -643,8 +721,10 @@ fn load_layer_gptq(
         &format!("layer {layer_idx} input_layernorm"),
     )?;
 
-    let post_attention_layernorm =
-        extract_tensor(tensor_map, &format!("{prefix}post_attention_layernorm.weight"))?;
+    let post_attention_layernorm = extract_tensor(
+        tensor_map,
+        &format!("{prefix}post_attention_layernorm.weight"),
+    )?;
     validate_shape(
         &post_attention_layernorm,
         &[config.hidden_size],
@@ -697,8 +777,8 @@ fn load_gptq_linear(
         .with_context(|| format!("{ctx}: qzeros"))?;
 
     // Convert scales dtype (GPTQ scales are typically F16)
-    let scales_dtype = convert_dtype(scales.2)
-        .with_context(|| format!("{ctx}: scales dtype {:?}", scales.2))?;
+    let scales_dtype =
+        convert_dtype(scales.2).with_context(|| format!("{ctx}: scales dtype {:?}", scales.2))?;
 
     quantized::dequantize_gptq_weight(
         &qweight.0,
@@ -740,16 +820,36 @@ fn load_full_attention_gptq(
     let q_out_dim = config.num_attention_heads * config.head_dim;
     let kv_dim = config.num_kv_heads * config.head_dim;
 
-    let q_proj = load_gptq_linear(tensor_map, &format!("{attn}q_proj"), gptq_config, &ctx("q_proj"))?;
+    let q_proj = load_gptq_linear(
+        tensor_map,
+        &format!("{attn}q_proj"),
+        gptq_config,
+        &ctx("q_proj"),
+    )?;
     validate_shape(&q_proj, &[q_proj_dim, config.hidden_size], &ctx("q_proj"))?;
 
-    let k_proj = load_gptq_linear(tensor_map, &format!("{attn}k_proj"), gptq_config, &ctx("k_proj"))?;
+    let k_proj = load_gptq_linear(
+        tensor_map,
+        &format!("{attn}k_proj"),
+        gptq_config,
+        &ctx("k_proj"),
+    )?;
     validate_shape(&k_proj, &[kv_dim, config.hidden_size], &ctx("k_proj"))?;
 
-    let v_proj = load_gptq_linear(tensor_map, &format!("{attn}v_proj"), gptq_config, &ctx("v_proj"))?;
+    let v_proj = load_gptq_linear(
+        tensor_map,
+        &format!("{attn}v_proj"),
+        gptq_config,
+        &ctx("v_proj"),
+    )?;
     validate_shape(&v_proj, &[kv_dim, config.hidden_size], &ctx("v_proj"))?;
 
-    let o_proj = load_gptq_linear(tensor_map, &format!("{attn}o_proj"), gptq_config, &ctx("o_proj"))?;
+    let o_proj = load_gptq_linear(
+        tensor_map,
+        &format!("{attn}o_proj"),
+        gptq_config,
+        &ctx("o_proj"),
+    )?;
     validate_shape(&o_proj, &[config.hidden_size, q_out_dim], &ctx("o_proj"))?;
 
     // QK norms are stored in original precision (1-D, not quantized).
@@ -791,7 +891,11 @@ fn load_linear_attention_gptq(
         gptq_config,
         &ctx("in_proj_qkv"),
     )?;
-    validate_shape(&in_proj_qkv, &[fused_qkv_dim, config.hidden_size], &ctx("in_proj_qkv"))?;
+    validate_shape(
+        &in_proj_qkv,
+        &[fused_qkv_dim, config.hidden_size],
+        &ctx("in_proj_qkv"),
+    )?;
 
     let in_proj_z = load_gptq_linear(
         tensor_map,
@@ -817,7 +921,11 @@ fn load_linear_attention_gptq(
         gptq_config,
         &ctx("in_proj_a"),
     )?;
-    validate_shape(&in_proj_a, &[num_heads, config.hidden_size], &ctx("in_proj_a"))?;
+    validate_shape(
+        &in_proj_a,
+        &[num_heads, config.hidden_size],
+        &ctx("in_proj_a"),
+    )?;
 
     let in_proj_b = load_gptq_or_dense(
         tensor_map,
@@ -825,7 +933,11 @@ fn load_linear_attention_gptq(
         gptq_config,
         &ctx("in_proj_b"),
     )?;
-    validate_shape(&in_proj_b, &[num_heads, config.hidden_size], &ctx("in_proj_b"))?;
+    validate_shape(
+        &in_proj_b,
+        &[num_heads, config.hidden_size],
+        &ctx("in_proj_b"),
+    )?;
 
     // Non-linear weights: stored in original precision.
     let conv1d = extract_tensor(tensor_map, &format!("{attn}conv1d.weight"))?;
@@ -954,9 +1066,7 @@ mod tests {
     use std::collections::HashMap as StdMap;
 
     /// Create a minimal safetensors file with the given tensors.
-    fn create_test_safetensors(
-        tensors: &[(&str, Vec<usize>, StDtype)],
-    ) -> Vec<u8> {
+    fn create_test_safetensors(tensors: &[(&str, Vec<usize>, StDtype)]) -> Vec<u8> {
         let mut data_map: StdMap<String, Vec<u8>> = StdMap::new();
         let mut views = Vec::new();
 
@@ -1013,37 +1123,117 @@ mod tests {
         let bf16 = StDtype::BF16;
 
         // Embedding + final norm
-        tensors.push((format!("{prefix}embed_tokens.weight"), vec![vocab, hidden], bf16));
+        tensors.push((
+            format!("{prefix}embed_tokens.weight"),
+            vec![vocab, hidden],
+            bf16,
+        ));
         tensors.push((format!("{prefix}norm.weight"), vec![hidden], bf16));
 
         // 4 layers: layers 0,1,2 are linear, layer 3 is full attention
         for i in 0..config.num_layers {
             let lp = format!("{prefix}layers.{i}.");
             tensors.push((format!("{lp}input_layernorm.weight"), vec![hidden], bf16));
-            tensors.push((format!("{lp}post_attention_layernorm.weight"), vec![hidden], bf16));
-            tensors.push((format!("{lp}mlp.gate_proj.weight"), vec![intermediate, hidden], bf16));
-            tensors.push((format!("{lp}mlp.up_proj.weight"), vec![intermediate, hidden], bf16));
-            tensors.push((format!("{lp}mlp.down_proj.weight"), vec![hidden, intermediate], bf16));
+            tensors.push((
+                format!("{lp}post_attention_layernorm.weight"),
+                vec![hidden],
+                bf16,
+            ));
+            tensors.push((
+                format!("{lp}mlp.gate_proj.weight"),
+                vec![intermediate, hidden],
+                bf16,
+            ));
+            tensors.push((
+                format!("{lp}mlp.up_proj.weight"),
+                vec![intermediate, hidden],
+                bf16,
+            ));
+            tensors.push((
+                format!("{lp}mlp.down_proj.weight"),
+                vec![hidden, intermediate],
+                bf16,
+            ));
 
             if config.is_full_attention_layer(i) {
                 // Full attention layer
-                tensors.push((format!("{lp}self_attn.q_proj.weight"), vec![q_proj_dim, hidden], bf16));
-                tensors.push((format!("{lp}self_attn.k_proj.weight"), vec![kv_dim, hidden], bf16));
-                tensors.push((format!("{lp}self_attn.v_proj.weight"), vec![kv_dim, hidden], bf16));
-                tensors.push((format!("{lp}self_attn.o_proj.weight"), vec![hidden, q_out_dim], bf16));
-                tensors.push((format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim], bf16));
-                tensors.push((format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim], bf16));
+                tensors.push((
+                    format!("{lp}self_attn.q_proj.weight"),
+                    vec![q_proj_dim, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}self_attn.k_proj.weight"),
+                    vec![kv_dim, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}self_attn.v_proj.weight"),
+                    vec![kv_dim, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}self_attn.o_proj.weight"),
+                    vec![hidden, q_out_dim],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}self_attn.q_norm.weight"),
+                    vec![config.head_dim],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}self_attn.k_norm.weight"),
+                    vec![config.head_dim],
+                    bf16,
+                ));
             } else {
                 // Linear attention layer
-                tensors.push((format!("{lp}linear_attn.in_proj_qkv.weight"), vec![fused_qkv_dim, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.in_proj_z.weight"), vec![v_dim, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.out_proj.weight"), vec![hidden, v_dim], bf16));
-                tensors.push((format!("{lp}linear_attn.in_proj_a.weight"), vec![num_linear_heads, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.in_proj_b.weight"), vec![num_linear_heads, hidden], bf16));
-                tensors.push((format!("{lp}linear_attn.conv1d.weight"), vec![fused_qkv_dim, 1, conv_size], bf16));
-                tensors.push((format!("{lp}linear_attn.norm.weight"), vec![config.linear_key_head_dim], bf16));
-                tensors.push((format!("{lp}linear_attn.A_log"), vec![num_linear_heads], bf16));
-                tensors.push((format!("{lp}linear_attn.dt_bias"), vec![num_linear_heads], bf16));
+                tensors.push((
+                    format!("{lp}linear_attn.in_proj_qkv.weight"),
+                    vec![fused_qkv_dim, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.in_proj_z.weight"),
+                    vec![v_dim, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.out_proj.weight"),
+                    vec![hidden, v_dim],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.in_proj_a.weight"),
+                    vec![num_linear_heads, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.in_proj_b.weight"),
+                    vec![num_linear_heads, hidden],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.conv1d.weight"),
+                    vec![fused_qkv_dim, 1, conv_size],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.norm.weight"),
+                    vec![config.linear_key_head_dim],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.A_log"),
+                    vec![num_linear_heads],
+                    bf16,
+                ));
+                tensors.push((
+                    format!("{lp}linear_attn.dt_bias"),
+                    vec![num_linear_heads],
+                    bf16,
+                ));
             }
         }
 
@@ -1207,7 +1397,10 @@ mod tests {
         let result = load_model(dir.path(), &config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Shape mismatch"), "Error should mention shape mismatch: {err}");
+        assert!(
+            err.contains("Shape mismatch"),
+            "Error should mention shape mismatch: {err}"
+        );
     }
 
     #[test]
@@ -1242,9 +1435,7 @@ mod tests {
     /// Create a safetensors file with custom binary data for each tensor.
     /// Unlike `create_test_safetensors` which fills with zeros, this takes
     /// pre-built byte arrays.
-    fn create_safetensors_with_data(
-        tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)],
-    ) -> Vec<u8> {
+    fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
         let tensor_views: Vec<(String, safetensors::tensor::TensorView<'_>)> = tensors
             .iter()
             .map(|(name, shape, dtype, data)| {
@@ -1305,7 +1496,10 @@ mod tests {
                 qweight_packed.push(packed);
             }
         }
-        let qweight_bytes: Vec<u8> = qweight_packed.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let qweight_bytes: Vec<u8> = qweight_packed
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
 
         // qzeros: all 8s (midpoint)
         let mut qzeros_packed = Vec::new();
@@ -1322,9 +1516,10 @@ mod tests {
 
         // scales: all 1.0 in F16
         // F16 1.0 = 0x3C00
-        let scales_bytes: Vec<u8> = std::iter::repeat_n(0x3C00u16.to_le_bytes(), num_groups * out_features)
-            .flatten()
-            .collect();
+        let scales_bytes: Vec<u8> =
+            std::iter::repeat_n(0x3C00u16.to_le_bytes(), num_groups * out_features)
+                .flatten()
+                .collect();
 
         // We leak the name string to get 'static lifetime for the test
         let qweight_name = format!("{name}.qweight");
@@ -1332,9 +1527,27 @@ mod tests {
         let qzeros_name = format!("{name}.qzeros");
 
         vec![
-            ("qweight", qweight_name, vec![in_packed, out_features], StDtype::I32, qweight_bytes),
-            ("scales", scales_name, vec![num_groups, out_features], StDtype::F16, scales_bytes),
-            ("qzeros", qzeros_name, vec![num_groups, out_packed], StDtype::I32, qzeros_bytes),
+            (
+                "qweight",
+                qweight_name,
+                vec![in_packed, out_features],
+                StDtype::I32,
+                qweight_bytes,
+            ),
+            (
+                "scales",
+                scales_name,
+                vec![num_groups, out_features],
+                StDtype::F16,
+                scales_bytes,
+            ),
+            (
+                "qzeros",
+                qzeros_name,
+                vec![num_groups, out_packed],
+                StDtype::I32,
+                qzeros_bytes,
+            ),
         ]
     }
 
@@ -1351,12 +1564,21 @@ mod tests {
         let mut tensors: Vec<(String, Vec<usize>, StDtype, Vec<u8>)> = Vec::new();
 
         // Helper functions (free functions to avoid closure borrow conflicts).
-        fn make_bf16_tensor(name: String, shape: Vec<usize>, bf16: StDtype) -> (String, Vec<usize>, StDtype, Vec<u8>) {
+        fn make_bf16_tensor(
+            name: String,
+            shape: Vec<usize>,
+            bf16: StDtype,
+        ) -> (String, Vec<usize>, StDtype, Vec<u8>) {
             let numel: usize = shape.iter().product();
             (name, shape, bf16, vec![0u8; numel * 2])
         }
 
-        fn make_gptq_tensors(name: &str, out: usize, inp: usize, group_size: usize) -> Vec<(String, Vec<usize>, StDtype, Vec<u8>)> {
+        fn make_gptq_tensors(
+            name: &str,
+            out: usize,
+            inp: usize,
+            group_size: usize,
+        ) -> Vec<(String, Vec<usize>, StDtype, Vec<u8>)> {
             let pack_factor = 8usize;
             let in_packed = inp / pack_factor;
             let num_groups = inp / group_size;
@@ -1371,12 +1593,23 @@ mod tests {
                     qweight_words.push(packed);
                 }
             }
-            let qweight_bytes: Vec<u8> = qweight_words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            result.push((format!("{name}.qweight"), vec![in_packed, out], StDtype::I32, qweight_bytes));
+            let qweight_bytes: Vec<u8> =
+                qweight_words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            result.push((
+                format!("{name}.qweight"),
+                vec![in_packed, out],
+                StDtype::I32,
+                qweight_bytes,
+            ));
 
             // scales: [num_groups, out], all F16 1.0
             let scales_bytes: Vec<u8> = vec![0x00, 0x3C].repeat(num_groups * out);
-            result.push((format!("{name}.scales"), vec![num_groups, out], StDtype::F16, scales_bytes));
+            result.push((
+                format!("{name}.scales"),
+                vec![num_groups, out],
+                StDtype::F16,
+                scales_bytes,
+            ));
 
             // qzeros: [num_groups, out/8], all 8s
             let out_packed_actual = (out + pack_factor - 1) / pack_factor;
@@ -1386,7 +1619,12 @@ mod tests {
                 qzeros_words.push(packed);
             }
             let qzeros_bytes: Vec<u8> = qzeros_words.iter().flat_map(|w| w.to_le_bytes()).collect();
-            result.push((format!("{name}.qzeros"), vec![num_groups, out_packed_actual], StDtype::I32, qzeros_bytes));
+            result.push((
+                format!("{name}.qzeros"),
+                vec![num_groups, out_packed_actual],
+                StDtype::I32,
+                qzeros_bytes,
+            ));
 
             result
         }
@@ -1436,19 +1674,41 @@ mod tests {
                 add_gptq_linear!(&format!("{lp}self_attn.v_proj"), kv_dim, hidden);
                 add_gptq_linear!(&format!("{lp}self_attn.o_proj"), hidden, q_out_dim);
                 // QK norms (not quantized)
-                add_bf16!(format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim]);
-                add_bf16!(format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim]);
+                add_bf16!(
+                    format!("{lp}self_attn.q_norm.weight"),
+                    vec![config.head_dim]
+                );
+                add_bf16!(
+                    format!("{lp}self_attn.k_norm.weight"),
+                    vec![config.head_dim]
+                );
             } else {
                 // Linear attention: large projections quantized
-                add_gptq_linear!(&format!("{lp}linear_attn.in_proj_qkv"), fused_qkv_dim, hidden);
+                add_gptq_linear!(
+                    &format!("{lp}linear_attn.in_proj_qkv"),
+                    fused_qkv_dim,
+                    hidden
+                );
                 add_gptq_linear!(&format!("{lp}linear_attn.in_proj_z"), v_dim, hidden);
                 add_gptq_linear!(&format!("{lp}linear_attn.out_proj"), hidden, v_dim);
                 // Small projections as dense (a, b have small out dim)
-                add_bf16!(format!("{lp}linear_attn.in_proj_a.weight"), vec![num_linear_heads, hidden]);
-                add_bf16!(format!("{lp}linear_attn.in_proj_b.weight"), vec![num_linear_heads, hidden]);
+                add_bf16!(
+                    format!("{lp}linear_attn.in_proj_a.weight"),
+                    vec![num_linear_heads, hidden]
+                );
+                add_bf16!(
+                    format!("{lp}linear_attn.in_proj_b.weight"),
+                    vec![num_linear_heads, hidden]
+                );
                 // Non-linear weights (not quantized)
-                add_bf16!(format!("{lp}linear_attn.conv1d.weight"), vec![fused_qkv_dim, 1, conv_size]);
-                add_bf16!(format!("{lp}linear_attn.norm.weight"), vec![config.linear_key_head_dim]);
+                add_bf16!(
+                    format!("{lp}linear_attn.conv1d.weight"),
+                    vec![fused_qkv_dim, 1, conv_size]
+                );
+                add_bf16!(
+                    format!("{lp}linear_attn.norm.weight"),
+                    vec![config.linear_key_head_dim]
+                );
                 add_bf16!(format!("{lp}linear_attn.A_log"), vec![num_linear_heads]);
                 add_bf16!(format!("{lp}linear_attn.dt_bias"), vec![num_linear_heads]);
             }

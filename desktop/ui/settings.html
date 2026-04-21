@@ -377,11 +377,11 @@
         </label>
         <label class="row"><span class="name">FP8 KV cache</span>
           <input type="checkbox" id="fp8_kv_cache" />
-          <span class="hint">Halves KV cache VRAM with minor quality impact. Recommended on.</span>
+          <span class="hint" id="fp8_kv_cache_hint">Halves KV cache VRAM on supported backends. Leave off on macOS/Metal.</span>
         </label>
         <label class="row"><span class="name">CUDA graphs</span>
           <input type="checkbox" id="cuda_graphs" />
-          <span class="hint">Replays fused GPU ops for faster decode. Recommended on.</span>
+          <span class="hint" id="cuda_graphs_hint">Faster decode on CUDA. Ignored on macOS/Metal.</span>
         </label>
         <label class="row"><span class="name">Prefix cache</span>
           <input type="checkbox" id="prefix_cache" />
@@ -474,6 +474,7 @@
       const dialog = window.__TAURI__.dialog;
       const statusEl = document.getElementById("status");
       const restartBtn = document.getElementById("restart");
+      const isMacOS = /mac/i.test(navigator.userAgent || "");
       let lastSavedSnapshot = null;
 
       const fields = [
@@ -606,6 +607,22 @@
       function setStatus(msg, err) {
         statusEl.textContent = msg;
         statusEl.className = err ? "status error" : "status";
+      }
+
+      function applyPlatformSpecificUi() {
+        if (!isMacOS) return;
+        const fp8 = document.getElementById("fp8_kv_cache");
+        const cudaGraphs = document.getElementById("cuda_graphs");
+        fp8.checked = false;
+        cudaGraphs.checked = false;
+        fp8.disabled = true;
+        cudaGraphs.disabled = true;
+        fp8.title = "Kiln Desktop forces this off on macOS because the current Metal FP8 KV path is slower.";
+        cudaGraphs.title = "Kiln Desktop forces this off on macOS because CUDA graph replay is CUDA-only.";
+        document.getElementById("fp8_kv_cache_hint").textContent =
+          "Forced off on macOS. The current Metal FP8 KV path is slower than BF16.";
+        document.getElementById("cuda_graphs_hint").textContent =
+          "Forced off on macOS. CUDA graph replay only applies to CUDA backends.";
       }
 
       function hideRestart() {
@@ -1424,6 +1441,7 @@
       }
       kilnUpdateInstallBtn.addEventListener("click", startKilnUpdateInstall);
 
+      applyPlatformSpecificUi();
       load();
     </script>
   </body>

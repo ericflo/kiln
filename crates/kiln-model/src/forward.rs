@@ -9,12 +9,12 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
-use crate::lora_loader::{
-    linear_with_lora_t, LoraLayerWeights, LoraProjectionWeights, LoraWeights,
-};
 #[cfg(feature = "cuda")]
 use crate::lora_loader::compute_lora_delta;
-use crate::paged_kv_cache::PagedKvCache;
+use crate::lora_loader::{
+    LoraLayerWeights, LoraProjectionWeights, LoraWeights, linear_with_lora_t,
+};
+use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
@@ -445,7 +445,10 @@ pub fn streaming_prefill_enabled() -> bool {
 /// or not a multiple of 64. The fallback path matches the documented default
 /// so misconfiguration cannot silently change the tile boundary.
 pub fn streaming_tile_tokens() -> usize {
-    match std::env::var("KILN_STREAMING_TILE_TOKENS").ok().and_then(|s| s.parse::<usize>().ok()) {
+    match std::env::var("KILN_STREAMING_TILE_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
         Some(n) if n > 0 && n % GDN_CHUNK_SIZE == 0 => n,
         _ => STREAMING_PREFILL_DEFAULT_TILE,
     }
@@ -457,7 +460,10 @@ pub fn streaming_tile_tokens() -> usize {
 /// full per-tile logits (still throwing them away for non-final tiles, but
 /// useful for parity tests against the monolithic path).
 pub fn streaming_last_token_lm_head() -> bool {
-    match std::env::var("KILN_STREAMING_LAST_TOKEN_LM_HEAD").ok().as_deref() {
+    match std::env::var("KILN_STREAMING_LAST_TOKEN_LM_HEAD")
+        .ok()
+        .as_deref()
+    {
         Some(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"),
         None => true,
     }
@@ -569,14 +575,26 @@ impl GpuWeights {
                     let k_proj = weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
                     let v_proj = weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
                     let o_proj = weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
-                    let q_proj_t = q_proj.t().context(ctx("q_proj.t"))?
-                        .contiguous().context(ctx("q_proj.t contiguous"))?;
-                    let k_proj_t = k_proj.t().context(ctx("k_proj.t"))?
-                        .contiguous().context(ctx("k_proj.t contiguous"))?;
-                    let v_proj_t = v_proj.t().context(ctx("v_proj.t"))?
-                        .contiguous().context(ctx("v_proj.t contiguous"))?;
-                    let o_proj_t = o_proj.t().context(ctx("o_proj.t"))?
-                        .contiguous().context(ctx("o_proj.t contiguous"))?;
+                    let q_proj_t = q_proj
+                        .t()
+                        .context(ctx("q_proj.t"))?
+                        .contiguous()
+                        .context(ctx("q_proj.t contiguous"))?;
+                    let k_proj_t = k_proj
+                        .t()
+                        .context(ctx("k_proj.t"))?
+                        .contiguous()
+                        .context(ctx("k_proj.t contiguous"))?;
+                    let v_proj_t = v_proj
+                        .t()
+                        .context(ctx("v_proj.t"))?
+                        .contiguous()
+                        .context(ctx("v_proj.t contiguous"))?;
+                    let o_proj_t = o_proj
+                        .t()
+                        .context(ctx("o_proj.t"))?
+                        .contiguous()
+                        .context(ctx("o_proj.t contiguous"))?;
                     // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
                     // Marlin batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
@@ -604,26 +622,41 @@ impl GpuWeights {
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
-                    let in_proj_qkv = weight_to_tensor(&attn.in_proj_qkv, device)
-                        .context(ctx("in_proj_qkv"))?;
-                    let in_proj_z = weight_to_tensor(&attn.in_proj_z, device)
-                        .context(ctx("in_proj_z"))?;
-                    let out_proj = weight_to_tensor(&attn.out_proj, device)
-                        .context(ctx("out_proj"))?;
-                    let in_proj_a = weight_to_tensor(&attn.in_proj_a, device)
-                        .context(ctx("in_proj_a"))?;
-                    let in_proj_b = weight_to_tensor(&attn.in_proj_b, device)
-                        .context(ctx("in_proj_b"))?;
-                    let in_proj_qkv_t = in_proj_qkv.t().context(ctx("in_proj_qkv.t"))?
-                        .contiguous().context(ctx("in_proj_qkv.t contiguous"))?;
-                    let in_proj_z_t = in_proj_z.t().context(ctx("in_proj_z.t"))?
-                        .contiguous().context(ctx("in_proj_z.t contiguous"))?;
-                    let in_proj_a_t = in_proj_a.t().context(ctx("in_proj_a.t"))?
-                        .contiguous().context(ctx("in_proj_a.t contiguous"))?;
-                    let in_proj_b_t = in_proj_b.t().context(ctx("in_proj_b.t"))?
-                        .contiguous().context(ctx("in_proj_b.t contiguous"))?;
-                    let out_proj_t = out_proj.t().context(ctx("out_proj.t"))?
-                        .contiguous().context(ctx("out_proj.t contiguous"))?;
+                    let in_proj_qkv =
+                        weight_to_tensor(&attn.in_proj_qkv, device).context(ctx("in_proj_qkv"))?;
+                    let in_proj_z =
+                        weight_to_tensor(&attn.in_proj_z, device).context(ctx("in_proj_z"))?;
+                    let out_proj =
+                        weight_to_tensor(&attn.out_proj, device).context(ctx("out_proj"))?;
+                    let in_proj_a =
+                        weight_to_tensor(&attn.in_proj_a, device).context(ctx("in_proj_a"))?;
+                    let in_proj_b =
+                        weight_to_tensor(&attn.in_proj_b, device).context(ctx("in_proj_b"))?;
+                    let in_proj_qkv_t = in_proj_qkv
+                        .t()
+                        .context(ctx("in_proj_qkv.t"))?
+                        .contiguous()
+                        .context(ctx("in_proj_qkv.t contiguous"))?;
+                    let in_proj_z_t = in_proj_z
+                        .t()
+                        .context(ctx("in_proj_z.t"))?
+                        .contiguous()
+                        .context(ctx("in_proj_z.t contiguous"))?;
+                    let in_proj_a_t = in_proj_a
+                        .t()
+                        .context(ctx("in_proj_a.t"))?
+                        .contiguous()
+                        .context(ctx("in_proj_a.t contiguous"))?;
+                    let in_proj_b_t = in_proj_b
+                        .t()
+                        .context(ctx("in_proj_b.t"))?
+                        .contiguous()
+                        .context(ctx("in_proj_b.t contiguous"))?;
+                    let out_proj_t = out_proj
+                        .t()
+                        .context(ctx("out_proj.t"))?
+                        .contiguous()
+                        .context(ctx("out_proj.t contiguous"))?;
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                         in_proj_qkv,
                         in_proj_z,
@@ -643,15 +676,26 @@ impl GpuWeights {
                 }
             };
 
-            let gate_proj = weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?;
+            let gate_proj =
+                weight_to_tensor(&lw.mlp.gate_proj, device).context(ctx("gate_proj"))?;
             let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
-            let down_proj = weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
-            let gate_proj_t = gate_proj.t().context(ctx("gate_proj.t"))?
-                .contiguous().context(ctx("gate_proj.t contiguous"))?;
-            let up_proj_t = up_proj.t().context(ctx("up_proj.t"))?
-                .contiguous().context(ctx("up_proj.t contiguous"))?;
-            let down_proj_t = down_proj.t().context(ctx("down_proj.t"))?
-                .contiguous().context(ctx("down_proj.t contiguous"))?;
+            let down_proj =
+                weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
+            let gate_proj_t = gate_proj
+                .t()
+                .context(ctx("gate_proj.t"))?
+                .contiguous()
+                .context(ctx("gate_proj.t contiguous"))?;
+            let up_proj_t = up_proj
+                .t()
+                .context(ctx("up_proj.t"))?
+                .contiguous()
+                .context(ctx("up_proj.t contiguous"))?;
+            let down_proj_t = down_proj
+                .t()
+                .context(ctx("down_proj.t"))?
+                .contiguous()
+                .context(ctx("down_proj.t contiguous"))?;
             // KILN_W4A16=1 opt-in: queue each MLP projection for the
             // post-loop Marlin batch pack. See the q_proj comment above —
             // the `*_proj_marlin` fields start as None, and
@@ -724,8 +768,19 @@ impl GpuWeights {
             let drop_disabled = marlin_bf16_drop_disabled();
             for (entry, maybe_packed) in marlin_pack_meta.into_iter().zip(packed.into_iter()) {
                 if let Some(p) = maybe_packed {
-                    install_marlin_packed(&mut layers[entry.layer_idx], entry.kind, p, device, drop_disabled)
-                        .with_context(|| format!("install marlin {:?} on layer {}", entry.kind, entry.layer_idx))?;
+                    install_marlin_packed(
+                        &mut layers[entry.layer_idx],
+                        entry.kind,
+                        p,
+                        device,
+                        drop_disabled,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "install marlin {:?} on layer {}",
+                            entry.kind, entry.layer_idx
+                        )
+                    })?;
                 }
             }
         }
@@ -748,8 +803,8 @@ impl GpuWeights {
                 .context("mtp.pre_fc_norm_embedding")?;
             let pre_fc_norm_hidden = weight_to_tensor(&mtp_w.pre_fc_norm_hidden, device)
                 .context("mtp.pre_fc_norm_hidden")?;
-            let final_layernorm = weight_to_tensor(&mtp_w.final_layernorm, device)
-                .context("mtp.final_layernorm")?;
+            let final_layernorm =
+                weight_to_tensor(&mtp_w.final_layernorm, device).context("mtp.final_layernorm")?;
 
             // The MTP inner transformer layer. Loader guarantees this is a
             // full-attention layer (bails otherwise). Keep the upload inline
@@ -760,17 +815,22 @@ impl GpuWeights {
                 let lw = &mtp_w.layer;
                 let ctx = |name: &str| format!("mtp.layer {name}");
 
-                let input_layernorm =
-                    weight_to_tensor(&lw.input_layernorm, device).context(ctx("input_layernorm"))?;
-                let post_attention_layernorm = weight_to_tensor(&lw.post_attention_layernorm, device)
-                    .context(ctx("post_attention_layernorm"))?;
+                let input_layernorm = weight_to_tensor(&lw.input_layernorm, device)
+                    .context(ctx("input_layernorm"))?;
+                let post_attention_layernorm =
+                    weight_to_tensor(&lw.post_attention_layernorm, device)
+                        .context(ctx("post_attention_layernorm"))?;
 
                 let attention = match &lw.attention {
                     crate::weights::AttentionWeights::Full(attn) => {
-                        let q_proj = weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?;
-                        let k_proj = weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
-                        let v_proj = weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
-                        let o_proj = weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
+                        let q_proj =
+                            weight_to_tensor(&attn.q_proj, device).context(ctx("q_proj"))?;
+                        let k_proj =
+                            weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
+                        let v_proj =
+                            weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
+                        let o_proj =
+                            weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
                         let q_proj_t = q_proj
                             .t()
                             .context(ctx("q_proj.t"))?
@@ -796,8 +856,10 @@ impl GpuWeights {
                             k_proj,
                             v_proj,
                             o_proj,
-                            q_norm: weight_to_tensor(&attn.q_norm, device).context(ctx("q_norm"))?,
-                            k_norm: weight_to_tensor(&attn.k_norm, device).context(ctx("k_norm"))?,
+                            q_norm: weight_to_tensor(&attn.q_norm, device)
+                                .context(ctx("q_norm"))?,
+                            k_norm: weight_to_tensor(&attn.k_norm, device)
+                                .context(ctx("k_norm"))?,
                             q_proj_t,
                             k_proj_t,
                             v_proj_t,
@@ -1005,7 +1067,13 @@ pub fn rotary_embedding_from_tensor(
 /// `head_dim`: total dimension per head
 /// `rotary_dim`: number of dimensions to rotate (must be even). The first `rotary_dim` dims
 ///   are rotated; the remaining `head_dim - rotary_dim` dims pass through unchanged.
-fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, head_dim: usize, rotary_dim: usize) -> Result<Tensor> {
+fn apply_rope(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<Tensor> {
     let half_rotary = rotary_dim / 2;
     let x_dtype = x.dtype();
 
@@ -1119,8 +1187,8 @@ fn mlp_proj_forward(
         let base = crate::marlin_proj::matmul_bf16(x, packed)
             .context("mlp_proj_forward: marlin matmul")?;
         if let Some(proj) = lora {
-            let delta = compute_lora_delta(x, proj, lora_scale)
-                .context("mlp_proj_forward: lora delta")?;
+            let delta =
+                compute_lora_delta(x, proj, lora_scale).context("mlp_proj_forward: lora delta")?;
             return Ok((base + delta).context("mlp_proj_forward: add lora delta")?);
         }
         return Ok(base);
@@ -1202,7 +1270,9 @@ fn causal_conv1d_prefill(
     let _device = x.device();
     let x_f32 = x.to_dtype(DType::F32)?;
     // Squeeze [channels, 1, kernel_size] -> [channels, kernel_size]
-    let w_f32 = weight.to_dtype(DType::F32)?.reshape((channels, kernel_size))?;
+    let w_f32 = weight
+        .to_dtype(DType::F32)?
+        .reshape((channels, kernel_size))?;
     let k_minus_1 = kernel_size - 1;
 
     // Left-pad with conv_state (previous K-1 inputs, or zeros for fresh state)
@@ -1224,9 +1294,7 @@ fn causal_conv1d_prefill(
     } else {
         // Fewer new tokens than buffer size: shift old state and append new
         let keep = k_minus_1 - seq_len;
-        let old_part = conv_state
-            .to_dtype(DType::F32)?
-            .narrow(2, seq_len, keep)?;
+        let old_part = conv_state.to_dtype(DType::F32)?.narrow(2, seq_len, keep)?;
         *conv_state = Tensor::cat(&[&old_part, &x_f32], 2)?.contiguous()?;
     }
 
@@ -1246,7 +1314,9 @@ fn causal_conv1d_decode(
 ) -> Result<Tensor> {
     let (_batch, channels, _one) = x.dims3()?;
     let x_f32 = x.to_dtype(DType::F32)?;
-    let w_f32 = weight.to_dtype(DType::F32)?.reshape((channels, kernel_size))?;
+    let w_f32 = weight
+        .to_dtype(DType::F32)?
+        .reshape((channels, kernel_size))?;
 
     // Full window = [conv_state | x] -> [batch, channels, kernel_size]
     let window = Tensor::cat(&[&conv_state.to_dtype(DType::F32)?, &x_f32], 2)?;
@@ -1729,9 +1799,9 @@ pub fn gated_deltanet_forward(
     let (mixed_qkv, z, a, b) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
         let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
-        let z = x.broadcast_matmul(&weights.in_proj_z_t)?;           // [B, T, v_dim]
-        let a = x.broadcast_matmul(&weights.in_proj_a_t)?;           // [B, T, nv]
-        let b = x.broadcast_matmul(&weights.in_proj_b_t)?;           // [B, T, nv]
+        let z = x.broadcast_matmul(&weights.in_proj_z_t)?; // [B, T, v_dim]
+        let a = x.broadcast_matmul(&weights.in_proj_a_t)?; // [B, T, nv]
+        let b = x.broadcast_matmul(&weights.in_proj_b_t)?; // [B, T, nv]
         (mixed_qkv, z, a, b)
     };
 
@@ -1767,20 +1837,10 @@ pub fn gated_deltanet_forward(
                 }
             }
         } else if seq_len > 1 {
-            let y = causal_conv1d_prefill(
-                &mixed_qkv_ct,
-                &weights.conv1d,
-                conv_state,
-                kernel_size,
-            )?;
+            let y = causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
             cuda_silu(&y.to_dtype(DType::F32)?)?
         } else {
-            let y = causal_conv1d_decode(
-                &mixed_qkv_ct,
-                &weights.conv1d,
-                conv_state,
-                kernel_size,
-            )?;
+            let y = causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
             cuda_silu(&y.to_dtype(DType::F32)?)?
         };
         // Transpose back to [B, T, qkv_dim]
@@ -1893,9 +1953,7 @@ pub fn gated_deltanet_forward(
     let (beta, g) = {
         kiln_nvtx::range!(c"kiln/gdn/gates");
         if backend.supports_gdn_gates() {
-            if let Some((beta, g)) =
-                backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
-            {
+            if let Some((beta, g)) = backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)? {
                 (beta, g)
             } else {
                 gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
@@ -2020,11 +2078,11 @@ pub fn q_proj_forward(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(ref packed) = attn_weights.q_proj_marlin {
-        let base = crate::marlin_proj::matmul_bf16(x, packed)
-            .context("q_proj_forward: marlin matmul")?;
+        let base =
+            crate::marlin_proj::matmul_bf16(x, packed).context("q_proj_forward: marlin matmul")?;
         if let Some(proj) = lora {
-            let delta = compute_lora_delta(x, proj, lora_scale)
-                .context("q_proj_forward: lora delta")?;
+            let delta =
+                compute_lora_delta(x, proj, lora_scale).context("q_proj_forward: lora delta")?;
             return Ok((base + delta).context("q_proj_forward: add lora delta")?);
         }
         return Ok(base);
@@ -2067,8 +2125,18 @@ pub fn gqa_attention(
             lora_layer.and_then(|l| l.q_proj.as_ref()),
             lora_scale,
         )?;
-        let k = linear_with_lora_t(x, &attn_weights.k_proj_t, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
-        let v = linear_with_lora_t(x, &attn_weights.v_proj_t, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+        let k = linear_with_lora_t(
+            x,
+            &attn_weights.k_proj_t,
+            lora_layer.and_then(|l| l.k_proj.as_ref()),
+            lora_scale,
+        )?;
+        let v = linear_with_lora_t(
+            x,
+            &attn_weights.v_proj_t,
+            lora_layer.and_then(|l| l.v_proj.as_ref()),
+            lora_scale,
+        )?;
         (q_raw, k, v)
     };
 
@@ -2080,7 +2148,9 @@ pub fn gqa_attention(
         let q = q_raw.narrow(3, 0, head_dim)?;
         let gate = q_raw.narrow(3, head_dim, head_dim)?;
         // gate needs to be [batch, seq_len, num_heads * head_dim] for later
-        let gate = gate.contiguous()?.reshape(((), seq_len, num_heads * head_dim))?;
+        let gate = gate
+            .contiguous()?
+            .reshape(((), seq_len, num_heads * head_dim))?;
         (q.contiguous()?, Some(gate))
     } else {
         let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
@@ -2122,7 +2192,12 @@ pub fn gqa_attention(
             };
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+                linear_with_lora_t(
+                    &attn_output,
+                    &attn_weights.o_proj_t,
+                    lora_layer.and_then(|l| l.o_proj.as_ref()),
+                    lora_scale,
+                )?
             };
             return Ok(out);
         }
@@ -2180,10 +2255,11 @@ pub fn gqa_attention(
     let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
-    let attn_output = attn_output
-        .transpose(1, 2)?
-        .contiguous()?
-        .reshape(((), seq_len, num_heads * head_dim))?;
+    let attn_output =
+        attn_output
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape(((), seq_len, num_heads * head_dim))?;
 
     // Apply output gate: attn_output * sigmoid(gate)
     let attn_output = if let Some(ref gate) = gate {
@@ -2196,7 +2272,12 @@ pub fn gqa_attention(
     // Output projection
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(
+            &attn_output,
+            &attn_weights.o_proj_t,
+            lora_layer.and_then(|l| l.o_proj.as_ref()),
+            lora_scale,
+        )?
     };
     Ok(out)
 }
@@ -2253,6 +2334,59 @@ fn try_flash_attn_paged_decode(
         return Ok(None);
     }
 
+    // Reshape Q for the fused-attention APIs: [batch, num_heads, 1, head_dim]
+    // -> [batch, 1, num_heads, head_dim].
+    let q_fa = {
+        kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
+        q.transpose(1, 2)?.contiguous()?
+    };
+
+    let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    // Common macOS/desktop case: a single sequence receives freshly-allocated
+    // blocks, so its whole live KV window is already one contiguous run in the
+    // pool. In that case we can bypass the paged gather path entirely and feed
+    // the fused prefill kernel a direct `[1, total_seq_len, kv_heads, head_dim]`
+    // narrow of the live K/V window.
+    if !paged_cache.is_fp8() {
+        if let Some(start_slot) =
+            contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
+        {
+            let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+            let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+            if let Some(attn_output) = flash_attention_forward(
+                backend,
+                &q_fa,
+                &k_live,
+                &v_live,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )? {
+                let attn_output = if let Some(gate) = gate {
+                    let sigmoid_gate = cuda_sigmoid(gate)?;
+                    (attn_output * sigmoid_gate)?
+                } else {
+                    attn_output
+                };
+
+                let out = {
+                    kiln_nvtx::range!(c"kiln/proj/o");
+                    linear_with_lora_t(
+                        &attn_output,
+                        &attn_weights.o_proj_t,
+                        lora_layer.and_then(|l| l.o_proj.as_ref()),
+                        lora_scale,
+                    )?
+                };
+                return Ok(Some(out));
+            }
+        }
+    }
+
     // Verify intra-chunk contiguity. The kernel reads block_table[c * 8] only
     // (for block_size=16) and assumes pages [c*8 .. c*8+7] are physically
     // contiguous in the pool. kiln's `BlockManager` allocates blocks
@@ -2262,9 +2396,7 @@ fn try_flash_attn_paged_decode(
     let n_chunks = total_seq_len.div_ceil(K_BLOCK_N);
     let blocks = &block_table.blocks;
     let allocated = blocks.len();
-    if allocated < n_chunks * pages_per_chunk
-        && allocated < total_seq_len.div_ceil(block_size)
-    {
+    if allocated < n_chunks * pages_per_chunk && allocated < total_seq_len.div_ceil(block_size) {
         // Block table too short for the requested seqlen.
         return Ok(None);
     }
@@ -2310,20 +2442,8 @@ fn try_flash_attn_paged_decode(
     }
 
     let device = q.device();
-    let bt_tensor = Tensor::new(padded.as_slice(), device)?
-        .reshape((1usize, max_blocks_per_seq))?;
-
-    // Reshape Q for the flash-attn API: [batch, num_heads, 1, head_dim]
-    // -> [batch, 1, num_heads, head_dim].
-    let q_fa = {
-        kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
-        q.transpose(1, 2)?.contiguous()?
-    };
-
-    let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
-        Some(p) => p,
-        None => return Ok(None),
-    };
+    let bt_tensor =
+        Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
 
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -2406,8 +2526,18 @@ pub fn gqa_attention_paged(
             lora_layer.and_then(|l| l.q_proj.as_ref()),
             lora_scale,
         )?;
-        let k = linear_with_lora_t(x, &attn_weights.k_proj_t, lora_layer.and_then(|l| l.k_proj.as_ref()), lora_scale)?;
-        let v = linear_with_lora_t(x, &attn_weights.v_proj_t, lora_layer.and_then(|l| l.v_proj.as_ref()), lora_scale)?;
+        let k = linear_with_lora_t(
+            x,
+            &attn_weights.k_proj_t,
+            lora_layer.and_then(|l| l.k_proj.as_ref()),
+            lora_scale,
+        )?;
+        let v = linear_with_lora_t(
+            x,
+            &attn_weights.v_proj_t,
+            lora_layer.and_then(|l| l.v_proj.as_ref()),
+            lora_scale,
+        )?;
         (q_raw, k, v)
     };
 
@@ -2417,7 +2547,9 @@ pub fn gqa_attention_paged(
             let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
             let q = q_raw.narrow(3, 0, head_dim)?;
             let gate = q_raw.narrow(3, head_dim, head_dim)?;
-            let gate = gate.contiguous()?.reshape(((), seq_len, num_heads * head_dim))?;
+            let gate = gate
+                .contiguous()?
+                .reshape(((), seq_len, num_heads * head_dim))?;
             (q.contiguous()?, Some(gate))
         } else {
             let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
@@ -2453,15 +2585,61 @@ pub fn gqa_attention_paged(
         (q, k, v)
     };
 
-    // Write new K/V into paged cache
+    let total_seq_len = start_pos + seq_len;
+
+    // Initial prefill fast path: when there is no prefix history yet
+    // (`start_pos == 0`), the current K/V tensors already cover the entire
+    // attention window. Route prefill through the backend flash-attn path
+    // directly and only write K/V into the paged cache once for future decode.
+    // This avoids a pointless write-then-read round-trip through
+    // `PagedKvCache` on the first prompt tile.
+    if seq_len > 1 && start_pos == 0 && backend.supports_flash_attn_prefill() {
+        kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
+        let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
+        let k_prefill = k.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
+        let v_prefill = v.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
+        if let Some(attn_output) = flash_attention_forward(
+            backend,
+            &q_prefill,
+            &k_prefill,
+            &v_prefill,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )? {
+            {
+                kiln_nvtx::range!(c"kiln/kv/copy");
+                paged_cache
+                    .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+                    .context("paged KV cache write failed")?;
+            }
+
+            let attn_output = if let Some(ref gate) = gate {
+                let sigmoid_gate = cuda_sigmoid(gate)?;
+                (attn_output * sigmoid_gate)?
+            } else {
+                attn_output
+            };
+            let out = {
+                kiln_nvtx::range!(c"kiln/proj/o");
+                linear_with_lora_t(
+                    &attn_output,
+                    &attn_weights.o_proj_t,
+                    lora_layer.and_then(|l| l.o_proj.as_ref()),
+                    lora_scale,
+                )?
+            };
+            return Ok(out);
+        }
+    }
+
+    // Write new K/V into paged cache.
     {
         kiln_nvtx::range!(c"kiln/kv/copy");
         paged_cache
             .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
             .context("paged KV cache write failed")?;
     }
-
-    let total_seq_len = start_pos + seq_len;
 
     // Fast path: fused paged-decode flash-attention kernel.
     // Eliminates the materializing `paged_cache.read()` (an `index_select` /
@@ -2525,7 +2703,9 @@ pub fn gqa_attention_paged(
         .context("paged KV cache read failed")?;
     let kv_len = total_seq_len;
 
-    // Fused-attention path for prefill (seq_len > 1).
+    // Fused-attention path for prefill with existing prefix history
+    // (`start_pos > 0`). Initial prefill is special-cased above so we do not
+    // materialize the same K/V we just produced.
     // Paged cache returns [batch, heads, kv_len, head_dim] — transpose to
     // [batch, kv_len, heads, head_dim] for the backend kernel.
     if seq_len > 1 && backend.supports_flash_attn_prefill() {
@@ -2545,7 +2725,12 @@ pub fn gqa_attention_paged(
             };
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+                linear_with_lora_t(
+                    &attn_output,
+                    &attn_weights.o_proj_t,
+                    lora_layer.and_then(|l| l.o_proj.as_ref()),
+                    lora_scale,
+                )?
             };
             return Ok(out);
         }
@@ -2612,7 +2797,12 @@ pub fn gqa_attention_paged(
         };
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+            linear_with_lora_t(
+                &attn_output,
+                &attn_weights.o_proj_t,
+                lora_layer.and_then(|l| l.o_proj.as_ref()),
+                lora_scale,
+            )?
         };
         return Ok(out);
     }
@@ -2646,10 +2836,11 @@ pub fn gqa_attention_paged(
     let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
 
     // Transpose back and output projection
-    let attn_output = attn_output
-        .transpose(1, 2)?
-        .contiguous()?
-        .reshape(((), seq_len, num_heads * head_dim))?;
+    let attn_output =
+        attn_output
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape(((), seq_len, num_heads * head_dim))?;
 
     let attn_output = if let Some(ref gate) = gate {
         let sigmoid_gate = cuda_sigmoid(gate)?;
@@ -2660,7 +2851,12 @@ pub fn gqa_attention_paged(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t(&attn_output, &attn_weights.o_proj_t, lora_layer.and_then(|l| l.o_proj.as_ref()), lora_scale)?
+        linear_with_lora_t(
+            &attn_output,
+            &attn_weights.o_proj_t,
+            lora_layer.and_then(|l| l.o_proj.as_ref()),
+            lora_scale,
+        )?
     };
     Ok(out)
 }
@@ -2821,7 +3017,9 @@ pub fn transformer_block_paged(
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
         GpuAttentionWeights::Linear(_) => {
-            anyhow::bail!("transformer_block_paged only supports full attention layers (not linear/GDN)")
+            anyhow::bail!(
+                "transformer_block_paged only supports full attention layers (not linear/GDN)"
+            )
         }
     };
 
@@ -2918,8 +3116,8 @@ pub fn model_forward(
     let mut linear_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
-        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
-            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
@@ -2945,8 +3143,9 @@ pub fn model_forward(
                 full_attn_idx += 1;
             }
             GpuAttentionWeights::Linear(lin_weights) => {
-                let state = linear_state.as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
+                let state = linear_state.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
+                })?;
                 // Pre-attention RMSNorm
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
@@ -2969,7 +3168,11 @@ pub fn model_forward(
                 // Post-attention RMSNorm + FFN
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
                 };
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
@@ -3025,8 +3228,8 @@ pub fn model_forward_segment(
 
     for i in start_layer..end_layer {
         let layer = &weights.layers[i];
-        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
-            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
@@ -3051,8 +3254,9 @@ pub fn model_forward_segment(
                 full_attn_idx += 1;
             }
             GpuAttentionWeights::Linear(lin_weights) => {
-                let state = linear_state.as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
+                let state = linear_state.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
+                })?;
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
@@ -3072,7 +3276,11 @@ pub fn model_forward_segment(
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
                 };
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
@@ -3091,10 +3299,7 @@ pub fn model_forward_segment(
 ///
 /// Returns `([1, seq_len, hidden_size], positions)` — the initial hidden state
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
-pub fn model_forward_embed(
-    token_ids: &[u32],
-    weights: &GpuWeights,
-) -> Result<(Tensor, Vec<u32>)> {
+pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
     let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
     hidden = hidden.unsqueeze(0)?;
@@ -3433,9 +3638,7 @@ fn model_forward_paged_inner(
     let positions: &Tensor = match positions_gpu {
         Some(t) => t,
         None => {
-            let pos_f32: Vec<f32> = (start_pos..start_pos + seq_len)
-                .map(|p| p as f32)
-                .collect();
+            let pos_f32: Vec<f32> = (start_pos..start_pos + seq_len).map(|p| p as f32).collect();
             positions_owned = Tensor::new(pos_f32.as_slice(), device)?;
             &positions_owned
         }
@@ -3446,8 +3649,8 @@ fn model_forward_paged_inner(
     let mut linear_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
-        let layer_lora: Option<(&LoraLayerWeights, f32)> = lora
-            .and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
@@ -3473,8 +3676,9 @@ fn model_forward_paged_inner(
                 full_attn_idx += 1;
             }
             GpuAttentionWeights::Linear(lin_weights) => {
-                let state = linear_state.as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("linear attention state required for GDN layers (layer {i})"))?;
+                let state = linear_state.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
+                })?;
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
@@ -3494,7 +3698,11 @@ fn model_forward_paged_inner(
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
                 };
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
@@ -3849,7 +4057,10 @@ mod tests {
 
         // First rotary_dim dims should be different at non-zero position
         let rotary_diff: f32 = (0..rotary_dim).map(|i| (orig[i] - rotated[i]).abs()).sum();
-        assert!(rotary_diff > 0.01, "Rotary dims should change at position 100");
+        assert!(
+            rotary_diff > 0.01,
+            "Rotary dims should change at position 100"
+        );
 
         // Passthrough dims (rotary_dim..head_dim) must be identical
         for i in rotary_dim..head_dim {
@@ -3875,7 +4086,12 @@ mod tests {
         let rotary_dim = 4; // partial rotation
 
         let q = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_heads, head_dim), &device)?;
-        let k = Tensor::randn(0.0_f32, 1.0, (batch, seq_len, num_kv_heads, head_dim), &device)?;
+        let k = Tensor::randn(
+            0.0_f32,
+            1.0,
+            (batch, seq_len, num_kv_heads, head_dim),
+            &device,
+        )?;
         let positions: Vec<u32> = (0..seq_len as u32).collect();
 
         let inv_freq = compute_rotary_inv_freq(rotary_dim, 10_000.0, &device)?;
@@ -3960,7 +4176,12 @@ mod tests {
     }
 
     /// Create a minimal config for tests (no output gate, simple dims).
-    fn make_test_config(num_heads: usize, num_kv_heads: usize, head_dim: usize, hidden: usize) -> kiln_core::config::ModelConfig {
+    fn make_test_config(
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        hidden: usize,
+    ) -> kiln_core::config::ModelConfig {
         kiln_core::config::ModelConfig {
             hidden_size: hidden,
             num_layers: 4,
@@ -4031,7 +4252,22 @@ mod tests {
 
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
         let backend = test_backend(&device);
-        let out = gqa_attention(&backend, &x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
+        let out = gqa_attention(
+            &backend,
+            &x,
+            &attn,
+            &positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            None,
+            0,
+            false,
+            None,
+        )?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -4054,12 +4290,30 @@ mod tests {
 
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
         let backend = test_backend(&device);
-        let out = gqa_attention(&backend, &x, &attn, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
+        let out = gqa_attention(
+            &backend,
+            &x,
+            &attn,
+            &positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            None,
+            0,
+            false,
+            None,
+        )?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         // Output should be finite and not all zeros
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
-        assert!(vals.iter().all(|v| v.is_finite()), "output should be finite");
+        assert!(
+            vals.iter().all(|v| v.is_finite()),
+            "output should be finite"
+        );
         let sum: f32 = vals.iter().map(|v| v.abs()).sum();
         assert!(sum > 1e-6, "output should not be all zeros");
 
@@ -4080,7 +4334,22 @@ mod tests {
 
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
         let backend = test_backend(&device);
-        let out = gqa_attention(&backend, &x, &attn, &[0], num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, false, None)?;
+        let out = gqa_attention(
+            &backend,
+            &x,
+            &attn,
+            &[0],
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            None,
+            0,
+            false,
+            None,
+        )?;
         assert_eq!(out.dims(), &[1, 1, hidden]);
 
         Ok(())
@@ -4133,9 +4402,13 @@ mod tests {
         let layer = GpuLayerWeights {
             input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
-            attention: GpuAttentionWeights::Full(
-                make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
-            ),
+            attention: GpuAttentionWeights::Full(make_test_attn_weights(
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                hidden,
+                &device,
+            )?),
             mlp: GpuFfnWeights {
                 gate_proj,
                 up_proj,
@@ -4152,7 +4425,22 @@ mod tests {
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
         let backend = test_backend(&device);
-        let out = transformer_block(&backend, &x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
+        let out = transformer_block(
+            &backend,
+            &x,
+            &layer,
+            &cfg,
+            &positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            None,
+            0,
+            None,
+        )?;
         assert_eq!(out.dims(), &[batch, seq_len, hidden]);
 
         Ok(())
@@ -4182,9 +4470,13 @@ mod tests {
         let layer = GpuLayerWeights {
             input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
             post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
-            attention: GpuAttentionWeights::Full(
-                make_test_attn_weights(num_heads, num_kv_heads, head_dim, hidden, &device)?,
-            ),
+            attention: GpuAttentionWeights::Full(make_test_attn_weights(
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                hidden,
+                &device,
+            )?),
             mlp: GpuFfnWeights {
                 gate_proj,
                 up_proj,
@@ -4201,13 +4493,34 @@ mod tests {
         let cfg = make_test_config(num_heads, num_kv_heads, head_dim, hidden);
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
         let backend = test_backend(&device);
-        let out = transformer_block(&backend, &x, &layer, &cfg, &positions, num_heads, num_kv_heads, head_dim, head_dim, &inv_freq, 1e-6, None, 0, None)?;
+        let out = transformer_block(
+            &backend,
+            &x,
+            &layer,
+            &cfg,
+            &positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            None,
+            0,
+            None,
+        )?;
 
         // Output should not be zero (residual adds input through)
         let vals = out.flatten_all()?.to_vec1::<f32>()?;
         let sum: f32 = vals.iter().map(|v| v.abs()).sum();
-        assert!(sum > 0.1, "residual connections should keep output non-zero, got sum={sum}");
-        assert!(vals.iter().all(|v| v.is_finite()), "output should be finite");
+        assert!(
+            sum > 0.1,
+            "residual connections should keep output non-zero, got sum={sum}"
+        );
+        assert!(
+            vals.iter().all(|v| v.is_finite()),
+            "output should be finite"
+        );
 
         Ok(())
     }
@@ -4253,7 +4566,22 @@ mod tests {
         let cfg = make_test_config(2, 1, 4, 8);
         let inv_freq = compute_rotary_inv_freq(4, 10_000.0, &device)?;
         let backend = test_backend(&device);
-        let result = transformer_block(&backend, &x, &layer, &cfg, &[0], 2, 1, 4, 4, &inv_freq, 1e-6, None, 0, None);
+        let result = transformer_block(
+            &backend,
+            &x,
+            &layer,
+            &cfg,
+            &[0],
+            2,
+            1,
+            4,
+            4,
+            &inv_freq,
+            1e-6,
+            None,
+            0,
+            None,
+        );
         assert!(result.is_err(), "should reject linear attention layers");
 
         Ok(())
@@ -4468,7 +4796,10 @@ mod tests {
 
         // Logits should be finite
         let vals = logits.flatten_all()?.to_vec1::<f32>()?;
-        assert!(vals.iter().all(|v| v.is_finite()), "all logits should be finite");
+        assert!(
+            vals.iter().all(|v| v.is_finite()),
+            "all logits should be finite"
+        );
 
         Ok(())
     }
@@ -4533,21 +4864,39 @@ mod tests {
         let last_ref_vals = last_ref.flatten_all()?.to_vec1::<f32>()?;
 
         // With KV cache: prefill first 4 tokens, then decode the 5th
-        let mut kv_cache = KvCache::new(
-            num_layers, num_kv_heads, head_dim, 32, DType::F32, &device,
-        )?;
+        let mut kv_cache =
+            KvCache::new(num_layers, num_kv_heads, head_dim, 32, DType::F32, &device)?;
 
         // Prefill
-        let _prefill_logits = model_forward(&backend, &tokens[..4], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let _prefill_logits = model_forward(
+            &backend,
+            &tokens[..4],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            None,
+            None,
+        )?;
         kv_cache.advance(4);
         assert_eq!(kv_cache.seq_len(), 4);
 
         // Decode the 5th token
-        let decode_logits = model_forward(&backend, &tokens[4..], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let decode_logits = model_forward(
+            &backend,
+            &tokens[4..],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            None,
+            None,
+        )?;
         kv_cache.advance(1);
         assert_eq!(kv_cache.seq_len(), 5);
 
-        let last_cached_vals = decode_logits.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
+        let last_cached_vals = decode_logits
+            .narrow(1, 0, 1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
 
         // Compare: should be identical (within floating point tolerance)
         assert_eq!(last_ref_vals.len(), last_cached_vals.len());
@@ -4577,8 +4926,14 @@ mod tests {
         let intermediate_size = 16;
 
         let weights = make_tiny_gpu_weights(
-            &device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, 1,
+            &device,
+            vocab_size,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            1,
         )?;
 
         let config = kiln_core::config::ModelConfig {
@@ -4609,24 +4964,54 @@ mod tests {
 
         // Reference
         let logits_ref = model_forward(&backend, &tokens, &weights, &config, None, None, None)?;
-        let last_ref = logits_ref.narrow(1, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
+        let last_ref = logits_ref
+            .narrow(1, 2, 1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
 
         // KV cache: process token by token
         let mut kv_cache = KvCache::new(1, num_kv_heads, head_dim, 16, DType::F32, &device)?;
 
         // Token 0
-        let _ = model_forward(&backend, &[3], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let _ = model_forward(
+            &backend,
+            &[3],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            None,
+            None,
+        )?;
         kv_cache.advance(1);
 
         // Token 1
-        let _ = model_forward(&backend, &[7], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let _ = model_forward(
+            &backend,
+            &[7],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            None,
+            None,
+        )?;
         kv_cache.advance(1);
 
         // Token 2
-        let logits_cached = model_forward(&backend, &[1], &weights, &config, Some(&mut kv_cache), None, None)?;
+        let logits_cached = model_forward(
+            &backend,
+            &[1],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            None,
+            None,
+        )?;
         kv_cache.advance(1);
 
-        let last_cached = logits_cached.narrow(1, 0, 1)?.flatten_all()?.to_vec1::<f32>()?;
+        let last_cached = logits_cached
+            .narrow(1, 0, 1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
 
         for (i, (r, c)) in last_ref.iter().zip(&last_cached).enumerate() {
             assert!(
@@ -4775,8 +5160,15 @@ mod tests {
         let full_attention_interval = 4; // layer 3 is full, layers 0,1,2 are linear
 
         let weights = make_hybrid_gpu_weights(
-            &device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, num_layers, full_attention_interval,
+            &device,
+            vocab_size,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            num_layers,
+            full_attention_interval,
         )?;
 
         let config = kiln_core::config::ModelConfig {
@@ -4807,12 +5199,23 @@ mod tests {
         // Prefill with multiple tokens
         let token_ids: Vec<u32> = vec![1, 5, 3, 10];
         let backend = test_backend(&device);
-        let logits = model_forward(&backend, &token_ids, &weights, &config, None, Some(&mut linear_state), None)?;
+        let logits = model_forward(
+            &backend,
+            &token_ids,
+            &weights,
+            &config,
+            None,
+            Some(&mut linear_state),
+            None,
+        )?;
         assert_eq!(logits.dims(), &[1, 4, vocab_size]);
 
         // All values should be finite (no NaN/Inf)
         let flat = logits.flatten_all()?.to_vec1::<f32>()?;
-        assert!(flat.iter().all(|v| v.is_finite()), "logits contain non-finite values");
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "logits contain non-finite values"
+        );
 
         Ok(())
     }
@@ -4850,16 +5253,24 @@ mod tests {
 
         let weights_cpu = make_hybrid_gpu_weights(
             &cpu_device,
-            scenario.vocab_size, scenario.hidden_size,
-            scenario.num_heads, scenario.num_kv_heads, scenario.head_dim,
-            scenario.intermediate_size, scenario.num_layers,
+            scenario.vocab_size,
+            scenario.hidden_size,
+            scenario.num_heads,
+            scenario.num_kv_heads,
+            scenario.head_dim,
+            scenario.intermediate_size,
+            scenario.num_layers,
             scenario.full_attention_interval,
         )?;
         let weights_metal = make_hybrid_gpu_weights(
             &metal_device,
-            scenario.vocab_size, scenario.hidden_size,
-            scenario.num_heads, scenario.num_kv_heads, scenario.head_dim,
-            scenario.intermediate_size, scenario.num_layers,
+            scenario.vocab_size,
+            scenario.hidden_size,
+            scenario.num_heads,
+            scenario.num_kv_heads,
+            scenario.head_dim,
+            scenario.intermediate_size,
+            scenario.num_layers,
             scenario.full_attention_interval,
         )?;
 
@@ -4867,9 +5278,21 @@ mod tests {
         // GDN layers in the model); otherwise set to head_dim so GDN state
         // is shaped for the fallback path.
         let has_linear_layers = scenario.full_attention_interval > 1;
-        let linear_num_kv_heads = if has_linear_layers { scenario.num_kv_heads } else { 0 };
-        let linear_num_value_heads = if has_linear_layers { scenario.num_heads } else { 0 };
-        let linear_head_dim = if has_linear_layers { scenario.head_dim } else { 0 };
+        let linear_num_kv_heads = if has_linear_layers {
+            scenario.num_kv_heads
+        } else {
+            0
+        };
+        let linear_num_value_heads = if has_linear_layers {
+            scenario.num_heads
+        } else {
+            0
+        };
+        let linear_head_dim = if has_linear_layers {
+            scenario.head_dim
+        } else {
+            0
+        };
         let linear_conv_kernel_dim = if has_linear_layers { 4 } else { 0 };
 
         let config = kiln_core::config::ModelConfig {
@@ -4884,7 +5307,11 @@ mod tests {
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
             dtype: kiln_core::config::DType::FP32,
-            num_full_attention_layers: if has_linear_layers { 1 } else { scenario.num_layers },
+            num_full_attention_layers: if has_linear_layers {
+                1
+            } else {
+                scenario.num_layers
+            },
             full_attention_interval: scenario.full_attention_interval,
             attn_output_gate: false,
             linear_num_key_heads: linear_num_kv_heads,
@@ -4898,15 +5325,25 @@ mod tests {
         let cpu_backend = test_backend(&cpu_device);
         let mut cpu_linear = LinearAttentionState::new(&config, &cpu_device)?;
         let logits_cpu = model_forward(
-            &cpu_backend, &scenario.token_ids, &weights_cpu, &config,
-            None, Some(&mut cpu_linear), None,
+            &cpu_backend,
+            &scenario.token_ids,
+            &weights_cpu,
+            &config,
+            None,
+            Some(&mut cpu_linear),
+            None,
         )?;
 
         let metal_backend = crate::backend::for_device(&metal_device);
         let mut metal_linear = LinearAttentionState::new(&config, &metal_device)?;
         let logits_metal = model_forward(
-            &*metal_backend, &scenario.token_ids, &weights_metal, &config,
-            None, Some(&mut metal_linear), None,
+            &*metal_backend,
+            &scenario.token_ids,
+            &weights_metal,
+            &config,
+            None,
+            Some(&mut metal_linear),
+            None,
         )?;
 
         assert_eq!(logits_cpu.dims(), logits_metal.dims());
@@ -4917,16 +5354,27 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
 
-        assert!(cpu_flat.iter().all(|v| v.is_finite()), "{}: CPU logits non-finite", scenario.label);
-        assert!(metal_flat.iter().all(|v| v.is_finite()), "{}: Metal logits non-finite", scenario.label);
+        assert!(
+            cpu_flat.iter().all(|v| v.is_finite()),
+            "{}: CPU logits non-finite",
+            scenario.label
+        );
+        assert!(
+            metal_flat.iter().all(|v| v.is_finite()),
+            "{}: Metal logits non-finite",
+            scenario.label
+        );
 
-        let max_abs_diff = cpu_flat.iter().zip(metal_flat.iter())
+        let max_abs_diff = cpu_flat
+            .iter()
+            .zip(metal_flat.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(
             max_abs_diff < scenario.max_abs_diff,
             "{}: CPU vs Metal logits diverge: max abs diff = {max_abs_diff} (bound {})",
-            scenario.label, scenario.max_abs_diff,
+            scenario.label,
+            scenario.max_abs_diff,
         );
         Ok(())
     }
@@ -4992,8 +5440,15 @@ mod tests {
         let full_attention_interval = 4;
 
         let weights = make_hybrid_gpu_weights(
-            &device, vocab_size, hidden_size, num_heads, num_kv_heads,
-            head_dim, intermediate_size, num_layers, full_attention_interval,
+            &device,
+            vocab_size,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size,
+            num_layers,
+            full_attention_interval,
         )?;
 
         let config = kiln_core::config::ModelConfig {
@@ -5024,18 +5479,37 @@ mod tests {
         let backend = test_backend(&device);
 
         // Prefill
-        let prefill_logits = model_forward(&backend, &[1, 5, 3], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
+        let prefill_logits = model_forward(
+            &backend,
+            &[1, 5, 3],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            Some(&mut linear_state),
+            None,
+        )?;
         kv_cache.advance(3);
         assert_eq!(prefill_logits.dims(), &[1, 3, vocab_size]);
 
         // Decode: single token should work with persisted linear state
-        let decode_logits = model_forward(&backend, &[10], &weights, &config, Some(&mut kv_cache), Some(&mut linear_state), None)?;
+        let decode_logits = model_forward(
+            &backend,
+            &[10],
+            &weights,
+            &config,
+            Some(&mut kv_cache),
+            Some(&mut linear_state),
+            None,
+        )?;
         kv_cache.advance(1);
         assert_eq!(decode_logits.dims(), &[1, 1, vocab_size]);
 
         // Both should produce finite values
         let flat = decode_logits.flatten_all()?.to_vec1::<f32>()?;
-        assert!(flat.iter().all(|v| v.is_finite()), "decode logits contain non-finite values");
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "decode logits contain non-finite values"
+        );
 
         Ok(())
     }
@@ -5087,8 +5561,10 @@ mod tests {
         let masked = apply_causal_mask_with_offset(&scores, 1, 4, 3)?;
         // Single query should attend to all 4 positions (no masking for q_len=1)
         let vals = masked.flatten_all()?.to_vec1::<f32>()?;
-        assert!(vals.iter().all(|v| (*v - 1.0).abs() < 1e-6),
-            "single query token should attend to all KV positions");
+        assert!(
+            vals.iter().all(|v| (*v - 1.0).abs() < 1e-6),
+            "single query token should attend to all KV positions"
+        );
 
         // Simulate prefill with offset: 2 new queries, 5 total KV (3 cached + 2 new)
         let scores = Tensor::ones((1, 1, 2, 5), DType::F32, &device)?;
@@ -5137,8 +5613,7 @@ mod tests {
             *state = state.broadcast_mul(&g_exp)?;
 
             let kv_mem = k_t.matmul(&*state)?.squeeze(2)?; // [B, nv, dv]
-            let delta: Tensor =
-                (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
+            let delta: Tensor = (v_t - kv_mem)?.broadcast_mul(&beta_t.unsqueeze(2)?)?; // [B, nv, dv]
 
             let k_col = k_t.squeeze(2)?.unsqueeze(3)?; // [B, nv, dk, 1]
             let outer = k_col.broadcast_mul(&delta.unsqueeze(2)?)?; // [B, nv, dk, dv]
@@ -5274,8 +5749,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_gdn_kernel_matches_fallback() -> Result<()> {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -5345,8 +5820,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_gdn_recurrent_kernel_matches_reference() -> Result<()> {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -5374,12 +5849,10 @@ mod tests {
         let q_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
         let k_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
         let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let beta_data: Vec<f32> =
-            (0..n_b).map(|_| rng.gen_range(0.3f32..1.2f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.3f32..1.2f32)).collect();
         // Small negative gates so exp(g) stays in (~0.8, 1.0).
         let g_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> =
-            (0..n_s).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
 
         let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?;
         let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?;
@@ -5405,9 +5878,8 @@ mod tests {
         let beta_ref = beta.to_dtype(DType::F32)?;
         let g_ref = g.to_dtype(DType::F32)?;
         let mut state_ref = state_bf16.to_dtype(DType::F32)?;
-        let out_ref = gdn_sequential_reference(
-            &q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref,
-        )?;
+        let out_ref =
+            gdn_sequential_reference(&q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref)?;
 
         // Kernel path: chunkwise dispatcher with seq_len == 1 routes to
         // the new fused recurrent kernel. Make sure no prior test left the
@@ -5415,12 +5887,13 @@ mod tests {
         // SAFETY: cargo test is single-threaded per test by default and we
         // are only mutating an env var that the dispatcher reads at the top
         // of the same call below. No other thread observes it concurrently.
-        unsafe { std::env::remove_var("KILN_DISABLE_GDN_KERNEL"); }
+        unsafe {
+            std::env::remove_var("KILN_DISABLE_GDN_KERNEL");
+        }
         let backend = crate::backend::for_device(&device);
         let mut state_kernel = state_bf16.clone();
-        let out_kernel = gdn_chunkwise_recurrence(
-            &*backend, &q, &k, &v, &beta, &g, &mut state_kernel, 1,
-        )?;
+        let out_kernel =
+            gdn_chunkwise_recurrence(&*backend, &q, &k, &v, &beta, &g, &mut state_kernel, 1)?;
 
         let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
         let abs = out_diff.abs()?;
@@ -5464,8 +5937,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_gdn_chunk_prep_matches_fallback() -> Result<()> {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -5505,14 +5978,8 @@ mod tests {
         let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
 
         // Kernel path.
-        let (
-            a_strict_k,
-            b_mask_k,
-            v_prime_k,
-            q_s_scaled_k,
-            decay_last_col_k,
-            p_last_k,
-        ) = kiln_gdn_kernel::gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
+        let (a_strict_k, b_mask_k, v_prime_k, q_s_scaled_k, decay_last_col_k, p_last_k) =
+            kiln_gdn_kernel::gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
 
         // Candle reference chain — mirrors the else branch in
         // gdn_chunkwise_recurrence.
@@ -5540,8 +6007,7 @@ mod tests {
         let q_s_scaled_ref = q_s.broadcast_mul(&p_col)?;
 
         let g_last = big_g.narrow(2, c - 1, 1)?; // [B, nv, 1]
-        let decay_last_col_ref =
-            g_last.broadcast_sub(&big_g)?.exp()?.to_dtype(DType::BF16)?; // [B, nv, C]
+        let decay_last_col_ref = g_last.broadcast_sub(&big_g)?.exp()?.to_dtype(DType::BF16)?; // [B, nv, C]
         let p_last_ref = g_last.squeeze(2)?.exp()?.to_dtype(DType::BF16)?; // [B, nv]
 
         let check = |name: &str, k: &Tensor, r: &Tensor| -> Result<()> {
@@ -5609,8 +6075,7 @@ mod tests {
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
-        let s_init =
-            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
 
         let x = x_f32.to_dtype(DType::BF16)?;
         let w = w_f32.to_dtype(DType::BF16)?;
@@ -5632,9 +6097,7 @@ mod tests {
         let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
             Some(t) => t,
             None => {
-                eprintln!(
-                    "backend declined causal_conv1d_update at Qwen3.5 envelope; skipping"
-                );
+                eprintln!("backend declined causal_conv1d_update at Qwen3.5 envelope; skipping");
                 return Ok(());
             }
         };
@@ -5822,7 +6285,11 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
         let stream_slice = stream_logits.flatten_all()?.to_vec1::<f32>()?;
-        assert_eq!(mono_slice.len(), stream_slice.len(), "last tile length mismatch");
+        assert_eq!(
+            mono_slice.len(),
+            stream_slice.len(),
+            "last tile length mismatch"
+        );
         let mut max_abs = 0f32;
         for (a, b) in mono_slice.iter().zip(stream_slice.iter()) {
             let d = (a - b).abs();
@@ -5967,35 +6434,67 @@ mod tests {
         let (mut mono_cache, mono_bt) = make_paged_setup(&config, total + 1, 64, &device)?;
         let mut mono_state = LinearAttentionState::new(&config, &device)?;
         let _ = model_forward_paged(
-            &backend, &tokens, &weights, &config,
-            &mut mono_cache, &mono_bt, 0,
-            Some(&mut mono_state), None, None,
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut mono_cache,
+            &mono_bt,
+            0,
+            Some(&mut mono_state),
+            None,
+            None,
         )?;
         let mono_decode = model_forward_paged(
-            &backend, &[next_token], &weights, &config,
-            &mut mono_cache, &mono_bt, total,
-            Some(&mut mono_state), None, None,
+            &backend,
+            &[next_token],
+            &weights,
+            &config,
+            &mut mono_cache,
+            &mono_bt,
+            total,
+            Some(&mut mono_state),
+            None,
+            None,
         )?;
 
         // Streaming prefill, then 1 decode step.
         let (mut stream_cache, stream_bt) = make_paged_setup(&config, total + 1, 64, &device)?;
         let mut stream_state = LinearAttentionState::new(&config, &device)?;
         let _ = model_forward_paged_streaming_with(
-            &backend, &tokens, &weights, &config,
-            &mut stream_cache, &stream_bt, 0,
-            Some(&mut stream_state), None,
-            tile, true,
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut stream_cache,
+            &stream_bt,
+            0,
+            Some(&mut stream_state),
+            None,
+            tile,
+            true,
         )?;
         let stream_decode = model_forward_paged(
-            &backend, &[next_token], &weights, &config,
-            &mut stream_cache, &stream_bt, total,
-            Some(&mut stream_state), None, None,
+            &backend,
+            &[next_token],
+            &weights,
+            &config,
+            &mut stream_cache,
+            &stream_bt,
+            total,
+            Some(&mut stream_state),
+            None,
+            None,
         )?;
 
         let a = mono_decode.flatten_all()?.to_vec1::<f32>()?;
         let b = stream_decode.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(a.len(), b.len());
-        let max_abs = a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        let max_abs = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max);
         assert!(
             max_abs <= 1e-5,
             "decode-after-streaming max_abs_diff={max_abs:e} exceeds 1e-5 \
@@ -6025,9 +6524,7 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
             Err(_) => {
-                eprintln!(
-                    "CUDA not available, skipping test_streaming_matches_monolithic_cuda"
-                );
+                eprintln!("CUDA not available, skipping test_streaming_matches_monolithic_cuda");
                 return Ok(());
             }
         };
@@ -6052,8 +6549,7 @@ mod tests {
         let backend = crate::backend::for_device(&device);
 
         // Monolithic: single forward pass, full LM head.
-        let (mut mono_cache, mono_bt) =
-            make_paged_setup(&config, total, block_size, &device)?;
+        let (mut mono_cache, mono_bt) = make_paged_setup(&config, total, block_size, &device)?;
         let mut mono_state = LinearAttentionState::new(&config, &device)?;
         let mono_logits = model_forward_paged(
             &*backend,
@@ -6070,8 +6566,7 @@ mod tests {
 
         // Streaming: tiled prefill, last_token_only=false so we get a full
         // last-tile logits slice for row-by-row comparison.
-        let (mut stream_cache, stream_bt) =
-            make_paged_setup(&config, total, block_size, &device)?;
+        let (mut stream_cache, stream_bt) = make_paged_setup(&config, total, block_size, &device)?;
         let mut stream_state = LinearAttentionState::new(&config, &device)?;
         let stream_logits = model_forward_paged_streaming_with(
             &*backend,
@@ -6112,7 +6607,11 @@ mod tests {
         {
             let m_v = m.flatten_all()?.to_vec1::<f32>()?;
             let s_v = s.flatten_all()?.to_vec1::<f32>()?;
-            assert_eq!(m_v.len(), s_v.len(), "recurrent_states[{l}] length mismatch");
+            assert_eq!(
+                m_v.len(),
+                s_v.len(),
+                "recurrent_states[{l}] length mismatch"
+            );
             let max_abs = m_v
                 .iter()
                 .zip(s_v.iter())
@@ -6160,20 +6659,30 @@ mod tests {
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
         assert!(streaming_last_token_lm_head(), "default must be true");
 
-        unsafe { std::env::set_var("KILN_STREAMING_PREFILL", "1"); }
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+        }
         assert!(streaming_prefill_enabled());
 
-        unsafe { std::env::set_var("KILN_STREAMING_PREFILL", "0"); }
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL", "0");
+        }
         assert!(!streaming_prefill_enabled());
 
-        unsafe { std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256"); }
+        unsafe {
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
+        }
         assert_eq!(streaming_tile_tokens(), 256);
 
         // Bad value (not a multiple of GDN_CHUNK_SIZE) falls back to default.
-        unsafe { std::env::set_var("KILN_STREAMING_TILE_TOKENS", "65"); }
+        unsafe {
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "65");
+        }
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
 
-        unsafe { std::env::set_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "0"); }
+        unsafe {
+            std::env::set_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD", "0");
+        }
         assert!(!streaming_last_token_lm_head());
 
         // Cleanup so this test does not leak state to peers (defensive even

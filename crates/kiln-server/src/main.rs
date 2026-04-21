@@ -5,18 +5,16 @@ use anyhow::Result;
 use clap::Parser;
 
 use kiln_server::api;
-use kiln_server::device::select_device;
-use kiln_server::cli::{
-    self, AdapterCommands, Cli, Commands, TrainCommands,
-};
+use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands};
 use kiln_server::config::KilnConfig;
+use kiln_server::device::select_device;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
+use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
-use kiln_model::ModelRunner;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::AppState;
 
@@ -61,7 +59,9 @@ async fn main() -> Result<()> {
             }
         },
         // Serve mode (default)
-        Some(Commands::Serve { ref served_model_id }) => {
+        Some(Commands::Serve {
+            ref served_model_id,
+        }) => {
             // CLI flag wins over env/TOML; surface it via env var so the
             // config loader picks it up uniformly.
             if let Some(v) = served_model_id {
@@ -101,7 +101,10 @@ async fn main() -> Result<()> {
         // Try loading tokenizer from the model directory first
         let tok_file = Path::new(mp).join("tokenizer.json");
         if tok_file.exists() {
-            tracing::info!("loading tokenizer from model directory: {}", tok_file.display());
+            tracing::info!(
+                "loading tokenizer from model directory: {}",
+                tok_file.display()
+            );
             KilnTokenizer::from_file(tok_file.to_str().unwrap())?
         } else {
             tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
@@ -120,25 +123,21 @@ async fn main() -> Result<()> {
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
-        let model_weights = kiln_model::load_model(Path::new(mp), &model_config)?;
+        let load_mtp = matches!(
+            config.speculative.effective_method(),
+            kiln_server::config::SpecMethod::Mtp
+        );
+        let model_weights = kiln_model::load_model_with_options(
+            Path::new(mp),
+            &model_config,
+            kiln_model::LoadModelOptions { load_mtp },
+        )?;
         let device = select_device()?;
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
 
-        // ModelRunner takes ownership of a tokenizer, so load a second instance.
-        let runner_tokenizer = if let Some(path) = tokenizer_path {
-            KilnTokenizer::from_file(path)?
-        } else {
-            let tok_file = Path::new(mp).join("tokenizer.json");
-            if tok_file.exists() {
-                KilnTokenizer::from_file(tok_file.to_str().unwrap())?
-            } else {
-                KilnTokenizer::from_pretrained(model_id)?
-            }
-        };
-
         let runner = ModelRunner::new_with_options(
             gpu_weights,
-            runner_tokenizer,
+            tokenizer.clone(),
             model_config.clone(),
             config.memory.cuda_graphs,
         );
@@ -156,7 +155,9 @@ async fn main() -> Result<()> {
         }
 
         tracing::info!(adapter_dir = %adapter_dir.display(), "model loaded — real inference mode");
-        tracing::info!("training endpoints available — in-process LoRA training (no sidecar needed)");
+        tracing::info!(
+            "training endpoints available — in-process LoRA training (no sidecar needed)"
+        );
         AppState::new_real(
             model_config,
             runner,
