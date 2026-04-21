@@ -22,13 +22,31 @@
 //! tensor or layout bug appears) or document the runtime evidence in a Tier 2
 //! diagnostic update to `PROFILING.md`.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
-static DUMP_DONE: AtomicBool = AtomicBool::new(false);
+// Phase B7a: track which mtp_pos values have already been dumped so a single
+// process can capture multiple positions. Initialized lazily on first use.
+static DUMP_DONE_POSITIONS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+
+thread_local! {
+    /// Phase B7b: thread-local sink for sub-op taps captured inside the MTP
+    /// inner transformer block. `None` = disabled (every `capture_subop` call
+    /// is a no-op). `Some(buf)` = currently capturing into `buf`.
+    ///
+    /// Driven by [`arm_subop_capture`] / [`drain_subop_capture`]. Lives in TLS
+    /// because the MTP debug call sites all run on the inference thread that
+    /// also owns the transformer block; cross-thread capture is not supported
+    /// (and not needed — the dump is single-call, single-thread).
+    static SUBOP_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
+}
 
 const DEFAULT_MAX_CALLS: usize = 16;
 
@@ -108,35 +126,118 @@ pub fn is_swap_fc_norms_enabled() -> bool {
 }
 
 /// Path to which `mtp_forward_step` should dump all 8 Phase B6 numerical
-/// bisect taps on the first draft call, if set. Unset → no dump. Set →
-/// after the first call with valid tensors, the file is written and any
-/// subsequent call is a no-op (see `try_consume_dump_slot`).
+/// bisect taps on each targeted MTP draft call, if set. Unset → no dump.
+///
+/// Phase B7a: when the path contains the literal substring `{pos}`, it is
+/// substituted with the current `mtp_pos` value (e.g. `dump_pos{pos}.st`
+/// becomes `dump_pos0.st`, `dump_pos1.st`, `dump_pos2.st`). This lets a
+/// single run capture multiple positions for monotonic-degradation tests.
+/// If the substring is absent, the path is used as-is — but the dump still
+/// fires once per position in `KILN_MTP_DUMP_POS`, so include `{pos}` to
+/// avoid each later position overwriting the prior file.
 ///
 /// Paired with a Python reference implementation (see
-/// `scripts/mtp_reference_dump.py`) that produces an identically-named
-/// safetensors file for the same fixed prompt + seed. A post-hoc
+/// `scripts/mtp_reference_dump.py`) that produces identically-named
+/// safetensors files for the same fixed prompt + seed. A post-hoc
 /// per-tap `allclose` sweep (see `scripts/mtp_compare.py`) localizes
 /// the first divergence and narrows the remaining runtime hypotheses.
 pub fn dump_path() -> Option<String> {
     std::env::var("KILN_MTP_DUMP_PATH").ok().filter(|s| !s.is_empty())
 }
 
-/// First call after the path env var is set returns `true`; all later
-/// calls return `false` so we only write the file once. Idempotent across
-/// the whole process.
-pub fn try_consume_dump_slot() -> bool {
+/// Path with `{pos}` substituted. Falls through to `dump_path()` when
+/// the placeholder is absent (callers that capture multiple positions
+/// should always include `{pos}` to avoid overwriting prior dumps).
+pub fn dump_path_for_pos(mtp_pos: usize) -> Option<String> {
+    let raw = dump_path()?;
+    Some(raw.replace("{pos}", &mtp_pos.to_string()))
+}
+
+/// Set of `mtp_pos` values for which a dump should be written. Defaults
+/// to `{0}` for backwards compatibility with Phase B6 (which always
+/// dumped pos 0). Set `KILN_MTP_DUMP_POS=0,1,2` to capture three
+/// positions in one process.
+pub fn target_dump_positions() -> HashSet<usize> {
+    let raw = std::env::var("KILN_MTP_DUMP_POS").unwrap_or_default();
+    if raw.trim().is_empty() {
+        let mut s = HashSet::new();
+        s.insert(0);
+        return s;
+    }
+    raw.split(',')
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+        .collect()
+}
+
+/// Returns `true` if this is the first call for `mtp_pos` AND that
+/// position is targeted by `KILN_MTP_DUMP_POS`. Idempotent within the
+/// process — each (pos) value fires at most once.
+pub fn try_consume_dump_slot_for_pos(mtp_pos: usize) -> bool {
     if dump_path().is_none() {
         return false;
     }
-    DUMP_DONE
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
+    if !target_dump_positions().contains(&mtp_pos) {
+        return false;
+    }
+    let mut guard = DUMP_DONE_POSITIONS
+        .lock()
+        .expect("DUMP_DONE_POSITIONS mutex poisoned");
+    let set = guard.get_or_insert_with(HashSet::new);
+    set.insert(mtp_pos)
 }
 
 /// Reset the dump latch. Test-only helper.
 #[cfg(test)]
 fn reset_dump_latch() {
-    DUMP_DONE.store(false, Ordering::SeqCst);
+    let mut guard = DUMP_DONE_POSITIONS.lock().unwrap();
+    *guard = None;
+}
+
+/// True when `KILN_MTP_DUMP_SUBOPS=1` (or `true`) is set. Phase B7b
+/// opt-in: when enabled and `mtp_forward_step` is about to dump for the
+/// targeted `mtp_pos`, the inner transformer block records each named
+/// sub-op tensor (post_q_proj, post_qk_norm, post_rope, …) into a
+/// thread-local buffer that is appended to the safetensors file.
+pub fn is_dump_subops_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_SUBOPS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Begin a sub-op capture window. Subsequent [`capture_subop`] calls
+/// from the same thread record into a fresh buffer until
+/// [`drain_subop_capture`] is called.
+pub fn arm_subop_capture() {
+    SUBOP_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured sub-op tensors and disarm. Returns whatever was
+/// recorded since the matching [`arm_subop_capture`] call, in order.
+pub fn drain_subop_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    SUBOP_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named tap if a capture window is currently open on this
+/// thread. Cheap no-op (single TLS access + borrow) when the window is
+/// closed, which is the production case. The tensor is materialized to
+/// host F32 immediately so the GPU scratch is free to be reused.
+///
+/// Unlike `write_mtp_dump`, this is best-effort: serialization errors
+/// are swallowed (returned via `Result` so callers using `?` get the
+/// usual propagation, but production callers wrap in `let _ = ...`).
+pub fn capture_subop(name: &str, t: &Tensor) -> Result<()> {
+    let armed = SUBOP_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_subop `{name}`: tensor→f32 host copy"))?;
+    SUBOP_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
 }
 
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
@@ -170,19 +271,25 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// | `mtp_logits`      | Output of `lm_head` on `post_final_ln`.              |
 ///
 /// Plus metadata: `draft_token_id`, `mtp_pos`, `swap_fc_norms`.
+///
+/// Phase B7b: pass `extra_subops` to append per-sub-op taps captured via
+/// the [`arm_subop_capture`] / [`drain_subop_capture`] / [`capture_subop`]
+/// trio. These are written under their captured names alongside the
+/// static taps; an empty slice makes this behave identically to Phase B6.
 pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
     mtp_pos: usize,
     swap_fc_norms: bool,
     taps: &[(&str, &Tensor)],
+    extra_subops: &[(String, Vec<usize>, Vec<f32>)],
 ) -> Result<()> {
     use safetensors::tensor::{Dtype, TensorView};
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> =
-        Vec::with_capacity(taps.len() + 3);
+        Vec::with_capacity(taps.len() + extra_subops.len() + 3);
     for (name, t) in taps {
         let (shape, flat) = tensor_to_f32_host(t)
             .with_context(|| format!("dump tap `{name}`: tensor→f32 host copy"))?;
@@ -191,6 +298,13 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push(((*name).to_string(), shape, Dtype::F32, bytes));
+    }
+    for (name, shape, flat) in extra_subops {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((name.clone(), shape.clone(), Dtype::F32, bytes));
     }
 
     // Metadata as 1-element I32 tensors so the Python side can read them
@@ -281,21 +395,99 @@ mod tests {
     }
 
     #[test]
-    fn dump_slot_fires_once_then_never() {
+    fn dump_slot_fires_once_per_position() {
         // SAFETY: single-threaded test; scoped env mutation.
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_slot_once.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_PATH", &tmp_s);
+            std::env::remove_var("KILN_MTP_DUMP_POS");
         }
         reset_dump_latch();
         assert_eq!(dump_path().as_deref(), Some(tmp_s.as_str()));
-        assert!(try_consume_dump_slot());
-        assert!(!try_consume_dump_slot());
-        assert!(!try_consume_dump_slot());
+        // Default targets only pos 0.
+        assert!(try_consume_dump_slot_for_pos(0));
+        assert!(!try_consume_dump_slot_for_pos(0));
+        assert!(!try_consume_dump_slot_for_pos(1));
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_PATH");
         }
+    }
+
+    #[test]
+    fn dump_slot_supports_multi_position_targets() {
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_multi_pos.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_PATH", &tmp_s);
+            std::env::set_var("KILN_MTP_DUMP_POS", "0,1,2");
+        }
+        reset_dump_latch();
+        let positions = target_dump_positions();
+        assert!(positions.contains(&0));
+        assert!(positions.contains(&1));
+        assert!(positions.contains(&2));
+        assert!(!positions.contains(&3));
+        // Each targeted position fires exactly once.
+        assert!(try_consume_dump_slot_for_pos(0));
+        assert!(!try_consume_dump_slot_for_pos(0));
+        assert!(try_consume_dump_slot_for_pos(1));
+        assert!(try_consume_dump_slot_for_pos(2));
+        // A non-targeted position never fires.
+        assert!(!try_consume_dump_slot_for_pos(3));
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+            std::env::remove_var("KILN_MTP_DUMP_POS");
+        }
+    }
+
+    #[test]
+    fn dump_path_for_pos_substitutes_placeholder() {
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_PATH", "/tmp/dump_pos{pos}.safetensors");
+        }
+        assert_eq!(
+            dump_path_for_pos(0).as_deref(),
+            Some("/tmp/dump_pos0.safetensors")
+        );
+        assert_eq!(
+            dump_path_for_pos(2).as_deref(),
+            Some("/tmp/dump_pos2.safetensors")
+        );
+        // Without `{pos}`, the path is returned as-is (caller should always
+        // include `{pos}` when capturing multiple positions).
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_PATH", "/tmp/dump.safetensors");
+        }
+        assert_eq!(
+            dump_path_for_pos(1).as_deref(),
+            Some("/tmp/dump.safetensors")
+        );
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+        }
+    }
+
+    #[test]
+    fn subop_capture_records_then_drains() {
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        // Disarmed: capture is a silent no-op.
+        capture_subop("post_q_proj", &a).unwrap();
+        assert!(drain_subop_capture().is_empty());
+        // Armed: records in order.
+        arm_subop_capture();
+        capture_subop("post_q_proj", &a).unwrap();
+        capture_subop("post_k_proj", &b).unwrap();
+        let drained = drain_subop_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "post_q_proj");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "post_k_proj");
+        // Drain disarms.
+        capture_subop("post_v_proj", &a).unwrap();
+        assert!(drain_subop_capture().is_empty());
     }
 
     #[test]
@@ -312,6 +504,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* swap_fc_norms = */ false,
             &[("h_main", &a), ("mtp_logits", &b)],
+            &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
         )
         .unwrap();
 
