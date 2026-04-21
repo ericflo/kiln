@@ -15,6 +15,8 @@ const DISABLE_METAL_CONV1D_PREFILL: &str = "KILN_DISABLE_METAL_CONV1D_PREFILL";
 const DISABLE_FUSED_CONV1D: &str = "KILN_DISABLE_FUSED_CONV1D";
 const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
 const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
+const DISABLE_FUSED_GDN_GATES: &str = "KILN_DISABLE_FUSED_GDN_GATES";
+const DISABLE_METAL_GDN_GATES: &str = "KILN_DISABLE_METAL_GDN_GATES";
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
 const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
 const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
@@ -67,6 +69,10 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_gdn_recurrent_step(&self) -> bool {
         !metal_gdn_recurrent_disabled()
+    }
+
+    fn supports_gdn_gates(&self) -> bool {
+        !metal_gdn_gates_disabled()
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
@@ -255,6 +261,21 @@ impl BackendRuntime for MetalBackend {
         Ok(Some(out))
     }
 
+    fn gdn_gates(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        if metal_gdn_gates_disabled() || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
+            return Ok(None);
+        }
+        let out = metal_gdn_gates_bf16(a, b, a_log, dt_bias)
+            .context("metal gdn_gates kernel failed")?;
+        Ok(Some(out))
+    }
+
     fn gdn_gated_rms_norm(
         &self,
         x: &Tensor,
@@ -291,6 +312,10 @@ fn metal_conv1d_update_disabled() -> bool {
 
 fn metal_gdn_recurrent_disabled() -> bool {
     env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
+}
+
+fn metal_gdn_gates_disabled() -> bool {
+    std::env::var(DISABLE_FUSED_GDN_GATES).is_ok() || env_truthy(DISABLE_METAL_GDN_GATES)
 }
 
 fn metal_gated_rms_norm_disabled() -> bool {
@@ -393,6 +418,36 @@ fn metal_conv1d_update_supports(
     conv_state
         .dims3()
         .is_ok_and(|(b, c, k)| (b, c, k) == (batch, channels, kernel_size - 1))
+}
+
+fn metal_gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Tensor) -> bool {
+    if !matches!(a.device(), Device::Metal(_))
+        || !matches!(b.device(), Device::Metal(_))
+        || !matches!(a_log.device(), Device::Metal(_))
+        || !matches!(dt_bias.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if a.dtype() != DType::BF16
+        || b.dtype() != DType::BF16
+        || a_log.dtype() != DType::BF16
+        || dt_bias.dtype() != DType::BF16
+    {
+        return false;
+    }
+    if a.shape() != b.shape() {
+        return false;
+    }
+    let Some(&nv) = a.dims().last() else {
+        return false;
+    };
+    if nv == 0 || nv > 256 {
+        return false;
+    }
+    if a_log.dims() != [nv] || dt_bias.dims() != [nv] {
+        return false;
+    }
+    a.elem_count() > 0
 }
 
 fn metal_gdn_recurrent_supports(
@@ -844,6 +899,193 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
     }
 
     Ok((q_out, k_out))
+}
+
+const METAL_GDN_GATES_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+inline float kiln_stable_sigmoid(float x) {
+    if (x >= 0.0f) {
+        return 1.0f / (1.0f + exp(-x));
+    }
+    const float e = exp(x);
+    return e / (1.0f + e);
+}
+
+inline float kiln_stable_softplus(float x) {
+    if (x > 20.0f) {
+        return x;
+    }
+    if (x < -20.0f) {
+        return exp(x);
+    }
+    return log(1.0f + exp(x));
+}
+
+kernel void kiln_gdn_gates_bf16(
+    device const bfloat* a [[buffer(0)]],
+    device const bfloat* b [[buffer(1)]],
+    device const bfloat* a_log [[buffer(2)]],
+    device const bfloat* dt_bias [[buffer(3)]],
+    device bfloat* beta_out [[buffer(4)]],
+    device bfloat* g_out [[buffer(5)]],
+    constant uint& nv [[buffer(6)]],
+    constant uint& total [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total) {
+        return;
+    }
+
+    const uint h = gid % nv;
+    const float a_val = static_cast<float>(a[gid]);
+    const float b_val = static_cast<float>(b[gid]);
+    const float a_log_val = static_cast<float>(a_log[h]);
+    const float dt_bias_val = static_cast<float>(dt_bias[h]);
+
+    const float beta = kiln_stable_sigmoid(b_val);
+    const float sp = kiln_stable_softplus(a_val + dt_bias_val);
+    const float g = sp * -exp(a_log_val);
+
+    beta_out[gid] = static_cast<bfloat>(beta);
+    g_out[gid] = static_cast<bfloat>(g);
+}
+"#;
+
+fn metal_gdn_gates_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn_gates pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = device
+        .device()
+        .new_library_with_source(METAL_GDN_GATES_KERNEL, None)
+        .map_err(|e| anyhow::anyhow!("compile metal gdn_gates library: {e:?}"))?;
+    let function = library
+        .get_function("kiln_gdn_gates_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn_gates function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn_gates pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_gates_bf16(
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let shape = a.dims().to_vec();
+    let nv = *shape
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("metal gdn_gates requires at least rank-1 input"))?;
+    let total = a.elem_count();
+    anyhow::ensure!(
+        total <= u32::MAX as usize,
+        "metal gdn_gates input too large"
+    );
+    anyhow::ensure!(nv <= u32::MAX as usize, "metal gdn_gates nv too large");
+
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
+    let a_log = a_log.contiguous()?;
+    let dt_bias = dt_bias.contiguous()?;
+    let beta = Tensor::zeros(shape.clone(), DType::BF16, a.device())?;
+    let g = Tensor::zeros(shape, DType::BF16, a.device())?;
+
+    let Device::Metal(device) = a.device() else {
+        anyhow::bail!("metal gdn_gates requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_gates_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_gates_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (a_storage, a_layout) = a.storage_and_layout();
+        let (b_storage, b_layout) = b.storage_and_layout();
+        let (al_storage, al_layout) = a_log.storage_and_layout();
+        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (g_storage, g_layout) = g.storage_and_layout();
+
+        let a_metal = match &*a_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates a must be on Metal"),
+        };
+        let b_metal = match &*b_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates b must be on Metal"),
+        };
+        let al_metal = match &*al_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates a_log must be on Metal"),
+        };
+        let dt_metal = match &*dt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates dt_bias must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates beta output must be on Metal"),
+        };
+        let g_metal = match &*g_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates g output must be on Metal"),
+        };
+
+        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let al_buf =
+            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+        let dt_buf =
+            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+
+        encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(al_buf.buffer), al_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(dt_buf.buffer), dt_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(g_buf.buffer), g_buf.offset_in_bytes);
+
+        let nv_u32 = nv as u32;
+        let total_u32 = total as u32;
+        encoder.set_bytes(6, &nv_u32);
+        encoder.set_bytes(7, &total_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((beta, g))
 }
 
 const METAL_GATED_RMSNORM_KERNEL: &str = r#"
@@ -1611,6 +1853,105 @@ mod tests {
             .flatten_all()?
             .mean(D::Minus1)?
             .to_scalar::<f32>()?)
+    }
+
+    fn gdn_gates_reference(
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let beta = (b.neg()?.exp()? + 1.0)?.recip()?.to_dtype(DType::BF16)?;
+        let a_biased = a
+            .to_dtype(DType::F32)?
+            .broadcast_add(&dt_bias.to_dtype(DType::F32)?)?;
+        let zeros = Tensor::zeros_like(&a_biased)?;
+        let relu_x = a_biased.maximum(&zeros)?;
+        let relu_neg_x = a_biased.neg()?.maximum(&zeros)?;
+        let neg_abs = (relu_x.clone() + relu_neg_x)?.neg()?;
+        let log_term = (neg_abs.exp()? + 1.0)?.log()?;
+        let sp = (relu_x + log_term)?;
+        let neg_decay = a_log.to_dtype(DType::F32)?.exp()?.neg()?;
+        let g = sp.broadcast_mul(&neg_decay)?.to_dtype(DType::BF16)?;
+        Ok((beta, g))
+    }
+
+    fn assert_gdn_gates_matches_reference(
+        batch: usize,
+        seq_len: usize,
+        nv: usize,
+        device: &Device,
+    ) -> Result<()> {
+        let total = batch * seq_len * nv;
+        let a_data: Vec<f32> = (0..total)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.25)
+            .collect();
+        let b_data: Vec<f32> = (0..total)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.2)
+            .collect();
+        let a_log_data: Vec<f32> = (0..nv)
+            .map(|i| ((i % 11) as f32 - 5.0) * 0.075)
+            .collect();
+        let dt_bias_data: Vec<f32> = (0..nv)
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.08)
+            .collect();
+
+        let a =
+            Tensor::from_slice(&a_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
+        let b =
+            Tensor::from_slice(&b_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&a_log_data, nv, device)?.to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(&dt_bias_data, nv, device)?.to_dtype(DType::BF16)?;
+
+        assert!(metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias));
+        let (beta_ref, g_ref) = gdn_gates_reference(&a, &b, &a_log, &dt_bias)?;
+        let (beta_fused, g_fused) = metal_gdn_gates_bf16(&a, &b, &a_log, &dt_bias)?;
+
+        assert_eq!(beta_fused.dims(), &[batch, seq_len, nv]);
+        assert_eq!(g_fused.dims(), &[batch, seq_len, nv]);
+        assert_eq!(beta_fused.dtype(), DType::BF16);
+        assert_eq!(g_fused.dtype(), DType::BF16);
+
+        let beta_max = max_abs_diff(&beta_ref, &beta_fused)?;
+        let beta_mean = mean_abs_diff(&beta_ref, &beta_fused)?;
+        let g_max = max_abs_diff(&g_ref, &g_fused)?;
+        let g_mean = mean_abs_diff(&g_ref, &g_fused)?;
+        assert!(
+            beta_max < 2e-2,
+            "GDN beta parity failed: max_abs_diff={beta_max}"
+        );
+        assert!(
+            beta_mean < 5e-3,
+            "GDN beta parity failed: mean_abs_diff={beta_mean}"
+        );
+        assert!(
+            g_max < 2e-2,
+            "GDN g parity failed: max_abs_diff={g_max}"
+        );
+        assert!(
+            g_mean < 5e-3,
+            "GDN g parity failed: mean_abs_diff={g_mean}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_gates_matches_fallback_decode_shape() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        assert_gdn_gates_matches_reference(1, 1, 32, &device)
+    }
+
+    #[test]
+    fn test_gdn_gates_matches_fallback_prefill_shape() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        assert_gdn_gates_matches_reference(1, 64, 32, &device)
     }
 
     #[test]
