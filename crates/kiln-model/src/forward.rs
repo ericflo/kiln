@@ -1258,6 +1258,13 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 .context("fused_rmsnorm kernel failed");
         }
     }
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_rms_norm_supports(x, weight) {
+            return crate::backend::metal::metal_rms_norm_bf16(x, weight, eps as f32)
+                .context("metal rms_norm kernel failed");
+        }
+    }
     rms_norm_fallback(x, weight, eps)
 }
 
@@ -4663,6 +4670,57 @@ mod tests {
         assert!(
             mean < 5e-4,
             "Metal gated_rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_rms_norm_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!("Metal unavailable, skipping test_metal_rms_norm_matches_fallback");
+            return Ok(());
+        };
+
+        let batch = 2usize;
+        let seq_len = 3usize;
+        let hidden = 4096usize;
+        let elems = batch * seq_len * hidden;
+
+        let mut rng = StdRng::seed_from_u64(0xA11CE);
+        let x_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let w_data: Vec<f32> = (0..hidden)
+            .map(|_| rng.gen_range(-0.2f32..0.2f32))
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+
+        assert!(crate::backend::metal::metal_rms_norm_supports(&x, &weight));
+        let fallback = rms_norm_fallback(&x, &weight, 1e-6)?;
+        let fused = crate::backend::metal::metal_rms_norm_bf16(&x, &weight, 1e-6)?;
+
+        assert_eq!(fused.dims(), fallback.dims());
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let diff = (fused.to_dtype(DType::F32)?
+            - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 5e-3,
+            "Metal rms_norm max_abs_diff={max:e} exceeds 5e-3"
+        );
+        assert!(
+            mean < 5e-4,
+            "Metal rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
         );
 
         Ok(())
