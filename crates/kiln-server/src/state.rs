@@ -16,6 +16,10 @@ use serde::Serialize;
 use crate::metrics::Metrics;
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
+const DEFAULT_BLOCK_SIZE: usize = 16;
+const MIN_AUTO_KV_BLOCKS: usize = 64;
+const METAL_AUTO_MAX_KV_BLOCKS: usize = 2048; // 32K tokens at block_size=16.
+
 /// GPU memory budget tracking for coordinating inference and training.
 ///
 /// On startup, we compute how much VRAM is available and partition it:
@@ -246,7 +250,7 @@ impl AppState {
         request_timeout_secs: u64,
         served_model_id: String,
     ) -> Self {
-        let block_size = 16;
+        let block_size = DEFAULT_BLOCK_SIZE;
 
         // KV cache dtype must match the model's activation dtype, otherwise
         // `paged_cache.write` hits a slice-set dtype mismatch on the first
@@ -299,19 +303,34 @@ impl AppState {
             if total_vram > 0 && bytes_per_block > 0 {
                 let available_for_kv = ((total_vram.saturating_sub(estimated_model_bytes)) as f64
                     * inference_fraction) as u64;
-                let auto_blocks = (available_for_kv / bytes_per_block) as usize;
-                let auto_blocks = auto_blocks.max(64); // minimum 64 blocks
+                let raw_auto_blocks = (available_for_kv / bytes_per_block) as usize;
+                let auto_blocks = cap_auto_num_blocks(
+                    raw_auto_blocks,
+                    model_config.max_position_embeddings,
+                    block_size,
+                    is_metal_device(&device),
+                );
                 tracing::info!(
                     total_vram_gb = total_vram as f64 / 1e9,
                     model_gb = estimated_model_bytes as f64 / 1e9,
                     inference_fraction,
+                    raw_auto_blocks,
                     auto_blocks,
                     "memory-aware KV cache sizing"
                 );
                 auto_blocks
             } else {
                 // Fallback: derive from max_position_embeddings
-                (model_config.max_position_embeddings / block_size).max(256)
+                let raw_auto_blocks = model_config
+                    .max_position_embeddings
+                    .div_ceil(block_size)
+                    .max(256);
+                cap_auto_num_blocks(
+                    raw_auto_blocks,
+                    model_config.max_position_embeddings,
+                    block_size,
+                    is_metal_device(&device),
+                )
             }
         };
 
@@ -427,6 +446,36 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
     total_params * dtype_bytes
 }
 
+fn cap_auto_num_blocks(
+    raw_blocks: usize,
+    max_position_embeddings: usize,
+    block_size: usize,
+    is_metal: bool,
+) -> usize {
+    let model_cap_blocks = max_position_embeddings
+        .div_ceil(block_size)
+        .max(MIN_AUTO_KV_BLOCKS);
+    let runtime_cap_blocks = if is_metal {
+        model_cap_blocks.min(METAL_AUTO_MAX_KV_BLOCKS)
+    } else {
+        model_cap_blocks
+    };
+
+    raw_blocks.max(MIN_AUTO_KV_BLOCKS).min(runtime_cap_blocks)
+}
+
+fn is_metal_device(device: &candle_core::Device) -> bool {
+    #[cfg(feature = "metal")]
+    {
+        matches!(device, candle_core::Device::Metal(_))
+    }
+    #[cfg(not(feature = "metal"))]
+    {
+        let _ = device;
+        false
+    }
+}
+
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.
 ///
 /// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
@@ -538,6 +587,40 @@ mod tests {
         assert!(
             gb > 4.0 && gb < 20.0,
             "model estimate {gb:.1}GB seems wrong"
+        );
+    }
+
+    #[test]
+    fn test_auto_num_blocks_caps_at_model_context() {
+        // Qwen3.5's 262K context is 16,384 blocks at block_size=16. There is
+        // no reason to auto-allocate more KV cache than the model can address.
+        assert_eq!(
+            cap_auto_num_blocks(50_000, 262_144, DEFAULT_BLOCK_SIZE, false),
+            16_384
+        );
+    }
+
+    #[test]
+    fn test_auto_num_blocks_caps_metal_desktop_default() {
+        // On large unified-memory Macs, pure memory-aware sizing can request
+        // tens of GiB of eagerly-zeroed KV cache. Default Metal auto-sizing is
+        // capped at 32K tokens; explicit KILN_NUM_BLOCKS still bypasses this
+        // helper entirely in AppState::new_real.
+        assert_eq!(
+            cap_auto_num_blocks(50_000, 262_144, DEFAULT_BLOCK_SIZE, true),
+            METAL_AUTO_MAX_KV_BLOCKS
+        );
+    }
+
+    #[test]
+    fn test_auto_num_blocks_preserves_small_auto_and_minimum() {
+        assert_eq!(
+            cap_auto_num_blocks(512, 262_144, DEFAULT_BLOCK_SIZE, true),
+            512
+        );
+        assert_eq!(
+            cap_auto_num_blocks(1, 262_144, DEFAULT_BLOCK_SIZE, true),
+            MIN_AUTO_KV_BLOCKS
         );
     }
 
