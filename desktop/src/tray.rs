@@ -370,8 +370,27 @@ async fn copy_openai_base_url_to_clipboard(app: &AppHandle, supervisor: Arc<Supe
         (s.host.clone(), s.port)
     };
     let url = crate::openai_base_url(&host, port);
-    if let Err(e) = app.clipboard().write_text(url) {
-        eprintln!("[tray] clipboard write_text failed: {}", e);
+    match app.clipboard().write_text(url.clone()) {
+        Ok(()) => {
+            let _ = app
+                .notification()
+                .builder()
+                .title("OpenAI base URL copied")
+                .body(url)
+                .show();
+        }
+        Err(e) => {
+            eprintln!("[tray] clipboard write_text failed: {}", e);
+            let _ = app
+                .notification()
+                .builder()
+                .title("Copy failed")
+                .body(format!(
+                    "Could not write OpenAI base URL to clipboard: {}",
+                    e
+                ))
+                .show();
+        }
     }
 }
 
