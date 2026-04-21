@@ -3589,3 +3589,106 @@ With that change the Mtp bench no longer fails at `linear attention state requir
 - 3× Mtp run ~6 min + 3× Off run ~6 min.
 - Well under the 120 min / $60 cap for the combined effort.
 
+## MTP low-α root cause — Phase A static audit + Phase B instrumentation (2026-04-21)
+
+Follow-up to "Phase X — native MTP spec-decode results" above. PR #257 unblocked the MTP measurement path; Mtp arm now runs to completion at α=0.411, well below the 0.72 stop-ship floor. This update lands the Phase B instrumentation patch and records the Phase A static-audit findings.
+
+### Tier classification
+
+This is a **Tier 2 diagnostic** PR (per the task brief): no fix shipped, no claim that any of the four candidate hypotheses from the Phase X "Why α is low" section are confirmed or refuted by code reading alone. Phase B requires a runtime trace on a pod plus an HF parity diff, which is the work the next agent picks up using the instrumentation landed here.
+
+### Phase A — static audit findings
+
+Code references are pinned to `e18ed1b` (PR #257 merge) on `main`.
+
+| Hypothesis (from Phase X "Why α is low") | Static-audit verdict | Evidence |
+|---|---|---|
+| Stale `h_prev` from base verify forward | **Doc-confirmed correct on ACCEPT** | `crates/kiln-model/src/speculative.rs:481-490` documents that `new_h_prev` is the hidden at the draft token's position in the verify pass, which is the correct conditioning input for the *next* MTP step (it predicts the bonus, which on accept is exactly the token immediately after the draft). The ACCEPT case is the dominant path at any reasonable α; the REJECT case has a known <5% staleness called out in the same comment block. Both paths are too small to explain the 0.31 gap from 0.411 to 0.72. |
+| Loader byte mismatch (`mtp.fc` etc.) | **Tensor names map cleanly** | `crates/kiln-model/src/loader.rs:610-704`: `mtp.fc.weight` shape validated as `[hidden, 2*hidden]`; both `mtp.norm.weight` and `mtp.final_layernorm.weight` accepted; `pre_fc_norm_embedding` and `pre_fc_norm_hidden` map directly to the corresponding `MtpWeights` fields with no aliasing. PR #253's `detect_mtp_prefix` covers Qwen3.5-4B's bare `mtp.*` layout. **Byte-equality vs. raw safetensors is not verifiable from code reading** — that needs Phase B. |
+| Sampler / temperature mismatch | **Both paths greedy** | `speculative_mtp_decode_step` calls `greedy_sample(&mtp_logits)` for the draft (`speculative.rs:566`) and `greedy_sample(&verify_pos0)` for the target (`speculative.rs:602`). The `_params: &SamplingParams` argument is intentionally unused (commented `# Greedy-only path (temperature == 0)` on `speculative.rs:533-535`). Sampler asymmetry is ruled out for the bench workload. |
+| Swapped `fc` input ordering vs. vLLM | **Visual match to vLLM** | `crates/kiln-model/src/forward.rs:3517-3523`: `Tensor::cat(&[&norm_emb, &norm_h], 2)` matches vLLM `qwen3_next_mtp.py`'s `concat([pre_fc_norm_embedding(inputs_embeds), pre_fc_norm_hidden(hidden_states)])`. Embed first, hidden second. **Tensor name → field semantics are correct.** What this *cannot* rule out from code reading: that `mtp.pre_fc_norm_embedding.weight` and `mtp.pre_fc_norm_hidden.weight` are themselves transposed in the published checkpoint relative to vLLM's training-time layout. Confirming that requires Phase B byte-equality + per-token dequant diff. |
+
+#### Other code-reading checks
+
+- **Tied lm_head**: `forward.rs:3553` reuses `weights.embed_tokens_t` for the MTP head's projection. Matches the loader's contract that there is no separate `mtp.lm_head.weight` tensor (per `loader.rs:604-606`). ✓
+- **Position handling**: MTP uses an independent position counter (`mtp_pos`, starting at 0) for both the RoPE positions tensor (`forward.rs:3528`) and the KV-cache start index (`forward.rs:3535`). The base model uses `base_pos` (starting at `prompt_tokens.len()`) for both. They cannot interact: the MTP layer has its own 1-layer paged cache (`generate.rs:~1280`) so there is no cross-cache RoPE interference. **Constant offset between base and MTP positions is invisible to attention** because RoPE attention scores depend only on `pos_j - pos_i`, and the MTP layer attends only to its own KV cache (single sequence). ✓
+- **`fc_t` cached transpose**: `cached_transpose(weight)` at `forward.rs:396-398` is a single `weight.t()?.contiguous()?`. Stored fc has shape `[H, 2H]` (PyTorch `nn.Linear(2H, H)` storage convention); `fc_t` has `[2H, H]`; matmul against `concat[..., 2H]` produces `[..., H]`. ✓
+- **Marlin off the MTP layer**: `MtpGpuWeights` does not carry Marlin packed projections — the MTP transformer block uses the raw BF16 layer (`forward.rs:130-172`). W4A16 quantization mismatch is ruled out for this layer. ✓
+
+#### Net Phase A verdict
+
+Static audit found **no obvious layout or routing bug from code alone**. The most-suspicious remaining hypothesis is "swapped `fc` input ordering during checkpoint export" (the Phase X note's "α≈0.4 is exactly the signature"), but the kiln code visually matches the vLLM reference order. Confirming or refuting this requires runtime evidence: byte-equality of the loaded `mtp.*` tensors vs. raw safetensors, plus per-token comparison of the draft logits vs. an HF reference run on the same prompt.
+
+### Phase B — instrumentation landed in this PR
+
+New module `crates/kiln-model/src/mtp_debug.rs` (~120 lines incl. tests):
+
+- `is_enabled()` / `should_log()` — `KILN_MTP_DEBUG=1` opt-in, with `KILN_MTP_DEBUG_MAX_CALLS` (default 16) limiting noise.
+- `top_k_logits(logits, k)` — extracts top-K `(token_id, logit)` pairs from `[V]` / `[1, V]` / `[1, 1, V]` tensors.
+- `tensor_l2_norm(t)` — single-f32 L2 sanity check.
+- `format_top_k(...)` — compact `"[(id=42, l=12.34), ...]"` rendering for log lines.
+
+Two call sites add one `tracing::info!` line each when enabled:
+
+- `forward.rs::mtp_forward_step` — `mtp_draft` line per draft pass: `mtp_pos`, `last_token`, `h_prev_l2`, `mtp_logits_l2`, `mtp_top5`.
+- `speculative.rs::speculative_mtp_decode_step` — `mtp_verify` line per verify pass: `mtp_pos`, `base_pos`, `last_token`, `draft_token`, `target_at_0`, `accepted`, `verify_pos0_l2`, `verify_pos0_top5`. Shares `mtp_pos` with the matching `mtp_draft` so trace lines pair by grep.
+
+Both call sites early-out cheaply (`std::env::var` lookup) when the flag is unset, so production decode is not affected.
+
+### Phase B — execution plan for the next agent
+
+1. **Acquire pod**: `ce kiln-pod-acquire --gpu-type 'NVIDIA RTX A6000'`. Use the pool, not raw `runpod_api.py launch`.
+2. **Build with this PR merged**: standard `cargo build --release --features cuda --bin kiln-bench` (sccache should land 90%+ on a warm pod).
+3. **Run a 16-step trace**:
+   ```bash
+   KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp \
+   KILN_MTP_DEBUG=1 RUST_LOG=kiln::mtp_debug=info,info \
+     ./target/release/kiln-bench --paged --prompt-tokens 512 \
+       --max-output-tokens 16 --skip-training 2>&1 | tee mtp-trace.log
+   ```
+   Output will contain 16 `mtp_draft` lines + 16 `mtp_verify` lines, each tagged with `mtp_pos` for pairing.
+4. **HF reference parity** — small Python harness using `transformers` to load Qwen/Qwen3.5-4B and compute the same first-16 MTP draft tokens given the same prompt tokens. Diff:
+   - Token-level: do `target_at_0` and `draft_token` from the trace match HF's predicted next-token for the same context? If `target_at_0` matches HF but `draft_token` doesn't, the bug is in the MTP draft head (loader / fc / norms / RoPE). If `target_at_0` itself doesn't match HF, the bug is in the base model verify path (less likely — base bench α metric would have caught it earlier).
+   - Logit-level: compare `verify_pos0_top5` against HF's softmax top-5 on the same context. Should be byte-equivalent at temperature=0.
+5. **Byte-equality of MTP tensors** — small Rust binary (or Python via `safetensors` crate equivalent) that:
+   - Loads `mtp.fc.weight`, `mtp.pre_fc_norm_embedding.weight`, `mtp.pre_fc_norm_hidden.weight`, `mtp.norm.weight` directly from raw safetensors.
+   - Compares to the same tensors after kiln's loader path (dequant if needed; these MTP tensors are BF16, no quantization in the layer).
+   - Confirms element-wise equality. If anything differs, that's the bug.
+6. **Decision tree**:
+   - Tensors byte-equal AND draft top-1 matches HF ⇒ MTP head is correct; α=0.411 is "as good as it gets" for this checkpoint and we should consider whether `mtp_num_hidden_layers=1` is a structural ceiling on Qwen3.5-4B (open a Phase 7 design question, not a bug fix).
+   - Tensors byte-equal AND draft top-1 does NOT match HF ⇒ forward-pass bug. Likely candidates remaining: RoPE position offset (despite relative-invariance argument; check partial-rotary application), GDN state initialization for the standalone MTP layer (despite this being a *full-attention* layer per `is_full_attention_layer(3)`), or `attn_output_gate` interaction.
+   - Tensors NOT byte-equal ⇒ loader bug. Fix in `loader.rs::load_mtp_if_present`. **This is the strongest fix-in-Tier-1 outcome** and would close the investigation.
+
+### Cost guardrails for Phase B
+
+- Pod: 1× A6000 warm lease, expected 30-45 min wall clock (build + 1× 16-step trace + HF parity Python script + byte-eq tool).
+- Use `wait-file` pattern from the kiln skill `resources/runpod-workflow.md`. **Never** write `until ssh ... kill -0` polling loops — that pattern burned $99.76 + $13.76 in two SSH-wedge incidents on 2026-04-20.
+- Hard cap: 90 min / $40 (per the standard kiln cap). Fall back to a Tier 2 docs-only update if Phase B blows the cap.
+
+### Files / Reproduction
+
+```bash
+# This PR — Tier 2 diagnostic, code patch + PROFILING.md update
+git fetch origin
+git checkout mtp/debug-low-alpha-instrumentation
+cargo check                                                        # CPU host
+cargo build --release --features cuda --bin kiln-bench             # Linux+CUDA pod
+
+# Phase B trace (next agent, on a pod)
+KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp \
+KILN_MTP_DEBUG=1 RUST_LOG=kiln::mtp_debug=info,info \
+  ./target/release/kiln-bench --paged --prompt-tokens 512 \
+    --max-output-tokens 16 --skip-training 2>&1 | tee mtp-trace.log
+```
+
+### What this PR does NOT do
+
+- Does not change MTP forward, loader, sampler, or scheduler behavior in production decode (instrumentation early-outs when `KILN_MTP_DEBUG` is unset).
+- Does not run a fresh bench. The α=0.411 baseline from the section above stands; this PR adds the instrumentation to investigate it.
+- Does not modify the Phase X "Why α is low" hypotheses table — those are still open. This PR only narrows the search space via static audit and lands the runtime instrumentation needed to close them.
+
+### Cost
+
+- Local-only PR (`cargo check` on CPU host).
+- $0 in pod time. The Phase B execution plan above commits to ≤90 min / $40 on a future pod lease.
+

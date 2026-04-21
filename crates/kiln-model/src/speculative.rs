@@ -606,6 +606,30 @@ pub fn speculative_mtp_decode_step(
     let mut hit_eos = false;
     let draft_accepted = target_at_0 == draft_token;
 
+    // Optional Phase B instrumentation. Off by default; enabled with
+    // `KILN_MTP_DEBUG=1`. Logs the verify pos-0 top-5 alongside the draft so
+    // a 16-step trace can be diffed against an HF reference run on the same
+    // prompt. The `mtp_draft` line emitted from `mtp_forward_step` and this
+    // `mtp_verify` line share `mtp_pos` so they can be paired by grep.
+    if crate::mtp_debug::is_enabled() {
+        let v_top = crate::mtp_debug::top_k_logits(&verify_pos0, 5)
+            .map(|t| crate::mtp_debug::format_top_k(&t))
+            .unwrap_or_else(|e| format!("<top_k err: {e}>"));
+        let v_norm = crate::mtp_debug::tensor_l2_norm(&verify_pos0).unwrap_or(f32::NAN);
+        tracing::info!(
+            target: "kiln::mtp_debug",
+            mtp_pos = mtp_pos,
+            base_pos = base_pos,
+            last_token = last_token,
+            draft_token = draft_token,
+            target_at_0 = target_at_0,
+            accepted = draft_accepted,
+            verify_pos0_l2 = v_norm,
+            verify_pos0_top5 = %v_top,
+            "mtp_verify"
+        );
+    }
+
     let (base_advance, mtp_advance) = if draft_accepted {
         // ACCEPT: draft_token matches target. Emit [draft, bonus].
         if eos_token_ids.contains(&draft_token) {
