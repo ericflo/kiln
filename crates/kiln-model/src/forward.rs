@@ -3552,6 +3552,26 @@ pub fn mtp_forward_step(
         let normed = rms_norm(&mtp_hidden, &mtp.final_layernorm, config.rms_norm_eps)?;
         normed.broadcast_matmul(&weights.embed_tokens_t)?
     };
+
+    // Optional Phase B instrumentation. Off by default; enabled with
+    // `KILN_MTP_DEBUG=1`. See `crate::mtp_debug` for the rate-limited path.
+    if crate::mtp_debug::should_log() {
+        let h_norm = crate::mtp_debug::tensor_l2_norm(h_prev).unwrap_or(f32::NAN);
+        let logits_norm = crate::mtp_debug::tensor_l2_norm(&logits).unwrap_or(f32::NAN);
+        let top = crate::mtp_debug::top_k_logits(&logits, 5)
+            .map(|t| crate::mtp_debug::format_top_k(&t))
+            .unwrap_or_else(|e| format!("<top_k err: {e}>"));
+        tracing::info!(
+            target: "kiln::mtp_debug",
+            mtp_pos = mtp_pos,
+            last_token = draft_token_id,
+            h_prev_l2 = h_norm,
+            mtp_logits_l2 = logits_norm,
+            mtp_top5 = %top,
+            "mtp_draft"
+        );
+    }
+
     Ok((logits, mtp_hidden))
 }
 
