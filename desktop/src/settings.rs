@@ -33,7 +33,7 @@ impl Default for Settings {
             model_path: None,
             host: "127.0.0.1".to_string(),
             port: 8000,
-            inference_fraction: 0.9,
+            inference_fraction: if cfg!(target_os = "macos") { 0.7 } else { 0.9 },
             fp8_kv_cache: false,
             cuda_graphs: !cfg!(target_os = "macos"),
             prefix_cache: true,
@@ -196,11 +196,7 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
 }
 
 fn bool_env(b: bool) -> String {
-    if b {
-        "1".into()
-    } else {
-        "0".into()
-    }
+    if b { "1".into() } else { "0".into() }
 }
 
 #[cfg(test)]
