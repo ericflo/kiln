@@ -235,7 +235,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 
 Kiln Desktop is a system-tray app that wraps the `kiln` server for people who don't want to use a CLI. It spawns and supervises the `kiln` binary as a child process, shows server status in the tray, and opens a dashboard, settings, and log viewer in native windows.
 
-**Windows, Linux, and macOS (Apple Silicon).** The Windows and Linux installers drive the CUDA build of `kiln`; the macOS installer drives the candle-metal build on M-series hardware. Intel Macs are not supported. A signed + notarized `.dmg` will ship alongside the existing installers once the macOS port lands — see [MACOS_MLX_PLAN.md](MACOS_MLX_PLAN.md), Phase 7.
+**Windows, Linux, and macOS (Apple Silicon).** The Windows and Linux installers drive the CUDA build of `kiln`; the macOS installer drives the candle-metal build on M-series hardware. Intel Macs are not supported.
 
 **Download — [Kiln Desktop v0.1.10](https://github.com/ericflo/kiln/releases/tag/desktop-v0.1.10):**
 

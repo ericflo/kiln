@@ -81,7 +81,7 @@
 - Tauri auto-updater plumbing + Check-for-Updates flow (tray + dashboard)
 - Show app version in the settings window footer
 - Refreshed README screenshots and dashboard description
-- macOS support via candle-metal (Wave 1) + mlx-rs (Wave 2)
+- macOS support via candle-metal
 
 ## desktop-v0.1.0 — 2026-04-17
 - Initial release
