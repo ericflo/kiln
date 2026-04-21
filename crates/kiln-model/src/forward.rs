@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
+use std::sync::OnceLock;
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
@@ -34,6 +35,11 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
     let one_plus = (exp_neg_x + 1.0)?;
     let result = one_plus.recip()?;
     Ok(result)
+}
+
+fn fused_paged_decode_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
 /// CUDA-compatible SiLU (Swish): `x * sigmoid(x)`.
@@ -3296,7 +3302,7 @@ pub fn gqa_attention_paged(
         && !single_token_self_attn
         && !paged_cache.is_fp8()
         && (num_heads / num_kv_heads) > 1
-        && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
+        && !fused_paged_decode_disabled()
         && backend.supports_flash_attn_paged_decode()
         && !crate::mtp_debug::is_c7_sdpa_capture_armed()
     {

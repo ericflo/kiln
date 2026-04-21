@@ -31,6 +31,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static C7_SDPA_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 static MTP_FP32_HEAD_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 // Phase B7a: track which mtp_pos values have already been dumped so a single
 // process can capture multiple positions. Initialized lazily on first use.
@@ -1010,6 +1011,9 @@ pub fn is_dump_c7_sdpa_enabled() -> bool {
 /// bypass (so the grouped-decode Candle path runs and materializes scores
 /// / probs as real tensors the capture can see).
 pub fn is_c7_sdpa_capture_armed() -> bool {
+    if C7_SDPA_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
+        return false;
+    }
     C7_SDPA_CAPTURE.with(|c| c.borrow().is_some())
 }
 
@@ -1022,13 +1026,29 @@ pub fn arm_c7_sdpa_capture() {
     if !is_dump_c7_sdpa_enabled() {
         return;
     }
-    C7_SDPA_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    let was_armed = C7_SDPA_CAPTURE.with(|c| {
+        let mut capture = c.borrow_mut();
+        let was_armed = capture.is_some();
+        *capture = Some(Vec::new());
+        was_armed
+    });
+    if !was_armed {
+        C7_SDPA_CAPTURE_ARMED_THREADS.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Drain the captured C7 SDPA taps and disarm. Returns whatever was
 /// recorded since the matching [`arm_c7_sdpa_capture`] call, in order.
 pub fn drain_c7_sdpa_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
-    C7_SDPA_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+    let (was_armed, drained) = C7_SDPA_CAPTURE.with(|c| {
+        let mut capture = c.borrow_mut();
+        let was_armed = capture.is_some();
+        (was_armed, capture.take().unwrap_or_default())
+    });
+    if was_armed {
+        C7_SDPA_CAPTURE_ARMED_THREADS.fetch_sub(1, Ordering::Release);
+    }
+    drained
 }
 
 /// Phase C8: returns true when the current thread is executing inside an
