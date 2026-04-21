@@ -1,5 +1,30 @@
 # Kiln Desktop Changelog
 
+## desktop-v0.1.11 — 2026-04-21
+- Notify when the Dashboard Copy URL button fails (#315)
+- Notify when the About window Copy Diagnostics fails (#312)
+- Notify when Copy/Save in the log viewer fails (#310)
+- Notify when Open Logs / Open Settings invocations fail (#305)
+- Notify when Check for Updates or Install Update fails (#300)
+- Notify when dashboard Stop/Restart Server buttons fail (#296)
+- Notify when the launch-at-login toggle fails to apply (#292)
+- Notify when "Open Kiln UI in Browser" fails to launch the default browser (#285)
+- Notify tray Start/Stop/Restart synchronous errors (#277)
+- Keep desktop starting until health passes
+- Guard Settings Reload button against unsaved changes (#270)
+- Suppress spurious "Kiln server ready" toast on Training → Running transition (#264)
+- Notify on Copy OpenAI Base URL success + clipboard failure (#262)
+- Notify when Copy OpenAI Base URL clicked while server not running (#259)
+- Preflight tray Restart Server — notify when model_path unset / binary missing (#254)
+- Preflight tray Start Server when kiln binary missing (#252)
+- Preflight tray Start Server — notify + open Settings when model_path unset (#250)
+- Enrich About Copy diagnostic info with binary path, model path, and server state (#249)
+- Add Troubleshooting section covering binary download, model path, CUDA driver, ports, logs, uninstall (#248)
+- Add Screenshots section to `desktop/README.md` (#246)
+- Link `desktop/CHANGELOG.md` from root + desktop READMEs (#242)
+- Add CHANGELOG and auto-populate release notes (#239)
+- Refresh `desktop/README.md` to v0.1.10 (#236)
+
 ## desktop-v0.1.10 — 2026-04-20
 - Updater parses `supported_sm` from kiln release notes
 - Updater parses `min_cuda` and refuses to install when the local CUDA driver is too old
