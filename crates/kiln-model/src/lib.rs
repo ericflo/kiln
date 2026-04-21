@@ -1,5 +1,6 @@
 pub mod adapter_merge;
 pub mod backend;
+pub mod c1_attr;
 pub mod cuda_graph;
 pub mod engine;
 pub mod forward;

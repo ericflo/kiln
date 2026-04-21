@@ -1,0 +1,55 @@
+==============================================================================
+Phase C1 — MTP Acceptance-Rate Attribution Summary
+==============================================================================
+
+File: c1_seed0.csv   rows=97
+  α =  30.93%   topk_match_rate =  30.93%   Class A (match, !accept) = 0   Class B (!match) = 67
+  mtp_pos buckets (decode-wide trend):
+    mtp_pos∈[   0..   3]  n=  17  α= 23.53%
+    mtp_pos∈[   4..   7]  n=  29  α= 13.79%
+    mtp_pos∈[   8..  11]  n=  15  α= 26.67%
+    mtp_pos∈[  12..  15]  n=  11  α= 36.36%
+    mtp_pos∈[  16..  19]  n=   8  α= 50.00%
+    mtp_pos∈[  20..  23]  n=   6  α= 66.67%
+    mtp_pos∈[  24..  27]  n=   8  α= 50.00%
+    mtp_pos∈[  28..  31]  n=   3  α= 66.67%
+  logit medians: mtp=24.250  main=24.625
+
+File: c1_seed1.csv   rows=113
+  α =  12.39%   topk_match_rate =  12.39%   Class A (match, !accept) = 0   Class B (!match) = 99
+  mtp_pos buckets (decode-wide trend):
+    mtp_pos∈[   0..   1]  n=  16  α= 12.50%
+    mtp_pos∈[   2..   3]  n=  42  α=  4.76%
+    mtp_pos∈[   4..   5]  n=  13  α= 15.38%
+    mtp_pos∈[   6..   7]  n=  13  α= 15.38%
+    mtp_pos∈[   8..   9]  n=   5  α= 40.00%
+    mtp_pos∈[  10..  11]  n=  16  α= 12.50%
+    mtp_pos∈[  12..  13]  n=   4  α= 50.00%
+    mtp_pos∈[  14..  15]  n=   4  α=  0.00%
+  logit medians: mtp=23.000  main=24.125
+
+File: c1_seed2.csv   rows=121
+  α =   4.96%   topk_match_rate =   4.96%   Class A (match, !accept) = 0   Class B (!match) = 115
+  mtp_pos buckets (decode-wide trend):
+    mtp_pos∈[   0..   0]  n=  32  α=  3.12%
+    mtp_pos∈[   1..   1]  n=   7  α= 14.29%
+    mtp_pos∈[   2..   2]  n=  50  α=  2.00%
+    mtp_pos∈[   3..   3]  n=   3  α= 33.33%
+    mtp_pos∈[   4..   4]  n=   7  α= 14.29%
+    mtp_pos∈[   5..   5]  n=   5  α= 20.00%
+    mtp_pos∈[   6..   6]  n=  17  α=  0.00%
+  logit medians: mtp=23.750  main=24.250
+
+------------------------------------------------------------------------------
+Aggregate across files:
+  rows            = 331
+  α               =  15.11%
+  topk_match_rate =  15.11%
+  α | match       = 100.00%
+  Class A rows    = 0  (topk_match=True, accepted=False)
+  Class B rows    = 281  (topk_match=False)
+
+VERDICT CODE: C2_BISECT_MTP_HEAD
+VERDICT: MTP HEAD BUG (Class B). Aggregate topk_match_rate =  15.11% (<95% — MTP top-1 disagrees with main top-1 on more than 5% of greedy positions). Either the MTP head forward is wrong, or the pretrained head is genuinely this noisy — the former must be ruled out first.
+RECOMMENDATION: C2 bisects the MTP forward pass. Dump the mtp_logits top-5 per step alongside the HF remote-code MTP head output on the same prompt (see scripts/ for existing B-phase reference-dump tooling) and localize the first divergent tap.
+------------------------------------------------------------------------------
