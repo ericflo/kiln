@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -200,7 +202,7 @@ async fn main() -> Result<()> {
     let shutdown_flag = state.shutdown.clone();
     kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
 
-    spawn_backend_prewarm(state.clone());
+    let prewarm_state = state.clone();
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");
@@ -211,6 +213,7 @@ async fn main() -> Result<()> {
         model_path = model_path.unwrap_or("none (mock mode)"),
         "kiln listening"
     );
+    spawn_backend_prewarm(prewarm_state);
     // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
     // then force-exit after a timeout.
     let shutdown_timeout_secs = config.server.shutdown_timeout_secs;
@@ -255,9 +258,31 @@ fn spawn_backend_prewarm(state: AppState) {
     let runner = runner.clone();
     let block_manager = block_manager.clone();
     let paged_cache = paged_cache.clone();
+    let metrics = state.metrics.clone();
 
     tokio::spawn(async move {
-        let prewarm = tokio::task::spawn_blocking(move || {
+        // Keep startup user-first: only warm a server that stayed idle long
+        // enough to prove no one is about to interact with it.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        if metrics.request_duration_count.load(Ordering::Relaxed) > 0 {
+            tracing::info!(
+                "skipping background inference prewarm because the server has already handled live traffic"
+            );
+            return;
+        }
+        if metrics.active_requests.load(Ordering::Relaxed) > 0 {
+            tracing::info!(
+                "skipping background inference prewarm because a request is already active"
+            );
+            return;
+        }
+
+        let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            if metrics.request_duration_count.load(Ordering::Relaxed) > 0
+                || metrics.active_requests.load(Ordering::Relaxed) > 0
+            {
+                return Ok(false);
+            }
             let runner_guard = runner.read().unwrap();
             let mut bm_guard = block_manager.lock().unwrap();
             let mut pc_guard = paged_cache.lock().unwrap();
@@ -276,12 +301,18 @@ fn spawn_backend_prewarm(state: AppState) {
                 &params,
                 &mut bm_guard,
                 &mut pc_guard,
-            )
+            )?;
+            Ok(true)
         })
         .await;
 
         match prewarm {
-            Ok(Ok(_)) => tracing::info!("background inference prewarm complete"),
+            Ok(Ok(true)) => tracing::info!("background inference prewarm complete"),
+            Ok(Ok(false)) => {
+                tracing::info!(
+                    "skipping background inference prewarm because a request became active"
+                );
+            }
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
