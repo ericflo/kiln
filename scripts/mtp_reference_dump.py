@@ -12,6 +12,36 @@ Usage
         --kiln-dump /tmp/mtp-kiln.safetensors \\
         --out /tmp/mtp-ref.safetensors
 
+Phase B10 — independent `h_main` reference
+------------------------------------------
+
+    python3 scripts/mtp_reference_dump.py \\
+        --checkpoint /workspace/qwen3.5-4b \\
+        --independent-h-main \\
+        --seed 42 --prompt-tokens 512 --bench-mtp-pos 0 \\
+        --out /tmp/mtp-ref-independent-pos0.safetensors
+
+When `--independent-h-main` is set, the script loads the full Qwen3.5-4B base
+model via `transformers.AutoModelForCausalLM` and runs forward on the same
+prompt + seed the kiln-bench harness would produce. It captures the
+pre-final-norm hidden at the position kiln uses as `h_main` (see below) and
+saves it as `h_main_independent`. The comparator (`mtp_compare.py`) then
+compares kiln's `h_main` tap against `h_main_independent` to decide whether
+the 32-layer main stack is the upstream cause of the α collapse.
+
+Scope: only `--bench-mtp-pos=0` is supported. For `mtp_pos=0` the value of
+`h_main` is the last-row pre-final-norm hidden from the prefill pass — fully
+reproducible from `(seed, prompt-tokens)` because the kiln-bench prompt is
+deterministic. For `mtp_pos>=1`, `h_main` depends on the accepted-token
+sequence which the kiln dump does not include; reproducing that would need a
+Rust-side extension to the dump format (future work).
+
+Gotcha: `h_main` is PRE-final-norm. HF's `outputs.hidden_states[-1]` and
+`outputs.last_hidden_state` are BOTH post-norm, so we install a forward hook
+on `model.model.layers[-1]` and grab its residual output before the final
+`model.model.norm` is applied. See `forward.rs:3991` comment: `h_prev is
+[1, 1, H] PRE-final-norm`.
+
 Design
 ------
 
@@ -513,6 +543,248 @@ def mtp_inner_block(
 
 
 # -----------------------------------------------------------------------------
+# Phase B10 — independent `h_main` reference via HF transformers
+# -----------------------------------------------------------------------------
+
+# Verbatim copy of PROMPT_POOL from crates/kiln-server/src/bench.rs:229-270.
+# Must stay bit-for-bit identical to the Rust source or the tokenized prompt
+# will differ and `h_main_independent` will not be comparable to kiln's
+# `h_main`. The whitespace (including the line-continuation indentation) is
+# preserved exactly as Rust's raw `\` line-continuation would render it.
+PROMPT_POOL: list[str] = [
+    # 0: canonical B2 baseline — do not edit
+    "The quick brown fox jumps over the lazy dog near the river bank. \
+     Scientists discovered a new species of deep-sea fish in the Pacific Ocean. \
+     The quantum computer solved the optimization problem in record time. \
+     She wrote a comprehensive analysis of market trends for the quarterly report. ",
+    # 1: software / algorithms
+    "A red-black tree balances itself on every insertion and deletion to keep operations logarithmic. \
+     The compiler lowered the expression into three-address code before register allocation. \
+     Pagination in a distributed system needs a stable sort key or the client will see duplicates. \
+     An idempotent retry policy is the simplest defense against transient network failures. ",
+    # 2: history / biography
+    "The library at Alexandria housed an estimated half million scrolls before the great fire. \
+     Marie Curie remains the only person to win Nobel prizes in two distinct scientific fields. \
+     The printing press transformed European literacy faster than any single invention before it. \
+     Ancient Sumerian accountants pressed wedge-shaped marks into damp clay to track grain shipments. ",
+    # 3: nature / geography
+    "The Mariana Trench descends nearly eleven kilometers below the surface of the western Pacific. \
+     Alpine glaciers carve U-shaped valleys whose walls record the slow movement of compacted ice. \
+     Monarch butterflies navigate thousands of miles to the same Mexican forests their ancestors left. \
+     The Amazon basin exchanges more moisture with the atmosphere than any other river system on Earth. ",
+    # 4: philosophy
+    "Stoic ethics ground virtue in accepting what is outside the rational agent's direct control. \
+     Hume argued that no description of the world by itself entails any obligation about what ought to be. \
+     Phenomenology studies the structures of conscious experience from the first-person point of view. \
+     A thought experiment about swapped qualia probes whether subjective color really supervenes on function. ",
+    # 5: cooking / food science
+    "A pinch of salt in caramel suppresses perceived sweetness and sharpens the roasted sugar flavor. \
+     Bread dough becomes elastic because kneading aligns the gluten strands formed by wheat proteins. \
+     Emulsifying lemon juice into olive oil yields a stable vinaigrette only when whisked vigorously. \
+     Slow braising converts tough connective tissue into gelatin, tenderizing an otherwise unpromising cut. ",
+    # 6: space / astronomy
+    "A binary pulsar's timing drift confirmed general relativity's prediction of gravitational waves. \
+     The Parker Solar Probe samples the corona from closer than any spacecraft has previously flown. \
+     Tidally locked exoplanets have a permanent dayside whose climate differs from the eternal night side. \
+     Supernova remnants seed the interstellar medium with the heavier elements later rocky worlds inherit. ",
+    # 7: music / craft
+    "Equal temperament tuning slightly detunes every interval except the octave to enable free modulation. \
+     A violin luthier planes the spruce top until tap tones resonate in the correct pitch relationship. \
+     Polyrhythms layer pulses that only align at measure boundaries, driving much West African drumming. \
+     The overtone series produced by a bowed string determines the characteristic timbre of each instrument. ",
+]
+
+
+def build_bench_prompt(tokenizer, target_tokens: int, seed: int) -> str:
+    """Reproduce `build_prompt()` from crates/kiln-server/src/bench.rs:276-295.
+
+    - Pick `base = PROMPT_POOL[seed % 8]`.
+    - Append `base` to a growing string until tokenized length >= target.
+    - Truncate back via repeated `rfind(". ") + 1` until tokenized length
+      <= target, or no `. ` separator remains.
+
+    The kiln-bench harness is fully deterministic from `(seed, target_tokens)`,
+    which is what makes mtp_pos=0 reproducible in HF without needing the kiln
+    runtime.
+    """
+    base = PROMPT_POOL[seed % len(PROMPT_POOL)]
+    prompt = ""
+    # Tight bound: kiln's Rust version has no step cap but we add one for
+    # defensive purposes (Python tokenizer quirks shouldn't spin forever).
+    for _ in range(10_000):
+        prompt += base
+        ids = tokenizer.encode(prompt, add_special_tokens=False)
+        if len(ids) >= target_tokens:
+            while True:
+                ids = tokenizer.encode(prompt, add_special_tokens=False)
+                if len(ids) <= target_tokens:
+                    break
+                idx = prompt.rfind(". ")
+                if idx < 0:
+                    break
+                prompt = prompt[: idx + 1]
+            return prompt
+    raise RuntimeError("build_bench_prompt: did not reach target tokens after 10k iterations")
+
+
+def run_independent_h_main(
+    checkpoint: str,
+    out_path: str,
+    seed: int,
+    prompt_tokens: int,
+    bench_mtp_pos: int,
+) -> int:
+    """Phase B10 — load Qwen3.5-4B via HF transformers, reproduce the
+    kiln-bench prompt, capture PRE-final-norm last-position hidden as
+    `h_main_independent`, save to safetensors.
+
+    Scope: only `bench_mtp_pos == 0` is supported. For pos >= 1 the kiln
+    `h_main` input depends on the accepted-token stream which is not dumped
+    by kiln today (future work: extend `write_mtp_dump`).
+    """
+    if bench_mtp_pos != 0:
+        print(
+            f"ERROR: --bench-mtp-pos={bench_mtp_pos} not supported. Phase B10 supports "
+            "only bench_mtp_pos=0 (the prefill-derived h_main). See docstring.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+    except ImportError as e:
+        print(
+            f"ERROR: transformers not installed: {e}. "
+            "Install with `uv pip install --system transformers` on the build pod.",
+            file=sys.stderr,
+        )
+        return 2
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    print(
+        f"[mtp_ref/b10] loading HF model from {checkpoint} on {device} dtype={dtype}",
+        file=sys.stderr,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    )
+    model = model.to(device)
+    model.eval()
+
+    # Build the deterministic bench prompt.
+    prompt = build_bench_prompt(tokenizer, prompt_tokens, seed)
+    ids = tokenizer.encode(prompt, add_special_tokens=False)
+    actual_tokens = len(ids)
+    print(
+        f"[mtp_ref/b10] seed={seed} target_prompt_tokens={prompt_tokens} "
+        f"actual_tokens={actual_tokens}",
+        file=sys.stderr,
+    )
+
+    input_ids = torch.tensor([ids], dtype=torch.long, device=device)
+
+    # Find the main backbone module that owns `.layers` and `.norm`.
+    # HF Qwen3Next layouts: `model.model` (causal-LM wrapper) OR
+    # `model.model.language_model` (VL-wrapper). Try in order.
+    candidates = []
+    root = getattr(model, "model", None)
+    if root is not None:
+        candidates.append(("model.model", root))
+        lm_inner = getattr(root, "language_model", None)
+        if lm_inner is not None:
+            candidates.append(("model.model.language_model", lm_inner))
+
+    backbone = None
+    backbone_name = ""
+    for name, cand in candidates:
+        if hasattr(cand, "layers") and hasattr(cand, "norm"):
+            backbone = cand
+            backbone_name = name
+            break
+    if backbone is None:
+        print(
+            "ERROR: could not locate the base-model backbone (a module with "
+            ".layers[-1] and .norm). Tried: "
+            + ", ".join(n for n, _ in candidates),
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        f"[mtp_ref/b10] backbone={backbone_name} num_layers={len(backbone.layers)}",
+        file=sys.stderr,
+    )
+
+    # Install a forward hook on the LAST layer of the backbone to capture the
+    # pre-final-norm residual. HF Llama-style layer forwards return a tuple
+    # whose [0] is the residual hidden state of shape [B, S, H]. That is
+    # exactly the input to `backbone.norm`, i.e. `h_main` in kiln parlance.
+    captured: Dict[str, torch.Tensor] = {}
+
+    def _hook(_module, _inputs, output):
+        # `output` is either a Tensor or a tuple with Tensor at index 0.
+        if isinstance(output, tuple):
+            hidden = output[0]
+        else:
+            hidden = output
+        captured["pre_norm"] = hidden.detach()
+
+    handle = backbone.layers[-1].register_forward_hook(_hook)
+    try:
+        with torch.no_grad():
+            # `output_hidden_states=False` — we don't need HF's hidden_states
+            # list (which is post-norm on the final entry anyway).
+            _ = model(input_ids=input_ids, use_cache=False)
+    finally:
+        handle.remove()
+
+    if "pre_norm" not in captured:
+        print("ERROR: forward hook on layers[-1] did not fire.", file=sys.stderr)
+        return 2
+
+    pre_norm = captured["pre_norm"]  # [1, S, H]
+    if pre_norm.ndim != 3 or pre_norm.shape[0] != 1 or pre_norm.shape[1] != actual_tokens:
+        print(
+            f"WARN: pre_norm hidden shape is {tuple(pre_norm.shape)}, expected "
+            f"[1, {actual_tokens}, H]. Using last-position slice anyway.",
+            file=sys.stderr,
+        )
+
+    # kiln's h_main for mtp_pos=0 is the last-row pre-final-norm hidden from
+    # the prefill pass. See bench.rs ~line 1030 / speculative.rs.
+    h_main_independent = pre_norm[:, -1:, :].contiguous()
+    print(
+        f"[mtp_ref/b10] h_main_independent shape={tuple(h_main_independent.shape)} "
+        f"dtype={h_main_independent.dtype}",
+        file=sys.stderr,
+    )
+
+    out_dict: Dict[str, torch.Tensor] = {
+        "h_main_independent": to_f32_tensor(h_main_independent),
+        "meta__seed": torch.tensor([int(seed)], dtype=torch.int32),
+        "meta__prompt_tokens": torch.tensor([int(actual_tokens)], dtype=torch.int32),
+        "meta__target_prompt_tokens": torch.tensor([int(prompt_tokens)], dtype=torch.int32),
+        "meta__bench_mtp_pos": torch.tensor([int(bench_mtp_pos)], dtype=torch.int32),
+        "meta__b10_mode": torch.tensor([1], dtype=torch.int32),
+    }
+    save_file(out_dict, out_path)
+    print(
+        f"[mtp_ref/b10] wrote {out_path} "
+        f"({sum(t.numel()*t.element_size() for t in out_dict.values())} bytes)",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def to_f32_tensor(t: torch.Tensor) -> torch.Tensor:
+    """Return a CPU float32 contiguous copy of `t` (safetensors-ready)."""
+    return t.detach().to(torch.float32).cpu().contiguous()
+
+
+# -----------------------------------------------------------------------------
 # Entrypoint
 # -----------------------------------------------------------------------------
 
@@ -532,9 +804,14 @@ def load_kiln_dump(path: str) -> Dict[str, torch.Tensor | int]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Phase B6/B7 reference MTP dump")
+    ap = argparse.ArgumentParser(description="Phase B6/B7/B10 reference MTP dump")
     ap.add_argument("--checkpoint", required=True, help="Qwen3.5-4B checkpoint directory")
-    ap.add_argument("--kiln-dump", required=True, help="Path to kiln's mtp dump (safetensors)")
+    ap.add_argument(
+        "--kiln-dump",
+        required=False,
+        default=None,
+        help="Path to kiln's mtp dump (safetensors). Required except in --independent-h-main mode.",
+    )
     ap.add_argument("--out", required=True, help="Output path for reference dump")
     ap.add_argument("--rms-eps", type=float, default=1e-6)
     ap.add_argument(
@@ -548,7 +825,48 @@ def main() -> int:
         default=None,
         help="Phase B7a sweep: override the mtp_pos used for RoPE without re-running kiln. Lets one kiln dump be replayed against the reference at different positions.",
     )
+    ap.add_argument(
+        "--independent-h-main",
+        action="store_true",
+        help="Phase B10: load full Qwen3.5-4B via HF transformers, reproduce the kiln-bench prompt from (seed, prompt-tokens), capture PRE-final-norm last-position hidden as `h_main_independent`. Supports --bench-mtp-pos=0 only.",
+    )
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Phase B10: kiln-bench seed to reproduce (default 42; must match kiln run).",
+    )
+    ap.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=512,
+        help="Phase B10: target prompt-token count passed to kiln-bench --prompt-tokens (default 512).",
+    )
+    ap.add_argument(
+        "--bench-mtp-pos",
+        type=int,
+        default=0,
+        help="Phase B10: which mtp_pos to reproduce h_main for (ONLY 0 supported).",
+    )
     args = ap.parse_args()
+
+    # Phase B10 branch: independent h_main reference from HF.
+    if args.independent_h_main:
+        return run_independent_h_main(
+            checkpoint=args.checkpoint,
+            out_path=args.out,
+            seed=int(args.seed),
+            prompt_tokens=int(args.prompt_tokens),
+            bench_mtp_pos=int(args.bench_mtp_pos),
+        )
+
+    # Existing B6/B7 path: requires --kiln-dump.
+    if not args.kiln_dump:
+        print(
+            "ERROR: --kiln-dump is required unless --independent-h-main is set.",
+            file=sys.stderr,
+        )
+        return 2
 
     print(f"[mtp_ref] loading kiln dump from {args.kiln_dump}", file=sys.stderr)
     kiln = load_kiln_dump(args.kiln_dump)

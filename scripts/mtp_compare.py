@@ -27,6 +27,27 @@ Sub-op tap mode (Phase B7b — fine-grained bisect):
     dumps that isn't a primary tap is compared at the end of the table
     in the canonical capture order from mtp_inner_block.
 
+Phase B10 — independent h_main audit:
+    python3 scripts/mtp_compare.py \\
+        --pair 0:/tmp/dump_pos0.st,/tmp/ref_pos0.st \\
+        --pair 1:/tmp/dump_pos1.st,/tmp/ref_pos1.st \\
+        --pair 2:/tmp/dump_pos2.st,/tmp/ref_pos2.st \\
+        --independent-ref 0:/tmp/ref_independent_pos0.safetensors \\
+        [--atol 1e-3] [--rtol 1e-2]
+
+    The `--independent-ref` flag accepts one or more `LABEL:PATH` pairs. For
+    each matching LABEL, the comparator loads `h_main_independent` from the
+    referenced safetensors and compares against the kiln dump's `h_main`
+    tap at that same position label. Emits a B10 verdict line:
+
+      - "MATCHES independent reference (kiln main-model stack OK)" when
+        cos_sim >= 0.999 AND max|Δ| is within BF16 noise (<= 0.05 absolute).
+        In that case the α collapse is NOT driven by the 32-layer forward.
+
+      - "DIVERGES from independent reference (kiln main-model stack is
+        upstream cause)" otherwise. Next step is to bisect the 24×GDN +
+        8×GQA stack (Phase B11).
+
 Exit code:
     0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
@@ -512,6 +533,186 @@ def _emit_b9_summary(
         emit("  -> Re-check the full sub-op table above for the first non-zone divergence.")
 
 
+# Phase B10 thresholds: a clean "MATCHES" verdict requires cos_sim near 1 and
+# max|Δ| within BF16 noise. Kiln runs main-model forward in BF16 on GPU while
+# the HF independent reference can run BF16 on CUDA or F32 on CPU — either way
+# we expect BF16-scale noise on the order of 1e-2 absolute across a [1, 1, H]
+# hidden vector. 0.05 is a generous absolute ceiling for "noise-level match";
+# divergences from a true 32-layer-stack bug will blow past this easily.
+B10_COS_SIM_THRESHOLD = 0.999
+B10_MAX_ABS_DIFF_THRESHOLD = 0.05
+
+
+def _parse_independent_ref_arg(s: str) -> Tuple[str, str]:
+    """Parse `LABEL:PATH` used for --independent-ref."""
+    if ":" not in s:
+        print(
+            f"ERROR: --independent-ref argument '{s}' missing 'LABEL:' prefix",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    label, path = s.split(":", 1)
+    return label.strip(), path.strip()
+
+
+def _emit_b10_summary(
+    pair_results: List[
+        Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]
+    ],
+    independent_refs: Dict[str, str],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase B10 — audit the kiln main-model stack by comparing kiln's `h_main`
+    tap against an independent HF-derived `h_main_independent` reference.
+
+    For each matching position label:
+      1. Re-load the kiln dump to get `h_main`.
+      2. Load the independent ref safetensors to get `h_main_independent`.
+      3. Compare with _compare_tap (same atol/rtol as elsewhere); also apply
+         B10-specific cos_sim + max|Δ| thresholds for the verdict.
+
+    Verdict:
+      - MATCHES: every requested label passes (cos_sim >= B10_COS_SIM_THRESHOLD
+        AND max|Δ| <= B10_MAX_ABS_DIFF_THRESHOLD). -> The 32-layer main-model
+        forward stack is NOT driving the α collapse; look inside MTP head.
+      - DIVERGES: at least one requested label fails. -> The 32-layer stack is
+        the upstream cause; next step is a per-layer bisect (Phase B11).
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase B10 independent h_main audit — kiln main-model stack verdict")
+    emit("=" * 78)
+
+    # Build label -> kiln dump path map from pair_results.
+    # pair_results stores (label, ok, first_div, rows, kiln_meta, ref_meta).
+    # We need the kiln dump path — re-load via the row data isn't possible
+    # since we only stored metrics. Instead, cross-reference by re-reading
+    # the kiln `h_main` tensor directly from the kiln dump path stored in
+    # the global label->kiln_path table below. We pass that through from
+    # main() by looking it up in the `pairs` list there; the pair_results
+    # tuple already carries kiln_meta which lets us cross-check seed/pos,
+    # but we need the raw tensor so we re-open the file here.
+    #
+    # To avoid plumbing dump paths through pair_results (which would be a
+    # wider refactor), we require the caller to also pass the label->kiln
+    # path map via `_b10_label_to_kiln_path` set on the function at call
+    # time. Keeping this localized below.
+    label_to_kiln_path: Dict[str, str] = getattr(
+        _emit_b10_summary, "_label_to_kiln_path", {}
+    )
+
+    rows: List[Dict[str, object]] = []
+    all_labels: List[str] = []
+    missing_labels: List[str] = []
+    for label, ref_path in independent_refs.items():
+        all_labels.append(label)
+        kiln_path = label_to_kiln_path.get(label)
+        if kiln_path is None:
+            emit(f"  pos={label}: ERROR — no matching kiln pair for this label")
+            missing_labels.append(label)
+            continue
+
+        kiln_arrays, _ = _load(kiln_path)
+        ref_arrays, ref_meta = _load(ref_path)
+
+        if "h_main" not in kiln_arrays:
+            emit(f"  pos={label}: ERROR — kiln dump at {kiln_path} has no `h_main` tap")
+            missing_labels.append(label)
+            continue
+        if "h_main_independent" not in ref_arrays:
+            emit(
+                f"  pos={label}: ERROR — independent ref at {ref_path} has no "
+                "`h_main_independent` tensor"
+            )
+            missing_labels.append(label)
+            continue
+        bench_mtp_pos = ref_meta.get("meta__bench_mtp_pos", None)
+        if bench_mtp_pos is not None and str(bench_mtp_pos) != str(label):
+            emit(
+                f"  pos={label}: WARN — independent ref meta__bench_mtp_pos="
+                f"{bench_mtp_pos} does not match pair label {label}"
+            )
+
+        row = _compare_tap(
+            f"h_main@pos={label}",
+            kiln_arrays["h_main"],
+            ref_arrays["h_main_independent"],
+            atol,
+            rtol,
+        )
+        rows.append(row)
+        shape_str = "x".join(str(s) for s in row["shape_kiln"])
+        emit(
+            f"  pos={label}: shape={shape_str} shape_ok={row['shape_match']} "
+            f"cos_sim={_fmt_sci(row['cos_sim'])} max|Δ|={_fmt_sci(row['max_abs_diff'])} "
+            f"mean|Δ|={_fmt_sci(row['mean_abs_diff'])} allclose={row['allclose']}"
+        )
+
+    if missing_labels:
+        emit("")
+        emit(
+            f"Phase B10 verdict: INCONCLUSIVE — could not evaluate labels "
+            f"{missing_labels}."
+        )
+        return
+
+    if not rows:
+        emit("")
+        emit("Phase B10 verdict: INCONCLUSIVE — no --independent-ref pairs resolved.")
+        return
+
+    # B10 threshold decision.
+    all_pass = True
+    worst: Dict[str, object] = rows[0]
+    for r in rows:
+        cs = float(r["cos_sim"])
+        mxd = float(r["max_abs_diff"])
+        if not r["shape_match"] or not np.isfinite(cs) or cs < B10_COS_SIM_THRESHOLD:
+            all_pass = False
+        if mxd > B10_MAX_ABS_DIFF_THRESHOLD:
+            all_pass = False
+        # Track the position with the lowest cos_sim (worst match) for reporting.
+        if (
+            not np.isfinite(float(worst["cos_sim"]))
+            or cs < float(worst["cos_sim"])
+        ):
+            worst = r
+
+    emit("")
+    emit(
+        f"  Thresholds: cos_sim >= {B10_COS_SIM_THRESHOLD}, "
+        f"max|Δ| <= {B10_MAX_ABS_DIFF_THRESHOLD}"
+    )
+    if all_pass:
+        emit(
+            "Phase B10 verdict: h_main MATCHES independent reference "
+            "(kiln main-model stack OK; collapse is in MTP-head-internal path)"
+        )
+        emit(
+            f"  Worst pos across {len(rows)} label(s): {worst['name']} "
+            f"cos_sim={_fmt_sci(worst['cos_sim'])} max|Δ|={_fmt_sci(worst['max_abs_diff'])}"
+        )
+        emit(
+            "  -> Next step: continue investigating MTP-head-internal path "
+            "(dual-norm order, fc matmul, inner-block sub-ops)."
+        )
+    else:
+        emit(
+            "Phase B10 verdict: h_main DIVERGES from independent reference "
+            "(kiln main-model stack is upstream cause; bisect 32 layers next)"
+        )
+        emit(
+            f"  Worst pos across {len(rows)} label(s): {worst['name']} "
+            f"cos_sim={_fmt_sci(worst['cos_sim'])} max|Δ|={_fmt_sci(worst['max_abs_diff'])}"
+        )
+        emit(
+            "  -> Next step: Phase B11 — bisect the 24×GDN + 8×GQA main-model "
+            "stack to localize which layer's forward drifts from HF."
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -521,6 +722,15 @@ def main() -> int:
         action="append",
         default=[],
         help="Multi-position mode: LABEL:KILN_PATH,REF_PATH. Repeat for each position.",
+    )
+    ap.add_argument(
+        "--independent-ref",
+        action="append",
+        default=[],
+        help="Phase B10: LABEL:INDEPENDENT_REF_PATH. Compare kiln's `h_main` tap "
+        "at this pair label against `h_main_independent` in the referenced "
+        "safetensors (produced by `mtp_reference_dump.py --independent-h-main`). "
+        "Repeat per position.",
     )
     ap.add_argument("--atol", type=float, default=1e-3)
     ap.add_argument("--rtol", type=float, default=1e-2)
@@ -539,6 +749,11 @@ def main() -> int:
             print("ERROR: must specify --kiln and --ref, or one or more --pair args", file=sys.stderr)
             return 2
         pairs.append(("", args.kiln, args.ref))
+
+    independent_refs: Dict[str, str] = {}
+    for s in args.independent_ref:
+        lab, path = _parse_independent_ref_arg(s)
+        independent_refs[lab] = path
 
     lines: List[str] = []
 
@@ -578,6 +793,14 @@ def main() -> int:
     elif multi:
         emit("")
         emit("Phase B9 zone bisect: skipped (no H2/H3 zone sub-op taps in dumps).")
+
+    # Phase B10: independent h_main audit. Only runs when --independent-ref is
+    # provided. Passes the label->kiln_path map through an attribute on the
+    # summary function so we don't need to refactor pair_results.
+    if independent_refs:
+        label_to_kiln_path = {label: kpath for (label, kpath, _rpath) in pairs}
+        _emit_b10_summary._label_to_kiln_path = label_to_kiln_path  # type: ignore[attr-defined]
+        _emit_b10_summary(pair_results, independent_refs, args.atol, args.rtol, emit)
 
     emit("")
     if overall_ok:
