@@ -3692,3 +3692,106 @@ KILN_MTP_DEBUG=1 RUST_LOG=kiln::mtp_debug=info,info \
 - Local-only PR (`cargo check` on CPU host).
 - $0 in pod time. The Phase B execution plan above commits to ≤90 min / $40 on a future pod lease.
 
+
+## Phase B — Runtime MTP bisect trace (2026-04-21)
+
+Follow-up to "Phase A audit + Phase B instrumentation" (PR #260). Landed a fresh runtime trace of native MTP speculative decode on A6000 with `KILN_MTP_DEBUG=1` and bisected the 13 draft/verify pairs per the Phase A execution plan.
+
+### Repro
+
+```bash
+KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp \
+  KILN_MTP_DEBUG=1 KILN_MTP_DEBUG_MAX_CALLS=32 \
+  RUST_LOG=kiln::mtp_debug=info,info \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 16 --skip-training
+```
+
+- Pod: A6000 (49140 MB), CUDA 12.4, image `ghcr.io/ericflo/kiln-runpod:latest`
+- Checkpoint: `Qwen/Qwen3.5-4B` (HF download), weight prefix `model.language_model.` (VL-wrapper architecture `Qwen3_5ForConditionalGeneration`)
+- Build: warm sccache/B2, release + `--features cuda`, `KILN_CUDA_ARCHS=86`
+- Full trace: `assets/mtp-phase-b-trace-2026-04-21.log` (194 lines, 13 draft/verify pairs)
+
+### Headline numbers
+
+| Metric | Value |
+| --- | --- |
+| Draft acceptance α | **0.154** (2 of 13 drafts accepted) |
+| Decode tok/s (MTP arm) | 30.13 |
+| Decode tok/s (baseline plain, from skill doc) | 49.76 |
+| Prefill TTFT ms | 11074.2 (warmup artifact; see skill note `kiln-bench-prefill-warmup-required`) |
+| Mean ITL ms | 57.56 |
+| P99 ITL ms | 67.998 |
+
+α = 0.154 is **lower than the 0.411 previously recorded** in the "Phase X — native MTP spec-decode results" section. The prior α=0.411 figure came from a different bench run that was not captured with full instrumentation; the 0.411 number remains in PROFILING.md but should be treated as a ceiling, not a floor, until re-measured under identical settings.
+
+**MTP is a decode regression at this α.** 30.13 tok/s vs 49.76 plain-decode baseline is 0.605× — worse than off. This is consistent with the overhead-math laid out in the prior phase (verify forward + draft forward + linear-state snapshot/restore dToD exceeds the savings below ~α=0.5).
+
+### Bisect table (13 steps)
+
+Full data in `assets/mtp-phase-b-trace-2026-04-21.log`. Summary:
+
+| # | mtp_pos | base_pos | last_token | draft_top1 | target_at_0 | accepted | identity? | h_prev_l2 |
+| --- | ---: | ---: | ---: | ---: | ---: | :---: | :---: | ---: |
+|  1 | 0 | 506 |    561 |    561 |  29144 | ✗ | **Y** | 64.00 |
+|  2 | 0 | 507 |  29144 |  29144 |   6165 | ✗ | **Y** | 68.21 |
+|  3 | 0 | 508 |   6165 |   6165 |  27050 | ✗ | **Y** | 74.76 |
+|  4 | 0 | 509 |  27050 |  27050 |    279 | ✗ | **Y** | 72.58 |
+|  5 | 0 | 510 |    279 |   3377 |  29144 | ✗ |   | 73.45 |
+|  6 | 0 | 511 |  29144 |   1785 |   6165 | ✗ |   | 56.80 |
+|  7 | 0 | 512 |   6165 |  18465 |  27050 | ✗ |   | 61.05 |
+|  8 | 0 | 513 |  27050 |    279 |    279 | **✓** |   | 61.82 |
+|  9 | 1 | 515 |  24460 |  24460 |   3377 | ✗ | **Y** | 67.95 |
+| 10 | 1 | 516 |   3377 |   3377 |     13 | ✗ | **Y** | 70.53 |
+| 11 | 1 | 517 |     13 |    271 |    271 | **✓** |   | 67.90 |
+| 12 | 2 | 519 | 248068 |    271 |    198 | ✗ |   | 51.76 |
+| 13 | 2 | 520 |    198 | 248069 |    760 | ✗ |   | 46.54 |
+
+Column key:
+- `identity?` — draft top-1 equals the input `last_token` (i.e. "the MTP head says the next token will be the same as the one just generated").
+
+### Primary finding — identity-prediction bias
+
+**6 of 13 draft predictions (46.2%) have `mtp_top5[0].id == last_token`.** Four of those six are consecutive at the start of decode (`mtp_pos=0, base_pos ∈ [506..509]`) with draft top-1 = last input token and logit-1 spread ≥4 over logit-2 — the MTP head is highly confident in the wrong answer.
+
+Magnitudes are all healthy:
+- `h_prev_l2 ∈ [46.5, 74.8]` — well-formed hidden states, no zero-out or explosion.
+- `mtp_logits_l2 ∈ [1062, 1479]` and `verify_pos0_l2 ∈ [1100, 1743]` — comparable scales, so this is **not** a magnitude bug; the argmax is wrong.
+
+### Secondary finding — out-of-vocab special-token drafting
+
+At steps 12–13, drafts include tokens `248068` and `248069`, both high-id special/reserved tokens (`image_token_id=248056`, `eos_token_id=248044` from `config.json`). These appear in draft top-5 with dominant logits (e.g. step 13 draft top-1 = 248069 @ l=24.6) but do not dominate the base verify_pos0 output. This is not the primary failure mode but it does indicate the MTP head is allocating nontrivial probability to VL/reserved token IDs the base model correctly rejects.
+
+### Hypotheses ranked by strength of runtime evidence
+
+1. **fc matmul produces an embed-dominated fused state (most likely).** When the MTP `fc` projection  (2560 ← 5120) weights the embed-half of `concat([norm_emb, norm_h])` disproportionately higher than the hidden-half, the single-layer MTP transformer block + tied `lm_head` projection regresses toward `argmax(embed(x) · embed^T)[x] = x`. This is exactly the identity bias pattern observed, and is strongest when `h_prev` carries the least task-specific signal (early in the decode, steps 1–4) and weakens as `h_prev` accumulates context (steps 5+). Phase A audit marked "fc input ordering" as checked statically, but a *magnitude* asymmetry between the two halves of `fc.weight` would not show up in a shape/concat-order check — only in a per-half norm comparison or byte-equality diff against HF.
+
+2. **`pre_fc_norm_hidden` loaded into the wrong tensor slot (plausible).** If `mtp.pre_fc_norm_hidden.weight` ended up loaded into the scale of `mtp.pre_fc_norm_embedding.weight` (or vice versa), or if one of the two RMSNorm scales collapsed to near-zero, the fused input is embed-dominant for exactly the reason above. Runtime tensor dump or byte-equality against the safetensors shard would disambiguate.
+
+3. **MTP RoPE position mismatch (weaker evidence).** `forward.rs:3528` passes `mtp_pos as f32` for RoPE (0..=2 across the trace), while the token being drafted actually lives at `base_pos + 1 ∈ [507, 521]`. On a single-token MTP attention pass the RoPE rotations cancel in `Q·K` (self-attention), so this alone would not produce identity bias — but it could compound with (1) on accepted steps when the MTP cache has >1 token.
+
+4. **Structural ceiling (unlikely given pattern).** If MTP were simply a weak draft head (`num_nextn_predict_layers=1` structural limit), we would expect low-but-diffuse draft distributions — not sharp, high-confidence, wrong-at-logit-gap-of-4+ identity predictions on 4 consecutive steps. The pattern is too consistent to be noise.
+
+### Recommended next bisect step (Tier 2, ≤45 min)
+
+Byte-equality check on the 3 critical MTP tensors directly on a pod:
+
+```python
+from safetensors import safe_open
+for t in ["mtp.fc.weight", "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight"]:
+    # Compare bytes with kiln's GpuWeights.mtp via a small ffi dump, or
+    # dump kiln's loaded tensors to .npy and diff against the raw safetensors.
+```
+
+In parallel, dump `mtp.fc.weight[:, :2560]` (embed half) and `mtp.fc.weight[:, 2560:]` (hidden half) L2 norms and compare. An asymmetry >2× would directly confirm hypothesis (1).
+
+If byte-equal and halves balanced → run a one-shot HF reference parity on the same 512-token prompt and diff `draft_top_k[0]` per step. If HF also emits identity-biased drafts at step 1–4, the pattern is a genuine checkpoint property (structural, hypothesis 4). If HF does not, the gap is in kiln's forward path — most likely (3) or a subtle op in `mtp_forward_step` (e.g. residual vs. no-residual at `fused → attn`, currently implicit via `transformer_block_paged`).
+
+### Budget used
+
+- Pod: 1× A6000 on-demand (pool fallback: `runpod_api.py launch` direct, image `ghcr.io/ericflo/kiln-runpod:latest`).
+- Wall-clock: ~45 min (under the 90 min / $40 cap).
+- Work: build (5m 26s warm sccache) + model download (~3 min, parallel with build) + 1 bench run (~30s decode after 37s model load) + analysis.
+
+Pod terminated on task completion.
