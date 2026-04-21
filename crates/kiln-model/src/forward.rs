@@ -1504,6 +1504,36 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
     Ok(normalized)
 }
 
+fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result<(Tensor, Tensor)> {
+    #[cfg(feature = "metal")]
+    {
+        if input_dtype == DType::BF16 && crate::backend::metal::metal_gdn_qk_norm_supports(q, k) {
+            return crate::backend::metal::metal_gdn_qk_norm_f32_bf16(
+                q,
+                k,
+                scale as f32,
+                1e-6,
+            )
+            .context("metal gdn qk_norm kernel failed");
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        let enabled = std::env::var("KILN_ENABLE_FUSED_L2_QK_NORM").is_ok();
+        if enabled && input_dtype == DType::BF16 && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k) {
+            return kiln_rmsnorm_kernel::fused_l2_qk_norm(q, k, scale as f32, 1e-6)
+                .context("fused_l2_qk_norm kernel failed");
+        }
+    }
+
+    let q = l2_normalize(q)?; // F32
+    let k = l2_normalize(k)?; // F32
+    let q = (q * scale)?.to_dtype(input_dtype)?;
+    let k = k.to_dtype(input_dtype)?;
+    Ok((q, k))
+}
+
 /// softplus(x) = ln(1 + exp(x)), numerically stable for all x.
 ///
 /// Uses the identity: softplus(x) = max(x, 0) + ln(1 + exp(-|x|))
@@ -2282,21 +2312,22 @@ pub fn gated_deltanet_forward(
 
     // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
     //
-    // Two paths: the candle-op reference path (default) and a fused CUDA
-    // kernel (`kiln_rmsnorm_kernel::fused_l2_qk_norm`) that collapses the
-    // l2-normalize(Q) + scale(Q) + l2-normalize(K) + dtype-cast chain
-    // (~11 candle launches on tiny per-row tensors at decode shape) into a
-    // single launch.
+    // Fast paths: Metal defaults to a fused F32->BF16 kernel for the desktop
+    // hot path, and CUDA keeps its opt-in `kiln_rmsnorm_kernel::fused_l2_qk_norm`.
+    // Both collapse the l2-normalize(Q) + scale(Q) + l2-normalize(K) +
+    // dtype-cast chain (~11 candle launches on tiny per-row tensors at decode
+    // shape) into a single launch.
     //
-    // The fused kernel is **opt-in via `KILN_ENABLE_FUSED_L2_QK_NORM=1`**.
-    // Phase 6 wallclock validation on Arm B (RTX A6000, KILN_W4A16=1
+    // The CUDA fused kernel remains **opt-in via
+    // `KILN_ENABLE_FUSED_L2_QK_NORM=1`**. Phase 6 wallclock validation on Arm B
+    // (RTX A6000, KILN_W4A16=1
     // KILN_CUDA_GRAPHS=true, paged 512/128, 3 paired runs) measured a
     // median speedup of 1.0093x — well below the task's 1.05x abort floor.
     // Mean ITL improved by 0.18ms (0.92%); only p99 ITL showed a
     // meaningful win (24.78ms -> 20.25ms, -18% tail latency) and the
     // run-to-run variance tightened. The kernel is correct (parity tests
     // and the full nextest suite pass) but the wallclock impact at the
-    // Qwen3.5-4B GDN decode shape (rows = 16, hidden = 128) does not meet
+    // Qwen3.5-4B GDN decode shape does not meet
     // the bar to engage by default. See PROFILING.md "Phase 6 fused
     // qk_norm null result" for the full numbers and analysis.
     //
@@ -2307,35 +2338,7 @@ pub fn gated_deltanet_forward(
     let (q, k) = {
         kiln_nvtx::range!(c"kiln/gdn/qk_norm");
         let scale = 1.0 / (dk as f64).sqrt();
-
-        #[cfg(feature = "cuda")]
-        {
-            let enabled = std::env::var("KILN_ENABLE_FUSED_L2_QK_NORM").is_ok();
-            if enabled
-                && input_dtype == DType::BF16
-                && kiln_rmsnorm_kernel::supports_l2_qk_norm(&q, &k)
-            {
-                let (q_out, k_out) =
-                    kiln_rmsnorm_kernel::fused_l2_qk_norm(&q, &k, scale as f32, 1e-6)
-                        .context("fused_l2_qk_norm kernel failed")?;
-                (q_out, k_out)
-            } else {
-                let q = l2_normalize(&q)?; // F32
-                let k = l2_normalize(&k)?; // F32
-                let q = (q * scale)?.to_dtype(input_dtype)?;
-                let k = k.to_dtype(input_dtype)?;
-                (q, k)
-            }
-        }
-
-        #[cfg(not(feature = "cuda"))]
-        {
-            let q = l2_normalize(&q)?; // F32
-            let k = l2_normalize(&k)?; // F32
-            let q = (q * scale)?.to_dtype(input_dtype)?;
-            let k = k.to_dtype(input_dtype)?;
-            (q, k)
-        }
+        gdn_qk_norm(&q, &k, input_dtype, scale)?
     };
 
     // --- Step 6: Compute gates ---
