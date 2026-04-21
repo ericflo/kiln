@@ -3928,6 +3928,16 @@ pub fn model_forward_paged_with_last_hidden(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<(Tensor, Tensor)> {
+    // Phase B10: arm the base-model per-layer hidden-state capture window
+    // when `KILN_MTP_DUMP_HIDDEN_STATES=1`. The arm is a no-op when the env
+    // var is unset, so production cost is a single TLS borrow + env lookup.
+    // The inner forward pass fills the window with boundary-layer last-row
+    // slices plus `h_pre_final_norm`; the window is drained in
+    // `mtp_forward_step`'s dump block so the taps appear alongside the
+    // standard 8 MTP taps in the same safetensors file. The next call to
+    // this function re-arms the window, overwriting any stale buffer from
+    // a prior call whose dump did not fire (e.g. non-targeted `mtp_pos`).
+    crate::mtp_debug::arm_h_main_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -4105,11 +4115,18 @@ pub fn mtp_forward_step(
     // Drain the sub-op capture window in BOTH success and error paths so the
     // TLS slot is not left armed for the next draft step (which would corrupt
     // the next dump or leak captures into other transformer block calls).
-    let extra_subops = if dump_subops {
+    //
+    // Phase B10 appends per-layer base-model hidden-state taps captured during
+    // the prior `model_forward_paged_with_last_hidden` call on this thread.
+    // These live in a distinct TLS slot (`H_MAIN_CAPTURE`) gated on
+    // `KILN_MTP_DUMP_HIDDEN_STATES=1`; `drain_h_main_capture` returns empty
+    // when the slot was never armed, so disarmed runs pay zero cost.
+    let mut extra_subops = if dump_subops {
         crate::mtp_debug::drain_subop_capture()
     } else {
         Vec::new()
     };
+    extra_subops.extend(crate::mtp_debug::drain_h_main_capture());
     let mtp_hidden = mtp_hidden_result.context("mtp transformer block")?;
 
     // 6. Final RMSNorm + weight-tied LM head (reuses base embed_tokens_t).
@@ -4363,6 +4380,18 @@ fn model_forward_paged_inner(
                 linear_attn_idx += 1;
             }
         }
+
+        // Phase B10: capture last-row hidden state at boundary layers when
+        // `KILN_MTP_DUMP_HIDDEN_STATES=1` and a capture window has been armed
+        // (done by `model_forward_paged_with_last_hidden`). Gate is a cheap
+        // TLS-borrow + array-contains check when disarmed; zero cost in
+        // production. The narrow+contiguous copies ~H floats per captured
+        // layer (5 layers × 2560 f32 ≈ 50 KiB total) which is negligible
+        // next to the full hidden tensor.
+        if crate::mtp_debug::should_capture_hidden_state_for_layer(i) {
+            let last_row = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
+            let _ = crate::mtp_debug::capture_h_main_tap(&format!("h_layer_{i}"), &last_row);
+        }
     }
 
     // 3. Final RMSNorm + 4. LM head projection (weight-tied)
@@ -4402,6 +4431,13 @@ fn model_forward_paged_inner(
             // compare draft predictions at position 0 and sample a bonus at
             // position 1 in a single pass.
             let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
+            // Phase B10: `h_pre_final_norm` is the same tensor the MTP head
+            // receives as `h_prev`. Captured under a distinct name so the
+            // comparator can verify the final-layer → h_main handoff
+            // independently from `h_layer_31`.
+            if crate::mtp_debug::is_h_main_capture_armed() {
+                let _ = crate::mtp_debug::capture_h_main_tap("h_pre_final_norm", &last_hidden);
+            }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
