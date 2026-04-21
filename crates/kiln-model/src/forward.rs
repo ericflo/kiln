@@ -4296,11 +4296,27 @@ pub fn mtp_forward_step(
     })?;
     let device = weights.embed_tokens.device();
 
+    // Phase C6 dump pre-flight: consume the dump slot up-front so we can arm
+    // the pre-RoPE capture window BEFORE any of the 5 pre-RoPE tensors
+    // (token_emb, norm_emb, norm_h, concat, fused) are materialized. The slot
+    // is one-shot per (process, mtp_pos), so `should_dump` threads through to
+    // the dump block below without being re-consumed. When
+    // `KILN_MTP_DUMP_PRE_ROPE` is unset the arm is a no-op and the per-tap
+    // `capture_pre_rope_tap` calls short-circuit on a closed TLS window.
+    let should_dump = crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos);
+    let dump_pre_rope = should_dump && crate::mtp_debug::is_dump_pre_rope_enabled();
+    if dump_pre_rope {
+        crate::mtp_debug::arm_pre_rope_capture();
+    }
+
     // 1. Token embedding for the draft token. `embedding_lookup` returns
     //    shape [1, H]; unsqueeze to [1, 1, H] to match transformer-block I/O.
     let token_ids = [draft_token_id];
     let token_emb = embedding_lookup(&token_ids, &weights.embed_tokens)?; // [1, H]
     let token_emb = token_emb.unsqueeze(0)?; // [1, 1, H]
+    if dump_pre_rope {
+        let _ = crate::mtp_debug::capture_pre_rope_tap("token_emb", &token_emb);
+    }
 
     // 2-3. Dual RMSNorms. `h_prev` is [1, 1, H] pre-final-norm.
     //
@@ -4320,34 +4336,39 @@ pub fn mtp_forward_step(
         kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_emb");
         rms_norm(&token_emb, norm_emb_weight, config.rms_norm_eps)?
     };
+    if dump_pre_rope {
+        let _ = crate::mtp_debug::capture_pre_rope_tap("norm_emb", &norm_emb);
+    }
     let norm_h = {
         kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_hidden");
         rms_norm(h_prev, norm_h_weight, config.rms_norm_eps)?
     };
+    if dump_pre_rope {
+        let _ = crate::mtp_debug::capture_pre_rope_tap("norm_h", &norm_h);
+    }
 
     // 4. Concat along the hidden dim and fuse: [1, 1, 2H] @ fc_t[2H, H] -> [1, 1, H]
     //
     // We keep the concat alive (named `concat`) so the Phase B6 dump can
     // capture the exact bytes fed into `fc.weight` as `fc_input`.
     let concat = Tensor::cat(&[&norm_emb, &norm_h], 2)?.contiguous()?;
+    if dump_pre_rope {
+        let _ = crate::mtp_debug::capture_pre_rope_tap("concat", &concat);
+    }
     let fused = {
         kiln_nvtx::range!(c"kiln/mtp/fc");
         concat.broadcast_matmul(&mtp.fc_t)?
     };
+    if dump_pre_rope {
+        let _ = crate::mtp_debug::capture_pre_rope_tap("fused", &fused);
+    }
 
-    // Phase B7 dump pre-flight: decide whether this draft step should
-    // dump for the current `mtp_pos` and whether to capture per-sub-op
-    // taps inside the inner transformer block. Both decisions happen
-    // BEFORE we run the block so that arming the sub-op capture window
-    // and running the block are bracketed correctly.
-    //
-    // `should_dump` is true at most once per (process, mtp_pos) pair
-    // (see `try_consume_dump_slot_for_pos`). `dump_subops` is a strict
-    // subset: only true when KILN_MTP_DUMP_SUBOPS=1 AND we are about to
-    // dump anyway. This keeps the production path entirely free of
-    // sub-op capture overhead — the TLS check inside `capture_subop`
-    // is a no-op when the window is closed.
-    let should_dump = crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos);
+    // Phase B7 sub-op capture pre-flight. `should_dump` was already consumed
+    // above (moved up to bracket Phase C6 pre-RoPE arming). `dump_subops` is
+    // a strict subset: only true when KILN_MTP_DUMP_SUBOPS=1 AND we are about
+    // to dump anyway. This keeps the production path entirely free of sub-op
+    // capture overhead — the TLS check inside `capture_subop` is a no-op when
+    // the window is closed.
     let dump_subops = should_dump && crate::mtp_debug::is_dump_subops_enabled();
     if dump_subops {
         crate::mtp_debug::arm_subop_capture();
@@ -4468,6 +4489,11 @@ pub fn mtp_forward_step(
             // `KILN_MTP_DUMP_B12_GQA_TAPS` is unset, which keeps the dump
             // format bit-identical to the pre-B12 layout.
             let b12_taps = crate::mtp_debug::drain_b12_gqa_capture();
+            // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
+            // norm_emb, norm_h, concat, fused) captured above. Empty when
+            // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
+            // bit-identical to the pre-C6 layout.
+            let c6_taps = crate::mtp_debug::drain_pre_rope_capture();
             match crate::mtp_debug::write_mtp_dump(
                 &path,
                 draft_token_id,
@@ -4479,6 +4505,7 @@ pub fn mtp_forward_step(
                 &prompt_tokens,
                 &b11_taps,
                 &b12_taps,
+                &c6_taps,
             ) {
                 Ok(()) => tracing::info!(
                     target: "kiln::mtp_debug",
@@ -4489,6 +4516,7 @@ pub fn mtp_forward_step(
                     prompt_tokens_len = prompt_tokens.len(),
                     b11_taps = b11_taps.len(),
                     b12_taps = b12_taps.len(),
+                    c6_taps = c6_taps.len(),
                     "mtp_b7_dump_written"
                 ),
                 Err(e) => tracing::warn!(
