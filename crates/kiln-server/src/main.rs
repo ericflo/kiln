@@ -11,12 +11,13 @@ use kiln_server::device::select_device;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
+use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
-use state::AppState;
+use state::{AppState, ModelBackend};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -199,6 +200,7 @@ async fn main() -> Result<()> {
     let shutdown_flag = state.shutdown.clone();
     kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
 
+    spawn_backend_prewarm(state.clone());
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");
@@ -209,7 +211,6 @@ async fn main() -> Result<()> {
         model_path = model_path.unwrap_or("none (mock mode)"),
         "kiln listening"
     );
-
     // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
     // then force-exit after a timeout.
     let shutdown_timeout_secs = config.server.shutdown_timeout_secs;
@@ -228,6 +229,63 @@ async fn main() -> Result<()> {
     tracing::warn!("shutdown timeout reached — exiting");
 
     Ok(())
+}
+
+fn spawn_backend_prewarm(state: AppState) {
+    let ModelBackend::Real {
+        runner,
+        block_manager,
+        paged_cache,
+    } = state.backend.as_ref()
+    else {
+        return;
+    };
+
+    let is_metal = {
+        let runner_guard = runner.read().unwrap();
+        matches!(
+            runner_guard.weights.embed_tokens.device(),
+            candle_core::Device::Metal(_)
+        )
+    };
+    if !is_metal {
+        return;
+    }
+
+    let runner = runner.clone();
+    let block_manager = block_manager.clone();
+    let paged_cache = paged_cache.clone();
+
+    tokio::spawn(async move {
+        let prewarm = tokio::task::spawn_blocking(move || {
+            let runner_guard = runner.read().unwrap();
+            let mut bm_guard = block_manager.lock().unwrap();
+            let mut pc_guard = paged_cache.lock().unwrap();
+            let params = SamplingParams {
+                temperature: 0.0,
+                top_p: 1.0,
+                top_k: 0,
+                max_tokens: 1,
+                repetition_penalty: 1.0,
+                stop: Vec::new(),
+                seed: Some(42),
+            };
+            let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8];
+            runner_guard.generate_from_tokens_paged(
+                &prompt_tokens,
+                &params,
+                &mut bm_guard,
+                &mut pc_guard,
+            )
+        })
+        .await;
+
+        match prewarm {
+            Ok(Ok(_)) => tracing::info!("background inference prewarm complete"),
+            Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
+            Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
+        }
+    });
 }
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown.

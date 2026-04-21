@@ -154,7 +154,8 @@ pub struct MtpGpuWeights {
     /// Concat-then-project: `[hidden_size, 2 * hidden_size]`, BF16 on device.
     /// Ingests `concat(norm_embed, norm_hidden)` → produces `[seq, hidden_size]`.
     pub fc: Tensor,
-    /// Pre-transposed `fc` for the forward hot path: `[2 * hidden_size, hidden_size]`, contiguous.
+    /// Cached `fc` transpose for the forward hot path: `[2 * hidden_size, hidden_size]`,
+    /// materialized contiguously once at load time.
     /// Same transpose-caching pattern as the base model's `*_proj_t` fields
     /// (PRs #117/#124/#128) — eliminates a per-draft-step `.t().contiguous()`
     /// on a 26 MiB bf16 matrix when drafting.
@@ -209,7 +210,8 @@ pub struct GpuFullAttentionWeights {
     pub o_proj: Tensor,
     pub q_norm: Tensor,
     pub k_norm: Tensor,
-    /// Pre-transposed q_proj for the forward hot path (contiguous).
+    /// Cached q_proj transpose for the forward hot path, materialized
+    /// contiguously once at load time.
     /// Avoids re-transposing bf16 projection weights on every layer / every step.
     /// Per PR #124 PROFILING.md: attention projection ucopy_bf16 was ~6.9% of decode GPU time.
     pub q_proj_t: Tensor,
@@ -234,7 +236,8 @@ pub struct GpuLinearAttentionWeights {
     pub norm: Tensor,
     pub a_log: Tensor,
     pub dt_bias: Tensor,
-    /// Pre-transposed GDN projection weights for the forward hot path (contiguous).
+    /// Cached GDN projection transposes for the forward hot path,
+    /// materialized contiguously once at load time.
     /// Same fix class as PR #128 (MLP/full-attn pre-transpose) and PR #117 (embed_tokens_t).
     /// Per Phase 6 PROFILING.md: GDN in_proj+out_proj together accounted for ~95% of
     /// decode-time `ucopy_bf16` mass on Qwen3.5-4B; eliminating the per-step `.t()` copies
@@ -250,7 +253,8 @@ pub struct GpuFfnWeights {
     pub gate_proj: Tensor,
     pub up_proj: Tensor,
     pub down_proj: Tensor,
-    /// Pre-transposed MLP projections for the forward hot path (contiguous).
+    /// Cached MLP projection transposes for the forward hot path,
+    /// materialized contiguously once at load time.
     /// Avoids re-transposing bf16 projection weights on every layer / every step.
     /// Per PR #124 PROFILING.md: MLP projection ucopy_bf16 was 50.7% of decode GPU time
     /// (61.8% of all ucopy_bf16 mass). Same class of fix as PR #117 (embed_tokens_t).
@@ -382,6 +386,15 @@ fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let t = Tensor::from_raw_buffer(&w.data, dtype, &w.shape, device)
         .context("failed to create tensor from raw buffer")?;
     Ok(t)
+}
+
+/// Cache a transpose for repeated GEMMs.
+///
+/// Matmuls on the hot path repeatedly consume these tensors, so materialize
+/// the transpose once at load time instead of relying on backend-specific
+/// strided access behaviour.
+fn cached_transpose(weight: &Tensor) -> Result<Tensor> {
+    Ok(weight.t()?.contiguous()?)
 }
 
 /// Tiny BF16 placeholder that replaces a projection's pre-transposed
@@ -540,11 +553,8 @@ impl GpuWeights {
     ) -> Result<Self> {
         let embed_tokens =
             weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
-        let embed_tokens_t = embed_tokens
-            .t()
-            .context("embed_tokens transpose")?
-            .contiguous()
-            .context("embed_tokens transpose contiguous")?;
+        let embed_tokens_t =
+            cached_transpose(&embed_tokens).context("embed_tokens cached transpose")?;
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
@@ -575,26 +585,14 @@ impl GpuWeights {
                     let k_proj = weight_to_tensor(&attn.k_proj, device).context(ctx("k_proj"))?;
                     let v_proj = weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
                     let o_proj = weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
-                    let q_proj_t = q_proj
-                        .t()
-                        .context(ctx("q_proj.t"))?
-                        .contiguous()
-                        .context(ctx("q_proj.t contiguous"))?;
-                    let k_proj_t = k_proj
-                        .t()
-                        .context(ctx("k_proj.t"))?
-                        .contiguous()
-                        .context(ctx("k_proj.t contiguous"))?;
-                    let v_proj_t = v_proj
-                        .t()
-                        .context(ctx("v_proj.t"))?
-                        .contiguous()
-                        .context(ctx("v_proj.t contiguous"))?;
-                    let o_proj_t = o_proj
-                        .t()
-                        .context(ctx("o_proj.t"))?
-                        .contiguous()
-                        .context(ctx("o_proj.t contiguous"))?;
+                    let q_proj_t =
+                        cached_transpose(&q_proj).context(ctx("q_proj cached transpose"))?;
+                    let k_proj_t =
+                        cached_transpose(&k_proj).context(ctx("k_proj cached transpose"))?;
+                    let v_proj_t =
+                        cached_transpose(&v_proj).context(ctx("v_proj cached transpose"))?;
+                    let o_proj_t =
+                        cached_transpose(&o_proj).context(ctx("o_proj cached transpose"))?;
                     // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
                     // Marlin batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
@@ -632,31 +630,16 @@ impl GpuWeights {
                         weight_to_tensor(&attn.in_proj_a, device).context(ctx("in_proj_a"))?;
                     let in_proj_b =
                         weight_to_tensor(&attn.in_proj_b, device).context(ctx("in_proj_b"))?;
-                    let in_proj_qkv_t = in_proj_qkv
-                        .t()
-                        .context(ctx("in_proj_qkv.t"))?
-                        .contiguous()
-                        .context(ctx("in_proj_qkv.t contiguous"))?;
-                    let in_proj_z_t = in_proj_z
-                        .t()
-                        .context(ctx("in_proj_z.t"))?
-                        .contiguous()
-                        .context(ctx("in_proj_z.t contiguous"))?;
-                    let in_proj_a_t = in_proj_a
-                        .t()
-                        .context(ctx("in_proj_a.t"))?
-                        .contiguous()
-                        .context(ctx("in_proj_a.t contiguous"))?;
-                    let in_proj_b_t = in_proj_b
-                        .t()
-                        .context(ctx("in_proj_b.t"))?
-                        .contiguous()
-                        .context(ctx("in_proj_b.t contiguous"))?;
-                    let out_proj_t = out_proj
-                        .t()
-                        .context(ctx("out_proj.t"))?
-                        .contiguous()
-                        .context(ctx("out_proj.t contiguous"))?;
+                    let in_proj_qkv_t = cached_transpose(&in_proj_qkv)
+                        .context(ctx("in_proj_qkv cached transpose"))?;
+                    let in_proj_z_t =
+                        cached_transpose(&in_proj_z).context(ctx("in_proj_z cached transpose"))?;
+                    let in_proj_a_t =
+                        cached_transpose(&in_proj_a).context(ctx("in_proj_a cached transpose"))?;
+                    let in_proj_b_t =
+                        cached_transpose(&in_proj_b).context(ctx("in_proj_b cached transpose"))?;
+                    let out_proj_t =
+                        cached_transpose(&out_proj).context(ctx("out_proj cached transpose"))?;
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                         in_proj_qkv,
                         in_proj_z,
@@ -681,21 +664,11 @@ impl GpuWeights {
             let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
             let down_proj =
                 weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
-            let gate_proj_t = gate_proj
-                .t()
-                .context(ctx("gate_proj.t"))?
-                .contiguous()
-                .context(ctx("gate_proj.t contiguous"))?;
-            let up_proj_t = up_proj
-                .t()
-                .context(ctx("up_proj.t"))?
-                .contiguous()
-                .context(ctx("up_proj.t contiguous"))?;
-            let down_proj_t = down_proj
-                .t()
-                .context(ctx("down_proj.t"))?
-                .contiguous()
-                .context(ctx("down_proj.t contiguous"))?;
+            let gate_proj_t =
+                cached_transpose(&gate_proj).context(ctx("gate_proj cached transpose"))?;
+            let up_proj_t = cached_transpose(&up_proj).context(ctx("up_proj cached transpose"))?;
+            let down_proj_t =
+                cached_transpose(&down_proj).context(ctx("down_proj cached transpose"))?;
             // KILN_W4A16=1 opt-in: queue each MLP projection for the
             // post-loop Marlin batch pack. See the q_proj comment above —
             // the `*_proj_marlin` fields start as None, and
@@ -794,11 +767,7 @@ impl GpuWeights {
         // the MTP layer's q_proj + MLP trio.
         let mtp = if let Some(mtp_w) = &weights.mtp {
             let fc = weight_to_tensor(&mtp_w.fc, device).context("mtp.fc")?;
-            let fc_t = fc
-                .t()
-                .context("mtp.fc.t")?
-                .contiguous()
-                .context("mtp.fc.t contiguous")?;
+            let fc_t = cached_transpose(&fc).context("mtp.fc cached transpose")?;
             let pre_fc_norm_embedding = weight_to_tensor(&mtp_w.pre_fc_norm_embedding, device)
                 .context("mtp.pre_fc_norm_embedding")?;
             let pre_fc_norm_hidden = weight_to_tensor(&mtp_w.pre_fc_norm_hidden, device)
@@ -831,26 +800,14 @@ impl GpuWeights {
                             weight_to_tensor(&attn.v_proj, device).context(ctx("v_proj"))?;
                         let o_proj =
                             weight_to_tensor(&attn.o_proj, device).context(ctx("o_proj"))?;
-                        let q_proj_t = q_proj
-                            .t()
-                            .context(ctx("q_proj.t"))?
-                            .contiguous()
-                            .context(ctx("q_proj.t contiguous"))?;
-                        let k_proj_t = k_proj
-                            .t()
-                            .context(ctx("k_proj.t"))?
-                            .contiguous()
-                            .context(ctx("k_proj.t contiguous"))?;
-                        let v_proj_t = v_proj
-                            .t()
-                            .context(ctx("v_proj.t"))?
-                            .contiguous()
-                            .context(ctx("v_proj.t contiguous"))?;
-                        let o_proj_t = o_proj
-                            .t()
-                            .context(ctx("o_proj.t"))?
-                            .contiguous()
-                            .context(ctx("o_proj.t contiguous"))?;
+                        let q_proj_t =
+                            cached_transpose(&q_proj).context(ctx("q_proj cached transpose"))?;
+                        let k_proj_t =
+                            cached_transpose(&k_proj).context(ctx("k_proj cached transpose"))?;
+                        let v_proj_t =
+                            cached_transpose(&v_proj).context(ctx("v_proj cached transpose"))?;
+                        let o_proj_t =
+                            cached_transpose(&o_proj).context(ctx("o_proj cached transpose"))?;
                         GpuAttentionWeights::Full(GpuFullAttentionWeights {
                             q_proj,
                             k_proj,
@@ -879,21 +836,12 @@ impl GpuWeights {
                 let up_proj = weight_to_tensor(&lw.mlp.up_proj, device).context(ctx("up_proj"))?;
                 let down_proj =
                     weight_to_tensor(&lw.mlp.down_proj, device).context(ctx("down_proj"))?;
-                let gate_proj_t = gate_proj
-                    .t()
-                    .context(ctx("gate_proj.t"))?
-                    .contiguous()
-                    .context(ctx("gate_proj.t contiguous"))?;
-                let up_proj_t = up_proj
-                    .t()
-                    .context(ctx("up_proj.t"))?
-                    .contiguous()
-                    .context(ctx("up_proj.t contiguous"))?;
-                let down_proj_t = down_proj
-                    .t()
-                    .context(ctx("down_proj.t"))?
-                    .contiguous()
-                    .context(ctx("down_proj.t contiguous"))?;
+                let gate_proj_t =
+                    cached_transpose(&gate_proj).context(ctx("gate_proj cached transpose"))?;
+                let up_proj_t =
+                    cached_transpose(&up_proj).context(ctx("up_proj cached transpose"))?;
+                let down_proj_t =
+                    cached_transpose(&down_proj).context(ctx("down_proj cached transpose"))?;
 
                 GpuLayerWeights {
                     input_layernorm,
@@ -1482,6 +1430,40 @@ fn compute_w_chunk_fallback(
     Ok(Tensor::cat(&w_rows, 2)?)
 }
 
+/// Specialized single-token GDN recurrence.
+///
+/// This is the non-CUDA fast path for `seq_len == 1`, avoiding the chunkwise
+/// prep work (`KKT`, `QKT`, masks, triangular solve) that is only worthwhile
+/// when a chunk contains multiple tokens.
+fn gdn_single_token_recurrence(
+    q: &Tensor,         // [B, nv, 1, dk]
+    k: &Tensor,         // [B, nv, 1, dk]
+    v: &Tensor,         // [B, nv, 1, dv]
+    beta: &Tensor,      // [B, nv, 1]
+    g: &Tensor,         // [B, nv, 1]
+    state: &mut Tensor, // [B, nv, dk, dv]
+) -> Result<Tensor> {
+    let dtype = q.dtype();
+
+    let p = g.to_dtype(DType::F32)?.exp()?.to_dtype(dtype)?;
+    let p_u = p.unsqueeze(3)?; // [B, nv, 1, 1]
+
+    let k_t = k.transpose(2, 3)?.contiguous()?; // [B, nv, dk, 1]
+    let ks_entry = k.matmul(&*state)?; // [B, nv, 1, dv]
+    let q_s = q.matmul(&*state)?; // [B, nv, 1, dv]
+
+    let v_prime = (v - ks_entry.broadcast_mul(&p_u)?)?;
+    let w = v_prime.broadcast_mul(&beta.unsqueeze(3)?)?; // [B, nv, 1, dv]
+    let qk = q.matmul(&k_t)?; // [B, nv, 1, 1]
+    let out = (q_s.broadcast_mul(&p_u)? + qk.matmul(&w)?)?;
+
+    let state_scaled = state.broadcast_mul(&p_u)?;
+    let delta_state = k_t.matmul(&w)?;
+    *state = (state_scaled + delta_state)?;
+
+    Ok(out)
+}
+
 /// Analytical chunkwise form of the Gated DeltaNet recurrence.
 ///
 /// The per-token recurrence is
@@ -1549,33 +1531,36 @@ fn gdn_chunkwise_recurrence(
     // decode regression in PR #80. The backend's `gdn_recurrent_step`
     // kernel (CUDA today) collapses the whole recurrence into one block
     // per (B,H).
-    if seq_len == 1
-        && dtype == DType::BF16
-        && state.dtype() == DType::BF16
-        && backend.supports_gdn_recurrent_step()
-    {
-        // The five squeeze+contiguous calls below each emit a bf16 ucopy
-        // kernel before the recurrent forward runs. PROFILING.md (PR #107)
-        // marks this block as the suspected source of the 24-GDN-layer
-        // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
-        // it separately from the kernel itself.
-        let (q1, k1, v1, beta1, g1) = {
-            kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
-            (
-                q.squeeze(2)?.contiguous()?,
-                k.squeeze(2)?.contiguous()?,
-                v.squeeze(2)?.contiguous()?,
-                beta.squeeze(2)?.contiguous()?,
-                g.squeeze(2)?.contiguous()?,
-            )
-        };
-        let out_opt = {
-            kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
-            backend.gdn_recurrent_step(&q1, &k1, &v1, &beta1, &g1, state)?
-        };
-        if let Some(out) = out_opt {
-            return Ok(out.unsqueeze(2)?);
+    if seq_len == 1 {
+        if dtype == DType::BF16
+            && state.dtype() == DType::BF16
+            && backend.supports_gdn_recurrent_step()
+        {
+            // The five squeeze+contiguous calls below each emit a bf16 ucopy
+            // kernel before the recurrent forward runs. PROFILING.md (PR #107)
+            // marks this block as the suspected source of the 24-GDN-layer
+            // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
+            // it separately from the kernel itself.
+            let (q1, k1, v1, beta1, g1) = {
+                kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
+                (
+                    q.squeeze(2)?.contiguous()?,
+                    k.squeeze(2)?.contiguous()?,
+                    v.squeeze(2)?.contiguous()?,
+                    beta.squeeze(2)?.contiguous()?,
+                    g.squeeze(2)?.contiguous()?,
+                )
+            };
+            let out_opt = {
+                kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
+                backend.gdn_recurrent_step(&q1, &k1, &v1, &beta1, &g1, state)?
+            };
+            if let Some(out) = out_opt {
+                return Ok(out.unsqueeze(2)?);
+            }
         }
+
+        return gdn_single_token_recurrence(q, k, v, beta, g, state);
     }
 
     let full_chunks = seq_len / chunk_size;
@@ -4609,6 +4594,41 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_cached_transpose_materializes_on_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let t = Tensor::new(&[[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]], &device)?;
+
+        let tt = cached_transpose(&t)?;
+
+        assert!(tt.is_contiguous());
+        assert_eq!(tt.dims(), &[3, 2]);
+        assert_eq!(
+            tt.to_vec2::<f32>()?,
+            vec![vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]]
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_cached_transpose_materializes_on_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let t = Tensor::new(&[[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]], &device)?;
+
+        let tt = cached_transpose(&t)?;
+
+        assert!(tt.is_contiguous());
+        assert_eq!(tt.dims(), &[3, 2]);
+        assert_eq!(
+            tt.to_vec2::<f32>()?,
+            vec![vec![1.0, 4.0], vec![2.0, 5.0], vec![3.0, 6.0]]
+        );
+        Ok(())
+    }
+
     /// Helper: build tiny GpuWeights for testing model_forward shape propagation.
     /// Uses full-attention layers only (no linear attention) with small dimensions.
     fn make_tiny_gpu_weights(
@@ -5734,6 +5754,68 @@ mod tests {
             assert!(sd < 1e-3, "chunkwise(cs={cs}) state diff {sd}");
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_single_token_matches_sequential() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let b = 1;
+        let nv = 2;
+        let t = 1;
+        let dk = 4;
+        let dv = 4;
+
+        let q = det_tensor(&[b, nv, t, dk], 1.0, 0.0, &device)?.to_dtype(dtype)?;
+        let k = det_tensor(&[b, nv, t, dk], 0.8, 0.1, &device)?.to_dtype(dtype)?;
+        let v = det_tensor(&[b, nv, t, dv], 0.6, -0.2, &device)?.to_dtype(dtype)?;
+        let beta_raw = det_tensor(&[b, nv, t], 1.5, 0.0, &device)?.to_dtype(dtype)?;
+        let beta = {
+            let ones = Tensor::ones_like(&beta_raw)?;
+            (&ones / (&ones + &beta_raw.neg()?.exp()?)?)?
+        };
+        let g_raw = det_tensor(&[b, nv, t], 0.2, 0.0, &device)?.to_dtype(dtype)?;
+        let g = (g_raw.abs()? * (-1.0_f64))?;
+
+        let state_init = det_tensor(&[b, nv, dk, dv], 0.1, 0.0, &device)?.to_dtype(dtype)?;
+        let backend = test_backend(&device);
+
+        let mut state_fast = state_init.clone();
+        let out_fast = gdn_chunkwise_recurrence(
+            &backend,
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            &mut state_fast,
+            GDN_CHUNK_SIZE,
+        )?;
+
+        let mut state_seq = state_init.clone();
+        let out_seq = gdn_sequential_reference(&q, &k, &v, &beta, &g, &mut state_seq)?;
+
+        let out_diff = (&out_fast - &out_seq)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let state_diff = (&state_fast - &state_seq)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+
+        assert!(
+            out_diff < 1e-5,
+            "single-token fast path output drifted: max_abs_diff={out_diff:e}"
+        );
+        assert!(
+            state_diff < 1e-5,
+            "single-token fast path state drifted: max_abs_diff={state_diff:e}"
+        );
         Ok(())
     }
 

@@ -298,6 +298,42 @@ impl Default for SpeculativeDecodingConfig {
 }
 
 impl SpeculativeDecodingConfig {
+    /// Build the speculative config from defaults plus the KILN_SPEC_* env vars.
+    ///
+    /// This mirrors the desktop app's control surface, which drives kiln
+    /// through env vars rather than CLI flags.
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        cfg.apply_env_overrides();
+        cfg
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("KILN_SPEC_ENABLED") {
+            self.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("KILN_SPEC_METHOD") {
+            if let Some(m) = SpecMethod::parse_env(&v) {
+                self.method = m;
+            } else {
+                tracing::warn!(
+                    "ignoring unknown KILN_SPEC_METHOD='{}' (expected off|skip_layer|mtp)",
+                    v
+                );
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_SPEC_NUM_TOKENS") {
+            if let Ok(n) = v.parse() {
+                self.num_speculative_tokens = n;
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_SPEC_DRAFT_LAYERS") {
+            if let Ok(n) = v.parse() {
+                self.draft_layers = n;
+            }
+        }
+    }
+
     /// Resolve the effective speculative-decoding method.
     ///
     /// Returns `Off` if the feature is disabled; otherwise returns the

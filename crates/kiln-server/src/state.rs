@@ -286,19 +286,19 @@ impl AppState {
             * block_size
             * kv_dtype_bytes) as u64;
 
-        // Detect VRAM for auto-configuration
+        // Detect VRAM once and reuse it for both auto-sizing and reporting so
+        // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_core::vram::detect_vram();
+        let total_vram = detected_gpu_total_memory(&device, &vram_info);
 
         // Determine num_blocks — either from config, or memory-aware auto-calculation
         let num_blocks = if let Some(explicit) = memory_cfg.num_blocks {
             explicit
         } else {
             // Try to compute from available VRAM and inference fraction
-            let total_vram = query_gpu_total_memory(&device);
             if total_vram > 0 && bytes_per_block > 0 {
-                let available_for_kv =
-                    ((total_vram.saturating_sub(estimated_model_bytes)) as f64 * inference_fraction)
-                        as u64;
+                let available_for_kv = ((total_vram.saturating_sub(estimated_model_bytes)) as f64
+                    * inference_fraction) as u64;
                 let auto_blocks = (available_for_kv / bytes_per_block) as usize;
                 let auto_blocks = auto_blocks.max(64); // minimum 64 blocks
                 tracing::info!(
@@ -331,10 +331,7 @@ impl AppState {
                 std::env::var("KILN_ALLOW_FP8_ON_METAL").as_deref(),
                 Ok("1") | Ok("true") | Ok("TRUE")
             );
-            if requested
-                && matches!(device, candle_core::Device::Metal(_))
-                && !metal_override
-            {
+            if requested && matches!(device, candle_core::Device::Metal(_)) && !metal_override {
                 tracing::warn!(
                     "FP8 cache disabled on Metal (CPU round-trip cost); \
                      set KILN_ALLOW_FP8_ON_METAL=1 to override"
@@ -344,7 +341,13 @@ impl AppState {
                 requested
             }
         };
-        tracing::info!(num_blocks, block_size, ?kv_dtype, fp8_enabled, "allocating paged KV cache");
+        tracing::info!(
+            num_blocks,
+            block_size,
+            ?kv_dtype,
+            fp8_enabled,
+            "allocating paged KV cache"
+        );
 
         let block_manager = BlockManager::new(num_blocks, block_size);
         let paged_cache = PagedKvCache::new_with_fp8(
@@ -360,7 +363,6 @@ impl AppState {
         .expect("failed to create PagedKvCache");
 
         let kv_cache_bytes = num_blocks as u64 * bytes_per_block;
-        let total_vram = query_gpu_total_memory(&device);
         let memory_budget = GpuMemoryBudget::compute(
             total_vram,
             estimated_model_bytes,
@@ -418,8 +420,7 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
     // Per layer: ~8 * hidden_size^2 + 3 * hidden_size * intermediate_size (approximate)
     // LM head: vocab_size * hidden_size (often tied with embedding)
     let embedding_params = config.vocab_size as u64 * config.hidden_size as u64;
-    let per_layer_params =
-        8 * (config.hidden_size as u64 * config.hidden_size as u64)
+    let per_layer_params = 8 * (config.hidden_size as u64 * config.hidden_size as u64)
         + 3 * (config.hidden_size as u64 * config.intermediate_size as u64);
     let total_params = embedding_params + per_layer_params * config.num_layers as u64;
 
@@ -430,8 +431,10 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
 ///
 /// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
 /// hw.memsize on Apple Silicon + env override).
-fn query_gpu_total_memory(device: &candle_core::Device) -> u64 {
-    let vram = kiln_core::vram::detect_vram();
+fn detected_gpu_total_memory(
+    device: &candle_core::Device,
+    vram: &kiln_core::vram::GpuVramInfo,
+) -> u64 {
     match device {
         #[cfg(feature = "cuda")]
         candle_core::Device::Cuda(_) => {
@@ -502,13 +505,17 @@ mod tests {
         // Only 4GB available for training
         assert_eq!(budget.training_budget_bytes, 4 * 1024 * 1024 * 1024);
         // Requesting 8GB should fail
-        assert!(budget
-            .check_training_feasible(8 * 1024 * 1024 * 1024)
-            .is_err());
+        assert!(
+            budget
+                .check_training_feasible(8 * 1024 * 1024 * 1024)
+                .is_err()
+        );
         // Requesting 3GB should succeed
-        assert!(budget
-            .check_training_feasible(3 * 1024 * 1024 * 1024)
-            .is_ok());
+        assert!(
+            budget
+                .check_training_feasible(3 * 1024 * 1024 * 1024)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -528,7 +535,10 @@ mod tests {
         let bytes = estimate_model_memory_bytes(&config);
         let gb = bytes as f64 / 1e9;
         // Should be in the ballpark of 8GB for Qwen3.5-4B bf16
-        assert!(gb > 4.0 && gb < 20.0, "model estimate {gb:.1}GB seems wrong");
+        assert!(
+            gb > 4.0 && gb < 20.0,
+            "model estimate {gb:.1}GB seems wrong"
+        );
     }
 
     #[test]

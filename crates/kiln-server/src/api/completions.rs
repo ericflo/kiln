@@ -5,8 +5,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use std::path::Path;
@@ -15,8 +15,9 @@ use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::ChatMessage;
 use kiln_model::lora_loader::LoraWeights;
-use kiln_model::{ModelRunner, StreamEvent};
+use kiln_model::{GenerationOutput, ModelRunner, SpeculativeConfig, StreamEvent};
 
+use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::metrics::RequestStatus;
 use crate::state::{AppState, ModelBackend};
@@ -73,7 +74,9 @@ where
         Content::Parts(parts) => {
             let mut out = String::new();
             for part in parts {
-                let Some(obj) = part.as_object() else { continue };
+                let Some(obj) = part.as_object() else {
+                    continue;
+                };
                 let ty = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if ty == "text" {
                     if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
@@ -135,6 +138,67 @@ pub struct Delta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedSpeculativeMode {
+    Off,
+    SkipLayer(SpeculativeConfig),
+    Mtp,
+}
+
+fn resolve_skip_layer_config(
+    model_config: &kiln_core::config::ModelConfig,
+    speculative: &SpeculativeDecodingConfig,
+) -> Option<SpeculativeConfig> {
+    let config = SpeculativeConfig {
+        num_speculative_tokens: speculative.num_speculative_tokens,
+        draft_layers: speculative.draft_layers,
+    };
+
+    config.validate(model_config).ok().map(|_| config)
+}
+
+fn resolve_speculative_mode_from_config(
+    model_config: &kiln_core::config::ModelConfig,
+    speculative: &SpeculativeDecodingConfig,
+    sampling: &SamplingParams,
+    mtp_supported: bool,
+    has_active_lora: bool,
+) -> ResolvedSpeculativeMode {
+    let skip_layer = resolve_skip_layer_config(model_config, speculative);
+
+    match speculative.effective_method() {
+        SpecMethod::Off => ResolvedSpeculativeMode::Off,
+        SpecMethod::SkipLayer => skip_layer
+            .map(ResolvedSpeculativeMode::SkipLayer)
+            .unwrap_or(ResolvedSpeculativeMode::Off),
+        SpecMethod::Mtp => {
+            if mtp_supported && sampling.temperature == 0.0 && !has_active_lora {
+                ResolvedSpeculativeMode::Mtp
+            } else {
+                skip_layer
+                    .map(ResolvedSpeculativeMode::SkipLayer)
+                    .unwrap_or(ResolvedSpeculativeMode::Off)
+            }
+        }
+    }
+}
+
+fn resolve_speculative_mode(
+    state: &AppState,
+    sampling: &SamplingParams,
+    mtp_supported: bool,
+    has_active_lora: bool,
+) -> ResolvedSpeculativeMode {
+    let speculative = SpeculativeDecodingConfig::from_env();
+    resolve_speculative_mode_from_config(
+        &state.model_config,
+        &speculative,
+        sampling,
+        mtp_supported,
+        has_active_lora,
+    )
 }
 
 async fn chat_completions(
@@ -284,7 +348,10 @@ async fn ensure_adapter(
             // Two-phase load: read device/num_layers, load weights, then swap.
             let (device, num_layers) = {
                 let guard = runner.read().unwrap();
-                (guard.weights.embed_tokens.device().clone(), guard.config.num_layers)
+                (
+                    guard.weights.embed_tokens.device().clone(),
+                    guard.config.num_layers,
+                )
             };
 
             let runner = runner.clone();
@@ -338,6 +405,13 @@ async fn generate_real(
         .map_err(ApiError::tokenization_failed)?
         .len();
 
+    let (mtp_supported, has_active_lora) = {
+        let guard = runner.read().unwrap();
+        (guard.weights.mtp.is_some(), guard.active_lora().is_some())
+    };
+    let speculative_mode =
+        resolve_speculative_mode(state, sampling, mtp_supported, has_active_lora);
+
     // ModelRunner.generate_paged() is CPU-bound; run on a blocking thread to
     // avoid starving the tokio runtime.
     let runner = runner.clone();
@@ -353,9 +427,22 @@ async fn generate_real(
         // but blocks while training holds the write lock.
         let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
-        let mut bm_guard = bm.lock().unwrap();
-        let mut pc_guard = pc.lock().unwrap();
-        runner_guard.generate_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
+        match speculative_mode {
+            ResolvedSpeculativeMode::Off => {
+                runner_guard.generate_paged_shared(&prompt, &params, bm.as_ref(), pc.as_ref())
+            }
+            ResolvedSpeculativeMode::SkipLayer(spec_config) => {
+                runner_guard.generate_speculative(&prompt, &params, &spec_config)
+            }
+            ResolvedSpeculativeMode::Mtp => {
+                let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
+                Ok(GenerationOutput {
+                    text: output.text,
+                    token_ids: output.token_ids,
+                    finish_reason: output.finish_reason,
+                })
+            }
+        }
     });
 
     let output = match tokio::time::timeout(timeout, generation).await {
@@ -417,6 +504,13 @@ async fn generate_real_streaming(
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
+    let (mtp_supported, has_active_lora) = {
+        let guard = runner.read().unwrap();
+        (guard.weights.mtp.is_some(), guard.active_lora().is_some())
+    };
+    let speculative_mode =
+        resolve_speculative_mode(state, sampling, mtp_supported, has_active_lora);
+
     let runner = runner.clone();
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
@@ -462,21 +556,57 @@ async fn generate_real_streaming(
                 return;
             }
 
-            // Run blocking generation with paged KV cache
-            let sync_rx = match tokio::task::spawn_blocking(move || {
-                // Acquire GPU coordination read lock
-                let _gpu_guard = gpu_lock.read().unwrap();
-                let runner_guard = runner.read().unwrap();
-                let mut bm_guard = bm.lock().unwrap();
-                let mut pc_guard = pc.lock().unwrap();
-                runner_guard.generate_streaming_paged(&prompt, &params, &mut bm_guard, &mut pc_guard)
-            })
-            .await
-            {
-                Ok(Ok(rx)) => rx,
-                _ => {
-                    let _ = tx.send(Event::default().data("[DONE]")).await;
-                    return;
+            let sync_rx = match speculative_mode {
+                ResolvedSpeculativeMode::Off => {
+                    match tokio::task::spawn_blocking(move || {
+                        // Acquire GPU coordination read lock
+                        let _gpu_guard = gpu_lock.read().unwrap();
+                        let runner_guard = runner.read().unwrap();
+                        runner_guard.generate_streaming_paged_shared(
+                            &prompt,
+                            &params,
+                            bm.as_ref(),
+                            pc.as_ref(),
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(rx)) => rx,
+                        _ => {
+                            let _ = tx.send(Event::default().data("[DONE]")).await;
+                            return;
+                        }
+                    }
+                }
+                ResolvedSpeculativeMode::SkipLayer(spec_config) => {
+                    match tokio::task::spawn_blocking(move || {
+                        let _gpu_guard = gpu_lock.read().unwrap();
+                        let runner_guard = runner.read().unwrap();
+                        runner_guard.generate_streaming_speculative(&prompt, &params, &spec_config)
+                    })
+                    .await
+                    {
+                        Ok(Ok(rx)) => rx,
+                        _ => {
+                            let _ = tx.send(Event::default().data("[DONE]")).await;
+                            return;
+                        }
+                    }
+                }
+                ResolvedSpeculativeMode::Mtp => {
+                    match tokio::task::spawn_blocking(move || {
+                        let _gpu_guard = gpu_lock.read().unwrap();
+                        let runner_guard = runner.read().unwrap();
+                        runner_guard.generate_streaming_mtp_speculative(&prompt, &params)
+                    })
+                    .await
+                    {
+                        Ok(Ok(rx)) => rx,
+                        _ => {
+                            let _ = tx.send(Event::default().data("[DONE]")).await;
+                            return;
+                        }
+                    }
                 }
             };
 
@@ -597,10 +727,7 @@ async fn generate_real_streaming(
                     }],
                 };
                 let _ = tx
-                    .send(
-                        Event::default()
-                            .data(serde_json::to_string(&error_chunk).unwrap()),
-                    )
+                    .send(Event::default().data(serde_json::to_string(&error_chunk).unwrap()))
                     .await;
                 let _ = tx.send(Event::default().data("[DONE]")).await;
             }
@@ -653,28 +780,14 @@ async fn generate_mock(
         // Build batch input
         let batch = kiln_model::engine::BatchInput {
             token_ids: vec![0; step_output.total_tokens],
-            seqlens: step_output
-                .scheduled
-                .iter()
-                .map(|s| s.num_tokens)
-                .collect(),
+            seqlens: step_output.scheduled.iter().map(|s| s.num_tokens).collect(),
             slot_mapping: vec![0; step_output.total_tokens],
-            block_tables: step_output
-                .scheduled
-                .iter()
-                .map(|_| vec![0])
-                .collect(),
+            block_tables: step_output.scheduled.iter().map(|_| vec![0]).collect(),
             is_prefill: step_output.scheduled.iter().map(|s| s.is_prefill).collect(),
-            request_ids: step_output
-                .scheduled
-                .iter()
-                .map(|s| s.request_id)
-                .collect(),
+            request_ids: step_output.scheduled.iter().map(|s| s.request_id).collect(),
         };
 
-        let engine_output = engine
-            .step(&batch)
-            .map_err(ApiError::generation_failed)?;
+        let engine_output = engine.step(&batch).map_err(ApiError::generation_failed)?;
 
         for (rid, token, finished) in &engine_output.results {
             if *rid == request_id {
@@ -753,16 +866,23 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SpecMethod;
+    use kiln_core::config::ModelConfig;
 
     fn parse_request(json: &str) -> ChatCompletionRequest {
         serde_json::from_str(json).expect("request should deserialize")
     }
 
+    fn make_sampling(temperature: f32) -> SamplingParams {
+        SamplingParams {
+            temperature,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn content_accepts_plain_string() {
-        let req = parse_request(
-            r#"{"messages":[{"role":"user","content":"hello"}]}"#,
-        );
+        let req = parse_request(r#"{"messages":[{"role":"user","content":"hello"}]}"#);
         assert_eq!(req.messages[0].content, "hello");
     }
 
@@ -784,9 +904,7 @@ mod tests {
 
     #[test]
     fn content_empty_array_is_empty_string() {
-        let req = parse_request(
-            r#"{"messages":[{"role":"user","content":[]}]}"#,
-        );
+        let req = parse_request(r#"{"messages":[{"role":"user","content":[]}]}"#);
         assert_eq!(req.messages[0].content, "");
     }
 
@@ -797,5 +915,86 @@ mod tests {
         );
         assert_eq!(req.messages[0].content, "be nice");
         assert_eq!(req.messages[1].content, "hi");
+    }
+
+    #[test]
+    fn speculative_toggle_defaults_to_skip_layer() {
+        let cfg = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Off,
+            num_speculative_tokens: 4,
+            draft_layers: 8,
+        };
+        let mode = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(1.0),
+            false,
+            false,
+        );
+
+        match mode {
+            ResolvedSpeculativeMode::SkipLayer(spec) => {
+                assert_eq!(spec.num_speculative_tokens, 4);
+                assert_eq!(spec.draft_layers, 8);
+            }
+            _ => panic!("desktop toggle should resolve to skip-layer"),
+        }
+    }
+
+    #[test]
+    fn mtp_requires_greedy_request_and_no_lora() {
+        let cfg = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Mtp,
+            num_speculative_tokens: 4,
+            draft_layers: 8,
+        };
+
+        let greedy = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            true,
+            false,
+        );
+        assert!(matches!(greedy, ResolvedSpeculativeMode::Mtp));
+
+        let sampled = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.7),
+            true,
+            false,
+        );
+        assert!(matches!(sampled, ResolvedSpeculativeMode::SkipLayer(_)));
+
+        let with_lora = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            true,
+            true,
+        );
+        assert!(matches!(with_lora, ResolvedSpeculativeMode::SkipLayer(_)));
+    }
+
+    #[test]
+    fn invalid_skip_layer_config_falls_back_to_off() {
+        let cfg = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::SkipLayer,
+            num_speculative_tokens: 4,
+            draft_layers: ModelConfig::qwen3_5_4b().num_layers,
+        };
+        let mode = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(1.0),
+            false,
+            false,
+        );
+
+        assert!(matches!(mode, ResolvedSpeculativeMode::Off));
     }
 }
