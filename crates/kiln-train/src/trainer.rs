@@ -11,15 +11,13 @@ use candle_core::{DType, Device, Tensor, Var};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_flce_kernel::{fused_linear_cross_entropy, DEFAULT_CHUNK_SIZE};
+use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy};
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
-    model_forward, model_forward_embed, model_forward_final_norm, model_forward_head,
-    model_forward_no_head, model_forward_segment, GpuWeights, LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_final_norm,
+    model_forward_head, model_forward_no_head, model_forward_segment,
 };
-use kiln_model::lora_loader::{
-    LoraLayerWeights, LoraProjectionWeights, LoraWeights,
-};
+use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 
 use crate::{ChatMessage, GrpoConfig, GrpoGroup, SftConfig, SftExample};
 
@@ -35,8 +33,13 @@ fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessa
 
 /// Which linear projections to train LoRA on.
 const DEFAULT_TARGET_MODULES: &[&str] = &[
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "gate_proj", "up_proj", "down_proj",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
 ];
 
 /// Trainable LoRA parameters as candle `Var`s.
@@ -96,25 +99,30 @@ impl TrainableLoraParams {
             for &module in DEFAULT_TARGET_MODULES {
                 let (in_features, out_features, bound) = match module {
                     "q_proj" | "k_proj" | "v_proj" | "o_proj" => {
-                        // Get actual dimensions from the weight tensor
-                        let w = match &layer_weights.attention {
-                            kiln_model::forward::GpuAttentionWeights::Full(full) => {
-                                match module {
-                                    "q_proj" => &full.q_proj,
-                                    "k_proj" => &full.k_proj,
-                                    "v_proj" => &full.v_proj,
-                                    "o_proj" => &full.o_proj,
-                                    _ => unreachable!(),
-                                }
-                            }
+                        // Projection originals may be one-element Metal loader
+                        // stubs; the transposed caches are always the real
+                        // tensors used by inference/training.
+                        let w_t = match &layer_weights.attention {
+                            kiln_model::forward::GpuAttentionWeights::Full(full) => match module {
+                                "q_proj" => &full.q_proj_t,
+                                "k_proj" => &full.k_proj_t,
+                                "v_proj" => &full.v_proj_t,
+                                "o_proj" => &full.o_proj_t,
+                                _ => unreachable!(),
+                            },
                             // Linear attention layers don't have q/k/v/o_proj
                             kiln_model::forward::GpuAttentionWeights::Linear(_) => {
                                 continue;
                             }
                         };
-                        let dims = w.dims();
-                        // Weight is [out_features, in_features]
-                        (dims[1], dims[0], bound_hidden)
+                        let dims = w_t.dims();
+                        anyhow::ensure!(
+                            dims.len() == 2,
+                            "expected rank-2 {module}_t for layer {layer_idx}, got {:?}",
+                            dims
+                        );
+                        // Transposed weight is [in_features, out_features].
+                        (dims[0], dims[1], bound_hidden)
                     }
                     "gate_proj" => (hidden, intermediate, bound_hidden),
                     "up_proj" => (hidden, intermediate, bound_hidden),
@@ -123,19 +131,12 @@ impl TrainableLoraParams {
                 };
 
                 // A: [rank, in_features] — Kaiming uniform
-                let a = Var::rand_f64(
-                    -bound, bound,
-                    (rank, in_features),
-                    DType::F32,
-                    device,
-                ).with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
+                let a = Var::rand_f64(-bound, bound, (rank, in_features), DType::F32, device)
+                    .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
-                let b = Var::zeros(
-                    (out_features, rank),
-                    DType::F32,
-                    device,
-                ).with_context(|| format!("init LoRA B for layer {layer_idx} {module}"))?;
+                let b = Var::zeros((out_features, rank), DType::F32, device)
+                    .with_context(|| format!("init LoRA B for layer {layer_idx} {module}"))?;
 
                 match module {
                     "q_proj" => layer_params.q_proj = Some((a, b)),
@@ -165,23 +166,27 @@ impl TrainableLoraParams {
     /// The returned `LoraWeights` holds tensors that are backed by our Vars,
     /// so autograd tracks all operations through them.
     pub fn as_lora_weights(&self) -> LoraWeights {
-        let layers: Vec<LoraLayerWeights> = self.layers.iter().map(|lp| {
-            let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
-                pair.as_ref().map(|(a, b)| LoraProjectionWeights {
-                    a: a.as_tensor().clone(),
-                    b: b.as_tensor().clone(),
-                })
-            };
-            LoraLayerWeights {
-                q_proj: make_proj(&lp.q_proj),
-                k_proj: make_proj(&lp.k_proj),
-                v_proj: make_proj(&lp.v_proj),
-                o_proj: make_proj(&lp.o_proj),
-                gate_proj: make_proj(&lp.gate_proj),
-                up_proj: make_proj(&lp.up_proj),
-                down_proj: make_proj(&lp.down_proj),
-            }
-        }).collect();
+        let layers: Vec<LoraLayerWeights> = self
+            .layers
+            .iter()
+            .map(|lp| {
+                let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
+                    pair.as_ref().map(|(a, b)| LoraProjectionWeights {
+                        a: a.as_tensor().clone(),
+                        b: b.as_tensor().clone(),
+                    })
+                };
+                LoraLayerWeights {
+                    q_proj: make_proj(&lp.q_proj),
+                    k_proj: make_proj(&lp.k_proj),
+                    v_proj: make_proj(&lp.v_proj),
+                    o_proj: make_proj(&lp.o_proj),
+                    gate_proj: make_proj(&lp.gate_proj),
+                    up_proj: make_proj(&lp.up_proj),
+                    down_proj: make_proj(&lp.down_proj),
+                }
+            })
+            .collect();
 
         LoraWeights {
             layers,
@@ -196,8 +201,13 @@ impl TrainableLoraParams {
         let mut vars = Vec::new();
         for layer in &self.layers {
             let pairs: [&Option<(Var, Var)>; 7] = [
-                &layer.q_proj, &layer.k_proj, &layer.v_proj, &layer.o_proj,
-                &layer.gate_proj, &layer.up_proj, &layer.down_proj,
+                &layer.q_proj,
+                &layer.k_proj,
+                &layer.v_proj,
+                &layer.o_proj,
+                &layer.gate_proj,
+                &layer.up_proj,
+                &layer.down_proj,
             ];
             for pair in pairs {
                 if let Some((a, b)) = pair {
@@ -233,21 +243,12 @@ impl TrainableLoraParams {
         let mut tensor_data: HashMap<String, Tensor> = HashMap::new();
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let mut save_proj = |name: &str, pair: &Option<(Var, Var)>,
-                             is_attn: bool| {
+            let mut save_proj = |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| {
                 if let Some((a, b)) = pair {
                     let sub = if is_attn { "self_attn" } else { "mlp" };
-                    let prefix = format!(
-                        "base_model.model.model.layers.{layer_idx}.{sub}.{name}"
-                    );
-                    tensor_data.insert(
-                        format!("{prefix}.lora_A.weight"),
-                        a.as_tensor().clone(),
-                    );
-                    tensor_data.insert(
-                        format!("{prefix}.lora_B.weight"),
-                        b.as_tensor().clone(),
-                    );
+                    let prefix = format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
+                    tensor_data.insert(format!("{prefix}.lora_A.weight"), a.as_tensor().clone());
+                    tensor_data.insert(format!("{prefix}.lora_B.weight"), b.as_tensor().clone());
                 }
             };
 
@@ -337,13 +338,11 @@ pub fn sft_train(
     // Labels: we want to train on assistant responses only.
     let tokenized: Vec<(Vec<u32>, Vec<bool>)> = examples
         .iter()
-        .filter_map(|ex| {
-            match tokenize_for_training(ex, tokenizer) {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    tracing::warn!("skipping example: {e}");
-                    None
-                }
+        .filter_map(|ex| match tokenize_for_training(ex, tokenizer) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("skipping example: {e}");
+                None
             }
         })
         .collect();
@@ -355,7 +354,10 @@ pub fn sft_train(
     // Configure gradient checkpointing
     let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
     let segments = if ckpt_config.enabled {
-        Some(compute_segment_boundaries(model_config.num_layers, ckpt_config.num_segments))
+        Some(compute_segment_boundaries(
+            model_config.num_layers,
+            ckpt_config.num_segments,
+        ))
     } else {
         None
     };
@@ -417,7 +419,8 @@ pub fn sft_train(
             // Periodic adapter checkpoint
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                    let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
                     if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
                         tracing::warn!(step = global_step, error = %e, "failed to save training checkpoint");
                     } else {
@@ -522,13 +525,11 @@ pub fn grpo_train(
     // Tokenize all completions: for each group, tokenize prompt + each completion
     let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
         .iter()
-        .filter_map(|group| {
-            match tokenize_grpo_group(group, tokenizer) {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    tracing::warn!("skipping GRPO group: {e}");
-                    None
-                }
+        .filter_map(|group| match tokenize_grpo_group(group, tokenizer) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("skipping GRPO group: {e}");
+                None
             }
         })
         .collect();
@@ -540,7 +541,10 @@ pub fn grpo_train(
     // Configure gradient checkpointing (same as SFT)
     let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
     let segments = if ckpt_config.enabled {
-        Some(compute_segment_boundaries(model_config.num_layers, ckpt_config.num_segments))
+        Some(compute_segment_boundaries(
+            model_config.num_layers,
+            ckpt_config.num_segments,
+        ))
     } else {
         None
     };
@@ -580,10 +584,10 @@ pub fn grpo_train(
                     None,
                     Some(&mut ref_linear_state),
                     None, // no LoRA = reference model
-                ).context("GRPO reference forward pass")?;
-                token_log_probs(
-                    &ref_logits, &comp.input_ids, &comp.completion_mask, &device,
-                )?.detach()
+                )
+                .context("GRPO reference forward pass")?;
+                token_log_probs(&ref_logits, &comp.input_ids, &comp.completion_mask, &device)?
+                    .detach()
             };
 
             // Step 2: Policy forward pass + GRPO loss + backward
@@ -620,13 +624,24 @@ pub fn grpo_train(
                     None,
                     Some(&mut linear_state),
                     Some(&lora_weights),
-                ).context("GRPO policy forward pass")?;
+                )
+                .context("GRPO policy forward pass")?;
 
                 let policy_log_probs = token_log_probs(
-                    &policy_logits, &comp.input_ids, &comp.completion_mask, &device,
+                    &policy_logits,
+                    &comp.input_ids,
+                    &comp.completion_mask,
+                    &device,
                 )?;
 
-                let loss = grpo_loss(&policy_log_probs, &ref_log_probs, advantage, config.clip_epsilon, config.kl_coeff, &device)?;
+                let loss = grpo_loss(
+                    &policy_log_probs,
+                    &ref_log_probs,
+                    advantage,
+                    config.clip_epsilon,
+                    config.kl_coeff,
+                    &device,
+                )?;
                 loss_val = loss.to_scalar::<f32>()? as f64;
 
                 let grads = loss.backward().context("GRPO backward pass")?;
@@ -705,10 +720,7 @@ struct TokenizedGrpoGroup {
 }
 
 /// Tokenize a GRPO group: prompt messages + each completion text.
-fn tokenize_grpo_group(
-    group: &GrpoGroup,
-    tokenizer: &KilnTokenizer,
-) -> Result<TokenizedGrpoGroup> {
+fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<TokenizedGrpoGroup> {
     if group.completions.is_empty() {
         anyhow::bail!("GRPO group has no completions");
     }
@@ -716,7 +728,8 @@ fn tokenize_grpo_group(
     let prompt_messages = to_core_messages(&group.messages);
 
     // Tokenize the prompt (without any assistant response)
-    let prompt_text = tokenizer.apply_chat_template(&prompt_messages)
+    let prompt_text = tokenizer
+        .apply_chat_template(&prompt_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let prompt_ids = tokenizer
         .encode(&prompt_text)
@@ -733,7 +746,8 @@ fn tokenize_grpo_group(
             content: scored.text.clone(),
         });
 
-        let full_text = tokenizer.apply_chat_template(&full_messages)
+        let full_text = tokenizer
+            .apply_chat_template(&full_messages)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let full_ids = tokenizer
             .encode(&full_text)
@@ -814,15 +828,16 @@ fn token_log_probs(
 
     // Gather active logits
     let indices = Tensor::new(
-        active_positions.iter().map(|&i| i as u32).collect::<Vec<_>>().as_slice(),
+        active_positions
+            .iter()
+            .map(|&i| i as u32)
+            .collect::<Vec<_>>()
+            .as_slice(),
         device,
     )?;
     let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
 
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| shift_labels[i])
-        .collect();
+    let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
 
     // log_softmax then gather
     let active_logits_f32 = active_logits.to_dtype(DType::F32)?;
@@ -849,7 +864,8 @@ fn tokenize_for_training(
     let core_messages = to_core_messages(&example.messages);
 
     // Build the full conversation text using the chat template
-    let full_text = tokenizer.apply_chat_template(&core_messages)
+    let full_text = tokenizer
+        .apply_chat_template(&core_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let input_ids = tokenizer
         .encode(&full_text)
@@ -871,7 +887,8 @@ fn tokenize_for_training(
         prefix_messages.push(msg.clone());
         if msg.role == "assistant" {
             // Tokenize everything up to and including this assistant message
-            let prefix_text = tokenizer.apply_chat_template(&prefix_messages)
+            let prefix_text = tokenizer
+                .apply_chat_template(&prefix_messages)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let prefix_ids = tokenizer
                 .encode(&prefix_text)
@@ -882,7 +899,8 @@ fn tokenize_for_training(
             let before_text = if before_messages.is_empty() {
                 String::new()
             } else {
-                tokenizer.apply_chat_template(&before_messages)
+                tokenizer
+                    .apply_chat_template(&before_messages)
                     .map_err(|e| anyhow::anyhow!("{e}"))?
             };
             let before_ids = if before_text.is_empty() {
@@ -948,17 +966,17 @@ fn cross_entropy_loss(
 
     // Gather active logits and labels
     let indices = Tensor::new(
-        active_positions.iter().map(|&i| i as u32).collect::<Vec<_>>().as_slice(),
+        active_positions
+            .iter()
+            .map(|&i| i as u32)
+            .collect::<Vec<_>>()
+            .as_slice(),
         device,
     )?;
     let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
 
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| shift_labels[i])
-        .collect();
-    let labels_tensor = Tensor::new(active_labels.as_slice(), device)?
-        .to_dtype(DType::U32)?;
+    let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
+    let labels_tensor = Tensor::new(active_labels.as_slice(), device)?.to_dtype(DType::U32)?;
 
     // Cross-entropy: -log(softmax(logits)[label])
     // Use log-sum-exp trick for numerical stability
@@ -1270,7 +1288,8 @@ fn standard_forward_backward(
             model_config,
             Some(&mut linear_state),
             Some(&lora_weights),
-        ).context("training forward pass (FLCE)")?;
+        )
+        .context("training forward pass (FLCE)")?;
         fused_linear_cross_entropy(
             &hidden,
             &weights.embed_tokens_t,
@@ -1278,7 +1297,8 @@ fn standard_forward_backward(
             label_mask,
             device,
             DEFAULT_CHUNK_SIZE,
-        ).context("fused linear cross-entropy")?
+        )
+        .context("fused linear cross-entropy")?
     } else {
         let logits = model_forward(
             backend,
@@ -1288,7 +1308,8 @@ fn standard_forward_backward(
             None,
             Some(&mut linear_state),
             Some(&lora_weights),
-        ).context("training forward pass")?;
+        )
+        .context("training forward pass")?;
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
     let loss_val = loss.to_scalar::<f32>()? as f64;
@@ -1321,8 +1342,7 @@ fn grpo_loss(
         .broadcast_as(&ratio_shape)?;
     let clipped_ratio = ratio.clamp(&lo, &hi)?;
 
-    let adv_tensor = Tensor::new(advantage as f32, device)?
-        .broadcast_as(&ratio_shape)?;
+    let adv_tensor = Tensor::new(advantage as f32, device)?.broadcast_as(&ratio_shape)?;
     let surr1 = (&ratio * &adv_tensor)?;
     let surr2 = (&clipped_ratio * &adv_tensor)?;
     let surrogate = surr1.minimum(&surr2)?;
@@ -1434,7 +1454,14 @@ fn checkpointed_grpo_forward_backward(
 
         // Compute policy log-probs and GRPO loss
         let policy_log_probs = token_log_probs(&logits, input_ids, completion_mask, device)?;
-        let loss = grpo_loss(&policy_log_probs, ref_log_probs, advantage, clip_epsilon, kl_coeff, device)?;
+        let loss = grpo_loss(
+            &policy_log_probs,
+            ref_log_probs,
+            advantage,
+            clip_epsilon,
+            kl_coeff,
+            device,
+        )?;
         let loss_val = loss.to_scalar::<f32>()? as f64;
         total_loss += loss_val;
 
@@ -1451,8 +1478,8 @@ fn checkpointed_grpo_forward_backward(
 mod tests {
     use super::*;
     use kiln_model::forward::{
-        GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights,
-        GpuLayerWeights, GpuLinearAttentionWeights,
+        GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
+        GpuLinearAttentionWeights,
     };
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
@@ -1545,8 +1572,10 @@ mod tests {
                 let in_proj_qkv = Tensor::randn(0.0f32, 0.02, (qkv_dim, h), device)?;
                 let in_proj_z = Tensor::randn(0.0f32, 0.02, (v_dim, h), device)?;
                 let out_proj = Tensor::randn(0.0f32, 0.02, (h, v_dim), device)?;
-                let in_proj_a = Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
-                let in_proj_b = Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
+                let in_proj_a =
+                    Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
+                let in_proj_b =
+                    Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
                 let in_proj_qkv_t = in_proj_qkv.t()?.contiguous()?;
                 let in_proj_z_t = in_proj_z.t()?.contiguous()?;
                 let in_proj_a_t = in_proj_a.t()?.contiguous()?;
@@ -1558,7 +1587,12 @@ mod tests {
                     out_proj,
                     in_proj_a,
                     in_proj_b,
-                    conv1d: Tensor::randn(0.0f32, 0.02, (qkv_dim, 1, config.linear_conv_kernel_dim), device)?,
+                    conv1d: Tensor::randn(
+                        0.0f32,
+                        0.02,
+                        (qkv_dim, 1, config.linear_conv_kernel_dim),
+                        device,
+                    )?,
                     norm: Tensor::zeros(config.linear_key_head_dim, DType::F32, device)?,
                     a_log: Tensor::randn(0.0f32, 0.5, (config.linear_num_key_heads,), device)?,
                     dt_bias: Tensor::zeros(config.linear_num_key_heads, DType::F32, device)?,
@@ -1595,15 +1629,61 @@ mod tests {
     }
 
     #[test]
+    fn test_lora_initialize_uses_transposed_projection_shapes() -> Result<()> {
+        let device = Device::Cpu;
+        let mut config = tiny_config();
+        config.hidden_size = 48;
+        config.intermediate_size = 80;
+        config.vocab_size = 64;
+        config.num_layers = 1;
+        config.num_full_attention_layers = 1;
+        config.full_attention_interval = 1;
+
+        let mut weights = tiny_weights(&config, &device)?;
+        let layer = &mut weights.layers[0];
+        let kiln_model::forward::GpuAttentionWeights::Full(full) = &mut layer.attention else {
+            unreachable!("test config should create a full-attention layer");
+        };
+        let stub = Tensor::zeros((1usize,), DType::F32, &device)?;
+        full.q_proj = stub.clone();
+        full.k_proj = stub.clone();
+        full.v_proj = stub.clone();
+        full.o_proj = stub;
+
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let layer = &params.layers[0];
+
+        let assert_pair =
+            |pair: &Option<(Var, Var)>, in_features: usize, out_features: usize| -> Result<()> {
+                let (a, b) = pair.as_ref().context("missing LoRA pair")?;
+                assert_eq!(a.as_tensor().dims(), &[4, in_features]);
+                assert_eq!(b.as_tensor().dims(), &[out_features, 4]);
+                Ok(())
+            };
+
+        let q_out = config.full_attn_q_proj_dim();
+        let kv_out = config.num_kv_heads * config.head_dim;
+        let o_in = config.num_attention_heads * config.head_dim;
+        assert_pair(&layer.q_proj, config.hidden_size, q_out)?;
+        assert_pair(&layer.k_proj, config.hidden_size, kv_out)?;
+        assert_pair(&layer.v_proj, config.hidden_size, kv_out)?;
+        assert_pair(&layer.o_proj, o_in, config.hidden_size)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_cross_entropy_loss_basic() -> Result<()> {
         let device = Device::Cpu;
 
         // 3 tokens, vocab size 4
         // logits: [1, 3, 4]
         let logits = Tensor::new(
-            &[[[2.0f32, 1.0, 0.1, 0.0],
-               [0.0, 3.0, 0.1, 0.0],
-               [0.0, 0.0, 0.0, 5.0]]],
+            &[[
+                [2.0f32, 1.0, 0.1, 0.0],
+                [0.0, 3.0, 0.1, 0.0],
+                [0.0, 0.0, 0.0, 5.0],
+            ]],
             &device,
         )?;
 
@@ -1698,7 +1778,10 @@ mod tests {
         let logits_seg = model_forward_head(&hidden, &weights, &config)?;
 
         // Compare logits
-        let diff = (logits_full - logits_seg)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        let diff = (logits_full - logits_seg)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
         assert!(diff < 1e-4, "segmented forward differs from full by {diff}");
 
         Ok(())
@@ -1714,33 +1797,54 @@ mod tests {
         let label_mask = vec![false, false, true, true, true, true, false];
 
         // Initialize identical LoRA params for both paths
-        let params_std = TrainableLoraParams::initialize(
-            &config, &weights, 4, 8.0, &device,
-        )?;
+        let params_std = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
 
         let backend = backend::for_device(&device);
         // Standard (non-checkpointed) forward/backward
         let (loss_std, _grads_std) = standard_forward_backward(
-            &*backend, &input_ids, &weights, &config, &params_std, &label_mask, &device,
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params_std,
+            &label_mask,
+            &device,
         )?;
 
         // Checkpointed forward/backward with 2 segments
         // Re-initialize identical params (same seed won't work since Var uses random init,
         // so we test that checkpointed loss is finite and reasonable instead of exact match).
-        let params_ckpt = TrainableLoraParams::initialize(
-            &config, &weights, 4, 8.0, &device,
-        )?;
+        let params_ckpt = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
         let segments = compute_segment_boundaries(config.num_layers, 2);
         let (loss_ckpt, _grads_ckpt) = checkpointed_forward_backward(
-            &*backend, &input_ids, &weights, &config, &params_ckpt, &label_mask, &segments, &device,
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params_ckpt,
+            &label_mask,
+            &segments,
+            &device,
         )?;
 
         // Both losses should be finite and in a reasonable range for random weights
-        assert!(loss_std.is_finite(), "standard loss is not finite: {loss_std}");
-        assert!(loss_ckpt.is_finite(), "checkpointed loss is not finite: {loss_ckpt}");
+        assert!(
+            loss_std.is_finite(),
+            "standard loss is not finite: {loss_std}"
+        );
+        assert!(
+            loss_ckpt.is_finite(),
+            "checkpointed loss is not finite: {loss_ckpt}"
+        );
         // Cross-entropy on random logits over vocab=32 should be ~ln(32) ≈ 3.47
-        assert!(loss_std > 1.0 && loss_std < 10.0, "standard loss out of range: {loss_std}");
-        assert!(loss_ckpt > 1.0 && loss_ckpt < 10.0, "checkpointed loss out of range: {loss_ckpt}");
+        assert!(
+            loss_std > 1.0 && loss_std < 10.0,
+            "standard loss out of range: {loss_std}"
+        );
+        assert!(
+            loss_ckpt > 1.0 && loss_ckpt < 10.0,
+            "checkpointed loss out of range: {loss_ckpt}"
+        );
 
         Ok(())
     }
@@ -1776,8 +1880,8 @@ mod tests {
             Some(&mut linear_state_naive),
             None,
         )?;
-        let loss_naive = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?
-            .to_scalar::<f32>()?;
+        let loss_naive =
+            cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?.to_scalar::<f32>()?;
 
         // FLCE path: no-head forward → fused LCE (small chunk to exercise the
         // chunked reduction on a modest vocab size).
@@ -1824,14 +1928,19 @@ mod tests {
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7];
         let label_mask = vec![false, true, true, true, false];
 
-        let params = TrainableLoraParams::initialize(
-            &config, &weights, 4, 8.0, &device,
-        )?;
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
 
         let segments = compute_segment_boundaries(config.num_layers, 2);
         let backend = backend::for_device(&device);
         let (_loss, grads) = checkpointed_forward_backward(
-            &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, &device,
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &segments,
+            &device,
         )?;
 
         // Verify that we got gradients for LoRA params in BOTH segments
@@ -1874,7 +1983,14 @@ mod tests {
         let mut losses = Vec::new();
         for step in 0..5 {
             let (loss_val, grads) = checkpointed_forward_backward(
-                &*backend, &input_ids, &weights, &config, &params, &label_mask, &segments, device,
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &label_mask,
+                &segments,
+                device,
             )?;
             sgd_step_from_map(&params, &grads, lr)?;
             losses.push(loss_val);
