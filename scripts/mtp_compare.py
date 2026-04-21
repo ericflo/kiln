@@ -68,10 +68,21 @@ SUBOP_ORDER: List[str] = [
     "post_q_proj_raw",
     "post_k_proj",
     "post_v_proj",
+    # Phase B9 H3 zone: pre/post gated-attn split (mostly aliases of the
+    # neighbouring B7b taps, kept distinct so the comparator can localize
+    # the H3 hypothesis by name).
+    "pre_gated_attn_split",
     "post_q_split",
+    "post_gated_attn_split_value",
     "post_gate_split",
+    "post_gated_attn_split_gate",
+    # Phase B9 H2 zone: pre/post per-head qk-norm.
+    "pre_qk_norm_q",
+    "pre_qk_norm_k",
     "post_q_norm",
     "post_k_norm",
+    "post_qk_norm_q",
+    "post_qk_norm_k",
     "post_q_rope",
     "post_k_rope",
     "post_attn_raw",
@@ -82,6 +93,15 @@ SUBOP_ORDER: List[str] = [
     "post_pre_mlp_norm",
     "post_mlp",
 ]
+
+# Phase B9 hypothesis zones — the comparator classifies the first sub-op
+# divergence into one of these zones to emit an H2/H3/both/neither verdict.
+B9_H2_ZONE = ("pre_qk_norm_q", "pre_qk_norm_k", "post_qk_norm_q", "post_qk_norm_k")
+B9_H3_ZONE = (
+    "pre_gated_attn_split",
+    "post_gated_attn_split_value",
+    "post_gated_attn_split_gate",
+)
 
 META_KEYS = (
     "meta__draft_token_id",
@@ -112,6 +132,13 @@ SUBOP_HYPOTHESIS = {
     "post_v_proj": "v_proj weight layout or transpose",
     "post_q_split": "Q/gate split: per-head narrow vs flat-half chunk semantic mismatch",
     "post_gate_split": "Q/gate split: gate half order or layout",
+    "pre_gated_attn_split": "B9 H3: q_raw input to gated-attn split (alias of post_q_proj_raw)",
+    "post_gated_attn_split_value": "B9 H3: value half after split (alias of post_q_split)",
+    "post_gated_attn_split_gate": "B9 H3: gate half after split (alias of post_gate_split)",
+    "pre_qk_norm_q": "B9 H2: per-head Q before RMSNorm (alias of post_q_split)",
+    "pre_qk_norm_k": "B9 H2: per-head K before RMSNorm (post_k_proj reshaped)",
+    "post_qk_norm_q": "B9 H2: per-head Q after RMSNorm (alias of post_q_norm)",
+    "post_qk_norm_k": "B9 H2: per-head K after RMSNorm (alias of post_k_norm)",
     "post_q_norm": "q_norm weight or per-head broadcast",
     "post_k_norm": "k_norm weight or per-head broadcast",
     "post_q_rope": "RoPE on Q: mtp_pos value, rotary_dim, half-rotate vs interleaved, theta",
@@ -361,6 +388,130 @@ def _emit_b7a_summary(
         emit("  another bug. Recommend running B7b anyway and re-evaluating.")
 
 
+def _emit_b9_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase B9 — H2 (qk-norm) vs H3 (gated-attn split) bisect.
+
+    Walks the canonical sub-op order across every position and finds the first
+    diverging sub-op tap. If that tap lands in the H2 zone, prints
+    'H2 dominant'; if in the H3 zone, 'H3 dominant'; if BOTH zones diverge in
+    one or more positions, prints 'BOTH'; if neither zone diverges, prints
+    'NEITHER (look upstream)'. Per-sub-op cos_sim + max|Δ| table per position
+    is also emitted so the verdict is auditable.
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase B9 H2/H3 sub-op bisect — per-position cos_sim + max|Δ|")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+
+    # B9 zone tap names in canonical capture order. We restrict the table to
+    # zone taps so the verdict is unambiguous; the full sub-op table for
+    # context already prints in the per-pair section above.
+    zone_taps: List[str] = []
+    for n in SUBOP_ORDER:
+        if n in B9_H2_ZONE or n in B9_H3_ZONE:
+            zone_taps.append(n)
+
+    # Build {tap: {label: (cos_sim, max_abs_diff, allclose)}} from rows.
+    cell: Dict[str, Dict[str, Tuple[float, float, bool]]] = {n: {} for n in zone_taps}
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if n in cell:
+                cell[n][label] = (
+                    float(r["cos_sim"]),
+                    float(r["max_abs_diff"]),
+                    bool(r["allclose"]),
+                )
+
+    # Header.
+    header = "  " + "tap".ljust(30) + " ".join(
+        f"pos={lab:<22}" for lab in labels
+    )
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    for tap in zone_taps:
+        zone_marker = "[H2]" if tap in B9_H2_ZONE else "[H3]"
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<26}")
+            else:
+                cs, mxd, ok = entry
+                tag = "ok" if ok else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<8} {tag:<3} "
+                )
+        emit(f"  {zone_marker} {tap:<26}{' '.join(cells)}")
+
+    # Decide H2 / H3 / both / neither based on whether ANY pair has a divergent
+    # tap in each zone, keyed off the row-level allclose flag the comparator
+    # already computed at the requested atol/rtol.
+    h2_div = any(
+        not entry[2]
+        for tap in B9_H2_ZONE
+        for entry in cell.get(tap, {}).values()
+    )
+    h3_div = any(
+        not entry[2]
+        for tap in B9_H3_ZONE
+        for entry in cell.get(tap, {}).values()
+    )
+
+    # First-diverging zone tap in canonical order, taken across all positions.
+    first_zone_div: Optional[str] = None
+    first_zone_pos: Optional[str] = None
+    for tap in zone_taps:
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is not None and not entry[2]:
+                first_zone_div = tap
+                first_zone_pos = lab
+                break
+        if first_zone_div is not None:
+            break
+
+    emit("")
+    emit(f"  H2 zone (qk-norm) divergence present:   {h2_div}")
+    emit(f"  H3 zone (gated-attn split) divergence present: {h3_div}")
+    if first_zone_div is not None:
+        emit(f"  First zone-tap divergence in canonical order: '{first_zone_div}' (pos={first_zone_pos})")
+
+    if h2_div and h3_div:
+        # Tie-break by which zone the canonical-first-diverging tap lands in.
+        if first_zone_div in B9_H2_ZONE:
+            emit("Phase B9 verdict: BOTH zones diverge; canonical-first divergence is in H2 zone")
+            emit("  -> H2 (qk-norm semantics) is the upstream cause; H3 likely inherits.")
+            emit("  -> Land Phase B9 PR with this finding; queue B10 fix targeting qk-norm.")
+        elif first_zone_div in B9_H3_ZONE:
+            emit("Phase B9 verdict: BOTH zones diverge; canonical-first divergence is in H3 zone")
+            emit("  -> H3 (gated-attn split semantics) is the upstream cause; H2 likely inherits.")
+            emit("  -> Land Phase B9 PR with this finding; queue B10 fix targeting gated-attn split.")
+        else:
+            emit("Phase B9 verdict: BOTH zones diverge; cannot pick canonical-first cleanly.")
+            emit("  -> Land Phase B9 PR with this finding; queue B10 to investigate both zones.")
+    elif h2_div:
+        emit("Phase B9 verdict: H2 DOMINANT — qk-norm zone diverges, gated-attn split zone matches.")
+        emit("  -> H2 (qk-norm semantics) drives the post_layer divergence on this pair.")
+        emit("  -> Land Phase B9 PR with this finding; queue B10 fix targeting qk-norm.")
+    elif h3_div:
+        emit("Phase B9 verdict: H3 DOMINANT — gated-attn split zone diverges, qk-norm zone matches.")
+        emit("  -> H3 (gated-attn split semantics) drives the post_layer divergence on this pair.")
+        emit("  -> Land Phase B9 PR with this finding; queue B10 fix targeting gated-attn split.")
+    else:
+        emit("Phase B9 verdict: NEITHER zone diverges in the H2/H3 bisect.")
+        emit("  -> The post_layer divergence is upstream of qk-norm and the gated-attn split,")
+        emit("     OR the divergence emerges only at a downstream tap (RoPE/attn/o_proj/MLP).")
+        emit("  -> Re-check the full sub-op table above for the first non-zone divergence.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -413,6 +564,20 @@ def main() -> int:
 
     if multi:
         _emit_b7a_summary(pair_results, emit)
+
+    # B9 sub-op zone bisect — emitted whenever any pair captured zone taps,
+    # whether single- or multi-pair. Exits cleanly with a "no zone taps
+    # captured" note when the dump didn't include the B9 sub-ops (e.g.
+    # legacy dumps from before this PR).
+    have_b9_taps = any(
+        any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
+        for pr in pair_results
+    )
+    if have_b9_taps:
+        _emit_b9_summary(pair_results, args.atol, args.rtol, emit)
+    elif multi:
+        emit("")
+        emit("Phase B9 zone bisect: skipped (no H2/H3 zone sub-op taps in dumps).")
 
     emit("")
     if overall_ok:
