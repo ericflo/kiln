@@ -1,0 +1,36 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.08
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+=== alpha with KILN_MTP_FC_FP32_ACCUM=1 ===
+--- seed=42 ---
+    Decode (MTP): 128 tokens, mean ITL 27.1ms (36.9 tok/s), α = 0.033 (4/123)
+Draft acceptance α:    0.033
+--- seed=43 ---
+    Decode (MTP): 128 tokens, mean ITL 26.8ms (37.3 tok/s), α = 0.058 (7/120)
+Draft acceptance α:    0.058
+--- seed=44 ---
+    Decode (MTP): 128 tokens, mean ITL 26.4ms (37.9 tok/s), α = 0.095 (11/116)
+Draft acceptance α:    0.095
+=== C6 dumps with KILN_MTP_FC_FP32_ACCUM=1 ===
+--- dump seed=42 ---
+[2m2026-04-21T18:02:27.460099Z[0m [32m INFO[0m [2mkiln::mtp_debug[0m[2m:[0m mtp_b7_dump_written [3mpath[0m[2m=[0m/workspace/c9_kiln_fp32/kiln_seed42_pos1.st [3mdraft_token_id[0m[2m=[0m2912 [3mmtp_pos[0m[2m=[0m1 [3msubops[0m[2m=[0m24 [3mprompt_tokens_len[0m[2m=[0m0 [3mb11_taps[0m[2m=[0m0 [3mb12_taps[0m[2m=[0m0 [3mc6_taps[0m[2m=[0m5 [3mc7_taps[0m[2m=[0m7
+[2m2026-04-21T18:02:27.515243Z[0m [32m INFO[0m [2mkiln::mtp_debug[0m[2m:[0m mtp_b7_dump_written [3mpath[0m[2m=[0m/workspace/c9_kiln_fp32/kiln_seed42_pos2.st [3mdraft_token_id[0m[2m=[0m33 [3mmtp_pos[0m[2m=[0m2 [3msubops[0m[2m=[0m24 [3mprompt_tokens_len[0m[2m=[0m0 [3mb11_taps[0m[2m=[0m0 [3mb12_taps[0m[2m=[0m0 [3mc6_taps[0m[2m=[0m5 [3mc7_taps[0m[2m=[0m7
+--- dump seed=43 ---
+[2m2026-04-21T18:02:55.681525Z[0m [32m INFO[0m [2mkiln::mtp_debug[0m[2m:[0m mtp_b7_dump_written [3mpath[0m[2m=[0m/workspace/c9_kiln_fp32/kiln_seed43_pos1.st [3mdraft_token_id[0m[2m=[0m369 [3mmtp_pos[0m[2m=[0m1 [3msubops[0m[2m=[0m24 [3mprompt_tokens_len[0m[2m=[0m0 [3mb11_taps[0m[2m=[0m0 [3mb12_taps[0m[2m=[0m0 [3mc6_taps[0m[2m=[0m5 [3mc7_taps[0m[2m=[0m7
+[2m2026-04-21T18:02:55.771051Z[0m [32m INFO[0m [2mkiln::mtp_debug[0m[2m:[0m mtp_b7_dump_written [3mpath[0m[2m=[0m/workspace/c9_kiln_fp32/kiln_seed43_pos2.st [3mdraft_token_id[0m[2m=[0m919 [3mmtp_pos[0m[2m=[0m2 [3msubops[0m[2m=[0m24 [3mprompt_tokens_len[0m[2m=[0m0 [3mb11_taps[0m[2m=[0m0 [3mb12_taps[0m[2m=[0m0 [3mc6_taps[0m[2m=[0m5 [3mc7_taps[0m[2m=[0m7
+--- dump seed=44 ---
+[2m2026-04-21T18:03:23.374620Z[0m [32m INFO[0m [2mkiln::mtp_debug[0m[2m:[0m mtp_b7_dump_written [3mpath[0m[2m=[0m/workspace/c9_kiln_fp32/kiln_seed44_pos1.st [3mdraft_token_id[0m[2m=[0m314 [3mmtp_pos[0m[2m=[0m1 [3msubops[0m[2m=[0m24 [3mprompt_tokens_len[0m[2m=[0m0 [3mb11_taps[0m[2m=[0m0 [3mb12_taps[0m[2m=[0m0 [3mc6_taps[0m[2m=[0m5 [3mc7_taps[0m[2m=[0m7
+[2m2026-04-21T18:03:23.433886Z[0m [32m INFO[0m [2mkiln::mtp_debug[0m[2m:[0m mtp_b7_dump_written [3mpath[0m[2m=[0m/workspace/c9_kiln_fp32/kiln_seed44_pos2.st [3mdraft_token_id[0m[2m=[0m68387 [3mmtp_pos[0m[2m=[0m2 [3msubops[0m[2m=[0m24 [3mprompt_tokens_len[0m[2m=[0m0 [3mb11_taps[0m[2m=[0m0 [3mb12_taps[0m[2m=[0m0 [3mc6_taps[0m[2m=[0m5 [3mc7_taps[0m[2m=[0m7
+kiln_seed42_pos1.st
+kiln_seed42_pos2.st
+kiln_seed43_pos1.st
+kiln_seed43_pos2.st
+kiln_seed44_pos1.st
+kiln_seed44_pos2.st
