@@ -3286,6 +3286,7 @@ pub fn gqa_attention_paged(
         && (num_heads / num_kv_heads) > 1
         && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
         && backend.supports_flash_attn_paged_decode()
+        && !crate::mtp_debug::is_c7_sdpa_capture_armed()
     {
         // Open the fused-decode range around the call so the kernel work is
         // attributed to it. When the eligibility checks inside reject (return
@@ -3384,6 +3385,24 @@ pub fn gqa_attention_paged(
     if seq_len == 1 && gqa_ratio > 1 {
         let scale = (head_dim as f64).sqrt();
 
+        // Phase C7 SDPA bisect: capture pre-SDPA Q/K/V and causal-mask taps
+        // BEFORE the grouping reshape, in the canonical HF shapes:
+        //   Q: [batch, num_heads, q_len=1, head_dim]
+        //   K: [batch, num_kv_heads, kv_len, head_dim] (unexpanded — HF
+        //      reference dumps the same pre-repeat_kv form)
+        //   V: same shape as K
+        //   causal_mask: scalar 0 placeholder (decode has q_len=1 and attends
+        //      to all kv_len positions, so no mask is applied)
+        let c7_armed = crate::mtp_debug::is_c7_sdpa_capture_armed();
+        if c7_armed {
+            crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_q", &q)?;
+            crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_k", &k)?;
+            crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_v", &v)?;
+            let empty_mask =
+                candle_core::Tensor::zeros((), candle_core::DType::F32, q.device())?;
+            crate::mtp_debug::capture_c7_sdpa_tap("causal_mask", &empty_mask)?;
+        }
+
         // Reshape Q: [batch, num_heads, 1, head_dim]
         //          -> [batch, num_kv_heads, gqa_ratio, 1, head_dim]
         //          -> [batch * num_kv_heads, gqa_ratio, 1, head_dim]
@@ -3411,8 +3430,27 @@ pub fn gqa_attention_paged(
         // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
         let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
         let attn_scores = (attn_scores / scale)?;
+
+        // Phase C7: reshape grouped scores back to canonical
+        // [batch, num_heads, 1, kv_len] for diff against HF.
+        if c7_armed {
+            let scores_canonical = attn_scores
+                .reshape((batch, num_kv_heads, gqa_ratio, 1, kv_len))?
+                .reshape((batch, num_heads, 1, kv_len))?;
+            crate::mtp_debug::capture_c7_sdpa_tap("attn_scores_pre_softmax", &scores_canonical)?;
+        }
+
         // No causal mask needed for decode (q_len=1 attends to everything)
         let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+
+        // Phase C7: reshape grouped probs back to canonical
+        // [batch, num_heads, 1, kv_len] for diff against HF.
+        if c7_armed {
+            let probs_canonical = attn_weights_softmax
+                .reshape((batch, num_kv_heads, gqa_ratio, 1, kv_len))?
+                .reshape((batch, num_heads, 1, kv_len))?;
+            crate::mtp_debug::capture_c7_sdpa_tap("attn_probs", &probs_canonical)?;
+        }
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
         let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
@@ -3425,6 +3463,12 @@ pub fn gqa_attention_paged(
             .contiguous()?
             .reshape((batch, 1, num_heads * head_dim))?;
         let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
+
+        // Phase C7: final SDPA output tap at the same point as post_attn_raw,
+        // shape [batch, q_len=1, num_heads*head_dim] = [1, 1, 4096].
+        if c7_armed {
+            crate::mtp_debug::capture_c7_sdpa_tap("attn_out", &attn_output)?;
+        }
 
         let attn_output = if let Some(ref gate) = gate {
             let sigmoid_gate = cuda_sigmoid(gate)?;
@@ -4308,6 +4352,19 @@ pub fn mtp_forward_step(
     if dump_pre_rope {
         crate::mtp_debug::arm_pre_rope_capture();
     }
+    // Phase C7 dump pre-flight: arm the SDPA-internal capture BEFORE the
+    // inner transformer block runs, so the 7 taps inside `gqa_attention_paged`
+    // can record Q/K/V, scores, probs, and the raw attention output. Armed
+    // independently of C6 because the two capture windows bracket different
+    // regions of the forward: C6 captures MTP fc inputs pre-RoPE, C7
+    // captures SDPA inside the inner block post-RoPE. Arming C7 also acts as
+    // a signal to the GQA path to bypass the fused flash-attention paged
+    // decode kernel (which doesn't materialize the intermediates we need)
+    // and take the unfused grouped-decode Candle path instead.
+    let dump_c7_sdpa = should_dump && crate::mtp_debug::is_dump_c7_sdpa_enabled();
+    if dump_c7_sdpa {
+        crate::mtp_debug::arm_c7_sdpa_capture();
+    }
 
     // 1. Token embedding for the draft token. `embedding_lookup` returns
     //    shape [1, H]; unsqueeze to [1, 1, H] to match transformer-block I/O.
@@ -4464,7 +4521,17 @@ pub fn mtp_forward_step(
     // Failure to dump is logged but non-fatal — we never want an
     // instrumentation bug to break decode.
     if should_dump {
-        if let Some(path) = crate::mtp_debug::dump_path_for_pos(mtp_pos) {
+        let dump_path_opt = crate::mtp_debug::dump_path_for_pos(mtp_pos);
+        // Always drain the C7 TLS slot before returning. If we entered the
+        // armed C7 path above but `dump_path_for_pos` returned None (pos not
+        // listed in `KILN_MTP_DUMP_POS`), the slot would otherwise leak
+        // captured tensors into the next draft step's dump. Dropping the
+        // drained vec here is cheap and keeps the invariant "armed ⇒ drained
+        // within the same mtp_forward_step".
+        if dump_c7_sdpa && dump_path_opt.is_none() {
+            let _ = crate::mtp_debug::drain_c7_sdpa_capture();
+        }
+        if let Some(path) = dump_path_opt {
             let taps: [(&str, &Tensor); 8] = [
                 ("h_main", h_prev),
                 ("tok_embed", &token_emb),
@@ -4494,6 +4561,12 @@ pub fn mtp_forward_step(
             // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
             // bit-identical to the pre-C6 layout.
             let c6_taps = crate::mtp_debug::drain_pre_rope_capture();
+            // Phase C7: drain the 7 SDPA-internal taps (pre_sdpa_q/k/v,
+            // causal_mask, attn_scores_pre_softmax, attn_probs, attn_out)
+            // captured inside `gqa_attention_paged`. Empty when
+            // `KILN_MTP_DUMP_C7_SDPA` is unset, which keeps the dump format
+            // bit-identical to the pre-C7 layout.
+            let c7_taps = crate::mtp_debug::drain_c7_sdpa_capture();
             match crate::mtp_debug::write_mtp_dump(
                 &path,
                 draft_token_id,
@@ -4506,6 +4579,7 @@ pub fn mtp_forward_step(
                 &b11_taps,
                 &b12_taps,
                 &c6_taps,
+                &c7_taps,
             ) {
                 Ok(()) => tracing::info!(
                     target: "kiln::mtp_debug",
@@ -4517,6 +4591,7 @@ pub fn mtp_forward_step(
                     b11_taps = b11_taps.len(),
                     b12_taps = b12_taps.len(),
                     c6_taps = c6_taps.len(),
+                    c7_taps = c7_taps.len(),
                     "mtp_b7_dump_written"
                 ),
                 Err(e) => tracing::warn!(
@@ -4526,6 +4601,13 @@ pub fn mtp_forward_step(
                 ),
             }
         }
+    } else if dump_c7_sdpa {
+        // Defensive: drain C7 capture even when `should_dump` is false to
+        // avoid leaving the TLS slot armed for the next draft step. This
+        // branch should be unreachable (dump_c7_sdpa implies should_dump),
+        // but is cheap insurance against future refactors that could break
+        // the invariant.
+        let _ = crate::mtp_debug::drain_c7_sdpa_capture();
     }
 
     // Optional Phase B instrumentation. Off by default; enabled with

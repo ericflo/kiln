@@ -282,6 +282,51 @@ C6_HYPOTHESIS: Dict[str, str] = {
 # the first tap to dip below this bar as the dominant source of drift.
 C6_COS_SIM_BAR = 0.9999
 
+# Phase C7 — SDPA-internal bisect inside the MTP inner transformer block.
+# Seven taps in strict forward-graph order inside scaled dot-product attention.
+# Kiln and the HF reference both write these under a `c7__` prefix so they
+# slot alongside the B- and C6 taps without collision. Must stay in lock-step
+# with `C7_SDPA_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs` and the
+# `out_dict["c7__*"]` writes in `scripts/mtp_reference_dump.py`.
+#
+# Shape conventions (decode step, batch=1):
+#   pre_sdpa_q              [1, 16, 1, 256]   canonical GQA Q (num_heads=16)
+#   pre_sdpa_k              [1, 4, kv_len, 256]  pre-repeat_kv (num_kv_heads=4)
+#   pre_sdpa_v              [1, 4, kv_len, 256]  pre-repeat_kv
+#   causal_mask             scalar 0 placeholder (decode q_len=1 — no mask)
+#   attn_scores_pre_softmax [1, 16, 1, kv_len]
+#   attn_probs              [1, 16, 1, kv_len]
+#   attn_out                [1, 1, 4096]       same tensor as existing post_attn_raw
+C7_SDPA_TAP_NAMES: Tuple[str, ...] = (
+    "pre_sdpa_q",
+    "pre_sdpa_k",
+    "pre_sdpa_v",
+    "causal_mask",
+    "attn_scores_pre_softmax",
+    "attn_probs",
+    "attn_out",
+)
+
+# One-line hypotheses for each C7 SDPA tap, used in verdict output. Targets
+# the most likely root cause at each bisect point inside the inner transformer
+# block's scaled-dot-product attention.
+C7_HYPOTHESIS: Dict[str, str] = {
+    "pre_sdpa_q": "Q projection output / RoPE mtp_pos threading / Q-head layout or transpose",
+    "pre_sdpa_k": "K projection output / RoPE mtp_pos threading / KV-head layout or cache write",
+    "pre_sdpa_v": "V projection output / KV-head layout or paged-cache write path",
+    "causal_mask": "decode should have no causal mask; divergence here = mask policy mismatch",
+    "attn_scores_pre_softmax": "scaled QK^T matmul: scale factor, head-grouping reshape, or bf16 GEMM epilogue",
+    "attn_probs": "softmax numerical path (cuda_softmax_last_dim vs HF F.softmax)",
+    "attn_out": "probs · V matmul or final head-merge reshape (matches existing post_attn_raw)",
+}
+
+# Phase C7 — same fp32-friendly cos_sim bar as C6 because most SDPA-internal
+# taps are in fp32 on the HF side; the KV cache path materializes bf16 in kiln
+# but the tap bar stays strict so the first genuine structural drop (not
+# bf16 noise) shows up clearly. If every tap rides above this bar, C7 rules
+# SDPA out as a root cause and the bisect advances past attention.
+C7_COS_SIM_BAR = 0.9999
+
 META_KEYS = (
     "meta__draft_token_id",
     "meta__mtp_pos",
@@ -433,6 +478,10 @@ def _ordered_taps(
             out.append(key)
     for name in C6_PRE_ROPE_TAP_NAMES:
         key = f"c6__{name}"
+        if key in common and key not in out:
+            out.append(key)
+    for name in C7_SDPA_TAP_NAMES:
+        key = f"c7__{name}"
         if key in common and key not in out:
             out.append(key)
     extras = sorted(common - set(out))
@@ -1312,6 +1361,133 @@ def _emit_c6_summary(
         emit("     and/or re-check the abs_pos threading in the MTP block.")
 
 
+def _emit_c7_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C7 — SDPA-internal bisect inside MTP inner transformer block.
+
+    Walks `C7_SDPA_TAP_NAMES` (prefixed with `c7__` in both dumps) in strict
+    forward-graph order across every pair, prints a per-position cos_sim /
+    max|Δ| / mean|Δ| / rel_l2 table, and names the FIRST tap whose MEDIAN
+    cos_sim across positions falls below C7_COS_SIM_BAR (0.9999) as the
+    dominant source of SDPA drift. Falls back to the first tap with ANY
+    position diverging when no tap's median crosses the bar.
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase C7 SDPA-internal bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
+        n: {} for n in C7_SDPA_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c7__"):
+                continue
+            short = n[len("c7__"):]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+            )
+
+    header = "  " + "tap".ljust(26) + " ".join(
+        f"pos={lab:<48}" for lab in labels
+    )
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C7_SDPA_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2 = entry
+                captured_any = True
+                tag = "ok" if cs >= C7_COS_SIM_BAR else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<26}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C7 verdict: no C7 SDPA taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_POS=1,2 AND")
+        emit("     KILN_MTP_DUMP_C7_SDPA=1 set, and re-run scripts/mtp_reference_dump.py")
+        emit("     against the same kiln dump (the reference always emits c7__ taps).")
+        return
+
+    def _median(xs: List[float]) -> float:
+        finite = sorted(v for v in xs if np.isfinite(v))
+        if not finite:
+            return float("nan")
+        n = len(finite)
+        mid = n // 2
+        if n % 2 == 1:
+            return finite[mid]
+        return 0.5 * (finite[mid - 1] + finite[mid])
+
+    first_median_div: Optional[str] = None
+    first_median_val: float = float("nan")
+    first_any_div: Optional[str] = None
+    first_any_pos: Optional[str] = None
+    for tap in C7_SDPA_TAP_NAMES:
+        per_pos = [cell[tap][lab][0] for lab in labels if lab in cell[tap]]
+        if not per_pos:
+            continue
+        med = _median(per_pos)
+        if first_median_div is None and np.isfinite(med) and med < C7_COS_SIM_BAR:
+            first_median_div = tap
+            first_median_val = med
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                continue
+            cs = entry[0]
+            if np.isfinite(cs) and cs < C7_COS_SIM_BAR and first_any_div is None:
+                first_any_div = tap
+                first_any_pos = lab
+
+    if first_median_div is not None:
+        hypo = C7_HYPOTHESIS.get(first_median_div, "<unknown tap>")
+        emit(
+            f"  first tap with MEDIAN cos_sim < {C7_COS_SIM_BAR}: '{first_median_div}' "
+            f"(median cos_sim = {first_median_val:.6f})"
+        )
+        emit(f"Phase C7 verdict: SDPA TARGET = '{first_median_div}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Queue the follow-up phase to investigate this tap in isolation.")
+    elif first_any_div is not None:
+        hypo = C7_HYPOTHESIS.get(first_any_div, "<unknown tap>")
+        emit(
+            f"  no tap has MEDIAN cos_sim < {C7_COS_SIM_BAR}, but '{first_any_div}' "
+            f"(pos={first_any_pos}) dips below {C7_COS_SIM_BAR} on at least one position."
+        )
+        emit(f"Phase C7 verdict: SDPA TARGET (noisy) = '{first_any_div}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Recommend capturing more positions / seeds before committing")
+        emit("     to a C8 fix direction.")
+    else:
+        emit(f"Phase C7 verdict: ALL SDPA taps match within cos_sim >= {C7_COS_SIM_BAR}.")
+        emit("  -> SDPA is NOT the dominant source of post_attn_raw drift at this bar.")
+        emit("  -> Look downstream of `attn_out` (o_proj, residual, post-attn RMSNorm,")
+        emit("     MLP) and/or upstream of SDPA (Q/K/V projections, RoPE, dual-norm).")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -1370,6 +1546,21 @@ def main() -> int:
             "below 0.9999 as the dominant source of pre-RoPE drift."
         ),
     )
+    ap.add_argument(
+        "--c7",
+        action="store_true",
+        help=(
+            "Phase C7 mode: emit SDPA-internal bisect inside the MTP inner "
+            "transformer block (7 taps prefixed with `c7__`: pre_sdpa_q, "
+            "pre_sdpa_k, pre_sdpa_v, causal_mask, attn_scores_pre_softmax, "
+            "attn_probs, attn_out). Defaults atol=1e-3, rtol=1e-2 "
+            "(fp32-appropriate; bf16 KV-cache noise is confined to a couple "
+            "of taps, the rest are fp32-clean). Verdict names the first tap "
+            "(top-down) whose median cos_sim across positions dips below "
+            "0.9999 as the dominant source of SDPA drift. Run after --c6 "
+            "rules pre-RoPE out as the cause."
+        ),
+    )
     ap.add_argument("--out", default=None, help="Optional path to write report text")
     args = ap.parse_args()
 
@@ -1378,7 +1569,12 @@ def main() -> int:
     # arithmetic noise across that many ops means a strict 1e-3/1e-2 bar
     # flags semantically-identical tensors as divergent. C6 taps are all
     # pre-RoPE (embed / dual RMSNorms / concat / single fc matmul), so keep
-    # the strict fp32 bar for C6 even though B-phase modes relax it.
+    # the strict fp32 bar for C6 even though B-phase modes relax it. C7 taps
+    # sit inside SDPA — Q/K/V projections, scores, softmax, and attn_out are
+    # fp32-clean on the HF side with only the bf16 KV cache read introducing
+    # noise; the strict bar stays on to catch real structural drops and the
+    # comparator report makes bf16-accumulation drift visible via per-position
+    # max|Δ| / rel_l2 columns.
     bf16_mode = args.b10 or args.b11 or args.b12
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
@@ -1405,7 +1601,9 @@ def main() -> int:
         lines.append(s)
 
     multi = len(pairs) > 1
-    if args.c6:
+    if args.c7:
+        mode = "SDPA-internal bisect (C7)"
+    elif args.c6:
         mode = "pre-RoPE MTP input bisect (C6)"
     elif args.b12:
         mode = "layer-31 drift bisect (B12)"
@@ -1431,7 +1629,9 @@ def main() -> int:
         if not ok:
             overall_ok = False
 
-    if args.c6:
+    if args.c7:
+        _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.c6:
         _emit_c6_summary(pair_results, args.atol, args.rtol, emit)
     elif args.b12:
         _emit_b12_summary(pair_results, args.atol, args.rtol, emit)
@@ -1447,7 +1647,7 @@ def main() -> int:
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
     # legacy dumps from before this PR). Skipped in explicit --b10/--b11/--b12/--c6
     # mode so the per-phase report isn't cluttered by unrelated sub-op tables.
-    if not args.b10 and not args.b11 and not args.b12 and not args.c6:
+    if not args.b10 and not args.b11 and not args.b12 and not args.c6 and not args.c7:
         have_b9_taps = any(
             any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
             for pr in pair_results
