@@ -2,6 +2,8 @@
 """
 Phase B10 — `h_main` base-model reference dump.
 Phase B11b — optional layer-0 GDN sub-op taps (`--b11-taps`).
+Phase B12  — optional per-layer taps for layers 24..31 + GQA sub-op taps at
+             layer 31 (`--b12-taps`), plus optional fp32 reference (`--fp32`).
 
 This script produces the independent pure-Python reference counterpart to the
 kiln-side main-model forward (the 24×GDN + 8×GQA stack) so that Phase B10 can
@@ -12,6 +14,32 @@ inside the MTP head, so the remaining candidate is the base-model `h_prev`
 Phase B11b extends this with 11 intra-layer taps at layer 0's GDN block so we
 can bisect the first diverging sub-op (B10 showed layer 0 as the first
 boundary where cos ≈ 0.827 between kiln and HF).
+
+Phase B12 adds per-layer `h_layer_{24..31}` taps (the 8 GQA layers that carry
+the accumulated-but-benign-looking drift) and, at layer 31, a full suite of
+sub-op taps inside `gqa_attention` + the MLP. B12 also supports running the
+HF reference in fp32 (`--fp32`) so the comparator can separate numerical
+bf16-accumulation noise from real kernel divergence.
+
+GDN class handling
+------------------
+
+Qwen3.5-4B instantiates `Qwen3_5GatedDeltaNet` with a 4-way in_proj:
+
+    mixed_qkv = in_proj_qkv(h)   # [B, T, key_dim*2 + value_dim]
+    z         = in_proj_z(h)     # [B, T, value_dim]
+    b         = in_proj_b(h)     # [B, T, num_v_heads]
+    a         = in_proj_a(h)     # [B, T, num_v_heads]
+
+Earlier Qwen3-Next uses `Qwen3NextGatedDeltaNet` with a packed 2-way in_proj:
+
+    projected_qkvz = in_proj_qkvz(h)   # [..., [q, k, v, z]]
+    projected_ba   = in_proj_ba(h)     # [..., [b, a]]
+
+This script detects which layout the loaded checkpoint uses (by inspecting
+layer 0's submodules for `in_proj_qkv` vs `in_proj_qkvz`) and monkey-patches
+the correct class's `forward`. Older revisions of this script only patched
+`Qwen3NextGatedDeltaNet`, silently no-op'ing on Qwen3.5-4B.
 
 Usage
 -----
@@ -116,6 +144,36 @@ B11_LAYER0_TAP_NAMES: Tuple[str, ...] = (
 )
 
 
+# Phase B12 — additional per-layer boundary taps for layers 24..30. Layer 31
+# is already captured by B10. Together with the existing B10 taps (which
+# include 23 and 31), this gives dense coverage of the 8 GQA layers where
+# the residual drift (cos_sim 0.97-0.98) currently lives.
+B12_GQA_LAYERS: Tuple[int, ...] = (24, 25, 26, 27, 28, 29, 30)
+
+
+# Phase B12 — ordered GQA sub-op tap names for layer 31. Must stay in
+# lock-step with `B12_GQA_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs`.
+# Captured at the last GQA layer because B10 shows that's where drift is
+# already visible; instrumenting earlier GQA layers would cost more RAM
+# without new information.
+B12_LAYER31_GQA_TAP_NAMES: Tuple[str, ...] = (
+    "post_input_norm",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "qk_norm_q",
+    "qk_norm_k",
+    "rope_q",
+    "rope_k",
+    "attn_out",
+    "o_proj",
+    "post_attn_norm",
+    "mlp_gate",
+    "mlp_up",
+    "mlp_down",
+)
+
+
 # -----------------------------------------------------------------------------
 # Kiln-dump loader (mirrors mtp_reference_dump.py's loader)
 # -----------------------------------------------------------------------------
@@ -202,20 +260,89 @@ def _l2_norm_last_dim(x: "torch.Tensor", eps: float = 1e-6) -> "torch.Tensor":
     return x / norm
 
 
-def make_instrumented_gdn_forward(
+def _get_base_model(model):
+    """Unwrap multimodal / causal-LM wrappers to return the transformer stack
+    whose `.embed_tokens` and `.layers` we want to hook.
+
+    * Qwen3-VL-style multimodal: `model.language_model.model` is the stack.
+    * Plain causal LMs: `model.model` is the stack.
+    * Already-unwrapped stacks (has `embed_tokens` + `layers`): returned as-is.
+    """
+    if (
+        hasattr(model, "language_model")
+        and hasattr(model.language_model, "model")
+        and hasattr(model.language_model.model, "layers")
+    ):
+        return model.language_model.model
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model
+    if hasattr(model, "embed_tokens") and hasattr(model, "layers"):
+        return model
+    raise RuntimeError(
+        "Could not locate base transformer stack: expected model.model, "
+        "model.language_model.model, or top-level embed_tokens+layers."
+    )
+
+
+def _find_gdn_class_and_attr(model) -> Tuple[type, str, str]:
+    """Inspect layer 0 to determine which GatedDeltaNet class the checkpoint
+    uses and what attribute name the GDN submodule is exposed under. Returns
+    `(klass, attr_name, layout)` where `layout` is either `"qwen3_5"`
+    (4-way in_proj: in_proj_qkv/in_proj_z/in_proj_b/in_proj_a) or
+    `"qwen3_next"` (2-way in_proj: in_proj_qkvz/in_proj_ba).
+    """
+    base = _get_base_model(model)
+    layer_0 = base.layers[0]
+    for attr_name, child in layer_0.named_children():
+        if hasattr(child, "in_proj_qkv") and hasattr(child, "in_proj_z"):
+            return type(child), attr_name, "qwen3_5"
+        if hasattr(child, "in_proj_qkvz") and hasattr(child, "in_proj_ba"):
+            return type(child), attr_name, "qwen3_next"
+    raise RuntimeError(
+        "Could not find GatedDeltaNet module in layer 0. Expected a submodule "
+        "with either in_proj_qkv (Qwen3_5) or in_proj_qkvz (Qwen3-Next)."
+    )
+
+
+def _import_apply_mask_to_padding_states():
+    """Locate `apply_mask_to_padding_states`. Qwen3-Next exports it directly;
+    Qwen3_5 may re-export the same helper under a different module path.
+    Fall back to a no-op (identity) if the helper isn't found — the function
+    is only a safety trim when attention_mask is present, and both classes
+    work correctly when attention_mask is None (our case)."""
+    try:
+        from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
+            apply_mask_to_padding_states,
+        )
+
+        return apply_mask_to_padding_states
+    except Exception:
+        pass
+    try:
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (  # type: ignore
+            apply_mask_to_padding_states,
+        )
+
+        return apply_mask_to_padding_states
+    except Exception:
+        pass
+
+    def _identity(hidden_states, attention_mask):
+        return hidden_states
+
+    return _identity
+
+
+def make_qwen3_next_instrumented_gdn_forward(
     taps_out: Dict[str, "torch.Tensor"], target_layer_idx: int = 0
 ):
-    """Return a replacement for `Qwen3NextGatedDeltaNet.forward` that runs the
-    module's math unmodified but, when `self.layer_idx == target_layer_idx`,
-    captures each of the 11 B11b sub-op outputs into `taps_out`. The returned
-    function binds `target_layer_idx` and `taps_out` via closure; assign it
-    with `Qwen3NextGatedDeltaNet.forward = ...` to instrument every GDN layer
-    in a model (only the target layer will write taps)."""
+    """Return a replacement for `Qwen3NextGatedDeltaNet.forward` (2-way in_proj:
+    in_proj_qkvz + in_proj_ba). When `self.layer_idx == target_layer_idx`,
+    captures each of the 11 B11b sub-op outputs into `taps_out`."""
 
     import torch.nn.functional as F  # noqa: F401 — needed inside closure
-    from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
-        apply_mask_to_padding_states,
-    )
+
+    apply_mask_to_padding_states = _import_apply_mask_to_padding_states()
 
     def forward(self, hidden_states, cache_params=None, attention_mask=None):
         capture = int(self.layer_idx) == int(target_layer_idx)
@@ -375,6 +502,245 @@ def make_instrumented_gdn_forward(
     return forward
 
 
+def make_qwen3_5_instrumented_gdn_forward(
+    taps_out: Dict[str, "torch.Tensor"], target_layer_idx: int = 0
+):
+    """Return a replacement for `Qwen3_5GatedDeltaNet.forward` (4-way in_proj:
+    in_proj_qkv / in_proj_z / in_proj_b / in_proj_a). Structurally mirrors
+    the Qwen3-Next variant above, but consumes the four separate projections
+    the way kiln's `gated_deltanet_forward()` does.
+
+    Layout (matches kiln's forward.rs `gated_deltanet_forward`):
+        mixed_qkv = in_proj_qkv(h)   # [B, T, key_dim*2 + value_dim]
+        z         = in_proj_z(h)     # [B, T, value_dim]
+        b         = in_proj_b(h)     # [B, T, num_v_heads]
+        a         = in_proj_a(h)     # [B, T, num_v_heads]
+
+    The `gdn_in_proj` tap matches kiln's tap: `cat([mixed_qkv, z, b, a], -1)`.
+    """
+
+    import torch.nn.functional as F  # noqa: F401 — needed inside closure
+
+    apply_mask_to_padding_states = _import_apply_mask_to_padding_states()
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None):
+        capture = int(self.layer_idx) == int(target_layer_idx)
+
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        batch_size, seq_len, _ = hidden_states.shape
+
+        use_precomputed_states = (
+            cache_params is not None
+            and cache_params.has_previous_state(self.layer_idx)
+            and seq_len == 1
+        )
+
+        if use_precomputed_states:
+            conv_state = cache_params.layers[self.layer_idx].conv_states
+            recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
+
+        mixed_qkv = self.in_proj_qkv(hidden_states)
+        z = self.in_proj_z(hidden_states)
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
+
+        if capture:
+            # Matches kiln's `Tensor::cat(&[&mixed_qkv, &z, &b, &a])`.
+            taps_out["gdn_in_proj"] = (
+                torch.cat([mixed_qkv, z, b, a], dim=-1).detach().clone()
+            )
+
+        # conv1d expects [B, C, T] — transpose, run, transpose back.
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+
+        if use_precomputed_states:
+            mixed_qkv = self.causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                self.activation,
+            )
+        else:
+            if cache_params is not None:
+                conv_state = F.pad(
+                    mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0)
+                )
+                conv_state = cache_params.update_conv_state(conv_state, self.layer_idx)
+            if self.causal_conv1d_fn is not None:
+                mixed_qkv = self.causal_conv1d_fn(
+                    x=mixed_qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    seq_idx=None,
+                )
+            else:
+                mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+
+        mixed_qkv = mixed_qkv.transpose(1, 2)  # [B, T, key_dim*2 + value_dim]
+
+        if capture:
+            taps_out["gdn_conv"] = mixed_qkv.detach().clone()
+
+        query, key, value = torch.split(
+            mixed_qkv,
+            [self.key_dim, self.key_dim, self.value_dim],
+            dim=-1,
+        )
+        query = query.reshape(query.shape[0], query.shape[1], -1, self.head_k_dim)
+        key = key.reshape(key.shape[0], key.shape[1], -1, self.head_k_dim)
+        value = value.reshape(value.shape[0], value.shape[1], -1, self.head_v_dim)
+
+        beta = b.sigmoid()  # [B, T, num_v_heads]
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+
+        if capture:
+            taps_out["gdn_gate_beta"] = beta.detach().clone()
+            taps_out["gdn_gate_g"] = g.detach().clone()
+
+        if self.num_v_heads // self.num_k_heads > 1:
+            query = query.repeat_interleave(
+                self.num_v_heads // self.num_k_heads, dim=2
+            )
+            key = key.repeat_interleave(
+                self.num_v_heads // self.num_k_heads, dim=2
+            )
+
+        if capture:
+            q_normed = _l2_norm_last_dim(query.float())
+            k_normed = _l2_norm_last_dim(key.float())
+            taps_out["gdn_qk_norm_q"] = q_normed.to(query.dtype).detach().clone()
+            taps_out["gdn_qk_norm_k"] = k_normed.to(key.dtype).detach().clone()
+
+        if not use_precomputed_states:
+            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=cache_params is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=recurrent_state,
+                output_final_state=cache_params is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        if capture:
+            taps_out["gdn_recur_out"] = core_attn_out.detach().clone()
+
+        if cache_params is not None:
+            cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
+
+        # GatedRMSNorm. For Qwen3_5 z starts as [B, T, value_dim]; reshape to
+        # [B, T, num_v_heads, head_v_dim] so the flatten-then-norm pattern
+        # matches the Qwen3-Next path (and kiln's GatedRMSNorm application).
+        z_4d = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        z_shape_og = z_4d.shape
+        core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z_flat = z_4d.reshape(-1, z_4d.shape[-1])
+        core_attn_out_flat = self.norm(core_attn_out_flat, z_flat)
+        core_attn_out = core_attn_out_flat.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(
+            core_attn_out.shape[0], core_attn_out.shape[1], -1
+        )
+
+        if capture:
+            taps_out["gdn_gated_norm"] = core_attn_out.detach().clone()
+
+        output = self.out_proj(core_attn_out)
+
+        if capture:
+            taps_out["gdn_out_proj"] = output.detach().clone()
+
+        return output
+
+    return forward
+
+
+# Back-compat alias for any external caller / old invocation sites.
+make_instrumented_gdn_forward = make_qwen3_next_instrumented_gdn_forward
+
+
+# -----------------------------------------------------------------------------
+# Phase B12 — layer-31 GQA sub-op instrumentation via forward hooks
+# -----------------------------------------------------------------------------
+
+
+def _arm_b12_layer31_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List[object]:
+    """Attach forward hooks to layer-31 submodules to capture the GQA sub-op
+    taps listed in `B12_LAYER31_GQA_TAP_NAMES`. Not every tap is observable
+    via hooks — the intermediate rope_q / rope_k / attn_out tensors live
+    inside the attention forward and can't be read via module hooks alone.
+    We capture what hooks can reach; missing taps are flagged on the
+    comparator side rather than blocking the run.
+
+    Returns the list of hook handles (caller is responsible for removing).
+    """
+    handles: List[object] = []
+    layer = base.layers[31]
+
+    def _hook(name: str):
+        def _fn(_mod, _inputs, output):
+            # Some HF modules return tuples; prefer the first tensor.
+            tensor = output[0] if isinstance(output, tuple) else output
+            taps_out[name] = tensor.detach().clone()
+
+        return _fn
+
+    # Module-level taps we can cleanly address by name.
+    # input_layernorm / post_attention_layernorm are stable across Qwen3
+    # variants; q_proj/k_proj/v_proj/o_proj live under `self_attn`; gate/up/
+    # down projections live under `mlp`.
+    if hasattr(layer, "input_layernorm"):
+        handles.append(
+            layer.input_layernorm.register_forward_hook(_hook("post_input_norm"))
+        )
+    if hasattr(layer, "post_attention_layernorm"):
+        handles.append(
+            layer.post_attention_layernorm.register_forward_hook(
+                _hook("post_attn_norm")
+            )
+        )
+
+    attn = getattr(layer, "self_attn", None)
+    if attn is not None:
+        for attr, tap in (
+            ("q_proj", "q_proj"),
+            ("k_proj", "k_proj"),
+            ("v_proj", "v_proj"),
+            ("o_proj", "o_proj"),
+        ):
+            if hasattr(attn, attr):
+                handles.append(getattr(attn, attr).register_forward_hook(_hook(tap)))
+        # HF Qwen3 exposes per-head RMSNorm on q and k as q_norm / k_norm.
+        for attr, tap in (("q_norm", "qk_norm_q"), ("k_norm", "qk_norm_k")):
+            if hasattr(attn, attr):
+                handles.append(getattr(attn, attr).register_forward_hook(_hook(tap)))
+
+    mlp = getattr(layer, "mlp", None)
+    if mlp is not None:
+        for attr, tap in (
+            ("gate_proj", "mlp_gate"),
+            ("up_proj", "mlp_up"),
+            ("down_proj", "mlp_down"),
+        ):
+            if hasattr(mlp, attr):
+                handles.append(getattr(mlp, attr).register_forward_hook(_hook(tap)))
+
+    return handles
+
+
 # -----------------------------------------------------------------------------
 # Reference forward
 # -----------------------------------------------------------------------------
@@ -385,42 +751,65 @@ def run_reference_forward(
     input_ids: torch.Tensor,
     device: torch.device,
     capture_b11_layer0: bool = False,
+    capture_b12: bool = False,
+    fp32: bool = False,
 ) -> Dict[str, torch.Tensor]:
-    """Run HF Qwen3-Next forward with `output_hidden_states=True`. Returns a
-    dict mapping tap name -> F32 tensor. Boundary taps (`h_layer_*`,
-    `h_pre_final_norm`) are last-row slices at shape [1, 1, H]. When
-    `capture_b11_layer0=True`, also returns 11 full-tensor layer-0 GDN sub-op
-    taps under keys in `B11_LAYER0_TAP_NAMES` (shapes match kiln's)."""
+    """Run HF Qwen3-Next / Qwen3.5 forward with `output_hidden_states=True`.
+    Returns a dict mapping tap name -> F32 tensor.
+
+    - Boundary taps (`h_layer_*`, `h_pre_final_norm`) are last-row slices at
+      shape [1, 1, H].
+    - `capture_b11_layer0=True`: 11 full-tensor layer-0 GDN sub-op taps
+      under keys in `B11_LAYER0_TAP_NAMES`.
+    - `capture_b12=True`: per-layer `h_layer_{24..30}` taps plus layer-31
+      GQA sub-op taps under `b12__<name>` keys.
+    - `fp32=True`: load the HF model in float32 (instead of bfloat16) so the
+      comparator can distinguish bf16-accumulation noise from real divergence.
+    """
     from transformers import AutoModelForCausalLM  # type: ignore
 
+    dtype = torch.float32 if fp32 else torch.bfloat16
     print(
-        f"[mtp_h_main_ref] loading HF model from {checkpoint} (bf16, trust_remote_code=True)",
+        f"[mtp_h_main_ref] loading HF model from {checkpoint} "
+        f"(dtype={dtype}, trust_remote_code=True)",
         file=sys.stderr,
     )
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=dtype,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
     )
     model.eval()
     model.to(device)
 
+    base = _get_base_model(model)
+
+    # Detect which GatedDeltaNet class the checkpoint instantiates so B11b
+    # monkey-patches the right one. Silently no-op'ing on Qwen3.5 is the bug
+    # this patch fixes.
+    gdn_klass, _gdn_attr, gdn_layout = _find_gdn_class_and_attr(model)
+    print(
+        f"[mtp_h_main_ref] detected GDN layout={gdn_layout!r} class={gdn_klass.__name__}",
+        file=sys.stderr,
+    )
+
     # Set up B11b instrumentation + embed/norm forward_hooks BEFORE the forward.
     b11_captures: Dict[str, torch.Tensor] = {}
+    b12_captures: Dict[str, torch.Tensor] = {}
     hook_handles: List[object] = []
     orig_gdn_forward = None
     if capture_b11_layer0:
-        from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
-            Qwen3NextGatedDeltaNet,
-        )
-
-        orig_gdn_forward = Qwen3NextGatedDeltaNet.forward  # type: ignore[attr-defined]
-        Qwen3NextGatedDeltaNet.forward = make_instrumented_gdn_forward(  # type: ignore[assignment]
-            b11_captures, target_layer_idx=0
-        )
-
-        base = model.model if hasattr(model, "model") else model
+        orig_gdn_forward = gdn_klass.forward  # type: ignore[attr-defined]
+        if gdn_layout == "qwen3_5":
+            instrumented = make_qwen3_5_instrumented_gdn_forward(
+                b11_captures, target_layer_idx=0
+            )
+        else:
+            instrumented = make_qwen3_next_instrumented_gdn_forward(
+                b11_captures, target_layer_idx=0
+            )
+        gdn_klass.forward = instrumented  # type: ignore[assignment]
 
         def _save_tok_embed(_mod, _inputs, output):
             b11_captures["tok_embed"] = output.detach().clone()
@@ -438,8 +827,16 @@ def run_reference_forward(
         )
 
         print(
-            "[mtp_h_main_ref] B11b instrumentation armed: "
-            "monkey-patched Qwen3NextGatedDeltaNet.forward + 2 embed/norm hooks",
+            f"[mtp_h_main_ref] B11b instrumentation armed: "
+            f"monkey-patched {gdn_klass.__name__}.forward + 2 embed/norm hooks",
+            file=sys.stderr,
+        )
+
+    if capture_b12:
+        hook_handles.extend(_arm_b12_layer31_hooks(base, b12_captures))
+        print(
+            f"[mtp_h_main_ref] B12 instrumentation armed: "
+            f"{len(b12_captures)} placeholder slots + layer-31 submodule hooks",
             file=sys.stderr,
         )
 
@@ -464,11 +861,7 @@ def run_reference_forward(
             except Exception:
                 pass
         if orig_gdn_forward is not None:
-            from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
-                Qwen3NextGatedDeltaNet,
-            )
-
-            Qwen3NextGatedDeltaNet.forward = orig_gdn_forward  # type: ignore[assignment]
+            gdn_klass.forward = orig_gdn_forward  # type: ignore[assignment]
     # HF convention: `hidden_states` has `num_hidden_layers + 1` entries.
     #   hidden_states[0]   = embedding input
     #   hidden_states[i+1] = output after layer i (for i in 0..num_layers-1)
@@ -488,7 +881,10 @@ def run_reference_forward(
     )
 
     taps: Dict[str, torch.Tensor] = {}
-    for li in B10_BOUNDARY_LAYERS:
+    layers_to_emit: List[int] = list(B10_BOUNDARY_LAYERS)
+    if capture_b12:
+        layers_to_emit = sorted(set(layers_to_emit) | set(B12_GQA_LAYERS))
+    for li in layers_to_emit:
         assert li < num_layers, f"layer {li} out of range (num_layers={num_layers})"
         # Output AFTER layer `li` sits at index li+1.
         h_after = hs[li + 1]  # [1, seq_len, H]
@@ -515,6 +911,22 @@ def run_reference_forward(
         for name in B11_LAYER0_TAP_NAMES:
             if name in b11_captures:
                 taps[f"b11__{name}"] = b11_captures[name]
+
+    # Emit B12 layer-31 GQA sub-op taps under `b12__<name>`. We only warn on
+    # missing taps — hook-unreachable taps (rope_q, rope_k, attn_out) are
+    # expected to be absent until a later patch monkey-patches attention
+    # forward.
+    if capture_b12:
+        missing = [n for n in B12_LAYER31_GQA_TAP_NAMES if n not in b12_captures]
+        if missing:
+            print(
+                f"[mtp_h_main_ref] NOTE: B12 hooks did not capture {missing} "
+                "(hook-unreachable taps require attention forward monkey-patch)",
+                file=sys.stderr,
+            )
+        for name in B12_LAYER31_GQA_TAP_NAMES:
+            if name in b12_captures:
+                taps[f"b12__{name}"] = b12_captures[name]
 
     # Free the model and all retained activations before returning.
     del model, out, hs
@@ -560,9 +972,28 @@ def main() -> int:
         action="store_true",
         help=(
             "Also capture 11 layer-0 GDN sub-op taps (Phase B11b) by "
-            "monkey-patching Qwen3NextGatedDeltaNet.forward. Output tensors "
-            "are emitted under `b11__<name>` keys matching B11_TAP_NAMES in "
-            "crates/kiln-model/src/mtp_debug.rs."
+            "monkey-patching the checkpoint's GatedDeltaNet.forward "
+            "(Qwen3NextGatedDeltaNet or Qwen3_5GatedDeltaNet, auto-detected). "
+            "Output tensors are emitted under `b11__<name>` keys matching "
+            "B11_TAP_NAMES in crates/kiln-model/src/mtp_debug.rs."
+        ),
+    )
+    ap.add_argument(
+        "--b12-taps",
+        action="store_true",
+        help=(
+            "Also capture per-layer h_layer_{24..30} taps plus layer-31 GQA "
+            "sub-op taps (Phase B12). Sub-op taps go under `b12__<name>` and "
+            "match B12_GQA_TAP_NAMES in crates/kiln-model/src/mtp_debug.rs."
+        ),
+    )
+    ap.add_argument(
+        "--fp32",
+        action="store_true",
+        help=(
+            "Load the HF model in float32 instead of bfloat16. Use this to "
+            "distinguish numerical bf16-accumulation drift from real kernel "
+            "divergence in the B12 comparator."
         ),
     )
     args = ap.parse_args()
@@ -621,7 +1052,12 @@ def main() -> int:
         torch.cuda.manual_seed_all(args.seed)
 
     taps_bf16 = run_reference_forward(
-        args.checkpoint, prompt_tokens, device, capture_b11_layer0=args.b11_taps
+        args.checkpoint,
+        prompt_tokens,
+        device,
+        capture_b11_layer0=args.b11_taps,
+        capture_b12=args.b12_taps,
+        fp32=args.fp32,
     )
 
     # Up-cast to F32 and move to CPU for the dump.
@@ -638,8 +1074,11 @@ def main() -> int:
     out_dict["meta__prompt_tokens_len"] = torch.tensor(
         [int(prompt_tokens.shape[-1])], dtype=torch.int32
     )
+    boundary_layers = list(B10_BOUNDARY_LAYERS)
+    if args.b12_taps:
+        boundary_layers = sorted(set(boundary_layers) | set(B12_GQA_LAYERS))
     out_dict["meta__boundary_layers"] = torch.tensor(
-        list(B10_BOUNDARY_LAYERS), dtype=torch.int32
+        boundary_layers, dtype=torch.int32
     )
     # Also write the resolved prompt tokens so later reruns can reproduce
     # bit-exactly even if the kiln dump gets rotated.
