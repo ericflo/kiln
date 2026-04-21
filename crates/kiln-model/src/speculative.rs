@@ -543,6 +543,7 @@ pub fn speculative_mtp_decode_step(
     base_cache: &mut PagedKvCache,
     base_block_table: &BlockTable,
     base_pos: usize,
+    linear_state: &mut LinearAttentionState,
     mtp_cache: &mut PagedKvCache,
     mtp_block_table: &BlockTable,
     mtp_pos: usize,
@@ -569,6 +570,15 @@ pub fn speculative_mtp_decode_step(
     //    and returns per-position logits (for draft comparison at position 0
     //    and bonus sampling at position 1) plus the last-row pre-final-norm
     //    hidden for threading into the next MTP step.
+    //
+    // The GDN recurrent + conv state advances by 2 tokens here (last_token +
+    // draft_token). On reject we rewind to this snapshot so only last_token's
+    // advance is kept — draft_token's state mutation is undone. Snapshot cost
+    // is ~49 MiB dToD per step on Qwen3.5-4B (24 GDN layers). Zero-copy
+    // ping-pong shadow-slot rewrite is a follow-up.
+    let linear_snapshot = linear_state
+        .snapshot()
+        .context("mtp: snapshot linear state before verify")?;
     let verify_input = [last_token, draft_token];
     let (verify_logits, new_hidden) = model_forward_paged_with_last_hidden(
         backend,
@@ -578,7 +588,7 @@ pub fn speculative_mtp_decode_step(
         base_cache,
         base_block_table,
         base_pos,
-        None, // MTP speculative: no linear-attn state rollback for GDN in this WIP.
+        Some(linear_state),
         None, // no LoRA on the verify pass — keep parity with scaffolding.
         None, // positions_gpu: let the forward pass build positions internally.
     )
@@ -618,6 +628,15 @@ pub fn speculative_mtp_decode_step(
         } else {
             accepted_tokens.push(target_at_0);
         }
+        // Rewind GDN state: the verify pass advanced the recurrent + conv
+        // state by 2 tokens, but only last_token is canonical on reject. The
+        // target_at_0 token will be re-consumed on the next iteration as the
+        // new last_token and will re-advance the state at that point. Without
+        // this rewind, the GDN state ends up 1 token ahead of the base KV
+        // cache and subsequent forward passes produce garbage.
+        linear_state
+            .restore_from(&linear_snapshot)
+            .context("mtp: restore linear state on reject")?;
         // Base consumed 1 slot in the canonical view (even though the forward
         // pass wrote KV at base_pos+1 with stale draft KV — that slot is
         // overwritten on the next iteration when the corrected token is

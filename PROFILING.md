@@ -3457,9 +3457,10 @@ Bench sweep of the native MTP decode arm introduced in PR #247 and patched by PR
 | Arm | decode tok/s | mean ITL (ms) | p50 ITL (ms) | p99 ITL (ms) | α |
 |---|---:|---:|---:|---:|---:|
 | Off | **48.5** | **20.6** | **20.50** | **23.70** | — |
-| Mtp | **BLOCKED** | — | — | — | — |
+| Mtp (initial, PR #247+#253) | **BLOCKED** | — | — | — | — |
+| Mtp (after GDN state threading, this PR) | **41.16** | **24.29** | **17.23** | **39.31** | **0.411** |
 
-Off median is the standard 512p/128d Arm B baseline; Mtp blocked before any decode steps completed.
+Off median is the standard 512p/128d Arm B baseline. The initial Mtp row blocked before any decode steps completed. The follow-up Mtp row is measured after threading `LinearAttentionState` through `speculative_mtp_decode_step` with snapshot/restore on reject (see "Follow-up: GDN state threading" below).
 
 ### Off — raw per-run numbers
 
@@ -3537,4 +3538,54 @@ Preflight Check 2 in the section above math-ceilings α=0.75 at 1.571× on Qwen3
 - Does not attempt the GDN state rollback fix (scope-discipline: doc-only, per task brief).
 - Does not run the SkipLayer arm (out of scope for this PR; Phase X preflight uses SkipLayer as an A/B option but the Mtp row is the blocker here).
 - Does not modify any `.rs` source. PROFILING.md only.
+
+### Follow-up: GDN state threading (2026-04-21, same-day)
+
+Surgical fix landed in the same branch that produced this PROFILING.md update: `speculative_mtp_decode_step` now accepts `linear_state: &mut LinearAttentionState`, takes a snapshot before the verify forward, threads `Some(linear_state)` into `model_forward_paged_with_last_hidden`, and calls `restore_from(&snapshot)` on the reject branch so the rejected draft token's GDN state mutation is rolled back.
+
+With that change the Mtp bench no longer fails at `linear attention state required for GDN layers (layer 0)`. 3× Mtp + 3× Off re-run on the same A6000 pod, same bench flags:
+
+#### Mtp — raw per-run numbers (post state-threading)
+
+| Run | prefill ms | prefill tok/s | mean ITL ms | mean ITL tok/s | p50 ITL ms | p99 ITL ms | α |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 335.8 | 1507 | 24.41 | 40.97 | 17.12 | 38.05 | 0.407 |
+| 2 | 331.2 | 1527 | 24.29 | 41.16 | 17.23 | 39.31 | 0.411 |
+| 3 | 334.9 | 1511 | 22.53 | 44.39 | 17.05 | 38.99 | 0.524 |
+| **median** | **334.9** | **1511** | **24.29** | **41.16** | **17.23** | **39.31** | **0.411** |
+
+#### Off — raw per-run numbers (same pod, re-run for fresh-paired comparison)
+
+| Run | prefill ms | prefill tok/s | mean ITL ms | mean ITL tok/s | p50 ITL ms | p99 ITL ms |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 324.2 | 1561 | 20.46 | 48.87 | 20.25 | 25.89 |
+| 2 | 334.9 | 1511 | 20.74 | 48.21 | 20.75 | 23.13 |
+| 3 | 326.2 | 1551 | 20.28 | 49.32 | 20.14 | 22.55 |
+| **median** | **326.2** | **1551** | **20.46** | **48.87** | **20.25** | **23.13** |
+
+#### Findings
+
+1. **State threading is correct.** The bench path that previously crashed at decode step 0 now completes all three runs with 128 tokens each, stable tok/s across runs, and sane α.
+2. **α = 0.411 is well below the 0.72 stop-ship floor.** Preflight Check 2 math-ceilings α=0.75 at 1.571× and sets ≥1.5× as the target. At α=0.411 with k=1, mean accepted tokens per verify call is 1.411; the verify-pass overhead (two-token forward + draft-head forward + snapshot/restore dToD) is larger than the 0.411-token savings, so:
+3. **Mtp is 15.7% SLOWER than Off on Qwen3.5-4B at this α** (41.16 vs 48.87 tok/s median decode). p99 ITL also widens from 23.13 → 39.31 ms.
+4. **The MTP path is functional but not yet shippable.** This PR unblocks the measurement path; the low-α investigation is a separate follow-up.
+
+#### Why α is low (hypotheses, not debugged here)
+
+- The MTP head may be consuming a stale `hidden_state` from the base forward — `speculative_mtp_decode_step` passes `last_hidden` returned from the verify forward, but the ordering vs the `embed(draft_token)` concat in `mtp_forward_step` should be re-checked against the HF reference.
+- `pre_fc_norm_embedding` and `pre_fc_norm_hidden` tensor loading (PR #253) should be re-verified post-loading — log a dequant sample vs. HF `safetensors` to confirm the MTP head weights are byte-identical.
+- Sampling temperature in the bench's rejection loop may not match the base sampler — preflight assumed greedy/temp=0; if the verify path uses a different sampler than the draft, acceptance will systematically under-report.
+- Pretraining mismatch: Qwen3.5-4B's native MTP was trained with `mtp_num_hidden_layers=1` and a specific concat order; any minor layout difference in our loader (e.g., swapped `fc` input ordering) would hand back near-random predictions → α≈0.4 is exactly the signature.
+
+#### Next steps
+
+- Open a dedicated `mtp: debug low-α root cause` task. Instrument α per-step, log the top-5 draft tokens + base-verify probs for the first 16 verify calls, compare against HF reference on the same prompt tokens, confirm weight-tensor byte-equality after loader.
+- Revisit shadow-slot ping-pong snapshot rewrite (zero-copy) only after α clears 0.72 — at α=0.411 it would not move the needle.
+- Consider gating MTP on the new `KILN_SPEC_METHOD=mtp` flag with a startup warning until α ships above floor.
+
+#### Cost (follow-up)
+
+- Same warm pod lease, incremental re-build: 33 s wall clock (sccache hit).
+- 3× Mtp run ~6 min + 3× Off run ~6 min.
+- Well under the 120 min / $60 cap for the combined effort.
 

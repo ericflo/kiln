@@ -1024,6 +1024,7 @@ fn bench_latency_paged_mtp(
             &mut base_cache,
             &base_block_table,
             base_pos,
+            &mut linear_state,
             &mut mtp_cache,
             &mtp_block_table,
             mtp_pos,
