@@ -208,7 +208,8 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.host, "127.0.0.1");
         assert_eq!(s.port, 8000);
-        assert!((s.inference_fraction - 0.9).abs() < f32::EPSILON);
+        let expected_fraction = if cfg!(target_os = "macos") { 0.7 } else { 0.9 };
+        assert!((s.inference_fraction - expected_fraction).abs() < f32::EPSILON);
         assert!(!s.fp8_kv_cache);
         assert_eq!(s.cuda_graphs, !cfg!(target_os = "macos"));
         assert!(s.prefix_cache);
