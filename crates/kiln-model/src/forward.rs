@@ -3506,13 +3506,26 @@ pub fn mtp_forward_step(
     let token_emb = token_emb.unsqueeze(0)?; // [1, 1, H]
 
     // 2-3. Dual RMSNorms. `h_prev` is [1, 1, H] pre-final-norm.
+    //
+    // `KILN_MTP_SWAP_FC_NORMS=1` swaps which RMSNorm weight is applied to
+    // which half. This is the Phase B2 secondary-hypothesis A/B: if the
+    // loader paired the two `pre_fc_norm_*` tensors to the wrong halves of
+    // the `fc` input (plausible since both are [H]-vectors and
+    // distinguishable only by name), swap-on should materially change α.
+    // If α is unchanged the hypothesis is disproven.
+    let swap_fc_norms = crate::mtp_debug::is_swap_fc_norms_enabled();
+    let (norm_emb_weight, norm_h_weight) = if swap_fc_norms {
+        (&mtp.pre_fc_norm_hidden, &mtp.pre_fc_norm_embedding)
+    } else {
+        (&mtp.pre_fc_norm_embedding, &mtp.pre_fc_norm_hidden)
+    };
     let norm_emb = {
         kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_emb");
-        rms_norm(&token_emb, &mtp.pre_fc_norm_embedding, config.rms_norm_eps)?
+        rms_norm(&token_emb, norm_emb_weight, config.rms_norm_eps)?
     };
     let norm_h = {
         kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_hidden");
-        rms_norm(h_prev, &mtp.pre_fc_norm_hidden, config.rms_norm_eps)?
+        rms_norm(h_prev, norm_h_weight, config.rms_norm_eps)?
     };
 
     // 4. Concat along the hidden dim and fuse: [1, 1, 2H] @ fc_t[2H, H] -> [1, 1, H]
@@ -3555,8 +3568,22 @@ pub fn mtp_forward_step(
 
     // Optional Phase B instrumentation. Off by default; enabled with
     // `KILN_MTP_DEBUG=1`. See `crate::mtp_debug` for the rate-limited path.
+    //
+    // Phase B2 additions: halves-L2 on the `fc` input (to quantify the
+    // embed-dominance hypothesis) and L2 on the fused output (to rule out
+    // explode/collapse failure modes inside the fc matmul). `halves_ratio`
+    // is `norm_emb_l2 / norm_h_l2`; values far from 1.0 are evidence the
+    // two halves have mismatched magnitudes feeding `fc`.
     if crate::mtp_debug::should_log() {
         let h_norm = crate::mtp_debug::tensor_l2_norm(h_prev).unwrap_or(f32::NAN);
+        let norm_emb_l2 = crate::mtp_debug::tensor_l2_norm(&norm_emb).unwrap_or(f32::NAN);
+        let norm_h_l2 = crate::mtp_debug::tensor_l2_norm(&norm_h).unwrap_or(f32::NAN);
+        let fused_l2 = crate::mtp_debug::tensor_l2_norm(&fused).unwrap_or(f32::NAN);
+        let halves_ratio = if norm_h_l2 > 0.0 {
+            norm_emb_l2 / norm_h_l2
+        } else {
+            f32::NAN
+        };
         let logits_norm = crate::mtp_debug::tensor_l2_norm(&logits).unwrap_or(f32::NAN);
         let top = crate::mtp_debug::top_k_logits(&logits, 5)
             .map(|t| crate::mtp_debug::format_top_k(&t))
@@ -3565,7 +3592,12 @@ pub fn mtp_forward_step(
             target: "kiln::mtp_debug",
             mtp_pos = mtp_pos,
             last_token = draft_token_id,
+            swap_fc_norms = swap_fc_norms,
             h_prev_l2 = h_norm,
+            norm_emb_l2 = norm_emb_l2,
+            norm_h_l2 = norm_h_l2,
+            halves_ratio = halves_ratio,
+            fused_l2 = fused_l2,
             mtp_logits_l2 = logits_norm,
             mtp_top5 = %top,
             "mtp_draft"

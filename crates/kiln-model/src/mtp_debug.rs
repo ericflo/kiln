@@ -92,6 +92,20 @@ pub fn tensor_l2_norm(t: &Tensor) -> Result<f32> {
     Ok(v.iter().map(|x| x * x).sum::<f32>().sqrt())
 }
 
+/// True when `KILN_MTP_SWAP_FC_NORMS=1` (or `true`) is set. When enabled,
+/// `mtp_forward_step` swaps which RMSNorm weight is applied to which half of
+/// the `fc` input — i.e. `pre_fc_norm_hidden` is applied to the embedding
+/// half and `pre_fc_norm_embedding` is applied to the `h_prev` half. This is
+/// the Phase B2 secondary-hypothesis A/B test from `PROFILING.md`: if α
+/// jumps with the swap on, the loader pairs the wrong norm tensor to the
+/// wrong half of the fused `fc` input. Read on every call (no caching) so
+/// runs can A/B by toggling the env var between processes.
+pub fn is_swap_fc_norms_enabled() -> bool {
+    std::env::var("KILN_MTP_SWAP_FC_NORMS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Format a top-K list as `"[(id=42, l=12.34), (id=1, l=11.20), ...]"`.
 pub fn format_top_k(top: &[(u32, f32)]) -> String {
     let parts: Vec<String> = top
