@@ -3928,3 +3928,111 @@ The norm-swap flipped step 2 from an identity-biased reject into a direct accept
 - Work: byte-eq test (Part A), halves-L2 logging (Part B), swap toggle (Part C), this write-up (Part D).
 
 Pod released to pool on task completion.
+
+## Phase B3 — MTP multi-prompt A/B: reject the B2 norm-swap finding (2026-04-21)
+
+Phase B2 ended on a single-prompt N=1 result: swap-ON lifted α from 0.240 to 0.348 (+45%) for one fixed bench prompt, 32 output tokens. Phase B3 set out to confirm or reject that finding across 8 distinct prompts × 128 output tokens, on the same A6000 pod image and the same MTP tracing plumbing.
+
+**Verdict: REJECT.** Across 8 seeds × 2 arms, swap-ON beats swap-OFF on α in only 3/8 seeds. Mean paired Δα = −0.208 (swap hurts on average). The B2 +45% result is within the normal prompt-dependent α variance of swap-OFF (range 0.085–0.829) and was not a reliable signal. The norm-swap is not the correct wiring; do not land PR-style wiring changes based on Phase B2 alone.
+
+The two consistent structural signals **are** real but do not translate into α gain:
+- **Δhalves_ratio = +0.327 ± 0.015** across all 8 seeds — the swap does materially change the fc input composition as expected.
+- **Δidentity_bias = −0.075 ± 0.049** across all 8 seeds — swap-ON reliably reduces the "draft the last token" failure mode. But this reduction is consumed by other draft failures, so α does not rise.
+
+### Methodology
+
+Reused everything from Phase B2 (bench binary, MTP tracing, halves-L2 logging, `KILN_MTP_SWAP_FC_NORMS`, MTP_DEBUG cap = 16 draft emissions). Two changes:
+
+1. `kiln-bench --seed <u64>` now also selects one of 8 prompt bases (`PROMPT_POOL[seed % 8]`), so seeds actually produce different token distributions instead of identical greedy runs. Seed 0 is the Phase B2 baseline preserved verbatim; seeds 1–7 cover distinct topics (software, history, nature, philosophy, cooking, astronomy, music).
+2. Output window increased from 32 → 128 tokens per run to amplify α signal (70–127 `mtp_verify` events per run vs. ~20 in B2).
+
+Sweep: 16 runs (8 seeds × {off, on}), paged production path, MTP_DEBUG on:
+
+```bash
+for SEED in 0..7; do for ARM in off on; do
+  env KILN_MTP_DEBUG=1 KILN_SPEC_METHOD=mtp ${ARM=on:+KILN_MTP_SWAP_FC_NORMS=1} \
+    kiln-bench --model-path .../qwen3.5-4b --paged \
+      --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+      --seed $SEED > mtp-b3-seed${SEED}-${ARM}.log 2>&1
+done; done
+```
+
+Wall-clock: 1710 s (≈ 28.5 min, ≈107 s per run) on one A6000. Trace files archived under `assets/mtp-phase-b3-seed{0..7}-{off,on}.log`.
+
+Aggregation (`assets/mtp-phase-b3-aggregate.py`): strips ANSI codes, stops at the `Inference Throughput Benchmarks` marker so post-latency events do not contaminate metrics, extracts α from `mtp_verify accepted=…`, identity-bias from `mtp_verify draft_token==last_token`, halves ratio / norm-L2 from `mtp_draft` events.
+
+### Per-run aggregate
+
+`alpha` = accept rate on `mtp_verify`; `id_bias` = fraction of verifies where `draft_token == last_token`; `halves` = mean `halves_ratio` (`norm_emb_l2 / norm_h_l2`); `norm_e`/`norm_h` = mean L2 of the two fc-input halves; `oov` = drafts with `draft_token >= 151936`; `n_d`/`n_v` = number of draft/verify events (n_d is capped at 16 by `KILN_MTP_DEBUG_MAX_CALLS`).
+
+| seed | arm | alpha  | id_bias | halves | norm_e | norm_h | oov | n_d | n_v |
+|-----:|:---:|:------:|:-------:|:------:|:------:|:------:|:---:|:---:|:---:|
+|    0 | off | 0.257  | 0.099   | 0.756  | 30.68  | 40.58  | 0   | 16  | 101 |
+|    0 | on  | 0.306  | 0.031   | 1.076  | 39.05  | 36.35  | 1   | 16  |  98 |
+|    1 | off | 0.198  | 0.085   | 0.762  | 31.19  | 40.96  | 0   | 16  | 106 |
+|    1 | on  | 0.366  | 0.011   | 1.069  | 39.06  | 36.56  | 0   | 16  |  93 |
+|    2 | off | 0.085  | 0.195   | 0.766  | 30.90  | 40.32  | 0   | 16  | 118 |
+|    2 | on  | 0.347  | 0.042   | 1.097  | 38.93  | 35.61  | 0   | 16  |  95 |
+|    3 | off | 0.477  | 0.023   | 0.768  | 30.80  | 40.15  | 2   | 16  |  86 |
+|    3 | on  | 0.337  | 0.021   | 1.105  | 39.10  | 35.50  | 1   | 16  |  95 |
+|    4 | off | 0.829  | 0.143   | 0.759  | 30.78  | 40.58  | 0   | 16  |  70 |
+|    4 | on  | 0.257  | 0.000   | 1.109  | 39.05  | 35.32  | 0   | 16  | 101 |
+|    5 | off | 0.309  | 0.093   | 0.769  | 30.75  | 40.03  | 3   | 16  |  97 |
+|    5 | on  | 0.033  | 0.008   | 1.082  | 38.88  | 35.94  | 0   | 16  | 123 |
+|    6 | off | 0.549  | 0.049   | 0.774  | 30.96  | 40.00  | 1   | 16  |  82 |
+|    6 | on  | 0.033  | 0.024   | 1.119  | 39.23  | 35.13  | 1   | 16  | 123 |
+|    7 | off | 0.641  | 0.051   | 0.764  | 31.05  | 40.67  | 0   | 16  |  78 |
+|    7 | on  | 0.000  | 0.000   | 1.075  | 39.46  | 36.75  | 0   | 16  | 127 |
+
+### Paired ON − OFF per seed
+
+| seed | d_alpha | d_id_bias | d_halves | d_oov |
+|-----:|:-------:|:---------:|:--------:|:-----:|
+|    0 | +0.049  | −0.068    | +0.319   | +1    |
+|    1 | +0.167  | −0.074    | +0.307   |  0    |
+|    2 | +0.263  | −0.153    | +0.330   |  0    |
+|    3 | −0.140  | −0.002    | +0.337   | −1    |
+|    4 | −0.571  | −0.143    | +0.350   |  0    |
+|    5 | −0.277  | −0.085    | +0.314   | −3    |
+|    6 | −0.516  | −0.024    | +0.345   |  0    |
+|    7 | −0.641  | −0.051    | +0.311   |  0    |
+
+Summary:
+
+| metric    | mean   | std   | min    | max    | n |
+|-----------|:------:|:-----:|:------:|:------:|:-:|
+| d_alpha   | −0.208 | 0.326 | −0.641 | +0.263 | 8 |
+| d_id_bias | −0.075 | 0.049 | −0.153 | −0.002 | 8 |
+| d_halves  | +0.327 | 0.015 | +0.307 | +0.350 | 8 |
+| d_oov     | −0.375 | 1.111 | −3.000 | +1.000 | 8 |
+
+**ON > OFF on d_alpha: 3/8 seeds.** Decision rule stated in the task spec — CONFIRM requires ≥ 7/8, INCONCLUSIVE 6/8, REJECT ≤ 5/8. We are well inside REJECT.
+
+### Interpretation
+
+Phase B2 compared swap-OFF α = 0.240 against swap-ON α = 0.348 on a single shared prompt (seed 0 in B3 terms, 32 output tokens). B3 seed-0 at 128 tokens is OFF=0.257 / ON=0.306, Δα = +0.049 — a much smaller lift than B2 reported, still positive but not +45%. Seeds 1–2 show a genuine Δα lift (+0.167, +0.263) while seeds 3–7 show a Δα *drop* as large as −0.641. No clean topic-cluster pattern in the "helped" vs. "hurt" split (seed 0 canonical / 1 software / 2 history were helped; 3 nature / 4 philosophy / 5 cooking / 6 astronomy / 7 music were hurt). The swap-OFF α distribution across prompts (0.085–0.829, range 0.74) is the dominant source of variance; once OFF α is high on a given prompt, ON α is often substantially lower, and vice versa — the two arms are not a pure "shifted mean" but a repairing-vs-breaking pair whose sign depends on the prompt.
+
+The two truly consistent deltas (halves_ratio and id_bias) confirm the norm-swap acts as intended mechanically — the `embed` half of the fc input gets the larger-scale norm applied, inverting which half dominates, and the "copy last token" failure mode drops reliably. But that failure mode only accounts for a small fraction of rejects (OFF id_bias ranges 2.3%–19.5%, mostly < 10%), so fixing it does not move α in the direction we need.
+
+**This rules out "swap the norms" as the wiring fix.** The remaining hypothesis from Phase B — that fc maps the wrong half-to-slot pairing in the concatenation — is still live, but the concat order and matmul direction are now the more likely culprits, not the RMSNorm attachment. A Phase B4 (if pursued) should:
+
+1. Verify the fc concat ordering (`[embed; h_prev]` vs. `[h_prev; embed]`) against the Qwen3-MTP reference generator end-to-end on the same prompt.
+2. Confirm the fc weight tensor's row/column layout matches the concat order kiln feeds it.
+3. Re-trace α with any such wiring fix across the same 8-prompt pool, using this same sweep script for a direct comparison.
+
+Do not reopen the norm-swap question without a new structural hypothesis — this A/B is decisively negative.
+
+### Caveats
+
+- `n_drafts` is the MAX_CALLS cap (16) per run, not the true number of drafts; α statistics come from `n_verifies` (70–127 per run), which is statistically adequate for ±~0.05 precision per arm.
+- Greedy sampling (`temperature = 0`) means seeds only vary the prompt, not per-token RNG. This is the correct choice for reproducibility but means each seed is effectively a single deterministic trajectory through decode.
+- The `oov` count (drafts with `token_id >= 151936`) is small (0–3 per run) and inconsistent in sign between arms. The Phase B OOV special-token pathology still exists but is orthogonal to the norm-pairing question.
+- MTP_DEBUG tracing adds stderr I/O overhead but is applied symmetrically, so it does not bias the ON/OFF comparison.
+
+### Budget used
+
+- Pod: 1× A6000 on-demand (pool lease, `ghcr.io/ericflo/kiln-runpod:latest`), reused from the B2 lease.
+- Wall-clock: sweep 28.5 min + aggregation + write-up ≈ 55 min on pod, well under the 120 min / $60 task cap.
+- Work: Part A (`--seed` prompt-pool wiring in `bench.rs`), Part B (16-run sweep script + execution), Part C (ANSI-safe aggregator), Part D (this section). All four parts landed in this PR.
+
+Pod released to pool on task completion.
