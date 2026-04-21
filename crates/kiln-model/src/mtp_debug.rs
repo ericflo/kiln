@@ -81,6 +81,32 @@ thread_local! {
     /// `KILN_MTP_DUMP_B11_TAPS=1` so production decode pays zero cost.
     static B11_LAYER0_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
+
+    /// Phase B12: thread-local sink for layer-31 GQA sub-op taps. Distinct
+    /// from B10/B11 sinks so each phase's capture window can be armed and
+    /// drained independently. Same `(name, shape, host_f32)` shape as the
+    /// other phase sinks; same release-at-capture-time pattern.
+    ///
+    /// Driven by [`arm_b12_gqa_capture`] / [`drain_b12_gqa_capture`] /
+    /// [`capture_b12_gqa_tap`], and gated on `KILN_MTP_DUMP_B12_GQA_TAPS=1`
+    /// so production decode pays zero cost.
+    static B12_GQA_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
+
+    /// Phase B12: thread-local "current absolute layer index" slot. Set by
+    /// the main transformer layer loop around each layer's forward call so
+    /// that deep inside `gqa_attention_paged` / `transformer_block_paged`
+    /// the capture call sites can gate on `abs_layer_idx == 31` without
+    /// needing an explicit signature-change plumb through every call site.
+    ///
+    /// `None` = no layer-scoped capture in flight (production path,
+    /// MTP-inner-block path). `Some(i)` = base-model layer `i` is currently
+    /// executing on this thread.
+    ///
+    /// Driven by [`enter_b12_layer_scope`] / [`exit_b12_layer_scope`] and
+    /// read via [`current_b12_layer_is_31`].
+    static B12_CURRENT_LAYER: RefCell<Option<usize>> =
+        const { RefCell::new(None) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -302,9 +328,22 @@ pub fn is_dump_hidden_states_enabled() -> bool {
 /// open on this thread AND the given layer index is one of the boundary
 /// layers. Call sites use this to gate the (relatively cheap) per-layer
 /// tensor-narrow + host copy so disarmed runs pay zero cost.
+///
+/// Phase B12: when `KILN_MTP_DUMP_B12_GQA_TAPS=1` is also set, this returns
+/// true for every layer in [`B12_GQA_LAYERS`] in addition to the B10
+/// boundary set, so the comparator gets full coverage of the 8 GQA layers.
 pub fn should_capture_hidden_state_for_layer(layer_idx: usize) -> bool {
     let armed = H_MAIN_CAPTURE.with(|c| c.borrow().is_some());
-    armed && B10_BOUNDARY_LAYERS.contains(&layer_idx)
+    if !armed {
+        return false;
+    }
+    if B10_BOUNDARY_LAYERS.contains(&layer_idx) {
+        return true;
+    }
+    if is_dump_b12_gqa_taps_enabled() && B12_GQA_LAYERS.contains(&layer_idx) {
+        return true;
+    }
+    false
 }
 
 /// True if the Phase B10 hidden-state capture window is currently armed on
@@ -468,6 +507,162 @@ pub fn capture_b11_layer0_tap(name: &str, t: &Tensor) -> Result<()> {
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Phase B12: layer 24..31 GQA per-layer + layer-31 sub-op taps
+// -----------------------------------------------------------------------------
+
+/// Layer indices captured under Phase B12 in addition to the standard B10
+/// boundary set. Covers the 8 full-attention (GQA) layers at the tail of the
+/// Qwen3.5-4B stack so the comparator can localize a sub-percentile cos_sim
+/// drift to a single layer.
+///
+/// Layer 31 is already in [`B10_BOUNDARY_LAYERS`]; including it here too is
+/// harmless because [`should_capture_hidden_state_for_layer`] uses set
+/// membership semantics.
+pub const B12_GQA_LAYERS: [usize; 8] = [24, 25, 26, 27, 28, 29, 30, 31];
+
+/// True when `KILN_MTP_DUMP_B12_GQA_TAPS=1` (or `true`) is set. Opt-in for
+/// the Phase B12 layer-24..31 + layer-31 GQA sub-op bisect: when enabled
+/// alongside `KILN_MTP_DUMP_PATH` *and* `KILN_MTP_DUMP_HIDDEN_STATES=1`,
+/// the base-model forward records:
+///
+/// - one `h_layer_<idx>` tap per layer in [`B12_GQA_LAYERS`] (in addition
+///   to the B10 boundary set), via the existing h_main capture path;
+/// - the named layer-31 GQA sub-op taps listed in [`B12_GQA_TAP_NAMES`],
+///   appended to the safetensors dump under names `b12__<name>`.
+pub fn is_dump_b12_gqa_taps_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_B12_GQA_TAPS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Canonical ordered list of Phase B12 layer-31 GQA sub-op tap names. The
+/// comparator (`scripts/mtp_compare.py --b12`) expects this exact order in
+/// its output table, and the HF reference (`scripts/mtp_h_main_reference_dump.py`)
+/// emits mirrored `b12__<name>` tensors in the same order.
+///
+/// Order follows the forward graph at layer 31:
+/// 1. `post_input_norm` — output of the pre-attention input LayerNorm
+/// 2. `q_proj` — output of `q_proj` linear (pre-reshape, pre-norm)
+/// 3. `k_proj` — output of `k_proj` linear (pre-reshape, pre-norm)
+/// 4. `v_proj` — output of `v_proj` linear (pre-reshape)
+/// 5. `qk_norm_q` — output of the per-head q RMSNorm (`q_norm`)
+/// 6. `qk_norm_k` — output of the per-head k RMSNorm (`k_norm`)
+/// 7. `rope_q` — q after rotary position embedding application
+/// 8. `rope_k` — k after rotary position embedding application
+/// 9. `attn_out` — output of the SDPA / FlashAttention call
+/// 10. `o_proj` — output of `o_proj` linear (post-attention output projection)
+/// 11. `post_attn_norm` — output of the post-attention LayerNorm (pre-MLP)
+/// 12. `mlp_gate` — output of the MLP gate projection
+/// 13. `mlp_up` — output of the MLP up projection
+/// 14. `mlp_down` — output of the MLP down projection
+pub const B12_GQA_TAP_NAMES: &[&str] = &[
+    "post_input_norm",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "qk_norm_q",
+    "qk_norm_k",
+    "rope_q",
+    "rope_k",
+    "attn_out",
+    "o_proj",
+    "post_attn_norm",
+    "mlp_gate",
+    "mlp_up",
+    "mlp_down",
+];
+
+/// True if the Phase B12 layer-31 GQA capture window is currently armed on
+/// this thread. Call sites use this to gate the (relatively cheap) host
+/// copy so disarmed runs pay zero cost.
+pub fn is_b12_gqa_capture_armed() -> bool {
+    B12_GQA_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// True if a B12 sub-op capture should happen for `layer_idx`. Currently
+/// only layer 31 is captured at sub-op granularity (the per-layer h_layer_*
+/// taps for layers 24..30 already provide the per-layer comparator data).
+/// Exposed as a helper so forward.rs can guard the per-call host copies.
+pub fn should_capture_b12_gqa_tap_for_layer(layer_idx: usize) -> bool {
+    layer_idx == 31 && is_b12_gqa_capture_armed()
+}
+
+/// Record that base-model layer `abs_layer_idx` is the one currently being
+/// executed on this thread. Set by the main transformer loop (and only the
+/// main transformer loop — not the MTP inner block path) right before the
+/// layer's forward call. Paired with [`exit_b12_layer_scope`] on the
+/// immediately following line so that the window is tightly scoped.
+///
+/// Safe to call unconditionally — it's a single TLS slot write. Call sites
+/// do not need to check `is_dump_b12_gqa_taps_enabled()` first, because the
+/// downstream [`capture_b12_gqa_tap`] gates already short-circuit when the
+/// capture window is not armed.
+pub fn enter_b12_layer_scope(abs_layer_idx: usize) {
+    B12_CURRENT_LAYER.with(|c| *c.borrow_mut() = Some(abs_layer_idx));
+}
+
+/// Clear the "current layer index" slot. Paired with
+/// [`enter_b12_layer_scope`]; must be called even on the error path so the
+/// slot does not leak into the next iteration. In practice call sites use
+/// this immediately after the layer's forward call returns (success or
+/// error) via a `?`-before-exit pattern.
+pub fn exit_b12_layer_scope() {
+    B12_CURRENT_LAYER.with(|c| *c.borrow_mut() = None);
+}
+
+/// True when the current layer scope on this thread is layer 31 AND a B12
+/// capture window is armed. This is the gate used by every
+/// [`capture_b12_gqa_tap`] call site in `gqa_attention_paged` /
+/// `transformer_block_paged` so that only the layer-31 forward pass emits
+/// sub-op taps. Layers 24..30 are covered by the per-layer h_layer_*
+/// boundary taps the B10 sink already records.
+pub fn current_b12_layer_is_31() -> bool {
+    if !is_b12_gqa_capture_armed() {
+        return false;
+    }
+    B12_CURRENT_LAYER.with(|c| *c.borrow() == Some(31))
+}
+
+/// Begin a B12 layer-31 GQA capture window. Subsequent
+/// [`capture_b12_gqa_tap`] calls from the same thread record into a fresh
+/// buffer until [`drain_b12_gqa_capture`] is called. Does nothing if
+/// [`is_dump_b12_gqa_taps_enabled`] is false — so callers can invoke this
+/// unconditionally around the base-model forward.
+pub fn arm_b12_gqa_capture() {
+    if !is_dump_b12_gqa_taps_enabled() {
+        return;
+    }
+    B12_GQA_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured B12 layer-31 GQA taps and disarm. Returns whatever
+/// was recorded since the matching [`arm_b12_gqa_capture`] call, in order.
+pub fn drain_b12_gqa_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    B12_GQA_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named B12 layer-31 GQA tap if a capture window is currently
+/// open on this thread. Cheap no-op (single TLS access + borrow) when the
+/// window is closed, which is the production case. The tensor is
+/// materialized to host F32 immediately so the GPU scratch is free to be
+/// reused — same pattern as [`capture_h_main_tap`] /
+/// [`capture_b11_layer0_tap`].
+pub fn capture_b12_gqa_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = B12_GQA_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_b12_gqa_tap `{name}`: tensor→f32 host copy"))?;
+    B12_GQA_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
 /// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
 /// whether the source is BF16 on CUDA or F32 on CPU.
@@ -526,6 +721,14 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// taps / subops pipeline (single host-materialization path, no `half`
 /// dependency). The comparator upcasts HF reference tensors to F32 anyway,
 /// so precision is not lost.
+///
+/// Phase B12: `b12_taps` carries the layer-31 GQA sub-op taps captured via
+/// [`arm_b12_gqa_capture`] / [`capture_b12_gqa_tap`] /
+/// [`drain_b12_gqa_capture`]. Each entry is serialized as F32 under the
+/// name `b12__<name>` (same scheme as B11). When the slice is empty, the
+/// dump bytes are bit-identical to the pre-B12 format, so legacy callers
+/// passing `&[]` for both `b11_taps` and `b12_taps` produce the historical
+/// safetensors layout.
 pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
@@ -535,16 +738,22 @@ pub fn write_mtp_dump(
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
     prompt_tokens: &[u32],
     b11_taps: &[(String, Vec<usize>, Vec<f32>)],
+    b12_taps: &[(String, Vec<usize>, Vec<f32>)],
 ) -> Result<()> {
     use safetensors::tensor::{Dtype, TensorView};
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
     // Capacity: static taps + subops + 3 meta + optional (prompt_tokens, len)
-    // + b11 taps.
+    // + b11 taps + b12 taps.
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
-        taps.len() + extra_subops.len() + 3 + prompt_reserve + b11_taps.len(),
+        taps.len()
+            + extra_subops.len()
+            + 3
+            + prompt_reserve
+            + b11_taps.len()
+            + b12_taps.len(),
     );
     for (name, t) in taps {
         let (shape, flat) = tensor_to_f32_host(t)
@@ -621,6 +830,17 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push((format!("b11__{name}"), shape.clone(), Dtype::F32, bytes));
+    }
+
+    // Phase B12: serialize the layer-31 GQA sub-op taps under `b12__<name>`
+    // (same scheme as B11). When `b12_taps` is empty the loop is a no-op
+    // and the on-disk dump is bit-identical to the pre-B12 layout.
+    for (name, shape, flat) in b12_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("b12__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     let mut views: Vec<(String, TensorView)> = Vec::with_capacity(backings.len());
@@ -872,6 +1092,7 @@ mod tests {
             &[],
             &prompt,
             /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
         )
         .unwrap();
 
@@ -926,6 +1147,7 @@ mod tests {
             &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
             /* prompt_tokens = */ &[],
             /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
         )
         .unwrap();
 
@@ -943,6 +1165,8 @@ mod tests {
         assert!(!names.contains(&"meta__prompt_tokens_len"));
         // With b11_taps = &[], no b11__* tensors should appear.
         assert!(!names.iter().any(|n| n.starts_with("b11__")));
+        // With b12_taps = &[], no b12__* tensors should appear.
+        assert!(!names.iter().any(|n| n.starts_with("b12__")));
 
         let h = st.tensor("h_main").unwrap();
         assert_eq!(h.dtype(), safetensors::Dtype::F32);
@@ -1048,6 +1272,7 @@ mod tests {
             &[],
             /* prompt_tokens = */ &[],
             &b11,
+            /* b12_taps = */ &[],
         )
         .unwrap();
 
@@ -1072,5 +1297,223 @@ mod tests {
         assert_eq!(op.shape(), &[3]);
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn b12_gqa_layers_span_full_attention_tail() {
+        // Guardrail: the 8 GQA layers at the end of the Qwen3.5-4B stack are
+        // 24..=31 inclusive. Comparator + reference both iterate this list.
+        assert_eq!(B12_GQA_LAYERS.len(), 8);
+        assert_eq!(B12_GQA_LAYERS[0], 24);
+        assert_eq!(B12_GQA_LAYERS[7], 31);
+    }
+
+    #[test]
+    fn b12_gqa_tap_names_enumerate_all_fourteen_subops() {
+        // Guardrail against accidental future edits that would drop a tap
+        // from the layer-31 GQA bisect span. Both the Rust capture sites and
+        // the Python HF reference dump iterate this list.
+        assert_eq!(B12_GQA_TAP_NAMES.len(), 14);
+        assert_eq!(B12_GQA_TAP_NAMES[0], "post_input_norm");
+        assert_eq!(B12_GQA_TAP_NAMES[13], "mlp_down");
+    }
+
+    #[test]
+    fn b12_gqa_capture_records_then_drains() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        // Disarmed: capture is a silent no-op.
+        capture_b12_gqa_tap("post_input_norm", &a).unwrap();
+        assert!(drain_b12_gqa_capture().is_empty());
+        assert!(!is_b12_gqa_capture_armed());
+        assert!(!should_capture_b12_gqa_tap_for_layer(31));
+
+        // Armed: records in order, only fires on layer 31.
+        arm_b12_gqa_capture();
+        assert!(is_b12_gqa_capture_armed());
+        assert!(should_capture_b12_gqa_tap_for_layer(31));
+        assert!(!should_capture_b12_gqa_tap_for_layer(30));
+        capture_b12_gqa_tap("post_input_norm", &a).unwrap();
+        capture_b12_gqa_tap("mlp_down", &b).unwrap();
+        let drained = drain_b12_gqa_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "post_input_norm");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "mlp_down");
+        assert_eq!(drained[1].1, vec![2]);
+        assert_eq!(drained[1].2, vec![10.0, 20.0]);
+
+        // Drain disarms.
+        assert!(!is_b12_gqa_capture_armed());
+        capture_b12_gqa_tap("q_proj", &a).unwrap();
+        assert!(drain_b12_gqa_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+    }
+
+    #[test]
+    fn b12_gqa_arm_is_noop_when_env_unset() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+        arm_b12_gqa_capture();
+        assert!(!is_b12_gqa_capture_armed());
+        assert!(!should_capture_b12_gqa_tap_for_layer(31));
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_b12_gqa_tap("post_input_norm", &a).unwrap();
+        assert!(drain_b12_gqa_capture().is_empty());
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_b12_taps_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_b12.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let b12 = vec![
+            (
+                "post_input_norm".to_string(),
+                vec![2],
+                vec![0.41_f32, 0.42],
+            ),
+            (
+                "mlp_down".to_string(),
+                vec![3],
+                vec![0.51_f32, 0.52, 0.53],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 77,
+            /* mtp_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            /* b11_taps = */ &[],
+            &b12,
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        // Both taps appear under the b12__<name> namespace.
+        assert!(names.contains(&"b12__post_input_norm"));
+        assert!(names.contains(&"b12__mlp_down"));
+        // No b11__ taps when b11_taps is empty.
+        assert!(!names.iter().any(|n| n.starts_with("b11__")));
+
+        let pin = st.tensor("b12__post_input_norm").unwrap();
+        assert_eq!(pin.dtype(), safetensors::Dtype::F32);
+        assert_eq!(pin.shape(), &[2]);
+        let bytes = pin.data();
+        let v0 = f32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let v1 = f32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert!((v0 - 0.41).abs() < 1e-6);
+        assert!((v1 - 0.42).abs() < 1e-6);
+
+        let md = st.tensor("b12__mlp_down").unwrap();
+        assert_eq!(md.dtype(), safetensors::Dtype::F32);
+        assert_eq!(md.shape(), &[3]);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn b12_layer_scope_disarmed_returns_false_regardless_of_scope() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+        // Without arming, setting layer 31 must still return false so that
+        // production runs (where capture is disabled) short-circuit the
+        // per-call capture gate.
+        enter_b12_layer_scope(31);
+        assert!(!current_b12_layer_is_31());
+        exit_b12_layer_scope();
+    }
+
+    #[test]
+    fn b12_layer_scope_armed_without_scope_returns_false() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
+        }
+        arm_b12_gqa_capture();
+        assert!(is_b12_gqa_capture_armed());
+        // Armed but no enter_b12_layer_scope call: the gate returns false so
+        // no capture fires for the MTP inner-block path which never enters a
+        // layer scope.
+        assert!(!current_b12_layer_is_31());
+        let _ = drain_b12_gqa_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+    }
+
+    #[test]
+    fn b12_layer_scope_armed_non_31_layer_returns_false() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
+        }
+        arm_b12_gqa_capture();
+        for layer in [0_usize, 23, 24, 30, 32, 63] {
+            enter_b12_layer_scope(layer);
+            assert!(
+                !current_b12_layer_is_31(),
+                "layer {layer} must not trigger layer-31 capture",
+            );
+            exit_b12_layer_scope();
+        }
+        let _ = drain_b12_gqa_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+    }
+
+    #[test]
+    fn b12_layer_scope_armed_layer_31_returns_true() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
+        }
+        arm_b12_gqa_capture();
+        enter_b12_layer_scope(31);
+        assert!(current_b12_layer_is_31());
+        exit_b12_layer_scope();
+        let _ = drain_b12_gqa_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+    }
+
+    #[test]
+    fn b12_layer_scope_exit_clears_slot() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
+        }
+        arm_b12_gqa_capture();
+        enter_b12_layer_scope(31);
+        assert!(current_b12_layer_is_31());
+        exit_b12_layer_scope();
+        // After exit, the TLS slot is cleared, so a subsequent check must
+        // return false — the next layer's forward must not leak capture.
+        assert!(!current_b12_layer_is_31());
+        let _ = drain_b12_gqa_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
     }
 }
