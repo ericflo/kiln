@@ -152,7 +152,44 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                     });
                 }
                 ITEM_RESTART => {
+                    let app_for_spawn = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        let has_model_path = {
+                            let settings_state = app_for_spawn.state::<Arc<RwLock<Settings>>>();
+                            let s = settings_state.read().await;
+                            is_model_path_set(&s)
+                        };
+                        if !has_model_path {
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Model path not set")
+                                .body(
+                                    "Open Settings and select a model before restarting the Kiln server.",
+                                )
+                                .show();
+                            if let Err(e) = open_settings_window(&app_for_spawn) {
+                                eprintln!("[tray] open_settings_window failed: {}", e);
+                            }
+                            let _ = app_for_spawn.emit("menu://open-settings", ());
+                            return;
+                        }
+                        let binary_path = supervisor.config_snapshot().await.binary_path;
+                        if !is_binary_available(&binary_path) {
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Kiln binary not installed")
+                                .body(
+                                    "Open Dashboard to download and install the kiln server binary.",
+                                )
+                                .show();
+                            if let Err(e) = open_dashboard_window(&app_for_spawn) {
+                                eprintln!("[tray] open_dashboard_window failed: {}", e);
+                            }
+                            let _ = app_for_spawn.emit("menu://open-dashboard", ());
+                            return;
+                        }
                         if let Err(e) = supervisor.restart().await {
                             eprintln!("[tray] restart_server failed: {}", e);
                         }
