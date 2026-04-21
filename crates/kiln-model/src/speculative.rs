@@ -552,6 +552,15 @@ pub fn speculative_mtp_decode_step(
     _rng: &mut StdRng,
 ) -> Result<MtpSpeculativeStepResult> {
     // 1. Draft: one MTP step produces a single candidate next token.
+    //
+    // We pass both `base_pos` (the absolute sequence index the draft token
+    // will occupy in the base stream) and `mtp_pos` (the MTP-cache slot
+    // index). The inner block uses `base_pos + mtp_pos` for RoPE — so the
+    // MTP head sees the same rotation angles the main GQA block would have
+    // applied at that absolute position — and keeps `mtp_pos` as the
+    // write slot in the isolated MTP paged cache. See Phase B7a evidence
+    // in PR #276: without this, `post_layer` drifts monotonically with
+    // `mtp_pos` (cos_sim 0.999977 → 0.999531 → 0.997527 at pos 0/1/2).
     let (mtp_logits, _mtp_hidden) = mtp_forward_step(
         backend,
         last_token,
@@ -560,6 +569,7 @@ pub fn speculative_mtp_decode_step(
         config,
         mtp_cache,
         mtp_block_table,
+        base_pos,
         mtp_pos,
     )
     .context("mtp draft step failed")?;
