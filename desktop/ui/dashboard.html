@@ -1025,10 +1025,12 @@
           } catch (err) {
             flashCopyBtn("Copy failed", "flash-warn");
             console.error("clipboard.writeText failed", err);
+            notifyError("Copy failed", "Could not write to clipboard: " + String(err || "Unknown error"));
           }
         } catch (err) {
           flashCopyBtn("Copy failed", "flash-warn");
           console.error("get_openai_base_url failed", err);
+          notifyError("Copy failed", "Could not get base URL: " + String(err || "Unknown error"));
         }
       }
 
