@@ -287,7 +287,7 @@ fn spawn_backend_prewarm(state: AppState) {
             let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
             let num_blocks = 2;
             let mut block_manager = BlockManager::new(num_blocks, 16);
-            let mut paged_cache = PagedKvCache::new(
+            let mut paged_cache = PagedKvCache::new_uninit(
                 runner_guard.config.num_full_attention_layers,
                 num_blocks,
                 16,

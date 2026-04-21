@@ -37,8 +37,14 @@ pub struct PagedKvCache {
     compute_dtype: DType,
 }
 
+#[derive(Clone, Copy)]
+enum PoolInit {
+    Zeroed,
+    Uninitialized,
+}
+
 impl PagedKvCache {
-    /// Create a new paged KV cache with pre-allocated pool tensors.
+    /// Create a new paged KV cache with zero-filled pre-allocated pool tensors.
     pub fn new(
         num_full_attn_layers: usize,
         num_blocks: usize,
@@ -60,7 +66,32 @@ impl PagedKvCache {
         )
     }
 
-    /// Create a new paged KV cache with optional FP8 quantization.
+    /// Create a new paged KV cache with uninitialized pre-allocated pool tensors.
+    ///
+    /// Use this only when every logical position included in later reads or raw
+    /// pool-tensor attention has first been populated through [`Self::write`].
+    pub fn new_uninit(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::new_uninit_with_fp8(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype,
+            device,
+            false,
+        )
+    }
+
+    /// Create a new paged KV cache with optional FP8 quantization and zero-filled pools.
     pub fn new_with_fp8(
         num_full_attn_layers: usize,
         num_blocks: usize,
@@ -71,13 +102,66 @@ impl PagedKvCache {
         device: &Device,
         fp8: bool,
     ) -> Result<Self> {
+        Self::new_impl(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype,
+            device,
+            fp8,
+            PoolInit::Zeroed,
+        )
+    }
+
+    /// Create a new paged KV cache with optional FP8 quantization and uninitialized pools.
+    ///
+    /// This avoids eager device zero-fill during startup. Unwritten slots contain
+    /// arbitrary data and must remain outside each sequence's active
+    /// `0..seq_len` window until populated by [`Self::write`].
+    pub fn new_uninit_with_fp8(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &Device,
+        fp8: bool,
+    ) -> Result<Self> {
+        Self::new_impl(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype,
+            device,
+            fp8,
+            PoolInit::Uninitialized,
+        )
+    }
+
+    fn new_impl(
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &Device,
+        fp8: bool,
+        pool_init: PoolInit,
+    ) -> Result<Self> {
         let storage_dtype = if fp8 { DType::U8 } else { dtype };
         let total_slots = num_blocks * block_size;
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
-            let k = Tensor::zeros((total_slots, num_kv_heads, head_dim), storage_dtype, device)
+            let shape = (total_slots, num_kv_heads, head_dim);
+            let k = allocate_pool_tensor(shape, storage_dtype, device, pool_init)
                 .with_context(|| format!("allocating k_pool for layer {i}"))?;
-            let v = Tensor::zeros((total_slots, num_kv_heads, head_dim), storage_dtype, device)
+            let v = allocate_pool_tensor(shape, storage_dtype, device, pool_init)
                 .with_context(|| format!("allocating v_pool for layer {i}"))?;
             layers.push((k, v));
         }
@@ -310,6 +394,24 @@ impl PagedKvCache {
     }
 }
 
+fn allocate_pool_tensor(
+    shape: (usize, usize, usize),
+    dtype: DType,
+    device: &Device,
+    pool_init: PoolInit,
+) -> Result<Tensor> {
+    match pool_init {
+        PoolInit::Zeroed => Ok(Tensor::zeros(shape, dtype, device)?),
+        PoolInit::Uninitialized => {
+            // SAFETY: `new_uninit*` constructors are reserved for generation
+            // paths where the BlockTable active window only covers slots after
+            // `write` has populated them. Existing zeroed constructors remain
+            // available for callers that may inspect unwritten capacity.
+            Ok(unsafe { Tensor::empty(shape, dtype, device)? })
+        }
+    }
+}
+
 pub(crate) fn contiguous_slot_run_start(
     block_table: &BlockTable,
     block_size: usize,
@@ -445,6 +547,51 @@ mod tests {
         let v_orig = v.flatten_all()?.to_vec1::<f32>()?;
         let v_read = v_out.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(v_orig, v_read, "V roundtrip failed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_uninit_write_then_read_roundtrip() -> Result<()> {
+        let device = Device::Cpu;
+        let mut cache = PagedKvCache::new_uninit(1, 4, 4, 1, 2, DType::F32, &device)?;
+
+        let mut bt = BlockTable::new();
+        bt.push(2);
+        bt.push(0);
+
+        let k = Tensor::new(
+            &[[[
+                [1.0_f32, 2.0],
+                [3.0, 4.0],
+                [5.0, 6.0],
+                [7.0, 8.0],
+                [9.0, 10.0],
+            ]]],
+            &device,
+        )?;
+        let v = Tensor::new(
+            &[[[
+                [11.0_f32, 12.0],
+                [13.0, 14.0],
+                [15.0, 16.0],
+                [17.0, 18.0],
+                [19.0, 20.0],
+            ]]],
+            &device,
+        )?;
+
+        cache.write(0, &bt, 0, &k, &v)?;
+        let (k_out, v_out) = cache.read(0, &bt, 5)?;
+
+        assert_eq!(
+            k_out.flatten_all()?.to_vec1::<f32>()?,
+            k.flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            v_out.flatten_all()?.to_vec1::<f32>()?,
+            v.flatten_all()?.to_vec1::<f32>()?
+        );
 
         Ok(())
     }
