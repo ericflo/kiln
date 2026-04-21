@@ -4219,3 +4219,120 @@ The α = 0.154 collapse with ~46% identity-bias persists despite correct MTP glu
 - **Pod:** none. $0 pod spend.
 - **Wall-clock:** ≈ 45 min desk audit (upstream source comparison, safetensors header probe, kiln source re-read, write-up).
 - **Output:** this PROFILING.md appendix + this PR. No code changes.
+
+---
+
+## Phase B5 — MTP inner-layer weight load (`layer_idx=3` trick) vs vLLM/SGLang reference (doc-only)
+
+**Status: NO MISMATCH at the MTP inner-layer weight load.** (2026-04-21)
+
+### Why this audit
+
+Phase B4 (PR #267) ruled out the MTP `fc` concat order and weight layout as the source of the α ≈ 0.154 collapse. The next structural candidate from Phase B4's ranked list was the MTP inner transformer block: kiln's loader reuses `load_layer(tensor_map, &mtp_layer_prefix, 3, config)` with a **synthetic** `layer_idx=3` to coerce the main-model full-attention codepath to fire for the MTP layer. The residue class `(3 + 1) % 4 == 0` makes `ModelConfig::is_full_attention_layer` return true, unlocking `attn_output_gate=true`, the gated `q_proj` split (`[2·num_heads·head_dim, H]`), Q/K norm, and GQA dims — all of which match the main-model full-attention layers.
+
+The worry: if any main-model-only fix-up inside `load_layer` / `load_full_attention` is keyed off `layer_idx` as a real index (not just an error-context label), or if anything downstream dispatches on the layer's position in the main-model stack, the synthetic `layer_idx=3` could silently mis-wire the MTP layer.
+
+Phase B5 is a $0, pod-free desk audit that compares kiln's MTP inner-layer load path byte-for-byte against two canonical Python reference implementations plus the published Qwen3.5-4B safetensors header.
+
+### Upstream references (pinned)
+
+| File | Path | SHA |
+|---|---|---|
+| vLLM | `vllm/model_executor/models/qwen3_5_mtp.py` | `771913e4a024` |
+| vLLM | `vllm/model_executor/models/qwen3_next_mtp.py` | `657855ab4179` |
+| SGLang | `python/sglang/srt/models/qwen3_5_mtp.py` | `cabe171b6ce3` |
+
+How each upstream gets the MTP inner layer into full-attention mode:
+
+- **vLLM `qwen3_5_mtp.py:97-104`** — explicit string:
+  ```python
+  self.mtp_block = Qwen3_5DecoderLayer(
+      vllm_config=vllm_config,
+      layer_type="full_attention",
+      prefix=maybe_prefix(prefix, "mtp_block"),
+  )
+  ```
+- **SGLang `qwen3_5_mtp.py:62-75`** — config mutation before delegating to the main-model class:
+  ```python
+  self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+  ...
+  config.num_hidden_layers = 1
+  config.full_attention_interval = 1
+  self.model = Qwen3_5ForCausalLM(config, quant_config, prefix=..., is_nextn=True)
+  ```
+- **kiln `loader.rs:676-683`** — synthetic layer index:
+  ```rust
+  // The MTP layer uses the same full-attention shape as the main-model
+  // full-attention layers (GQA + output gate + SwiGLU MLP). We reuse
+  // `load_layer` with a synthetic prefix that points at `mtp.layers.0.`
+  // and an index (3) whose residue class `(i + 1) % 4 == 0` makes
+  // `is_full_attention_layer` return true. The layer_idx argument is only
+  // used for error context strings, not for dispatch.
+  let mtp_layer_prefix = format!("{mtp_prefix}layers.0.");
+  let layer = load_layer(tensor_map, &mtp_layer_prefix, 3, config).context("mtp layer 0")?;
+  ```
+
+All three arrive at the **same dispatch outcome**: load an MTP inner layer using the full-attention path. vLLM does it via an explicit `layer_type` string; SGLang mutates `full_attention_interval=1` so every index is full-attn; kiln picks any `layer_idx` that satisfies its fixed residue class.
+
+### Ground truth: Qwen3.5-4B MTP layer tensor shapes
+
+Fetched via HTTP Range on `model.safetensors-00001-of-00002.safetensors` and `model.safetensors-00002-of-00002.safetensors` headers on Hugging Face (`Qwen/Qwen3.5-4B`):
+
+```
+mtp.layers.0.input_layernorm.weight            BF16 [2560]
+mtp.layers.0.post_attention_layernorm.weight   BF16 [2560]
+mtp.layers.0.self_attn.q_proj.weight           BF16 [8192, 2560]   # [2·num_heads·head_dim, H] = gated
+mtp.layers.0.self_attn.k_proj.weight           BF16 [1024, 2560]   # [num_kv_heads·head_dim, H]
+mtp.layers.0.self_attn.v_proj.weight           BF16 [1024, 2560]
+mtp.layers.0.self_attn.o_proj.weight           BF16 [2560, 4096]   # [H, num_heads·head_dim]
+mtp.layers.0.self_attn.q_norm.weight           BF16 [256]          # [head_dim]
+mtp.layers.0.self_attn.k_norm.weight           BF16 [256]
+mtp.layers.0.mlp.gate_proj.weight              BF16 [9216, 2560]   # [intermediate_size, H]
+mtp.layers.0.mlp.up_proj.weight                BF16 [9216, 2560]
+mtp.layers.0.mlp.down_proj.weight              BF16 [2560, 9216]
+```
+
+Cross-check against `model.layers.3.*` (a real main-model full-attention layer per `(3+1)%4==0`): **all 11 tensor shapes are identical**. The MTP inner layer is byte-for-byte the same shape as a main-model full-attention layer, which is exactly what the synthetic `layer_idx=3` trick assumes.
+
+(Note: `intermediate_size=9216` — the value in `ModelConfig::qwen3_5_4b()` at `kiln-core/src/config.rs:86`. The Phase B4 appendix printed `9728` in the shape dump at PROFILING.md:4185-4187 — that was a transcription typo. `kiln-core` validates `[9216, 2560]`, the checkpoint is `[9216, 2560]`, they match.)
+
+### 6-point wiring audit
+
+| # | Wiring point | Upstream vLLM / SGLang | Kiln | Match |
+|---|---|---|---|:-:|
+| 1 | **Checkpoint key names** (`mtp.layers.0.self_attn.q_proj.weight`, etc.) | Both remap `mtp.` → `model.` in `load_weights`, then feed unchanged through the main-model `Qwen3_5DecoderLayer` loader | `detect_mtp_prefix` keeps the `mtp.` prefix and passes `mtp.layers.0.` to `load_layer`; each tensor is looked up by its stock checkpoint name | ✅ |
+| 2 | **Gated `q_proj` dispatch** (must see `[8192, 2560]`, not `[4096, 2560]`) | vLLM: explicit `layer_type="full_attention"`. SGLang: `config.full_attention_interval=1`. Both route to the main-model full-attn block that handles `attn_output_gate=true` | `is_full_attention_layer(3)` = `(3+1)%4==0` = `true` → `AttentionWeights::Full(load_full_attention(...))` (loader.rs:380-386). `full_attn_q_proj_dim()` = `16·256·2 = 8192` (config.rs:157-160) | ✅ |
+| 3 | **GQA dims** (`num_heads=16`, `num_kv_heads=4`, `head_dim=256`) | Global model-config read; no per-layer overrides | `load_full_attention` (loader.rs:406-420) reads `config.num_attention_heads`, `config.num_kv_heads`, `config.head_dim` — no `layer_idx`-dependent branches | ✅ |
+| 4 | **Q/K RMSNorm** (shape `[256] = [head_dim]`) | No `layer_idx` branch; same head-dim norm whether layer is main-model layer 3 or MTP | `load_full_attention` loader.rs:422-426 validates both against `[config.head_dim]`; identical to main-model layer 3 load | ✅ |
+| 5 | **RoPE threading** (partial rotary, `rotary_dim=64`, `rope_theta=1e7`) | Upstream `Qwen3_5DecoderLayer` instance reuses the main-model RoPE module (not rebuilt per layer) | `mtp_forward_step` forward.rs:3547-3558 passes `weights.rotary_inv_freq` (main-model table, built once loader.rs:564-566) and `config.rotary_dim()=64` to `transformer_block_paged`. Same inv_freq table as main-model layer 3 | ✅ |
+| 6 | **Weight on-disk layout** (PyTorch `[out, in]`) | All three use PyTorch `nn.Linear` storage: `q_proj=[8192, H]`, `k_proj=[kv_dim, H]`, `o_proj=[H, 4096]`, `gate_proj=[I, H]`, `down_proj=[H, I]` | `validate_shape` checks at loader.rs:411, 414, 417, 420 match PyTorch order. Cached `_t` transposes happen downstream on the GPU (identical to how main-model layers are transposed); no layer-specific transpose path | ✅ |
+
+### What the synthetic `layer_idx=3` actually controls
+
+Grepping `crates/kiln-model/src/loader.rs` for every use of the `layer_idx` parameter reaching from `load_layer` / `load_full_attention` / `load_ffn`:
+
+1. **`is_full_attention_layer(layer_idx)` at loader.rs:380** — the only load-time dispatch. Returns `true` for `3`, just like for main-model layers 3/7/11/15/19/23/27/31.
+2. **Error-context strings** (`&format!("layer {layer_idx} input_layernorm")` and similar) at loader.rs:365, 375, 404, 411, 414, 417, 420, 423, 426 — cosmetic. Zero effect on tensor values.
+3. **Defensive post-load check** at loader.rs:684-695 — asserts the resulting `AttentionWeights` variant is `Full`, not `Linear`. Belt-and-braces against a future checkpoint schema change. Zero effect on loaded tensors.
+
+That's all. The synthetic layer index **never reaches the MTP KV-cache slot, the forward path, or any tensor loader**. The forward path dispatches on its own index: `mtp_forward_step` hard-codes `full_attn_layer_idx = 0` when it calls `transformer_block_paged` (forward.rs:3562), because the MTP head has its own one-element cache — it is not a slot in the main-model KV cache.
+
+### Verdict
+
+**No mismatch.** kiln's `layer_idx=3` trick is mechanically equivalent to vLLM's `layer_type="full_attention"` and SGLang's `full_attention_interval=1` — three different ways to route the same checkpoint tensors through the same full-attention code. The checkpoint header confirms the shape assumptions (`q_proj=[8192, 2560]`, `kv=[1024, 2560]`, etc.). Nothing about the synthetic layer index leaks into tensor values, forward compute, or cache routing.
+
+### Recommendation — next hypothesis
+
+With the Phase B4 hypothesis #1 now disproved (load-time), the ranking from PROFILING.md:4208-4215 collapses to three runtime candidates:
+
+1. **RoPE position threading** (forward-time, not load-time). `mtp_forward_step` builds its own one-element `positions` tensor from `mtp_pos`. The reference semantics advance `mtp_pos` by +1 per *accepted* draft; kiln's caller advances it only on acceptance (confirmed in loader.rs comment at 601). Worth a scalar A/B against the upstream generator: run the same prompt through vLLM's `Qwen3NextMTP` with acceptance telemetry, diff the `mtp_pos` trajectory.
+2. **Tied lm_head via `embed_tokens_t`**. The MTP head reuses the base model's `embed_tokens_t` as its unembedding matrix (forward.rs:3571). Confirm that `embed_tokens_t` is the true transpose of `embed_tokens`, not a shared-storage alias that forwards would be mutating. A one-shot check: load `embed_tokens`, transpose, assert byte-equality against `embed_tokens_t` at load time.
+3. **`mtp.final_layernorm` application site**. The loader accepts both `mtp.norm.weight` and `mtp.final_layernorm.weight` (loader.rs:657-668). The checkpoint ships `mtp.norm.weight`. Confirm the forward path (forward.rs:3570) is applying the *loaded MTP norm scale*, not accidentally reaching back through a closure to the main-model's `final_layernorm`.
+
+If all three runtime hypotheses clear, Phase B5-follow-up should move from structural auditing to a direct numerical A/B: load the same Qwen3.5-4B checkpoint into vLLM (using `Qwen3NextMTP`), feed a fixed prompt, and dump MTP intermediate activations (`fc` output, attn output, final norm output, logits) at every step. Scalar diff against kiln's `KILN_MTP_DEBUG=1` trace. Any divergence localizes the bug to a specific sub-op.
+
+### Budget used
+
+- **Pod:** none. $0 pod spend.
+- **Wall-clock:** ≈ 55 min desk audit (fetching upstream at pinned SHAs, safetensors header probe on both shards, re-reading `loader.rs::load_mtp_if_present` + `load_layer` + `load_full_attention`, cross-checking forward.rs MTP path, writing this appendix).
+- **Output:** this PROFILING.md appendix + this PR. No code changes.
