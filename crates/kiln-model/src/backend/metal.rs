@@ -660,6 +660,41 @@ kernel void kiln_gdn_qk_norm_f32_bf16(
 }
 "#;
 
+fn metal_shared_library(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::Library> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::Library;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static LIBRARIES: OnceLock<Mutex<HashMap<DeviceId, Library>>> = OnceLock::new();
+    let cache = LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal shared library cache poisoned"))?;
+    if let Some(library) = cache.get(&device.id()) {
+        return Ok(library.clone());
+    }
+
+    let shared_source = [
+        METAL_RMSNORM_KERNEL,
+        METAL_GDN_QK_NORM_KERNEL,
+        METAL_GDN_GATES_KERNEL,
+        METAL_GATED_RMSNORM_KERNEL,
+        METAL_GDN_RECURRENT_KERNEL,
+        METAL_CONV1D_PREFILL_KERNEL,
+        METAL_CONV1D_UPDATE_KERNEL,
+    ]
+    .join("");
+    let library = device
+        .device()
+        .new_library_with_source(&shared_source, None)
+        .map_err(|e| anyhow::anyhow!("compile metal shared library: {e:?}"))?;
+    cache.insert(device.id(), library.clone());
+    Ok(library)
+}
+
 fn metal_rms_norm_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -677,10 +712,7 @@ fn metal_rms_norm_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_RMSNORM_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal rmsnorm library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_rmsnorm_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal rmsnorm function: {e:?}"))?;
@@ -709,10 +741,7 @@ fn metal_gdn_qk_norm_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_GDN_QK_NORM_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal gdn qk norm library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_gdn_qk_norm_f32_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn qk norm function: {e:?}"))?;
@@ -970,10 +999,7 @@ fn metal_gdn_gates_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_GDN_GATES_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal gdn_gates library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_gdn_gates_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn_gates function: {e:?}"))?;
@@ -1154,10 +1180,7 @@ fn metal_gated_rms_norm_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_GATED_RMSNORM_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal gated rmsnorm library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_gated_rmsnorm_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gated rmsnorm function: {e:?}"))?;
@@ -1331,10 +1354,7 @@ fn metal_gdn_recurrent_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_GDN_RECURRENT_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal gdn recurrent library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_gdn_recurrent_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn recurrent function: {e:?}"))?;
@@ -1576,10 +1596,7 @@ fn metal_conv1d_prefill_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_CONV1D_PREFILL_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal conv1d prefill library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_causal_conv1d_prefill_bf16_f32_k4", None)
         .map_err(|e| anyhow::anyhow!("load metal conv1d prefill function: {e:?}"))?;
@@ -1608,10 +1625,7 @@ fn metal_conv1d_update_pipeline(
         return Ok(pipeline.clone());
     }
 
-    let library = device
-        .device()
-        .new_library_with_source(METAL_CONV1D_UPDATE_KERNEL, None)
-        .map_err(|e| anyhow::anyhow!("compile metal conv1d update library: {e:?}"))?;
+    let library = metal_shared_library(device)?;
     let function = library
         .get_function("kiln_causal_conv1d_update_bf16_f32_k4", None)
         .map_err(|e| anyhow::anyhow!("load metal conv1d update function: {e:?}"))?;
