@@ -18,7 +18,9 @@ use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
 const DEFAULT_BLOCK_SIZE: usize = 16;
 const MIN_AUTO_KV_BLOCKS: usize = 64;
-const METAL_AUTO_MAX_KV_BLOCKS: usize = 2048; // 32K tokens at block_size=16.
+const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=16.
+const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.
+const METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM: usize = 2048; // 32K tokens at block_size=16.
 
 /// GPU memory budget tracking for coordinating inference and training.
 ///
@@ -309,6 +311,7 @@ impl AppState {
                     model_config.max_position_embeddings,
                     block_size,
                     is_metal_device(&device),
+                    total_vram,
                 );
                 tracing::info!(
                     total_vram_gb = total_vram as f64 / 1e9,
@@ -330,6 +333,7 @@ impl AppState {
                     model_config.max_position_embeddings,
                     block_size,
                     is_metal_device(&device),
+                    total_vram,
                 )
             }
         };
@@ -451,17 +455,29 @@ fn cap_auto_num_blocks(
     max_position_embeddings: usize,
     block_size: usize,
     is_metal: bool,
+    total_vram_bytes: u64,
 ) -> usize {
     let model_cap_blocks = max_position_embeddings
         .div_ceil(block_size)
         .max(MIN_AUTO_KV_BLOCKS);
     let runtime_cap_blocks = if is_metal {
-        model_cap_blocks.min(METAL_AUTO_MAX_KV_BLOCKS)
+        model_cap_blocks.min(metal_auto_max_kv_blocks(total_vram_bytes))
     } else {
         model_cap_blocks
     };
 
     raw_blocks.max(MIN_AUTO_KV_BLOCKS).min(runtime_cap_blocks)
+}
+
+fn metal_auto_max_kv_blocks(total_vram_bytes: u64) -> usize {
+    let gib = total_vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    if gib < 14.0 {
+        METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
+    } else if gib < 24.0 {
+        METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
+    } else {
+        METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
+    }
 }
 
 fn is_metal_device(device: &candle_core::Device) -> bool {
@@ -595,31 +611,75 @@ mod tests {
         // Qwen3.5's 262K context is 16,384 blocks at block_size=16. There is
         // no reason to auto-allocate more KV cache than the model can address.
         assert_eq!(
-            cap_auto_num_blocks(50_000, 262_144, DEFAULT_BLOCK_SIZE, false),
+            cap_auto_num_blocks(
+                50_000,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                false,
+                10 * 1024 * 1024 * 1024,
+            ),
             16_384
         );
     }
 
     #[test]
-    fn test_auto_num_blocks_caps_metal_desktop_default() {
-        // On large unified-memory Macs, pure memory-aware sizing can request
-        // tens of GiB of eagerly-zeroed KV cache. Default Metal auto-sizing is
-        // capped at 32K tokens; explicit KILN_NUM_BLOCKS still bypasses this
-        // helper entirely in AppState::new_real.
+    fn test_auto_num_blocks_caps_metal_desktop_defaults_by_memory_tier() {
+        // On unified-memory Macs, pure memory-aware sizing can request a large
+        // eagerly-zeroed KV cache. Default Metal auto-sizing is tier-capped by
+        // detected memory; explicit KILN_NUM_BLOCKS still bypasses this helper
+        // entirely in AppState::new_real.
         assert_eq!(
-            cap_auto_num_blocks(50_000, 262_144, DEFAULT_BLOCK_SIZE, true),
-            METAL_AUTO_MAX_KV_BLOCKS
+            cap_auto_num_blocks(
+                50_000,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                true,
+                10 * 1024 * 1024 * 1024,
+            ),
+            METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
+        );
+        assert_eq!(
+            cap_auto_num_blocks(
+                50_000,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                true,
+                16 * 1024 * 1024 * 1024,
+            ),
+            METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
+        );
+        assert_eq!(
+            cap_auto_num_blocks(
+                50_000,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                true,
+                32 * 1024 * 1024 * 1024,
+            ),
+            METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
         );
     }
 
     #[test]
     fn test_auto_num_blocks_preserves_small_auto_and_minimum() {
         assert_eq!(
-            cap_auto_num_blocks(512, 262_144, DEFAULT_BLOCK_SIZE, true),
+            cap_auto_num_blocks(
+                512,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                true,
+                10 * 1024 * 1024 * 1024,
+            ),
             512
         );
         assert_eq!(
-            cap_auto_num_blocks(1, 262_144, DEFAULT_BLOCK_SIZE, true),
+            cap_auto_num_blocks(
+                1,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                true,
+                10 * 1024 * 1024 * 1024,
+            ),
             MIN_AUTO_KV_BLOCKS
         );
     }
