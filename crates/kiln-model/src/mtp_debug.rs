@@ -46,6 +46,17 @@ thread_local! {
     /// (and not needed — the dump is single-call, single-thread).
     static SUBOP_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
+
+    /// Phase B10: separate thread-local sink for base-model per-layer hidden
+    /// states (`h_layer_*` + `h_pre_final_norm`). Kept distinct from
+    /// [`SUBOP_CAPTURE`] so the base-model forward can run while the MTP
+    /// inner-block capture window is closed (and vice versa), and so each
+    /// buffer can be drained without conflation.
+    ///
+    /// Driven by [`arm_h_main_capture`] / [`drain_h_main_capture`] /
+    /// [`capture_h_main_tap`].
+    static H_MAIN_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -233,6 +244,82 @@ pub fn capture_subop(name: &str, t: &Tensor) -> Result<()> {
     let (shape, flat) = tensor_to_f32_host(t)
         .with_context(|| format!("capture_subop `{name}`: tensor→f32 host copy"))?;
     SUBOP_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Phase B10: base-model per-layer hidden-state capture
+// -----------------------------------------------------------------------------
+
+/// Boundary layer indices captured when `KILN_MTP_DUMP_HIDDEN_STATES=1`.
+/// Spans the full 32-layer Qwen3.5-4B stack: three GDN samples (0, 8, 16)
+/// plus two GQA samples (23, 31). Layer 31's output IS the pre-final-norm
+/// hidden state, but the comparator still writes a separate `h_pre_final_norm`
+/// tap so the final-layer → h_main handoff can be verified independently.
+pub const B10_BOUNDARY_LAYERS: [usize; 5] = [0, 8, 16, 23, 31];
+
+/// True when `KILN_MTP_DUMP_HIDDEN_STATES=1` (or `true`) is set. Phase B10
+/// opt-in: when enabled alongside `KILN_MTP_DUMP_PATH`, the base-model
+/// forward records the last-row hidden state at each boundary layer and at
+/// the pre-final-norm site, and appends them to the MTP dump safetensors
+/// under names `h_layer_0`, `h_layer_8`, `h_layer_16`, `h_layer_23`,
+/// `h_layer_31`, and `h_pre_final_norm`.
+pub fn is_dump_hidden_states_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_HIDDEN_STATES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// True if the Phase B10 base-model hidden-state capture window is currently
+/// open on this thread AND the given layer index is one of the boundary
+/// layers. Call sites use this to gate the (relatively cheap) per-layer
+/// tensor-narrow + host copy so disarmed runs pay zero cost.
+pub fn should_capture_hidden_state_for_layer(layer_idx: usize) -> bool {
+    let armed = H_MAIN_CAPTURE.with(|c| c.borrow().is_some());
+    armed && B10_BOUNDARY_LAYERS.contains(&layer_idx)
+}
+
+/// True if the Phase B10 hidden-state capture window is currently armed on
+/// this thread. Used to gate `h_pre_final_norm` capture (which is not
+/// indexed by layer).
+pub fn is_h_main_capture_armed() -> bool {
+    H_MAIN_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// Begin a B10 base-model hidden-state capture window. Subsequent
+/// [`capture_h_main_tap`] calls from the same thread record into a fresh
+/// buffer until [`drain_h_main_capture`] is called. Does nothing if
+/// [`is_dump_hidden_states_enabled`] is false — so callers can just invoke
+/// this unconditionally around the base-model forward.
+pub fn arm_h_main_capture() {
+    if !is_dump_hidden_states_enabled() {
+        return;
+    }
+    H_MAIN_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured h_main taps and disarm. Returns whatever was recorded
+/// since the matching [`arm_h_main_capture`] call, in order.
+pub fn drain_h_main_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    H_MAIN_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named h_main tap if a capture window is currently open on
+/// this thread. Cheap no-op (single TLS access + borrow) when the window
+/// is closed, which is the production case. The tensor is materialized to
+/// host F32 immediately so the GPU scratch is free to be reused.
+pub fn capture_h_main_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = H_MAIN_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_h_main_tap `{name}`: tensor→f32 host copy"))?;
+    H_MAIN_CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push((name.to_string(), shape, flat));
         }
@@ -488,6 +575,64 @@ mod tests {
         // Drain disarms.
         capture_subop("post_v_proj", &a).unwrap();
         assert!(drain_subop_capture().is_empty());
+    }
+
+    #[test]
+    fn h_main_capture_records_then_drains() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        // Disarmed: capture is a silent no-op.
+        capture_h_main_tap("h_layer_0", &a).unwrap();
+        assert!(drain_h_main_capture().is_empty());
+        // Armed: records in order.
+        arm_h_main_capture();
+        assert!(is_h_main_capture_armed());
+        assert!(should_capture_hidden_state_for_layer(0));
+        assert!(should_capture_hidden_state_for_layer(31));
+        assert!(!should_capture_hidden_state_for_layer(5));
+        capture_h_main_tap("h_layer_0", &a).unwrap();
+        capture_h_main_tap("h_pre_final_norm", &b).unwrap();
+        let drained = drain_h_main_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "h_layer_0");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "h_pre_final_norm");
+        // Drain disarms.
+        assert!(!is_h_main_capture_armed());
+        capture_h_main_tap("h_layer_16", &a).unwrap();
+        assert!(drain_h_main_capture().is_empty());
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
+        }
+    }
+
+    #[test]
+    fn h_main_arm_is_noop_when_env_unset() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
+        }
+        arm_h_main_capture();
+        assert!(!is_h_main_capture_armed());
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_h_main_tap("h_layer_0", &a).unwrap();
+        assert!(drain_h_main_capture().is_empty());
+    }
+
+    #[test]
+    fn b10_boundary_layers_span_full_stack() {
+        // Guardrail against accidental future edits that would narrow the
+        // bisect span. Order matters only for the comparator output, but
+        // the set must include layers 0 and 31 so the comparator can verify
+        // both the embedding-adjacent and pre-final-norm ends of the stack.
+        assert!(B10_BOUNDARY_LAYERS.contains(&0));
+        assert!(B10_BOUNDARY_LAYERS.contains(&31));
+        assert_eq!(B10_BOUNDARY_LAYERS.len(), 5);
     }
 
     #[test]

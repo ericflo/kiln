@@ -27,6 +27,15 @@ Sub-op tap mode (Phase B7b — fine-grained bisect):
     dumps that isn't a primary tap is compared at the end of the table
     in the canonical capture order from mtp_inner_block.
 
+Base-model h_main bisect (Phase B10 — per-layer divergence):
+    python3 scripts/mtp_compare.py --b10 \\
+        --pair main:/tmp/h-kiln.safetensors,/tmp/h-ref.safetensors
+
+    --b10 defaults atol=1e-2, rtol=1e-1 (bf16-appropriate) and emits a
+    per-layer cos_sim + max|Δ| table for taps h_layer_{0,8,16,23,31} and
+    h_pre_final_norm, plus a verdict identifying the first layer at which
+    kiln's base-model hidden state diverges from the HF reference.
+
 Exit code:
     0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
@@ -102,6 +111,20 @@ B9_H3_ZONE = (
     "post_gated_attn_split_value",
     "post_gated_attn_split_gate",
 )
+
+# Phase B10 — per-layer base-model hidden-state taps, in ascending layer order
+# so the first entry that diverges identifies the first divergent transformer
+# block. `h_pre_final_norm` is the last-row hidden fed into `model.norm`, i.e.
+# the same tensor the MTP head consumes as `h_prev`, kept as a distinct tap so
+# the comparator can verify the final-layer → h_main handoff independently.
+B10_LAYER_TAPS: List[str] = [
+    "h_layer_0",
+    "h_layer_8",
+    "h_layer_16",
+    "h_layer_23",
+    "h_layer_31",
+    "h_pre_final_norm",
+]
 
 META_KEYS = (
     "meta__draft_token_id",
@@ -231,6 +254,9 @@ def _ordered_taps(
             out.append(name)
     for name in SUBOP_ORDER:
         if name in common:
+            out.append(name)
+    for name in B10_LAYER_TAPS:
+        if name in common and name not in out:
             out.append(name)
     extras = sorted(common - set(out))
     out.extend(extras)
@@ -512,6 +538,128 @@ def _emit_b9_summary(
         emit("  -> Re-check the full sub-op table above for the first non-zone divergence.")
 
 
+def _emit_b10_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase B10 — per-layer base-model hidden-state bisect.
+
+    Walks `B10_LAYER_TAPS` in ascending order across every pair and reports
+    the first layer at which kiln's hidden state diverges from the HF
+    reference. Because the full 32-layer main stack is being exercised, the
+    first divergence pinpoints either the first bad transformer block or the
+    final-layer → h_main handoff (when `h_pre_final_norm` is the first
+    diverging tap but `h_layer_31` matched).
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase B10 per-layer base-model h_main bisect — cos_sim + max|Δ|")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+
+    cell: Dict[str, Dict[str, Tuple[float, float, bool, Tuple[int, ...]]]] = {
+        n: {} for n in B10_LAYER_TAPS
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if n in cell:
+                cell[n][label] = (
+                    float(r["cos_sim"]),
+                    float(r["max_abs_diff"]),
+                    bool(r["allclose"]),
+                    tuple(r["shape_kiln"]),
+                )
+
+    header = "  " + "tap".ljust(22) + " ".join(
+        f"pos={lab:<28}" for lab in labels
+    )
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in B10_LAYER_TAPS:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<32}")
+            else:
+                cs, mxd, ok, _shape = entry
+                captured_any = True
+                tag = "ok" if ok else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} {tag:<3}  "
+                )
+        emit(f"  {tap:<22}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase B10 verdict: no B10 layer taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_HIDDEN_STATES=1, and re-run")
+        emit("     mtp_h_main_reference_dump.py against the same kiln dump.")
+        return
+
+    first_div_tap: Optional[str] = None
+    first_div_pos: Optional[str] = None
+    last_match_tap: Optional[str] = None
+    for tap in B10_LAYER_TAPS:
+        any_div_here = False
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                continue
+            if not entry[2]:
+                any_div_here = True
+                if first_div_tap is None:
+                    first_div_tap = tap
+                    first_div_pos = lab
+        if not any_div_here and first_div_tap is None:
+            last_match_tap = tap
+
+    if first_div_tap is None:
+        emit("Phase B10 verdict: all layer taps match within tolerance.")
+        emit(f"  (atol={atol}, rtol={rtol} — bf16-appropriate)")
+        emit("  -> Base-model h_main is NUMERICALLY CLEAN against the HF reference.")
+        emit("  -> Divergence must be introduced downstream of model.norm, i.e. in")
+        emit("     the MTP head itself. Re-inspect B6–B9 outcomes and the final")
+        emit("     tokenizer/sampling path; the base stack is exonerated.")
+        return
+
+    emit(f"  first diverging tap: '{first_div_tap}' (pos={first_div_pos})")
+    if last_match_tap is not None:
+        emit(f"  last matching tap before divergence: '{last_match_tap}'")
+
+    if first_div_tap == "h_layer_0":
+        emit("Phase B10 verdict: DIVERGENCE AT LAYER 0")
+        emit("  -> Input-path bug: embedding lookup, rotary_inv_freq build, first")
+        emit("     block's Q/K/V proj or GDN sub-op, OR prompt-token construction")
+        emit("     mismatch between kiln and reference. Verify `prompt_tokens` meta")
+        emit("     matches exactly, then narrow to layer 0's sub-ops.")
+    elif first_div_tap in ("h_layer_8", "h_layer_16"):
+        emit("Phase B10 verdict: DIVERGENCE IN EARLY GDN STACK")
+        emit(f"  -> The first bad transformer block lies between {last_match_tap or 'start'}")
+        emit(f"     and {first_div_tap}. Narrow by capturing intermediate layers")
+        emit("     (e.g. layers 4 and 12) and re-running B10 on the new dump.")
+    elif first_div_tap == "h_layer_23":
+        emit("Phase B10 verdict: DIVERGENCE IN MID-STACK (GDN→GQA transition zone)")
+        emit(f"  -> The first bad block lies between {last_match_tap or 'start'} and 23.")
+        emit("     Layer 23 is a GQA block (full_attention_interval=4). Narrow by")
+        emit("     capturing layers 20, 21, 22 on the next dump.")
+    elif first_div_tap == "h_layer_31":
+        emit("Phase B10 verdict: DIVERGENCE IN LATE STACK")
+        emit(f"  -> The first bad block lies between {last_match_tap or 'start'} and 31.")
+        emit("     Narrow by capturing layers 24, 27, 29 on the next dump.")
+    elif first_div_tap == "h_pre_final_norm":
+        emit("Phase B10 verdict: DIVERGENCE AT FINAL-LAYER → h_main HANDOFF")
+        emit("  -> All 32 layers match, but `h_pre_final_norm` (what MTP consumes")
+        emit("     as `h_prev`) diverges. The bug is in the last-row extraction")
+        emit("     (`narrow(1, seq_len-1, 1)`), the residual add at layer 31, or")
+        emit("     how the base-model main path routes hidden into the MTP head.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -522,10 +670,28 @@ def main() -> int:
         default=[],
         help="Multi-position mode: LABEL:KILN_PATH,REF_PATH. Repeat for each position.",
     )
-    ap.add_argument("--atol", type=float, default=1e-3)
-    ap.add_argument("--rtol", type=float, default=1e-2)
+    ap.add_argument("--atol", type=float, default=None)
+    ap.add_argument("--rtol", type=float, default=None)
+    ap.add_argument(
+        "--b10",
+        action="store_true",
+        help=(
+            "Phase B10 mode: emit per-layer base-model hidden-state summary "
+            "(taps h_layer_{0,8,16,23,31} + h_pre_final_norm). Defaults atol=1e-2, "
+            "rtol=1e-1 (bf16-appropriate) unless explicitly overridden."
+        ),
+    )
     ap.add_argument("--out", default=None, help="Optional path to write report text")
     args = ap.parse_args()
+
+    # Default tolerances depend on mode. B10 compares bf16 base-model hidden
+    # states end-to-end through 32 transformer blocks; the accumulated
+    # arithmetic noise across that many ops means a strict 1e-3/1e-2 bar
+    # flags semantically-identical tensors as divergent.
+    if args.atol is None:
+        args.atol = 1e-2 if args.b10 else 1e-3
+    if args.rtol is None:
+        args.rtol = 1e-1 if args.b10 else 1e-2
 
     pairs: List[Tuple[str, str, str]] = []
     if args.pair:
@@ -547,7 +713,12 @@ def main() -> int:
         lines.append(s)
 
     multi = len(pairs) > 1
-    mode = "multi-position (B7a)" if multi else "single-pair (B6/B7)"
+    if args.b10:
+        mode = "base-model h_main bisect (B10)"
+    elif multi:
+        mode = "multi-position (B7a)"
+    else:
+        mode = "single-pair (B6/B7)"
     emit(f"MTP numerical bisect — mode: {mode}, atol={args.atol}, rtol={args.rtol}")
 
     pair_results: List[
@@ -562,22 +733,26 @@ def main() -> int:
         if not ok:
             overall_ok = False
 
-    if multi:
+    if args.b10:
+        _emit_b10_summary(pair_results, args.atol, args.rtol, emit)
+    elif multi:
         _emit_b7a_summary(pair_results, emit)
 
     # B9 sub-op zone bisect — emitted whenever any pair captured zone taps,
     # whether single- or multi-pair. Exits cleanly with a "no zone taps
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
-    # legacy dumps from before this PR).
-    have_b9_taps = any(
-        any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
-        for pr in pair_results
-    )
-    if have_b9_taps:
-        _emit_b9_summary(pair_results, args.atol, args.rtol, emit)
-    elif multi:
-        emit("")
-        emit("Phase B9 zone bisect: skipped (no H2/H3 zone sub-op taps in dumps).")
+    # legacy dumps from before this PR). Skipped in explicit --b10 mode so
+    # the B10 report isn't cluttered by unrelated sub-op tables.
+    if not args.b10:
+        have_b9_taps = any(
+            any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
+            for pr in pair_results
+        )
+        if have_b9_taps:
+            _emit_b9_summary(pair_results, args.atol, args.rtol, emit)
+        elif multi:
+            emit("")
+            emit("Phase B9 zone bisect: skipped (no H2/H3 zone sub-op taps in dumps).")
 
     emit("")
     if overall_ok:
