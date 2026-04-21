@@ -1,4 +1,8 @@
 use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+
+use memmap2::Mmap;
 
 /// Data type for stored tensor data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,12 +32,70 @@ impl fmt::Display for TensorDType {
     }
 }
 
-/// A loaded tensor: owned raw bytes with shape and dtype metadata.
+/// Backing storage for loaded tensor bytes.
+pub enum WeightData {
+    /// Owned bytes, used by generated/dequantized tensors and tests.
+    Owned(Vec<u8>),
+    /// Read-only slice into a memory-mapped safetensors shard.
+    MmapSlice {
+        mmap: Arc<Mmap>,
+        offset: usize,
+        len: usize,
+    },
+}
+
+impl WeightData {
+    pub fn owned(data: Vec<u8>) -> Self {
+        Self::Owned(data)
+    }
+
+    pub fn mmap_slice(mmap: Arc<Mmap>, offset: usize, len: usize) -> Self {
+        Self::MmapSlice { mmap, offset, len }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            WeightData::Owned(data) => data,
+            WeightData::MmapSlice { mmap, offset, len } => &mmap[*offset..*offset + *len],
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
+    pub fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
+}
+
+impl Deref for WeightData {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_bytes()
+    }
+}
+
+impl fmt::Debug for WeightData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WeightData::Owned(data) => f.debug_struct("Owned").field("len", &data.len()).finish(),
+            WeightData::MmapSlice { offset, len, .. } => f
+                .debug_struct("MmapSlice")
+                .field("offset", offset)
+                .field("len", len)
+                .finish(),
+        }
+    }
+}
+
+/// A loaded tensor: raw bytes with shape and dtype metadata.
 ///
 /// This is a CPU-side representation. The forward pass will convert these
 /// to GPU tensors (candle Tensor or raw CUDA buffers).
 pub struct WeightTensor {
-    pub data: Vec<u8>,
+    pub data: WeightData,
     pub shape: Vec<usize>,
     pub dtype: TensorDType,
 }
@@ -47,6 +109,11 @@ impl WeightTensor {
     /// Total size in bytes.
     pub fn size_bytes(&self) -> usize {
         self.data.len()
+    }
+
+    /// Raw tensor bytes in row-major safetensors order.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.data.as_bytes()
     }
 }
 

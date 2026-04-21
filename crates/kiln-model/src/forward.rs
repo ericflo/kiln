@@ -421,7 +421,7 @@ impl LinearAttentionState {
 /// Convert a `WeightTensor` (raw bytes + shape + dtype) to a candle `Tensor` on `device`.
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let dtype = weight_dtype(w);
-    let t = Tensor::from_raw_buffer(&w.data, dtype, &w.shape, device)
+    let t = Tensor::from_raw_buffer(w.as_bytes(), dtype, &w.shape, device)
         .context("failed to create tensor from raw buffer")?;
     Ok(t)
 }
@@ -443,25 +443,26 @@ fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])>
     let rows = w.shape[0];
     let cols = w.shape[1];
     let elem_size = w.dtype.size_bytes();
+    let data = w.as_bytes();
     let expected_len = rows
         .checked_mul(cols)
         .and_then(|n| n.checked_mul(elem_size))
         .context("weight tensor byte size overflow")?;
     anyhow::ensure!(
-        w.data.len() == expected_len,
+        data.len() == expected_len,
         "weight tensor data length mismatch: got {} bytes, expected {} bytes for shape {:?} and dtype {}",
-        w.data.len(),
+        data.len(),
         expected_len,
         w.shape,
         w.dtype
     );
 
-    let mut out = vec![0u8; w.data.len()];
+    let mut out = vec![0u8; data.len()];
     const ROW_TILE: usize = 32;
     const COL_TILE: usize = 32;
     const PARALLEL_TRANSPOSE_MIN_BYTES: usize = 1 << 20;
 
-    if w.data.len() < PARALLEL_TRANSPOSE_MIN_BYTES {
+    if data.len() < PARALLEL_TRANSPOSE_MIN_BYTES {
         for row0 in (0..rows).step_by(ROW_TILE) {
             let row_end = (row0 + ROW_TILE).min(rows);
             for col0 in (0..cols).step_by(COL_TILE) {
@@ -470,7 +471,7 @@ fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])>
                     for col in col0..col_end {
                         let src = (row * cols + col) * elem_size;
                         let dst = (col * rows + row) * elem_size;
-                        out[dst..dst + elem_size].copy_from_slice(&w.data[src..src + elem_size]);
+                        out[dst..dst + elem_size].copy_from_slice(&data[src..src + elem_size]);
                     }
                 }
             }
@@ -494,7 +495,7 @@ fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])>
                             let src = (row * cols + col) * elem_size;
                             let dst = out_base + row * elem_size;
                             out_block[dst..dst + elem_size]
-                                .copy_from_slice(&w.data[src..src + elem_size]);
+                                .copy_from_slice(&data[src..src + elem_size]);
                         }
                     }
                 }
@@ -4860,7 +4861,7 @@ mod tests {
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         let wt = WeightTensor {
-            data: bytes,
+            data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::F32,
         };
@@ -4882,7 +4883,7 @@ mod tests {
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         let wt = WeightTensor {
-            data: bytes,
+            data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::F32,
         };
@@ -4905,7 +4906,7 @@ mod tests {
         let values: Vec<u16> = vec![1, 2, 3, 4, 5, 6];
         let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let wt = WeightTensor {
-            data: bytes,
+            data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::BF16,
         };
@@ -4931,7 +4932,7 @@ mod tests {
         let data: Vec<f32> = vec![1.0, -2.0, 3.5, 4.25, 5.0, -6.75];
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         let wt = WeightTensor {
-            data: bytes,
+            data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::F32,
         };
