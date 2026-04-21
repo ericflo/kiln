@@ -252,6 +252,36 @@ B12_HYPOTHESIS: Dict[str, str] = {
 # that layer is 31, the sub-op table identifies the specific op.
 B12_COS_SIM_BAR = 0.995
 
+# Phase C6 — pre-RoPE MTP input bisect. Five taps in strict forward-graph
+# order. Kiln and the HF reference both write these under a `c6__` prefix so
+# they slot alongside the existing B-phase taps without colliding with the
+# pre-existing Phase B6 taps (which share 3 of 5 activations under different
+# names; C6 keeps them under a self-contained prefix so the bisect table is
+# self-contained). Must stay in lock-step with `C6_TAP_NAMES` in
+# `crates/kiln-model/src/mtp_debug.rs` and the `out_dict["c6__*"]` writes in
+# `scripts/mtp_reference_dump.py`.
+C6_PRE_ROPE_TAP_NAMES: Tuple[str, ...] = (
+    "token_emb",
+    "norm_emb",
+    "norm_h",
+    "concat",
+    "fused",
+)
+
+# One-line hypotheses for each C6 pre-RoPE tap, used in verdict output.
+C6_HYPOTHESIS: Dict[str, str] = {
+    "token_emb": "embedding lookup for draft_token_id: tied embed weight, dtype, or token-id routing",
+    "norm_emb": "pre_fc_norm_embedding: RMSNorm weight, eps, or the dual-norm A/B swap",
+    "norm_h": "pre_fc_norm_hidden: RMSNorm weight, eps, or the upstream h_prev path",
+    "concat": "Tensor::cat([norm_emb, norm_h], dim=2): half ordering / contiguity",
+    "fused": "mtp.fc matmul: weight layout, transpose, or bf16 GEMM epilogue",
+}
+
+# Phase C6 — same cos_sim bar as C5 bench alpha floor: any tap below 0.9999
+# is a first-class divergence candidate. The bisect walks top-down and names
+# the first tap to dip below this bar as the dominant source of drift.
+C6_COS_SIM_BAR = 0.9999
+
 META_KEYS = (
     "meta__draft_token_id",
     "meta__mtp_pos",
@@ -399,6 +429,10 @@ def _ordered_taps(
             out.append(name)
     for name in B12_LAYER31_GQA_TAP_NAMES:
         key = f"b12__{name}"
+        if key in common and key not in out:
+            out.append(key)
+    for name in C6_PRE_ROPE_TAP_NAMES:
+        key = f"c6__{name}"
         if key in common and key not in out:
             out.append(key)
     extras = sorted(common - set(out))
@@ -1150,6 +1184,134 @@ def _emit_b12_summary(
         emit("     Strong signal for benign bf16 accumulation. Confirm against fp32 HF.")
 
 
+def _emit_c6_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C6 — pre-RoPE MTP input bisect.
+
+    Walks `C6_PRE_ROPE_TAP_NAMES` (prefixed with `c6__` in both dumps) in
+    strict forward-graph order across every pair, prints a per-position
+    cos_sim / max|Δ| / mean|Δ| / rel_l2 table, and names the FIRST tap
+    whose MEDIAN cos_sim across positions falls below C6_COS_SIM_BAR
+    (0.9999) as the dominant source of pre-RoPE drift. Falls back to the
+    first tap with ANY position diverging when no tap's median crosses
+    the bar.
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase C6 pre-RoPE MTP input bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
+        n: {} for n in C6_PRE_ROPE_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c6__"):
+                continue
+            short = n[len("c6__"):]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+            )
+
+    header = "  " + "tap".ljust(14) + " ".join(
+        f"pos={lab:<48}" for lab in labels
+    )
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C6_PRE_ROPE_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2 = entry
+                captured_any = True
+                tag = "ok" if cs >= C6_COS_SIM_BAR else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<14}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C6 verdict: no C6 pre-RoPE taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_POS=0,2 AND")
+        emit("     KILN_MTP_DUMP_PRE_ROPE=1 set, and re-run scripts/mtp_reference_dump.py")
+        emit("     against the same kiln dump (the reference always emits c6__ taps).")
+        return
+
+    def _median(xs: List[float]) -> float:
+        finite = sorted(v for v in xs if np.isfinite(v))
+        if not finite:
+            return float("nan")
+        n = len(finite)
+        mid = n // 2
+        if n % 2 == 1:
+            return finite[mid]
+        return 0.5 * (finite[mid - 1] + finite[mid])
+
+    first_median_div: Optional[str] = None
+    first_median_val: float = float("nan")
+    first_any_div: Optional[str] = None
+    first_any_pos: Optional[str] = None
+    for tap in C6_PRE_ROPE_TAP_NAMES:
+        per_pos = [cell[tap][lab][0] for lab in labels if lab in cell[tap]]
+        if not per_pos:
+            continue
+        med = _median(per_pos)
+        if first_median_div is None and np.isfinite(med) and med < C6_COS_SIM_BAR:
+            first_median_div = tap
+            first_median_val = med
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                continue
+            cs = entry[0]
+            if np.isfinite(cs) and cs < C6_COS_SIM_BAR and first_any_div is None:
+                first_any_div = tap
+                first_any_pos = lab
+
+    if first_median_div is not None:
+        hypo = C6_HYPOTHESIS.get(first_median_div, "<unknown tap>")
+        emit(
+            f"  first tap with MEDIAN cos_sim < {C6_COS_SIM_BAR}: '{first_median_div}' "
+            f"(median cos_sim = {first_median_val:.6f})"
+        )
+        emit(f"Phase C6 verdict: PRE-ROPE TARGET = '{first_median_div}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Queue the follow-up phase to investigate this tap in isolation.")
+    elif first_any_div is not None:
+        hypo = C6_HYPOTHESIS.get(first_any_div, "<unknown tap>")
+        emit(
+            f"  no tap has MEDIAN cos_sim < {C6_COS_SIM_BAR}, but '{first_any_div}' "
+            f"(pos={first_any_pos}) dips below {C6_COS_SIM_BAR} on at least one position."
+        )
+        emit(f"Phase C6 verdict: PRE-ROPE TARGET (noisy) = '{first_any_div}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Recommend capturing more positions / seeds before committing")
+        emit("     to a C7 fix direction.")
+    else:
+        emit(f"Phase C6 verdict: ALL pre-RoPE taps match within cos_sim >= {C6_COS_SIM_BAR}.")
+        emit("  -> Pre-RoPE input is NOT the dominant source of drift at this bar.")
+        emit("  -> Look downstream of `fused` (RoPE / attention / final_layernorm)")
+        emit("     and/or re-check the abs_pos threading in the MTP block.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -1196,13 +1358,27 @@ def main() -> int:
             "fp32 HF ref to separate real bugs from benign bf16 accumulation."
         ),
     )
+    ap.add_argument(
+        "--c6",
+        action="store_true",
+        help=(
+            "Phase C6 mode: emit pre-RoPE MTP input bisect (5 taps prefixed "
+            "with `c6__`: token_emb, norm_emb, norm_h, concat, fused). "
+            "Defaults atol=1e-3, rtol=1e-2 (fp32-appropriate; these taps are "
+            "computed before any bf16 transformer block). Verdict names the "
+            "first tap (top-down) whose median cos_sim across positions dips "
+            "below 0.9999 as the dominant source of pre-RoPE drift."
+        ),
+    )
     ap.add_argument("--out", default=None, help="Optional path to write report text")
     args = ap.parse_args()
 
     # Default tolerances depend on mode. B10/B11/B12 compare bf16 base-model
     # hidden states end-to-end through 32 transformer blocks; the accumulated
     # arithmetic noise across that many ops means a strict 1e-3/1e-2 bar
-    # flags semantically-identical tensors as divergent.
+    # flags semantically-identical tensors as divergent. C6 taps are all
+    # pre-RoPE (embed / dual RMSNorms / concat / single fc matmul), so keep
+    # the strict fp32 bar for C6 even though B-phase modes relax it.
     bf16_mode = args.b10 or args.b11 or args.b12
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
@@ -1229,7 +1405,9 @@ def main() -> int:
         lines.append(s)
 
     multi = len(pairs) > 1
-    if args.b12:
+    if args.c6:
+        mode = "pre-RoPE MTP input bisect (C6)"
+    elif args.b12:
         mode = "layer-31 drift bisect (B12)"
     elif args.b11:
         mode = "layer-0 GDN sub-op bisect (B11b)"
@@ -1253,7 +1431,9 @@ def main() -> int:
         if not ok:
             overall_ok = False
 
-    if args.b12:
+    if args.c6:
+        _emit_c6_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.b12:
         _emit_b12_summary(pair_results, args.atol, args.rtol, emit)
     elif args.b11:
         _emit_b11_summary(pair_results, args.atol, args.rtol, emit)
@@ -1265,9 +1445,9 @@ def main() -> int:
     # B9 sub-op zone bisect — emitted whenever any pair captured zone taps,
     # whether single- or multi-pair. Exits cleanly with a "no zone taps
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
-    # legacy dumps from before this PR). Skipped in explicit --b10/--b11/--b12
+    # legacy dumps from before this PR). Skipped in explicit --b10/--b11/--b12/--c6
     # mode so the per-phase report isn't cluttered by unrelated sub-op tables.
-    if not args.b10 and not args.b11 and not args.b12:
+    if not args.b10 and not args.b11 and not args.b12 and not args.c6:
         have_b9_taps = any(
             any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
             for pr in pair_results

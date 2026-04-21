@@ -107,6 +107,19 @@ thread_local! {
     /// read via [`current_b12_layer_is_31`].
     static B12_CURRENT_LAYER: RefCell<Option<usize>> =
         const { RefCell::new(None) };
+
+    /// Phase C6: thread-local sink for the 5 pre-RoPE MTP-input taps
+    /// captured inside `mtp_forward_step`. The pre-RoPE bisect localizes
+    /// drift to one of `token_emb`, `norm_emb`, `norm_h`, `concat`, or
+    /// `fused` before the inner transformer block applies RoPE. Kept
+    /// distinct from B11/B12 sinks so the MTP-inner capture window can
+    /// be drained independently of the base-model sinks.
+    ///
+    /// Driven by [`arm_pre_rope_capture`] / [`drain_pre_rope_capture`] /
+    /// [`capture_pre_rope_tap`], and gated on `KILN_MTP_DUMP_PRE_ROPE=1`
+    /// so production decode pays zero cost.
+    static PRE_ROPE_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -663,6 +676,87 @@ pub fn capture_b12_gqa_tap(name: &str, t: &Tensor) -> Result<()> {
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Phase C6: pre-RoPE MTP-input bisect taps
+// -----------------------------------------------------------------------------
+
+/// Canonical ordered list of Phase C6 pre-RoPE tap names. The comparator
+/// (`scripts/mtp_compare.py --c6`) expects this exact order in its output
+/// table, and the HF reference (`scripts/mtp_reference_dump.py`) emits
+/// mirrored `c6__<name>` tensors in the same order.
+///
+/// Order follows the forward graph inside `mtp_forward_step`, top-down, up
+/// to the moment the inner transformer block begins to apply RoPE:
+/// 1. `token_emb` — `embed_tokens(draft_token)` output, unsqueezed to [1,1,H]
+/// 2. `norm_emb` — `rms_norm(token_emb, pre_fc_norm_embedding)` (pre-fc norm on embed half)
+/// 3. `norm_h` — `rms_norm(h_prev, pre_fc_norm_hidden)` (pre-fc norm on hidden half)
+/// 4. `concat` — `Tensor::cat([norm_emb, norm_h], dim=2)` post-contiguous
+/// 5. `fused` — `concat @ mtp.fc_t` (output of the fused-input linear)
+pub const C6_TAP_NAMES: &[&str] = &[
+    "token_emb",
+    "norm_emb",
+    "norm_h",
+    "concat",
+    "fused",
+];
+
+/// True when `KILN_MTP_DUMP_PRE_ROPE=1` (or `true`) is set. Opt-in for the
+/// Phase C6 pre-RoPE MTP-input bisect: when enabled alongside
+/// `KILN_MTP_DUMP_PATH`, `mtp_forward_step` captures the 5 named tensors in
+/// [`C6_TAP_NAMES`] and appends them to the MTP dump safetensors under names
+/// `c6__<name>`. Naming-space is distinct from B11/B12 so the existing dump
+/// format is unchanged when this flag is unset.
+pub fn is_dump_pre_rope_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_PRE_ROPE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// True if the Phase C6 pre-RoPE capture window is currently armed on this
+/// thread. Call sites use this to gate the host copy so disarmed runs pay
+/// zero cost.
+pub fn is_pre_rope_capture_armed() -> bool {
+    PRE_ROPE_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// Begin a C6 pre-RoPE capture window. Subsequent [`capture_pre_rope_tap`]
+/// calls from the same thread record into a fresh buffer until
+/// [`drain_pre_rope_capture`] is called. Does nothing if
+/// [`is_dump_pre_rope_enabled`] is false — so callers can invoke this
+/// unconditionally around the MTP inner-block path.
+pub fn arm_pre_rope_capture() {
+    if !is_dump_pre_rope_enabled() {
+        return;
+    }
+    PRE_ROPE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured C6 pre-RoPE taps and disarm. Returns whatever was
+/// recorded since the matching [`arm_pre_rope_capture`] call, in order.
+pub fn drain_pre_rope_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    PRE_ROPE_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named pre-RoPE tap if a capture window is currently open on
+/// this thread. Cheap no-op (single TLS access + borrow) when the window
+/// is closed, which is the production case. The tensor is materialized to
+/// host F32 immediately so the GPU scratch is free to be reused — same
+/// pattern as [`capture_h_main_tap`] / [`capture_b11_layer0_tap`].
+pub fn capture_pre_rope_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = PRE_ROPE_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_pre_rope_tap `{name}`: tensor→f32 host copy"))?;
+    PRE_ROPE_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
 /// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
 /// whether the source is BF16 on CUDA or F32 on CPU.
@@ -729,6 +823,13 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// dump bytes are bit-identical to the pre-B12 format, so legacy callers
 /// passing `&[]` for both `b11_taps` and `b12_taps` produce the historical
 /// safetensors layout.
+///
+/// Phase C6: `c6_taps` carries the pre-RoPE MTP-input taps captured via
+/// [`arm_pre_rope_capture`] / [`capture_pre_rope_tap`] /
+/// [`drain_pre_rope_capture`]. Each entry is serialized as F32 under the
+/// name `c6__<name>` so the comparator can select them with a single
+/// prefix match. When the slice is empty, the dump bytes are bit-identical
+/// to the pre-C6 format (see `write_and_reparse_mtp_dump_round_trips`).
 pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
@@ -740,13 +841,14 @@ pub fn write_mtp_dump(
     prompt_tokens: &[u32],
     b11_taps: &[(String, Vec<usize>, Vec<f32>)],
     b12_taps: &[(String, Vec<usize>, Vec<f32>)],
+    c6_taps: &[(String, Vec<usize>, Vec<f32>)],
 ) -> Result<()> {
     use safetensors::tensor::{Dtype, TensorView};
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
     // Capacity: static taps + subops + 4 meta + optional (prompt_tokens, len)
-    // + b11 taps + b12 taps.
+    // + b11 taps + b12 taps + c6 taps.
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
@@ -754,7 +856,8 @@ pub fn write_mtp_dump(
             + 4
             + prompt_reserve
             + b11_taps.len()
-            + b12_taps.len(),
+            + b12_taps.len()
+            + c6_taps.len(),
     );
     for (name, t) in taps {
         let (shape, flat) = tensor_to_f32_host(t)
@@ -853,6 +956,18 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push((format!("b12__{name}"), shape.clone(), Dtype::F32, bytes));
+    }
+
+    // Phase C6: serialize the pre-RoPE MTP-input taps under `c6__<name>` so
+    // the comparator (`scripts/mtp_compare.py --c6`) can select them with a
+    // single prefix match. When `c6_taps` is empty the loop is a no-op and
+    // the on-disk dump is bit-identical to the pre-C6 layout.
+    for (name, shape, flat) in c6_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("c6__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     let mut views: Vec<(String, TensorView)> = Vec::with_capacity(backings.len());
@@ -1106,6 +1221,7 @@ mod tests {
             &prompt,
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c6_taps = */ &[],
         )
         .unwrap();
 
@@ -1162,6 +1278,7 @@ mod tests {
             /* prompt_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c6_taps = */ &[],
         )
         .unwrap();
 
@@ -1182,6 +1299,8 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("b11__")));
         // With b12_taps = &[], no b12__* tensors should appear.
         assert!(!names.iter().any(|n| n.starts_with("b12__")));
+        // With c6_taps = &[], no c6__* tensors should appear.
+        assert!(!names.iter().any(|n| n.starts_with("c6__")));
 
         let h = st.tensor("h_main").unwrap();
         assert_eq!(h.dtype(), safetensors::Dtype::F32);
@@ -1289,6 +1408,7 @@ mod tests {
             /* prompt_tokens = */ &[],
             &b11,
             /* b12_taps = */ &[],
+            /* c6_taps = */ &[],
         )
         .unwrap();
 
@@ -1418,6 +1538,7 @@ mod tests {
             /* prompt_tokens = */ &[],
             /* b11_taps = */ &[],
             &b12,
+            /* c6_taps = */ &[],
         )
         .unwrap();
 
@@ -1532,5 +1653,128 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
         }
+    }
+
+    #[test]
+    fn c6_tap_names_enumerate_all_five_pre_rope_taps() {
+        // Guardrail against accidental future edits that would drop a tap
+        // from the pre-RoPE bisect span. Both the Rust capture sites and
+        // the Python HF reference dump iterate this list.
+        assert_eq!(C6_TAP_NAMES.len(), 5);
+        assert_eq!(C6_TAP_NAMES[0], "token_emb");
+        assert_eq!(C6_TAP_NAMES[1], "norm_emb");
+        assert_eq!(C6_TAP_NAMES[2], "norm_h");
+        assert_eq!(C6_TAP_NAMES[3], "concat");
+        assert_eq!(C6_TAP_NAMES[4], "fused");
+    }
+
+    #[test]
+    fn c6_pre_rope_capture_records_then_drains() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_PRE_ROPE", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        // Disarmed: capture is a silent no-op.
+        capture_pre_rope_tap("token_emb", &a).unwrap();
+        assert!(drain_pre_rope_capture().is_empty());
+        assert!(!is_pre_rope_capture_armed());
+
+        // Armed: records in order.
+        arm_pre_rope_capture();
+        assert!(is_pre_rope_capture_armed());
+        capture_pre_rope_tap("token_emb", &a).unwrap();
+        capture_pre_rope_tap("fused", &b).unwrap();
+        let drained = drain_pre_rope_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "token_emb");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "fused");
+        assert_eq!(drained[1].1, vec![2]);
+        assert_eq!(drained[1].2, vec![10.0, 20.0]);
+
+        // Drain disarms.
+        assert!(!is_pre_rope_capture_armed());
+        capture_pre_rope_tap("norm_emb", &a).unwrap();
+        assert!(drain_pre_rope_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_PRE_ROPE");
+        }
+    }
+
+    #[test]
+    fn c6_pre_rope_arm_is_noop_when_env_unset() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_PRE_ROPE");
+        }
+        arm_pre_rope_capture();
+        assert!(!is_pre_rope_capture_armed());
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_pre_rope_tap("token_emb", &a).unwrap();
+        assert!(drain_pre_rope_capture().is_empty());
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_c6_taps_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c6.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let c6 = vec![
+            (
+                "token_emb".to_string(),
+                vec![2],
+                vec![0.61_f32, 0.62],
+            ),
+            (
+                "fused".to_string(),
+                vec![3],
+                vec![0.71_f32, 0.72, 0.73],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 55,
+            /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
+            &c6,
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        // Both taps appear under the c6__<name> namespace.
+        assert!(names.contains(&"c6__token_emb"));
+        assert!(names.contains(&"c6__fused"));
+        // No b11__ / b12__ taps when those slices are empty.
+        assert!(!names.iter().any(|n| n.starts_with("b11__")));
+        assert!(!names.iter().any(|n| n.starts_with("b12__")));
+
+        let te = st.tensor("c6__token_emb").unwrap();
+        assert_eq!(te.dtype(), safetensors::Dtype::F32);
+        assert_eq!(te.shape(), &[2]);
+        let bytes = te.data();
+        let v0 = f32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let v1 = f32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert!((v0 - 0.61).abs() < 1e-6);
+        assert!((v1 - 0.62).abs() < 1e-6);
+
+        let fu = st.tensor("c6__fused").unwrap();
+        assert_eq!(fu.dtype(), safetensors::Dtype::F32);
+        assert_eq!(fu.shape(), &[3]);
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }

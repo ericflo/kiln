@@ -692,6 +692,16 @@ def main() -> int:
         for name, t in capture_subops.items():
             assert name not in out_dict, f"sub-op tap name `{name}` collides with existing tap"
             out_dict[name] = t.contiguous()
+    # Phase C6: emit the 5 pre-RoPE MTP input taps under a `c6__` prefix so the
+    # comparator can do a top-down bisect of embed/norm/splice/fc without
+    # colliding with the pre-existing Phase B6 taps (which share 3 of the 5
+    # activations under different names). Keep the B6 taps unchanged for
+    # back-compat with prior dumps.
+    out_dict["c6__token_emb"] = tok_embed.detach().clone().contiguous()
+    out_dict["c6__norm_emb"] = norm_emb.detach().clone().contiguous()
+    out_dict["c6__norm_h"] = norm_h.detach().clone().contiguous()
+    out_dict["c6__concat"] = fc_input.detach().clone().contiguous()
+    out_dict["c6__fused"] = fc_output.detach().clone().contiguous()
     save_file(out_dict, args.out)
     print(f"[mtp_ref] wrote {args.out} ({sum(t.numel()*t.element_size() for t in out_dict.values())} bytes)", file=sys.stderr)
     return 0
