@@ -527,10 +527,50 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     Ok(Tensor::zeros((1usize,), weight_dtype(w), device)?)
 }
 
-fn projection_tensors_for_load(w: &WeightTensor, device: &Device) -> Result<(Tensor, Tensor)> {
+struct ProjectionLoadCache {
+    metal_bf16_stub: Option<Tensor>,
+    metal_f16_stub: Option<Tensor>,
+    metal_f32_stub: Option<Tensor>,
+}
+
+impl ProjectionLoadCache {
+    fn new(device: &Device) -> Result<Self> {
+        if matches!(device, Device::Metal(_)) {
+            Ok(Self {
+                metal_bf16_stub: Some(Tensor::zeros((1usize,), DType::BF16, device)?),
+                metal_f16_stub: Some(Tensor::zeros((1usize,), DType::F16, device)?),
+                metal_f32_stub: Some(Tensor::zeros((1usize,), DType::F32, device)?),
+            })
+        } else {
+            Ok(Self {
+                metal_bf16_stub: None,
+                metal_f16_stub: None,
+                metal_f32_stub: None,
+            })
+        }
+    }
+
+    fn metal_stub_for(&self, dtype: DType) -> Option<Tensor> {
+        match dtype {
+            DType::BF16 => self.metal_bf16_stub.clone(),
+            DType::F16 => self.metal_f16_stub.clone(),
+            DType::F32 => self.metal_f32_stub.clone(),
+            _ => None,
+        }
+    }
+}
+
+fn projection_tensors_for_load(
+    w: &WeightTensor,
+    device: &Device,
+    cache: &ProjectionLoadCache,
+) -> Result<(Tensor, Tensor)> {
     if matches!(device, Device::Metal(_)) {
         let transposed = weight_to_transposed_tensor_2d(w, device)?;
-        let original_stub = dropped_weight_stub(w, device)?;
+        let original_stub = match cache.metal_stub_for(weight_dtype(w)) {
+            Some(stub) => stub,
+            None => dropped_weight_stub(w, device)?,
+        };
         Ok((original_stub, transposed))
     } else {
         let materialized = weight_to_tensor(w, device)?;
@@ -711,6 +751,8 @@ impl GpuWeights {
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
                 .context("rotary_inv_freq")?;
+        let projection_load_cache =
+            ProjectionLoadCache::new(device).context("projection load cache")?;
 
         // Per-layer `pack_from_bf16` used to run inline during weight load,
         // serializing ~104 calls (8 × q_proj + 96 × MLP gate/up/down) behind
@@ -733,14 +775,18 @@ impl GpuWeights {
 
             let attention = match &lw.attention {
                 crate::weights::AttentionWeights::Full(attn) => {
-                    let (q_proj, q_proj_t) = projection_tensors_for_load(&attn.q_proj, device)
-                        .context(ctx("q_proj projection tensors"))?;
-                    let (k_proj, k_proj_t) = projection_tensors_for_load(&attn.k_proj, device)
-                        .context(ctx("k_proj projection tensors"))?;
-                    let (v_proj, v_proj_t) = projection_tensors_for_load(&attn.v_proj, device)
-                        .context(ctx("v_proj projection tensors"))?;
-                    let (o_proj, o_proj_t) = projection_tensors_for_load(&attn.o_proj, device)
-                        .context(ctx("o_proj projection tensors"))?;
+                    let (q_proj, q_proj_t) =
+                        projection_tensors_for_load(&attn.q_proj, device, &projection_load_cache)
+                            .context(ctx("q_proj projection tensors"))?;
+                    let (k_proj, k_proj_t) =
+                        projection_tensors_for_load(&attn.k_proj, device, &projection_load_cache)
+                            .context(ctx("k_proj projection tensors"))?;
+                    let (v_proj, v_proj_t) =
+                        projection_tensors_for_load(&attn.v_proj, device, &projection_load_cache)
+                            .context(ctx("v_proj projection tensors"))?;
+                    let (o_proj, o_proj_t) =
+                        projection_tensors_for_load(&attn.o_proj, device, &projection_load_cache)
+                            .context(ctx("o_proj projection tensors"))?;
                     // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
                     // Marlin batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
@@ -768,21 +814,33 @@ impl GpuWeights {
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
-                    let (in_proj_qkv, in_proj_qkv_t) =
-                        projection_tensors_for_load(&attn.in_proj_qkv, device)
-                            .context(ctx("in_proj_qkv projection tensors"))?;
-                    let (in_proj_z, in_proj_z_t) =
-                        projection_tensors_for_load(&attn.in_proj_z, device)
-                            .context(ctx("in_proj_z projection tensors"))?;
+                    let (in_proj_qkv, in_proj_qkv_t) = projection_tensors_for_load(
+                        &attn.in_proj_qkv,
+                        device,
+                        &projection_load_cache,
+                    )
+                    .context(ctx("in_proj_qkv projection tensors"))?;
+                    let (in_proj_z, in_proj_z_t) = projection_tensors_for_load(
+                        &attn.in_proj_z,
+                        device,
+                        &projection_load_cache,
+                    )
+                    .context(ctx("in_proj_z projection tensors"))?;
                     let (out_proj, out_proj_t) =
-                        projection_tensors_for_load(&attn.out_proj, device)
+                        projection_tensors_for_load(&attn.out_proj, device, &projection_load_cache)
                             .context(ctx("out_proj projection tensors"))?;
-                    let (in_proj_a, in_proj_a_t) =
-                        projection_tensors_for_load(&attn.in_proj_a, device)
-                            .context(ctx("in_proj_a projection tensors"))?;
-                    let (in_proj_b, in_proj_b_t) =
-                        projection_tensors_for_load(&attn.in_proj_b, device)
-                            .context(ctx("in_proj_b projection tensors"))?;
+                    let (in_proj_a, in_proj_a_t) = projection_tensors_for_load(
+                        &attn.in_proj_a,
+                        device,
+                        &projection_load_cache,
+                    )
+                    .context(ctx("in_proj_a projection tensors"))?;
+                    let (in_proj_b, in_proj_b_t) = projection_tensors_for_load(
+                        &attn.in_proj_b,
+                        device,
+                        &projection_load_cache,
+                    )
+                    .context(ctx("in_proj_b projection tensors"))?;
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                         in_proj_qkv,
                         in_proj_z,
@@ -802,12 +860,15 @@ impl GpuWeights {
                 }
             };
 
-            let (gate_proj, gate_proj_t) = projection_tensors_for_load(&lw.mlp.gate_proj, device)
-                .context(ctx("gate_proj projection tensors"))?;
-            let (up_proj, up_proj_t) = projection_tensors_for_load(&lw.mlp.up_proj, device)
-                .context(ctx("up_proj projection tensors"))?;
-            let (down_proj, down_proj_t) = projection_tensors_for_load(&lw.mlp.down_proj, device)
-                .context(ctx("down_proj projection tensors"))?;
+            let (gate_proj, gate_proj_t) =
+                projection_tensors_for_load(&lw.mlp.gate_proj, device, &projection_load_cache)
+                    .context(ctx("gate_proj projection tensors"))?;
+            let (up_proj, up_proj_t) =
+                projection_tensors_for_load(&lw.mlp.up_proj, device, &projection_load_cache)
+                    .context(ctx("up_proj projection tensors"))?;
+            let (down_proj, down_proj_t) =
+                projection_tensors_for_load(&lw.mlp.down_proj, device, &projection_load_cache)
+                    .context(ctx("down_proj projection tensors"))?;
             // KILN_W4A16=1 opt-in: queue each MLP projection for the
             // post-loop Marlin batch pack. See the q_proj comment above —
             // the `*_proj_marlin` fields start as None, and
@@ -905,7 +966,7 @@ impl GpuWeights {
         // simple. The follow-up PR extends `marlin_pack_inputs` to include
         // the MTP layer's q_proj + MLP trio.
         let mtp = if let Some(mtp_w) = &weights.mtp {
-            let (fc, fc_t) = projection_tensors_for_load(&mtp_w.fc, device)
+            let (fc, fc_t) = projection_tensors_for_load(&mtp_w.fc, device, &projection_load_cache)
                 .context("mtp.fc projection tensors")?;
             let pre_fc_norm_embedding = weight_to_tensor(&mtp_w.pre_fc_norm_embedding, device)
                 .context("mtp.pre_fc_norm_embedding")?;
@@ -931,14 +992,30 @@ impl GpuWeights {
 
                 let attention = match &lw.attention {
                     crate::weights::AttentionWeights::Full(attn) => {
-                        let (q_proj, q_proj_t) = projection_tensors_for_load(&attn.q_proj, device)
-                            .context(ctx("q_proj projection tensors"))?;
-                        let (k_proj, k_proj_t) = projection_tensors_for_load(&attn.k_proj, device)
-                            .context(ctx("k_proj projection tensors"))?;
-                        let (v_proj, v_proj_t) = projection_tensors_for_load(&attn.v_proj, device)
-                            .context(ctx("v_proj projection tensors"))?;
-                        let (o_proj, o_proj_t) = projection_tensors_for_load(&attn.o_proj, device)
-                            .context(ctx("o_proj projection tensors"))?;
+                        let (q_proj, q_proj_t) = projection_tensors_for_load(
+                            &attn.q_proj,
+                            device,
+                            &projection_load_cache,
+                        )
+                        .context(ctx("q_proj projection tensors"))?;
+                        let (k_proj, k_proj_t) = projection_tensors_for_load(
+                            &attn.k_proj,
+                            device,
+                            &projection_load_cache,
+                        )
+                        .context(ctx("k_proj projection tensors"))?;
+                        let (v_proj, v_proj_t) = projection_tensors_for_load(
+                            &attn.v_proj,
+                            device,
+                            &projection_load_cache,
+                        )
+                        .context(ctx("v_proj projection tensors"))?;
+                        let (o_proj, o_proj_t) = projection_tensors_for_load(
+                            &attn.o_proj,
+                            device,
+                            &projection_load_cache,
+                        )
+                        .context(ctx("o_proj projection tensors"))?;
                         GpuAttentionWeights::Full(GpuFullAttentionWeights {
                             q_proj,
                             k_proj,
@@ -963,12 +1040,13 @@ impl GpuWeights {
                 };
 
                 let (gate_proj, gate_proj_t) =
-                    projection_tensors_for_load(&lw.mlp.gate_proj, device)
+                    projection_tensors_for_load(&lw.mlp.gate_proj, device, &projection_load_cache)
                         .context(ctx("gate_proj projection tensors"))?;
-                let (up_proj, up_proj_t) = projection_tensors_for_load(&lw.mlp.up_proj, device)
-                    .context(ctx("up_proj projection tensors"))?;
+                let (up_proj, up_proj_t) =
+                    projection_tensors_for_load(&lw.mlp.up_proj, device, &projection_load_cache)
+                        .context(ctx("up_proj projection tensors"))?;
                 let (down_proj, down_proj_t) =
-                    projection_tensors_for_load(&lw.mlp.down_proj, device)
+                    projection_tensors_for_load(&lw.mlp.down_proj, device, &projection_load_cache)
                         .context(ctx("down_proj projection tensors"))?;
 
                 GpuLayerWeights {
