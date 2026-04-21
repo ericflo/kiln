@@ -123,6 +123,22 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                             let _ = app_for_spawn.emit("menu://open-settings", ());
                             return;
                         }
+                        let binary_path = supervisor.config_snapshot().await.binary_path;
+                        if !is_binary_available(&binary_path) {
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Kiln binary not installed")
+                                .body(
+                                    "Open Dashboard to download and install the kiln server binary.",
+                                )
+                                .show();
+                            if let Err(e) = open_dashboard_window(&app_for_spawn) {
+                                eprintln!("[tray] open_dashboard_window failed: {}", e);
+                            }
+                            let _ = app_for_spawn.emit("menu://open-dashboard", ());
+                            return;
+                        }
                         if let Err(e) = supervisor.start().await {
                             eprintln!("[tray] start_server failed: {}", e);
                         }
@@ -480,6 +496,14 @@ pub fn is_model_path_set(settings: &Settings) -> bool {
     }
 }
 
+/// Return true when the configured kiln binary path resolves to an existing
+/// file (either as an absolute/relative path or via `PATH` lookup for bare
+/// names). Pure predicate kept out of the Tauri runtime so the tray Start
+/// preflight can be unit-tested without GTK/webkit2gtk.
+pub fn is_binary_available(binary_path: &std::path::Path) -> bool {
+    crate::installer::resolve_binary(binary_path).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +722,28 @@ mod tests {
         let mut s = Settings::default();
         s.model_path = Some(std::path::PathBuf::from("/models/qwen3.5-4b"));
         assert!(is_model_path_set(&s));
+    }
+
+    #[test]
+    fn is_binary_available_returns_false_for_missing_path() {
+        let p = std::path::PathBuf::from("/definitely/not/a/binary/kiln-xyz");
+        assert!(!is_binary_available(&p));
+    }
+
+    #[test]
+    fn is_binary_available_returns_false_for_empty_path() {
+        let p = std::path::PathBuf::from("");
+        assert!(!is_binary_available(&p));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_binary_available_returns_true_for_existing_binary() {
+        // /bin/sh exists on every supported Unix target the desktop ships
+        // for and is a regular executable file, matching the "absolute path
+        // points at an installed binary" case the supervisor would see.
+        let p = std::path::PathBuf::from("/bin/sh");
+        assert!(is_binary_available(&p));
     }
 
     #[test]
