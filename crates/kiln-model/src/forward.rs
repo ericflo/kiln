@@ -4432,9 +4432,13 @@ pub fn mtp_forward_step(
     if dump_pre_rope {
         let _ = crate::mtp_debug::capture_pre_rope_tap("concat", &concat);
     }
+    // Phase C12: `KILN_MTP_FP32_HEAD=1` subsumes `KILN_MTP_FC_FP32_ACCUM=1` —
+    // the full-head kill switch always includes fc_input/fc_output in f32,
+    // so either flag alone is sufficient to trigger the fp32 fc path.
+    let fp32_head = crate::mtp_debug::is_mtp_fp32_head_enabled();
     let fused = {
         kiln_nvtx::range!(c"kiln/mtp/fc");
-        if crate::mtp_debug::is_mtp_fc_fp32_accum_enabled() {
+        if crate::mtp_debug::is_mtp_fc_fp32_accum_enabled() || fp32_head {
             // Phase C9 falsification: promote inputs to f32, matmul in f32,
             // cast the result back to the input dtype. Eliminates the bf16
             // accumulation noise visible at the `fused` / `fc_output` tap
@@ -4500,6 +4504,19 @@ pub fn mtp_forward_step(
     // K/V scratch path for the MTP layer only; the disarm below clears
     // it before any non-MTP attention path on this thread can observe it.
     crate::mtp_debug::arm_mtp_single_token_self_attn();
+    // Phase C12: arm fp32-head BEFORE the inner block so that every
+    // projection matmul inside `gqa_attention_paged` (q/k/v/o) and the
+    // MLP (`swiglu_ffn`'s gate/up/down) sees the TLS flag armed. This is
+    // the cleanest minimal invasive cast point: `linear_with_lora_t` is
+    // the single chokepoint for all of those matmuls, and the non-MTP
+    // paths never observe the armed flag because it is disarmed below
+    // before we return. The MTP head is not Marlin-packed today, so in
+    // practice the flag gates the straight BF16 `broadcast_matmul`; if a
+    // future PR adds Marlin to MTP, the marlin path in `q_proj_forward`
+    // will need an analogous upcast branch.
+    if fp32_head {
+        crate::mtp_debug::arm_mtp_fp32_head();
+    }
     let mtp_hidden_result = transformer_block_paged(
         backend,
         &fused,
@@ -4521,6 +4538,9 @@ pub fn mtp_forward_step(
     // Always disarm in both success and error paths (`mtp_hidden_result`
     // is `?`-propagated below, so we cannot rely on the function tail).
     crate::mtp_debug::disarm_mtp_single_token_self_attn();
+    if fp32_head {
+        crate::mtp_debug::disarm_mtp_fp32_head();
+    }
 
     // Drain the sub-op capture window in BOTH success and error paths so the
     // TLS slot is not left armed for the next draft step (which would corrupt
