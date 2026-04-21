@@ -434,6 +434,117 @@ fn weight_dtype(w: &WeightTensor) -> DType {
     }
 }
 
+const TRANSPOSE_ROW_TILE: usize = 32;
+const TRANSPOSE_COL_TILE: usize = 32;
+const PARALLEL_TRANSPOSE_MIN_BYTES: usize = 1 << 20;
+
+#[inline(always)]
+fn copy_transpose_elem_unaligned<T: Copy>(data: &[u8], out: &mut [u8], src: usize, dst: usize) {
+    // Safetensors byte offsets are not guaranteed to satisfy Rust alignment
+    // for typed views, so use unaligned loads/stores while still avoiding a
+    // tiny `memmove` call per BF16/F32 element.
+    unsafe {
+        let value = std::ptr::read_unaligned(data.as_ptr().add(src).cast::<T>());
+        std::ptr::write_unaligned(out.as_mut_ptr().add(dst).cast::<T>(), value);
+    }
+}
+
+fn transpose_weight_bytes_typed<T: Copy + Send + Sync>(
+    data: &[u8],
+    out: &mut [u8],
+    rows: usize,
+    cols: usize,
+) {
+    let elem_size = std::mem::size_of::<T>();
+
+    if data.len() < PARALLEL_TRANSPOSE_MIN_BYTES {
+        for row0 in (0..rows).step_by(TRANSPOSE_ROW_TILE) {
+            let row_end = (row0 + TRANSPOSE_ROW_TILE).min(rows);
+            for col0 in (0..cols).step_by(TRANSPOSE_COL_TILE) {
+                let col_end = (col0 + TRANSPOSE_COL_TILE).min(cols);
+                for row in row0..row_end {
+                    for col in col0..col_end {
+                        let src = (row * cols + col) * elem_size;
+                        let dst = (col * rows + row) * elem_size;
+                        copy_transpose_elem_unaligned::<T>(data, out, src, dst);
+                    }
+                }
+            }
+        }
+    } else {
+        use rayon::prelude::*;
+
+        let out_col_stride = rows * elem_size;
+        let out_block_stride = out_col_stride * TRANSPOSE_COL_TILE;
+        out.par_chunks_mut(out_block_stride)
+            .enumerate()
+            .for_each(|(block_idx, out_block)| {
+                let col0 = block_idx * TRANSPOSE_COL_TILE;
+                let col_end = (col0 + (out_block.len() / out_col_stride)).min(cols);
+                for row0 in (0..rows).step_by(TRANSPOSE_ROW_TILE) {
+                    let row_end = (row0 + TRANSPOSE_ROW_TILE).min(rows);
+                    for col in col0..col_end {
+                        let out_col = col - col0;
+                        let out_base = out_col * out_col_stride;
+                        for row in row0..row_end {
+                            let src = (row * cols + col) * elem_size;
+                            let dst = out_base + row * elem_size;
+                            copy_transpose_elem_unaligned::<T>(data, out_block, src, dst);
+                        }
+                    }
+                }
+            });
+    }
+}
+
+fn transpose_weight_bytes_generic(
+    data: &[u8],
+    out: &mut [u8],
+    rows: usize,
+    cols: usize,
+    elem_size: usize,
+) {
+    if data.len() < PARALLEL_TRANSPOSE_MIN_BYTES {
+        for row0 in (0..rows).step_by(TRANSPOSE_ROW_TILE) {
+            let row_end = (row0 + TRANSPOSE_ROW_TILE).min(rows);
+            for col0 in (0..cols).step_by(TRANSPOSE_COL_TILE) {
+                let col_end = (col0 + TRANSPOSE_COL_TILE).min(cols);
+                for row in row0..row_end {
+                    for col in col0..col_end {
+                        let src = (row * cols + col) * elem_size;
+                        let dst = (col * rows + row) * elem_size;
+                        out[dst..dst + elem_size].copy_from_slice(&data[src..src + elem_size]);
+                    }
+                }
+            }
+        }
+    } else {
+        use rayon::prelude::*;
+
+        let out_col_stride = rows * elem_size;
+        let out_block_stride = out_col_stride * TRANSPOSE_COL_TILE;
+        out.par_chunks_mut(out_block_stride)
+            .enumerate()
+            .for_each(|(block_idx, out_block)| {
+                let col0 = block_idx * TRANSPOSE_COL_TILE;
+                let col_end = (col0 + (out_block.len() / out_col_stride)).min(cols);
+                for row0 in (0..rows).step_by(TRANSPOSE_ROW_TILE) {
+                    let row_end = (row0 + TRANSPOSE_ROW_TILE).min(rows);
+                    for col in col0..col_end {
+                        let out_col = col - col0;
+                        let out_base = out_col * out_col_stride;
+                        for row in row0..row_end {
+                            let src = (row * cols + col) * elem_size;
+                            let dst = out_base + row * elem_size;
+                            out_block[dst..dst + elem_size]
+                                .copy_from_slice(&data[src..src + elem_size]);
+                        }
+                    }
+                }
+            });
+    }
+}
+
 fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])> {
     anyhow::ensure!(
         w.shape.len() == 2,
@@ -458,48 +569,12 @@ fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])>
     );
 
     let mut out = vec![0u8; data.len()];
-    const ROW_TILE: usize = 32;
-    const COL_TILE: usize = 32;
-    const PARALLEL_TRANSPOSE_MIN_BYTES: usize = 1 << 20;
-
-    if data.len() < PARALLEL_TRANSPOSE_MIN_BYTES {
-        for row0 in (0..rows).step_by(ROW_TILE) {
-            let row_end = (row0 + ROW_TILE).min(rows);
-            for col0 in (0..cols).step_by(COL_TILE) {
-                let col_end = (col0 + COL_TILE).min(cols);
-                for row in row0..row_end {
-                    for col in col0..col_end {
-                        let src = (row * cols + col) * elem_size;
-                        let dst = (col * rows + row) * elem_size;
-                        out[dst..dst + elem_size].copy_from_slice(&data[src..src + elem_size]);
-                    }
-                }
-            }
-        }
-    } else {
-        use rayon::prelude::*;
-
-        let out_col_stride = rows * elem_size;
-        let out_block_stride = out_col_stride * COL_TILE;
-        out.par_chunks_mut(out_block_stride)
-            .enumerate()
-            .for_each(|(block_idx, out_block)| {
-                let col0 = block_idx * COL_TILE;
-                let col_end = (col0 + (out_block.len() / out_col_stride)).min(cols);
-                for row0 in (0..rows).step_by(ROW_TILE) {
-                    let row_end = (row0 + ROW_TILE).min(rows);
-                    for col in col0..col_end {
-                        let out_col = col - col0;
-                        let out_base = out_col * out_col_stride;
-                        for row in row0..row_end {
-                            let src = (row * cols + col) * elem_size;
-                            let dst = out_base + row * elem_size;
-                            out_block[dst..dst + elem_size]
-                                .copy_from_slice(&data[src..src + elem_size]);
-                        }
-                    }
-                }
-            });
+    match elem_size {
+        1 => transpose_weight_bytes_typed::<u8>(data, &mut out, rows, cols),
+        2 => transpose_weight_bytes_typed::<u16>(data, &mut out, rows, cols),
+        4 => transpose_weight_bytes_typed::<u32>(data, &mut out, rows, cols),
+        8 => transpose_weight_bytes_typed::<u64>(data, &mut out, rows, cols),
+        _ => transpose_weight_bytes_generic(data, &mut out, rows, cols, elem_size),
     }
 
     Ok((out, [cols, rows]))
