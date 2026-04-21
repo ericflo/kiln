@@ -255,6 +255,10 @@ fn spawn_backend_prewarm(state: AppState) {
     let metrics = state.metrics.clone();
 
     tokio::spawn(async move {
+        // Give immediately-started desktop traffic a chance to claim the GPU
+        // before background warmup begins compiling kernels.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
         if metrics.request_duration_count.load(Ordering::Relaxed) > 0 {
             tracing::info!(
                 "skipping background inference prewarm because the server has already handled live traffic"
