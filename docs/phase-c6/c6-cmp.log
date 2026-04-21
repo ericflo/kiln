@@ -1,0 +1,452 @@
+==========================================
+HF reference dumps (6 total)
+==========================================
+--- ref for seed=42 pos=0 ---
+[mtp_ref] loading kiln dump from /tmp/c6_kiln/kiln_seed42_pos0.st
+[mtp_ref] draft_token_id=198 mtp_pos=0 swap_fc_norms=0
+[mtp_ref] base_pos=15 (abs_pos=15)
+[mtp_ref] loading MTP weights from /root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[mtp_ref] rope_theta=10000000.0 rotary_frac=0.25
+[mtp_ref] captured 24 sub-op taps: ['post_attn_block', 'post_attn_gated', 'post_attn_raw', 'post_attn_residual', 'post_gate_split', 'post_gated_attn_split_gate', 'post_gated_attn_split_value', 'post_k_norm', 'post_k_proj', 'post_k_rope', 'post_mlp', 'post_o_proj', 'post_pre_attn_norm', 'post_pre_mlp_norm', 'post_q_norm', 'post_q_proj_raw', 'post_q_rope', 'post_q_split', 'post_qk_norm_k', 'post_qk_norm_q', 'post_v_proj', 'pre_gated_attn_split', 'pre_qk_norm_k', 'pre_qk_norm_q']
+[mtp_ref] wrote /tmp/c6_ref/ref_seed42_pos0.st (1452064 bytes)
+--- ref for seed=42 pos=2 ---
+[mtp_ref] loading kiln dump from /tmp/c6_kiln/kiln_seed42_pos2.st
+[mtp_ref] draft_token_id=33 mtp_pos=2 swap_fc_norms=0
+[mtp_ref] base_pos=20 (abs_pos=22)
+[mtp_ref] loading MTP weights from /root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[mtp_ref] rope_theta=10000000.0 rotary_frac=0.25
+[mtp_ref] captured 24 sub-op taps: ['post_attn_block', 'post_attn_gated', 'post_attn_raw', 'post_attn_residual', 'post_gate_split', 'post_gated_attn_split_gate', 'post_gated_attn_split_value', 'post_k_norm', 'post_k_proj', 'post_k_rope', 'post_mlp', 'post_o_proj', 'post_pre_attn_norm', 'post_pre_mlp_norm', 'post_q_norm', 'post_q_proj_raw', 'post_q_rope', 'post_q_split', 'post_qk_norm_k', 'post_qk_norm_q', 'post_v_proj', 'pre_gated_attn_split', 'pre_qk_norm_k', 'pre_qk_norm_q']
+[mtp_ref] wrote /tmp/c6_ref/ref_seed42_pos2.st (1452064 bytes)
+--- ref for seed=43 pos=0 ---
+[mtp_ref] loading kiln dump from /tmp/c6_kiln/kiln_seed43_pos0.st
+[mtp_ref] draft_token_id=561 mtp_pos=0 swap_fc_norms=0
+[mtp_ref] base_pos=17 (abs_pos=17)
+[mtp_ref] loading MTP weights from /root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[mtp_ref] rope_theta=10000000.0 rotary_frac=0.25
+[mtp_ref] captured 24 sub-op taps: ['post_attn_block', 'post_attn_gated', 'post_attn_raw', 'post_attn_residual', 'post_gate_split', 'post_gated_attn_split_gate', 'post_gated_attn_split_value', 'post_k_norm', 'post_k_proj', 'post_k_rope', 'post_mlp', 'post_o_proj', 'post_pre_attn_norm', 'post_pre_mlp_norm', 'post_q_norm', 'post_q_proj_raw', 'post_q_rope', 'post_q_split', 'post_qk_norm_k', 'post_qk_norm_q', 'post_v_proj', 'pre_gated_attn_split', 'pre_qk_norm_k', 'pre_qk_norm_q']
+[mtp_ref] wrote /tmp/c6_ref/ref_seed43_pos0.st (1452064 bytes)
+--- ref for seed=43 pos=2 ---
+[mtp_ref] loading kiln dump from /tmp/c6_kiln/kiln_seed43_pos2.st
+[mtp_ref] draft_token_id=919 mtp_pos=2 swap_fc_norms=0
+[mtp_ref] base_pos=24 (abs_pos=26)
+[mtp_ref] loading MTP weights from /root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[mtp_ref] rope_theta=10000000.0 rotary_frac=0.25
+[mtp_ref] captured 24 sub-op taps: ['post_attn_block', 'post_attn_gated', 'post_attn_raw', 'post_attn_residual', 'post_gate_split', 'post_gated_attn_split_gate', 'post_gated_attn_split_value', 'post_k_norm', 'post_k_proj', 'post_k_rope', 'post_mlp', 'post_o_proj', 'post_pre_attn_norm', 'post_pre_mlp_norm', 'post_q_norm', 'post_q_proj_raw', 'post_q_rope', 'post_q_split', 'post_qk_norm_k', 'post_qk_norm_q', 'post_v_proj', 'pre_gated_attn_split', 'pre_qk_norm_k', 'pre_qk_norm_q']
+[mtp_ref] wrote /tmp/c6_ref/ref_seed43_pos2.st (1452064 bytes)
+--- ref for seed=44 pos=0 ---
+[mtp_ref] loading kiln dump from /tmp/c6_kiln/kiln_seed44_pos0.st
+[mtp_ref] draft_token_id=1061 mtp_pos=0 swap_fc_norms=0
+[mtp_ref] base_pos=18 (abs_pos=18)
+[mtp_ref] loading MTP weights from /root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[mtp_ref] rope_theta=10000000.0 rotary_frac=0.25
+[mtp_ref] captured 24 sub-op taps: ['post_attn_block', 'post_attn_gated', 'post_attn_raw', 'post_attn_residual', 'post_gate_split', 'post_gated_attn_split_gate', 'post_gated_attn_split_value', 'post_k_norm', 'post_k_proj', 'post_k_rope', 'post_mlp', 'post_o_proj', 'post_pre_attn_norm', 'post_pre_mlp_norm', 'post_q_norm', 'post_q_proj_raw', 'post_q_rope', 'post_q_split', 'post_qk_norm_k', 'post_qk_norm_q', 'post_v_proj', 'pre_gated_attn_split', 'pre_qk_norm_k', 'pre_qk_norm_q']
+[mtp_ref] wrote /tmp/c6_ref/ref_seed44_pos0.st (1452064 bytes)
+--- ref for seed=44 pos=2 ---
+[mtp_ref] loading kiln dump from /tmp/c6_kiln/kiln_seed44_pos2.st
+[mtp_ref] draft_token_id=68387 mtp_pos=2 swap_fc_norms=0
+[mtp_ref] base_pos=24 (abs_pos=26)
+[mtp_ref] loading MTP weights from /root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[mtp_ref] rope_theta=10000000.0 rotary_frac=0.25
+[mtp_ref] captured 24 sub-op taps: ['post_attn_block', 'post_attn_gated', 'post_attn_raw', 'post_attn_residual', 'post_gate_split', 'post_gated_attn_split_gate', 'post_gated_attn_split_value', 'post_k_norm', 'post_k_proj', 'post_k_rope', 'post_mlp', 'post_o_proj', 'post_pre_attn_norm', 'post_pre_mlp_norm', 'post_q_norm', 'post_q_proj_raw', 'post_q_rope', 'post_q_split', 'post_qk_norm_k', 'post_qk_norm_q', 'post_v_proj', 'pre_gated_attn_split', 'pre_qk_norm_k', 'pre_qk_norm_q']
+[mtp_ref] wrote /tmp/c6_ref/ref_seed44_pos2.st (1452064 bytes)
+==========================================
+C6 compare per seed
+==========================================
+=======================
+=== SEED=42 compare ===
+=======================
+MTP numerical bisect — mode: pre-RoPE MTP input bisect (C6), atol=0.001, rtol=0.01
+
+=== mtp_pos=0 ===
+  kiln dump : /tmp/c6_kiln/kiln_seed42_pos0.st
+  ref  dump : /tmp/c6_ref/ref_seed42_pos0.st
+Metadata:
+  meta__draft_token_id: kiln=198 ref=198 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=0 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   1.38e-02     6.68e-04    
+fc_output              1x1x2560               True     False    1.00e+00   5.62e-03     5.55e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   5.62e-03     5.55e-04    
+post_layer             1x1x2560               True     False    1.00e+00   5.60e-02     3.05e-03    
+post_final_ln          1x1x2560               True     False    1.00e+00   1.83e-01     1.37e-02    
+mtp_logits             1x1x248320             True     False    1.00e+00   8.28e-02     1.11e-02    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   2.94e-02     3.19e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   5.19e-02     4.41e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   4.52e-02     3.14e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.19e-02     5.15e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   5.19e-02     4.41e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   5.19e-02     3.25e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   5.19e-02     3.25e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   4.84e-02     5.57e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   4.84e-02     5.57e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   5.19e-02     3.25e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   4.52e-02     3.14e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   5.80e-02     3.82e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   4.54e-02     4.99e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   5.80e-02     3.82e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   4.54e-02     4.99e-03    
+post_q_rope            1x1x16x256             True     False    1.00e+00   5.80e-02     3.88e-03    
+post_k_rope            1x1x4x256              True     False    1.00e+00   4.53e-02     5.04e-03    
+post_attn_raw          1x1x4096               True     False    1.00e+00   4.19e-02     5.15e-03    
+post_attn_gated        1x1x4096               True     False    1.00e+00   4.35e-02     1.46e-03    
+post_o_proj            1x1x2560               True     False    1.00e+00   8.87e-03     1.73e-03    
+post_attn_block        1x1x2560               True     False    1.00e+00   8.87e-03     1.73e-03    
+post_attn_residual     1x1x2560               True     False    1.00e+00   1.34e-02     1.95e-03    
+post_pre_mlp_norm      1x1x2560               True     False    1.00e+00   8.47e-02     5.50e-03    
+post_mlp               1x1x2560               True     False    1.00e+00   4.64e-02     2.50e-03    
+c6__token_emb          1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+c6__norm_emb           1x1x2560               True     True     1.00e+00   1.38e-02     6.50e-04    
+c6__norm_h             1x1x2560               True     True     1.00e+00   1.14e-02     6.86e-04    
+c6__concat             1x1x5120               True     True     1.00e+00   1.38e-02     6.68e-04    
+c6__fused              1x1x2560               True     False    1.00e+00   5.62e-03     5.55e-04    
+
+  pair verdict: first divergence at tap 'fc_output'.
+    Most-likely cause: mtp.fc matmul (weight transpose or layout)
+
+=== mtp_pos=2 ===
+  kiln dump : /tmp/c6_kiln/kiln_seed42_pos2.st
+  ref  dump : /tmp/c6_ref/ref_seed42_pos2.st
+Metadata:
+  meta__draft_token_id: kiln=33 ref=33 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=2 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   3.01e-02     7.03e-04    
+fc_output              1x1x2560               True     False    1.00e+00   7.34e-03     6.17e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   7.34e-03     6.17e-04    
+post_layer             1x1x2560               True     False    9.81e-01   3.46e-01     7.17e-02    
+post_final_ln          1x1x2560               True     False    9.78e-01   2.73e+00     5.53e-01    
+mtp_logits             1x1x248320             True     False    9.80e-01   3.07e+00     3.81e-01    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   3.66e-02     3.47e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   8.18e-02     5.08e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   3.20e-02     3.60e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   6.93e-02     6.61e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   8.18e-02     5.08e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   8.18e-02     3.41e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   8.18e-02     3.41e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   5.37e-02     6.74e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   5.37e-02     6.74e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   8.18e-02     3.41e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   3.20e-02     3.60e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   4.60e-02     4.06e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   3.89e-02     5.39e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   4.60e-02     4.06e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   3.89e-02     5.39e-03    
+post_q_rope            1x1x16x256             True     False    1.00e+00   4.64e-02     4.16e-03    
+post_k_rope            1x1x4x256              True     False    1.00e+00   3.89e-02     5.40e-03    
+post_attn_raw          1x1x4096               True     False    9.93e-01   3.96e+00     1.66e-01    
+post_attn_gated        1x1x4096               True     False    9.87e-01   2.57e+00     3.07e-02    
+post_o_proj            1x1x2560               True     False    9.75e-01   4.24e-01     5.54e-02    
+post_attn_block        1x1x2560               True     False    9.75e-01   4.24e-01     5.54e-02    
+post_attn_residual     1x1x2560               True     False    9.85e-01   4.17e-01     5.55e-02    
+post_pre_mlp_norm      1x1x2560               True     False    9.84e-01   1.95e+00     1.85e-01    
+post_mlp               1x1x2560               True     False    9.75e-01   6.38e-01     6.90e-02    
+c6__token_emb          1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+c6__norm_emb           1x1x2560               True     True     1.00e+00   7.76e-03     6.56e-04    
+c6__norm_h             1x1x2560               True     True     1.00e+00   3.01e-02     7.49e-04    
+c6__concat             1x1x5120               True     True     1.00e+00   3.01e-02     7.03e-04    
+c6__fused              1x1x2560               True     False    1.00e+00   7.34e-03     6.17e-04    
+
+  pair verdict: first divergence at tap 'fc_output'.
+    Most-likely cause: mtp.fc matmul (weight transpose or layout)
+
+==============================================================================
+Phase C6 pre-RoPE MTP input bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2
+==============================================================================
+  tap           pos=mtp_pos=0                                        pos=mtp_pos=2                                       
+  -----------------------------------------------------------------------------------------------------------------------
+  token_emb     cos=1.00e+00   max|Δ|=0.00e+00   mean|Δ|=0.00e+00   rel_l2=0.00e+00   ok  cos=1.00e+00   max|Δ|=0.00e+00   mean|Δ|=0.00e+00   rel_l2=0.00e+00   ok 
+  norm_emb      cos=1.00e+00   max|Δ|=1.38e-02   mean|Δ|=6.50e-04   rel_l2=1.60e-03   ok  cos=1.00e+00   max|Δ|=7.76e-03   mean|Δ|=6.56e-04   rel_l2=1.66e-03   ok 
+  norm_h        cos=1.00e+00   max|Δ|=1.14e-02   mean|Δ|=6.86e-04   rel_l2=1.52e-03   ok  cos=1.00e+00   max|Δ|=3.01e-02   mean|Δ|=7.49e-04   rel_l2=1.62e-03   ok 
+  concat        cos=1.00e+00   max|Δ|=1.38e-02   mean|Δ|=6.68e-04   rel_l2=1.56e-03   ok  cos=1.00e+00   max|Δ|=3.01e-02   mean|Δ|=7.03e-04   rel_l2=1.63e-03   ok 
+  fused         cos=1.00e+00   max|Δ|=5.62e-03   mean|Δ|=5.55e-04   rel_l2=2.87e-03   ok  cos=1.00e+00   max|Δ|=7.34e-03   mean|Δ|=6.17e-04   rel_l2=3.17e-03   ok 
+
+Phase C6 verdict: ALL pre-RoPE taps match within cos_sim >= 0.9999.
+  -> Pre-RoPE input is NOT the dominant source of drift at this bar.
+  -> Look downstream of `fused` (RoPE / attention / final_layernorm)
+     and/or re-check the abs_pos threading in the MTP block.
+
+Overall verdict: divergence(s) at: ['fc_output', 'fc_output']
+=======================
+=== SEED=43 compare ===
+=======================
+MTP numerical bisect — mode: pre-RoPE MTP input bisect (C6), atol=0.001, rtol=0.01
+
+=== mtp_pos=0 ===
+  kiln dump : /tmp/c6_kiln/kiln_seed43_pos0.st
+  ref  dump : /tmp/c6_ref/ref_seed43_pos0.st
+Metadata:
+  meta__draft_token_id: kiln=561 ref=561 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=0 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   1.58e-02     7.05e-04    
+fc_output              1x1x2560               True     False    1.00e+00   8.57e-03     5.67e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   8.57e-03     5.67e-04    
+post_layer             1x1x2560               True     False    1.00e+00   3.42e-02     2.43e-03    
+post_final_ln          1x1x2560               True     False    1.00e+00   1.86e-01     1.53e-02    
+mtp_logits             1x1x248320             True     False    1.00e+00   9.56e-02     1.31e-02    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   5.78e-02     3.08e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   6.27e-02     4.08e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   5.00e-02     3.00e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.85e-02     5.38e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   6.27e-02     4.08e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   6.27e-02     2.99e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   6.27e-02     2.99e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   3.99e-02     5.18e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   3.99e-02     5.18e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   6.27e-02     2.99e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   5.00e-02     3.00e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   3.59e-02     3.59e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   2.84e-02     4.77e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   3.59e-02     3.59e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   2.84e-02     4.77e-03    
+post_q_rope            1x1x16x256             True     False    1.00e+00   3.78e-02     3.69e-03    
+post_k_rope            1x1x4x256              True     False    1.00e+00   2.84e-02     4.83e-03    
+post_attn_raw          1x1x4096               True     False    1.00e+00   4.85e-02     5.38e-03    
+post_attn_gated        1x1x4096               True     False    1.00e+00   3.09e-02     1.09e-03    
+post_o_proj            1x1x2560               True     False    1.00e+00   1.19e-02     1.25e-03    
+post_attn_block        1x1x2560               True     False    1.00e+00   1.19e-02     1.25e-03    
+post_attn_residual     1x1x2560               True     False    1.00e+00   2.31e-02     1.44e-03    
+post_pre_mlp_norm      1x1x2560               True     False    1.00e+00   8.73e-02     4.59e-03    
+post_mlp               1x1x2560               True     False    1.00e+00   2.12e-02     1.98e-03    
+c6__token_emb          1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+c6__norm_emb           1x1x2560               True     True     1.00e+00   7.40e-03     6.69e-04    
+c6__norm_h             1x1x2560               True     True     1.00e+00   1.58e-02     7.41e-04    
+c6__concat             1x1x5120               True     True     1.00e+00   1.58e-02     7.05e-04    
+c6__fused              1x1x2560               True     False    1.00e+00   8.57e-03     5.67e-04    
+
+  pair verdict: first divergence at tap 'fc_output'.
+    Most-likely cause: mtp.fc matmul (weight transpose or layout)
+
+=== mtp_pos=2 ===
+  kiln dump : /tmp/c6_kiln/kiln_seed43_pos2.st
+  ref  dump : /tmp/c6_ref/ref_seed43_pos2.st
+Metadata:
+  meta__draft_token_id: kiln=919 ref=919 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=2 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   7.66e-03     7.35e-04    
+fc_output              1x1x2560               True     False    1.00e+00   5.07e-03     6.34e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   5.07e-03     6.34e-04    
+post_layer             1x1x2560               True     False    9.92e-01   5.16e-01     4.96e-02    
+post_final_ln          1x1x2560               True     False    9.91e-01   2.79e+00     3.40e-01    
+mtp_logits             1x1x248320             True     False    9.93e-01   2.05e+00     2.14e-01    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   4.35e-02     3.01e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   4.01e-02     3.64e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   2.13e-02     2.77e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.04e-02     5.37e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   4.01e-02     3.64e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   3.03e-02     2.56e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   3.03e-02     2.56e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   4.01e-02     4.72e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   4.01e-02     4.72e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   3.03e-02     2.56e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   2.13e-02     2.77e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   4.06e-02     3.47e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   4.46e-02     4.91e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   4.06e-02     3.47e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   4.46e-02     4.91e-03    
+post_q_rope            1x1x16x256             True     False    1.00e+00   4.12e-02     3.57e-03    
+post_k_rope            1x1x4x256              True     False    1.00e+00   4.46e-02     4.99e-03    
+post_attn_raw          1x1x4096               True     False    9.86e-01   4.00e+00     2.22e-01    
+post_attn_gated        1x1x4096               True     False    9.91e-01   9.59e-01     2.37e-02    
+post_o_proj            1x1x2560               True     False    9.88e-01   4.60e-01     3.43e-02    
+post_attn_block        1x1x2560               True     False    9.88e-01   4.60e-01     3.43e-02    
+post_attn_residual     1x1x2560               True     False    9.95e-01   4.47e-01     3.43e-02    
+post_pre_mlp_norm      1x1x2560               True     False    9.95e-01   4.76e-01     1.08e-01    
+post_mlp               1x1x2560               True     False    9.94e-01   4.68e-01     3.65e-02    
+c6__token_emb          1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+c6__norm_emb           1x1x2560               True     True     1.00e+00   5.43e-03     6.64e-04    
+c6__norm_h             1x1x2560               True     True     1.00e+00   7.66e-03     8.06e-04    
+c6__concat             1x1x5120               True     True     1.00e+00   7.66e-03     7.35e-04    
+c6__fused              1x1x2560               True     False    1.00e+00   5.07e-03     6.34e-04    
+
+  pair verdict: first divergence at tap 'fc_output'.
+    Most-likely cause: mtp.fc matmul (weight transpose or layout)
+
+==============================================================================
+Phase C6 pre-RoPE MTP input bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2
+==============================================================================
+  tap           pos=mtp_pos=0                                        pos=mtp_pos=2                                       
+  -----------------------------------------------------------------------------------------------------------------------
+  token_emb     cos=1.00e+00   max|Δ|=0.00e+00   mean|Δ|=0.00e+00   rel_l2=0.00e+00   ok  cos=1.00e+00   max|Δ|=0.00e+00   mean|Δ|=0.00e+00   rel_l2=0.00e+00   ok 
+  norm_emb      cos=1.00e+00   max|Δ|=7.40e-03   mean|Δ|=6.69e-04   rel_l2=1.66e-03   ok  cos=1.00e+00   max|Δ|=5.43e-03   mean|Δ|=6.64e-04   rel_l2=1.61e-03   ok 
+  norm_h        cos=1.00e+00   max|Δ|=1.58e-02   mean|Δ|=7.41e-04   rel_l2=1.63e-03   ok  cos=1.00e+00   max|Δ|=7.66e-03   mean|Δ|=8.06e-04   rel_l2=1.62e-03   ok 
+  concat        cos=1.00e+00   max|Δ|=1.58e-02   mean|Δ|=7.05e-04   rel_l2=1.64e-03   ok  cos=1.00e+00   max|Δ|=7.66e-03   mean|Δ|=7.35e-04   rel_l2=1.62e-03   ok 
+  fused         cos=1.00e+00   max|Δ|=8.57e-03   mean|Δ|=5.67e-04   rel_l2=2.89e-03   ok  cos=1.00e+00   max|Δ|=5.07e-03   mean|Δ|=6.34e-04   rel_l2=2.71e-03   ok 
+
+Phase C6 verdict: ALL pre-RoPE taps match within cos_sim >= 0.9999.
+  -> Pre-RoPE input is NOT the dominant source of drift at this bar.
+  -> Look downstream of `fused` (RoPE / attention / final_layernorm)
+     and/or re-check the abs_pos threading in the MTP block.
+
+Overall verdict: divergence(s) at: ['fc_output', 'fc_output']
+=======================
+=== SEED=44 compare ===
+=======================
+MTP numerical bisect — mode: pre-RoPE MTP input bisect (C6), atol=0.001, rtol=0.01
+
+=== mtp_pos=0 ===
+  kiln dump : /tmp/c6_kiln/kiln_seed44_pos0.st
+  ref  dump : /tmp/c6_ref/ref_seed44_pos0.st
+Metadata:
+  meta__draft_token_id: kiln=1061 ref=1061 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=0 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   1.48e-02     6.95e-04    
+fc_output              1x1x2560               True     False    1.00e+00   6.55e-03     5.70e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   6.55e-03     5.70e-04    
+post_layer             1x1x2560               True     False    1.00e+00   4.12e-02     3.09e-03    
+post_final_ln          1x1x2560               True     False    1.00e+00   1.68e-01     1.57e-02    
+mtp_logits             1x1x248320             True     False    1.00e+00   1.05e-01     1.35e-02    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   4.22e-02     3.13e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   7.48e-02     3.91e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   4.98e-02     3.02e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.22e-02     5.35e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   7.48e-02     3.91e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   6.01e-02     2.98e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   6.01e-02     2.98e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   7.48e-02     4.84e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   7.48e-02     4.84e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   6.01e-02     2.98e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   4.98e-02     3.02e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   3.66e-02     3.47e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   5.21e-02     4.72e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   3.66e-02     3.47e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   5.21e-02     4.72e-03    
+post_q_rope            1x1x16x256             True     False    1.00e+00   3.69e-02     3.56e-03    
+post_k_rope            1x1x4x256              True     False    1.00e+00   5.22e-02     4.82e-03    
+post_attn_raw          1x1x4096               True     False    1.00e+00   4.22e-02     5.35e-03    
+post_attn_gated        1x1x4096               True     False    1.00e+00   3.60e-02     1.42e-03    
+post_o_proj            1x1x2560               True     False    1.00e+00   1.58e-02     1.64e-03    
+post_attn_block        1x1x2560               True     False    1.00e+00   1.58e-02     1.64e-03    
+post_attn_residual     1x1x2560               True     False    1.00e+00   1.73e-02     1.83e-03    
+post_pre_mlp_norm      1x1x2560               True     False    1.00e+00   5.62e-02     5.57e-03    
+post_mlp               1x1x2560               True     False    1.00e+00   2.93e-02     2.54e-03    
+c6__token_emb          1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+c6__norm_emb           1x1x2560               True     True     1.00e+00   7.54e-03     6.86e-04    
+c6__norm_h             1x1x2560               True     True     1.00e+00   1.48e-02     7.03e-04    
+c6__concat             1x1x5120               True     True     1.00e+00   1.48e-02     6.95e-04    
+c6__fused              1x1x2560               True     False    1.00e+00   6.55e-03     5.70e-04    
+
+  pair verdict: first divergence at tap 'fc_output'.
+    Most-likely cause: mtp.fc matmul (weight transpose or layout)
+
+=== mtp_pos=2 ===
+  kiln dump : /tmp/c6_kiln/kiln_seed44_pos2.st
+  ref  dump : /tmp/c6_ref/ref_seed44_pos2.st
+Metadata:
+  meta__draft_token_id: kiln=68387 ref=68387 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=2 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   1.46e-02     7.25e-04    
+fc_output              1x1x2560               True     False    1.00e+00   1.60e-02     6.29e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   1.60e-02     6.29e-04    
+post_layer             1x1x2560               True     False    9.98e-01   2.47e-01     2.71e-02    
+post_final_ln          1x1x2560               True     False    9.98e-01   9.17e-01     1.86e-01    
+mtp_logits             1x1x248320             True     False    9.97e-01   9.97e-01     1.35e-01    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   2.83e-02     2.95e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   5.04e-02     3.84e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   4.35e-02     2.95e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.58e-02     5.53e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   5.04e-02     3.84e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   5.04e-02     2.76e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   5.04e-02     2.76e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   4.06e-02     4.93e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   4.06e-02     4.93e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   5.04e-02     2.76e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   4.35e-02     2.95e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   5.56e-02     3.51e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   4.07e-02     4.80e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   5.56e-02     3.51e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   4.07e-02     4.80e-03    
+post_q_rope            1x1x16x256             True     False    1.00e+00   5.57e-02     3.56e-03    
+post_k_rope            1x1x4x256              True     False    1.00e+00   4.07e-02     4.82e-03    
+post_attn_raw          1x1x4096               True     False    9.96e-01   2.03e+00     1.33e-01    
+post_attn_gated        1x1x4096               True     False    9.96e-01   4.76e-01     1.80e-02    
+post_o_proj            1x1x2560               True     False    9.94e-01   1.79e-01     1.90e-02    
+post_attn_block        1x1x2560               True     False    9.94e-01   1.79e-01     1.90e-02    
+post_attn_residual     1x1x2560               True     False    9.98e-01   1.81e-01     1.90e-02    
+post_pre_mlp_norm      1x1x2560               True     False    9.98e-01   5.31e-01     6.67e-02    
+post_mlp               1x1x2560               True     False    9.97e-01   3.24e-01     2.46e-02    
+c6__token_emb          1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+c6__norm_emb           1x1x2560               True     True     1.00e+00   3.98e-03     6.60e-04    
+c6__norm_h             1x1x2560               True     True     1.00e+00   1.46e-02     7.91e-04    
+c6__concat             1x1x5120               True     True     1.00e+00   1.46e-02     7.25e-04    
+c6__fused              1x1x2560               True     False    1.00e+00   1.60e-02     6.29e-04    
+
+  pair verdict: first divergence at tap 'fc_output'.
+    Most-likely cause: mtp.fc matmul (weight transpose or layout)
+
+==============================================================================
+Phase C6 pre-RoPE MTP input bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2
+==============================================================================
+  tap           pos=mtp_pos=0                                        pos=mtp_pos=2                                       
+  -----------------------------------------------------------------------------------------------------------------------
+  token_emb     cos=1.00e+00   max|Δ|=0.00e+00   mean|Δ|=0.00e+00   rel_l2=0.00e+00   ok  cos=1.00e+00   max|Δ|=0.00e+00   mean|Δ|=0.00e+00   rel_l2=0.00e+00   ok 
+  norm_emb      cos=1.00e+00   max|Δ|=7.54e-03   mean|Δ|=6.86e-04   rel_l2=1.65e-03   ok  cos=1.00e+00   max|Δ|=3.98e-03   mean|Δ|=6.60e-04   rel_l2=1.61e-03   ok 
+  norm_h        cos=1.00e+00   max|Δ|=1.48e-02   mean|Δ|=7.03e-04   rel_l2=1.52e-03   ok  cos=1.00e+00   max|Δ|=1.46e-02   mean|Δ|=7.91e-04   rel_l2=1.68e-03   ok 
+  concat        cos=1.00e+00   max|Δ|=1.48e-02   mean|Δ|=6.95e-04   rel_l2=1.58e-03   ok  cos=1.00e+00   max|Δ|=1.46e-02   mean|Δ|=7.25e-04   rel_l2=1.65e-03   ok 
+  fused         cos=1.00e+00   max|Δ|=6.55e-03   mean|Δ|=5.70e-04   rel_l2=2.81e-03   ok  cos=1.00e+00   max|Δ|=1.60e-02   mean|Δ|=6.29e-04   rel_l2=2.79e-03   ok 
+
+Phase C6 verdict: ALL pre-RoPE taps match within cos_sim >= 0.9999.
+  -> Pre-RoPE input is NOT the dominant source of drift at this bar.
+  -> Look downstream of `fused` (RoPE / attention / final_layernorm)
+     and/or re-check the abs_pos threading in the MTP block.
+
+Overall verdict: divergence(s) at: ['fc_output', 'fc_output']
+ALL_DONE
+EXIT=0

@@ -697,11 +697,11 @@ def main() -> int:
     # colliding with the pre-existing Phase B6 taps (which share 3 of the 5
     # activations under different names). Keep the B6 taps unchanged for
     # back-compat with prior dumps.
-    out_dict["c6__token_emb"] = tok_embed.contiguous()
-    out_dict["c6__norm_emb"] = norm_emb.contiguous()
-    out_dict["c6__norm_h"] = norm_h.contiguous()
-    out_dict["c6__concat"] = fc_input.contiguous()
-    out_dict["c6__fused"] = fc_output.contiguous()
+    out_dict["c6__token_emb"] = tok_embed.detach().clone().contiguous()
+    out_dict["c6__norm_emb"] = norm_emb.detach().clone().contiguous()
+    out_dict["c6__norm_h"] = norm_h.detach().clone().contiguous()
+    out_dict["c6__concat"] = fc_input.detach().clone().contiguous()
+    out_dict["c6__fused"] = fc_output.detach().clone().contiguous()
     save_file(out_dict, args.out)
     print(f"[mtp_ref] wrote {args.out} ({sum(t.numel()*t.element_size() for t in out_dict.values())} bytes)", file=sys.stderr)
     return 0
