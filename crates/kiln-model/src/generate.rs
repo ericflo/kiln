@@ -686,6 +686,35 @@ impl ModelRunner {
         })
     }
 
+    /// Same as [`generate_paged_shared`], but accepts an already-tokenized
+    /// prompt so API callers do not render/tokenize the same prompt twice.
+    pub fn generate_paged_shared_tokens(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<GenerationOutput> {
+        let output = self.generate_from_tokens_paged_shared(
+            prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+        )?;
+
+        let text = self
+            .tokenizer
+            .decode(&output.token_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(GenerationOutput {
+            text,
+            token_ids: output.token_ids,
+            finish_reason: output.finish_reason,
+        })
+    }
+
     fn generate_from_tokens_paged_shared(
         &self,
         prompt_tokens: &[TokenId],
@@ -1946,6 +1975,22 @@ impl ModelRunner {
         )
     }
 
+    /// Streaming variant of [`generate_paged_shared_tokens`].
+    pub fn generate_streaming_paged_shared_tokens(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        self.generate_from_tokens_streaming_paged_shared(
+            prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+        )
+    }
+
     fn generate_from_tokens_streaming_paged_shared(
         &self,
         prompt_tokens: &[TokenId],
@@ -2029,7 +2074,7 @@ impl ModelRunner {
                 )
                 .context("prefill forward pass (paged, streaming) failed")?
             } else {
-                model_forward_paged(
+                model_forward_paged_last_token(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
