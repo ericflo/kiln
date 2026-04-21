@@ -40,6 +40,26 @@ impl MetalBackend {
     }
 }
 
+/// Compile Kiln's custom Metal library and compute pipelines ahead of the
+/// first forward pass. Candle kernels still compile lazily inside Candle, but
+/// this removes Kiln-owned pipeline setup from the first prewarm/request.
+pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
+    let Device::Metal(metal_device) = device else {
+        return Ok(());
+    };
+
+    metal_shared_library(metal_device)?;
+    metal_rms_norm_pipeline(metal_device)?;
+    metal_gdn_qk_norm_pipeline(metal_device)?;
+    metal_gdn_gates_pipeline(metal_device)?;
+    metal_gated_rms_norm_pipeline(metal_device)?;
+    metal_gdn_recurrent_pipeline(metal_device)?;
+    metal_gdn_forward_substitution_pipeline(metal_device)?;
+    metal_conv1d_prefill_pipeline(metal_device)?;
+    metal_conv1d_update_pipeline(metal_device)?;
+    Ok(())
+}
+
 impl BackendRuntime for MetalBackend {
     fn name(&self) -> &'static str {
         "metal"
@@ -2071,6 +2091,16 @@ pub fn try_new_metal() -> Option<Device> {
 mod tests {
     use super::*;
     use candle_core::D;
+
+    #[test]
+    fn test_precompile_custom_kernels_smoke() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            eprintln!("Metal unavailable, skipping test_precompile_custom_kernels_smoke");
+            return Ok(());
+        };
+
+        precompile_custom_kernels(&device)
+    }
 
     fn gdn_qk_norm_reference(
         q: &Tensor,
