@@ -377,7 +377,7 @@ impl AppState {
         );
 
         let block_manager = BlockManager::new(num_blocks, block_size);
-        let paged_cache = PagedKvCache::new_with_fp8(
+        let paged_cache = PagedKvCache::new_uninit_with_fp8(
             model_config.num_full_attention_layers,
             num_blocks,
             block_size,
