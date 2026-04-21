@@ -1,0 +1,188 @@
+MTP numerical bisect — mode: multi-position (B7a), atol=0.001, rtol=0.01
+
+=== pos0 ===
+  kiln dump : /tmp/kiln_pos0.st
+  ref  dump : /tmp/ref_pos0.st
+Metadata:
+  meta__draft_token_id: kiln=561 ref=561 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=0 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+post_attn_raw          MISSING IN KILN DUMP
+post_attn_gated        MISSING IN KILN DUMP
+post_o_proj            MISSING IN KILN DUMP
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   2.89e-02     6.75e-04    
+fc_output              1x1x2560               True     False    1.00e+00   1.95e-02     5.43e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   1.95e-02     5.43e-04    
+post_layer             1x1x2560               True     False    1.00e+00   4.41e-02     2.88e-03    
+post_final_ln          1x1x2560               True     False    1.00e+00   2.41e-01     1.57e-02    
+mtp_logits             1x1x248320             True     False    1.00e+00   1.00e-01     2.31e-02    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   2.50e-02     2.98e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   4.65e-02     4.40e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   3.13e-02     2.95e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.23e-02     5.17e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   4.65e-02     4.40e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   3.44e-02     2.84e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   3.44e-02     2.84e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   4.65e-02     5.96e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   4.65e-02     5.96e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   3.44e-02     2.84e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   3.13e-02     2.95e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   4.05e-02     3.39e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   4.36e-02     4.88e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   4.05e-02     3.39e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   4.36e-02     4.88e-03    
+post_q_rope            1x1x16x256             True     False    9.22e-01   1.12e+01     1.14e-01    
+post_k_rope            1x1x4x256              True     False    9.76e-01   4.76e+00     7.89e-02    
+post_attn_block        1x1x2560               True     False    1.00e+00   1.45e-02     1.36e-03    
+post_attn_residual     1x1x2560               True     False    1.00e+00   2.05e-02     1.53e-03    
+post_pre_mlp_norm      1x1x2560               True     False    1.00e+00   6.32e-02     5.11e-03    
+post_mlp               1x1x2560               True     False    1.00e+00   5.90e-02     2.49e-03    
+
+  pair verdict: first divergence at tap 'post_attn_raw'.
+    Most-likely cause: softmax(QK^T)V mechanics (single-token reduces to V — divergence here is unusual)
+
+=== pos1 ===
+  kiln dump : /tmp/kiln_pos1.st
+  ref  dump : /tmp/ref_pos1.st
+Metadata:
+  meta__draft_token_id: kiln=37550 ref=37550 [OK]
+  meta__mtp_pos: kiln=1 ref=1 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=1 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+post_attn_raw          MISSING IN KILN DUMP
+post_attn_gated        MISSING IN KILN DUMP
+post_o_proj            MISSING IN KILN DUMP
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   3.08e-02     6.70e-04    
+fc_output              1x1x2560               True     False    1.00e+00   5.50e-03     5.74e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   5.50e-03     5.74e-04    
+post_layer             1x1x2560               True     False    9.96e-01   5.48e-01     4.83e-02    
+post_final_ln          1x1x2560               True     False    9.95e-01   1.52e+00     2.54e-01    
+mtp_logits             1x1x248320             True     False    9.96e-01   1.82e+00     1.62e-01    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   5.28e-02     2.74e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   5.42e-02     4.08e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   2.55e-02     2.83e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   4.76e-02     5.08e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   5.42e-02     4.08e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   5.37e-02     2.74e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   5.37e-02     2.74e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   5.42e-02     5.41e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   5.42e-02     5.41e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   5.37e-02     2.74e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   2.55e-02     2.83e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   6.18e-02     3.02e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   3.53e-02     5.14e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   6.18e-02     3.02e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   3.53e-02     5.14e-03    
+post_q_rope            1x1x16x256             True     False    9.35e-01   8.45e+00     1.10e-01    
+post_k_rope            1x1x4x256              True     False    9.62e-01   7.18e+00     8.98e-02    
+post_attn_block        1x1x2560               True     False    9.89e-01   1.47e-01     3.17e-02    
+post_attn_residual     1x1x2560               True     False    9.96e-01   1.47e-01     3.17e-02    
+post_pre_mlp_norm      1x1x2560               True     False    9.95e-01   6.73e-01     1.00e-01    
+post_mlp               1x1x2560               True     False    9.96e-01   6.91e-01     3.77e-02    
+
+  pair verdict: first divergence at tap 'post_attn_raw'.
+    Most-likely cause: softmax(QK^T)V mechanics (single-token reduces to V — divergence here is unusual)
+
+=== pos2 ===
+  kiln dump : /tmp/kiln_pos2.st
+  ref  dump : /tmp/ref_pos2.st
+Metadata:
+  meta__draft_token_id: kiln=15217 ref=15217 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=0 [OK]
+  meta__kiln_mtp_pos: kiln=<missing> ref=2 [MISMATCH]
+  meta__capture_subops: kiln=<missing> ref=1 [MISMATCH]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+post_attn_raw          MISSING IN KILN DUMP
+post_attn_gated        MISSING IN KILN DUMP
+post_o_proj            MISSING IN KILN DUMP
+h_main                 1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+tok_embed              1x1x2560               True     True     1.00e+00   0.00e+00     0.00e+00    
+fc_input               1x1x5120               True     True     1.00e+00   2.67e-02     6.76e-04    
+fc_output              1x1x2560               True     False    1.00e+00   5.38e-03     5.72e-04    
+pre_layer              1x1x2560               True     False    1.00e+00   5.38e-03     5.72e-04    
+post_layer             1x1x2560               True     False    9.84e-01   8.55e-01     8.40e-02    
+post_final_ln          1x1x2560               True     False    9.83e-01   2.31e+00     4.93e-01    
+mtp_logits             1x1x248320             True     False    9.88e-01   2.26e+00     3.15e-01    
+post_pre_attn_norm     1x1x2560               True     False    1.00e+00   3.73e-02     2.92e-03    
+post_q_proj_raw        1x1x8192               True     False    1.00e+00   4.68e-02     4.40e-03    
+post_k_proj            1x1x1024               True     False    1.00e+00   3.75e-02     2.82e-03    
+post_v_proj            1x1x1024               True     False    1.00e+00   6.19e-02     5.56e-03    
+pre_gated_attn_split   1x1x8192               True     False    1.00e+00   4.68e-02     4.40e-03    
+post_q_split           1x1x16x256             True     False    1.00e+00   4.68e-02     2.95e-03    
+post_gated_attn_split_value 1x1x16x256             True     False    1.00e+00   4.68e-02     2.95e-03    
+post_gate_split        1x1x4096               True     False    1.00e+00   4.57e-02     5.85e-03    
+post_gated_attn_split_gate 1x1x4096               True     False    1.00e+00   4.57e-02     5.85e-03    
+pre_qk_norm_q          1x1x16x256             True     False    1.00e+00   4.68e-02     2.95e-03    
+pre_qk_norm_k          1x1x4x256              True     False    1.00e+00   3.75e-02     2.82e-03    
+post_q_norm            1x1x16x256             True     False    1.00e+00   4.44e-02     3.08e-03    
+post_k_norm            1x1x4x256              True     False    1.00e+00   3.09e-02     4.87e-03    
+post_qk_norm_q         1x1x16x256             True     False    1.00e+00   4.44e-02     3.08e-03    
+post_qk_norm_k         1x1x4x256              True     False    1.00e+00   3.09e-02     4.87e-03    
+post_q_rope            1x1x16x256             True     False    8.34e-01   2.14e+01     1.52e-01    
+post_k_rope            1x1x4x256              True     False    9.59e-01   8.07e+00     1.01e-01    
+post_attn_block        1x1x2560               True     False    9.60e-01   2.99e-01     5.72e-02    
+post_attn_residual     1x1x2560               True     False    9.85e-01   2.99e-01     5.72e-02    
+post_pre_mlp_norm      1x1x2560               True     False    9.83e-01   1.11e+00     1.89e-01    
+post_mlp               1x1x2560               True     False    9.87e-01   9.56e-01     6.50e-02    
+
+  pair verdict: first divergence at tap 'post_attn_raw'.
+    Most-likely cause: softmax(QK^T)V mechanics (single-token reduces to V — divergence here is unusual)
+
+==============================================================================
+Phase B7a multi-position summary — cos_sim per primary tap, per position
+==============================================================================
+  tap                 pos=pos0     pos=pos1     pos=pos2    
+  ----------------------------------------------------------
+  h_main              1.00e+00     1.00e+00     1.00e+00    
+  tok_embed           1.00e+00     1.00e+00     1.00e+00    
+  fc_input            1.00e+00     1.00e+00     1.00e+00    
+  fc_output           1.00e+00     1.00e+00     1.00e+00    
+  pre_layer           1.00e+00     1.00e+00     1.00e+00    
+  post_layer          1.00e+00     9.96e-01     9.84e-01    
+  post_final_ln       1.00e+00     9.95e-01     9.83e-01    
+  mtp_logits          1.00e+00     9.96e-01     9.88e-01    
+
+  post_layer cos_sim across positions: [0.999982, 0.995831, 0.984403]
+  spread (max-min): 1.56e-02
+Phase B7a verdict: H1 CONFIRMED — post_layer cos_sim degrades monotonically
+  with mtp_pos. The MTP path's RoPE position threading is the divergence
+  source. -> Land Phase B7 PR with this finding; queue B8 fix task to
+  thread the correct mtp_pos through the inner block's RoPE call site.
+
+==============================================================================
+Phase B9 H2/H3 sub-op bisect — per-position cos_sim + max|Δ|
+==============================================================================
+  tap                           pos=pos0                   pos=pos1                   pos=pos2                  
+  --------------------------------------------------------------------------------------------------------------
+  [H3] pre_gated_attn_split      cos=1.00e+00   max|Δ|=4.65e-02 DIV  cos=1.00e+00   max|Δ|=5.42e-02 DIV  cos=1.00e+00   max|Δ|=4.68e-02 DIV 
+  [H3] post_gated_attn_split_valuecos=1.00e+00   max|Δ|=3.44e-02 DIV  cos=1.00e+00   max|Δ|=5.37e-02 DIV  cos=1.00e+00   max|Δ|=4.68e-02 DIV 
+  [H3] post_gated_attn_split_gatecos=1.00e+00   max|Δ|=4.65e-02 DIV  cos=1.00e+00   max|Δ|=5.42e-02 DIV  cos=1.00e+00   max|Δ|=4.57e-02 DIV 
+  [H2] pre_qk_norm_q             cos=1.00e+00   max|Δ|=3.44e-02 DIV  cos=1.00e+00   max|Δ|=5.37e-02 DIV  cos=1.00e+00   max|Δ|=4.68e-02 DIV 
+  [H2] pre_qk_norm_k             cos=1.00e+00   max|Δ|=3.13e-02 DIV  cos=1.00e+00   max|Δ|=2.55e-02 DIV  cos=1.00e+00   max|Δ|=3.75e-02 DIV 
+  [H2] post_qk_norm_q            cos=1.00e+00   max|Δ|=4.05e-02 DIV  cos=1.00e+00   max|Δ|=6.18e-02 DIV  cos=1.00e+00   max|Δ|=4.44e-02 DIV 
+  [H2] post_qk_norm_k            cos=1.00e+00   max|Δ|=4.36e-02 DIV  cos=1.00e+00   max|Δ|=3.53e-02 DIV  cos=1.00e+00   max|Δ|=3.09e-02 DIV 
+
+  H2 zone (qk-norm) divergence present:   True
+  H3 zone (gated-attn split) divergence present: True
+  First zone-tap divergence in canonical order: 'pre_gated_attn_split' (pos=pos0)
+Phase B9 verdict: BOTH zones diverge; canonical-first divergence is in H3 zone
+  -> H3 (gated-attn split semantics) is the upstream cause; H2 likely inherits.
+  -> Land Phase B9 PR with this finding; queue B10 fix targeting gated-attn split.
+
+Overall verdict: divergence(s) at: ['post_attn_raw', 'post_attn_raw', 'post_attn_raw']
