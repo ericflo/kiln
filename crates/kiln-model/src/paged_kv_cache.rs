@@ -48,7 +48,16 @@ impl PagedKvCache {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        Self::new_with_fp8(num_full_attn_layers, num_blocks, block_size, num_kv_heads, head_dim, dtype, device, false)
+        Self::new_with_fp8(
+            num_full_attn_layers,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype,
+            device,
+            false,
+        )
     }
 
     /// Create a new paged KV cache with optional FP8 quantization.
@@ -120,6 +129,14 @@ impl PagedKvCache {
         let k_flat = k.squeeze(0)?.transpose(0, 1)?.contiguous()?;
         let v_flat = v.squeeze(0)?.transpose(0, 1)?.contiguous()?;
 
+        if let Some(start_slot) =
+            contiguous_slot_run_start(block_table, self.block_size, start_pos, new_len)
+        {
+            k_pool.slice_set(&k_flat, 0, start_slot)?;
+            v_pool.slice_set(&v_flat, 0, start_slot)?;
+            return Ok(());
+        }
+
         for i in 0..new_len {
             let pos = start_pos + i;
             let slot = block_table
@@ -159,6 +176,14 @@ impl PagedKvCache {
 
         let (k_pool, v_pool) = &mut self.layers[layer_idx];
 
+        if let Some(start_slot) =
+            contiguous_slot_run_start(block_table, self.block_size, start_pos, new_len)
+        {
+            k_pool.slice_set(&k_q, 0, start_slot)?;
+            v_pool.slice_set(&v_q, 0, start_slot)?;
+            return Ok(());
+        }
+
         for i in 0..new_len {
             let pos = start_pos + i;
             let slot = block_table
@@ -185,22 +210,33 @@ impl PagedKvCache {
     ) -> Result<(Tensor, Tensor)> {
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
-        // Compute physical slot indices for all positions
-        let slot_indices: Vec<u32> = (0..seq_len)
-            .map(|pos| {
-                block_table
-                    .slot_for(pos, self.block_size)
-                    .map(|s| s as u32)
-                    .ok_or_else(|| anyhow::anyhow!("no slot for position {pos}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
         let device = k_pool.device();
-        let indices = Tensor::new(&slot_indices[..], device)?;
+        let (k, v) = if let Some(start_slot) =
+            contiguous_slot_run_start(block_table, self.block_size, 0, seq_len)
+        {
+            (
+                k_pool.narrow(0, start_slot, seq_len)?,
+                v_pool.narrow(0, start_slot, seq_len)?,
+            )
+        } else {
+            // Compute physical slot indices for all positions.
+            let slot_indices: Vec<u32> = (0..seq_len)
+                .map(|pos| {
+                    block_table
+                        .slot_for(pos, self.block_size)
+                        .map(|s| s as u32)
+                        .ok_or_else(|| anyhow::anyhow!("no slot for position {pos}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
 
-        // Gather: [seq_len, num_kv_heads, head_dim]
-        let k = k_pool.index_select(&indices, 0)?;
-        let v = v_pool.index_select(&indices, 0)?;
+            let indices = Tensor::new(&slot_indices[..], device)?;
+
+            // Gather: [seq_len, num_kv_heads, head_dim]
+            (
+                k_pool.index_select(&indices, 0)?,
+                v_pool.index_select(&indices, 0)?,
+            )
+        };
 
         // Dequantize if FP8 (direct, no scaling — values are stored as raw E4M3)
         let (k, v) = if self.fp8 {
@@ -245,16 +281,73 @@ impl PagedKvCache {
     /// For FP8 caches the returned tensors are still U8-encoded — callers must
     /// either dequantize first or use a kernel that supports FP8 inputs.
     pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&Tensor, &Tensor)> {
-        self.layers
-            .get(layer_idx)
-            .map(|(k, v)| (k, v))
+        self.layers.get(layer_idx).map(|(k, v)| (k, v))
     }
+}
+
+pub(crate) fn contiguous_slot_run_start(
+    block_table: &BlockTable,
+    block_size: usize,
+    start_pos: usize,
+    len: usize,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+
+    let start_slot = block_table.slot_for(start_pos, block_size)?;
+    if len == 1 {
+        return Some(start_slot);
+    }
+
+    let start_block = start_pos / block_size;
+    let end_pos = start_pos + len - 1;
+    let end_block = end_pos / block_size;
+
+    if start_block == end_block {
+        return Some(start_slot);
+    }
+
+    let first_phys_block = *block_table.blocks.get(start_block)? as usize;
+    for logical_block in (start_block + 1)..=end_block {
+        let expected_phys_block = first_phys_block + (logical_block - start_block);
+        let phys_block = *block_table.blocks.get(logical_block)? as usize;
+        if phys_block != expected_phys_block {
+            return None;
+        }
+    }
+
+    Some(start_slot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kv_cache::KvCache;
+
+    #[test]
+    fn test_contiguous_slot_run_start_detection() {
+        let mut contiguous = BlockTable::new();
+        contiguous.push(5);
+        contiguous.push(6);
+        contiguous.push(7);
+
+        assert_eq!(contiguous_slot_run_start(&contiguous, 4, 0, 6), Some(20));
+        assert_eq!(contiguous_slot_run_start(&contiguous, 4, 2, 6), Some(22));
+        assert_eq!(contiguous_slot_run_start(&contiguous, 4, 4, 4), Some(24));
+
+        let mut non_contiguous = BlockTable::new();
+        non_contiguous.push(5);
+        non_contiguous.push(7);
+        non_contiguous.push(8);
+
+        assert_eq!(
+            contiguous_slot_run_start(&non_contiguous, 4, 0, 4),
+            Some(20)
+        );
+        assert_eq!(contiguous_slot_run_start(&non_contiguous, 4, 0, 6), None);
+        assert_eq!(contiguous_slot_run_start(&non_contiguous, 4, 2, 6), None);
+    }
 
     #[test]
     fn test_write_then_read_roundtrip() -> Result<()> {
@@ -264,7 +357,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 4;
 
-        let mut cache = PagedKvCache::new(1, num_blocks, block_size, num_kv_heads, head_dim, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new(
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::F32,
+            &device,
+        )?;
 
         // Set up a block table with 2 blocks (capacity = 8 tokens)
         let mut bt = BlockTable::new();
@@ -274,13 +375,33 @@ mod tests {
         // Write 3 tokens at position 0
         // Shape: [1, num_kv_heads=2, new_len=3, head_dim=4]
         let k = Tensor::new(
-            &[[[[1.0_f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
-              [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]]],
+            &[[
+                [
+                    [1.0_f32, 2.0, 3.0, 4.0],
+                    [5.0, 6.0, 7.0, 8.0],
+                    [9.0, 10.0, 11.0, 12.0],
+                ],
+                [
+                    [13.0, 14.0, 15.0, 16.0],
+                    [17.0, 18.0, 19.0, 20.0],
+                    [21.0, 22.0, 23.0, 24.0],
+                ],
+            ]],
             &device,
         )?;
         let v = Tensor::new(
-            &[[[[101.0_f32, 102.0, 103.0, 104.0], [105.0, 106.0, 107.0, 108.0], [109.0, 110.0, 111.0, 112.0]],
-              [[113.0, 114.0, 115.0, 116.0], [117.0, 118.0, 119.0, 120.0], [121.0, 122.0, 123.0, 124.0]]]],
+            &[[
+                [
+                    [101.0_f32, 102.0, 103.0, 104.0],
+                    [105.0, 106.0, 107.0, 108.0],
+                    [109.0, 110.0, 111.0, 112.0],
+                ],
+                [
+                    [113.0, 114.0, 115.0, 116.0],
+                    [117.0, 118.0, 119.0, 120.0],
+                    [121.0, 122.0, 123.0, 124.0],
+                ],
+            ]],
             &device,
         )?;
 
@@ -311,7 +432,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 4;
 
-        let mut cache = PagedKvCache::new(1, num_blocks, block_size, num_kv_heads, head_dim, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new(
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::F32,
+            &device,
+        )?;
 
         // Sequence A uses blocks 0 and 2
         let mut bt_a = BlockTable::new();
@@ -336,12 +465,20 @@ mod tests {
         // Read back sequence A — should be all 1.0
         let (k_a_out, _) = cache.read(0, &bt_a, 5)?;
         let vals = k_a_out.flatten_all()?.to_vec1::<f32>()?;
-        assert!(vals.iter().all(|&x| (x - 1.0).abs() < 1e-6), "Sequence A contaminated: {:?}", vals);
+        assert!(
+            vals.iter().all(|&x| (x - 1.0).abs() < 1e-6),
+            "Sequence A contaminated: {:?}",
+            vals
+        );
 
         // Read back sequence B — should be all 2.0
         let (k_b_out, _) = cache.read(0, &bt_b, 5)?;
         let vals = k_b_out.flatten_all()?.to_vec1::<f32>()?;
-        assert!(vals.iter().all(|&x| (x - 2.0).abs() < 1e-6), "Sequence B contaminated: {:?}", vals);
+        assert!(
+            vals.iter().all(|&x| (x - 2.0).abs() < 1e-6),
+            "Sequence B contaminated: {:?}",
+            vals
+        );
 
         Ok(())
     }
@@ -354,7 +491,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 2;
 
-        let mut cache = PagedKvCache::new(1, num_blocks, block_size, num_kv_heads, head_dim, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new(
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::F32,
+            &device,
+        )?;
 
         let mut bt = BlockTable::new();
         bt.push(0); // block 0: slots 0-3
@@ -384,7 +529,15 @@ mod tests {
         let block_size = 4;
         let num_blocks = 2;
 
-        let mut cache = PagedKvCache::new(1, num_blocks, block_size, num_kv_heads, head_dim, DType::F32, &device)?;
+        let mut cache = PagedKvCache::new(
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::F32,
+            &device,
+        )?;
 
         let mut bt = BlockTable::new();
         bt.push(0);
@@ -422,8 +575,17 @@ mod tests {
         let num_blocks = 4; // 4 blocks * 4 tokens = 16 slots
 
         // Create both caches
-        let mut contiguous = KvCache::new(1, num_kv_heads, head_dim, max_seq_len, DType::F32, &device)?;
-        let mut paged = PagedKvCache::new(1, num_blocks, block_size, num_kv_heads, head_dim, DType::F32, &device)?;
+        let mut contiguous =
+            KvCache::new(1, num_kv_heads, head_dim, max_seq_len, DType::F32, &device)?;
+        let mut paged = PagedKvCache::new(
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::F32,
+            &device,
+        )?;
 
         // Block table with sequential blocks (0, 1, 2, 3) — same layout as contiguous
         let mut bt = BlockTable::new();
@@ -448,13 +610,19 @@ mod tests {
         let p_k_vals = p_k.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(c_k_vals.len(), p_k_vals.len());
         for (i, (c, p)) in c_k_vals.iter().zip(p_k_vals.iter()).enumerate() {
-            assert!((c - p).abs() < 1e-6, "K mismatch at index {i}: contiguous={c}, paged={p}");
+            assert!(
+                (c - p).abs() < 1e-6,
+                "K mismatch at index {i}: contiguous={c}, paged={p}"
+            );
         }
 
         let c_v_vals = c_v.flatten_all()?.to_vec1::<f32>()?;
         let p_v_vals = p_v.flatten_all()?.to_vec1::<f32>()?;
         for (i, (c, p)) in c_v_vals.iter().zip(p_v_vals.iter()).enumerate() {
-            assert!((c - p).abs() < 1e-6, "V mismatch at index {i}: contiguous={c}, paged={p}");
+            assert!(
+                (c - p).abs() < 1e-6,
+                "V mismatch at index {i}: contiguous={c}, paged={p}"
+            );
         }
 
         // Decode: write 1 more token
@@ -470,13 +638,19 @@ mod tests {
         let c_k_vals = c_k.flatten_all()?.to_vec1::<f32>()?;
         let p_k_vals = p_k.flatten_all()?.to_vec1::<f32>()?;
         for (i, (c, p)) in c_k_vals.iter().zip(p_k_vals.iter()).enumerate() {
-            assert!((c - p).abs() < 1e-6, "K decode mismatch at {i}: contiguous={c}, paged={p}");
+            assert!(
+                (c - p).abs() < 1e-6,
+                "K decode mismatch at {i}: contiguous={c}, paged={p}"
+            );
         }
 
         let c_v_vals = c_v.flatten_all()?.to_vec1::<f32>()?;
         let p_v_vals = p_v.flatten_all()?.to_vec1::<f32>()?;
         for (i, (c, p)) in c_v_vals.iter().zip(p_v_vals.iter()).enumerate() {
-            assert!((c - p).abs() < 1e-6, "V decode mismatch at {i}: contiguous={c}, paged={p}");
+            assert!(
+                (c - p).abs() < 1e-6,
+                "V decode mismatch at {i}: contiguous={c}, paged={p}"
+            );
         }
 
         Ok(())
@@ -506,7 +680,11 @@ mod tests {
             let k_vals = k_out.flatten_all()?.to_vec1::<f32>()?;
             assert_eq!(k_vals, vec![val, val * 10.0], "Layer {layer} K mismatch");
             let v_vals = v_out.flatten_all()?.to_vec1::<f32>()?;
-            assert_eq!(v_vals, vec![val * 100.0, val * 1000.0], "Layer {layer} V mismatch");
+            assert_eq!(
+                v_vals,
+                vec![val * 100.0, val * 1000.0],
+                "Layer {layer} V mismatch"
+            );
         }
 
         Ok(())
@@ -523,8 +701,14 @@ mod tests {
         let num_blocks = 4;
 
         let mut cache = PagedKvCache::new_with_fp8(
-            1, num_blocks, block_size, num_kv_heads, head_dim,
-            DType::F32, &device, true,
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::F32,
+            &device,
+            true,
         )?;
         assert!(cache.is_fp8());
 
@@ -533,13 +717,33 @@ mod tests {
         bt.push(3);
 
         let k = Tensor::new(
-            &[[[[1.0_f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
-              [[13.0, 14.0, 15.0, 16.0], [17.0, 18.0, 19.0, 20.0], [21.0, 22.0, 23.0, 24.0]]]],
+            &[[
+                [
+                    [1.0_f32, 2.0, 3.0, 4.0],
+                    [5.0, 6.0, 7.0, 8.0],
+                    [9.0, 10.0, 11.0, 12.0],
+                ],
+                [
+                    [13.0, 14.0, 15.0, 16.0],
+                    [17.0, 18.0, 19.0, 20.0],
+                    [21.0, 22.0, 23.0, 24.0],
+                ],
+            ]],
             &device,
         )?;
         let v = Tensor::new(
-            &[[[[101.0_f32, 102.0, 103.0, 104.0], [105.0, 106.0, 107.0, 108.0], [109.0, 110.0, 111.0, 112.0]],
-              [[113.0, 114.0, 115.0, 116.0], [117.0, 118.0, 119.0, 120.0], [121.0, 122.0, 123.0, 124.0]]]],
+            &[[
+                [
+                    [101.0_f32, 102.0, 103.0, 104.0],
+                    [105.0, 106.0, 107.0, 108.0],
+                    [109.0, 110.0, 111.0, 112.0],
+                ],
+                [
+                    [113.0, 114.0, 115.0, 116.0],
+                    [117.0, 118.0, 119.0, 120.0],
+                    [121.0, 122.0, 123.0, 124.0],
+                ],
+            ]],
             &device,
         )?;
 
@@ -554,7 +758,10 @@ mod tests {
         let k_read = k_out.flatten_all()?.to_vec1::<f32>()?;
         for (i, (o, r)) in k_orig.iter().zip(k_read.iter()).enumerate() {
             let rel_err = (o - r).abs() / o.abs().max(0.01);
-            assert!(rel_err < 0.15, "K index {i}: orig={o}, read={r}, rel_err={rel_err}");
+            assert!(
+                rel_err < 0.15,
+                "K index {i}: orig={o}, read={r}, rel_err={rel_err}"
+            );
         }
 
         Ok(())

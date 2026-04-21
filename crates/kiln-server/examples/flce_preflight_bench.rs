@@ -28,8 +28,8 @@ use kiln_train::trainer::sft_train;
 use kiln_train::{ChatMessage, SftConfig, SftExample};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,10 +49,7 @@ struct Row {
 
 fn current_vram_mib() -> u64 {
     std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -290,8 +287,12 @@ fn main() -> Result<()> {
         VOCAB_SIZE, HIDDEN
     );
     eprintln!("Loading model from {}", model_path.display());
-    let model_weights =
-        kiln_model::load_model(&model_path, &model_config).context("load_model")?;
+    let model_weights = kiln_model::load_model_with_options(
+        &model_path,
+        &model_config,
+        kiln_model::LoadModelOptions { load_mtp: false },
+    )
+    .context("load_model")?;
     let device = kiln_server::device::select_device()?;
     if matches!(device, Device::Cpu) {
         anyhow::bail!("CUDA device required — preflight measures real VRAM");

@@ -189,7 +189,10 @@ impl Supervisor {
             ServerState::Starting | ServerState::Running | ServerState::TrainingActive
         ) {
             if let Err(e) = self.stop().await {
-                eprintln!("[supervisor] restart: stop failed, attempting start anyway: {}", e);
+                eprintln!(
+                    "[supervisor] restart: stop failed, attempting start anyway: {}",
+                    e
+                );
             }
         }
         self.start().await
@@ -216,18 +219,32 @@ async fn run_loop(
         // state, not an Error. This both suppresses the "server crashed"
         // OS notification on fresh installs and lets the dashboard show a
         // download prompt instead of a raw spawn error.
-        if crate::installer::resolve_binary(&config.binary_path).is_none() {
-            let msg = config.binary_path.display().to_string();
-            push_log(
-                &logs,
-                format!("[supervisor] kiln binary not found: {}", msg),
-            )
-            .await;
-            *state.lock().await = ServerState::NoBinary(msg);
-            return;
-        }
+        let resolved_binary = match crate::installer::resolve_binary(&config.binary_path) {
+            Some(path) => path,
+            None => {
+                let msg = config.binary_path.display().to_string();
+                push_log(
+                    &logs,
+                    format!("[supervisor] kiln binary not found: {}", msg),
+                )
+                .await;
+                *state.lock().await = ServerState::NoBinary(msg);
+                return;
+            }
+        };
+        push_log(
+            &logs,
+            format!(
+                "[supervisor] spawning {} (configured as {})",
+                resolved_binary.display(),
+                config.binary_path.display()
+            ),
+        )
+        .await;
 
-        let spawn_result = Command::new(&config.binary_path)
+        let mut cmd = Command::new(&resolved_binary);
+        scrub_ambient_env(&mut cmd);
+        let spawn_result = cmd
             .args(&config.args)
             .envs(config.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdout(Stdio::piped())
@@ -251,11 +268,7 @@ async fn run_loop(
                     *state.lock().await = ServerState::NoBinary(msg);
                     return;
                 }
-                let msg = format!(
-                    "failed to spawn {}: {}",
-                    config.binary_path.display(),
-                    e
-                );
+                let msg = format!("failed to spawn {}: {}", resolved_binary.display(), e);
                 push_log(&logs, format!("[supervisor] {}", msg)).await;
                 *state.lock().await = ServerState::Error(msg);
                 return;
@@ -341,6 +354,15 @@ async fn run_loop(
 
 async fn push_log(logs: &Arc<Mutex<RingBuffer>>, line: String) {
     logs.lock().await.push(line);
+}
+
+fn scrub_ambient_env(cmd: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        let Some(name) = key.to_str() else { continue };
+        if name.starts_with("KILN_") || name == "RUST_LOG" {
+            cmd.env_remove(name);
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -440,7 +462,7 @@ mod tests {
         rb.push("aaaa".to_string()); // 4
         rb.push("bbbb".to_string()); // 8
         rb.push("cccccccccccc".to_string()); // 20
-        // Total bytes = 20, at cap. Push one more pushes out first.
+                                             // Total bytes = 20, at cap. Push one more pushes out first.
         rb.push("d".to_string());
         let snap = rb.snapshot();
         assert!(!snap.contains(&"aaaa".to_string()));

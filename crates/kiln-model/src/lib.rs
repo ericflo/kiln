@@ -16,7 +16,7 @@ pub mod sampling;
 pub mod speculative;
 pub mod weights;
 
-pub use backend::{for_device as backend_for_device, BackendRuntime};
+pub use backend::{BackendRuntime, for_device as backend_for_device};
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{
@@ -24,7 +24,7 @@ pub use generate::{
     StreamToken,
 };
 pub use kv_cache::KvCache;
-pub use loader::load_model;
+pub use loader::{LoadModelOptions, load_model, load_model_with_options};
 pub use lora_loader::LoraWeights;
 pub use paged_kv_cache::PagedKvCache;
 pub use speculative::SpeculativeConfig;

@@ -15,19 +15,18 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_core::vram::detect_vram;
+use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    model_forward, model_forward_paged, model_forward_paged_streaming,
-    model_forward_paged_with_last_hidden, streaming_prefill_enabled, GpuWeights,
-    LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
+    model_forward_paged_streaming, model_forward_paged_with_last_hidden, streaming_prefill_enabled,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
-    speculative_decode_step, speculative_mtp_decode_step, SpeculativeConfig,
+    SpeculativeConfig, speculative_decode_step, speculative_mtp_decode_step,
 };
-use kiln_model::ModelRunner;
 use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the kiln-core default.
@@ -151,12 +150,20 @@ fn parse_args() -> Result<BenchArgs> {
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
-                eprintln!("  --max-output-tokens <n>   Max tokens to generate per request (default: 128)");
-                eprintln!("  --prompt-tokens <n>       Approximate prompt length in tokens (default: 512)");
+                eprintln!(
+                    "  --max-output-tokens <n>   Max tokens to generate per request (default: 128)"
+                );
+                eprintln!(
+                    "  --prompt-tokens <n>       Approximate prompt length in tokens (default: 512)"
+                );
                 eprintln!("  --training-steps <n>      Number of SFT training steps (default: 10)");
                 eprintln!("  --skip-training           Skip training benchmarks");
-                eprintln!("  --paged                   Route latency phase through PagedKvCache + model_forward_paged");
-                eprintln!("                            (matches the HTTP/scheduler production path)");
+                eprintln!(
+                    "  --paged                   Route latency phase through PagedKvCache + model_forward_paged"
+                );
+                eprintln!(
+                    "                            (matches the HTTP/scheduler production path)"
+                );
                 std::process::exit(0);
             }
             _ => {}
@@ -588,7 +595,10 @@ fn bench_latency_paged(
             .take(32)
             .map(|t| t.to_string())
             .collect();
-        eprintln!("    Paged decode first 32 token ids: [{}]", first_n.join(","));
+        eprintln!(
+            "    Paged decode first 32 token ids: [{}]",
+            first_n.join(",")
+        );
     }
 
     let mean_itl = if inter_token_ms.is_empty() {
@@ -814,8 +824,7 @@ fn bench_latency_skiplayer(
             break;
         }
 
-        let per_token_ms =
-            (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
+        let per_token_ms = (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
         for &tok in &step.accepted_tokens {
             inter_token_ms.push(per_token_ms);
             emitted.push(tok);
@@ -1034,8 +1043,7 @@ fn bench_latency_paged_mtp(
             draft_accepted_count += 1;
         }
 
-        let per_token_ms =
-            (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
+        let per_token_ms = (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
         for &tok in &step.accepted_tokens {
             inter_token_ms.push(per_token_ms);
             num_tokens += 1;
@@ -1155,15 +1163,12 @@ fn bench_training(
     let adapter_dir = std::env::temp_dir().join("kiln-bench-adapters");
     std::fs::create_dir_all(&adapter_dir)?;
 
-    let progress_cb =
-        Some(
-            Box::new(|progress: kiln_train::trainer::TrainingProgress| {
-                eprintln!(
-                    "    Step {}/{}: loss={:.6}",
-                    progress.step, progress.total_steps, progress.loss
-                );
-            }) as kiln_train::trainer::ProgressCallback,
+    let progress_cb = Some(Box::new(|progress: kiln_train::trainer::TrainingProgress| {
+        eprintln!(
+            "    Step {}/{}: loss={:.6}",
+            progress.step, progress.total_steps, progress.loss
         );
+    }) as kiln_train::trainer::ProgressCallback);
 
     let start = Instant::now();
     let result = kiln_train::trainer::sft_train(
@@ -1224,10 +1229,7 @@ fn print_summary(results: &BenchmarkResults) {
     }
 
     eprintln!("\n--- Latency (single request) ---");
-    eprintln!(
-        "Prompt tokens:         {}",
-        results.latency.prompt_tokens
-    );
+    eprintln!("Prompt tokens:         {}", results.latency.prompt_tokens);
     eprintln!(
         "Prefill time:          {:.1} ms ({:.0} tok/s)",
         results.latency.prefill_time_ms, results.latency.prefill_tokens_per_sec
@@ -1252,10 +1254,7 @@ fn print_summary(results: &BenchmarkResults) {
         "Tokens generated:      {}",
         results.latency.num_tokens_generated
     );
-    eprintln!(
-        "Spec method:           {}",
-        results.latency.spec_method
-    );
+    eprintln!("Spec method:           {}", results.latency.spec_method);
     if let Some(alpha) = results.latency.acceptance_rate {
         eprintln!("Draft acceptance α:    {:.3}", alpha);
     }
@@ -1299,8 +1298,15 @@ fn main() -> Result<()> {
     let vram_before = current_vram_used_bytes();
     let load_start = Instant::now();
 
-    let model_weights = kiln_model::load_model(model_path, &model_config)
-        .context("failed to load model weights")?;
+    let spec_method = read_spec_method_from_env();
+    let model_weights = kiln_model::load_model_with_options(
+        model_path,
+        &model_config,
+        kiln_model::LoadModelOptions {
+            load_mtp: matches!(spec_method, SpecMethod::Mtp),
+        },
+    )
+    .context("failed to load model weights")?;
 
     let device = kiln_server::device::select_device()?;
     if matches!(device, candle_core::Device::Cpu) {
@@ -1345,7 +1351,6 @@ fn main() -> Result<()> {
     //   * KILN_SPEC_METHOD=skip_layer → bench_latency_skiplayer (flat KV + skip-layer)
     //   * default / off               → bench_latency_paged (paged Off) when
     //                                   --paged, else bench_latency (flat Off).
-    let spec_method = read_spec_method_from_env();
     let latency = match spec_method {
         SpecMethod::Mtp => {
             eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
@@ -1435,7 +1440,13 @@ fn main() -> Result<()> {
 
     for &n in &run_counts {
         eprintln!("\n{n} sequential runs:");
-        match bench_inference(&runner, &tokenizer, n, args.prompt_tokens, args.max_output_tokens) {
+        match bench_inference(
+            &runner,
+            &tokenizer,
+            n,
+            args.prompt_tokens,
+            args.max_output_tokens,
+        ) {
             Ok(result) => {
                 eprintln!("  => {:.1} tok/s aggregate", result.tokens_per_sec);
                 inference_results.push(result);

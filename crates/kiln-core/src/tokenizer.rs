@@ -22,6 +22,7 @@ pub struct ChatMessage {
 }
 
 /// Wraps the HuggingFace tokenizers crate for Kiln's tokenization needs.
+#[derive(Clone)]
 pub struct KilnTokenizer {
     inner: Tokenizer,
     chat_template: Option<String>,
@@ -58,8 +59,7 @@ impl KilnTokenizer {
 
     /// Load a tokenizer from a local tokenizer.json file.
     pub fn from_file(path: &str) -> Result<Self, TokenizerError> {
-        let inner =
-            Tokenizer::from_file(path).map_err(|e| TokenizerError::Load(e.to_string()))?;
+        let inner = Tokenizer::from_file(path).map_err(|e| TokenizerError::Load(e.to_string()))?;
         Ok(Self {
             inner,
             chat_template: None,

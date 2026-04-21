@@ -10,10 +10,12 @@ mod tray;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use settings::{apply_to_supervisor_config, Settings};
+use settings::{
+    apply_desktop_launch_contract, apply_to_supervisor_config, normalize_for_platform, Settings,
+};
 use supervisor::{ServerState, Supervisor, SupervisorConfig};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::sync::RwLock;
 
@@ -38,6 +40,16 @@ fn reconcile_autolaunch(app: &AppHandle, desired: bool) {
             eprintln!("[main] autolaunch disable failed: {}", e);
         }
     }
+}
+
+fn build_supervisor_config(
+    app: &AppHandle,
+    settings: &Settings,
+) -> Result<SupervisorConfig, String> {
+    let mut cfg = SupervisorConfig::default();
+    apply_to_supervisor_config(settings, &mut cfg);
+    apply_desktop_launch_contract(app, &mut cfg)?;
+    Ok(cfg)
 }
 
 type SettingsState = Arc<RwLock<Settings>>;
@@ -96,10 +108,7 @@ async fn copy_logs(
 }
 
 #[tauri::command]
-async fn save_logs_to_file(
-    path: String,
-    sup: State<'_, Arc<Supervisor>>,
-) -> Result<usize, String> {
+async fn save_logs_to_file(path: String, sup: State<'_, Arc<Supervisor>>) -> Result<usize, String> {
     let lines = sup.logs().await;
     let count = lines.len();
     let text = lines.join("\n");
@@ -143,7 +152,9 @@ async fn get_binary_status(
             .unwrap_or_else(|| std::path::PathBuf::from("kiln"))
     };
     let resolved = installer::resolve_binary(&configured);
-    let install_dir = installer::install_dir(&app).ok().map(|p| p.display().to_string());
+    let install_dir = installer::install_dir(&app)
+        .ok()
+        .map(|p| p.display().to_string());
     Ok(BinaryStatus {
         installed: resolved.is_some(),
         resolved_path: resolved.map(|p| p.display().to_string()),
@@ -189,21 +200,35 @@ async fn download_kiln_server(
                 let cfg_update = {
                     let mut s = settings_state.write().await;
                     s.kiln_binary = Some(path.clone());
+                    let normalized = normalize_for_platform(s.clone());
+                    *s = normalized;
                     if let Err(e) = s.save(&app_for_task) {
                         eprintln!("[install] settings.save failed: {}", e);
                     }
-                    let mut cfg = SupervisorConfig::default();
-                    apply_to_supervisor_config(&s, &mut cfg);
-                    cfg
+                    build_supervisor_config(&app_for_task, &s)
                 };
-                supervisor.update_config(cfg_update).await;
-                let _ = app_for_task.emit(
-                    installer::INSTALL_DONE_EVENT,
-                    installer::InstallDone {
-                        path: path.display().to_string(),
-                        version,
-                    },
-                );
+                match cfg_update {
+                    Ok(cfg) => {
+                        supervisor.update_config(cfg).await;
+                        let _ = app_for_task.emit(
+                            installer::INSTALL_DONE_EVENT,
+                            installer::InstallDone {
+                                path: path.display().to_string(),
+                                version,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!("[install] build_supervisor_config failed: {}", err);
+                        let _ = app_for_task.emit(
+                            installer::INSTALL_FAILED_EVENT,
+                            installer::InstallFailed {
+                                error: err,
+                                cancelled: false,
+                            },
+                        );
+                    }
+                }
             }
             Err(err) => {
                 let cancelled = inst_for_task.cancel.load(Ordering::SeqCst);
@@ -320,9 +345,7 @@ async fn extract_update(
     inst: State<'_, InstallerHandle>,
 ) -> Result<(), String> {
     if inst.in_progress.swap(true, Ordering::SeqCst) {
-        return Err(
-            "an install, update download, or extract is already in progress".into(),
-        );
+        return Err("an install, update download, or extract is already in progress".into());
     }
     inst.cancel.store(false, Ordering::SeqCst);
 
@@ -624,8 +647,7 @@ async fn check_for_kiln_update(
         if !installer::is_cuda_compatible_for_release(local, release_body.as_deref()) {
             let req = installer::min_cuda_for_release(release_body.as_deref())
                 .expect("min_cuda must be Some when compat check failed");
-            let local =
-                local.expect("local driver must be Some when compat check failed");
+            let local = local.expect("local driver must be Some when compat check failed");
             update_available = false;
             Some(format!(
                 "This kiln release requires CUDA >= {}.{}; local driver supports CUDA {}.{}.",
@@ -691,13 +713,15 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
     {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[main] auto_update check: build reqwest client failed: {}", e);
+            eprintln!(
+                "[main] auto_update check: build reqwest client failed: {}",
+                e
+            );
             return;
         }
     };
 
-    let Some((latest, release_body)) =
-        installer::discover_latest_version_and_body(&client).await
+    let Some((latest, release_body)) = installer::discover_latest_version_and_body(&client).await
     else {
         return;
     };
@@ -716,10 +740,7 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
     // for Updates".
     if let installer::GpuCompat::Unsupported(sm) = installer::gpu_compat().await {
         if !installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
-            eprintln!(
-                "[main] auto_update: skipping — GPU SM {} not supported",
-                sm
-            );
+            eprintln!("[main] auto_update: skipping — GPU SM {} not supported", sm);
             return;
         }
     }
@@ -732,8 +753,7 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
     if !installer::is_cuda_compatible_for_release(local_cuda, release_body.as_deref()) {
         let req = installer::min_cuda_for_release(release_body.as_deref())
             .expect("min_cuda must be Some when compat check failed");
-        let local =
-            local_cuda.expect("local driver must be Some when compat check failed");
+        let local = local_cuda.expect("local driver must be Some when compat check failed");
         eprintln!(
             "[main] auto_update: skipping — release requires CUDA >= {}.{}, local {}.{}",
             req.0, req.1, local.0, local.1
@@ -786,7 +806,9 @@ async fn get_kiln_url(
 ) -> Result<String, String> {
     let server_state = sup.state().await;
     match server_state {
-        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => Ok(String::new()),
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => {
+            Ok(String::new())
+        }
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             let s = state.read().await;
             Ok(format!("http://{}:{}/ui", s.host, s.port))
@@ -828,7 +850,9 @@ async fn get_openai_base_url(
 ) -> Result<String, String> {
     let server_state = sup.state().await;
     match server_state {
-        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => Ok(String::new()),
+        ServerState::Stopped | ServerState::Error(_) | ServerState::NoBinary(_) => {
+            Ok(String::new())
+        }
         ServerState::Starting | ServerState::Running | ServerState::TrainingActive => {
             let s = state.read().await;
             Ok(openai_base_url(&s.host, s.port))
@@ -983,13 +1007,13 @@ async fn set_settings(
     state: State<'_, SettingsState>,
     sup: State<'_, Arc<Supervisor>>,
 ) -> Result<(), String> {
+    let new = normalize_for_platform(new);
     new.save(&app)?;
     {
         let mut guard = state.write().await;
         *guard = new.clone();
     }
-    let mut cfg = SupervisorConfig::default();
-    apply_to_supervisor_config(&new, &mut cfg);
+    let cfg = build_supervisor_config(&app, &new)?;
     sup.update_config(cfg).await;
     reconcile_autolaunch(&app, new.launch_at_login);
     Ok(())
@@ -1012,8 +1036,7 @@ fn main() {
             let handle = app.handle().clone();
             let settings = Settings::load(&handle);
 
-            let mut cfg = SupervisorConfig::default();
-            apply_to_supervisor_config(&settings, &mut cfg);
+            let cfg = build_supervisor_config(&handle, &settings)?;
             let supervisor = Arc::new(Supervisor::new(cfg));
             let settings_state: SettingsState = Arc::new(RwLock::new(settings.clone()));
 
@@ -1025,13 +1048,25 @@ fn main() {
 
             reconcile_autolaunch(&handle, settings.launch_at_login);
 
-            if settings.auto_start {
+            let configured_binary = settings
+                .kiln_binary
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("kiln"));
+            let should_auto_start = settings.auto_start
+                && tray::is_model_path_set(&settings)
+                && tray::is_binary_available(&configured_binary);
+
+            if should_auto_start {
                 let sup = Arc::clone(&supervisor);
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = sup.start().await {
                         eprintln!("[main] auto_start failed: {}", e);
                     }
                 });
+            } else if settings.auto_start {
+                eprintln!(
+                    "[main] auto_start skipped: waiting for both a model path and an installed kiln binary"
+                );
             }
 
             // Non-blocking auto-check for a newer kiln binary. Runs once per
@@ -1091,7 +1126,10 @@ mod tests {
 
     #[test]
     fn default_loopback() {
-        assert_eq!(openai_base_url("127.0.0.1", 8000), "http://127.0.0.1:8000/v1");
+        assert_eq!(
+            openai_base_url("127.0.0.1", 8000),
+            "http://127.0.0.1:8000/v1"
+        );
     }
 
     #[test]
