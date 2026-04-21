@@ -140,6 +140,25 @@ thread_local! {
     static C7_SDPA_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
 
+    /// Phase C14: thread-local sink for the 3 post-MTP-transformer-block taps
+    /// captured inside `mtp_forward_step`. Extends the C13 pre-projection
+    /// splice verdict (splice inputs clear, cos ≥ 0.9999928) downstream to
+    /// cover the MTP transformer block output (`post_block`), final
+    /// normalization (`post_norm`), and tied lm_head logits (`logits`). The
+    /// three tensors are already visible at the outer `mtp_forward_step`
+    /// scope (no deep-plumb needed), so capture sites live next to the
+    /// existing dump taps. Kept distinct from C6/C7 sinks so the post-block
+    /// capture window can be drained independently of the pre-projection
+    /// bisect. Serialization format matches C6/C7: `(name, shape, host_f32)`
+    /// triples, emitted as `c14__<name>` F32 tensors in the dump.
+    ///
+    /// Driven by [`arm_c14_post_block_capture`] /
+    /// [`drain_c14_post_block_capture`] / [`capture_c14_post_block_tap`],
+    /// and gated on `KILN_MTP_DUMP_C14_POST_BLOCK=1` (OR-composed with the
+    /// C13 splice meta-flag) so production decode pays zero cost.
+    static C14_POST_BLOCK_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
+
     /// Phase C8: thread-local flag that switches the MTP inner GQA attention
     /// to single-token self-attention (kv_len = 1, no paged-cache history).
     /// Set by [`arm_mtp_single_token_self_attn`] inside `mtp_forward_step`
@@ -1156,6 +1175,91 @@ pub fn capture_c7_sdpa_tap(name: &str, t: &Tensor) -> Result<()> {
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Phase C14: post-MTP-transformer-block splice dump taps
+// -----------------------------------------------------------------------------
+
+/// Canonical ordered list of Phase C14 post-block tap names. The comparator
+/// (`scripts/c14_hf_reference_dump.py`) expects this exact order in its
+/// output table, and the HF reference emits mirrored `c14__<name>` tensors
+/// in the same order.
+///
+/// Order follows the forward graph inside `mtp_forward_step`, top-down, from
+/// the moment the MTP transformer block returns through the tied lm_head:
+/// 1. `post_block` — output of the MTP inner transformer block (pre-norm,
+///    the same tensor exposed by the legacy `post_layer` tap but under the
+///    C14 prefix for the splice-mode comparator)
+/// 2. `post_norm` — output of `mtp.final_layernorm` (pre-lm_head)
+/// 3. `logits` — output of the tied lm_head on `post_norm` (pre-softmax)
+pub const C14_TAP_NAMES: &[&str] = &["post_block", "post_norm", "logits"];
+
+/// True when `KILN_MTP_DUMP_C14_POST_BLOCK=1` (or `true`) is set. Opt-in for
+/// the Phase C14 post-block MTP-output bisect: when enabled alongside
+/// `KILN_MTP_DUMP_PATH`, `mtp_forward_step` captures the 3 named tensors in
+/// [`C14_TAP_NAMES`] and appends them to the MTP dump safetensors under
+/// names `c14__<name>`. Naming-space is distinct from B11/B12/C6/C7 so the
+/// existing dump format is unchanged when this flag is unset.
+pub fn is_dump_c14_post_block_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_C14_POST_BLOCK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// OR-composition: post-block capture should fire when either the explicit
+/// `KILN_MTP_DUMP_C14_POST_BLOCK=1` flag is set or the C13 splice meta-flag
+/// is set. Use this in the forward dump wiring so splice mode does not need
+/// callers to set both env vars — identical pattern to
+/// [`is_dump_pre_rope_effectively_enabled`].
+pub fn is_dump_c14_post_block_effectively_enabled() -> bool {
+    is_dump_c14_post_block_enabled() || is_dump_splice_enabled()
+}
+
+/// True if the Phase C14 post-block capture window is currently armed on
+/// this thread. Call sites use this to gate the host copy so disarmed runs
+/// pay zero cost.
+pub fn is_c14_post_block_capture_armed() -> bool {
+    C14_POST_BLOCK_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// Begin a C14 post-block capture window. Subsequent
+/// [`capture_c14_post_block_tap`] calls from the same thread record into a
+/// fresh buffer until [`drain_c14_post_block_capture`] is called. Does
+/// nothing if [`is_dump_c14_post_block_effectively_enabled`] is false — so
+/// callers can invoke this unconditionally around the MTP inner-block path.
+pub fn arm_c14_post_block_capture() {
+    if !is_dump_c14_post_block_effectively_enabled() {
+        return;
+    }
+    C14_POST_BLOCK_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured C14 post-block taps and disarm. Returns whatever was
+/// recorded since the matching [`arm_c14_post_block_capture`] call, in order.
+pub fn drain_c14_post_block_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    C14_POST_BLOCK_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named post-block tap if a capture window is currently open on
+/// this thread. Cheap no-op (single TLS access + borrow) when the window is
+/// closed, which is the production case. The tensor is materialized to host
+/// F32 immediately so the GPU scratch is free to be reused — same pattern as
+/// [`capture_pre_rope_tap`] / [`capture_c7_sdpa_tap`].
+pub fn capture_c14_post_block_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = C14_POST_BLOCK_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t).with_context(|| {
+        format!("capture_c14_post_block_tap `{name}`: tensor→f32 host copy")
+    })?;
+    C14_POST_BLOCK_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
 /// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
 /// whether the source is BF16 on CUDA or F32 on CPU.
@@ -1236,6 +1340,14 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// name `c7__<name>` (same scheme as C6). When the slice is empty, the
 /// dump bytes are bit-identical to the pre-C7 format, so legacy callers
 /// passing `&[]` for `c7_taps` produce the historical safetensors layout.
+///
+/// Phase C14: `c14_taps` carries the post-MTP-transformer-block taps
+/// captured via [`arm_c14_post_block_capture`] /
+/// [`capture_c14_post_block_tap`] / [`drain_c14_post_block_capture`]. Each
+/// entry is serialized as F32 under the name `c14__<name>` (same scheme as
+/// C6/C7). When the slice is empty, the dump bytes are bit-identical to
+/// the pre-C14 format, so legacy callers passing `&[]` for `c14_taps`
+/// produce the historical safetensors layout.
 pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
@@ -1249,13 +1361,14 @@ pub fn write_mtp_dump(
     b12_taps: &[(String, Vec<usize>, Vec<f32>)],
     c6_taps: &[(String, Vec<usize>, Vec<f32>)],
     c7_taps: &[(String, Vec<usize>, Vec<f32>)],
+    c14_taps: &[(String, Vec<usize>, Vec<f32>)],
 ) -> Result<()> {
     use safetensors::tensor::{Dtype, TensorView};
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
     // Capacity: static taps + subops + 4 meta + optional (prompt_tokens, len)
-    // + b11 taps + b12 taps + c6 taps + c7 taps.
+    // + b11 taps + b12 taps + c6 taps + c7 taps + c14 taps.
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
@@ -1265,7 +1378,8 @@ pub fn write_mtp_dump(
             + b11_taps.len()
             + b12_taps.len()
             + c6_taps.len()
-            + c7_taps.len(),
+            + c7_taps.len()
+            + c14_taps.len(),
     );
     for (name, t) in taps {
         let (shape, flat) = tensor_to_f32_host(t)
@@ -1389,6 +1503,18 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push((format!("c7__{name}"), shape.clone(), Dtype::F32, bytes));
+    }
+
+    // Phase C14: serialize the post-MTP-transformer-block taps under
+    // `c14__<name>` (same scheme as C6/C7). When `c14_taps` is empty the
+    // loop is a no-op and the on-disk dump is bit-identical to the pre-C14
+    // layout.
+    for (name, shape, flat) in c14_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("c14__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     let mut views: Vec<(String, TensorView)> = Vec::with_capacity(backings.len());
@@ -1796,6 +1922,7 @@ mod tests {
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
         )
         .unwrap();
 
@@ -1854,6 +1981,7 @@ mod tests {
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
         )
         .unwrap();
 
@@ -1878,6 +2006,8 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("c6__")));
         // With c7_taps = &[], no c7__* tensors should appear.
         assert!(!names.iter().any(|n| n.starts_with("c7__")));
+        // With c14_taps = &[], no c14__* tensors should appear.
+        assert!(!names.iter().any(|n| n.starts_with("c14__")));
 
         let h = st.tensor("h_main").unwrap();
         assert_eq!(h.dtype(), safetensors::Dtype::F32);
@@ -1987,6 +2117,7 @@ mod tests {
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
         )
         .unwrap();
 
@@ -2118,6 +2249,7 @@ mod tests {
             &b12,
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
         )
         .unwrap();
 
@@ -2329,6 +2461,7 @@ mod tests {
             /* b12_taps = */ &[],
             &c6,
             /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
         )
         .unwrap();
 
@@ -2456,6 +2589,7 @@ mod tests {
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
             &c7,
+            /* c14_taps = */ &[],
         )
         .unwrap();
 
@@ -2482,6 +2616,160 @@ mod tests {
         let out = st.tensor("c7__attn_out").unwrap();
         assert_eq!(out.dtype(), safetensors::Dtype::F32);
         assert_eq!(out.shape(), &[3]);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase C14: post-MTP-transformer-block splice dump taps
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn c14_tap_names_enumerate_all_three_post_block_taps() {
+        // Guardrail: the post-MTP-transformer-block splice window is exactly
+        // three taps (output of the MTP block before final norm, after final
+        // norm, and post-lm_head logits). Both the Rust capture sites and the
+        // Python HF reference dump iterate this list.
+        assert_eq!(C14_TAP_NAMES.len(), 3);
+        assert_eq!(C14_TAP_NAMES[0], "post_block");
+        assert_eq!(C14_TAP_NAMES[1], "post_norm");
+        assert_eq!(C14_TAP_NAMES[2], "logits");
+    }
+
+    #[test]
+    fn c14_post_block_capture_records_then_drains() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_C14_POST_BLOCK", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        // Disarmed: capture is a silent no-op.
+        capture_c14_post_block_tap("post_block", &a).unwrap();
+        assert!(drain_c14_post_block_capture().is_empty());
+        assert!(!is_c14_post_block_capture_armed());
+
+        // Armed: records in order.
+        arm_c14_post_block_capture();
+        assert!(is_c14_post_block_capture_armed());
+        capture_c14_post_block_tap("post_block", &a).unwrap();
+        capture_c14_post_block_tap("logits", &b).unwrap();
+        let drained = drain_c14_post_block_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "post_block");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "logits");
+        assert_eq!(drained[1].1, vec![2]);
+        assert_eq!(drained[1].2, vec![10.0, 20.0]);
+
+        // Drain disarms.
+        assert!(!is_c14_post_block_capture_armed());
+        capture_c14_post_block_tap("post_norm", &a).unwrap();
+        assert!(drain_c14_post_block_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C14_POST_BLOCK");
+        }
+    }
+
+    #[test]
+    fn c14_post_block_arm_is_noop_when_env_unset() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C14_POST_BLOCK");
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE");
+        }
+        arm_c14_post_block_capture();
+        assert!(!is_c14_post_block_capture_armed());
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_c14_post_block_tap("post_block", &a).unwrap();
+        assert!(drain_c14_post_block_capture().is_empty());
+    }
+
+    #[test]
+    fn c14_post_block_splice_flag_enables_capture() {
+        // OR-composition contract: setting the C13 splice meta-flag alone is
+        // sufficient to enable C14 capture, without needing a separate
+        // explicit per-phase opt-in. This is what lets a single
+        // KILN_MTP_DUMP_SPLICE=1 invocation drive the full splice-bisect
+        // window (C6 + C7 + C14) end-to-end.
+        //
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C14_POST_BLOCK");
+            std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
+        }
+        assert!(!is_dump_c14_post_block_enabled());
+        assert!(is_dump_c14_post_block_effectively_enabled());
+        arm_c14_post_block_capture();
+        assert!(is_c14_post_block_capture_armed());
+        let _ = drain_c14_post_block_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_SPLICE");
+        }
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_c14_taps_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c14.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let c14 = vec![
+            (
+                "post_block".to_string(),
+                vec![2],
+                vec![0.91_f32, 0.92],
+            ),
+            (
+                "logits".to_string(),
+                vec![3],
+                vec![1.01_f32, 1.02, 1.03],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 22,
+            /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
+            /* c6_taps = */ &[],
+            /* c7_taps = */ &[],
+            &c14,
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        // Both taps appear under the c14__<name> namespace.
+        assert!(names.contains(&"c14__post_block"));
+        assert!(names.contains(&"c14__logits"));
+        // No b11__ / b12__ / c6__ / c7__ taps when those slices are empty.
+        assert!(!names.iter().any(|n| n.starts_with("b11__")));
+        assert!(!names.iter().any(|n| n.starts_with("b12__")));
+        assert!(!names.iter().any(|n| n.starts_with("c6__")));
+        assert!(!names.iter().any(|n| n.starts_with("c7__")));
+
+        let pb = st.tensor("c14__post_block").unwrap();
+        assert_eq!(pb.dtype(), safetensors::Dtype::F32);
+        assert_eq!(pb.shape(), &[2]);
+        let bytes = pb.data();
+        let v0 = f32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let v1 = f32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert!((v0 - 0.91).abs() < 1e-6);
+        assert!((v1 - 0.92).abs() < 1e-6);
+
+        let lg = st.tensor("c14__logits").unwrap();
+        assert_eq!(lg.dtype(), safetensors::Dtype::F32);
+        assert_eq!(lg.shape(), &[3]);
 
         let _ = std::fs::remove_file(&tmp);
     }

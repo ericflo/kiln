@@ -4409,6 +4409,21 @@ pub fn mtp_forward_step(
         crate::mtp_debug::arm_c7_sdpa_capture();
     }
 
+    // Phase C14 post-block splice-dump pre-flight. Mirrors the C7 arm above.
+    // Gated on `should_dump` AND either the explicit
+    // `KILN_MTP_DUMP_C14_POST_BLOCK=1` opt-in or (via OR-composition inside
+    // `is_dump_c14_post_block_effectively_enabled`) the C13 splice meta-flag
+    // `KILN_MTP_DUMP_SPLICE=1`. When armed, we capture three taps after the
+    // MTP transformer block returns: `post_block` (pre-norm hidden),
+    // `post_norm` (post-final-norm hidden, pre-lm_head), and `logits`
+    // (post-lm_head, pre-softmax). This is the extension of the splice
+    // window past the `c6__fused` exit that C13 certified clean.
+    let dump_c14_post_block =
+        should_dump && crate::mtp_debug::is_dump_c14_post_block_effectively_enabled();
+    if dump_c14_post_block {
+        crate::mtp_debug::arm_c14_post_block_capture();
+    }
+
     // 1. Token embedding for the draft token. `embedding_lookup` returns
     //    shape [1, H]; unsqueeze to [1, 1, H] to match transformer-block I/O.
     let token_ids = [draft_token_id];
@@ -4581,6 +4596,10 @@ pub fn mtp_forward_step(
     };
     extra_subops.extend(crate::mtp_debug::drain_h_main_capture());
     let mtp_hidden = mtp_hidden_result.context("mtp transformer block")?;
+    // Phase C14 tap 1/3: pre-final-norm output of the MTP transformer block.
+    if dump_c14_post_block {
+        let _ = crate::mtp_debug::capture_c14_post_block_tap("post_block", &mtp_hidden);
+    }
 
     // 6. Final RMSNorm + weight-tied LM head (reuses base embed_tokens_t).
     //
@@ -4592,10 +4611,18 @@ pub fn mtp_forward_step(
         kiln_nvtx::range!(c"kiln/mtp/final_layernorm");
         rms_norm(&mtp_hidden, &mtp.final_layernorm, config.rms_norm_eps)?
     };
+    // Phase C14 tap 2/3: post-final-norm hidden state, pre-lm_head.
+    if dump_c14_post_block {
+        let _ = crate::mtp_debug::capture_c14_post_block_tap("post_norm", &normed);
+    }
     let logits = {
         kiln_nvtx::range!(c"kiln/mtp/lm_head");
         normed.broadcast_matmul(&weights.embed_tokens_t)?
     };
+    // Phase C14 tap 3/3: post-lm_head logits, pre-softmax / pre-sampler.
+    if dump_c14_post_block {
+        let _ = crate::mtp_debug::capture_c14_post_block_tap("logits", &logits);
+    }
 
     // Phase B6/B7 numerical-bisect dump. Fires once per (process, mtp_pos)
     // pair when `KILN_MTP_DUMP_PATH` is set and the current `mtp_pos` is
@@ -4628,6 +4655,12 @@ pub fn mtp_forward_step(
         // within the same mtp_forward_step".
         if dump_c7_sdpa && dump_path_opt.is_none() {
             let _ = crate::mtp_debug::drain_c7_sdpa_capture();
+        }
+        // Phase C14: mirror the C7 defensive drain so the post-block TLS slot
+        // is not left armed for the next draft step when the path is filtered
+        // out for this pos.
+        if dump_c14_post_block && dump_path_opt.is_none() {
+            let _ = crate::mtp_debug::drain_c14_post_block_capture();
         }
         if let Some(path) = dump_path_opt {
             let taps: [(&str, &Tensor); 8] = [
@@ -4665,6 +4698,12 @@ pub fn mtp_forward_step(
             // `KILN_MTP_DUMP_C7_SDPA` is unset, which keeps the dump format
             // bit-identical to the pre-C7 layout.
             let c7_taps = crate::mtp_debug::drain_c7_sdpa_capture();
+            // Phase C14: drain the 3 post-MTP-transformer-block taps
+            // (post_block, post_norm, logits) captured above. Empty when
+            // neither `KILN_MTP_DUMP_C14_POST_BLOCK` nor the C13 splice
+            // meta-flag is set, which keeps the dump format bit-identical
+            // to the pre-C14 layout.
+            let c14_taps = crate::mtp_debug::drain_c14_post_block_capture();
             match crate::mtp_debug::write_mtp_dump(
                 &path,
                 draft_token_id,
@@ -4678,6 +4717,7 @@ pub fn mtp_forward_step(
                 &b12_taps,
                 &c6_taps,
                 &c7_taps,
+                &c14_taps,
             ) {
                 Ok(()) => tracing::info!(
                     target: "kiln::mtp_debug",
@@ -4691,6 +4731,7 @@ pub fn mtp_forward_step(
                     b12_taps = b12_taps.len(),
                     c6_taps = c6_taps.len(),
                     c7_taps = c7_taps.len(),
+                    c14_taps = c14_taps.len(),
                     "mtp_b7_dump_written"
                 ),
                 Err(e) => tracing::warn!(
@@ -4700,13 +4741,18 @@ pub fn mtp_forward_step(
                 ),
             }
         }
-    } else if dump_c7_sdpa {
-        // Defensive: drain C7 capture even when `should_dump` is false to
-        // avoid leaving the TLS slot armed for the next draft step. This
-        // branch should be unreachable (dump_c7_sdpa implies should_dump),
+    } else if dump_c7_sdpa || dump_c14_post_block {
+        // Defensive: drain C7 / C14 captures even when `should_dump` is false
+        // to avoid leaving the TLS slots armed for the next draft step. This
+        // branch should be unreachable (both flags AND with `should_dump`),
         // but is cheap insurance against future refactors that could break
         // the invariant.
-        let _ = crate::mtp_debug::drain_c7_sdpa_capture();
+        if dump_c7_sdpa {
+            let _ = crate::mtp_debug::drain_c7_sdpa_capture();
+        }
+        if dump_c14_post_block {
+            let _ = crate::mtp_debug::drain_c14_post_block_capture();
+        }
     }
 
     // Optional Phase B instrumentation. Off by default; enabled with
