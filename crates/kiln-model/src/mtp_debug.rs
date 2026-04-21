@@ -137,6 +137,19 @@ thread_local! {
     /// so production decode pays zero cost.
     static C7_SDPA_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
+
+    /// Phase C8: thread-local flag that switches the MTP inner GQA attention
+    /// to single-token self-attention (kv_len = 1, no paged-cache history).
+    /// Set by [`arm_mtp_single_token_self_attn`] inside `mtp_forward_step`
+    /// and cleared by [`disarm_mtp_single_token_self_attn`] right after the
+    /// inner block returns. Read by `gqa_attention_paged` to:
+    ///   * Skip the paged KV cache write/read for the MTP layer
+    ///   * Bypass the fused paged-decode flash-attention kernel (which would
+    ///     attend over the entire MTP cache history, defeating the fix)
+    /// Always defaults to `false`, so non-MTP paths and pre-C8 callers see
+    /// the legacy paged-cache behavior unchanged.
+    static MTP_SINGLE_TOKEN_SELF_ATTN_ARMED: RefCell<bool> =
+        const { RefCell::new(false) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -843,6 +856,40 @@ pub fn arm_c7_sdpa_capture() {
 /// recorded since the matching [`arm_c7_sdpa_capture`] call, in order.
 pub fn drain_c7_sdpa_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
     C7_SDPA_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Phase C8: returns true when the current thread is executing inside an
+/// `mtp_forward_step` call that has armed single-token self-attention for
+/// the MTP inner block. `gqa_attention_paged` checks this to:
+///   * Skip the paged KV cache write (the cache is never read in this mode)
+///   * Skip the paged KV cache read (use per-step K/V scratch directly)
+///   * Bypass the fused paged-decode flash-attention kernel (which reads
+///     over the full cache history, defeating the kv_len=1 contract)
+///
+/// This implements the Phase C8 fix for the MTP SDPA kv_len mismatch
+/// localized in Phase C7. The Qwen3-Next reference contract — see
+/// `scripts/mtp_reference_dump.py` and the HF / vLLM
+/// `Qwen3NextMultiTokenPredictor` — runs the MTP inner attention as a
+/// single-token self-attention over the just-fused hidden state: Q·K^T
+/// yields a 1×1 scalar, softmax = 1.0, and the output equals V.
+pub fn is_mtp_single_token_self_attn_armed() -> bool {
+    MTP_SINGLE_TOKEN_SELF_ATTN_ARMED.with(|c| *c.borrow())
+}
+
+/// Arm single-token self-attention for the MTP inner block on this thread.
+/// Idempotent within a single `mtp_forward_step` call; the matching
+/// [`disarm_mtp_single_token_self_attn`] is required and runs in both the
+/// success and the early-error paths inside `mtp_forward_step`.
+pub fn arm_mtp_single_token_self_attn() {
+    MTP_SINGLE_TOKEN_SELF_ATTN_ARMED.with(|c| *c.borrow_mut() = true);
+}
+
+/// Disarm single-token self-attention for the MTP inner block on this
+/// thread. Always runs after the inner block returns (success or error)
+/// so the next `mtp_forward_step` call (or any non-MTP attention call on
+/// this thread) sees the legacy paged-cache behavior.
+pub fn disarm_mtp_single_token_self_attn() {
+    MTP_SINGLE_TOKEN_SELF_ATTN_ARMED.with(|c| *c.borrow_mut() = false);
 }
 
 /// Record one named SDPA-internal tap if a capture window is currently

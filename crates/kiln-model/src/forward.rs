@@ -3262,8 +3262,17 @@ pub fn gqa_attention_paged(
         }
     }
 
+    // Phase C8: when the MTP forward step has armed single-token
+    // self-attention, the MTP layer attends only to the just-computed K/V
+    // (kv_len = 1, no history). Skip the paged-cache write/read and the
+    // fused paged-decode kernel entirely so the per-step (k, v) above
+    // becomes the SDPA input. Cleared back to `false` by the matching
+    // `disarm_mtp_single_token_self_attn` in `mtp_forward_step`, so non-MTP
+    // attention calls on this thread are unaffected.
+    let single_token_self_attn = crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+
     // Write new K/V into paged cache.
-    {
+    if !single_token_self_attn {
         kiln_nvtx::range!(c"kiln/kv/copy");
         paged_cache
             .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
@@ -3281,7 +3290,10 @@ pub fn gqa_attention_paged(
     //   * Single sequence with physically contiguous block allocation
     //     (kiln's BlockManager allocates blocks in order from a free list, so
     //     a freshly-allocated single sequence is always contiguous)
+    //   * Phase C8: not in single-token self-attn mode (kernel reads the
+    //     full cache history, defeating the kv_len = 1 contract).
     if seq_len == 1
+        && !single_token_self_attn
         && !paged_cache.is_fp8()
         && (num_heads / num_kv_heads) > 1
         && std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_err()
@@ -3327,11 +3339,19 @@ pub fn gqa_attention_paged(
         None
     };
 
-    // Read full K/V from paged cache (all positions 0..start_pos+seq_len)
-    let (k, v) = paged_cache
-        .read(full_attn_layer_idx, block_table, total_seq_len)
-        .context("paged KV cache read failed")?;
-    let kv_len = total_seq_len;
+    // Read full K/V from paged cache (all positions 0..start_pos+seq_len).
+    // Phase C8: when single_token_self_attn is armed (MTP inner GQA call),
+    // attend only to the just-computed (k, v) — kv_len = 1, no cache read.
+    // This matches the Qwen3-Next MTP reference contract where the inner
+    // block performs single-token self-attention without a growing KV history.
+    let (k, v, kv_len) = if single_token_self_attn {
+        (k, v, 1usize)
+    } else {
+        let (k, v) = paged_cache
+            .read(full_attn_layer_idx, block_table, total_seq_len)
+            .context("paged KV cache read failed")?;
+        (k, v, total_seq_len)
+    };
 
     // Fused-attention path for prefill with existing prefix history
     // (`start_pos > 0`). Initial prefill is special-cased above so we do not
@@ -4453,6 +4473,17 @@ pub fn mtp_forward_step(
     //    per step is fine.
     let abs_pos = base_pos + mtp_pos;
     let positions = Tensor::new(&[abs_pos as f32][..], device)?;
+    // Phase C8: arm single-token self-attention for the MTP inner GQA call.
+    // The Qwen3-Next reference contract (see `scripts/mtp_reference_dump.py`
+    // and HF/vLLM `Qwen3NextMultiTokenPredictor`) runs the MTP inner
+    // attention as kv_len = 1 — Q·K^T is a 1×1 scalar, softmax = 1.0,
+    // attn_out = V. Phase C7 (PR #319) localized the mtp_pos > 0
+    // attn_out divergence to kiln attending over the growing MTP paged
+    // cache (kv_len = mtp_pos + 1) instead of single-token self-attn.
+    // Arming this flag flips `gqa_attention_paged` onto the per-step
+    // K/V scratch path for the MTP layer only; the disarm below clears
+    // it before any non-MTP attention path on this thread can observe it.
+    crate::mtp_debug::arm_mtp_single_token_self_attn();
     let mtp_hidden_result = transformer_block_paged(
         backend,
         &fused,
@@ -4471,6 +4502,9 @@ pub fn mtp_forward_step(
         /* full_attn_layer_idx = */ 0,
         /* lora = */ None,
     );
+    // Always disarm in both success and error paths (`mtp_hidden_result`
+    // is `?`-propagated below, so we cannot rely on the function tail).
+    crate::mtp_debug::disarm_mtp_single_token_self_attn();
 
     // Drain the sub-op capture window in BOTH success and error paths so the
     // TLS slot is not left armed for the next draft step (which would corrupt
