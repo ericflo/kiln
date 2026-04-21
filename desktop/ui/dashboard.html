@@ -1821,6 +1821,7 @@
           updateCheckInFlight = false;
           flashCheckUpdatesBtn("Check failed", "flash-warn");
           console.error("check_for_updates failed", err);
+          notifyError("Update check failed", String(err || "Unknown error"));
           return;
         }
         if (!result || !result.available) {
@@ -1850,6 +1851,7 @@
         } catch (err) {
           flashCheckUpdatesBtn("Install failed", "flash-warn");
           console.error("install_update failed", err);
+          notifyError("Update install failed", String(err || "Unknown error"));
         } finally {
           updateCheckInFlight = false;
         }
