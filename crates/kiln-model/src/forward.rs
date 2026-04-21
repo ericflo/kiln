@@ -3954,6 +3954,7 @@ pub fn mtp_forward_step(
     config: &kiln_core::config::ModelConfig,
     mtp_cache: &mut PagedKvCache,
     mtp_block_table: &BlockTable,
+    base_pos: usize,
     mtp_pos: usize,
 ) -> Result<(Tensor, Tensor)> {
     kiln_nvtx::range!(c"kiln/mtp/step");
@@ -4022,9 +4023,27 @@ pub fn mtp_forward_step(
     }
 
     // 5. Single full-attention transformer block with its own paged cache.
-    //    Build a one-element position tensor since MTP has its own position
-    //    space (distinct from the base model's) and is not CUDA-graph-captured.
-    let positions = Tensor::new(&[mtp_pos as f32][..], device)?;
+    //
+    //    Two distinct position counters are in play here:
+    //
+    //    * `base_pos + mtp_pos` — the ABSOLUTE sequence position the draft
+    //      token would occupy in the prompt+decode stream. This is what
+    //      RoPE must use so the MTP head sees the same rotation angles the
+    //      base Qwen3-Next block would have applied at that position. The
+    //      PyTorch reference (`scripts/mtp_reference_dump.py`) applies RoPE
+    //      at the absolute position; Phase B7a (PR #276) confirmed kiln's
+    //      prior use of bare `mtp_pos` here caused monotonic `post_layer`
+    //      drift at pos=1,2 — the RoPE-wrong-position signature.
+    //
+    //    * `mtp_pos` — the LOCAL slot index into the MTP paged KV cache.
+    //      The MTP cache is its own isolated address space (distinct from
+    //      the base KV cache); slot `mtp_pos` is the right write target
+    //      regardless of where the token sits in absolute stream order.
+    //
+    //    MTP is not CUDA-graph-captured, so rebuilding the position tensor
+    //    per step is fine.
+    let abs_pos = base_pos + mtp_pos;
+    let positions = Tensor::new(&[abs_pos as f32][..], device)?;
     let mtp_hidden_result = transformer_block_paged(
         backend,
         &fused,
