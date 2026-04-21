@@ -358,6 +358,7 @@ def mtp_inner_block(
     eps: float,
     capture_subops: Optional[Dict[str, torch.Tensor]] = None,
     base_pos: int = 0,
+    capture_c7: Optional[Dict[str, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Single MTP transformer block with self-attention over exactly one
     position. `x` shape: `[1, 1, H]`. Returns `[1, 1, H]` (pre-final-norm).
@@ -474,6 +475,20 @@ def mtp_inner_block(
     k_t = k.transpose(1, 2).contiguous()  # [1, num_kv_heads, 1, head_dim]
     v_t = v.transpose(1, 2).contiguous()  # [1, num_kv_heads, 1, head_dim]
 
+    # Phase C7: capture SDPA-internal taps in canonical shapes that match
+    # kiln's grouped-decode path. K/V are emitted pre-expansion in
+    # [1, num_kv_heads, kv_len, head_dim]; the reference's kv_len is always 1
+    # (single-token self-attn), while kiln's kv_len = mtp_pos + 1 — a shape
+    # mismatch at mtp_pos>0 on these taps (and on scores/probs) IS the C7
+    # bisect signal for KV-cache-path divergence.
+    _capture(capture_c7, "pre_sdpa_q", q_t)
+    _capture(capture_c7, "pre_sdpa_k", k_t)
+    _capture(capture_c7, "pre_sdpa_v", v_t)
+    # Causal mask is scalar-0 for MTP decode (q_len=1 attends over all kv_len
+    # with no masking); emit an F32 scalar placeholder so the tap schema is
+    # pinned and any divergence flags a mask-policy mismatch.
+    _capture(capture_c7, "causal_mask", torch.zeros((), dtype=torch.float32))
+
     # Expand KV for GQA. seq_len=1 so this is a no-op cost-wise; included
     # only so the math matches the gqa-grouped path in forward.rs:2837-2879
     # without having to reproduce the per-group reshape.
@@ -488,12 +503,17 @@ def mtp_inner_block(
     # Single-token self-attention.
     scale = 1.0 / math.sqrt(head_dim)
     scores = torch.matmul(q_t, k_full.transpose(-2, -1)) * scale  # [1, num_heads, 1, 1]
+    # C7: post-scale scores, pre-softmax — matches kiln's capture site.
+    _capture(capture_c7, "attn_scores_pre_softmax", scores)
     attn = torch.softmax(scores.to(torch.float32), dim=-1).to(v_full.dtype)
+    # C7: post-softmax probabilities.
+    _capture(capture_c7, "attn_probs", attn)
     attn_out = torch.matmul(attn, v_full)  # [1, num_heads, 1, head_dim]
 
     # Reshape into kiln's `post_attn_raw` form: [1, 1, num_heads * head_dim].
     # Mirrors forward.rs:2875-2879 (the attn_output reshape after softmax/V).
     attn_out = attn_out.transpose(1, 2).contiguous().view(1, 1, num_heads * head_dim)
+    _capture(capture_c7, "attn_out", attn_out)
     _capture(capture_subops, "post_attn_raw", attn_out)
 
     # Gated-attn: per-element sigmoid(gate) * attn_out, both flat last dim.
@@ -648,6 +668,8 @@ def main() -> int:
     # distinct tensors.
     pre_layer = fc_output.clone()
     capture_subops: Optional[Dict[str, torch.Tensor]] = {} if args.capture_subops else None
+    # Phase C7: always-on SDPA-internal taps (like C6 — no flag needed).
+    capture_c7: Dict[str, torch.Tensor] = {}
     post_layer = mtp_inner_block(
         pre_layer,
         w,
@@ -657,6 +679,7 @@ def main() -> int:
         args.rms_eps,
         capture_subops=capture_subops,
         base_pos=base_pos,
+        capture_c7=capture_c7,
     )
     if capture_subops is not None:
         print(
@@ -702,6 +725,13 @@ def main() -> int:
     out_dict["c6__norm_h"] = norm_h.detach().clone().contiguous()
     out_dict["c6__concat"] = fc_input.detach().clone().contiguous()
     out_dict["c6__fused"] = fc_output.detach().clone().contiguous()
+    # Phase C7: emit the 7 SDPA-internal taps under a `c7__` prefix. Reference
+    # runs single-token self-attn (kv_len=1), so K/V/scores/probs will
+    # shape-mismatch kiln at mtp_pos>0 — that IS the bisect signal.
+    for name, t in capture_c7.items():
+        key = f"c7__{name}"
+        assert key not in out_dict, f"c7 tap name `{key}` collides with existing tap"
+        out_dict[key] = t.detach().clone().contiguous()
     save_file(out_dict, args.out)
     print(f"[mtp_ref] wrote {args.out} ({sum(t.numel()*t.element_size() for t in out_dict.values())} bytes)", file=sys.stderr)
     return 0
