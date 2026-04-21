@@ -575,24 +575,15 @@ pub fn speculative_mtp_decode_step(
     .context("mtp draft step failed")?;
     let draft_token = greedy_sample(&mtp_logits).context("mtp draft sampling failed")?;
 
-    // 2. Verify: feed [last_token, draft_token] through the base model in a
-    //    single paged forward pass. This writes KV at [base_pos, base_pos+1]
-    //    and returns per-position logits (for draft comparison at position 0
-    //    and bonus sampling at position 1) plus the last-row pre-final-norm
-    //    hidden for threading into the next MTP step.
-    //
-    // The GDN recurrent + conv state advances by 2 tokens here (last_token +
-    // draft_token). On reject we rewind to this snapshot so only last_token's
-    // advance is kept — draft_token's state mutation is undone. Snapshot cost
-    // is ~49 MiB dToD per step on Qwen3.5-4B (24 GDN layers). Zero-copy
-    // ping-pong shadow-slot rewrite is a follow-up.
-    let linear_snapshot = linear_state
-        .snapshot()
-        .context("mtp: snapshot linear state before verify")?;
-    let verify_input = [last_token, draft_token];
-    let (verify_logits, new_hidden) = model_forward_paged_with_last_hidden(
+    // 2. Verify the draft with a one-token base-model step. A single
+    // `[last_token, draft_token]` call is mathematically equivalent for
+    // greedy verification, but it misses Metal's single-token decode fast
+    // paths. Split verification keeps the base model on the normal decode
+    // path and lets us skip the second token entirely on rejection.
+    let verify_input0 = [last_token];
+    let (verify_logits0, hidden_after_last) = model_forward_paged_with_last_hidden(
         backend,
-        &verify_input,
+        &verify_input0,
         weights,
         config,
         base_cache,
@@ -602,16 +593,16 @@ pub fn speculative_mtp_decode_step(
         None, // no LoRA on the verify pass — keep parity with scaffolding.
         None, // positions_gpu: let the forward pass build positions internally.
     )
-    .context("mtp verify forward failed")?;
+    .context("mtp verify position 0 forward failed")?;
 
-    // 3. Extract target predictions. verify_logits shape: [1, 2, V].
-    //    Position 0 = prediction for what follows last_token = verify of draft.
-    //    Position 1 = prediction for what follows draft = bonus (on accept).
-    let verify_pos0 = verify_logits.narrow(1, 0, 1)?.squeeze(1)?;
-    let verify_pos1 = verify_logits.narrow(1, 1, 1)?.squeeze(1)?;
+    // Position 0 predicts what follows `last_token`; compare it with the MTP
+    // draft. If it rejects, `hidden_after_last` is the correct `h_prev` for
+    // the next MTP step because the accepted token will be consumed as the
+    // next loop's `last_token`.
+    let verify_pos0 = verify_logits0.squeeze(1)?;
     let target_at_0 = greedy_sample(&verify_pos0).context("verify pos-0 sampling failed")?;
 
-    // 4. Accept / reject decision. Greedy compare.
+    // 3. Accept / reject decision. Greedy compare.
     let mut accepted_tokens: Vec<TokenId> = Vec::new();
     let mut hit_eos = false;
     let draft_accepted = target_at_0 == draft_token;
@@ -640,21 +631,41 @@ pub fn speculative_mtp_decode_step(
         );
     }
 
+    let mut new_h_prev = hidden_after_last;
     let (base_advance, mtp_advance) = if draft_accepted {
         // ACCEPT: draft_token matches target. Emit [draft, bonus].
         if eos_token_ids.contains(&draft_token) {
             hit_eos = true;
+            // Generation stops here, so there is no need to run the bonus
+            // forward just to materialize state that will never be read.
+            (1, 1)
         } else {
             accepted_tokens.push(draft_token);
+            let verify_input1 = [draft_token];
+            let (verify_logits1, hidden_after_draft) = model_forward_paged_with_last_hidden(
+                backend,
+                &verify_input1,
+                weights,
+                config,
+                base_cache,
+                base_block_table,
+                base_pos + 1,
+                Some(linear_state),
+                None, // no LoRA on the verify pass — keep parity with scaffolding.
+                None, // positions_gpu: let the forward pass build positions internally.
+            )
+            .context("mtp verify bonus forward failed")?;
+            new_h_prev = hidden_after_draft;
+            let verify_pos1 = verify_logits1.squeeze(1)?;
             let bonus = greedy_sample(&verify_pos1).context("bonus sampling failed")?;
             if eos_token_ids.contains(&bonus) {
                 hit_eos = true;
             } else {
                 accepted_tokens.push(bonus);
             }
+            // Base consumed 2 slots (last_token + draft). MTP consumed 1 slot.
+            (2, 1)
         }
-        // Base consumed 2 slots (last_token + draft). MTP consumed 1 slot.
-        (2, 1)
     } else {
         // REJECT: emit the target's token at position 0.
         if eos_token_ids.contains(&target_at_0) {
@@ -662,26 +673,16 @@ pub fn speculative_mtp_decode_step(
         } else {
             accepted_tokens.push(target_at_0);
         }
-        // Rewind GDN state: the verify pass advanced the recurrent + conv
-        // state by 2 tokens, but only last_token is canonical on reject. The
-        // target_at_0 token will be re-consumed on the next iteration as the
-        // new last_token and will re-advance the state at that point. Without
-        // this rewind, the GDN state ends up 1 token ahead of the base KV
-        // cache and subsequent forward passes produce garbage.
-        linear_state
-            .restore_from(&linear_snapshot)
-            .context("mtp: restore linear state on reject")?;
-        // Base consumed 1 slot in the canonical view (even though the forward
-        // pass wrote KV at base_pos+1 with stale draft KV — that slot is
-        // overwritten on the next iteration when the corrected token is
-        // processed as the new last_token). MTP did not commit.
+        // Base consumed exactly last_token. The rejected draft was never fed
+        // through the base model, so no recurrent-state snapshot/restore is
+        // needed and the KV cache has no stale base_pos+1 slot.
         (1, 0)
     };
 
     Ok(MtpSpeculativeStepResult {
         accepted_tokens,
         hit_eos,
-        new_h_prev: new_hidden,
+        new_h_prev,
         base_advance,
         mtp_advance,
         draft_accepted,
