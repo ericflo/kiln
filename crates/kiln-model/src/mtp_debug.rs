@@ -69,6 +69,18 @@ thread_local! {
     /// the exact same prompt during the per-tap bisect.
     static H_MAIN_PROMPT_TOKENS: RefCell<Option<Vec<u32>>> =
         const { RefCell::new(None) };
+
+    /// Phase B11b: thread-local sink for layer-0 GDN sub-op taps. Kept
+    /// distinct from [`H_MAIN_CAPTURE`] so the per-layer boundary taps and
+    /// the fine-grained layer-0 bisect taps can be drained independently.
+    /// Entries are stored as `(name, shape, host_f32)` so the GPU scratch
+    /// is released at capture time — same pattern as B10's h_main slot.
+    ///
+    /// Driven by [`arm_b11_layer0_capture`] / [`drain_b11_layer0_capture`] /
+    /// [`capture_b11_layer0_tap`], and gated on
+    /// `KILN_MTP_DUMP_B11_TAPS=1` so production decode pays zero cost.
+    static B11_LAYER0_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -357,6 +369,105 @@ pub fn drain_h_main_prompt_tokens() -> Vec<u32> {
     H_MAIN_PROMPT_TOKENS.with(|c| c.borrow_mut().take().unwrap_or_default())
 }
 
+// -----------------------------------------------------------------------------
+// Phase B11b: layer-0 GDN sub-op taps
+// -----------------------------------------------------------------------------
+
+/// True when `KILN_MTP_DUMP_B11_TAPS=1` (or `true`) is set. Opt-in for the
+/// layer-0 GDN sub-op bisect: when enabled alongside `KILN_MTP_DUMP_PATH`
+/// *and* `KILN_MTP_DUMP_HIDDEN_STATES=1`, the base-model forward records the
+/// 11 named layer-0 taps listed in [`b11_tap_names`] and appends them to the
+/// MTP dump safetensors under names `b11__<name>`.
+pub fn is_dump_b11_taps_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_B11_TAPS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Canonical ordered list of Phase B11b layer-0 GDN sub-op tap names. The
+/// comparator (`scripts/mtp_compare.py --b11`) expects this exact order in
+/// its output table, and the HF reference (`scripts/mtp_h_main_reference_dump.py`)
+/// emits mirrored `b11__<name>` tensors in the same order.
+///
+/// Order follows the forward graph at layer 0:
+/// 1. `tok_embed` — `embed_tokens(input_ids)` output at layer 0 entry
+/// 2. `layer_0_post_input_norm` — output of the layer's pre-GDN input LayerNorm
+/// 3. `gdn_in_proj` — `in_proj_qkvz` / `in_proj_ba` output, concatenated
+/// 4. `gdn_conv` — causal conv1d output (prefill path)
+/// 5. `gdn_qk_norm_q` — L2-normalized query after `q_l2norm`
+/// 6. `gdn_qk_norm_k` — L2-normalized key after `k_l2norm`
+/// 7. `gdn_gate_beta` — sigmoid-gated `beta` after the beta projection
+/// 8. `gdn_gate_g` — softplus-gated `g` after the A/gate projection
+/// 9. `gdn_recur_out` — output of `fused_recurrent_gated_delta_rule` / chunked eqvt
+/// 10. `gdn_gated_norm` — output of the `GatedRMSNorm` / gated pre-out-proj norm
+/// 11. `gdn_out_proj` — output of the final `out_proj` linear
+pub const B11_TAP_NAMES: &[&str] = &[
+    "tok_embed",
+    "layer_0_post_input_norm",
+    "gdn_in_proj",
+    "gdn_conv",
+    "gdn_qk_norm_q",
+    "gdn_qk_norm_k",
+    "gdn_gate_beta",
+    "gdn_gate_g",
+    "gdn_recur_out",
+    "gdn_gated_norm",
+    "gdn_out_proj",
+];
+
+/// True if the Phase B11b layer-0 capture window is currently armed on this
+/// thread. Call sites use this to gate the (relatively cheap) host copy so
+/// disarmed runs pay zero cost.
+pub fn is_b11_layer0_capture_armed() -> bool {
+    B11_LAYER0_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// True if a B11b capture should happen for `layer_idx`. Currently only
+/// layer 0 is captured (matches the task brief — the B10 boundary scan
+/// already localized the divergence to layer 0). Exposed as a helper so
+/// forward.rs can guard the cheap arithmetic / host copy per call site.
+pub fn should_capture_b11_tap_for_layer(layer_idx: usize) -> bool {
+    layer_idx == 0 && is_b11_layer0_capture_armed()
+}
+
+/// Begin a B11b layer-0 capture window. Subsequent [`capture_b11_layer0_tap`]
+/// calls from the same thread record into a fresh buffer until
+/// [`drain_b11_layer0_capture`] is called. Does nothing if
+/// [`is_dump_b11_taps_enabled`] is false — so callers can invoke this
+/// unconditionally around the base-model forward.
+pub fn arm_b11_layer0_capture() {
+    if !is_dump_b11_taps_enabled() {
+        return;
+    }
+    B11_LAYER0_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured B11b layer-0 taps and disarm. Returns whatever was
+/// recorded since the matching [`arm_b11_layer0_capture`] call, in order.
+pub fn drain_b11_layer0_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    B11_LAYER0_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named B11b layer-0 tap if a capture window is currently open
+/// on this thread. Cheap no-op (single TLS access + borrow) when the window
+/// is closed, which is the production case. The tensor is materialized to
+/// host F32 immediately so the GPU scratch is free to be reused — same
+/// pattern as [`capture_h_main_tap`].
+pub fn capture_b11_layer0_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = B11_LAYER0_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_b11_layer0_tap `{name}`: tensor→f32 host copy"))?;
+    B11_LAYER0_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
 /// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
 /// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
 /// whether the source is BF16 on CUDA or F32 on CPU.
@@ -403,6 +514,18 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// canonical greeting so both sides replay the exact same prompt during
 /// the per-tap bisect. Pass `&[]` (or legacy callers using `&extra_subops`
 /// before this param) to skip the prompt-tokens emission.
+///
+/// Phase B11b: `b11_taps` carries the layer-0 GDN sub-op taps captured via
+/// [`arm_b11_layer0_capture`] / [`capture_b11_layer0_tap`] /
+/// [`drain_b11_layer0_capture`]. Each entry is serialized as F32 under the
+/// name `b11__<name>` so the comparator can select them with a single
+/// prefix match. When the slice is empty, the dump bytes are bit-identical
+/// to the legacy format (preserved by
+/// [`write_and_reparse_mtp_dump_round_trips`]). Note: the task spec called
+/// for BF16 serialization; F32 is used here for parity with the existing
+/// taps / subops pipeline (single host-materialization path, no `half`
+/// dependency). The comparator upcasts HF reference tensors to F32 anyway,
+/// so precision is not lost.
 pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
@@ -411,15 +534,18 @@ pub fn write_mtp_dump(
     taps: &[(&str, &Tensor)],
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
     prompt_tokens: &[u32],
+    b11_taps: &[(String, Vec<usize>, Vec<f32>)],
 ) -> Result<()> {
     use safetensors::tensor::{Dtype, TensorView};
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
-    // Capacity: 8 named taps + subops + 3 meta + optional (prompt_tokens, len).
+    // Capacity: static taps + subops + 3 meta + optional (prompt_tokens, len)
+    // + b11 taps.
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
-    let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> =
-        Vec::with_capacity(taps.len() + extra_subops.len() + 3 + prompt_reserve);
+    let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
+        taps.len() + extra_subops.len() + 3 + prompt_reserve + b11_taps.len(),
+    );
     for (name, t) in taps {
         let (shape, flat) = tensor_to_f32_host(t)
             .with_context(|| format!("dump tap `{name}`: tensor→f32 host copy"))?;
@@ -483,6 +609,18 @@ pub fn write_mtp_dump(
             Dtype::I32,
             pt_bytes,
         ));
+    }
+
+    // Phase B11b: serialize the layer-0 GDN sub-op taps under `b11__<name>`
+    // so the comparator (`scripts/mtp_compare.py --b11`) can select them
+    // with a single prefix match. When `b11_taps` is empty the loop is a
+    // no-op and the on-disk dump is bit-identical to the legacy layout.
+    for (name, shape, flat) in b11_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("b11__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     let mut views: Vec<(String, TensorView)> = Vec::with_capacity(backings.len());
@@ -733,6 +871,7 @@ mod tests {
             &[("h_main", &a)],
             &[],
             &prompt,
+            /* b11_taps = */ &[],
         )
         .unwrap();
 
@@ -786,6 +925,7 @@ mod tests {
             &[("h_main", &a), ("mtp_logits", &b)],
             &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
             /* prompt_tokens = */ &[],
+            /* b11_taps = */ &[],
         )
         .unwrap();
 
@@ -801,6 +941,8 @@ mod tests {
         // should be serialized.
         assert!(!names.contains(&"prompt_tokens"));
         assert!(!names.contains(&"meta__prompt_tokens_len"));
+        // With b11_taps = &[], no b11__* tensors should appear.
+        assert!(!names.iter().any(|n| n.starts_with("b11__")));
 
         let h = st.tensor("h_main").unwrap();
         assert_eq!(h.dtype(), safetensors::Dtype::F32);
@@ -809,6 +951,125 @@ mod tests {
         assert_eq!(meta.dtype(), safetensors::Dtype::I32);
         let v = i32::from_le_bytes(meta.data()[0..4].try_into().unwrap());
         assert_eq!(v, 561);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn b11_tap_names_enumerate_all_eleven_layer0_subops() {
+        // Guardrail against accidental future edits that would drop a tap
+        // from the layer-0 bisect span. Both the Rust capture sites and the
+        // Python HF reference dump iterate this list; keeping it fixed at
+        // 11 entries is part of the B11b contract.
+        assert_eq!(B11_TAP_NAMES.len(), 11);
+        assert_eq!(B11_TAP_NAMES[0], "tok_embed");
+        assert_eq!(B11_TAP_NAMES[10], "gdn_out_proj");
+    }
+
+    #[test]
+    fn b11_layer0_capture_records_then_drains() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B11_TAPS", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+        // Disarmed: capture is a silent no-op.
+        capture_b11_layer0_tap("tok_embed", &a).unwrap();
+        assert!(drain_b11_layer0_capture().is_empty());
+        assert!(!is_b11_layer0_capture_armed());
+        assert!(!should_capture_b11_tap_for_layer(0));
+
+        // Armed: records in order.
+        arm_b11_layer0_capture();
+        assert!(is_b11_layer0_capture_armed());
+        assert!(should_capture_b11_tap_for_layer(0));
+        assert!(!should_capture_b11_tap_for_layer(1));
+        capture_b11_layer0_tap("tok_embed", &a).unwrap();
+        capture_b11_layer0_tap("gdn_out_proj", &b).unwrap();
+        let drained = drain_b11_layer0_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "tok_embed");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "gdn_out_proj");
+        assert_eq!(drained[1].1, vec![2]);
+        assert_eq!(drained[1].2, vec![10.0, 20.0]);
+
+        // Drain disarms.
+        assert!(!is_b11_layer0_capture_armed());
+        capture_b11_layer0_tap("gdn_conv", &a).unwrap();
+        assert!(drain_b11_layer0_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B11_TAPS");
+        }
+    }
+
+    #[test]
+    fn b11_layer0_arm_is_noop_when_env_unset() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_B11_TAPS");
+        }
+        arm_b11_layer0_capture();
+        assert!(!is_b11_layer0_capture_armed());
+        assert!(!should_capture_b11_tap_for_layer(0));
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_b11_layer0_tap("tok_embed", &a).unwrap();
+        assert!(drain_b11_layer0_capture().is_empty());
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_b11_taps_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_b11.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let b11 = vec![
+            (
+                "tok_embed".to_string(),
+                vec![2],
+                vec![0.11_f32, 0.22],
+            ),
+            (
+                "gdn_out_proj".to_string(),
+                vec![3],
+                vec![0.31_f32, 0.32, 0.33],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 99,
+            /* mtp_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            &b11,
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        // Both taps appear under the b11__<name> namespace.
+        assert!(names.contains(&"b11__tok_embed"));
+        assert!(names.contains(&"b11__gdn_out_proj"));
+
+        let te = st.tensor("b11__tok_embed").unwrap();
+        assert_eq!(te.dtype(), safetensors::Dtype::F32);
+        assert_eq!(te.shape(), &[2]);
+        let bytes = te.data();
+        let v0 = f32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let v1 = f32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert!((v0 - 0.11).abs() < 1e-6);
+        assert!((v1 - 0.22).abs() < 1e-6);
+
+        let op = st.tensor("b11__gdn_out_proj").unwrap();
+        assert_eq!(op.dtype(), safetensors::Dtype::F32);
+        assert_eq!(op.shape(), &[3]);
 
         let _ = std::fs::remove_file(&tmp);
     }

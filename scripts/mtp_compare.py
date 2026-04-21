@@ -36,6 +36,17 @@ Base-model h_main bisect (Phase B10 — per-layer divergence):
     h_pre_final_norm, plus a verdict identifying the first layer at which
     kiln's base-model hidden state diverges from the HF reference.
 
+Layer-0 GDN sub-op bisect (Phase B11b — per-sub-op divergence):
+    python3 scripts/mtp_compare.py --b11 \\
+        --pair main:/tmp/h-kiln.safetensors,/tmp/h-ref.safetensors
+
+    --b11 defaults atol=1e-2, rtol=1e-1 (bf16-appropriate) and emits a
+    per-sub-op cos_sim + max|Δ| + mean|Δ| + relative_l2 table for the 11
+    `b11__<name>` taps written by kiln (KILN_MTP_DUMP_B11_TAPS=1) and by
+    mtp_h_main_reference_dump.py --b11-taps. The verdict identifies the
+    first sub-op whose median cos_sim across positions falls below 0.95,
+    which becomes the B12 recommendation for targeted investigation.
+
 Exit code:
     0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
@@ -126,6 +137,40 @@ B10_LAYER_TAPS: List[str] = [
     "h_pre_final_norm",
 ]
 
+# Phase B11b — layer-0 GDN sub-op taps, in forward-graph order. Kiln and the
+# HF reference both write these under a `b11__` prefix so they slot alongside
+# the B10 layer taps without colliding with primary taps. The comparator
+# walks these in order and reports the first sub-op whose median cos_sim
+# across positions falls below 0.95; that sub-op becomes the B12 target.
+B11_LAYER0_TAP_NAMES: Tuple[str, ...] = (
+    "tok_embed",
+    "layer_0_post_input_norm",
+    "gdn_in_proj",
+    "gdn_conv",
+    "gdn_qk_norm_q",
+    "gdn_qk_norm_k",
+    "gdn_gate_beta",
+    "gdn_gate_g",
+    "gdn_recur_out",
+    "gdn_gated_norm",
+    "gdn_out_proj",
+)
+
+# One-line hypotheses for each B11b sub-op, used in verdict output.
+B11_HYPOTHESIS: Dict[str, str] = {
+    "tok_embed": "embedding lookup: token-id routing, tied-embed weight, or dtype",
+    "layer_0_post_input_norm": "layer 0 input_layernorm weight/eps or pre-GDN norm site",
+    "gdn_in_proj": "in_proj_qkvz / in_proj_ba weight layout, split order, or dtype",
+    "gdn_conv": "causal_conv1d: kernel packing, stride/pad, SiLU activation, or bias",
+    "gdn_qk_norm_q": "Qwen3Next in-kernel L2 qk_norm on Q (use_qk_l2norm_in_kernel path)",
+    "gdn_qk_norm_k": "Qwen3Next in-kernel L2 qk_norm on K (use_qk_l2norm_in_kernel path)",
+    "gdn_gate_beta": "beta gate: sigmoid(b) from in_proj_ba split order / head layout",
+    "gdn_gate_g": "g gate: -A_log.exp() * softplus(a + dt_bias), log-gate parameterization",
+    "gdn_recur_out": "chunk_gated_delta_rule / fused_recurrent_gated_delta_rule math",
+    "gdn_gated_norm": "GatedRMSNorm(core_attn_out, z): gate-modulated RMSNorm weight/eps",
+    "gdn_out_proj": "out_proj weight layout, transpose, or residual dtype",
+}
+
 META_KEYS = (
     "meta__draft_token_id",
     "meta__mtp_pos",
@@ -212,6 +257,7 @@ def _compare_tap(
         row["cos_sim"] = float("nan")
         row["max_abs_diff"] = float("nan")
         row["mean_abs_diff"] = float("nan")
+        row["rel_l2"] = float("nan")
         return row
 
     a64 = a.astype(np.float64)
@@ -221,6 +267,11 @@ def _compare_tap(
     row["mean_abs_diff"] = float(diff.mean()) if diff.size else 0.0
     row["allclose"] = bool(np.allclose(a64, b64, atol=atol, rtol=rtol))
     row["cos_sim"] = _cos_sim(a64, b64)
+    ref_norm = float(np.linalg.norm(b64.reshape(-1)))
+    if ref_norm == 0.0 or not diff.size:
+        row["rel_l2"] = float("nan")
+    else:
+        row["rel_l2"] = float(np.linalg.norm(diff.reshape(-1)) / ref_norm)
     return row
 
 
@@ -258,6 +309,10 @@ def _ordered_taps(
     for name in B10_LAYER_TAPS:
         if name in common and name not in out:
             out.append(name)
+    for name in B11_LAYER0_TAP_NAMES:
+        key = f"b11__{name}"
+        if key in common and key not in out:
+            out.append(key)
     extras = sorted(common - set(out))
     out.extend(extras)
     return out
@@ -660,6 +715,137 @@ def _emit_b10_summary(
         emit("     how the base-model main path routes hidden into the MTP head.")
 
 
+def _emit_b11_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase B11b — layer-0 GDN sub-op bisect.
+
+    Walks `B11_LAYER0_TAP_NAMES` (prefixed with `b11__` in both dumps) across
+    every pair, prints a per-position cos_sim / max|Δ| / mean|Δ| / rel_l2
+    table, and recommends the first sub-op whose MEDIAN cos_sim across
+    positions falls below 0.95 as the B12 target. Falls back to the first
+    tap with ANY position diverging when no tap crosses the 0.95 median bar
+    so the recommendation stays actionable when every sub-op is noisy.
+    """
+    emit("")
+    emit("=" * 78)
+    emit("Phase B11b layer-0 GDN sub-op bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+
+    # tap -> {label: (cos_sim, max|Δ|, mean|Δ|, rel_l2)}
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float]]] = {
+        n: {} for n in B11_LAYER0_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("b11__"):
+                continue
+            short = n[len("b11__"):]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+            )
+
+    header = "  " + "tap".ljust(26) + " ".join(
+        f"pos={lab:<48}" for lab in labels
+    )
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in B11_LAYER0_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2 = entry
+                captured_any = True
+                tag = "ok" if cs >= 0.95 else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<26}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase B11b verdict: no B11 layer-0 taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_HIDDEN_STATES=1 AND")
+        emit("     KILN_MTP_DUMP_B11_TAPS=1, then re-run mtp_h_main_reference_dump.py")
+        emit("     with --b11-taps against the same kiln dump.")
+        return
+
+    # B12 recommendation: first tap whose MEDIAN cos_sim across finite
+    # positions dips below 0.95. Falls back to first tap with ANY position
+    # diverging under the atol/rtol bar when no tap crosses the 0.95 line.
+    def _median(xs: List[float]) -> float:
+        finite = sorted(v for v in xs if np.isfinite(v))
+        if not finite:
+            return float("nan")
+        n = len(finite)
+        mid = n // 2
+        if n % 2 == 1:
+            return finite[mid]
+        return 0.5 * (finite[mid - 1] + finite[mid])
+
+    first_median_div: Optional[str] = None
+    first_median_val: float = float("nan")
+    first_any_div: Optional[str] = None
+    first_any_pos: Optional[str] = None
+    for tap in B11_LAYER0_TAP_NAMES:
+        per_pos = [cell[tap][lab][0] for lab in labels if lab in cell[tap]]
+        if not per_pos:
+            continue
+        med = _median(per_pos)
+        if first_median_div is None and np.isfinite(med) and med < 0.95:
+            first_median_div = tap
+            first_median_val = med
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                continue
+            cs = entry[0]
+            if np.isfinite(cs) and cs < 0.95 and first_any_div is None:
+                first_any_div = tap
+                first_any_pos = lab
+
+    if first_median_div is not None:
+        hypo = B11_HYPOTHESIS.get(first_median_div, "<unknown sub-op>")
+        emit(
+            f"  first sub-op with MEDIAN cos_sim < 0.95: '{first_median_div}' "
+            f"(median cos_sim = {first_median_val:.6f})"
+        )
+        emit(f"Phase B11b verdict: B12 TARGET = '{first_median_div}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Queue B12 task to investigate this sub-op in isolation.")
+    elif first_any_div is not None:
+        hypo = B11_HYPOTHESIS.get(first_any_div, "<unknown sub-op>")
+        emit(
+            f"  no sub-op has MEDIAN cos_sim < 0.95, but '{first_any_div}' "
+            f"(pos={first_any_pos}) dips below 0.95 on at least one position."
+        )
+        emit(f"Phase B11b verdict: B12 TARGET (noisy) = '{first_any_div}'.")
+        emit(f"    Most-likely cause: {hypo}")
+        emit("  -> Recommend capturing more positions / longer prompts to confirm")
+        emit("     before committing to a B12 fix direction.")
+    else:
+        emit("Phase B11b verdict: ALL layer-0 GDN sub-ops match within cos_sim >= 0.95.")
+        emit("  -> Divergence is NOT localized inside layer 0's GDN block at this bar.")
+        emit("  -> Re-check B10 atol/rtol and consider extending taps to layers 1-7")
+        emit("     (GDN stack) before committing to a B12 target.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
@@ -681,17 +867,29 @@ def main() -> int:
             "rtol=1e-1 (bf16-appropriate) unless explicitly overridden."
         ),
     )
+    ap.add_argument(
+        "--b11",
+        action="store_true",
+        help=(
+            "Phase B11b mode: emit layer-0 GDN sub-op bisect summary (11 taps "
+            "prefixed with `b11__`). Defaults atol=1e-2, rtol=1e-1 "
+            "(bf16-appropriate) unless explicitly overridden. Recommends the "
+            "first sub-op whose median cos_sim across positions falls below "
+            "0.95 as the B12 target."
+        ),
+    )
     ap.add_argument("--out", default=None, help="Optional path to write report text")
     args = ap.parse_args()
 
-    # Default tolerances depend on mode. B10 compares bf16 base-model hidden
+    # Default tolerances depend on mode. B10/B11 compare bf16 base-model hidden
     # states end-to-end through 32 transformer blocks; the accumulated
     # arithmetic noise across that many ops means a strict 1e-3/1e-2 bar
     # flags semantically-identical tensors as divergent.
+    bf16_mode = args.b10 or args.b11
     if args.atol is None:
-        args.atol = 1e-2 if args.b10 else 1e-3
+        args.atol = 1e-2 if bf16_mode else 1e-3
     if args.rtol is None:
-        args.rtol = 1e-1 if args.b10 else 1e-2
+        args.rtol = 1e-1 if bf16_mode else 1e-2
 
     pairs: List[Tuple[str, str, str]] = []
     if args.pair:
@@ -713,7 +911,9 @@ def main() -> int:
         lines.append(s)
 
     multi = len(pairs) > 1
-    if args.b10:
+    if args.b11:
+        mode = "layer-0 GDN sub-op bisect (B11b)"
+    elif args.b10:
         mode = "base-model h_main bisect (B10)"
     elif multi:
         mode = "multi-position (B7a)"
@@ -733,7 +933,9 @@ def main() -> int:
         if not ok:
             overall_ok = False
 
-    if args.b10:
+    if args.b11:
+        _emit_b11_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.b10:
         _emit_b10_summary(pair_results, args.atol, args.rtol, emit)
     elif multi:
         _emit_b7a_summary(pair_results, emit)
@@ -741,9 +943,9 @@ def main() -> int:
     # B9 sub-op zone bisect — emitted whenever any pair captured zone taps,
     # whether single- or multi-pair. Exits cleanly with a "no zone taps
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
-    # legacy dumps from before this PR). Skipped in explicit --b10 mode so
-    # the B10 report isn't cluttered by unrelated sub-op tables.
-    if not args.b10:
+    # legacy dumps from before this PR). Skipped in explicit --b10/--b11 mode
+    # so the B10/B11 report isn't cluttered by unrelated sub-op tables.
+    if not args.b10 and not args.b11:
         have_b9_taps = any(
             any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
             for pr in pair_results
