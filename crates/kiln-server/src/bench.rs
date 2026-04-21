@@ -111,6 +111,10 @@ struct BenchArgs {
     /// non-paged contiguous KvCache + model_forward path so prior numbers stay
     /// comparable.
     paged: bool,
+    /// RNG seed threaded through `SamplingParams` and `StdRng` sites so bench
+    /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
+    /// this across {0..=7} to get independent prompt/sampling trajectories.
+    seed: u64,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -121,6 +125,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut training_steps = 10;
     let mut skip_training = false;
     let mut paged = false;
+    let mut seed: u64 = 42;
 
     let mut i = 1;
     while i < args.len() {
@@ -147,6 +152,10 @@ fn parse_args() -> Result<BenchArgs> {
             "--paged" => {
                 paged = true;
             }
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(42);
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -163,6 +172,9 @@ fn parse_args() -> Result<BenchArgs> {
                 );
                 eprintln!(
                     "                            (matches the HTTP/scheduler production path)"
+                );
+                eprintln!(
+                    "  --seed <u64>              RNG seed for sampling + MTP drafts (default: 42)"
                 );
                 std::process::exit(0);
             }
@@ -182,6 +194,7 @@ fn parse_args() -> Result<BenchArgs> {
         training_steps,
         skip_training,
         paged,
+        seed,
     })
 }
 
@@ -243,6 +256,7 @@ fn bench_inference(
     num_runs: usize,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
 ) -> Result<InferenceBenchResult> {
     let prompt = build_prompt(tokenizer, prompt_tokens);
     let actual_prompt_tokens = tokenizer
@@ -257,7 +271,7 @@ fn bench_inference(
         max_tokens: max_output_tokens,
         repetition_penalty: 1.0,
         stop: vec![],
-        seed: Some(42),
+        seed: Some(seed),
     };
 
     // Warmup
@@ -695,6 +709,7 @@ fn bench_latency_skiplayer(
     tokenizer: &KilnTokenizer,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -786,9 +801,9 @@ fn bench_latency_skiplayer(
         max_tokens: max_output_tokens,
         repetition_penalty: 1.0,
         stop: vec![],
-        seed: Some(42),
+        seed: Some(seed),
     };
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     while num_tokens < max_output_tokens {
         if eos_token_ids.contains(&last_token) {
@@ -898,6 +913,7 @@ fn bench_latency_paged_mtp(
     tokenizer: &KilnTokenizer,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -1005,9 +1021,9 @@ fn bench_latency_paged_mtp(
         max_tokens: max_output_tokens,
         repetition_penalty: 1.0,
         stop: vec![],
-        seed: Some(42),
+        seed: Some(seed),
     };
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     while num_tokens < max_output_tokens {
         if eos_token_ids.contains(&last_token) {
@@ -1361,6 +1377,7 @@ fn main() -> Result<()> {
                 &tokenizer,
                 args.prompt_tokens,
                 args.max_output_tokens,
+                args.seed,
             )
             .context("MTP latency benchmark failed")?
         }
@@ -1372,6 +1389,7 @@ fn main() -> Result<()> {
                 &tokenizer,
                 args.prompt_tokens,
                 args.max_output_tokens,
+                args.seed,
             )
             .context("skip-layer latency benchmark failed")?
         }
@@ -1447,6 +1465,7 @@ fn main() -> Result<()> {
             n,
             args.prompt_tokens,
             args.max_output_tokens,
+            args.seed,
         ) {
             Ok(result) => {
                 eprintln!("  => {:.1} tok/s aggregate", result.tokens_per_sec);
