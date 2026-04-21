@@ -352,6 +352,16 @@ async fn copy_openai_base_url_to_clipboard(app: &AppHandle, supervisor: Arc<Supe
             "[tray] copy OpenAI base URL skipped — server not running (state: {})",
             state_label(&state)
         );
+        let body = match &state {
+            ServerState::Error(msg) => format!("Server not running ({}).", msg),
+            _ => format!("Server is {}. Start it first.", state_label(&state)),
+        };
+        let _ = app
+            .notification()
+            .builder()
+            .title("OpenAI base URL unavailable")
+            .body(body)
+            .show();
         return;
     }
     let (host, port) = {
