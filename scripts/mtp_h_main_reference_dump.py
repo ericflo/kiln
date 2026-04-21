@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Phase B10 — `h_main` base-model reference dump.
+Phase B11b — optional layer-0 GDN sub-op taps (`--b11-taps`).
 
 This script produces the independent pure-Python reference counterpart to the
 kiln-side main-model forward (the 24×GDN + 8×GQA stack) so that Phase B10 can
@@ -8,13 +9,25 @@ bisect which layer first diverges. Prior phases (B6–B9) ruled out every sub-op
 inside the MTP head, so the remaining candidate is the base-model `h_prev`
 (`h_main`) that kiln feeds into MTP.
 
+Phase B11b extends this with 11 intra-layer taps at layer 0's GDN block so we
+can bisect the first diverging sub-op (B10 showed layer 0 as the first
+boundary where cos ≈ 0.827 between kiln and HF).
+
 Usage
 -----
 
+    # B10-only boundary taps (original flow)
     python3 scripts/mtp_h_main_reference_dump.py \\
         --checkpoint /workspace/qwen3.5-4b \\
         --kiln-dump /tmp/h-kiln.safetensors \\
         --out /tmp/h-ref.safetensors
+
+    # B10 boundary taps + B11b layer-0 GDN sub-op taps
+    python3 scripts/mtp_h_main_reference_dump.py \\
+        --checkpoint /workspace/qwen3.5-4b \\
+        --kiln-dump /tmp/h-kiln.safetensors \\
+        --out /tmp/h-ref.safetensors \\
+        --b11-taps
 
 Design
 ------
@@ -29,8 +42,15 @@ the last-row slice of the hidden state at five boundary layers (0, 8, 16, 23,
 `model.norm`). Those are the same six taps kiln captures when
 `KILN_MTP_DUMP_HIDDEN_STATES=1`.
 
+When `--b11-taps` is passed, we additionally monkey-patch
+`Qwen3NextGatedDeltaNet.forward` with an instrumented copy that captures
+11 intra-layer sub-op outputs at layer 0 (matching `B11_TAP_NAMES` in
+`crates/kiln-model/src/mtp_debug.rs`). The full-tensor layer-0 taps are saved
+alongside the boundary taps with a `b11__` prefix.
+
 The safetensors file written here uses the same layout and naming convention
-as kiln's dump so `scripts/mtp_compare.py --b10` can diff them tap-for-tap.
+as kiln's dump so `scripts/mtp_compare.py --b10` / `--b11` can diff them
+tap-for-tap.
 
 Prompt provenance
 -----------------
@@ -76,6 +96,24 @@ from safetensors.torch import save_file
 #   - layer 23: GQA (indices 3, 7, 11, 15, 19, 23, 27, 31 are full-attn)
 #   - layer 31: GQA (last layer; its output IS `h_pre_final_norm`)
 B10_BOUNDARY_LAYERS: Tuple[int, ...] = (0, 8, 16, 23, 31)
+
+
+# Phase B11b — ordered layer-0 GDN sub-op tap names. Must stay in lock-step
+# with `B11_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs`. The comparator
+# (`scripts/mtp_compare.py --b11`) prints rows in this order.
+B11_LAYER0_TAP_NAMES: Tuple[str, ...] = (
+    "tok_embed",
+    "layer_0_post_input_norm",
+    "gdn_in_proj",
+    "gdn_conv",
+    "gdn_qk_norm_q",
+    "gdn_qk_norm_k",
+    "gdn_gate_beta",
+    "gdn_gate_g",
+    "gdn_recur_out",
+    "gdn_gated_norm",
+    "gdn_out_proj",
+)
 
 
 # -----------------------------------------------------------------------------
@@ -150,6 +188,194 @@ def build_fallback_prompt_tokens(
 
 
 # -----------------------------------------------------------------------------
+# Phase B11b — instrumented layer-0 GDN forward
+# -----------------------------------------------------------------------------
+
+
+def _l2_norm_last_dim(x: "torch.Tensor", eps: float = 1e-6) -> "torch.Tensor":
+    """L2-normalize along the final dim. Matches the
+    `use_qk_l2norm_in_kernel=True` behavior applied by the fla-org
+    `chunk_gated_delta_rule` / `fused_recurrent_gated_delta_rule` kernels
+    to query and key tensors right before recurrence. We compute this in
+    FP32 for stability; callers cast back if needed."""
+    norm = x.pow(2).sum(dim=-1, keepdim=True).clamp_min(eps).sqrt()
+    return x / norm
+
+
+def make_instrumented_gdn_forward(
+    taps_out: Dict[str, "torch.Tensor"], target_layer_idx: int = 0
+):
+    """Return a replacement for `Qwen3NextGatedDeltaNet.forward` that runs the
+    module's math unmodified but, when `self.layer_idx == target_layer_idx`,
+    captures each of the 11 B11b sub-op outputs into `taps_out`. The returned
+    function binds `target_layer_idx` and `taps_out` via closure; assign it
+    with `Qwen3NextGatedDeltaNet.forward = ...` to instrument every GDN layer
+    in a model (only the target layer will write taps)."""
+
+    import torch.nn.functional as F  # noqa: F401 — needed inside closure
+    from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
+        apply_mask_to_padding_states,
+    )
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None):
+        capture = int(self.layer_idx) == int(target_layer_idx)
+
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        batch_size, seq_len, _ = hidden_states.shape
+
+        use_precomputed_states = (
+            cache_params is not None
+            and cache_params.has_previous_state(self.layer_idx)
+            and seq_len == 1
+        )
+
+        if use_precomputed_states:
+            conv_state = cache_params.layers[self.layer_idx].conv_states
+            recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
+
+        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
+        projected_states_ba = self.in_proj_ba(hidden_states)
+
+        if capture:
+            # gdn_in_proj mirrors kiln's `Tensor::cat(&[&mixed_qkv, &z, &b, &a])`
+            # which equals `cat([in_proj_qkvz, in_proj_ba], dim=-1)` because
+            # `in_proj_qkvz` packs [q, k, v, z] and `in_proj_ba` packs [b, a].
+            taps_out["gdn_in_proj"] = (
+                torch.cat([projected_states_qkvz, projected_states_ba], dim=-1)
+                .detach()
+                .clone()
+            )
+
+        query, key, value, z, b, a = self.fix_query_key_value_ordering(
+            projected_states_qkvz, projected_states_ba
+        )
+        query, key, value = (
+            x.reshape(x.shape[0], x.shape[1], -1) for x in (query, key, value)
+        )
+
+        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+
+        if use_precomputed_states:
+            mixed_qkv = self.causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                self.activation,
+            )
+        else:
+            if cache_params is not None:
+                conv_state = F.pad(
+                    mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0)
+                )
+                conv_state = cache_params.update_conv_state(conv_state, self.layer_idx)
+            if self.causal_conv1d_fn is not None:
+                mixed_qkv = self.causal_conv1d_fn(
+                    x=mixed_qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    seq_idx=None,
+                )
+            else:
+                mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+
+        if capture:
+            # Post-silu, post-transpose, shape [B, T, conv_dim]. Matches
+            # kiln's `gdn_conv` tap captured at the same semantic point.
+            taps_out["gdn_conv"] = mixed_qkv.detach().clone()
+
+        query, key, value = torch.split(
+            mixed_qkv,
+            [self.key_dim, self.key_dim, self.value_dim],
+            dim=-1,
+        )
+        query = query.reshape(query.shape[0], query.shape[1], -1, self.head_k_dim)
+        key = key.reshape(key.shape[0], key.shape[1], -1, self.head_k_dim)
+        value = value.reshape(value.shape[0], value.shape[1], -1, self.head_v_dim)
+
+        beta = b.sigmoid()
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+
+        if capture:
+            taps_out["gdn_gate_beta"] = beta.detach().clone()  # [B, T, nv]
+            taps_out["gdn_gate_g"] = g.detach().clone()  # [B, T, nv]
+
+        if self.num_v_heads // self.num_k_heads > 1:
+            query = query.repeat_interleave(
+                self.num_v_heads // self.num_k_heads, dim=2
+            )
+            key = key.repeat_interleave(
+                self.num_v_heads // self.num_k_heads, dim=2
+            )
+
+        if capture:
+            # HF kernel applies L2 norm internally (`use_qk_l2norm_in_kernel=True`),
+            # so we mirror it explicitly here to match kiln's captured
+            # post-L2-norm q/k tensors.
+            q_normed = _l2_norm_last_dim(query.float())
+            k_normed = _l2_norm_last_dim(key.float())
+            taps_out["gdn_qk_norm_q"] = q_normed.to(query.dtype).detach().clone()
+            taps_out["gdn_qk_norm_k"] = k_normed.to(key.dtype).detach().clone()
+
+        if not use_precomputed_states:
+            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=cache_params is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=recurrent_state,
+                output_final_state=cache_params is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        if capture:
+            # Recurrence output, shape [B, T, nv, dv]. This is the tensor
+            # kiln captures at post-transpose time (matches the input to
+            # GatedRMSNorm).
+            taps_out["gdn_recur_out"] = core_attn_out.detach().clone()
+
+        if cache_params is not None:
+            cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
+
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
+
+        if capture:
+            # After GatedRMSNorm + flatten-last-two-dims, shape [B, T, value_dim].
+            taps_out["gdn_gated_norm"] = core_attn_out.detach().clone()
+
+        output = self.out_proj(core_attn_out)
+
+        if capture:
+            # Final out_proj output, shape [B, T, hidden].
+            taps_out["gdn_out_proj"] = output.detach().clone()
+
+        return output
+
+    return forward
+
+
+# -----------------------------------------------------------------------------
 # Reference forward
 # -----------------------------------------------------------------------------
 
@@ -158,10 +384,13 @@ def run_reference_forward(
     checkpoint: str,
     input_ids: torch.Tensor,
     device: torch.device,
+    capture_b11_layer0: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Run HF Qwen3-Next forward with `output_hidden_states=True`. Returns a
-    dict mapping tap name -> BF16 tensor of shape [1, 1, H] (last-row slice
-    of the hidden state at that boundary layer / pre-final-norm site)."""
+    dict mapping tap name -> F32 tensor. Boundary taps (`h_layer_*`,
+    `h_pre_final_norm`) are last-row slices at shape [1, 1, H]. When
+    `capture_b11_layer0=True`, also returns 11 full-tensor layer-0 GDN sub-op
+    taps under keys in `B11_LAYER0_TAP_NAMES` (shapes match kiln's)."""
     from transformers import AutoModelForCausalLM  # type: ignore
 
     print(
@@ -177,18 +406,69 @@ def run_reference_forward(
     model.eval()
     model.to(device)
 
+    # Set up B11b instrumentation + embed/norm forward_hooks BEFORE the forward.
+    b11_captures: Dict[str, torch.Tensor] = {}
+    hook_handles: List[object] = []
+    orig_gdn_forward = None
+    if capture_b11_layer0:
+        from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
+            Qwen3NextGatedDeltaNet,
+        )
+
+        orig_gdn_forward = Qwen3NextGatedDeltaNet.forward  # type: ignore[attr-defined]
+        Qwen3NextGatedDeltaNet.forward = make_instrumented_gdn_forward(  # type: ignore[assignment]
+            b11_captures, target_layer_idx=0
+        )
+
+        base = model.model if hasattr(model, "model") else model
+
+        def _save_tok_embed(_mod, _inputs, output):
+            b11_captures["tok_embed"] = output.detach().clone()
+
+        def _save_post_input_norm(_mod, _inputs, output):
+            b11_captures["layer_0_post_input_norm"] = output.detach().clone()
+
+        hook_handles.append(
+            base.embed_tokens.register_forward_hook(_save_tok_embed)
+        )
+        hook_handles.append(
+            base.layers[0].input_layernorm.register_forward_hook(
+                _save_post_input_norm
+            )
+        )
+
+        print(
+            "[mtp_h_main_ref] B11b instrumentation armed: "
+            "monkey-patched Qwen3NextGatedDeltaNet.forward + 2 embed/norm hooks",
+            file=sys.stderr,
+        )
+
     input_ids = input_ids.to(device)
     print(
         f"[mtp_h_main_ref] forward: input_ids shape={tuple(input_ids.shape)} device={device}",
         file=sys.stderr,
     )
-    with torch.inference_mode():
-        out = model(
-            input_ids=input_ids,
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True,
-        )
+    try:
+        with torch.inference_mode():
+            out = model(
+                input_ids=input_ids,
+                output_hidden_states=True,
+                use_cache=False,
+                return_dict=True,
+            )
+    finally:
+        # Always tear down instrumentation, even if the forward blows up.
+        for h in hook_handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        if orig_gdn_forward is not None:
+            from transformers.models.qwen3_next.modeling_qwen3_next import (  # type: ignore
+                Qwen3NextGatedDeltaNet,
+            )
+
+            Qwen3NextGatedDeltaNet.forward = orig_gdn_forward  # type: ignore[assignment]
     # HF convention: `hidden_states` has `num_hidden_layers + 1` entries.
     #   hidden_states[0]   = embedding input
     #   hidden_states[i+1] = output after layer i (for i in 0..num_layers-1)
@@ -221,6 +501,20 @@ def run_reference_forward(
     # the comparator can track the channel independently from `h_layer_31`.
     h_pre_final = hs[num_layers][:, -1:, :].contiguous()  # [1, 1, H]
     taps["h_pre_final_norm"] = h_pre_final
+
+    # Emit B11b layer-0 sub-op taps if captured. Each tap goes in under the
+    # `b11__<name>` key so the comparator can identify them distinct from
+    # the boundary taps.
+    if capture_b11_layer0:
+        missing = [n for n in B11_LAYER0_TAP_NAMES if n not in b11_captures]
+        if missing:
+            print(
+                f"[mtp_h_main_ref] WARNING: B11b instrumentation missed taps: {missing}",
+                file=sys.stderr,
+            )
+        for name in B11_LAYER0_TAP_NAMES:
+            if name in b11_captures:
+                taps[f"b11__{name}"] = b11_captures[name]
 
     # Free the model and all retained activations before returning.
     del model, out, hs
@@ -260,6 +554,16 @@ def main() -> int:
         type=int,
         default=42,
         help="Torch/NumPy seed for fallback prompt generation (default 42)",
+    )
+    ap.add_argument(
+        "--b11-taps",
+        action="store_true",
+        help=(
+            "Also capture 11 layer-0 GDN sub-op taps (Phase B11b) by "
+            "monkey-patching Qwen3NextGatedDeltaNet.forward. Output tensors "
+            "are emitted under `b11__<name>` keys matching B11_TAP_NAMES in "
+            "crates/kiln-model/src/mtp_debug.rs."
+        ),
     )
     args = ap.parse_args()
 
@@ -316,7 +620,9 @@ def main() -> int:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    taps_bf16 = run_reference_forward(args.checkpoint, prompt_tokens, device)
+    taps_bf16 = run_reference_forward(
+        args.checkpoint, prompt_tokens, device, capture_b11_layer0=args.b11_taps
+    )
 
     # Up-cast to F32 and move to CPU for the dump.
     def _to_f32_cpu(t: torch.Tensor) -> torch.Tensor:
