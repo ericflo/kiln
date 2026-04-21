@@ -113,6 +113,34 @@
       const invoke = (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke)
         || (window.__TAURI__ && window.__TAURI__.invoke);
 
+      const notificationApi = window.__TAURI__ && window.__TAURI__.notification;
+      async function notifyError(title, body) {
+        try {
+          if (notificationApi && typeof notificationApi.isPermissionGranted === "function") {
+            let granted = await notificationApi.isPermissionGranted();
+            if (!granted && typeof notificationApi.requestPermission === "function") {
+              const req = await notificationApi.requestPermission();
+              granted = req === "granted";
+            }
+            if (granted) {
+              await notificationApi.sendNotification({ title: title, body: body });
+            }
+            return;
+          }
+          if (!invoke) return;
+          let granted = await invoke("plugin:notification|is_permission_granted");
+          if (!granted) {
+            const req = await invoke("plugin:notification|request_permission");
+            granted = req === "granted";
+          }
+          if (granted) {
+            await invoke("plugin:notification|notify", { options: { title: title, body: body } });
+          }
+        } catch (_) {
+          // Notification is a best-effort surface; the button flash still fires.
+        }
+      }
+
       const versionEl = document.getElementById("version");
       const platformEl = document.getElementById("platform");
       const diag = {
@@ -183,7 +211,9 @@
           flashCopy("Copied!");
         } catch (err) {
           flashCopy("Copy failed");
+          const detail = String((err && err.message) || err || "Unknown error");
           console.error("clipboard.writeText failed", err);
+          notifyError("Copy diagnostics failed", detail);
         }
       });
 
