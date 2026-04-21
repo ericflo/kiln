@@ -3437,3 +3437,104 @@ Existing speculative decoding infrastructure:
 ### Recommendation
 
 **GREENLIGHT a follow-up implementation task** titled along the lines of "Phase X — native MTP spec-decode on Qwen3.5-4B (GREEN-after-preflight)". Scope: the 6-7 files listed in Check 4 (~800-1000 LOC). Gate behind `KILN_SPEC_METHOD=mtp`, default off. Ship with A/B bench (off / skip-layer / MTP) on A6000 warm pod, median-of-3 rule. Target: **≥1.5× decode tok/s vs. baseline Arm B on the standard 512p/128d workload**, with α reported separately. If measured α < 0.72 on the standard workload, stop at the A/B numbers — don't force-ship a below-ceiling path.
+
+## Phase X — native MTP spec-decode results (2026-04-21)
+
+Bench sweep of the native MTP decode arm introduced in PR #247 and patched by PR #253 (loader now accepts Qwen3.5-4B's bare `mtp.*` tensor layout). Fills in the Mtp row of the results table that PR #247 opened.
+
+### Context
+
+- Hardware: RunPod A6000 (SM 86), CUDA 12.4, `ghcr.io/ericflo/kiln-runpod:latest`.
+- Commit: `0443b81` (tip of `main` post-#253).
+- Model: `Qwen/Qwen3.5-4B` weights at `/workspace/qwen3.5-4b` (15 `mtp.*` tensors, `mtp_num_hidden_layers=1`, `tie_word_embeddings=true`).
+- Build: `cargo build --release --features cuda --bin kiln-bench` (sccache: 94% hit rate on warm pod, 81 s wall clock).
+- Env flags for all runs: `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`.
+- Bench args: `--paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`.
+- Cadence: 3 runs per arm, back-to-back, median reported.
+
+### Results table
+
+| Arm | decode tok/s | mean ITL (ms) | p50 ITL (ms) | p99 ITL (ms) | α |
+|---|---:|---:|---:|---:|---:|
+| Off | **48.5** | **20.6** | **20.50** | **23.70** | — |
+| Mtp | **BLOCKED** | — | — | — | — |
+
+Off median is the standard 512p/128d Arm B baseline; Mtp blocked before any decode steps completed.
+
+### Off — raw per-run numbers
+
+| Run | prefill ms | prefill tok/s | mean ITL ms | mean ITL tok/s | p50 ITL ms | p99 ITL ms |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 343.5 | 1473 | 19.4 | 51.6 | 19.01 | 25.28 |
+| 2 | 354.7 | 1427 | 20.6 | 48.4 | 20.50 | 23.70 |
+| 3 | 362.0 | 1398 | 20.6 | 48.5 | 20.58 | 22.69 |
+| **median** | **354.7** | **1427** | **20.6** | **48.5** | **20.50** | **23.70** |
+
+Compare to PR #247's Arm B baseline (50.77 tok/s): 48.5 is ~4.4% lower, comfortably inside the median-of-3 noise floor — baseline is reproduced, not regressed.
+
+### Mtp — blocker
+
+All 3 runs prefilled successfully (~355 ms / ~1420 tok/s) then failed identically at the first decode step:
+
+```
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=48] (506 prompt tokens)...
+    Prefill (MTP): 358.7ms (1410 tok/s)
+Error: MTP latency benchmark failed
+
+Caused by:
+    0: speculative_mtp_decode_step failed
+    1: mtp verify forward failed
+    2: linear attention state required for GDN layers (layer 0)
+```
+
+Loader is good — every Mtp run logs `Native MTP head detected and loaded (k=1 draft depth)`, confirming PR #253's `detect_mtp_prefix` fix is working against Qwen3.5-4B's stock tensor layout. The failure is downstream of loading.
+
+### Root cause
+
+`crates/kiln-model/src/speculative.rs:573-585`, inside `speculative_mtp_decode_step`, calls the base model verify forward with `None` for the `LinearAttentionState`:
+
+```rust
+let verify_input = [last_token, draft_token];
+let (verify_logits, new_hidden) = model_forward_paged_with_last_hidden(
+    backend,
+    &verify_input,
+    weights,
+    config,
+    base_cache,
+    base_block_table,
+    base_pos,
+    None, // MTP speculative: no linear-attn state rollback for GDN in this WIP.
+    None, // no LoRA on the verify pass — keep parity with scaffolding.
+    None, // positions_gpu: let the forward pass build positions internally.
+)
+.context("mtp verify forward failed")?;
+```
+
+The 8th argument is `None`, but Qwen3.5-4B's 24 GDN layers require a `LinearAttentionState`. The forward pass panics at `forward.rs:2949` (and the mirrored 3055 / 3477 sites for the other GDN paths): `linear attention state required for GDN layers (layer {i})`. The inline comment in `speculative.rs:581` explicitly flags this as a known WIP gap.
+
+MTP cannot run in kiln today on this hybrid-architecture model until GDN state snapshot / restore is threaded through the MTP verify path.
+
+### Recommendation
+
+Minimal follow-up fix PR, narrow scope:
+
+1. Add `LinearAttentionState::snapshot()` / `restore_from(snapshot)` on the struct at `forward.rs:241` (deep-clone `recurrent_states` + `conv_states`; ping-pong allocation per preflight Risk #1 above — avoid per-step `cudaMemcpy`).
+2. Thread the snapshotted state into `speculative_mtp_decode_step`: take a snapshot before the draft step, pass the live `&mut LinearAttentionState` to `model_forward_paged_with_last_hidden`, and restore from the snapshot on rejected tokens.
+3. Re-run the 3× Mtp sweep. Keep the same `KILN_W4A16=1 KILN_CUDA_GRAPHS=true --paged --prompt-tokens 512 --max-output-tokens 128` workload. Median-of-3, reporting α alongside decode tok/s.
+
+Preflight Check 2 in the section above math-ceilings α=0.75 at 1.571× on Qwen3.5-4B's MTP (k=1, ~86% overhead). The ≥1.5× target stands; α<0.72 is the stop-ship threshold.
+
+### Cost
+
+- Pod: 1× A6000 warm lease from the `ce kiln-pod-acquire` pool, ~35 min wall clock (preflight + build + 3×Off + 3×Mtp + log pull + lease release).
+- Build: 81 s (sccache hit rate 94%).
+- No nsys capture, no Marlin repack, no second pod.
+- Well under the 120 min / $60 cap.
+
+### What this PR does NOT do
+
+- Does not attempt the GDN state rollback fix (scope-discipline: doc-only, per task brief).
+- Does not run the SkipLayer arm (out of scope for this PR; Phase X preflight uses SkipLayer as an A/B option but the Mtp row is the blocker here).
+- Does not modify any `.rs` source. PROFILING.md only.
+
