@@ -297,12 +297,17 @@ impl LinearAttentionState {
         let dv = config.linear_value_head_dim;
         let conv_dim = config.linear_qkv_dim();
         let k_minus_1 = config.linear_conv_kernel_dim.saturating_sub(1);
+        let recurrent_dtype = match (device, config.dtype) {
+            (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
+            (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
+            _ => DType::F32,
+        };
 
         let mut recurrent_states = Vec::with_capacity(num_linear_layers);
         let mut conv_states = Vec::with_capacity(num_linear_layers);
 
         for _ in 0..num_linear_layers {
-            recurrent_states.push(Tensor::zeros((1, nv, dk, dv), DType::F32, device)?);
+            recurrent_states.push(Tensor::zeros((1, nv, dk, dv), recurrent_dtype, device)?);
             conv_states.push(Tensor::zeros((1, conv_dim, k_minus_1), DType::F32, device)?);
         }
 
@@ -5618,9 +5623,48 @@ mod tests {
         assert_eq!(state.conv_states.len(), 3);
         // Recurrent state shape: [1, nv, dk, dv]
         assert_eq!(state.recurrent_states[0].dims(), &[1, 4, 4, 4]);
+        assert_eq!(state.recurrent_states[0].dtype(), DType::F32);
         // Conv state shape: [1, qkv_dim, kernel_size-1] where qkv_dim = 2*(nk*dk) + nv*dv = 2*8+16=32
         let qkv_dim = 2 * (2 * 4) + 4 * 4; // 32
         assert_eq!(state.conv_states[0].dims(), &[1, qkv_dim, 3]);
+        assert_eq!(state.conv_states[0].dtype(), DType::F32);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_linear_attention_state_uses_bf16_on_metal_for_bf16_models() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: 16,
+            num_layers: 4,
+            num_attention_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: false,
+            linear_num_key_heads: 2,
+            linear_key_head_dim: 4,
+            linear_num_value_heads: 4,
+            linear_value_head_dim: 4,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let state = LinearAttentionState::new(&config, &device)?;
+        assert_eq!(state.recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(state.conv_states[0].dtype(), DType::F32);
 
         Ok(())
     }
