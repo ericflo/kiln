@@ -275,8 +275,6 @@ async fn run_loop(
             }
         };
 
-        *state.lock().await = ServerState::Running;
-
         if let Some(out) = child.stdout.take() {
             let logs_c = Arc::clone(&logs);
             tokio::spawn(async move {
@@ -403,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_kills_running_process() {
+    async fn stop_kills_started_process() {
         let config = SupervisorConfig {
             binary_path: PathBuf::from("/bin/sleep"),
             args: vec!["10".to_string()],
@@ -420,8 +418,8 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
-            matches!(sup.state().await, ServerState::Running),
-            "expected Running"
+            matches!(sup.state().await, ServerState::Starting | ServerState::Running),
+            "expected Starting or Running"
         );
 
         sup.stop().await.expect("stop");
