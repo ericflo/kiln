@@ -17,7 +17,8 @@ use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_streaming, model_forward_paged_with_last_hidden, streaming_prefill_enabled,
+    model_forward_paged_last_token, model_forward_paged_streaming,
+    model_forward_paged_with_last_hidden, streaming_prefill_enabled,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -411,6 +412,10 @@ impl ModelRunner {
                 }
             }
 
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
             // Decode step: forward pass on just the new token
             let logits = model_forward(
                 &*self.backend,
@@ -525,6 +530,10 @@ impl ModelRunner {
                         }
                     }
                 }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
@@ -759,7 +768,7 @@ impl ModelRunner {
                 )
                 .context("prefill forward pass (paged, streaming) failed")?
             } else {
-                model_forward_paged(
+                model_forward_paged_last_token(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -823,6 +832,10 @@ impl ModelRunner {
                         }
                     }
                 }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
             }
 
             let logits = {
@@ -890,7 +903,7 @@ impl ModelRunner {
             )
             .context("prefill forward pass (paged, streaming) failed")?
         } else {
-            model_forward_paged(
+            model_forward_paged_last_token(
                 &*self.backend,
                 prompt_tokens,
                 &self.weights,
@@ -962,6 +975,10 @@ impl ModelRunner {
                         }
                     }
                 }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
             }
 
             // Decode step: use CUDA graph runner (captures/replays when enabled)
@@ -2070,6 +2087,10 @@ impl ModelRunner {
                 StreamTokenDisposition::ReceiverDropped => return Ok(rx),
             }
 
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
             let logits = {
                 let mut pc_guard = lock_paged_cache(paged_cache)?;
                 model_forward_paged(
@@ -2263,6 +2284,10 @@ impl ModelRunner {
                         }
                     }
                 }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
             }
 
             // Decode step: use CUDA graph runner

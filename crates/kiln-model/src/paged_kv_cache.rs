@@ -125,6 +125,17 @@ impl PagedKvCache {
         let new_len = k.dim(2)?;
         let (k_pool, v_pool) = &mut self.layers[layer_idx];
 
+        if new_len == 1 {
+            let slot = block_table
+                .slot_for(start_pos, self.block_size)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no slot for position {start_pos} in block table")
+                })?;
+            k_pool.slice_set(&k.squeeze(2)?, 0, slot)?;
+            v_pool.slice_set(&v.squeeze(2)?, 0, slot)?;
+            return Ok(());
+        }
+
         // Reshape from [1, num_kv_heads, new_len, head_dim] to [new_len, num_kv_heads, head_dim]
         let k_flat = k.squeeze(0)?.transpose(0, 1)?.contiguous()?;
         let v_flat = v.squeeze(0)?.transpose(0, 1)?.contiguous()?;
@@ -161,6 +172,20 @@ impl PagedKvCache {
         v: &Tensor,
     ) -> Result<()> {
         let new_len = k.dim(2)?;
+
+        if new_len == 1 {
+            let slot = block_table
+                .slot_for(start_pos, self.block_size)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no slot for position {start_pos} in block table")
+                })?;
+            let k_q = fp8::quantize_to_fp8_direct(&k.squeeze(2)?)?;
+            let v_q = fp8::quantize_to_fp8_direct(&v.squeeze(2)?)?;
+            let (k_pool, v_pool) = &mut self.layers[layer_idx];
+            k_pool.slice_set(&k_q, 0, slot)?;
+            v_pool.slice_set(&v_q, 0, slot)?;
+            return Ok(());
+        }
 
         // Reshape from [1, num_kv_heads, new_len, head_dim] to [new_len, num_kv_heads, head_dim]
         let k_flat = k.squeeze(0)?.transpose(0, 1)?.contiguous()?;
@@ -566,6 +591,31 @@ mod tests {
     }
 
     #[test]
+    fn test_single_token_write_preserves_multihead_layout() -> Result<()> {
+        let device = Device::Cpu;
+        let mut cache = PagedKvCache::new(1, 2, 4, 2, 3, DType::F32, &device)?;
+        let mut bt = BlockTable::new();
+        bt.push(1);
+
+        let k = Tensor::new(&[[[[1.0_f32, 2.0, 3.0]], [[4.0_f32, 5.0, 6.0]]]], &device)?;
+        let v = Tensor::new(
+            &[[[[11.0_f32, 12.0, 13.0]], [[14.0_f32, 15.0, 16.0]]]],
+            &device,
+        )?;
+
+        cache.write(0, &bt, 2, &k, &v)?;
+        let (k_out, v_out) = cache.read(0, &bt, 3)?;
+        assert_eq!(k_out.dims(), &[1, 2, 3, 3]);
+
+        let k_last = k_out.narrow(2, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(k_last, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let v_last = v_out.narrow(2, 2, 1)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(v_last, vec![11.0, 12.0, 13.0, 14.0, 15.0, 16.0]);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_paged_vs_contiguous_equivalence() -> Result<()> {
         let device = Device::Cpu;
         let num_kv_heads = 2;
@@ -762,6 +812,37 @@ mod tests {
                 rel_err < 0.15,
                 "K index {i}: orig={o}, read={r}, rel_err={rel_err}"
             );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fp8_single_token_write_roundtrip() -> Result<()> {
+        let device = Device::Cpu;
+        let mut cache = PagedKvCache::new_with_fp8(1, 2, 4, 2, 3, DType::F32, &device, true)?;
+        let mut bt = BlockTable::new();
+        bt.push(0);
+
+        let k = Tensor::new(&[[[[1.0_f32, 2.0, 3.0]], [[4.0_f32, 5.0, 6.0]]]], &device)?;
+        let v = Tensor::new(
+            &[[[[11.0_f32, 12.0, 13.0]], [[14.0_f32, 15.0, 16.0]]]],
+            &device,
+        )?;
+
+        cache.write(0, &bt, 1, &k, &v)?;
+        let (k_out, v_out) = cache.read(0, &bt, 2)?;
+        let k_last = k_out.narrow(2, 1, 1)?.flatten_all()?.to_vec1::<f32>()?;
+        let v_last = v_out.narrow(2, 1, 1)?.flatten_all()?.to_vec1::<f32>()?;
+
+        for (orig, read) in [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0].iter().zip(k_last.iter()) {
+            assert!((orig - read).abs() / orig.abs().max(0.01) < 0.15);
+        }
+        for (orig, read) in [11.0_f32, 12.0, 13.0, 14.0, 15.0, 16.0]
+            .iter()
+            .zip(v_last.iter())
+        {
+            assert!((orig - read).abs() / orig.abs().max(0.01) < 0.15);
         }
 
         Ok(())

@@ -39,6 +39,10 @@ impl BackendRuntime for MetalBackend {
         true
     }
 
+    fn supports_flash_attn_prefill_head_major(&self) -> bool {
+        true
+    }
+
     fn supports_flash_attn_paged_decode(&self) -> bool {
         true
     }
@@ -71,6 +75,26 @@ impl BackendRuntime for MetalBackend {
             .context("candle-metal sdpa failed")?;
 
         let out = out.transpose(1, 2)?.contiguous()?;
+        Ok(Some(out))
+    }
+
+    fn flash_attn_prefill_head_major(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<Tensor>> {
+        if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+            return Ok(None);
+        }
+        if !metal_sdpa_supports_head_dim(q.dim(candle_core::D::Minus1)?) {
+            return Ok(None);
+        }
+
+        let out = candle_nn::ops::sdpa(q, k, v, None, causal, softmax_scale, 1.0)
+            .context("candle-metal head-major sdpa failed")?;
         Ok(Some(out))
     }
 
@@ -141,14 +165,8 @@ impl BackendRuntime for MetalBackend {
         // [1, 1, num_heads, head_dim]; K/V are [total_seqlen_k, num_kv_heads, head_dim].
         // SDPA handles GQA internally when num_heads % num_kv_heads == 0.
         let q_sdpa = q.transpose(1, 2)?.contiguous()?; // [1, num_heads, 1, head_dim]
-        let k_sdpa = k_live
-            .unsqueeze(0)?
-            .transpose(1, 2)?
-            .contiguous()?; // [1, num_kv_heads, total_seqlen_k, head_dim]
-        let v_sdpa = v_live
-            .unsqueeze(0)?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let k_sdpa = k_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?; // [1, num_kv_heads, total_seqlen_k, head_dim]
+        let v_sdpa = v_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?;
 
         let out = candle_nn::ops::sdpa(&q_sdpa, &k_sdpa, &v_sdpa, None, causal, softmax_scale, 1.0)
             .context("candle-metal paged sdpa failed")?;
@@ -214,8 +232,8 @@ mod tests {
         // Shuffled physical block table — exercises the gather, not just
         // sequential blocks.
         let block_ids: [u32; 4] = [3, 7, 0, 5];
-        let block_table = Tensor::new(block_ids.as_slice(), &device)?
-            .reshape((1usize, max_blocks_per_seq))?;
+        let block_table =
+            Tensor::new(block_ids.as_slice(), &device)?.reshape((1usize, max_blocks_per_seq))?;
 
         // Fill the pool with distinctive per-slot values so the gather's
         // correctness is visible in the output. Each slot's values are
@@ -226,16 +244,10 @@ mod tests {
         let v_pool_data: Vec<f32> = (0..total_slots * num_kv_heads * head_dim)
             .map(|i| (i as f32) * 0.0001 + 1.0)
             .collect();
-        let k_pool = Tensor::from_slice(
-            &k_pool_data,
-            (total_slots, num_kv_heads, head_dim),
-            &device,
-        )?;
-        let v_pool = Tensor::from_slice(
-            &v_pool_data,
-            (total_slots, num_kv_heads, head_dim),
-            &device,
-        )?;
+        let k_pool =
+            Tensor::from_slice(&k_pool_data, (total_slots, num_kv_heads, head_dim), &device)?;
+        let v_pool =
+            Tensor::from_slice(&v_pool_data, (total_slots, num_kv_heads, head_dim), &device)?;
 
         let q = Tensor::randn(0.0f32, 0.02, (1, 1, num_heads, head_dim), &device)?;
         let softmax_scale = 1.0 / (head_dim as f32).sqrt();
@@ -243,8 +255,14 @@ mod tests {
 
         let out_paged = backend
             .flash_attn_paged_decode(
-                &q, &k_pool, &v_pool, &block_table, total_seqlen_k,
-                block_size, softmax_scale, true,
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                total_seqlen_k,
+                block_size,
+                softmax_scale,
+                true,
             )?
             .expect("backend should handle this shape");
 
@@ -273,7 +291,10 @@ mod tests {
             .flatten_all()?
             .max(D::Minus1)?
             .to_scalar::<f32>()?;
-        assert!(diff < 1e-5, "paged vs direct SDPA diverge: max abs diff = {diff}");
+        assert!(
+            diff < 1e-5,
+            "paged vs direct SDPA diverge: max abs diff = {diff}"
+        );
 
         Ok(())
     }
@@ -292,7 +313,8 @@ mod tests {
         let q = Tensor::zeros((1, 1, 2, head_dim), DType::F32, &device)?;
 
         let backend = MetalBackend::new(device);
-        let out = backend.flash_attn_paged_decode(&q, &k_pool, &v_pool, &block_table, 4, 4, 1.0, true)?;
+        let out =
+            backend.flash_attn_paged_decode(&q, &k_pool, &v_pool, &block_table, 4, 4, 1.0, true)?;
         assert!(out.is_none(), "should decline unsupported head_dim");
         Ok(())
     }

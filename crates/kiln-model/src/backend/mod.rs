@@ -45,6 +45,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_flash_attn_prefill_head_major(&self) -> bool {
+        false
+    }
+
     fn supports_flash_attn_paged_decode(&self) -> bool {
         false
     }
@@ -67,6 +71,23 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Caller must GQA-expand K/V to match Q's head count. Returns
     /// `[batch, seq_len, num_heads, head_dim]` bf16.
     fn flash_attn_prefill(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _softmax_scale: f32,
+        _causal: bool,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// FlashAttention-2 forward for prefill with Q/K/V already in SDPA layout.
+    ///
+    /// `q`: `[batch, num_heads, seq_len, head_dim]` bf16 contiguous. `k` and
+    /// `v`: `[batch, num_kv_heads, seq_len, head_dim]` bf16 contiguous.
+    /// Backends may decline when they lack native GQA support. Returns
+    /// `[batch, num_heads, seq_len, head_dim]` bf16.
+    fn flash_attn_prefill_head_major(
         &self,
         _q: &Tensor,
         _k: &Tensor,
