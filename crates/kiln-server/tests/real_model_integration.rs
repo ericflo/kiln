@@ -258,7 +258,16 @@ async fn test_real_model_streaming_chat_completion() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300, "qwen3.5-4b-kiln".to_string());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device.clone(),
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        300,
+        "qwen3.5-4b-kiln".to_string(),
+    );
 
     let app = api::router(state);
 
@@ -434,8 +443,14 @@ async fn test_health_with_real_backend() {
 
     assert_eq!(resp["status"], "ok");
     assert_eq!(resp["backend"], "model");
-    // scheduler should be null for real backend
-    assert!(resp["scheduler"].is_null());
+    let scheduler = &resp["scheduler"];
+    assert_eq!(scheduler["waiting"], 0);
+    assert_eq!(scheduler["running"], 0);
+    assert!(scheduler["blocks_total"].as_u64().unwrap() > 0);
+    let checks = resp["checks"].as_array().unwrap();
+    assert!(checks
+        .iter()
+        .any(|check| check["name"] == "inference_prewarm_complete" && check["pass"] == true));
 }
 
 /// End-to-end: HTTP → axum → ModelRunner → Metal → generate. Runs the tiny

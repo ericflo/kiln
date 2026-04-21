@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -122,6 +123,7 @@ async fn main() -> Result<()> {
         vocab_size = tokenizer.vocab_size(),
         "tokenizer loaded successfully"
     );
+    warm_tokenizer(&tokenizer);
 
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
@@ -254,9 +256,11 @@ fn spawn_backend_prewarm(state: AppState) {
 
     let runner = runner.clone();
     let gpu_lock = state.gpu_lock.clone();
+    let prewarm_complete = state.inference_prewarm_complete.clone();
 
     tokio::spawn(async move {
         tracing::info!("starting background inference prewarm");
+        let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             // Hold the exclusive GPU lock so prewarm never races real
             // generation. If a request starts first, this blocks until that
@@ -303,11 +307,34 @@ fn spawn_backend_prewarm(state: AppState) {
         .await;
 
         match prewarm {
-            Ok(Ok(())) => tracing::info!("background inference prewarm complete"),
+            Ok(Ok(())) => tracing::info!(
+                elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
+                "background inference prewarm complete"
+            ),
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
+        prewarm_complete.store(true, Ordering::Release);
     });
+}
+
+fn warm_tokenizer(tokenizer: &KilnTokenizer) {
+    let start = std::time::Instant::now();
+    let prompt = "Kiln tokenizer startup warmup.";
+    match tokenizer.encode(prompt) {
+        Ok(tokens) => {
+            if let Err(err) = tokenizer.decode(&tokens) {
+                tracing::warn!(error = %err, "tokenizer decode warmup failed");
+            } else {
+                tracing::info!(
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    tokens = tokens.len(),
+                    "tokenizer warmup complete"
+                );
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "tokenizer encode warmup failed"),
+    }
 }
 
 #[cfg(feature = "metal")]

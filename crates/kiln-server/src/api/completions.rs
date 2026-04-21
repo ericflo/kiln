@@ -10,6 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
@@ -233,6 +234,8 @@ async fn chat_completions_inner(
     state: &AppState,
     req: ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
+    wait_for_inference_prewarm(state).await?;
+
     // Convert request messages to ChatMessage for template formatting
     let chat_messages: Vec<ChatMessage> = req
         .messages
@@ -323,6 +326,23 @@ async fn chat_completions_inner(
             }
         }
     }
+}
+
+async fn wait_for_inference_prewarm(state: &AppState) -> Result<(), ApiError> {
+    if state.inference_prewarm_complete.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let timeout = state.request_timeout;
+    let wait = async {
+        while !state.inference_prewarm_complete.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+
+    tokio::time::timeout(timeout, wait)
+        .await
+        .map_err(|_| ApiError::request_timeout(timeout.as_secs()))
 }
 
 /// Ensure the correct LoRA adapter is active for the given request.
