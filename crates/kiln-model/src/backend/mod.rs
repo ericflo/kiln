@@ -191,6 +191,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_gated_rms_norm(&self) -> bool {
+        false
+    }
+
     fn supports_causal_conv1d_update(&self) -> bool {
         false
     }
@@ -258,6 +262,23 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _a_log: &Tensor,
         _dt_bias: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
+        Ok(None)
+    }
+
+    /// Fused GDN gated RMSNorm.
+    ///
+    /// Computes `rms_norm(x, weight) * silu(z)` for Gated DeltaNet outputs.
+    /// `x` and `z` are `[B, T, H, D]`, and `weight` is `[D]`.
+    /// Returns a tensor with the same shape as `x`. Backends may return the
+    /// model dtype directly; the call site already casts to the requested
+    /// dtype after reshaping, matching the portable fallback.
+    fn gdn_gated_rms_norm(
+        &self,
+        _x: &Tensor,
+        _z: &Tensor,
+        _weight: &Tensor,
+        _eps: f64,
+    ) -> Result<Option<Tensor>> {
         Ok(None)
     }
 }

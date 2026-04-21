@@ -16,6 +16,7 @@ const DISABLE_FUSED_CONV1D: &str = "KILN_DISABLE_FUSED_CONV1D";
 const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
 const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
+const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
 
 #[derive(Debug)]
 pub struct MetalBackend {
@@ -63,6 +64,10 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_gdn_recurrent_step(&self) -> bool {
         !metal_gdn_recurrent_disabled()
+    }
+
+    fn supports_gdn_gated_rms_norm(&self) -> bool {
+        !metal_gated_rms_norm_disabled()
     }
 
     fn flash_attn_prefill(
@@ -246,6 +251,21 @@ impl BackendRuntime for MetalBackend {
             .context("metal gdn_recurrent_step kernel failed")?;
         Ok(Some(out))
     }
+
+    fn gdn_gated_rms_norm(
+        &self,
+        x: &Tensor,
+        z: &Tensor,
+        weight: &Tensor,
+        eps: f64,
+    ) -> Result<Option<Tensor>> {
+        if metal_gated_rms_norm_disabled() || !metal_gated_rms_norm_supports(x, z, weight) {
+            return Ok(None);
+        }
+        let out = metal_gated_rms_norm_bf16(x, z, weight, eps as f32)
+            .context("metal gated_rms_norm kernel failed")?;
+        Ok(Some(out))
+    }
 }
 
 /// Mirrors the head-dim whitelist in candle-nn 0.10.2's
@@ -268,6 +288,10 @@ fn metal_conv1d_update_disabled() -> bool {
 
 fn metal_gdn_recurrent_disabled() -> bool {
     env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
+}
+
+fn metal_gated_rms_norm_disabled() -> bool {
+    env_truthy(DISABLE_METAL_GATED_RMSNORM)
 }
 
 fn env_truthy(var: &str) -> bool {
@@ -411,6 +435,198 @@ fn metal_gdn_recurrent_supports(
         && (b_s, h_s, dk_s, dv_s) == (batch, heads, dk, dv)
         && dk <= 256
         && dv <= 1024
+}
+
+fn metal_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> bool {
+    if !matches!(x.device(), Device::Metal(_))
+        || !matches!(z.device(), Device::Metal(_))
+        || !matches!(weight.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::BF16 {
+        return false;
+    }
+    let Ok((batch, seq_len, heads, hidden)) = x.dims4() else {
+        return false;
+    };
+    let Ok((z_batch, z_seq_len, z_heads, z_hidden)) = z.dims4() else {
+        return false;
+    };
+    if (z_batch, z_seq_len, z_heads, z_hidden) != (batch, seq_len, heads, hidden) {
+        return false;
+    }
+    weight.dims() == &[hidden] && hidden <= 1024
+}
+
+const METAL_GATED_RMSNORM_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gated_rmsnorm_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* z [[buffer(1)]],
+    device const bfloat* weight [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    constant uint& threadgroup_width [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    threadgroup float scratch[1024];
+
+    const uint row = gid.y;
+    if (row >= rows) {
+        return;
+    }
+
+    const uint base = row * hidden;
+    float sum_sq = 0.0f;
+    if (tid < hidden) {
+        const float xv = static_cast<float>(x[base + tid]);
+        sum_sq = xv * xv;
+    }
+    scratch[tid] = sum_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = threadgroup_width / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            scratch[tid] += scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid < hidden) {
+        const float rms_inv = rsqrt((scratch[0] / static_cast<float>(hidden)) + eps);
+        const float xv = static_cast<float>(x[base + tid]);
+        const float zv = static_cast<float>(z[base + tid]);
+        const float gate = zv / (1.0f + exp(-zv));
+        out[base + tid] = static_cast<bfloat>(xv * rms_inv * static_cast<float>(weight[tid]) * gate);
+    }
+}
+"#;
+
+fn metal_gated_rms_norm_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gated rmsnorm pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = device
+        .device()
+        .new_library_with_source(METAL_GATED_RMSNORM_KERNEL, None)
+        .map_err(|e| anyhow::anyhow!("compile metal gated rmsnorm library: {e:?}"))?;
+    let function = library
+        .get_function("kiln_gated_rmsnorm_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gated rmsnorm function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gated rmsnorm pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gated_rms_norm_bf16(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    let (batch, seq_len, heads, hidden) = x.dims4()?;
+    let rows = batch
+        .checked_mul(seq_len)
+        .and_then(|v| v.checked_mul(heads))
+        .context("metal gated rmsnorm row count overflow")?;
+    anyhow::ensure!(
+        rows <= u32::MAX as usize && hidden <= u32::MAX as usize,
+        "metal gated rmsnorm shape too large"
+    );
+    anyhow::ensure!(hidden <= 1024, "metal gated rmsnorm hidden dim > 1024");
+
+    let x = x.contiguous()?;
+    let z = z.contiguous()?;
+    let weight = weight.contiguous()?;
+    let out = Tensor::zeros((batch, seq_len, heads, hidden), DType::BF16, x.device())?;
+
+    if rows == 0 {
+        return Ok(out);
+    }
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal gated rmsnorm requires a Metal tensor");
+    };
+    let pipeline = metal_gated_rms_norm_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gated_rmsnorm_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (z_storage, z_layout) = z.storage_and_layout();
+        let (w_storage, w_layout) = weight.storage_and_layout();
+        let (o_storage, o_layout) = out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gated rmsnorm x must be on Metal"),
+        };
+        let z_metal = match &*z_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gated rmsnorm z must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gated rmsnorm weight must be on Metal"),
+        };
+        let out_metal = match &*o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gated rmsnorm out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let z_buf = candle_core::metal_backend::buffer_o(z_metal.buffer(), &z_layout, z.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(z_buf.buffer), z_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let rows_u32 = rows as u32;
+        let hidden_u32 = hidden as u32;
+        let threads = hidden.next_power_of_two().clamp(32, 1024);
+        let threads_u32 = threads as u32;
+        encoder.set_bytes(4, &rows_u32);
+        encoder.set_bytes(5, &hidden_u32);
+        encoder.set_bytes(6, &eps);
+        encoder.set_bytes(7, &threads_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: threads,
+            height: rows,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 const METAL_GDN_RECURRENT_KERNEL: &str = r#"
