@@ -1,9 +1,50 @@
 # Phase C10 — fp32 HF reference comparator + top1-flip per-site bisect
 
-**Status:** WIP (script complete, execution blocked by pod-infrastructure failure — see "Execution blockers" below)
+**Status:** Complete. **Null result** — zero tap flips across all 24 taps × 3 seeds (72 splice tests). The C9 bf16-noise verdict holds: no single operator's bf16 materialization is responsible for the Class B rejection rate. C11 target promotes to holistic changes (Marlin W4A16 q_proj audit, abs_pos/RoPE at pos > 0, or fp32 draft head as a policy).
 
 **Branch:** `mtp-phase-c10-fp32-reference-comparator`
 **Baseline:** main @ `175b13a` (post-C9 merge `32ae7be` + Metal prewarm hardening)
+
+## Verdict
+
+| Hypothesis | Outcome | C11 target |
+|---|---|---|
+| **C9 bf16-noise verdict holds** ✅ | Every tap flip = False across all 3 seeds. `any_flip=False`, comparator exit 0. | **Holistic changes only** — Marlin W4A16 q_proj audit, abs_pos/RoPE at pos > 0, or fp32 draft head policy |
+| Single-operator semantic bug | Rejected: zero taps flipped at ≥ 1/3 pairs, let alone ≥ 4/6 | — |
+| Multi-operator compounding | Rejected: zero taps flipped even intermittently | — |
+
+**Headline numbers:**
+
+- `kiln_matches_ref` = True on all 3 seeds (seed42/3074, seed43/16078, seed44/1814 at `mtp_pos=2`) — kiln's bf16 argmax already equals the fp32 HF reference argmax at these draft positions. No splice is capable of "flipping" a prediction that already matches.
+- 0 / 72 tap splices produced an argmax flip.
+- ref_top1 margins after splice stay positive everywhere: min +3.1250 (seed43, mtp_logits terminal), max +8.2500 (seed42, mtp_logits terminal). Per-tap margin spread is ≤ 0.09 fp32-logit units against the mtp_logits endpoint, confirming no tap is pushing the argmax near a decision boundary.
+
+See `docs/phase-c10/c10_splice_bisect_table.md` for the full per-tap table.
+
+## Interpretation
+
+C9 said cos_sim ≥ 0.9999 at every tap; C10 now confirms the *behavioral* counterpart — at every tap, substituting kiln's bf16 activation into the fp32 reference forward does not change the argmax. Combined, the MTP head operators are numerically and behaviorally equivalent to the fp32 HF reference on the sampled positions. The Class B rejection rate (87.6% of MTP rejections) and α ≈ 0.058 floor therefore cannot be pinned on any single MTP-head operator's precision — they must arise from:
+
+1. **Policy-level quantization drift** — e.g. Marlin W4A16 q_proj, where the effective fp32-equivalent numerics depend on per-channel scale choices rather than bf16 accumulation.
+2. **Upstream-trunk drift** — the `h_main` input into the MTP head comes from the main-model forward, which has its own cumulative drift budget (audited separately in B10/B11b/B12). C10 splices on top of kiln's `h_main`, so this audit cannot see main-model drift as a "flip."
+3. **Positional semantics at pos > 0** — abs_pos / RoPE handling at draft positions is the only part of the reference that differs structurally from the main-model forward; worth a targeted audit even though no single tap flipped.
+4. **Decode-time state divergence** — scheduler/paging path, stochastic-sampling alignment, or KV-cache fp8 interactions not captured by dump-replay.
+
+These are the C11 candidates, in decreasing expected yield:
+
+1. **Marlin W4A16 q_proj audit** (most likely) — verify packed weight channel scales match the bf16 q_proj behavior within the fp32 equivalence band, across MLP and attention projections.
+2. **fp32 draft head policy** — if the draft head alone runs in fp32 while the trunk stays bf16, does α lift off the floor? This is an ops-level test, not an operator fix.
+3. **abs_pos / RoPE correctness at pos > 0** — a symbolic audit (not numerical) against the HF reference for `mtp_pos ∈ {1, 2, 3}`.
+4. **Main-model `h_main` drift** — cross-reference the B10/B11b/B12 audits; if `h_main` is the drift source, MTP-head fixes will be null.
+
+## Execution (this PR)
+
+- Pod: `nwgdfesb0jpsuq` (A40, $0.44/hr, kiln-runpod image).
+- Build: sccache-hot cargo build, 110 s wall-clock; `kiln-bench --paged` at `KILN_W4A16=0` (default dumps path).
+- Model: `hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b` (the `hf` CLI rejects the legacy `huggingface-cli download ... --local-dir-use-symlinks False` form).
+- Dumps: 3 seeds × 1 file each (positions 1 & 2 multiplexed into one safetensors per seed via `KILN_MTP_DUMP_POS=1,2`). Each dump ~1.5 MB, ~2 min per seed.
+- Comparator: CPU-only, ~16 s for all 3 pairs. Wrote `docs/phase-c10/c10_splice_bisect_table.md` with `any_flip=False`, exit 0.
+- Total pod time: ~10 min. Pod self-terminated via the workflow's `cleanup()` function.
 
 ## Goal
 
@@ -215,13 +256,9 @@ timeout 120 python3 $RP scp $POD /workspace/kiln/docs/phase-c10/c10_splice_bisec
 ce kiln-pod-release --lease $LEASE
 ```
 
-### Verdict template (to be filled in next session)
+### Verdict (filled)
 
-| Hypothesis | Predicted outcome | C11 target |
-|---|---|---|
-| C9 bf16-noise verdict holds | Every tap flip = False across all 6 pairs | Holistic changes only — Marlin W4A16 q_proj audit, abs_pos/RoPE at pos>0, or fp32 draft head policy |
-| Single-operator semantic bug | One tap consistently flips (≥ 4/6 pairs) | Fix that operator's bf16 materialization or force fp32 locally |
-| Multi-operator compounding | 2-3 taps flip intermittently but never all together | Measure multi-site splice; likely policy-level fix |
+See "Verdict" section at the top of this report. Outcome: **C9 bf16-noise verdict holds**, C11 promotes to holistic changes.
 
 ## Anti-duplication preflight (done)
 
@@ -239,5 +276,5 @@ ce kiln-pod-release --lease $LEASE
   comparator with splice-override semantics. Self-contained; runs on CPU
   in minutes given six pre-generated kiln dumps. Vendored helpers from
   `mtp_reference_dump.py` so it has no cross-file import drift risk.
-- `docs/phase-c10/c10_report.md` (this file) — methodology, execution
-  blockers, resume recipe, verdict template.
+- `docs/phase-c10/c10_report.md` (this file) — methodology, execution log, final verdict.
+- `docs/phase-c10/c10_splice_bisect_table.md` (new) — per-pair + per-tap splice-bisect output from the A40 run. All 72 cells are `.` (no flip); margins stay positive everywhere.
