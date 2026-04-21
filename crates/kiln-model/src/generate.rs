@@ -2236,7 +2236,7 @@ impl ModelRunner {
                 self.active_lora.as_ref(),
             )
         } else {
-            model_forward_paged(
+            model_forward_paged_last_token(
                 &*self.backend,
                 &prompt_tokens,
                 &self.weights,

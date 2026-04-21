@@ -126,8 +126,9 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `v_prime`: `[B, H, C, dv]` bf16. `beta`: `[B, H, C]` bf16.
     /// Returns `W: [B, H, C, dv]` bf16.
     ///
-    /// Current CUDA kernel envelope is `C <= 128`; callers enforce it so the
-    /// trait impl doesn't need to check.
+    /// Backend kernels may advertise narrower envelopes; callers enforce the
+    /// shared `C <= 128` cap and implementations can return `None` for shapes
+    /// they do not handle.
     fn gdn_forward_substitution(
         &self,
         _a_strict: &Tensor,
