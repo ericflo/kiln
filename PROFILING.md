@@ -4036,3 +4036,186 @@ Do not reopen the norm-swap question without a new structural hypothesis — thi
 - Work: Part A (`--seed` prompt-pool wiring in `bench.rs`), Part B (16-run sweep script + execution), Part C (ANSI-safe aggregator), Part D (this section). All four parts landed in this PR.
 
 Pod released to pool on task completion.
+
+## Phase B4 — MTP `fc` concat order + weight layout audit vs upstream (doc-only)
+
+### Goal
+
+Phase B3 (PR #265) ruled out the `pre_fc_norm_embedding` ↔ `pre_fc_norm_hidden` swap as the α-collapse fix. The next live hypothesis from Phase B was that kiln's `fc` concat order or weight row/column layout mismatches the upstream Qwen3-MTP reference. Phase B4 is a $0, pod-free desk audit: compare kiln's MTP glue wiring byte-for-byte against the vLLM and SGLang reference implementations, plus a shape check against the published Qwen3.5-4B checkpoint header.
+
+### Upstream references
+
+**vLLM — `vllm/model_executor/models/qwen3_5_mtp.py`** (commit `771913e4a024`):
+
+```python
+# vllm-project/vllm @ 771913e4a024, qwen3_5_mtp.py
+self.fc = ColumnParallelLinear(
+    self.config.hidden_size * 2,
+    self.config.hidden_size,
+    bias=False,
+    ...,
+)
+self.pre_fc_norm_embedding = RMSNorm(
+    self.config.hidden_size, eps=self.config.rms_norm_eps
+)
+self.pre_fc_norm_hidden = RMSNorm(
+    self.config.hidden_size, eps=self.config.rms_norm_eps
+)
+...
+inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+hidden_states = self.pre_fc_norm_hidden(hidden_states)
+hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+hidden_states, _ = self.fc(hidden_states)
+```
+
+Source: <https://github.com/vllm-project/vllm/blob/771913e4a024/vllm/model_executor/models/qwen3_5_mtp.py>.
+
+**vLLM — `vllm/model_executor/models/qwen3_next_mtp.py`** (commit `657855ab4179`):
+
+```python
+# vllm-project/vllm @ 657855ab4179, qwen3_next_mtp.py
+self.fc = ColumnParallelLinear(
+    self.config.hidden_size * 2,
+    self.config.hidden_size,
+    bias=False,
+    ...,
+)
+inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+hidden_states = self.pre_fc_norm_hidden(hidden_states)
+hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+hidden_states, _ = self.fc(hidden_states)
+```
+
+Source: <https://github.com/vllm-project/vllm/blob/657855ab4179/vllm/model_executor/models/qwen3_next_mtp.py>.
+
+**SGLang — `python/sglang/srt/models/qwen3_5_mtp.py`** (commit `cabe171b6ce3`):
+
+```python
+# sgl-project/sglang @ cabe171b6ce3, qwen3_5_mtp.py
+self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
+self.pre_fc_norm_embedding = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+self.pre_fc_norm_hidden = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+...
+input_embeds = self.pre_fc_norm_embedding(input_embeds)
+hidden_states = self.pre_fc_norm_hidden(hidden_states)
+hidden_states = torch.cat([input_embeds, hidden_states], dim=-1)
+hidden_states = self.fc(hidden_states)
+```
+
+Source: <https://github.com/sgl-project/sglang/blob/cabe171b6ce3/python/sglang/srt/models/qwen3_5_mtp.py>.
+
+All three upstream references agree on the same wiring:
+
+1. **Concat order** is `[embed, hidden]` — the freshly embedded draft token first, the pre-final-norm hidden state second, along `dim=-1`.
+2. **Norm-to-input assignment** is `pre_fc_norm_embedding` → embedding half, `pre_fc_norm_hidden` → hidden half.
+3. **fc projection** is a standard PyTorch `nn.Linear(2*H, H)` (aliased as `ColumnParallelLinear(2*H, H)` in vLLM, which is identical to `nn.Linear` at `tensor_parallel_size=1`). PyTorch `nn.Linear(in, out)` stores `weight` as `[out, in]`, so on disk the tensor must be `[H, 2H]`.
+
+### Kiln code
+
+**`crates/kiln-model/src/forward.rs:3516–3536`** — current `mtp_forward_step` glue:
+
+```rust
+let swap_fc_norms = crate::mtp_debug::is_swap_fc_norms_enabled();
+let (norm_emb_weight, norm_h_weight) = if swap_fc_norms {
+    (&mtp.pre_fc_norm_hidden, &mtp.pre_fc_norm_embedding)
+} else {
+    (&mtp.pre_fc_norm_embedding, &mtp.pre_fc_norm_hidden)
+};
+let norm_emb = {
+    kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_emb");
+    rms_norm(&token_emb, norm_emb_weight, config.rms_norm_eps)?
+};
+let norm_h = {
+    kiln_nvtx::range!(c"kiln/mtp/pre_fc_norm_hidden");
+    rms_norm(h_prev, norm_h_weight, config.rms_norm_eps)?
+};
+
+// 4. Concat along the hidden dim and fuse: [1, 1, 2H] @ fc_t[2H, H] -> [1, 1, H]
+let fused = {
+    kiln_nvtx::range!(c"kiln/mtp/fc");
+    let concat = Tensor::cat(&[&norm_emb, &norm_h], 2)?.contiguous()?;
+    concat.broadcast_matmul(&mtp.fc_t)?
+};
+```
+
+With `KILN_MTP_SWAP_FC_NORMS=0` (the production default, which Phase B3 confirmed as optimal), this resolves to:
+
+- `norm_emb = RMSNorm_embedding(token_emb)` — embed-side norm on the draft-token embedding.
+- `norm_h   = RMSNorm_hidden(h_prev)` — hidden-side norm on the pre-final-norm hidden state.
+- `concat = cat([norm_emb, norm_h], dim=2)` — embed first, hidden second, matching vLLM/SGLang byte-for-byte.
+
+**`crates/kiln-model/src/loader.rs:626–632`** — fc shape check at load time:
+
+```rust
+let fc = extract_tensor(tensor_map, &format!("{mtp_prefix}fc.weight"))?;
+// fc maps concat(embed, hidden) → hidden, so shape is [hidden, 2*hidden].
+validate_shape(
+    &fc,
+    &[config.hidden_size, 2 * config.hidden_size],
+    &ctx("fc"),
+)?;
+```
+
+**`crates/kiln-model/src/forward.rs:768–770`** — upload-time transpose that feeds the forward path:
+
+```rust
+let fc = weight_to_tensor(&mtp_w.fc, device).context("mtp.fc")?;
+let fc_t = cached_transpose(&fc).context("mtp.fc cached transpose")?;
+```
+
+So on device we hold `fc_t: [2H, H]`, and the forward path computes `concat[1,1,2H] @ fc_t[2H, H] → [1,1,H]`, which is exactly equivalent to `nn.Linear(2H, H)` applied to `concat`.
+
+### Qwen3.5-4B checkpoint header (ground truth)
+
+Cross-check against the published `Qwen/Qwen3.5-4B` checkpoint, read via an HTTP Range request on `model.safetensors` (first ~200 KB is the JSON header). Relevant MTP entries:
+
+```
+mtp.fc.weight                           dtype=BF16  shape=[2560, 5120]
+mtp.pre_fc_norm_embedding.weight        dtype=BF16  shape=[2560]
+mtp.pre_fc_norm_hidden.weight           dtype=BF16  shape=[2560]
+mtp.norm.weight                         dtype=BF16  shape=[2560]
+mtp.layers.0.input_layernorm.weight     dtype=BF16  shape=[2560]
+mtp.layers.0.post_attention_layernorm.  dtype=BF16  shape=[2560]
+mtp.layers.0.self_attn.q_norm.weight    dtype=BF16  shape=[256]
+mtp.layers.0.self_attn.k_norm.weight    dtype=BF16  shape=[256]
+mtp.layers.0.self_attn.q_proj.weight    dtype=BF16  shape=[8192, 2560]
+mtp.layers.0.self_attn.k_proj.weight    dtype=BF16  shape=[1024, 2560]
+mtp.layers.0.self_attn.v_proj.weight    dtype=BF16  shape=[1024, 2560]
+mtp.layers.0.self_attn.o_proj.weight    dtype=BF16  shape=[2560, 4096]
+mtp.layers.0.mlp.gate_proj.weight       dtype=BF16  shape=[9728, 2560]
+mtp.layers.0.mlp.up_proj.weight         dtype=BF16  shape=[9728, 2560]
+mtp.layers.0.mlp.down_proj.weight       dtype=BF16  shape=[2560, 9728]
+```
+
+`hidden_size = 2560`, so `[2560, 5120] = [H, 2H]` for `mtp.fc.weight`, matching both (a) PyTorch's `nn.Linear(2*H, H)` storage convention used upstream, and (b) kiln's `validate_shape(&fc, &[H, 2H])`.
+
+Note also that `mtp.layers.0.self_attn.q_proj.weight` is `[8192, 2560] = [2·16·256, H]`, i.e. the gated `q_proj` (`attn_output_gate=true`), and `k_proj`/`v_proj` are `[1024, 2560] = [4·256, H]` (4 KV heads → GQA). These are the same shapes the main-model full-attention layers use; kiln's loader routes them through the existing `load_layer(..., 3, config)` call (line 683) precisely because layer_idx 3 falls in the full-attention residue class `(i + 1) % 4 == 0`.
+
+### Verdict
+
+**No mismatch.** Every one of the three wiring points audited is byte-equivalent between kiln and the upstream references, and the checkpoint header confirms the shape assumptions:
+
+| Wiring point                                  | Upstream (vLLM + SGLang)            | Kiln                                                    | Match |
+|-----------------------------------------------|-------------------------------------|---------------------------------------------------------|:-----:|
+| Concat order along the 2H dim                 | `[embed, hidden]`                   | `Tensor::cat(&[&norm_emb, &norm_h], 2)` (embed first)   |   ✅   |
+| Norm assigned to the embedding half           | `pre_fc_norm_embedding`             | `mtp.pre_fc_norm_embedding` (swap-off default)          |   ✅   |
+| Norm assigned to the hidden half              | `pre_fc_norm_hidden`                | `mtp.pre_fc_norm_hidden` (swap-off default)             |   ✅   |
+| `fc.weight` on-disk shape                     | `nn.Linear(2H, H)` ⇒ `[H, 2H]`      | `validate_shape(&fc, &[H, 2H])`                         |   ✅   |
+| `fc` applied to concat                        | `nn.Linear(concat)` ≡ `concat @ Wᵀ` | `concat.broadcast_matmul(&mtp.fc_t)` with `fc_t=[2H,H]` |   ✅   |
+
+Phase B3 already disproved the norm swap as the fix. Phase B4 now disproves the "fc concat order / weight layout is inverted" hypothesis: the kiln code and the Qwen3.5-4B checkpoint are fully consistent with both of the canonical Python reference implementations.
+
+### Recommendation — next hypothesis
+
+The α = 0.154 collapse with ~46% identity-bias persists despite correct MTP glue wiring. The remaining structural candidates, in order of likelihood:
+
+1. **`mtp.layers.0.*` transformer block weight load.** The MTP inner layer is loaded by re-using `load_layer(tensor_map, &mtp_layer_prefix, 3, config)`. This threads a synthetic `layer_idx=3` through the main-model full-attention path to pick up `attn_output_gate=true`, gated `q_proj` splitting (`[2·num_heads·head_dim, H]`), RMSNorm Q/K norm, etc. Any subtle loader divergence here — e.g. a main-model-only fix-up that assumes a sequential `layer_idx` residue pattern, or a slice of the gated `q_proj` that only activates on the real layers — would silently mis-wire the MTP layer without tripping any shape validator. Phase B5 should re-verify the MTP layer's GQA weights via a direct scalar-comparison test against vLLM's `Qwen3NextMultiTokenPredictor` on an identical input.
+2. **RoPE position threading into the MTP layer.** `mtp_forward_step` (forward.rs:3541) builds its own one-element position tensor (`Tensor::new(&[mtp_pos as f32][..], device)`) and passes it to `transformer_block_paged`. The MTP "position space" is distinct from the base model's. Confirm that `mtp_pos` is advanced exactly the same way as the reference generator (vLLM/SGLang advance it by +1 per accepted draft, not per verify-step).
+3. **Tied `lm_head` (`embed_tokens_t`).** The MTP head reuses the base model's `embed_tokens_t` as its LM head (loader.rs:604–606). Verify that `embed_tokens_t` is, in fact, `embed_tokens.transpose()` and not the same tensor feeding forward — a copy-vs-transpose confusion would look like a stochastic identity bias even when draft logits look plausible.
+4. **`mtp.final_layernorm` vs main-model `final_layernorm` reuse.** The MTP head ships its own `mtp.norm.weight` (confirmed in checkpoint header). Ensure the forward path applies `mtp.final_layernorm` and not the base model's after the inner transformer block.
+
+### Budget used
+
+- **Pod:** none. $0 pod spend.
+- **Wall-clock:** ≈ 45 min desk audit (upstream source comparison, safetensors header probe, kiln source re-read, write-up).
+- **Output:** this PROFILING.md appendix + this PR. No code changes.
