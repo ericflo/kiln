@@ -654,6 +654,59 @@ fn projection_tensors_for_load(
     }
 }
 
+fn parallel_projection_load_disabled() -> bool {
+    matches!(
+        std::env::var("KILN_DISABLE_PARALLEL_PROJECTION_LOAD")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn projection_tensors_for_load_batch(
+    weights: &[(&str, &WeightTensor)],
+    device: &Device,
+    cache: &ProjectionLoadCache,
+) -> Result<Vec<(Tensor, Tensor)>> {
+    if !matches!(device, Device::Metal(_)) || parallel_projection_load_disabled() {
+        return weights
+            .iter()
+            .map(|(name, w)| {
+                projection_tensors_for_load(w, device, cache)
+                    .with_context(|| format!("{name} projection tensors"))
+            })
+            .collect();
+    }
+
+    use rayon::prelude::*;
+
+    let transposed: Result<Vec<(Vec<u8>, [usize; 2])>> = weights
+        .par_iter()
+        .map(|(name, w)| {
+            transposed_weight_bytes_2d(w)
+                .with_context(|| format!("{name} transposed projection bytes"))
+        })
+        .collect();
+
+    transposed?
+        .into_iter()
+        .zip(weights.iter())
+        .map(|((data, shape), (name, w))| {
+            let transposed = Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, device)
+                .with_context(|| format!("{name} transposed projection upload"))?;
+            let original_stub = match cache.metal_stub_for(weight_dtype(w)) {
+                Some(stub) => stub,
+                None => dropped_weight_stub(w, device)
+                    .with_context(|| format!("{name} projection stub"))?,
+            };
+            Ok((original_stub, transposed))
+        })
+        .collect()
+}
+
 /// Cache a transpose for repeated GEMMs.
 ///
 /// Matmuls on the hot path repeatedly consume these tensors, so materialize
@@ -850,18 +903,22 @@ impl GpuWeights {
 
             let attention = match &lw.attention {
                 crate::weights::AttentionWeights::Full(attn) => {
-                    let (q_proj, q_proj_t) =
-                        projection_tensors_for_load(&attn.q_proj, device, &projection_load_cache)
-                            .context(ctx("q_proj projection tensors"))?;
-                    let (k_proj, k_proj_t) =
-                        projection_tensors_for_load(&attn.k_proj, device, &projection_load_cache)
-                            .context(ctx("k_proj projection tensors"))?;
-                    let (v_proj, v_proj_t) =
-                        projection_tensors_for_load(&attn.v_proj, device, &projection_load_cache)
-                            .context(ctx("v_proj projection tensors"))?;
-                    let (o_proj, o_proj_t) =
-                        projection_tensors_for_load(&attn.o_proj, device, &projection_load_cache)
-                            .context(ctx("o_proj projection tensors"))?;
+                    let attn_proj = projection_tensors_for_load_batch(
+                        &[
+                            ("q_proj", &attn.q_proj),
+                            ("k_proj", &attn.k_proj),
+                            ("v_proj", &attn.v_proj),
+                            ("o_proj", &attn.o_proj),
+                        ],
+                        device,
+                        &projection_load_cache,
+                    )
+                    .context(ctx("attention projection tensors"))?;
+                    let mut attn_proj = attn_proj.into_iter();
+                    let (q_proj, q_proj_t) = attn_proj.next().context(ctx("q_proj missing"))?;
+                    let (k_proj, k_proj_t) = attn_proj.next().context(ctx("k_proj missing"))?;
+                    let (v_proj, v_proj_t) = attn_proj.next().context(ctx("v_proj missing"))?;
+                    let (o_proj, o_proj_t) = attn_proj.next().context(ctx("o_proj missing"))?;
                     // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
                     // Marlin batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
@@ -889,33 +946,29 @@ impl GpuWeights {
                     })
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
-                    let (in_proj_qkv, in_proj_qkv_t) = projection_tensors_for_load(
-                        &attn.in_proj_qkv,
+                    let attn_proj = projection_tensors_for_load_batch(
+                        &[
+                            ("in_proj_qkv", &attn.in_proj_qkv),
+                            ("in_proj_z", &attn.in_proj_z),
+                            ("out_proj", &attn.out_proj),
+                            ("in_proj_a", &attn.in_proj_a),
+                            ("in_proj_b", &attn.in_proj_b),
+                        ],
                         device,
                         &projection_load_cache,
                     )
-                    .context(ctx("in_proj_qkv projection tensors"))?;
-                    let (in_proj_z, in_proj_z_t) = projection_tensors_for_load(
-                        &attn.in_proj_z,
-                        device,
-                        &projection_load_cache,
-                    )
-                    .context(ctx("in_proj_z projection tensors"))?;
+                    .context(ctx("linear attention projection tensors"))?;
+                    let mut attn_proj = attn_proj.into_iter();
+                    let (in_proj_qkv, in_proj_qkv_t) =
+                        attn_proj.next().context(ctx("in_proj_qkv missing"))?;
+                    let (in_proj_z, in_proj_z_t) =
+                        attn_proj.next().context(ctx("in_proj_z missing"))?;
                     let (out_proj, out_proj_t) =
-                        projection_tensors_for_load(&attn.out_proj, device, &projection_load_cache)
-                            .context(ctx("out_proj projection tensors"))?;
-                    let (in_proj_a, in_proj_a_t) = projection_tensors_for_load(
-                        &attn.in_proj_a,
-                        device,
-                        &projection_load_cache,
-                    )
-                    .context(ctx("in_proj_a projection tensors"))?;
-                    let (in_proj_b, in_proj_b_t) = projection_tensors_for_load(
-                        &attn.in_proj_b,
-                        device,
-                        &projection_load_cache,
-                    )
-                    .context(ctx("in_proj_b projection tensors"))?;
+                        attn_proj.next().context(ctx("out_proj missing"))?;
+                    let (in_proj_a, in_proj_a_t) =
+                        attn_proj.next().context(ctx("in_proj_a missing"))?;
+                    let (in_proj_b, in_proj_b_t) =
+                        attn_proj.next().context(ctx("in_proj_b missing"))?;
                     GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                         in_proj_qkv,
                         in_proj_z,
@@ -935,15 +988,20 @@ impl GpuWeights {
                 }
             };
 
-            let (gate_proj, gate_proj_t) =
-                projection_tensors_for_load(&lw.mlp.gate_proj, device, &projection_load_cache)
-                    .context(ctx("gate_proj projection tensors"))?;
-            let (up_proj, up_proj_t) =
-                projection_tensors_for_load(&lw.mlp.up_proj, device, &projection_load_cache)
-                    .context(ctx("up_proj projection tensors"))?;
-            let (down_proj, down_proj_t) =
-                projection_tensors_for_load(&lw.mlp.down_proj, device, &projection_load_cache)
-                    .context(ctx("down_proj projection tensors"))?;
+            let mlp_proj = projection_tensors_for_load_batch(
+                &[
+                    ("gate_proj", &lw.mlp.gate_proj),
+                    ("up_proj", &lw.mlp.up_proj),
+                    ("down_proj", &lw.mlp.down_proj),
+                ],
+                device,
+                &projection_load_cache,
+            )
+            .context(ctx("mlp projection tensors"))?;
+            let mut mlp_proj = mlp_proj.into_iter();
+            let (gate_proj, gate_proj_t) = mlp_proj.next().context(ctx("gate_proj missing"))?;
+            let (up_proj, up_proj_t) = mlp_proj.next().context(ctx("up_proj missing"))?;
+            let (down_proj, down_proj_t) = mlp_proj.next().context(ctx("down_proj missing"))?;
             // KILN_W4A16=1 opt-in: queue each MLP projection for the
             // post-loop Marlin batch pack. See the q_proj comment above —
             // the `*_proj_marlin` fields start as None, and
@@ -1067,30 +1125,22 @@ impl GpuWeights {
 
                 let attention = match &lw.attention {
                     crate::weights::AttentionWeights::Full(attn) => {
-                        let (q_proj, q_proj_t) = projection_tensors_for_load(
-                            &attn.q_proj,
+                        let attn_proj = projection_tensors_for_load_batch(
+                            &[
+                                ("q_proj", &attn.q_proj),
+                                ("k_proj", &attn.k_proj),
+                                ("v_proj", &attn.v_proj),
+                                ("o_proj", &attn.o_proj),
+                            ],
                             device,
                             &projection_load_cache,
                         )
-                        .context(ctx("q_proj projection tensors"))?;
-                        let (k_proj, k_proj_t) = projection_tensors_for_load(
-                            &attn.k_proj,
-                            device,
-                            &projection_load_cache,
-                        )
-                        .context(ctx("k_proj projection tensors"))?;
-                        let (v_proj, v_proj_t) = projection_tensors_for_load(
-                            &attn.v_proj,
-                            device,
-                            &projection_load_cache,
-                        )
-                        .context(ctx("v_proj projection tensors"))?;
-                        let (o_proj, o_proj_t) = projection_tensors_for_load(
-                            &attn.o_proj,
-                            device,
-                            &projection_load_cache,
-                        )
-                        .context(ctx("o_proj projection tensors"))?;
+                        .context(ctx("attention projection tensors"))?;
+                        let mut attn_proj = attn_proj.into_iter();
+                        let (q_proj, q_proj_t) = attn_proj.next().context(ctx("q_proj missing"))?;
+                        let (k_proj, k_proj_t) = attn_proj.next().context(ctx("k_proj missing"))?;
+                        let (v_proj, v_proj_t) = attn_proj.next().context(ctx("v_proj missing"))?;
+                        let (o_proj, o_proj_t) = attn_proj.next().context(ctx("o_proj missing"))?;
                         GpuAttentionWeights::Full(GpuFullAttentionWeights {
                             q_proj,
                             k_proj,
@@ -1114,15 +1164,20 @@ impl GpuWeights {
                     }
                 };
 
-                let (gate_proj, gate_proj_t) =
-                    projection_tensors_for_load(&lw.mlp.gate_proj, device, &projection_load_cache)
-                        .context(ctx("gate_proj projection tensors"))?;
-                let (up_proj, up_proj_t) =
-                    projection_tensors_for_load(&lw.mlp.up_proj, device, &projection_load_cache)
-                        .context(ctx("up_proj projection tensors"))?;
-                let (down_proj, down_proj_t) =
-                    projection_tensors_for_load(&lw.mlp.down_proj, device, &projection_load_cache)
-                        .context(ctx("down_proj projection tensors"))?;
+                let mlp_proj = projection_tensors_for_load_batch(
+                    &[
+                        ("gate_proj", &lw.mlp.gate_proj),
+                        ("up_proj", &lw.mlp.up_proj),
+                        ("down_proj", &lw.mlp.down_proj),
+                    ],
+                    device,
+                    &projection_load_cache,
+                )
+                .context(ctx("mlp projection tensors"))?;
+                let mut mlp_proj = mlp_proj.into_iter();
+                let (gate_proj, gate_proj_t) = mlp_proj.next().context(ctx("gate_proj missing"))?;
+                let (up_proj, up_proj_t) = mlp_proj.next().context(ctx("up_proj missing"))?;
+                let (down_proj, down_proj_t) = mlp_proj.next().context(ctx("down_proj missing"))?;
 
                 GpuLayerWeights {
                     input_layernorm,
