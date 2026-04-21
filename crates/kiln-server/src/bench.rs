@@ -111,6 +111,10 @@ struct BenchArgs {
     /// non-paged contiguous KvCache + model_forward path so prior numbers stay
     /// comparable.
     paged: bool,
+    /// RNG seed threaded through `SamplingParams` and `StdRng` sites so bench
+    /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
+    /// this across {0..=7} to get independent prompt/sampling trajectories.
+    seed: u64,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -121,6 +125,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut training_steps = 10;
     let mut skip_training = false;
     let mut paged = false;
+    let mut seed: u64 = 42;
 
     let mut i = 1;
     while i < args.len() {
@@ -147,6 +152,10 @@ fn parse_args() -> Result<BenchArgs> {
             "--paged" => {
                 paged = true;
             }
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(42);
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -163,6 +172,9 @@ fn parse_args() -> Result<BenchArgs> {
                 );
                 eprintln!(
                     "                            (matches the HTTP/scheduler production path)"
+                );
+                eprintln!(
+                    "  --seed <u64>              RNG seed + prompt selector from 8-prompt pool (default: 42)"
                 );
                 std::process::exit(0);
             }
@@ -182,6 +194,7 @@ fn parse_args() -> Result<BenchArgs> {
         training_steps,
         skip_training,
         paged,
+        seed,
     })
 }
 
@@ -208,12 +221,59 @@ fn current_vram_used_bytes() -> u64 {
         .unwrap_or(0)
 }
 
+/// 8 distinct prompt bases, indexed by `seed % 8`. Seed 0 is the historical
+/// default (the Phase B2 baseline), preserved verbatim for comparability.
+/// Seeds 1-7 give the multi-prompt A/B enough content diversity to exercise
+/// MTP draft behavior across different token distributions.
+const PROMPT_POOL: [&str; 8] = [
+    // 0: canonical B2 baseline — do not edit
+    "The quick brown fox jumps over the lazy dog near the river bank. \
+     Scientists discovered a new species of deep-sea fish in the Pacific Ocean. \
+     The quantum computer solved the optimization problem in record time. \
+     She wrote a comprehensive analysis of market trends for the quarterly report. ",
+    // 1: software / algorithms
+    "A red-black tree balances itself on every insertion and deletion to keep operations logarithmic. \
+     The compiler lowered the expression into three-address code before register allocation. \
+     Pagination in a distributed system needs a stable sort key or the client will see duplicates. \
+     An idempotent retry policy is the simplest defense against transient network failures. ",
+    // 2: history / biography
+    "The library at Alexandria housed an estimated half million scrolls before the great fire. \
+     Marie Curie remains the only person to win Nobel prizes in two distinct scientific fields. \
+     The printing press transformed European literacy faster than any single invention before it. \
+     Ancient Sumerian accountants pressed wedge-shaped marks into damp clay to track grain shipments. ",
+    // 3: nature / geography
+    "The Mariana Trench descends nearly eleven kilometers below the surface of the western Pacific. \
+     Alpine glaciers carve U-shaped valleys whose walls record the slow movement of compacted ice. \
+     Monarch butterflies navigate thousands of miles to the same Mexican forests their ancestors left. \
+     The Amazon basin exchanges more moisture with the atmosphere than any other river system on Earth. ",
+    // 4: philosophy
+    "Stoic ethics ground virtue in accepting what is outside the rational agent's direct control. \
+     Hume argued that no description of the world by itself entails any obligation about what ought to be. \
+     Phenomenology studies the structures of conscious experience from the first-person point of view. \
+     A thought experiment about swapped qualia probes whether subjective color really supervenes on function. ",
+    // 5: cooking / food science
+    "A pinch of salt in caramel suppresses perceived sweetness and sharpens the roasted sugar flavor. \
+     Bread dough becomes elastic because kneading aligns the gluten strands formed by wheat proteins. \
+     Emulsifying lemon juice into olive oil yields a stable vinaigrette only when whisked vigorously. \
+     Slow braising converts tough connective tissue into gelatin, tenderizing an otherwise unpromising cut. ",
+    // 6: space / astronomy
+    "A binary pulsar's timing drift confirmed general relativity's prediction of gravitational waves. \
+     The Parker Solar Probe samples the corona from closer than any spacecraft has previously flown. \
+     Tidally locked exoplanets have a permanent dayside whose climate differs from the eternal night side. \
+     Supernova remnants seed the interstellar medium with the heavier elements later rocky worlds inherit. ",
+    // 7: music / craft
+    "Equal temperament tuning slightly detunes every interval except the octave to enable free modulation. \
+     A violin luthier planes the spruce top until tap tones resonate in the correct pitch relationship. \
+     Polyrhythms layer pulses that only align at measure boundaries, driving much West African drumming. \
+     The overtone series produced by a bowed string determines the characteristic timbre of each instrument. ",
+];
+
 /// Build a prompt string of approximately `target_tokens` tokens by repeating sentences.
-fn build_prompt(tokenizer: &KilnTokenizer, target_tokens: usize) -> String {
-    let base = "The quick brown fox jumps over the lazy dog near the river bank. \
-                Scientists discovered a new species of deep-sea fish in the Pacific Ocean. \
-                The quantum computer solved the optimization problem in record time. \
-                She wrote a comprehensive analysis of market trends for the quarterly report. ";
+/// `seed` selects which base prompt to use from an 8-prompt pool (via `seed % 8`).
+/// Seed 0 reproduces the original Phase B2 baseline; other seeds use distinct content
+/// so a multi-prompt A/B actually varies the token distribution seen by the model.
+fn build_prompt(tokenizer: &KilnTokenizer, target_tokens: usize, seed: u64) -> String {
+    let base = PROMPT_POOL[(seed % PROMPT_POOL.len() as u64) as usize];
 
     let mut prompt = String::new();
     loop {
@@ -243,8 +303,9 @@ fn bench_inference(
     num_runs: usize,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
 ) -> Result<InferenceBenchResult> {
-    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let actual_prompt_tokens = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -257,7 +318,7 @@ fn bench_inference(
         max_tokens: max_output_tokens,
         repetition_penalty: 1.0,
         stop: vec![],
-        seed: Some(42),
+        seed: Some(seed),
     };
 
     // Warmup
@@ -315,7 +376,7 @@ fn bench_latency(
     prompt_tokens: usize,
     max_output_tokens: usize,
 ) -> Result<LatencyResult> {
-    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt = build_prompt(tokenizer, prompt_tokens, 0);
     let prompt_token_ids = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -464,7 +525,7 @@ fn bench_latency_paged(
     prompt_tokens: usize,
     max_output_tokens: usize,
 ) -> Result<LatencyResult> {
-    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt = build_prompt(tokenizer, prompt_tokens, 0);
     let prompt_token_ids = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -695,6 +756,7 @@ fn bench_latency_skiplayer(
     tokenizer: &KilnTokenizer,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -707,7 +769,7 @@ fn bench_latency_skiplayer(
         .and_then(|v| v.parse().ok())
         .unwrap_or(8usize);
 
-    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let prompt_token_ids = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -786,9 +848,9 @@ fn bench_latency_skiplayer(
         max_tokens: max_output_tokens,
         repetition_penalty: 1.0,
         stop: vec![],
-        seed: Some(42),
+        seed: Some(seed),
     };
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     while num_tokens < max_output_tokens {
         if eos_token_ids.contains(&last_token) {
@@ -898,6 +960,7 @@ fn bench_latency_paged_mtp(
     tokenizer: &KilnTokenizer,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -907,7 +970,7 @@ fn bench_latency_paged_mtp(
          (Qwen3.5-4B includes them)"
     );
 
-    let prompt = build_prompt(tokenizer, prompt_tokens);
+    let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let prompt_token_ids = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1005,9 +1068,9 @@ fn bench_latency_paged_mtp(
         max_tokens: max_output_tokens,
         repetition_penalty: 1.0,
         stop: vec![],
-        seed: Some(42),
+        seed: Some(seed),
     };
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     while num_tokens < max_output_tokens {
         if eos_token_ids.contains(&last_token) {
@@ -1361,6 +1424,7 @@ fn main() -> Result<()> {
                 &tokenizer,
                 args.prompt_tokens,
                 args.max_output_tokens,
+                args.seed,
             )
             .context("MTP latency benchmark failed")?
         }
@@ -1372,6 +1436,7 @@ fn main() -> Result<()> {
                 &tokenizer,
                 args.prompt_tokens,
                 args.max_output_tokens,
+                args.seed,
             )
             .context("skip-layer latency benchmark failed")?
         }
@@ -1447,6 +1512,7 @@ fn main() -> Result<()> {
             n,
             args.prompt_tokens,
             args.max_output_tokens,
+            args.seed,
         ) {
             Ok(result) => {
                 eprintln!("  => {:.1} tok/s aggregate", result.tokens_per_sec);
