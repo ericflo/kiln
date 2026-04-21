@@ -11,12 +11,14 @@ use kiln_server::config::KilnConfig;
 use kiln_server::device::select_device;
 use kiln_server::state;
 
+use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
+use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
 
@@ -234,12 +236,7 @@ async fn main() -> Result<()> {
 }
 
 fn spawn_backend_prewarm(state: AppState) {
-    let ModelBackend::Real {
-        runner,
-        block_manager,
-        paged_cache,
-    } = state.backend.as_ref()
-    else {
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
         return;
     };
 
@@ -255,11 +252,13 @@ fn spawn_backend_prewarm(state: AppState) {
     }
 
     let runner = runner.clone();
-    let block_manager = block_manager.clone();
-    let paged_cache = paged_cache.clone();
     let metrics = state.metrics.clone();
 
     tokio::spawn(async move {
+        // Give immediately-started desktop traffic a chance to claim the GPU
+        // before background warmup begins compiling kernels.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
         if metrics.request_duration_count.load(Ordering::Relaxed) > 0 {
             tracing::info!(
                 "skipping background inference prewarm because the server has already handled live traffic"
@@ -281,8 +280,6 @@ fn spawn_backend_prewarm(state: AppState) {
                 return Ok(false);
             }
             let runner_guard = runner.read().unwrap();
-            let mut bm_guard = block_manager.lock().unwrap();
-            let mut pc_guard = paged_cache.lock().unwrap();
             let params = SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
@@ -296,11 +293,21 @@ fn spawn_backend_prewarm(state: AppState) {
                 seed: Some(42),
             };
             let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8];
+            let mut block_manager = BlockManager::new(1, 16);
+            let mut paged_cache = PagedKvCache::new(
+                runner_guard.config.num_full_attention_layers,
+                1,
+                16,
+                runner_guard.config.num_kv_heads,
+                runner_guard.config.head_dim,
+                prewarm_kv_dtype(&runner_guard.config),
+                runner_guard.weights.embed_tokens.device(),
+            )?;
             runner_guard.generate_from_tokens_paged(
                 &prompt_tokens,
                 &params,
-                &mut bm_guard,
-                &mut pc_guard,
+                &mut block_manager,
+                &mut paged_cache,
             )?;
             Ok(true)
         })
@@ -317,6 +324,14 @@ fn spawn_backend_prewarm(state: AppState) {
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
     });
+}
+
+fn prewarm_kv_dtype(config: &ModelConfig) -> candle_core::DType {
+    match config.dtype {
+        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+        kiln_core::config::DType::FP16 => candle_core::DType::F16,
+        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+    }
 }
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown.
