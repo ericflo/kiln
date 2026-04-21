@@ -1073,6 +1073,12 @@ fn bench_latency_paged_mtp(
     };
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
+    // Phase C1 — reset the attribution sink (and its step counter) at the
+    // start of each bench run. The capture hook inside
+    // `speculative_mtp_decode_step` is a no-op unless `KILN_C1_ATTR_PATH`
+    // is set, so this clear is cheap either way.
+    kiln_model::c1_attr::clear();
+
     while num_tokens < max_output_tokens {
         if eos_token_ids.contains(&last_token) {
             break;
@@ -1162,6 +1168,20 @@ fn bench_latency_paged_mtp(
          α = {:.3} ({}/{})",
         mean_itl, decode_tok_per_sec, alpha, draft_accepted_count, total_draft_attempts
     );
+
+    // Phase C1 — drain the attribution sink to CSV when
+    // `KILN_C1_ATTR_PATH` is set. The path may include `{seed}` which is
+    // substituted with the current run's seed so a single env var covers
+    // multi-seed runs cleanly.
+    if let Ok(path_template) = std::env::var("KILN_C1_ATTR_PATH") {
+        if !path_template.is_empty() {
+            let path = path_template.replace("{seed}", &seed.to_string());
+            match kiln_model::c1_attr::drain_to_csv(&path) {
+                Ok(n) => eprintln!("    C1 attribution: wrote {n} rows → {path}"),
+                Err(e) => eprintln!("    C1 attribution: WRITE FAILED ({path}): {e:#}"),
+            }
+        }
+    }
 
     Ok(LatencyResult {
         prompt_tokens: actual_prompt_tokens,

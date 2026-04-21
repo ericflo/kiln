@@ -20,6 +20,7 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 
 use crate::backend::BackendRuntime;
+use crate::c1_attr;
 use crate::forward::{
     model_forward, model_forward_embed, model_forward_head,
     model_forward_paged_with_last_hidden, model_forward_segment, mtp_forward_step, GpuWeights,
@@ -606,6 +607,40 @@ pub fn speculative_mtp_decode_step(
     let mut accepted_tokens: Vec<TokenId> = Vec::new();
     let mut hit_eos = false;
     let draft_accepted = target_at_0 == draft_token;
+
+    // Phase C1 — MTP acceptance-rate attribution (greedy).
+    // Under greedy decoding `accepted == (mtp_top1 == main_top1)` must hold
+    // by construction; recording both independently lets the CSV analyzer
+    // verify that invariant and attribute any low α to either an MTP head
+    // bug (tokens disagree) or a verification/sampling bug (tokens agree
+    // but accept flips false). Off by default; enabled with
+    // `KILN_C1_ATTR_PATH=<path>`.
+    if c1_attr::is_enabled() {
+        // top_k=1 extraction is ~O(V) on host but only runs when the env
+        // var is set, so production decode pays nothing.
+        let draft_top1 = crate::mtp_debug::top_k_logits(&mtp_logits, 1);
+        let main_top1 = crate::mtp_debug::top_k_logits(&verify_pos0, 1);
+        let (mtp_top1_logit, main_top1_logit) = match (draft_top1, main_top1) {
+            (Ok(d), Ok(m)) => (
+                d.first().map(|p| p.1).unwrap_or(f32::NAN),
+                m.first().map(|p| p.1).unwrap_or(f32::NAN),
+            ),
+            _ => (f32::NAN, f32::NAN),
+        };
+        c1_attr::push_row(c1_attr::C1Row {
+            step_idx: c1_attr::next_step_idx(),
+            pos_in_k: 0, // Qwen3.5-4B k=1 MTP: one draft per step.
+            base_pos,
+            mtp_pos,
+            last_token,
+            mtp_top1: draft_token,
+            mtp_top1_logit,
+            main_top1: target_at_0,
+            main_top1_logit,
+            accepted: draft_accepted,
+            topk_match: draft_token == target_at_0,
+        });
+    }
 
     // Optional Phase B instrumentation. Off by default; enabled with
     // `KILN_MTP_DEBUG=1`. Logs the verify pos-0 top-5 alongside the draft so
