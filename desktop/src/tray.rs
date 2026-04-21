@@ -337,7 +337,17 @@ async fn open_kiln_ui_in_default_browser(app: &AppHandle, supervisor: Arc<Superv
     match kiln_ui_url(&state, &host, port) {
         Some(url) => {
             if let Err(e) = app.shell().open(url, None) {
-                eprintln!("[tray] open_kiln_ui_in_default_browser shell.open failed: {}", e);
+                let err = e.to_string();
+                eprintln!(
+                    "[tray] open_kiln_ui_in_default_browser shell.open failed: {}",
+                    err
+                );
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Could not open browser")
+                    .body(browser_open_error_body(&err))
+                    .show();
             }
         }
         None => {
@@ -572,6 +582,25 @@ pub fn ready_notification_body(port: u16) -> String {
 /// helper so it can be unit-tested without GTK/webkit2gtk.
 pub fn tray_op_error_body(op: &str, err: &str) -> String {
     format!("Could not {} the Kiln server: {}", op, err)
+}
+
+/// Format the body of a "browser launch failed" notification shown when the
+/// "Open Kiln UI in Browser" tray item cannot hand the URL off to the OS
+/// default browser (e.g. no browser registered, xdg-open missing on Linux).
+/// Pure helper so it can be unit-tested without GTK/webkit2gtk.
+pub fn browser_open_error_body(err: &str) -> String {
+    let trimmed = err.trim();
+    if trimmed.is_empty() {
+        "Could not launch the default browser. Copy the OpenAI base URL from \
+         the tray menu and open it manually."
+            .to_string()
+    } else {
+        format!(
+            "Could not launch the default browser: {}. Copy the OpenAI base \
+             URL from the tray menu and open it manually.",
+            trimmed
+        )
+    }
 }
 
 pub fn should_notify_stopped(prev_kind: Option<&str>) -> bool {
@@ -899,5 +928,54 @@ mod tests {
         let body = tray_op_error_body("start", "");
         assert!(!body.is_empty(), "body should be non-empty even when err is empty");
         assert!(body.contains("start"), "body {body:?} should contain op");
+    }
+
+    #[test]
+    fn browser_open_error_body_includes_err() {
+        let err = "xdg-open not found";
+        let body = browser_open_error_body(err);
+        assert!(
+            body.contains(err),
+            "body {body:?} should contain err {err:?}"
+        );
+        assert!(
+            body.contains("browser"),
+            "body {body:?} should mention the browser"
+        );
+    }
+
+    #[test]
+    fn browser_open_error_body_empty_err_falls_back() {
+        let body = browser_open_error_body("");
+        assert!(
+            !body.is_empty(),
+            "body should be non-empty even when err is empty"
+        );
+        assert!(
+            body.contains("browser"),
+            "body {body:?} should still mention the browser"
+        );
+    }
+
+    #[test]
+    fn browser_open_error_body_whitespace_only_falls_back() {
+        let body = browser_open_error_body("   \t\n");
+        // Whitespace-only error strings should behave like empty ones rather
+        // than leaking a notification body ending in a bare colon.
+        assert!(
+            !body.contains(":"),
+            "whitespace-only err should not leak a dangling colon: {body:?}"
+        );
+    }
+
+    #[test]
+    fn browser_open_error_body_suggests_copy_url_fallback() {
+        // The notification should point the user at the OpenAI base URL copy
+        // workflow so a browser-launch failure isn't a dead end.
+        let body = browser_open_error_body("boom");
+        assert!(
+            body.contains("OpenAI base URL"),
+            "body {body:?} should suggest the OpenAI base URL fallback"
+        );
     }
 }
