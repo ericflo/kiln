@@ -1,0 +1,28 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+[c12] device=cuda dtype=bf16
+[c12] loading model from /workspace/qwen3.5-4b
+`torch_dtype` is deprecated! Use `dtype` instead!
+The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights:   0%|          | 1/426 [00:00<00:53,  8.00it/s]Loading weights:   8%|▊         | 32/426 [00:00<00:02, 167.78it/s]Loading weights:  12%|█▏        | 51/426 [00:00<00:02, 176.47it/s]Loading weights:  18%|█▊        | 77/426 [00:00<00:01, 207.92it/s]Loading weights:  23%|██▎       | 99/426 [00:00<00:01, 197.91it/s]Loading weights:  30%|███       | 128/426 [00:00<00:01, 221.94it/s]Loading weights:  35%|███▌      | 151/426 [00:00<00:01, 207.94it/s]Loading weights:  41%|████      | 173/426 [00:00<00:01, 206.65it/s]Loading weights:  47%|████▋     | 199/426 [00:00<00:01, 217.94it/s]Loading weights:  52%|█████▏    | 222/426 [00:01<00:00, 218.74it/s]Loading weights:  58%|█████▊    | 245/426 [00:01<00:00, 217.11it/s]Loading weights:  63%|██████▎   | 267/426 [00:01<00:00, 199.04it/s]Loading weights:  68%|██████▊   | 291/426 [00:01<00:00, 206.12it/s]Loading weights:  73%|███████▎  | 312/426 [00:01<00:00, 191.21it/s]Loading weights:  79%|███████▉  | 336/426 [00:01<00:00, 201.16it/s]Loading weights:  84%|████████▍ | 359/426 [00:01<00:00, 200.31it/s]Loading weights:  90%|█████████ | 385/426 [00:01<00:00, 211.51it/s]Loading weights:  97%|█████████▋| 412/426 [00:02<00:00, 221.54it/s]Loading weights: 100%|██████████| 426/426 [00:02<00:00, 203.41it/s]
+[c12] layer prefix = `model.language_model.`
+[c12] installed 104 hooks across 32 layers (8 full-attn q_proj hooks)
+[c12] prompt 0: 10 tokens
+[c12] prompt 1: 14 tokens
+[c12] prompt 2: 21 tokens
+[c12] captured activations over 595 total tokens across 32 prompts
+[c12] processed 20 projections (current worst L6.down_proj ratio=1.447e-01)
+[c12] processed 40 projections (current worst L6.down_proj ratio=1.447e-01)
+[c12] processed 60 projections (current worst L6.down_proj ratio=1.447e-01)
+[c12] processed 80 projections (current worst L6.down_proj ratio=1.447e-01)
+[c12] processed 100 projections (current worst L6.down_proj ratio=1.447e-01)
+[c12] wrote /workspace/c12-out/probe-report.md and /workspace/c12-out/probe-report.json
+[c12] worst=L6.down_proj ratio=1.447e-01

@@ -1,0 +1,133 @@
+{
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "bench_flags": [
+    "--paged",
+    "--prompt-tokens",
+    "512",
+    "--max-output-tokens",
+    "128",
+    "--skip-training"
+  ],
+  "configs": [
+    {
+      "name": "baseline",
+      "env": {
+        "KILN_W4A16": "1"
+      },
+      "trials": [
+        {
+          "seed": 42,
+          "alpha": 0.032520325203252036,
+          "top1_agreement": 0.032520325203252036,
+          "decode_tok_per_sec": 41.08733816417334,
+          "mean_itl_ms": 24.33839826771654,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 24.3ms (41.1 tok/s), \u03b1 = 0.033 (4/123)",
+          "elapsed_s": 123.4
+        },
+        {
+          "seed": 43,
+          "alpha": 0.032520325203252036,
+          "top1_agreement": 0.032520325203252036,
+          "decode_tok_per_sec": 41.86725808465325,
+          "mean_itl_ms": 23.885012913385825,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 23.9ms (41.9 tok/s), \u03b1 = 0.033 (4/123)",
+          "elapsed_s": 107.2
+        },
+        {
+          "seed": 44,
+          "alpha": 0.09482758620689655,
+          "top1_agreement": 0.09482758620689655,
+          "decode_tok_per_sec": 39.43081253260326,
+          "mean_itl_ms": 25.36087733858268,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 25.4ms (39.4 tok/s), \u03b1 = 0.095 (11/116)",
+          "elapsed_s": 108.8
+        }
+      ],
+      "median_alpha": 0.032520325203252036,
+      "median_top1_agreement": 0.032520325203252036,
+      "median_decode_tok_per_sec": 41.08733816417334
+    },
+    {
+      "name": "primary",
+      "env": {
+        "KILN_W4A16": "1",
+        "KILN_MTP_FP32_HEAD": "1"
+      },
+      "trials": [
+        {
+          "seed": 42,
+          "alpha": 0.032520325203252036,
+          "top1_agreement": 0.032520325203252036,
+          "decode_tok_per_sec": 37.66243728389407,
+          "mean_itl_ms": 26.55165390551182,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 26.6ms (37.7 tok/s), \u03b1 = 0.033 (4/123)",
+          "elapsed_s": 109.7
+        },
+        {
+          "seed": 43,
+          "alpha": 0.032520325203252036,
+          "top1_agreement": 0.032520325203252036,
+          "decode_tok_per_sec": 37.14920491734478,
+          "mean_itl_ms": 26.918476511811022,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 26.9ms (37.1 tok/s), \u03b1 = 0.033 (4/123)",
+          "elapsed_s": 109.2
+        },
+        {
+          "seed": 44,
+          "alpha": 0.10434782608695652,
+          "top1_agreement": 0.10434782608695652,
+          "decode_tok_per_sec": 38.95644940608617,
+          "mean_itl_ms": 25.669690519685037,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 25.7ms (39.0 tok/s), \u03b1 = 0.104 (12/115)",
+          "elapsed_s": 106.4
+        }
+      ],
+      "median_alpha": 0.032520325203252036,
+      "median_top1_agreement": 0.032520325203252036,
+      "median_decode_tok_per_sec": 37.66243728389407
+    },
+    {
+      "name": "sanity_nomarlin",
+      "env": {
+        "KILN_W4A16": "0"
+      },
+      "trials": [
+        {
+          "seed": 42,
+          "alpha": 0.032520325203252036,
+          "top1_agreement": 0.032520325203252036,
+          "decode_tok_per_sec": 36.67246307671677,
+          "mean_itl_ms": 27.268416574803148,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 27.3ms (36.7 tok/s), \u03b1 = 0.033 (4/123)",
+          "elapsed_s": 103.3
+        },
+        {
+          "seed": 43,
+          "alpha": 0.058333333333333334,
+          "top1_agreement": 0.058333333333333334,
+          "decode_tok_per_sec": 36.76236531458697,
+          "mean_itl_ms": 27.20173175590552,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 27.2ms (36.8 tok/s), \u03b1 = 0.058 (7/120)",
+          "elapsed_s": 102.9
+        },
+        {
+          "seed": 44,
+          "alpha": 0.10434782608695652,
+          "top1_agreement": 0.10434782608695652,
+          "decode_tok_per_sec": 37.02075852691495,
+          "mean_itl_ms": 27.011872251968494,
+          "accept_line": "Decode (MTP): 128 tokens, mean ITL 27.0ms (37.0 tok/s), \u03b1 = 0.104 (12/115)",
+          "elapsed_s": 103.2
+        }
+      ],
+      "median_alpha": 0.058333333333333334,
+      "median_top1_agreement": 0.058333333333333334,
+      "median_decode_tok_per_sec": 36.76236531458697
+    }
+  ],
+  "total_elapsed_s": 974.2
+}

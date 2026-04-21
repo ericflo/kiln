@@ -150,6 +150,23 @@ thread_local! {
     /// the legacy paged-cache behavior unchanged.
     static MTP_SINGLE_TOKEN_SELF_ATTN_ARMED: RefCell<bool> =
         const { RefCell::new(false) };
+
+    /// Phase C12: thread-local flag that forces projection matmuls inside
+    /// the MTP draft head to compute in f32. Set by [`arm_mtp_fp32_head`]
+    /// inside `mtp_forward_step` when `KILN_MTP_FP32_HEAD=1` is active, and
+    /// cleared by [`disarm_mtp_fp32_head`] right after the inner block
+    /// returns. Read by `linear_with_lora_t` (and by the fused `mtp.fc`
+    /// matmul path in `mtp_forward_step` itself, which also honors the
+    /// existing `KILN_MTP_FC_FP32_ACCUM` flag) to promote inputs + weights
+    /// to f32, matmul, then downcast back to the input dtype. This is the
+    /// C12 kill switch: if α materially recovers with the flag on, the
+    /// residual bf16 accumulation inside the MTP head's q/k/v/o + fc
+    /// matmuls contributes meaningfully to α suppression. If α is
+    /// unchanged, the null result exonerates bf16-accumulation in MTP.
+    /// Always defaults to `false`, so non-MTP paths and pre-C12 callers
+    /// see the legacy bf16 path unchanged.
+    static MTP_FP32_HEAD_ARMED: RefCell<bool> =
+        const { RefCell::new(false) };
 }
 
 const DEFAULT_MAX_CALLS: usize = 16;
@@ -242,6 +259,32 @@ pub fn is_swap_fc_norms_enabled() -> bool {
 /// the env var between processes.
 pub fn is_mtp_fc_fp32_accum_enabled() -> bool {
     std::env::var("KILN_MTP_FC_FP32_ACCUM")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// True when `KILN_MTP_FP32_HEAD=1` (or `true`) is set. When enabled,
+/// `mtp_forward_step` arms the [`MTP_FP32_HEAD_ARMED`] TLS flag before the
+/// MTP inner transformer block runs, which causes `linear_with_lora_t` to
+/// promote projection inputs + weights to f32, matmul in f32, and cast the
+/// result back to the input dtype for the q/k/v/o projections inside the
+/// block. The arm flag also forces the `mtp.fc` matmul in
+/// `mtp_forward_step` onto its fp32 accumulation path (same behaviour as
+/// `KILN_MTP_FC_FP32_ACCUM=1`), so a single flag covers both halves of the
+/// Phase C12 kill switch: q/k/v/o and fc_input/fc_output.
+///
+/// Subtlety: the MTP head is not Marlin-packed in the current build (see
+/// `mtp_forward_step` docstring), so "whichever are currently Marlin-packed"
+/// resolves to the empty set today. The flag still runs the intended
+/// experiment because the test is really whether bf16 accumulation in the
+/// MTP projection matmuls is the α-suppressor, regardless of whether those
+/// matmuls go through the Marlin path or the straight BF16 broadcast_matmul
+/// path. If α recovers with the flag on, Marlin-packing the MTP head is
+/// expected to regress α once it lands — and a fused fp32 accumulation
+/// variant of Marlin would be the follow-up. If α is unchanged, the signal
+/// is elsewhere and Marlin can be added to MTP without worry.
+pub fn is_mtp_fp32_head_enabled() -> bool {
+    std::env::var("KILN_MTP_FP32_HEAD")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -907,6 +950,32 @@ pub fn arm_mtp_single_token_self_attn() {
 /// this thread) sees the legacy paged-cache behavior.
 pub fn disarm_mtp_single_token_self_attn() {
     MTP_SINGLE_TOKEN_SELF_ATTN_ARMED.with(|c| *c.borrow_mut() = false);
+}
+
+/// True if the Phase C12 fp32-head TLS flag is currently armed on this
+/// thread. Read by `linear_with_lora_t` to decide whether to promote the
+/// projection matmul to f32. Cheap single TLS access; the production path
+/// pays a branch when the flag is off. Always `false` outside the window
+/// bracketed by [`arm_mtp_fp32_head`] / [`disarm_mtp_fp32_head`] inside
+/// `mtp_forward_step`.
+pub fn is_mtp_fp32_head_armed() -> bool {
+    MTP_FP32_HEAD_ARMED.with(|c| *c.borrow())
+}
+
+/// Arm fp32 projection matmuls for the MTP inner block on this thread.
+/// Idempotent within a single `mtp_forward_step` call; the matching
+/// [`disarm_mtp_fp32_head`] is required and runs in both the success and
+/// the early-error paths inside `mtp_forward_step`.
+pub fn arm_mtp_fp32_head() {
+    MTP_FP32_HEAD_ARMED.with(|c| *c.borrow_mut() = true);
+}
+
+/// Disarm fp32 projection matmuls for the MTP inner block on this thread.
+/// Always runs after the inner block returns (success or error) so the
+/// next `mtp_forward_step` call (or any non-MTP projection call on this
+/// thread) sees the legacy bf16 matmul behavior.
+pub fn disarm_mtp_fp32_head() {
+    MTP_FP32_HEAD_ARMED.with(|c| *c.borrow_mut() = false);
 }
 
 /// Record one named SDPA-internal tap if a capture window is currently
