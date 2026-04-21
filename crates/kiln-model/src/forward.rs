@@ -437,6 +437,7 @@ fn weight_dtype(w: &WeightTensor) -> DType {
 const TRANSPOSE_ROW_TILE: usize = 32;
 const TRANSPOSE_COL_TILE: usize = 32;
 const PARALLEL_TRANSPOSE_MIN_BYTES: usize = 1 << 20;
+const PARALLEL_TRANSPOSE_ROW_CHUNK: usize = 64;
 
 #[inline(always)]
 fn copy_transpose_elem_unaligned<T: Copy>(data: &[u8], out: &mut [u8], src: usize, dst: usize) {
@@ -472,29 +473,46 @@ fn transpose_weight_bytes_typed<T: Copy + Send + Sync>(
             }
         }
     } else {
-        use rayon::prelude::*;
-
-        let out_col_stride = rows * elem_size;
-        let out_block_stride = out_col_stride * TRANSPOSE_COL_TILE;
-        out.par_chunks_mut(out_block_stride)
-            .enumerate()
-            .for_each(|(block_idx, out_block)| {
-                let col0 = block_idx * TRANSPOSE_COL_TILE;
-                let col_end = (col0 + (out_block.len() / out_col_stride)).min(cols);
-                for row0 in (0..rows).step_by(TRANSPOSE_ROW_TILE) {
-                    let row_end = (row0 + TRANSPOSE_ROW_TILE).min(rows);
-                    for col in col0..col_end {
-                        let out_col = col - col0;
-                        let out_base = out_col * out_col_stride;
-                        for row in row0..row_end {
-                            let src = (row * cols + col) * elem_size;
-                            let dst = out_base + row * elem_size;
-                            copy_transpose_elem_unaligned::<T>(data, out_block, src, dst);
-                        }
-                    }
-                }
-            });
+        transpose_weight_bytes_typed_parallel_rows::<T>(data, out, rows, cols);
     }
+}
+
+fn transpose_weight_bytes_typed_parallel_rows<T: Copy + Send + Sync>(
+    data: &[u8],
+    out: &mut [u8],
+    rows: usize,
+    cols: usize,
+) {
+    use rayon::prelude::*;
+
+    let elem_size = std::mem::size_of::<T>();
+    let out_col_stride = rows * elem_size;
+    let chunks = rows.div_ceil(PARALLEL_TRANSPOSE_ROW_CHUNK);
+    let out_addr = out.as_mut_ptr() as usize;
+
+    (0..chunks).into_par_iter().for_each(|chunk_idx| {
+        let row0 = chunk_idx * PARALLEL_TRANSPOSE_ROW_CHUNK;
+        let row_end = (row0 + PARALLEL_TRANSPOSE_ROW_CHUNK).min(rows);
+        let out_ptr = out_addr as *mut u8;
+
+        for row in row0..row_end {
+            let mut src = row * cols * elem_size;
+            let mut dst = row * elem_size;
+            for _ in 0..cols {
+                // SAFETY: row chunks are disjoint. For any source element
+                // `(row, col)`, the transposed destination is `(col, row)`,
+                // so different row chunks write non-overlapping bytes within
+                // each output column. `transposed_weight_bytes_2d` validated
+                // data/out lengths before dispatching here.
+                unsafe {
+                    let value = std::ptr::read_unaligned(data.as_ptr().add(src).cast::<T>());
+                    std::ptr::write_unaligned(out_ptr.add(dst).cast::<T>(), value);
+                }
+                src += elem_size;
+                dst += out_col_stride;
+            }
+        }
+    });
 }
 
 fn transpose_weight_bytes_generic(
@@ -5464,6 +5482,33 @@ mod tests {
 
         assert_eq!(shape, [3, 2]);
         assert_eq!(got, vec![1, 4, 2, 5, 3, 6]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_transposed_weight_bytes_2d_parallel_preserves_two_byte_elements() -> Result<()> {
+        let rows = 513usize;
+        let cols = 1025usize;
+        let values: Vec<u16> = (0..rows * cols).map(|idx| idx as u16).collect();
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert!(bytes.len() >= PARALLEL_TRANSPOSE_MIN_BYTES);
+        let wt = WeightTensor {
+            data: crate::weights::WeightData::owned(bytes),
+            shape: vec![rows, cols],
+            dtype: TensorDType::BF16,
+        };
+
+        let (transposed, shape) = transposed_weight_bytes_2d(&wt)?;
+
+        assert_eq!(shape, [cols, rows]);
+        for col in 0..cols {
+            for row in 0..rows {
+                let got_offset = (col * rows + row) * 2;
+                let got =
+                    u16::from_le_bytes([transposed[got_offset], transposed[got_offset + 1]]);
+                assert_eq!(got, values[row * cols + col]);
+            }
+        }
         Ok(())
     }
 
