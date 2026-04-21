@@ -6,9 +6,8 @@ System-tray app that wraps the `kiln` local LLM server in a GUI for people who d
 
 Windows, Linux, and macOS (Apple Silicon). The Linux and Windows bundles drive
 CUDA-backed `kiln`; the macOS bundle drives the candle-metal backend on
-Apple Silicon (M-series) Macs. Intel Macs are not supported — Metal/MLX need
-Apple Silicon and an x86_64 build would be strictly worse than running Linux
-in a VM.
+Apple Silicon (M-series) Macs. Intel Macs are not supported; an x86_64 build
+would be strictly worse than running Linux in a VM.
 
 ## Releases
 

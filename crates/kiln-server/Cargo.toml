@@ -47,7 +47,6 @@ rand = { workspace = true }
 [features]
 cuda = ["kiln-model/cuda"]
 metal = ["kiln-model/metal"]
-mlx = ["metal", "kiln-model/mlx"]
 # Forward kiln-model's NVTX feature so kiln-bench / kiln binaries emit ranges
 # under nsys for per-call-site attribution. No effect without --features cuda.
 nvtx = ["kiln-model/nvtx"]

@@ -29,9 +29,6 @@ pub mod cuda;
 #[cfg(feature = "metal")]
 pub mod metal;
 
-#[cfg(feature = "mlx")]
-pub mod mlx;
-
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
@@ -267,16 +264,15 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 
 /// Pick the right backend for a given candle device.
 ///
-/// On Metal devices, `--features mlx` wins over `--features metal` when
-/// both are active — MLX is the peak-perf path. `--features metal` alone
-/// gives the candle-metal backend (no full-Xcode requirement).
+/// On Metal devices, `--features metal` uses Kiln's native candle-metal
+/// backend and Metal kernels. The former MLX bridge was removed because it
+/// only accelerated attention while paying Candle<->MLX host-copy overheads
+/// and bypassing Kiln's Qwen3.5 GDN decode kernels.
 pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
     match device {
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(device.clone())),
-        #[cfg(feature = "mlx")]
-        Device::Metal(_) => Arc::new(mlx::MlxBackend::new(device.clone())),
-        #[cfg(all(feature = "metal", not(feature = "mlx")))]
+        #[cfg(feature = "metal")]
         Device::Metal(_) => Arc::new(metal::MetalBackend::new(device.clone())),
         _ => Arc::new(cpu::CpuBackend::new(device.clone())),
     }

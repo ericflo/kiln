@@ -25,9 +25,6 @@ kiln-rmsnorm-kernel = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
-mlx-rs = { workspace = true, optional = true }
-# Pin to the same major as candle-core and mlx-rs. Only pulled in by the
-# mlx backend for native bf16/f16 conversion at the candle↔mlx boundary.
 half = { version = "2", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 
@@ -36,11 +33,6 @@ cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kil
 # Enable candle's Metal backend on Apple Silicon. Pulls in candle-metal-kernels
 # (JIT-compiled MSL shaders cached in the MetalDevice); no Xcode required.
 metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "dep:objc2-metal"]
-# Wave 2 mlx-rs backend. Peak Apple Silicon perf via Apple's MLX framework.
-# Layers on top of `metal` so candle still handles weight loading and the
-# ops mlx doesn't replace. Requires full Xcode (mlx-sys compiles MSL at
-# build time). See MACOS_MLX_PLAN.md.
-mlx = ["metal", "dep:mlx-rs", "dep:half"]
 # Emit NVTX ranges around the hot paths in `forward.rs` so nsys can attribute
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
 # link line. Pair with `--features cuda,nvtx`.
