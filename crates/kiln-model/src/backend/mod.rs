@@ -198,6 +198,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_causal_conv1d_prefill(&self) -> bool {
+        false
+    }
+
     /// Fused single-step causal depthwise conv1d + state update + silu.
     ///
     /// Replaces the candle `to_f32 -> cat(state, x) -> sum(window * weight) ->
@@ -215,6 +219,25 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// violation, disabled via env kill switch). When `Some`, the caller must
     /// NOT apply `silu` again — it is fused into the kernel epilogue.
     fn causal_conv1d_update(
+        &self,
+        _x: &Tensor,
+        _weight: &Tensor,
+        _conv_state: &mut Tensor,
+        _kernel_size: usize,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Fused prefill causal depthwise conv1d + state update + silu.
+    ///
+    /// `x`: `[B, C, T]` bf16 contiguous with `T > 1`. `weight`: `[C, 1, K]`
+    /// bf16 contiguous (or `[C, K]`). `conv_state`: `[B, C, K-1]` F32,
+    /// mutated in place after all outputs have consumed the entry state.
+    ///
+    /// Returns `Ok(Some(out))` with `out: [B, C, T]` F32 (silu-fused), or
+    /// `Ok(None)` when the backend declines. When `Some`, the caller must not
+    /// apply `silu` again.
+    fn causal_conv1d_prefill(
         &self,
         _x: &Tensor,
         _weight: &Tensor,

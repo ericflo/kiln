@@ -2191,8 +2191,29 @@ pub fn gated_deltanet_forward(
                 }
             }
         } else if seq_len > 1 {
-            let y = causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
-            cuda_silu(&y)?
+            if backend.supports_causal_conv1d_prefill() {
+                match backend.causal_conv1d_prefill(
+                    &mixed_qkv_ct,
+                    &weights.conv1d,
+                    conv_state,
+                    kernel_size,
+                )? {
+                    Some(out) => out, // F32, SiLU fused into the kernel epilogue
+                    None => {
+                        let y = causal_conv1d_prefill(
+                            &mixed_qkv_ct,
+                            &weights.conv1d,
+                            conv_state,
+                            kernel_size,
+                        )?;
+                        cuda_silu(&y)?
+                    }
+                }
+            } else {
+                let y =
+                    causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
+                cuda_silu(&y)?
+            }
         } else {
             let y = causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
             cuda_silu(&y.to_dtype(DType::F32)?)?
@@ -6974,6 +6995,84 @@ mod tests {
         assert!(
             smax < 1e-6,
             "bf16 prefill state max_abs_diff={smax:e} exceeds 1e-6"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_causal_conv1d_prefill_kernel_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal not available, skipping test_metal_causal_conv1d_prefill_kernel_matches_fallback"
+            );
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
+        let seq_len = 16usize;
+        let kernel_size = 4usize;
+
+        let mut rng = StdRng::seed_from_u64(0xC0FFEE_8175);
+        let n_x = batch * channels * seq_len;
+        let n_w = channels * kernel_size;
+        let n_s = batch * channels * (kernel_size - 1);
+
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+            .to_dtype(DType::BF16)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+
+        let mut s_ref = s_init.clone();
+        let out_ref =
+            causal_conv1d_prefill_with_dtype(&x, &w, &mut s_ref, kernel_size, DType::F32)?;
+        let out_ref = cuda_silu(&out_ref)?;
+
+        let backend = crate::backend::for_device(&device);
+        assert!(backend.supports_causal_conv1d_prefill());
+        let mut s_kernel = s_init.clone();
+        let out_kernel = match backend.causal_conv1d_prefill(&x, &w, &mut s_kernel, kernel_size)? {
+            Some(out) => out,
+            None => {
+                eprintln!("Metal backend declined causal_conv1d_prefill; skipping");
+                return Ok(());
+            }
+        };
+        assert_eq!(out_kernel.dtype(), DType::F32);
+        assert_eq!(s_kernel.dtype(), DType::F32);
+
+        let diff = (out_kernel.to_dtype(DType::F32)? - out_ref.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!(
+            "metal conv1d_prefill kernel vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+        );
+        assert!(
+            max < 1e-5,
+            "metal prefill output max_abs_diff={max:e} exceeds 1e-5"
+        );
+        assert!(
+            mean < 1e-6,
+            "metal prefill output mean_abs_diff={mean:e} exceeds 1e-6"
+        );
+
+        let sdiff = (s_kernel.to_dtype(DType::F32)? - s_ref.to_dtype(DType::F32)?)?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        eprintln!("metal conv1d_prefill kernel state parity: max_abs_diff={smax:e}");
+        assert!(
+            smax < 1e-6,
+            "metal prefill state max_abs_diff={smax:e} exceeds 1e-6"
         );
 
         Ok(())

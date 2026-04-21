@@ -16,6 +16,7 @@ safetensors = { workspace = true }
 memmap2 = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
+candle-metal-kernels = { version = "0.10", optional = true }
 kiln-conv1d-kernel = { workspace = true, optional = true }
 kiln-flash-attn = { workspace = true, optional = true }
 kiln-gdn-kernel = { workspace = true, optional = true }
@@ -28,12 +29,13 @@ mlx-rs = { workspace = true, optional = true }
 # Pin to the same major as candle-core and mlx-rs. Only pulled in by the
 # mlx backend for native bf16/f16 conversion at the candle↔mlx boundary.
 half = { version = "2", optional = true }
+objc2-metal = { version = "0.3", optional = true }
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:half"]
 # Enable candle's Metal backend on Apple Silicon. Pulls in candle-metal-kernels
 # (JIT-compiled MSL shaders cached in the MetalDevice); no Xcode required.
-metal = ["candle-core/metal", "candle-nn/metal"]
+metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "dep:objc2-metal"]
 # Wave 2 mlx-rs backend. Peak Apple Silicon perf via Apple's MLX framework.
 # Layers on top of `metal` so candle still handles weight loading and the
 # ops mlx doesn't replace. Requires full Xcode (mlx-sys compiles MSL at

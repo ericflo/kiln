@@ -1876,6 +1876,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "candle-core",
+ "candle-metal-kernels",
  "candle-nn",
  "half",
  "kiln-conv1d-kernel",
@@ -1887,6 +1888,7 @@ dependencies = [
  "kiln-rmsnorm-kernel",
  "memmap2",
  "mlx-rs",
+ "objc2-metal",
  "rand 0.8.6",
  "rayon",
  "safetensors 0.5.3",
