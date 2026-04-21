@@ -31,6 +31,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static MTP_FP32_HEAD_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 // Phase B7a: track which mtp_pos values have already been dumped so a single
 // process can capture multiple positions. Initialized lazily on first use.
 static DUMP_DONE_POSITIONS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
@@ -955,10 +956,14 @@ pub fn disarm_mtp_single_token_self_attn() {
 /// True if the Phase C12 fp32-head TLS flag is currently armed on this
 /// thread. Read by `linear_with_lora_t` to decide whether to promote the
 /// projection matmul to f32. Cheap single TLS access; the production path
-/// pays a branch when the flag is off. Always `false` outside the window
-/// bracketed by [`arm_mtp_fp32_head`] / [`disarm_mtp_fp32_head`] inside
-/// `mtp_forward_step`.
+/// pays one atomic load when no thread is inside the fp32-head window. The
+/// expensive TLS check is only needed while at least one thread has armed the
+/// kill switch. Always `false` outside the window bracketed by
+/// [`arm_mtp_fp32_head`] / [`disarm_mtp_fp32_head`] inside `mtp_forward_step`.
 pub fn is_mtp_fp32_head_armed() -> bool {
+    if MTP_FP32_HEAD_ARMED_THREADS.load(Ordering::Acquire) == 0 {
+        return false;
+    }
     MTP_FP32_HEAD_ARMED.with(|c| *c.borrow())
 }
 
@@ -967,7 +972,15 @@ pub fn is_mtp_fp32_head_armed() -> bool {
 /// [`disarm_mtp_fp32_head`] is required and runs in both the success and
 /// the early-error paths inside `mtp_forward_step`.
 pub fn arm_mtp_fp32_head() {
-    MTP_FP32_HEAD_ARMED.with(|c| *c.borrow_mut() = true);
+    let was_armed = MTP_FP32_HEAD_ARMED.with(|c| {
+        let mut armed = c.borrow_mut();
+        let was_armed = *armed;
+        *armed = true;
+        was_armed
+    });
+    if !was_armed {
+        MTP_FP32_HEAD_ARMED_THREADS.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 /// Disarm fp32 projection matmuls for the MTP inner block on this thread.
@@ -975,7 +988,19 @@ pub fn arm_mtp_fp32_head() {
 /// next `mtp_forward_step` call (or any non-MTP projection call on this
 /// thread) sees the legacy bf16 matmul behavior.
 pub fn disarm_mtp_fp32_head() {
-    MTP_FP32_HEAD_ARMED.with(|c| *c.borrow_mut() = false);
+    let was_armed = MTP_FP32_HEAD_ARMED.with(|c| {
+        let mut armed = c.borrow_mut();
+        let was_armed = *armed;
+        *armed = false;
+        was_armed
+    });
+    if was_armed {
+        let _ = MTP_FP32_HEAD_ARMED_THREADS.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |count| Some(count.saturating_sub(1)),
+        );
+    }
 }
 
 /// Record one named SDPA-internal tap if a capture window is currently
@@ -1390,6 +1415,24 @@ mod tests {
         // Drain disarms.
         capture_subop("post_v_proj", &a).unwrap();
         assert!(drain_subop_capture().is_empty());
+    }
+
+    #[test]
+    fn fp32_head_arm_is_thread_local_and_idempotent() {
+        disarm_mtp_fp32_head();
+        assert!(!is_mtp_fp32_head_armed());
+
+        arm_mtp_fp32_head();
+        assert!(is_mtp_fp32_head_armed());
+
+        arm_mtp_fp32_head();
+        assert!(is_mtp_fp32_head_armed());
+
+        disarm_mtp_fp32_head();
+        assert!(!is_mtp_fp32_head_armed());
+
+        disarm_mtp_fp32_head();
+        assert!(!is_mtp_fp32_head_armed());
     }
 
     #[test]
