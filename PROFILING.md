@@ -3795,3 +3795,136 @@ If byte-equal and halves balanced → run a one-shot HF reference parity on the 
 - Work: build (5m 26s warm sccache) + model download (~3 min, parallel with build) + 1 bench run (~30s decode after 37s model load) + analysis.
 
 Pod terminated on task completion.
+
+## Phase B2 — fc halves + norm-swap bisect (2026-04-21)
+
+Follow-up to Phase B. Three-part experiment: (1) byte-equality verification of all 15 MTP tensors against the raw safetensors shards, (2) runtime logging of the two halves of `fc`'s input (pre-norm-embedding on `embed(last_token)` vs pre-norm-hidden on `h_prev`) plus fused output L2, (3) A/B toggle (`KILN_MTP_SWAP_FC_NORMS=1`) that swaps which RMSNorm weight is paired with which half. Goal: isolate whether Phase B's identity bias comes from a byte-level loader bug, a halves-magnitude asymmetry, or the two RMSNorm scales being wired to the wrong halves of the fused input.
+
+All runs on the same A6000 pod (on-demand, `ghcr.io/ericflo/kiln-runpod:latest`, warm sccache B2), same model (`/workspace/qwen3.5-4b`), same prompt used in Phase B, `--paged --skip-training --max-output-tokens 32`, `KILN_MTP_DEBUG=1 KILN_MTP_DEBUG_MAX_CALLS=16`.
+
+### Part A — byte-equality (rules out raw loader bugs)
+
+New test `crates/kiln-model/tests/mtp_byte_eq.rs` walks all 15 MTP tensors under the detected `mtp.*` prefix, flattens each `Tensor` kiln loaded into host memory, and compares bytes against the corresponding slice in the raw safetensors shard (mmap via `safetensors::SafeTensors::deserialize`). Runs on CPU so the same test reproduces on any developer laptop.
+
+```
+test mtp_weights_match_safetensors_byte_for_byte ...
+[mtp_byte_eq] using mtp_prefix = mtp.
+[mtp_byte_eq] === report ===
+PASS fc                                  (mtp.fc.weight)                                  shape=[2560, 5120] dtype=BF16
+PASS pre_fc_norm_embedding               (mtp.pre_fc_norm_embedding.weight)               shape=[2560]       dtype=BF16
+PASS pre_fc_norm_hidden                  (mtp.pre_fc_norm_hidden.weight)                  shape=[2560]       dtype=BF16
+PASS final_layernorm                     (mtp.norm.weight)                                shape=[2560]       dtype=BF16
+PASS transformer_block.input_layernorm   (mtp.layer.input_layernorm.weight)               shape=[2560]       dtype=BF16
+PASS transformer_block.post_attn_ln      (mtp.layer.post_attention_layernorm.weight)      shape=[2560]       dtype=BF16
+PASS mlp.gate_proj                       (mtp.layer.mlp.gate_proj.weight)                 shape=[9728, 2560] dtype=BF16
+PASS mlp.up_proj                         (mtp.layer.mlp.up_proj.weight)                   shape=[9728, 2560] dtype=BF16
+PASS mlp.down_proj                       (mtp.layer.mlp.down_proj.weight)                 shape=[2560, 9728] dtype=BF16
+PASS attn.q_proj                         (mtp.layer.self_attn.q_proj.weight)              shape=[4096, 2560] dtype=BF16
+PASS attn.k_proj                         (mtp.layer.self_attn.k_proj.weight)              shape=[1024, 2560] dtype=BF16
+PASS attn.v_proj                         (mtp.layer.self_attn.v_proj.weight)              shape=[1024, 2560] dtype=BF16
+PASS attn.o_proj                         (mtp.layer.self_attn.o_proj.weight)              shape=[2560, 4096] dtype=BF16
+PASS attn.q_norm                         (mtp.layer.self_attn.q_norm.weight)              shape=[256]        dtype=BF16
+PASS attn.k_norm                         (mtp.layer.self_attn.k_norm.weight)              shape=[256]        dtype=BF16
+[mtp_byte_eq] PASS — all MTP tensors byte-equal to safetensors
+test result: ok. 1 passed; finished in 6.87s
+```
+
+**Verdict A**: kiln's MTP loader is byte-for-byte faithful for every MTP tensor on this Qwen3.5-4B checkpoint. This mechanically rules out Phase B hypothesis 2 in its strong form — no raw loader bug exists where a tensor is loaded into the wrong slot or byte-mangled during conversion. Any remaining ambiguity must be in *how* the correctly-loaded tensors are wired into `mtp_forward_step`.
+
+### Part B — halves-L2 instrumentation
+
+`crates/kiln-model/src/mtp_debug.rs` extended with `is_swap_fc_norms_enabled()` and emits, per draft step, the L2 norms of:
+
+- `h_prev_l2` — L2 norm of the incoming last-layer hidden state
+- `norm_emb_l2` — L2 of `rms_norm(embed(last_token), pre_fc_norm_embedding)`
+- `norm_h_l2` — L2 of `rms_norm(h_prev, pre_fc_norm_hidden)`
+- `halves_ratio = norm_emb_l2 / norm_h_l2`
+- `fused_l2` — L2 of `fc(concat(...))` output, the input to the MTP transformer block
+
+Halves are extracted in `mtp_forward_step` via `narrow` slices on the fused `concat` result so the measured halves come from exactly the tensor the matmul sees, not a re-computation.
+
+### Part C — norm-swap A/B toggle
+
+`KILN_MTP_SWAP_FC_NORMS=1` causes `mtp_forward_step` to swap which `RmsNorm` weight is applied to which half of the fused input (`pre_fc_norm_hidden` applied to the embedding half, `pre_fc_norm_embedding` applied to the `h_prev` half). Read every call so an A/B can be run across two processes with no code change. Matches the bisect workflow described at the end of Phase B under "Recommended next bisect step".
+
+### Runtime results — single 32-output-token prompt, A/B
+
+| Arm | α (draft accept) | num_drafts | num_accepts | identity (draft==last_tok) overall | halves_ratio median |
+|---|---|---|---|---|---|
+| swap **OFF** (default) | **0.240** (6 / 25 verify) | 16 | 6 | 7/25 = **28%** | ~0.745 (emb < h) |
+| swap **ON**  | **0.348** (8 / 23 verify) | 16 | 8 | 3/23 = **13%** | ~1.067 (emb > h) |
+
+Δα: **+0.108 absolute, +45% relative** with swap ON.
+
+#### Halves table — swap-OFF (first 13 draft rows)
+
+| mtp_pos | last_tok | h_prev_l2 | norm_emb_l2 | norm_h_l2 | halves_ratio | fused_l2 | mtp_logits_l2 | top1_id | top1_logit |
+|--|--|--|--|--|--|--|--|--|--|
+| 0 | 561   | 64.38 | 32.02 | 41.34 | 0.7745 | 14.14 | 1068.4 | 561   | 21.12 |
+| 0 | 29144 | 69.17 | 30.24 | 40.13 | 0.7537 | 15.01 | 1229.8 | 29144 | 17.25 |
+| 0 | 6165  | 76.73 | 29.93 | 41.27 | 0.7251 | 15.40 | 1111.6 | 6165  | 17.88 |
+| 0 | 27050 | 72.92 | 30.29 | 41.16 | 0.7360 | 14.91 | 1155.7 | 27050 | 15.75 |
+| 0 | 279   | 75.05 | 32.18 | 41.50 | 0.7754 | 14.91 | 1076.6 | 3377  | 14.81 |
+| 0 | 29144 | 59.62 | 30.24 | 40.67 | 0.7436 | 15.06 | 1398.4 | 1785  | 14.81 |
+| 0 | 6165  | 60.48 | 29.93 | 40.45 | 0.7400 | 15.58 | 1252.1 | 18465 | 18.62 |
+| 0 | 27050 | 63.04 | 30.29 | 40.47 | 0.7485 | 14.59 | 1210.6 | 279   | 18.88 |
+| 1 | 24460 | 67.21 | 30.29 | 40.78 | 0.7429 | 14.81 | 1148.9 | 3377  | 20.38 |
+| 2 | 303   | 65.20 | 32.76 | 41.04 | 0.7983 | 13.92 | 1212.8 | 279   | 20.50 |
+| 2 | 3150  | 60.00 | 29.88 | 39.46 | 0.7572 | 14.68 | 1227.2 | 3150  | 19.88 |
+| 2 | 854   | 70.49 | 30.16 | 40.21 | 0.7501 | 15.05 | 1129.8 | 13    | 19.00 |
+| 3 | 2838  | 72.92 | 29.92 | 39.71 | 0.7534 | 13.43 | 1130.1 | 2838  | 17.38 |
+
+`halves_ratio` is tightly clustered in `[0.725, 0.798]`. The pre-norm on the embed half produces a scale ~25% smaller than the pre-norm on the hidden half, every step. Identity hits at rows 1-4 (pos=0) and again at rows 11 and 13.
+
+#### Halves table — swap-ON (first 13 draft rows)
+
+| mtp_pos | last_tok | h_prev_l2 | norm_emb_l2 | norm_h_l2 | halves_ratio | fused_l2 | mtp_logits_l2 | top1_id | top1_logit |
+|--|--|--|--|--|--|--|--|--|--|
+| 0 | 561   | 64.38 | 40.21 | 36.55 | 1.1001 | 13.88 |  960.7 | 561   | 16.38 |
+| 0 | 29144 | 69.17 | 38.75 | 37.62 | 1.0301 | 15.88 | 1267.3 | 6165  | 15.06 |
+| 1 | 27050 | 67.78 | 38.68 | 35.60 | 1.0865 | 14.80 | 1235.3 | 279   | 18.62 |
+| 2 | 24460 | 67.40 | 38.68 | 36.89 | 1.0486 | 15.10 | 1096.8 | 3377  | 18.00 |
+| 3 | 303   | 63.82 | 40.74 | 36.62 | 1.1127 | 13.54 | 1493.0 | 279   | 21.62 |
+| 3 | 3150  | 61.95 | 37.89 | 36.59 | 1.0357 | 14.58 | 1191.0 | 3150  | 18.50 |
+| 3 | 854   | 69.00 | 38.19 | 36.07 | 1.0587 | 14.86 | 1150.8 | 13    | 19.12 |
+| 4 | 2838  | 71.45 | 38.24 | 34.96 | 1.0935 | 13.85 | 1251.6 | 369   | 16.88 |
+| 4 | 5947  | 65.90 | 38.58 | 37.24 | 1.0361 | 14.55 | 1128.3 | 264   | 18.12 |
+| 5 | 15352 | 89.60 | 38.94 | 38.15 | 1.0207 | 15.78 | 1243.3 | 6157  | 16.75 |
+| 6 | 314   | 77.91 | 40.44 | 37.15 | 1.0885 | 13.06 | 1097.5 | 220   | 19.12 |
+| 6 | 2981  | 67.48 | 38.11 | 34.16 | 1.1155 | 15.57 | 1042.6 | 8876  | 14.56 |
+| 6 | 17793 | 78.24 | 38.99 | 36.77 | 1.0603 | 15.06 | 1221.4 | 48736 | 17.00 |
+
+With the norm-swap on, `halves_ratio` clusters in `[1.02, 1.12]` — the embedding half is now slightly larger than the hidden half. The top-1 token no longer matches `last_tok` at rows 1, 3-8, 10-13 (only two identity hits in 13 rows vs five in the swap-OFF table over the same slice).
+
+#### Phase B verify-pos0 comparison
+
+Direct comparison against the Phase B verify trace for the same prompt (first 4 draft steps, `mtp_pos=0`, predictions of the next ground-truth token):
+
+| step | last_tok | target | swap-OFF top1 | swap-ON top1 |
+|--|--|--|--|--|
+| 1 | 561   | 29144 | **561** (identity, wrong)   | **561** (identity, wrong)   |
+| 2 | 29144 | 6165  | **29144** (identity, wrong) | **6165** ✅ |
+| 3 | 6165  | 27050 | **6165** (identity, wrong)  | — (advanced by accept at step 2) |
+| 4 | 27050 | 279   | **27050** (identity, wrong) | — |
+
+The norm-swap flipped step 2 from an identity-biased reject into a direct accept. Step 1 remains wrong under both arms — consistent with "cold" MTP state when `h_prev` for the very first draft carries too little task context regardless of norm pairing.
+
+### Verdict
+
+- **Phase B hypothesis 2 (wrong norm-tensor slot / collapsed scale) — still plausible but not byte-level.** Part A proves no tensor is byte-swapped or corrupted at load. But Part C shows a direct, reproducible, same-prompt α lift of +45% when the two RMSNorm scales are applied to each other's half. That is exactly the signature expected if the loader/wiring maps `pre_fc_norm_embedding` to operate on `h_prev` and `pre_fc_norm_hidden` to operate on `embed(last_token)` — i.e. the two scales are correctly loaded but attached to the wrong half inside `mtp_forward_step`.
+- **Phase B hypothesis 1 (fc matmul embed-dominance) — partially supported as a consequence, not the root cause.** Under swap-OFF the embed half is smaller (`halves_ratio ≈ 0.74`) yet identity bias dominates; under swap-ON the embed half is slightly larger (`halves_ratio ≈ 1.07`) and identity bias drops. That direction is opposite to "fc weights the embed half too heavily" — if embed magnitude alone drove the bias we would expect more identity with a larger embed half, not less. The halves ratio interacts with the identity bias through the norm pairing, not directly through halves magnitude.
+- **Direction for Phase B3**: re-verify the norm-half pairing in `mtp_forward_step` against the Qwen3-MTP reference implementation and/or the HF generator. Compare kiln's concatenation order and the binding between `pre_fc_norm_embedding`/`pre_fc_norm_hidden` and the `embed`/`h_prev` halves. If swap-ON is the "correct" pairing, the fix is a one-line rewire and should reproduce across multiple prompts and longer decode windows.
+
+### Caveats
+
+- **N=1, single prompt, 32 output tokens, 16 draft calls captured per arm.** The +45% α lift is a strong signal but has not been confirmed across prompts. Phase B3 must run a multi-prompt A/B (e.g. 8–16 prompts × 128 output tokens) before any code change is landed as the canonical wiring.
+- Both runs use the same bench seed and the same prompt, so the first draft step's `last_token=561` and `target=29144` are identical. The divergence at step 2 (6165 vs identity) is deterministic relative to the norm-pairing choice.
+- Out-of-vocab special-token drafting (`248068`, `248069`) from Phase B still reproduces under swap-ON at `pos=8`, so the norm-swap is not a universal fix — it is a bisect result pointing at the pairing, not a production patch.
+
+### Budget used
+
+- Pod: 1× A6000 on-demand (pool lease, `ghcr.io/ericflo/kiln-runpod:latest`).
+- Wall-clock: ~55 min total (build + byte-eq 34s on warm sccache, A/B pair 81s, upload/download/parse ~5 min; rest was planning and PROFILING.md write-up).
+- Work: byte-eq test (Part A), halves-L2 logging (Part B), swap toggle (Part C), this write-up (Part D).
+
+Pod released to pool on task completion.
