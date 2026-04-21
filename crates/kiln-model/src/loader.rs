@@ -487,15 +487,44 @@ fn load_ffn(
     })
 }
 
+/// Detect which MTP prefix (if any) the loaded checkpoint uses.
+///
+/// Qwen3.5-4B publishes MTP tensors under the bare `mtp.` prefix. A future
+/// VL-wrapped checkpoint could instead nest them under the language-model
+/// prefix (e.g. `model.language_model.mtp.`). Probe both by checking for
+/// `{candidate}fc.weight`, which is always present when MTP is shipped.
+/// Returns `None` if no MTP tensors are present (checkpoint is MTP-less).
+fn detect_mtp_prefix(
+    tensor_map: &HashMap<&str, (usize, &safetensors::tensor::TensorView<'_>)>,
+    base_prefix: &str,
+) -> Option<String> {
+    let prefixed = format!("{base_prefix}mtp.");
+    if tensor_map.contains_key(format!("{prefixed}fc.weight").as_str()) {
+        return Some(prefixed);
+    }
+    if tensor_map.contains_key("mtp.fc.weight") {
+        return Some("mtp.".to_string());
+    }
+    None
+}
+
 /// Detect and load the native MTP head if present in the checkpoint.
 ///
-/// Qwen3.5-4B ships 15 MTP-prefixed tensors under `<prefix>mtp.*`:
+/// Qwen3.5-4B ships 15 MTP-prefixed tensors. The top-level prefix can be
+/// either the VL language-model prefix (`{prefix}mtp.*`, e.g. if a future
+/// checkpoint re-exports the VL wrapper) or bare `mtp.*` (the layout that
+/// `Qwen/Qwen3.5-4B` actually publishes on the Hub). Similarly, the final
+/// RMSNorm key is `mtp.norm.weight` in the published checkpoint but older
+/// docs / vLLM references call it `mtp.final_layernorm.weight`. Detect
+/// both layouts so `KILN_SPEC_METHOD=mtp` works on the stock release.
+///
+/// Tensors loaded (Qwen3.5-4B layout):
 /// - `mtp.fc.weight` `[hidden, 2*hidden]`
 /// - `mtp.pre_fc_norm_embedding.weight` `[hidden]`
 /// - `mtp.pre_fc_norm_hidden.weight` `[hidden]`
 /// - `mtp.layers.0.*` — one full GQA transformer layer (shape identical to a
 ///   main-model full-attention layer including `attn_output_gate`)
-/// - `mtp.final_layernorm.weight` `[hidden]`
+/// - `mtp.norm.weight` (or `mtp.final_layernorm.weight`) `[hidden]`
 ///
 /// The MTP head ties its `lm_head` to the base model's `embed_tokens`, so we
 /// do NOT load a separate `mtp.lm_head` tensor. The spec-decode forward
@@ -508,17 +537,18 @@ fn load_mtp_if_present(
     prefix: &str,
     config: &ModelConfig,
 ) -> Result<Option<MtpWeights>> {
-    // Probe: is the MTP fc projection present? (Single-file and VL-prefixed
-    // checkpoints both land at `{prefix}mtp.fc.weight`.)
-    let mtp_prefix = format!("{prefix}mtp.");
-    let fc_key = format!("{mtp_prefix}fc.weight");
-    if !tensor_map.contains_key(fc_key.as_str()) {
-        return Ok(None);
-    }
+    // Probe: is the MTP fc projection present under either the VL prefix
+    // or the bare `mtp.` prefix? Qwen3.5-4B publishes bare; keep the
+    // VL-prefixed form working for any re-exports that embed the LM inside
+    // the VL wrapper tensors.
+    let mtp_prefix = match detect_mtp_prefix(tensor_map, prefix) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
 
-    let ctx = |name: &str| format!("mtp.{name}");
+    let ctx = |name: &str| format!("{mtp_prefix}{name}");
 
-    let fc = extract_tensor(tensor_map, &fc_key)?;
+    let fc = extract_tensor(tensor_map, &format!("{mtp_prefix}fc.weight"))?;
     // fc maps concat(embed, hidden) → hidden, so shape is [hidden, 2*hidden].
     validate_shape(&fc, &[config.hidden_size, 2 * config.hidden_size], &ctx("fc"))?;
 
@@ -542,8 +572,22 @@ fn load_mtp_if_present(
         &ctx("pre_fc_norm_hidden"),
     )?;
 
-    let final_layernorm =
-        extract_tensor(tensor_map, &format!("{mtp_prefix}final_layernorm.weight"))?;
+    // Stock Qwen3.5-4B names this `mtp.norm.weight`; older vLLM / HF docs
+    // (and earlier kiln comments) refer to it as `mtp.final_layernorm`.
+    // Accept either.
+    let final_ln_key = [
+        format!("{mtp_prefix}norm.weight"),
+        format!("{mtp_prefix}final_layernorm.weight"),
+    ]
+    .into_iter()
+    .find(|k| tensor_map.contains_key(k.as_str()))
+    .with_context(|| {
+        format!(
+            "MTP final RMSNorm not found (looked for {mtp_prefix}norm.weight and \
+             {mtp_prefix}final_layernorm.weight)"
+        )
+    })?;
+    let final_layernorm = extract_tensor(tensor_map, &final_ln_key)?;
     validate_shape(
         &final_layernorm,
         &[config.hidden_size],
@@ -1233,6 +1277,130 @@ mod tests {
             err.contains("not found"),
             "Error should mention missing tensor: {err}"
         );
+    }
+
+    /// Append MTP tensor specs for the tiny test model.
+    ///
+    /// `mtp_prefix` controls the prefix used for the MTP weights (`"mtp."`
+    /// for Qwen3.5-4B stock, `"{base}mtp."` for VL-wrapped checkpoints).
+    /// `final_ln_name` is the leaf used for the head RMSNorm — either
+    /// `"norm"` (Qwen3.5-4B stock) or `"final_layernorm"` (older convention).
+    fn tiny_mtp_tensors(
+        mtp_prefix: &str,
+        final_ln_name: &str,
+    ) -> Vec<(String, Vec<usize>, StDtype)> {
+        let config = tiny_model_config();
+        let hidden = config.hidden_size;
+        let intermediate = config.intermediate_size;
+        let q_proj_dim = config.full_attn_q_proj_dim();
+        let q_out_dim = config.num_attention_heads * config.head_dim;
+        let kv_dim = config.num_kv_heads * config.head_dim;
+        let bf16 = StDtype::BF16;
+
+        let mut tensors: Vec<(String, Vec<usize>, StDtype)> = Vec::new();
+        tensors.push((format!("{mtp_prefix}fc.weight"), vec![hidden, 2 * hidden], bf16));
+        tensors.push((format!("{mtp_prefix}pre_fc_norm_embedding.weight"), vec![hidden], bf16));
+        tensors.push((format!("{mtp_prefix}pre_fc_norm_hidden.weight"), vec![hidden], bf16));
+        tensors.push((format!("{mtp_prefix}{final_ln_name}.weight"), vec![hidden], bf16));
+
+        // One full-attention transformer layer at mtp.layers.0.*
+        let lp = format!("{mtp_prefix}layers.0.");
+        tensors.push((format!("{lp}input_layernorm.weight"), vec![hidden], bf16));
+        tensors.push((format!("{lp}post_attention_layernorm.weight"), vec![hidden], bf16));
+        tensors.push((format!("{lp}mlp.gate_proj.weight"), vec![intermediate, hidden], bf16));
+        tensors.push((format!("{lp}mlp.up_proj.weight"), vec![intermediate, hidden], bf16));
+        tensors.push((format!("{lp}mlp.down_proj.weight"), vec![hidden, intermediate], bf16));
+        tensors.push((format!("{lp}self_attn.q_proj.weight"), vec![q_proj_dim, hidden], bf16));
+        tensors.push((format!("{lp}self_attn.k_proj.weight"), vec![kv_dim, hidden], bf16));
+        tensors.push((format!("{lp}self_attn.v_proj.weight"), vec![kv_dim, hidden], bf16));
+        tensors.push((format!("{lp}self_attn.o_proj.weight"), vec![hidden, q_out_dim], bf16));
+        tensors.push((format!("{lp}self_attn.q_norm.weight"), vec![config.head_dim], bf16));
+        tensors.push((format!("{lp}self_attn.k_norm.weight"), vec![config.head_dim], bf16));
+        tensors
+    }
+
+    /// Load a tiny model with the given base prefix + MTP tensors under
+    /// `mtp_prefix` with `final_ln_name` naming, returning the loaded weights.
+    fn load_tiny_with_mtp(
+        base_prefix: &str,
+        mtp_prefix: &str,
+        final_ln_name: &str,
+    ) -> ModelWeights {
+        let mut tensors = tiny_model_tensors(base_prefix);
+        tensors.extend(tiny_mtp_tensors(mtp_prefix, final_ln_name));
+
+        let tensor_refs: Vec<(&str, Vec<usize>, StDtype)> = tensors
+            .iter()
+            .map(|(n, s, d)| (n.as_str(), s.clone(), *d))
+            .collect();
+        let bytes = create_test_safetensors(&tensor_refs);
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("model.safetensors"), &bytes).unwrap();
+
+        let config = tiny_model_config();
+        load_model(dir.path(), &config).unwrap()
+    }
+
+    #[test]
+    fn test_load_mtp_vl_prefix_with_norm() {
+        // VL-wrapped layout: mtp tensors nested under the LM prefix,
+        // final RMSNorm is `norm.weight`.
+        let weights = load_tiny_with_mtp(
+            "model.language_model.",
+            "model.language_model.mtp.",
+            "norm",
+        );
+        let mtp = weights.mtp.expect("MTP weights should have loaded");
+        assert_eq!(mtp.fc.shape, vec![64, 128]);
+        assert_eq!(mtp.final_layernorm.shape, vec![64]);
+        assert!(matches!(mtp.layer.attention, AttentionWeights::Full(_)));
+    }
+
+    #[test]
+    fn test_load_mtp_bare_prefix_qwen35() {
+        // Qwen3.5-4B stock layout: LM under `model.language_model.` prefix
+        // but MTP tensors at bare `mtp.*` with `norm.weight` head norm.
+        let weights = load_tiny_with_mtp(
+            "model.language_model.",
+            "mtp.",
+            "norm",
+        );
+        let mtp = weights.mtp.expect("MTP weights should have loaded (bare prefix)");
+        assert_eq!(mtp.fc.shape, vec![64, 128]);
+        assert_eq!(mtp.final_layernorm.shape, vec![64]);
+        assert!(matches!(mtp.layer.attention, AttentionWeights::Full(_)));
+    }
+
+    #[test]
+    fn test_load_mtp_final_layernorm_alias() {
+        // Older convention / vLLM naming: final RMSNorm is
+        // `final_layernorm.weight`. Must still load.
+        let weights = load_tiny_with_mtp(
+            "model.language_model.",
+            "mtp.",
+            "final_layernorm",
+        );
+        let mtp = weights.mtp.expect("MTP weights should have loaded with final_layernorm alias");
+        assert_eq!(mtp.final_layernorm.shape, vec![64]);
+    }
+
+    #[test]
+    fn test_load_without_mtp_leaves_none() {
+        // Base checkpoint without MTP should leave mtp = None and load fine.
+        let tensors = tiny_model_tensors("model.language_model.");
+        let tensor_refs: Vec<(&str, Vec<usize>, StDtype)> = tensors
+            .iter()
+            .map(|(n, s, d)| (n.as_str(), s.clone(), *d))
+            .collect();
+        let bytes = create_test_safetensors(&tensor_refs);
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("model.safetensors"), &bytes).unwrap();
+
+        let config = tiny_model_config();
+        let weights = load_model(dir.path(), &config).unwrap();
+        assert!(weights.mtp.is_none(), "MTP should be None when tensors are absent");
     }
 
     // -----------------------------------------------------------------------
