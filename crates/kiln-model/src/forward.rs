@@ -894,11 +894,21 @@ impl GpuWeights {
         config: &kiln_core::config::ModelConfig,
         device: &Device,
     ) -> Result<Self> {
-        let embed_tokens =
-            weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
-        let embed_tokens_t =
-            cached_transpose_for_weight(&weights.embedding.embed_tokens, &embed_tokens, device)
-                .context("embed_tokens cached transpose")?;
+        let (embed_tokens, embed_tokens_t) = if matches!(device, Device::Metal(_)) {
+            let embed_tokens_t =
+                weight_to_transposed_tensor_2d(&weights.embedding.embed_tokens, device)
+                    .context("embed_tokens transposed upload")?;
+            let embed_tokens = dropped_weight_stub(&weights.embedding.embed_tokens, device)
+                .context("embed_tokens stub")?;
+            (embed_tokens, embed_tokens_t)
+        } else {
+            let embed_tokens =
+                weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
+            let embed_tokens_t =
+                cached_transpose_for_weight(&weights.embedding.embed_tokens, &embed_tokens, device)
+                    .context("embed_tokens cached transpose")?;
+            (embed_tokens, embed_tokens_t)
+        };
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
         let rotary_inv_freq =
             compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
@@ -1258,6 +1268,23 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     let index = Tensor::new(token_ids, embed_weights.device())?;
     let out = embed_weights.index_select(&index, 0)?;
     Ok(out)
+}
+
+fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
+    let t_dims = weights.embed_tokens_t.dims();
+    if t_dims.len() == 2 {
+        let expected_embed_dims = [t_dims[1], t_dims[0]];
+        if weights.embed_tokens.dims() != expected_embed_dims.as_slice() {
+            return embedding_lookup_from_transposed(token_ids, &weights.embed_tokens_t);
+        }
+    }
+    embedding_lookup(token_ids, &weights.embed_tokens)
+}
+
+fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
+    let index = Tensor::new(token_ids, embed_tokens_t.device())?;
+    let gathered = embed_tokens_t.index_select(&index, 1)?;
+    Ok(gathered.t()?.contiguous()?)
 }
 
 /// RMSNorm: x * weight / sqrt(mean(x^2) + eps).
@@ -3851,7 +3878,7 @@ pub fn model_forward(
     let seq_len = token_ids.len();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -4053,7 +4080,7 @@ pub fn model_forward_segment(
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
 pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
-    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
     hidden = hidden.unsqueeze(0)?;
     let positions: Vec<u32> = (0..seq_len).map(|p| p as u32).collect();
     Ok((hidden, positions))
@@ -4427,7 +4454,7 @@ pub fn mtp_forward_step(
     // 1. Token embedding for the draft token. `embedding_lookup` returns
     //    shape [1, H]; unsqueeze to [1, 1, H] to match transformer-block I/O.
     let token_ids = [draft_token_id];
-    let token_emb = embedding_lookup(&token_ids, &weights.embed_tokens)?; // [1, H]
+    let token_emb = embedding_lookup_from_weights(&token_ids, weights)?; // [1, H]
     let token_emb = token_emb.unsqueeze(0)?; // [1, 1, H]
     if dump_pre_rope {
         let _ = crate::mtp_debug::capture_pre_rope_tap("token_emb", &token_emb);
@@ -4856,7 +4883,7 @@ fn model_forward_paged_inner(
     let device = weights.embed_tokens.device();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = embedding_lookup(token_ids, &weights.embed_tokens)?;
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -5205,6 +5232,27 @@ mod tests {
         // Token 4
         assert!((vals[2][0] - 1.3).abs() < 1e-6);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_embedding_lookup_from_transposed_matches_table() -> Result<()> {
+        let device = Device::Cpu;
+        let embed_data: Vec<f32> = vec![
+            0.1, 0.2, 0.3, //
+            0.4, 0.5, 0.6, //
+            0.7, 0.8, 0.9, //
+            1.0, 1.1, 1.2, //
+            1.3, 1.4, 1.5,
+        ];
+        let embed = Tensor::new(embed_data, &device)?.reshape((5, 3))?;
+        let embed_t = embed.t()?.contiguous()?;
+
+        let direct = embedding_lookup(&[2, 0, 4], &embed)?;
+        let transposed = embedding_lookup_from_transposed(&[2, 0, 4], &embed_t)?;
+
+        assert_eq!(transposed.dims(), direct.dims());
+        assert_eq!(transposed.to_vec2::<f32>()?, direct.to_vec2::<f32>()?);
         Ok(())
     }
 
