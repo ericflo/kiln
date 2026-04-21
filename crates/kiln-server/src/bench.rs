@@ -5,7 +5,7 @@
 //! Requires a GPU with the Qwen3.5-4B model weights downloaded.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -19,7 +19,8 @@ use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_streaming, model_forward_paged_with_last_hidden, streaming_prefill_enabled,
+    model_forward_paged_last_token, model_forward_paged_streaming,
+    model_forward_paged_with_last_hidden, streaming_prefill_enabled,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -584,7 +585,7 @@ fn bench_latency_paged(
         )
         .context("paged prefill forward pass (streaming) failed")?
     } else {
-        model_forward_paged(
+        model_forward_paged_last_token(
             &*backend,
             &prompt_token_ids,
             weights,

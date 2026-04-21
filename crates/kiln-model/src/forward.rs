@@ -112,6 +112,43 @@ fn flash_attention_forward(
     Ok(Some(attn_output))
 }
 
+/// Compute attention using a backend fast path when Q/K/V are already in
+/// `[batch, heads, seq_len, head_dim]` layout.
+///
+/// The paged prefill path transposes Q/K/V to this layout before writing the
+/// KV cache. Metal's fused SDPA also consumes this layout, so this variant
+/// avoids transposing all three tensors back to token-major only for the
+/// backend to transpose them again.
+fn flash_attention_forward_head_major(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    num_heads: usize,
+    head_dim: usize,
+) -> Result<Option<Tensor>> {
+    if !backend.supports_flash_attn_prefill_head_major() {
+        return Ok(None);
+    }
+
+    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+    let causal = true;
+
+    let Some(attn_output) =
+        backend.flash_attn_prefill_head_major(q, k, v, softmax_scale, causal)?
+    else {
+        return Ok(None);
+    };
+
+    let (batch, _heads, seq_len, _hd) = attn_output.dims4()?;
+    let attn_output = attn_output.transpose(1, 2)?.contiguous()?.reshape((
+        batch,
+        seq_len,
+        num_heads * head_dim,
+    ))?;
+    Ok(Some(attn_output))
+}
+
 /// GPU-ready tensors organized by layer, converted from raw `ModelWeights` bytes.
 pub struct GpuWeights {
     /// Token embedding table: [vocab_size, hidden_size]
@@ -2668,20 +2705,34 @@ pub fn gqa_attention_paged(
     // directly and only write K/V into the paged cache once for future decode.
     // This avoids a pointless write-then-read round-trip through
     // `PagedKvCache` on the first prompt tile.
-    if seq_len > 1 && start_pos == 0 && backend.supports_flash_attn_prefill() {
+    if seq_len > 1
+        && start_pos == 0
+        && (backend.supports_flash_attn_prefill_head_major()
+            || backend.supports_flash_attn_prefill())
+    {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
-        let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
-        let k_prefill = k.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
-        let v_prefill = v.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
-        if let Some(attn_output) = flash_attention_forward(
-            backend,
-            &q_prefill,
-            &k_prefill,
-            &v_prefill,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        )? {
+        let attn_output = if let Some(attn_output) =
+            flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)?
+        {
+            Some(attn_output)
+        } else if backend.supports_flash_attn_prefill() {
+            let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
+            let k_prefill = k.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
+            let v_prefill = v.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
+            flash_attention_forward(
+                backend,
+                &q_prefill,
+                &k_prefill,
+                &v_prefill,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )?
+        } else {
+            None
+        };
+
+        if let Some(attn_output) = attn_output {
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
                 paged_cache
@@ -3488,6 +3539,40 @@ pub fn model_forward_paged(
     )?;
     // `LmHeadMode::Full` always returns Some.
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
+}
+
+/// Paged-KV forward pass for generation prefill when only the next-token
+/// distribution is needed.
+///
+/// This runs the same layer loop and paged KV writes as [`model_forward_paged`]
+/// but only projects the final hidden row through the LM head, returning
+/// logits with shape `[1, 1, vocab_size]`.
+pub fn model_forward_paged_last_token(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+) -> Result<Tensor> {
+    let (logits, _hidden) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+        LmHeadMode::LastRowOnly,
+    )?;
+    Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
@@ -6733,6 +6818,73 @@ mod tests {
                 "tile={tile} last-token max_abs_diff={max_abs:e} exceeds 1e-5"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_forward_paged_last_token_matches_full_last_row_cpu() -> Result<()> {
+        let config = streaming_test_config();
+        let total = 128;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+
+        let (mut full_cache, full_bt) = make_paged_setup(&config, total, 64, &device)?;
+        let mut full_state = LinearAttentionState::new(&config, &device)?;
+        let full_logits = model_forward_paged(
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut full_cache,
+            &full_bt,
+            0,
+            Some(&mut full_state),
+            None,
+            None,
+        )?;
+        let reference_last = full_logits
+            .narrow(1, total - 1, 1)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        let (mut last_cache, last_bt) = make_paged_setup(&config, total, 64, &device)?;
+        let mut last_state = LinearAttentionState::new(&config, &device)?;
+        let last_logits = model_forward_paged_last_token(
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut last_cache,
+            &last_bt,
+            0,
+            Some(&mut last_state),
+            None,
+            None,
+        )?;
+        assert_eq!(last_logits.dims(), &[1, 1, config.vocab_size]);
+        let last = last_logits.flatten_all()?.to_vec1::<f32>()?;
+        let max_abs = reference_last
+            .iter()
+            .zip(last.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs <= 1e-5,
+            "last-token prefill max_abs_diff={max_abs:e} exceeds 1e-5"
+        );
+
         Ok(())
     }
 
