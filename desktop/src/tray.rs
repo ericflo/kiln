@@ -327,6 +327,15 @@ pub(crate) fn kiln_ui_url(state: &ServerState, host: &str, port: u16) -> Option<
     }
 }
 
+/// Format the body of the notification surfaced when the tray's "Open Kiln UI
+/// in Browser" action fails at `shell.open` — typically a missing or broken
+/// default-handler (xdg-open on Linux, Explorer on Windows). Includes the URL
+/// so the user can fall back to manual paste. Pure helper so it can be
+/// unit-tested without GTK/webkit2gtk.
+pub fn open_kiln_ui_failure_body(url: &str, err: &str) -> String {
+    format!("Couldn't open browser: {}. URL: {}", err, url)
+}
+
 async fn open_kiln_ui_in_default_browser(app: &AppHandle, supervisor: Arc<Supervisor>) {
     let state = supervisor.state().await;
     let (host, port) = {
@@ -335,11 +344,21 @@ async fn open_kiln_ui_in_default_browser(app: &AppHandle, supervisor: Arc<Superv
         (s.host.clone(), s.port)
     };
     match kiln_ui_url(&state, &host, port) {
-        Some(url) => {
-            if let Err(e) = app.shell().open(url, None) {
-                eprintln!("[tray] open_kiln_ui_in_default_browser shell.open failed: {}", e);
+        Some(url) => match app.shell().open(&url, None) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!(
+                    "[tray] open_kiln_ui_in_default_browser shell.open failed: {}",
+                    e
+                );
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Kiln UI unavailable")
+                    .body(open_kiln_ui_failure_body(&url, &e.to_string()))
+                    .show();
             }
-        }
+        },
         None => {
             // Surface the "server not running" case to the user instead of
             // silently no-opping: without this the tray item looks broken.
@@ -785,6 +804,42 @@ mod tests {
         assert_eq!(
             ready_notification_body(8080),
             "OpenAI base URL: http://localhost:8080/v1"
+        );
+    }
+
+    #[test]
+    fn open_kiln_ui_failure_body_contains_url_and_error() {
+        let body = open_kiln_ui_failure_body(
+            "http://127.0.0.1:9000/ui",
+            "xdg-open: not found",
+        );
+        assert!(
+            body.contains("http://127.0.0.1:9000/ui"),
+            "body should include URL for manual paste, got: {}",
+            body
+        );
+        assert!(
+            body.contains("xdg-open: not found"),
+            "body should include underlying error, got: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn open_kiln_ui_failure_body_distinct_inputs_flow_through() {
+        let body = open_kiln_ui_failure_body(
+            "http://localhost:8080/ui",
+            "The system cannot find the file specified. (os error 2)",
+        );
+        assert!(
+            body.contains("http://localhost:8080/ui"),
+            "body should include URL, got: {}",
+            body
+        );
+        assert!(
+            body.contains("The system cannot find the file specified. (os error 2)"),
+            "body should include Windows-style error message, got: {}",
+            body
         );
     }
 
