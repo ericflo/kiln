@@ -17,6 +17,8 @@ const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
 const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
 const DISABLE_FUSED_GDN_GATES: &str = "KILN_DISABLE_FUSED_GDN_GATES";
 const DISABLE_METAL_GDN_GATES: &str = "KILN_DISABLE_METAL_GDN_GATES";
+const DISABLE_METAL_GDN_FORWARD_SUBSTITUTION: &str =
+    "KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION";
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
 const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
 const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
@@ -65,6 +67,10 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_causal_conv1d_update(&self) -> bool {
         !metal_conv1d_update_disabled()
+    }
+
+    fn supports_gdn_forward_substitution(&self) -> bool {
+        !metal_gdn_forward_substitution_disabled()
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
@@ -243,6 +249,22 @@ impl BackendRuntime for MetalBackend {
         Ok(Some(out))
     }
 
+    fn gdn_forward_substitution(
+        &self,
+        a_strict: &Tensor,
+        v_prime: &Tensor,
+        beta: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        if metal_gdn_forward_substitution_disabled()
+            || !metal_gdn_forward_substitution_supports(a_strict, v_prime, beta)
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta)
+            .context("metal gdn_forward_substitution kernel failed")?;
+        Ok(Some(out))
+    }
+
     fn gdn_recurrent_step(
         &self,
         q: &Tensor,
@@ -312,6 +334,10 @@ fn metal_conv1d_update_disabled() -> bool {
 
 fn metal_gdn_recurrent_disabled() -> bool {
     env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
+}
+
+fn metal_gdn_forward_substitution_disabled() -> bool {
+    env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_FORWARD_SUBSTITUTION)
 }
 
 fn metal_gdn_gates_disabled() -> bool {
@@ -448,6 +474,42 @@ fn metal_gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Te
         return false;
     }
     a.elem_count() > 0
+}
+
+fn metal_gdn_forward_substitution_supports(
+    a_strict: &Tensor,
+    v_prime: &Tensor,
+    beta: &Tensor,
+) -> bool {
+    if !matches!(a_strict.device(), Device::Metal(_))
+        || !matches!(v_prime.device(), Device::Metal(_))
+        || !matches!(beta.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if a_strict.dtype() != DType::BF16
+        || v_prime.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((batch, heads, chunk, chunk_cols)) = a_strict.dims4() else {
+        return false;
+    };
+    let Ok((b_v, h_v, c_v, dv)) = v_prime.dims4() else {
+        return false;
+    };
+    let Ok((b_b, h_b, c_b)) = beta.dims3() else {
+        return false;
+    };
+
+    chunk == chunk_cols
+        && (b_v, h_v, c_v) == (batch, heads, chunk)
+        && (b_b, h_b, c_b) == (batch, heads, chunk)
+        && chunk > 0
+        && chunk <= 64
+        && dv > 0
+        && dv <= 128
 }
 
 fn metal_gdn_recurrent_supports(
@@ -1335,6 +1397,59 @@ kernel void kiln_gdn_recurrent_bf16(
 
     out[v_base + col] = static_cast<bfloat>(out_acc);
 }
+
+kernel void kiln_gdn_forward_substitution_bf16(
+    device const bfloat* a_strict [[buffer(0)]],
+    device const bfloat* v_prime [[buffer(1)]],
+    device const bfloat* beta [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& batch_heads [[buffer(4)]],
+    constant uint& chunk_size [[buffer(5)]],
+    constant uint& dv [[buffer(6)]],
+    uint bh [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (bh >= batch_heads) {
+        return;
+    }
+
+    // Conservative Qwen3.5 envelope: C <= 64, dv <= 128. Static threadgroup
+    // storage keeps the kernel simple and under Apple Silicon's common 32 KiB
+    // per-threadgroup memory budget: (64*64 + 64*128) bf16 = 24 KiB.
+    threadgroup bfloat sA[4096];
+    threadgroup bfloat sW[8192];
+
+    const uint a_base = bh * chunk_size * chunk_size;
+    const uint v_base = bh * chunk_size * dv;
+    const uint beta_base = bh * chunk_size;
+    const uint total_a = chunk_size * chunk_size;
+
+    for (uint i = tid; i < total_a; i += 128) {
+        sA[i] = a_strict[a_base + i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint t = 0; t < chunk_size; ++t) {
+        const float beta_t = static_cast<float>(beta[beta_base + t]);
+
+        for (uint d = tid; d < dv; d += 128) {
+            float acc = 0.0f;
+            for (uint i = 0; i < t; ++i) {
+                const float a = static_cast<float>(sA[t * chunk_size + i]);
+                const float w = static_cast<float>(sW[i * dv + d]);
+                acc += a * w;
+            }
+
+            const uint row_col = t * dv + d;
+            const float vp = static_cast<float>(v_prime[v_base + row_col]);
+            const bfloat w = static_cast<bfloat>(beta_t * (vp - acc));
+            sW[row_col] = w;
+            out[v_base + row_col] = w;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
 "#;
 
 fn metal_gdn_recurrent_pipeline(
@@ -1364,6 +1479,127 @@ fn metal_gdn_recurrent_pipeline(
         .map_err(|e| anyhow::anyhow!("build metal gdn recurrent pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
+}
+
+fn metal_gdn_forward_substitution_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn forward-substitution pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_forward_substitution_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn forward-substitution function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn forward-substitution pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_forward_substitution_bf16(
+    a_strict: &Tensor,
+    v_prime: &Tensor,
+    beta: &Tensor,
+) -> Result<Tensor> {
+    let (batch, heads, chunk_size, _) = a_strict.dims4()?;
+    let dv = v_prime.dim(3)?;
+    let batch_heads = batch * heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize
+            && chunk_size <= u32::MAX as usize
+            && dv <= u32::MAX as usize,
+        "metal gdn forward-substitution shape too large"
+    );
+
+    let a_strict = a_strict.contiguous()?;
+    let v_prime = v_prime.contiguous()?;
+    let beta = beta.contiguous()?;
+    let out = Tensor::zeros(
+        (batch, heads, chunk_size, dv),
+        DType::BF16,
+        a_strict.device(),
+    )?;
+
+    let Device::Metal(device) = a_strict.device() else {
+        anyhow::bail!("metal gdn forward-substitution requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_forward_substitution_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_forward_substitution_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (a_storage, a_layout) = a_strict.storage_and_layout();
+        let (v_storage, v_layout) = v_prime.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let a_metal = match &*a_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution a_strict must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution v_prime must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution beta must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution out must be on Metal"),
+        };
+
+        let a_buf =
+            candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
+        let v_buf =
+            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_prime.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let chunk_size_u32 = chunk_size as u32;
+        let dv_u32 = dv as u32;
+        encoder.set_bytes(4, &batch_heads_u32);
+        encoder.set_bytes(5, &chunk_size_u32);
+        encoder.set_bytes(6, &dv_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: batch_heads,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 fn metal_gdn_recurrent_bf16(

@@ -1882,7 +1882,7 @@ fn slice_chunked_3d(t: &Tensor, ci: usize) -> Result<Tensor> {
 
 /// Compute the chunk-local W = (I + A_strict)^{-1} (beta * V_prime) by
 /// forward substitution. On backends that advertise
-/// `supports_gdn_forward_substitution()` (today: CUDA + bf16 only), dispatches
+/// `supports_gdn_forward_substitution()` (CUDA/Metal bf16 today), dispatches
 /// to the fused kernel (one kernel block per (batch, head)) when
 /// `chunk_size <= 128`. Otherwise it falls back to the per-token candle loop.
 fn compute_w_chunk(
@@ -2197,9 +2197,9 @@ fn gdn_chunkwise_recurrence(
         // Forward substitution for W[t]:
         //   W[t] = beta[t] * ( V'[t] - Σ_{i<t} a_strict[t, i] * W[i] )
         //
-        // Dispatch: on CUDA + bf16 + chunk_size <= 128, use the vendored
-        // fused kernel from kiln-gdn-kernel. On CPU or outside that
-        // envelope, fall back to the per-token candle loop.
+        // Dispatch: on CUDA/Metal + bf16 + supported chunk envelope, use the
+        // backend fused kernel. On CPU or outside that envelope, fall back to
+        // the per-token candle loop.
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?; // [B, nv, C, dv]
 
         // Intra-chunk output contribution: B_mask @ W
@@ -7320,6 +7320,71 @@ mod tests {
         assert!(
             mean < 1e-3,
             "kernel mean drift exceeds tolerance: mean_abs_diff = {mean:e}"
+        );
+
+        Ok(())
+    }
+
+    /// Correctness test for the Metal fused forward-substitution kernel.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_gdn_forward_substitution_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal not available, skipping test_metal_gdn_forward_substitution_matches_fallback"
+            );
+            return Ok(());
+        };
+
+        let b = 1usize;
+        let nv = 8usize;
+        let c = 16usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xFACE_FEED_u64);
+
+        let n_a = b * nv * c * c;
+        let n_v = b * nv * c * dv;
+        let n_b = b * nv * c;
+
+        let a_data: Vec<f32> = (0..n_a).map(|_| rng.gen_range(-0.05f32..0.05f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+
+        let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?;
+        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, c), &device)?;
+
+        let mask = strict_lower_tri_mask(c, DType::F32, &device)?;
+        let a_f32 = a_f32.broadcast_mul(&mask)?;
+
+        let a = a_f32.to_dtype(DType::BF16)?;
+        let v = v_f32.to_dtype(DType::BF16)?;
+        let beta = beta_f32.to_dtype(DType::BF16)?;
+
+        let backend = crate::backend::for_device(&device);
+        let w_kernel = compute_w_chunk(&*backend, &a, &v, &beta, c)?;
+        let w_fb = compute_w_chunk_fallback(&a, &v, &beta, c)?;
+
+        let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+
+        eprintln!(
+            "metal gdn-forward-sub vs fallback: max_abs_diff={max:e}, mean_abs_diff={mean:e}"
+        );
+
+        assert!(
+            max < 1e-2,
+            "metal forward-sub kernel output exceeds tolerance: max_abs_diff = {max:e}"
+        );
+        assert!(
+            mean < 1e-3,
+            "metal forward-sub kernel mean drift exceeds tolerance: mean_abs_diff = {mean:e}"
         );
 
         Ok(())
