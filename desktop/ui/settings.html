@@ -701,7 +701,12 @@
       const reloadBtn = document.getElementById("reload");
       const saveBtn = document.getElementById("save");
       const restoreBtn = document.getElementById("restore-defaults");
-      reloadBtn.addEventListener("click", load);
+      reloadBtn.addEventListener("click", () => {
+        if (isDirty() && !window.confirm("You have unsaved changes. Discard them and reload from disk?")) {
+          return;
+        }
+        load();
+      });
       saveBtn.addEventListener("click", save);
       restoreBtn.addEventListener("click", restoreDefaults);
       restartBtn.addEventListener("click", restart);
