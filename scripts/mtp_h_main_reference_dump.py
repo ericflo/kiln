@@ -782,6 +782,13 @@ def run_reference_forward(
     )
     model.eval()
     model.to(device)
+    # Force dtype post-load: Qwen3.5 with trust_remote_code + low_cpu_mem_usage
+    # can silently honour `config.torch_dtype` (bf16) instead of the requested
+    # `torch_dtype` kwarg, leaving the `--fp32` comparator path running in
+    # bf16. Cast explicitly so the dumped activations really are fp32 when
+    # requested. No-op on the bf16 default path.
+    if fp32:
+        model.to(torch.float32)
 
     base = _get_base_model(model)
 
