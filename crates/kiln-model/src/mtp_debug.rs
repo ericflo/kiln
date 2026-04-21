@@ -229,6 +229,23 @@ pub fn is_swap_fc_norms_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// True when `KILN_MTP_FC_FP32_ACCUM=1` (or `true`) is set. When enabled,
+/// `mtp_forward_step` promotes the `mtp.fc` matmul inputs to f32, performs
+/// the `[1, 2H] @ [2H, H]` fused projection in f32, and casts the result
+/// back to bf16. This is the Phase C9 opt-in falsification toggle: if α
+/// materially lifts with the flag on, the residual bf16 matmul accumulation
+/// noise at `fc_output` (max|Δ| ~1.6e-2, within the BF16 error budget)
+/// contributes to downstream top1 flips; if α is unchanged, the null
+/// result confirms that the bf16 variance captured by the C6 comparator
+/// is a benign accumulation artifact and not the dominant α-suppressing
+/// signal. Read on every call (no caching) so runs can A/B by toggling
+/// the env var between processes.
+pub fn is_mtp_fc_fp32_accum_enabled() -> bool {
+    std::env::var("KILN_MTP_FC_FP32_ACCUM")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Path to which `mtp_forward_step` should dump all 8 Phase B6 numerical
 /// bisect taps on each targeted MTP draft call, if set. Unset → no dump.
 ///

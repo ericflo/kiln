@@ -1,0 +1,19 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.08
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+=== ALPHA seed=42 main-baseline ===
+    Decode (MTP): 128 tokens, mean ITL 25.4ms (39.3 tok/s), α = 0.033 (4/123)
+Draft acceptance α:    0.033
+=== ALPHA seed=43 main-baseline ===
+    Decode (MTP): 128 tokens, mean ITL 25.8ms (38.8 tok/s), α = 0.058 (7/120)
+Draft acceptance α:    0.058
+=== ALPHA seed=44 main-baseline ===
+    Decode (MTP): 128 tokens, mean ITL 25.8ms (38.8 tok/s), α = 0.104 (12/115)
+Draft acceptance α:    0.104

@@ -4434,7 +4434,23 @@ pub fn mtp_forward_step(
     }
     let fused = {
         kiln_nvtx::range!(c"kiln/mtp/fc");
-        concat.broadcast_matmul(&mtp.fc_t)?
+        if crate::mtp_debug::is_mtp_fc_fp32_accum_enabled() {
+            // Phase C9 falsification: promote inputs to f32, matmul in f32,
+            // cast the result back to the input dtype. Eliminates the bf16
+            // accumulation noise visible at the `fused` / `fc_output` tap
+            // (max|Δ| ~1.6e-2 against the HF bf16 reference). The
+            // [1, 1, 2H] @ [2H, H] shape is tiny (~13M FLOPs for 4B), so
+            // the per-step cost is negligible and there is no hot-path
+            // regression to worry about.
+            let in_dtype = concat.dtype();
+            let concat_f32 = concat.to_dtype(candle_core::DType::F32)?;
+            let fc_t_f32 = mtp.fc_t.to_dtype(candle_core::DType::F32)?;
+            concat_f32
+                .broadcast_matmul(&fc_t_f32)?
+                .to_dtype(in_dtype)?
+        } else {
+            concat.broadcast_matmul(&mtp.fc_t)?
+        }
     };
     if dump_pre_rope {
         let _ = crate::mtp_debug::capture_pre_rope_tap("fused", &fused);
