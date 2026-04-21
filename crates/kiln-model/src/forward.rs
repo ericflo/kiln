@@ -2906,12 +2906,17 @@ fn try_flash_attn_paged_decode(
                 num_kv_heads,
                 head_dim,
             )? {
+                // `flash_attention_forward` already reshapes to
+                // [batch, seq_len, num_heads * head_dim].
+                let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
+
                 let attn_output = if let Some(gate) = gate {
                     let sigmoid_gate = cuda_sigmoid(gate)?;
                     (attn_output * sigmoid_gate)?
                 } else {
                     attn_output
                 };
+                let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
@@ -2922,6 +2927,7 @@ fn try_flash_attn_paged_decode(
                         lora_scale,
                     )?
                 };
+                let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
                 return Ok(Some(out));
             }
         }
@@ -3005,6 +3011,7 @@ fn try_flash_attn_paged_decode(
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
     let _ = num_kv_heads; // unused — kept in signature for symmetry / future use
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
+    let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
     let attn_output = if let Some(gate) = gate {
         let sigmoid_gate = cuda_sigmoid(gate)?;
@@ -3012,6 +3019,7 @@ fn try_flash_attn_paged_decode(
     } else {
         attn_output
     };
+    let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
@@ -3022,6 +3030,7 @@ fn try_flash_attn_paged_decode(
             lora_scale,
         )?
     };
+    let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(Some(out))
 }
 
@@ -4463,6 +4472,7 @@ pub fn mtp_forward_step(
                 &path,
                 draft_token_id,
                 mtp_pos,
+                base_pos,
                 swap_fc_norms,
                 &taps,
                 &extra_subops,

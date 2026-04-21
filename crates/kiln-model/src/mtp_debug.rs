@@ -733,6 +733,7 @@ pub fn write_mtp_dump(
     path: &str,
     draft_token_id: u32,
     mtp_pos: usize,
+    base_pos: usize,
     swap_fc_norms: bool,
     taps: &[(&str, &Tensor)],
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
@@ -744,13 +745,13 @@ pub fn write_mtp_dump(
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
-    // Capacity: static taps + subops + 3 meta + optional (prompt_tokens, len)
+    // Capacity: static taps + subops + 4 meta + optional (prompt_tokens, len)
     // + b11 taps + b12 taps.
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
-            + 3
+            + 4
             + prompt_reserve
             + b11_taps.len()
             + b12_taps.len(),
@@ -788,6 +789,17 @@ pub fn write_mtp_dump(
         vec![1],
         Dtype::I32,
         mpi.to_le_bytes().to_vec(),
+    ));
+    // Phase C3: emit absolute base position so the HF reference can compute
+    // `abs_pos = base_pos + mtp_pos` when applying RoPE inside the MTP inner
+    // block. Without this the reference used bare `mtp_pos` for RoPE, which
+    // diverged from kiln's absolute-position threading (PR #284 / Phase B8).
+    let bpi = base_pos as i32;
+    backings.push((
+        "meta__base_pos".into(),
+        vec![1],
+        Dtype::I32,
+        bpi.to_le_bytes().to_vec(),
     ));
     let swf = if swap_fc_norms { 1i32 } else { 0i32 };
     backings.push((
@@ -1087,6 +1099,7 @@ mod tests {
             &tmp_s,
             /* draft_token_id = */ 42,
             /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
             &[("h_main", &a)],
             &[],
@@ -1142,6 +1155,7 @@ mod tests {
             &tmp_s,
             /* draft_token_id = */ 561,
             /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
             &[("h_main", &a), ("mtp_logits", &b)],
             &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
@@ -1158,6 +1172,7 @@ mod tests {
         assert!(names.contains(&"mtp_logits"));
         assert!(names.contains(&"meta__draft_token_id"));
         assert!(names.contains(&"meta__mtp_pos"));
+        assert!(names.contains(&"meta__base_pos"));
         assert!(names.contains(&"meta__swap_fc_norms"));
         // With prompt_tokens = &[], neither the tensor nor its length meta
         // should be serialized.
@@ -1267,6 +1282,7 @@ mod tests {
             &tmp_s,
             /* draft_token_id = */ 99,
             /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
             &[("h_main", &h)],
             &[],
@@ -1395,6 +1411,7 @@ mod tests {
             &tmp_s,
             /* draft_token_id = */ 77,
             /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
             &[("h_main", &h)],
             &[],

@@ -357,6 +357,7 @@ def mtp_inner_block(
     rotary_frac: float,
     eps: float,
     capture_subops: Optional[Dict[str, torch.Tensor]] = None,
+    base_pos: int = 0,
 ) -> torch.Tensor:
     """Single MTP transformer block with self-attention over exactly one
     position. `x` shape: `[1, 1, H]`. Returns `[1, 1, H]` (pre-final-norm).
@@ -373,6 +374,15 @@ def mtp_inner_block(
     tensor layouts at each tap match kiln's exactly so per-element comparison
     is meaningful — see in particular the per-head Q/gate narrow that
     replaces the older flat-half chunk.
+
+    Phase C3: RoPE on Q and K must use the *absolute* position
+    `abs_pos = base_pos + mtp_pos`, matching kiln's Phase B8 fix (PR #284).
+    `base_pos` is the sequence-absolute position of the token that was
+    emitted from the base model (i.e. the token the MTP head is drafting
+    a continuation for); `mtp_pos` is the local MTP-cache slot index. The
+    older reference used bare `mtp_pos`, which is wrong for any non-zero
+    base_pos and was the source of the post_q_rope/post_k_rope divergence
+    isolated by Phase C2 (PR #313).
     """
     cfg = w.config
     H = x.shape[-1]
@@ -446,8 +456,15 @@ def mtp_inner_block(
     # RoPE on rotary_dim prefix in the [B, S, H, D] layout — matches kiln's
     # `rotary_embedding_from_tensor` call site in forward.rs:2661-2666 (both
     # use half-rotate; see `apply_rope_partial` docstring above).
-    q = apply_rope_partial(q, mtp_pos, head_dim, rotary_dim, rope_theta)
-    k = apply_rope_partial(k, mtp_pos, head_dim, rotary_dim, rope_theta)
+    #
+    # Phase C3: rotate by `abs_pos = base_pos + mtp_pos`, not bare `mtp_pos`.
+    # Kiln's forward.rs passes `base_pos + mtp_pos` via the `positions`
+    # tensor in `mtp_forward_step` (see forward.rs ~line 4367 for the
+    # Phase B8 fix). The KV-cache write slot remains `mtp_pos`, but the
+    # rotary angle must track the absolute sequence position.
+    abs_pos = base_pos + mtp_pos
+    q = apply_rope_partial(q, abs_pos, head_dim, rotary_dim, rope_theta)
+    k = apply_rope_partial(k, abs_pos, head_dim, rotary_dim, rope_theta)
     _capture(capture_subops, "post_q_rope", q)
     _capture(capture_subops, "post_k_rope", k)
 
@@ -548,6 +565,12 @@ def main() -> int:
         default=None,
         help="Phase B7a sweep: override the mtp_pos used for RoPE without re-running kiln. Lets one kiln dump be replayed against the reference at different positions.",
     )
+    ap.add_argument(
+        "--base-pos-override",
+        type=int,
+        default=None,
+        help="Phase C3 sweep: override the base_pos (sequence-absolute position) without re-running kiln. RoPE uses `abs_pos = base_pos + mtp_pos`, so this lets one kiln dump be replayed with a different base offset.",
+    )
     args = ap.parse_args()
 
     print(f"[mtp_ref] loading kiln dump from {args.kiln_dump}", file=sys.stderr)
@@ -556,6 +579,11 @@ def main() -> int:
         assert name in kiln, f"kiln dump missing expected tap `{name}`"
     draft_token_id = kiln["meta__draft_token_id"]
     kiln_mtp_pos = int(kiln["meta__mtp_pos"])
+    # Phase C3: `meta__base_pos` is the absolute base-model position; RoPE
+    # uses `abs_pos = base_pos + mtp_pos`. Older kiln dumps (pre-C3) omit
+    # this field, so fall back to 0 for backward compatibility — that matches
+    # the pre-C3 reference behavior, which is wrong but non-regressive.
+    kiln_base_pos = int(kiln.get("meta__base_pos", 0))
     swap = kiln["meta__swap_fc_norms"]
     if args.mtp_pos_override is not None:
         mtp_pos = int(args.mtp_pos_override)
@@ -567,6 +595,18 @@ def main() -> int:
         mtp_pos = kiln_mtp_pos
         print(
             f"[mtp_ref] draft_token_id={draft_token_id} mtp_pos={mtp_pos} swap_fc_norms={swap}",
+            file=sys.stderr,
+        )
+    if args.base_pos_override is not None:
+        base_pos = int(args.base_pos_override)
+        print(
+            f"[mtp_ref] kiln_base_pos={kiln_base_pos} -> overridden base_pos={base_pos} (abs_pos={base_pos + mtp_pos})",
+            file=sys.stderr,
+        )
+    else:
+        base_pos = kiln_base_pos
+        print(
+            f"[mtp_ref] base_pos={base_pos} (abs_pos={base_pos + mtp_pos})",
             file=sys.stderr,
         )
 
@@ -616,6 +656,7 @@ def main() -> int:
         rotary_frac,
         args.rms_eps,
         capture_subops=capture_subops,
+        base_pos=base_pos,
     )
     if capture_subops is not None:
         print(
@@ -641,6 +682,9 @@ def main() -> int:
         "meta__draft_token_id": torch.tensor([int(draft_token_id)], dtype=torch.int32),
         "meta__mtp_pos": torch.tensor([int(mtp_pos)], dtype=torch.int32),
         "meta__kiln_mtp_pos": torch.tensor([int(kiln_mtp_pos)], dtype=torch.int32),
+        "meta__base_pos": torch.tensor([int(base_pos)], dtype=torch.int32),
+        "meta__kiln_base_pos": torch.tensor([int(kiln_base_pos)], dtype=torch.int32),
+        "meta__abs_pos": torch.tensor([int(base_pos + mtp_pos)], dtype=torch.int32),
         "meta__swap_fc_norms": torch.tensor([int(swap)], dtype=torch.int32),
         "meta__capture_subops": torch.tensor([int(args.capture_subops)], dtype=torch.int32),
     }
