@@ -1,27 +1,41 @@
 #!/usr/bin/env python3
 """
-Phase B6 — Per-tap numerical comparison of MTP intermediates.
+Phase B6/B7 — Per-tap numerical comparison of MTP intermediates.
 
-Consumes two safetensors dumps (kiln native + PyTorch reference), prints a
-divergence table, and identifies the first tap where the two paths disagree
-beyond (atol=1e-3, rtol=1e-2).
-
-Usage:
+Single-pair mode (Phase B6 — backward compatible):
     python3 scripts/mtp_compare.py \\
         --kiln /tmp/mtp-kiln.safetensors \\
         --ref  /tmp/mtp-ref.safetensors \\
         [--atol 1e-3] [--rtol 1e-2] \\
         [--out /tmp/mtp-compare.txt]
 
+Multi-position mode (Phase B7a — H1 RoPE bisect):
+    python3 scripts/mtp_compare.py \\
+        --pair 0:/tmp/dump_pos0.st,/tmp/ref_pos0.st \\
+        --pair 1:/tmp/dump_pos1.st,/tmp/ref_pos1.st \\
+        --pair 2:/tmp/dump_pos2.st,/tmp/ref_pos2.st \\
+        [--atol 1e-3] [--rtol 1e-2] \\
+        [--out /tmp/mtp-compare-pos.txt]
+
+In multi-position mode, prints a per-position cos_sim table for each tap, then
+a B7a verdict line: monotonic degradation in `post_layer` across mtp_pos
+implicates H1 (RoPE position threading); flat (invariant) cos_sim across
+positions REJECTS H1 and the next step is per-sub-op tap bisect (B7b).
+
+Sub-op tap mode (Phase B7b — fine-grained bisect):
+    Sub-op taps are auto-detected. Any non-meta tensor present in both
+    dumps that isn't a primary tap is compared at the end of the table
+    in the canonical capture order from mtp_inner_block.
+
 Exit code:
-    0 — all taps match within tolerance
+    0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
-    2 — structural error (missing file, missing tap, shape mismatch)
+    2 — structural error (missing file, missing tap, shape mismatch, bad CLI)
 """
 
 import argparse
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -32,8 +46,8 @@ except ImportError:
     sys.exit(2)
 
 
-# Canonical tap order — must match the order written by write_mtp_dump in
-# mtp_debug.rs and by mtp_reference_dump.py. First divergence is reported by
+# Canonical primary tap order — must match the order written by write_mtp_dump
+# in mtp_debug.rs and by mtp_reference_dump.py. First divergence is reported by
 # this sequence.
 TAP_ORDER: List[str] = [
     "h_main",
@@ -46,7 +60,70 @@ TAP_ORDER: List[str] = [
     "mtp_logits",
 ]
 
-META_KEYS = ("meta__draft_token_id", "meta__mtp_pos", "meta__swap_fc_norms")
+# Phase B7b sub-op taps — match capture order in mtp_inner_block (Python ref)
+# and gqa_attention_paged + transformer_block_paged (Rust). Any sub-op present
+# in both dumps but not listed here gets appended at the end in name-sort order.
+SUBOP_ORDER: List[str] = [
+    "post_pre_attn_norm",
+    "post_q_proj_raw",
+    "post_k_proj",
+    "post_v_proj",
+    "post_q_split",
+    "post_gate_split",
+    "post_q_norm",
+    "post_k_norm",
+    "post_q_rope",
+    "post_k_rope",
+    "post_attn_raw",
+    "post_attn_gated",
+    "post_o_proj",
+    "post_attn_block",
+    "post_attn_residual",
+    "post_pre_mlp_norm",
+    "post_mlp",
+]
+
+META_KEYS = (
+    "meta__draft_token_id",
+    "meta__mtp_pos",
+    "meta__swap_fc_norms",
+    "meta__kiln_mtp_pos",
+    "meta__capture_subops",
+)
+
+# Hypothesis map for the 8 primary taps. Keep in sync with the planning notes
+# in mtp_debug.rs / forward.rs.
+PRIMARY_HYPOTHESIS = {
+    "h_main": "upstream (base model) — this ref takes h_main FROM kiln, so shouldn't differ",
+    "tok_embed": "tied embed lookup or token-id path",
+    "fc_input": "RMSNorm inputs, concat ordering, or the dual-norm A/B swap",
+    "fc_output": "mtp.fc matmul (weight transpose or layout)",
+    "pre_layer": "(same tensor as fc_output at this site)",
+    "post_layer": "single-layer MTP block: RoPE mtp_pos advancement, Q/K/V proj, or gated-attn",
+    "post_final_ln": "mtp.final_layernorm application site / weight",
+    "mtp_logits": "tied embed_tokens_t transpose vs alias for LM head",
+}
+
+# Hypothesis map for sub-op taps (B7b bisect targets).
+SUBOP_HYPOTHESIS = {
+    "post_pre_attn_norm": "input_layernorm weight or eps mismatch",
+    "post_q_proj_raw": "q_proj weight layout or transpose",
+    "post_k_proj": "k_proj weight layout or transpose",
+    "post_v_proj": "v_proj weight layout or transpose",
+    "post_q_split": "Q/gate split: per-head narrow vs flat-half chunk semantic mismatch",
+    "post_gate_split": "Q/gate split: gate half order or layout",
+    "post_q_norm": "q_norm weight or per-head broadcast",
+    "post_k_norm": "k_norm weight or per-head broadcast",
+    "post_q_rope": "RoPE on Q: mtp_pos value, rotary_dim, half-rotate vs interleaved, theta",
+    "post_k_rope": "RoPE on K: mtp_pos value, rotary_dim, half-rotate vs interleaved, theta",
+    "post_attn_raw": "softmax(QK^T)V mechanics (single-token reduces to V — divergence here is unusual)",
+    "post_attn_gated": "gated attention: sigmoid/silu choice, gate broadcast",
+    "post_o_proj": "o_proj weight layout or transpose",
+    "post_attn_block": "post-attn output before residual",
+    "post_attn_residual": "residual addition site / dtype",
+    "post_pre_mlp_norm": "post_attention_layernorm weight or eps",
+    "post_mlp": "MLP path: gate/up/down matmul + activation",
+}
 
 
 def _fmt_sci(x: float) -> str:
@@ -97,12 +174,6 @@ def _compare_tap(
     return row
 
 
-def _print_meta(title: str, meta: Dict[str, int]) -> None:
-    print(f"  {title}:")
-    for k in META_KEYS:
-        print(f"    {k}: {meta.get(k, '<missing>')}")
-
-
 def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
     try:
         tensors = load_file(path)
@@ -112,35 +183,51 @@ def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
     meta: Dict[str, int] = {}
     arrays: Dict[str, np.ndarray] = {}
     for key, val in tensors.items():
-        if key in META_KEYS:
+        if key in META_KEYS or key.startswith("meta__"):
             meta[key] = int(val.item()) if val.size == 1 else int(val.flatten()[0])
         else:
             arrays[key] = val
     return arrays, meta
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--kiln", required=True, help="Path to kiln dump (.safetensors)")
-    ap.add_argument("--ref", required=True, help="Path to reference dump (.safetensors)")
-    ap.add_argument("--atol", type=float, default=1e-3)
-    ap.add_argument("--rtol", type=float, default=1e-2)
-    ap.add_argument("--out", default=None, help="Optional path to write report text")
-    args = ap.parse_args()
+def _ordered_taps(
+    kiln_arr: Dict[str, np.ndarray],
+    ref_arr: Dict[str, np.ndarray],
+) -> List[str]:
+    """Return tap names in canonical order: primary taps first, then sub-op
+    taps in SUBOP_ORDER, then any extras alpha-sorted. Only taps present in
+    BOTH dumps are emitted here; missing-on-one-side is reported separately."""
+    out: List[str] = []
+    common = set(kiln_arr.keys()) & set(ref_arr.keys())
+    for name in TAP_ORDER:
+        if name in common:
+            out.append(name)
+    for name in SUBOP_ORDER:
+        if name in common:
+            out.append(name)
+    extras = sorted(common - set(out))
+    out.extend(extras)
+    return out
 
-    kiln_arr, kiln_meta = _load(args.kiln)
-    ref_arr, ref_meta = _load(args.ref)
 
-    lines: List[str] = []
+def _compare_pair(
+    label: str,
+    kiln_path: str,
+    ref_path: str,
+    atol: float,
+    rtol: float,
+    emit,
+) -> Tuple[bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]:
+    """Compare a single (kiln, ref) pair. Returns (all_ok, first_divergence,
+    rows, kiln_meta, ref_meta). `label` is shown in headers for multi-pair
+    runs."""
+    kiln_arr, kiln_meta = _load(kiln_path)
+    ref_arr, ref_meta = _load(ref_path)
 
-    def emit(s: str) -> None:
-        print(s)
-        lines.append(s)
-
-    emit(f"MTP Phase B6 numerical bisect — atol={args.atol}, rtol={args.rtol}")
-    emit(f"  kiln dump : {args.kiln}")
-    emit(f"  ref  dump : {args.ref}")
-    emit("")
+    if label:
+        emit(f"\n=== {label} ===")
+    emit(f"  kiln dump : {kiln_path}")
+    emit(f"  ref  dump : {ref_path}")
     emit("Metadata:")
     for k in META_KEYS:
         kv = kiln_meta.get(k, "<missing>")
@@ -149,9 +236,8 @@ def main() -> int:
         emit(f"  {k}: kiln={kv} ref={rv} [{match}]")
     emit("")
 
-    # Header
     header = (
-        f"{'tap':<18} {'shape':<18} {'shape_ok':<8} "
+        f"{'tap':<22} {'shape':<22} {'shape_ok':<8} "
         f"{'allclose':<8} {'cos_sim':<10} {'max|Δ|':<12} {'mean|Δ|':<12}"
     )
     emit(header)
@@ -160,25 +246,28 @@ def main() -> int:
     first_div: str = ""
     all_ok = True
     rows: List[Dict[str, object]] = []
+    canonical_order = _ordered_taps(kiln_arr, ref_arr)
 
-    for name in TAP_ORDER:
-        if name not in kiln_arr:
-            emit(f"{name:<18} MISSING IN KILN DUMP")
-            all_ok = False
-            if not first_div:
-                first_div = name
-            continue
-        if name not in ref_arr:
-            emit(f"{name:<18} MISSING IN REF DUMP")
-            all_ok = False
-            if not first_div:
-                first_div = name
-            continue
-        row = _compare_tap(name, kiln_arr[name], ref_arr[name], args.atol, args.rtol)
+    # Report missing-on-one-side first so the table itself is uniform width.
+    missing_in_kiln = [n for n in (TAP_ORDER + SUBOP_ORDER) if n in ref_arr and n not in kiln_arr]
+    missing_in_ref = [n for n in (TAP_ORDER + SUBOP_ORDER) if n in kiln_arr and n not in ref_arr]
+    for n in missing_in_kiln:
+        emit(f"{n:<22} MISSING IN KILN DUMP")
+        all_ok = False
+        if not first_div:
+            first_div = n
+    for n in missing_in_ref:
+        emit(f"{n:<22} MISSING IN REF DUMP")
+        all_ok = False
+        if not first_div:
+            first_div = n
+
+    for name in canonical_order:
+        row = _compare_tap(name, kiln_arr[name], ref_arr[name], atol, rtol)
         rows.append(row)
         shape_str = "x".join(str(s) for s in row["shape_kiln"])
         emit(
-            f"{row['name']:<18} {shape_str:<18} {str(row['shape_match']):<8} "
+            f"{row['name']:<22} {shape_str:<22} {str(row['shape_match']):<8} "
             f"{str(row['allclose']):<8} {_fmt_sci(row['cos_sim']):<10} "
             f"{_fmt_sci(row['max_abs_diff']):<12} {_fmt_sci(row['mean_abs_diff']):<12}"
         )
@@ -189,28 +278,155 @@ def main() -> int:
 
     emit("")
     if all_ok:
-        emit("VERDICT: all taps match within tolerance — no divergence found.")
+        emit("  pair verdict: all taps match within tolerance.")
     else:
-        emit(f"VERDICT: first divergence at tap '{first_div}'.")
-        # Map first-divergence tap back to the hypothesis it most directly implicates.
-        hypothesis_map = {
-            "h_main": "upstream (base model) — this ref takes h_main FROM kiln, so shouldn't differ",
-            "tok_embed": "tied embed lookup or token-id path",
-            "fc_input": "RMSNorm inputs, concat ordering, or the dual-norm A/B swap",
-            "fc_output": "mtp.fc matmul (weight transpose or layout)",
-            "pre_layer": "(same tensor as fc_output at this site)",
-            "post_layer": "single-layer MTP block: RoPE mtp_pos advancement, Q/K/V proj, or gated-attn",
-            "post_final_ln": "mtp.final_layernorm application site / weight",
-            "mtp_logits": "tied embed_tokens_t transpose vs alias for LM head",
-        }
-        emit(f"  Most-likely cause: {hypothesis_map.get(first_div, '<unknown tap>')}")
+        cause = PRIMARY_HYPOTHESIS.get(first_div) or SUBOP_HYPOTHESIS.get(
+            first_div, "<unknown tap>"
+        )
+        emit(f"  pair verdict: first divergence at tap '{first_div}'.")
+        emit(f"    Most-likely cause: {cause}")
+
+    return all_ok, first_div, rows, kiln_meta, ref_meta
+
+
+def _parse_pair_arg(s: str) -> Tuple[str, str, str]:
+    """Parse `LABEL:KILN_PATH,REF_PATH` (LABEL is typically the mtp_pos)."""
+    if ":" not in s:
+        print(f"ERROR: --pair argument '{s}' missing 'LABEL:' prefix", file=sys.stderr)
+        sys.exit(2)
+    label, paths = s.split(":", 1)
+    if "," not in paths:
+        print(f"ERROR: --pair argument '{s}' must be LABEL:KILN,REF", file=sys.stderr)
+        sys.exit(2)
+    kiln_path, ref_path = paths.split(",", 1)
+    return label.strip(), kiln_path.strip(), ref_path.strip()
+
+
+def _emit_b7a_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    emit,
+) -> None:
+    """Print per-position cos_sim summary for the B7a decision: H1 confirmed
+    (monotonic degradation in post_layer across mtp_pos) vs rejected
+    (cos_sim invariant across positions)."""
+    emit("")
+    emit("=" * 78)
+    emit("Phase B7a multi-position summary — cos_sim per primary tap, per position")
+    emit("=" * 78)
+
+    # Build label -> {tap_name: cos_sim} map.
+    labels = [pr[0] for pr in pair_results]
+    cos_table: Dict[str, Dict[str, float]] = {name: {} for name in TAP_ORDER}
+    for label, _ok, _first, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if n in cos_table:
+                cos_table[n][label] = float(r["cos_sim"])
+
+    header = "  " + "tap".ljust(20) + " ".join(f"pos={lab:<8}" for lab in labels)
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    for tap in TAP_ORDER:
+        cells = " ".join(
+            f"{_fmt_sci(cos_table[tap].get(lab, float('nan'))):<12}" for lab in labels
+        )
+        emit(f"  {tap:<20}{cells}")
+
+    # H1 decision on `post_layer` specifically.
+    emit("")
+    pl_vals = [cos_table["post_layer"].get(lab, float("nan")) for lab in labels]
+    finite = [v for v in pl_vals if np.isfinite(v)]
+    if len(finite) < 2:
+        emit("Phase B7a verdict: insufficient finite post_layer cos_sim values to decide.")
+        return
+    spread = max(finite) - min(finite)
+    monotonic_down = all(pl_vals[i] >= pl_vals[i + 1] - 1e-6 for i in range(len(pl_vals) - 1)) and (
+        pl_vals[0] - pl_vals[-1] > 1e-3
+    )
+    invariant = spread < 1e-3
+    emit(f"  post_layer cos_sim across positions: {[round(v, 6) for v in pl_vals]}")
+    emit(f"  spread (max-min): {_fmt_sci(spread)}")
+    if invariant:
+        emit("Phase B7a verdict: H1 REJECTED — post_layer cos_sim is essentially invariant")
+        emit("  across mtp_pos. RoPE-position threading is NOT the divergence source.")
+        emit("  -> Proceed to Phase B7b (per-sub-op tap bisect).")
+    elif monotonic_down:
+        emit("Phase B7a verdict: H1 CONFIRMED — post_layer cos_sim degrades monotonically")
+        emit("  with mtp_pos. The MTP path's RoPE position threading is the divergence")
+        emit("  source. -> Land Phase B7 PR with this finding; queue B8 fix task to")
+        emit("  thread the correct mtp_pos through the inner block's RoPE call site.")
+    else:
+        emit("Phase B7a verdict: INCONCLUSIVE — post_layer cos_sim varies across positions")
+        emit("  but not monotonically. May indicate a position-dependent issue mixed with")
+        emit("  another bug. Recommend running B7b anyway and re-evaluating.")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kiln", help="Path to kiln dump (.safetensors) — single-pair mode")
+    ap.add_argument("--ref", help="Path to reference dump (.safetensors) — single-pair mode")
+    ap.add_argument(
+        "--pair",
+        action="append",
+        default=[],
+        help="Multi-position mode: LABEL:KILN_PATH,REF_PATH. Repeat for each position.",
+    )
+    ap.add_argument("--atol", type=float, default=1e-3)
+    ap.add_argument("--rtol", type=float, default=1e-2)
+    ap.add_argument("--out", default=None, help="Optional path to write report text")
+    args = ap.parse_args()
+
+    pairs: List[Tuple[str, str, str]] = []
+    if args.pair:
+        if args.kiln or args.ref:
+            print("ERROR: cannot mix --pair with --kiln/--ref", file=sys.stderr)
+            return 2
+        for s in args.pair:
+            pairs.append(_parse_pair_arg(s))
+    else:
+        if not (args.kiln and args.ref):
+            print("ERROR: must specify --kiln and --ref, or one or more --pair args", file=sys.stderr)
+            return 2
+        pairs.append(("", args.kiln, args.ref))
+
+    lines: List[str] = []
+
+    def emit(s: str) -> None:
+        print(s)
+        lines.append(s)
+
+    multi = len(pairs) > 1
+    mode = "multi-position (B7a)" if multi else "single-pair (B6/B7)"
+    emit(f"MTP numerical bisect — mode: {mode}, atol={args.atol}, rtol={args.rtol}")
+
+    pair_results: List[
+        Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]
+    ] = []
+    overall_ok = True
+    for label, kpath, rpath in pairs:
+        ok, first_div, rows, km, rm = _compare_pair(
+            label, kpath, rpath, args.atol, args.rtol, emit
+        )
+        pair_results.append((label, ok, first_div, rows, km, rm))
+        if not ok:
+            overall_ok = False
+
+    if multi:
+        _emit_b7a_summary(pair_results, emit)
+
+    emit("")
+    if overall_ok:
+        emit("Overall verdict: all taps match within tolerance.")
+    else:
+        first_divs = [pr[2] for pr in pair_results if pr[2]]
+        emit(f"Overall verdict: divergence(s) at: {first_divs}")
 
     if args.out:
         with open(args.out, "w") as f:
             f.write("\n".join(lines) + "\n")
         print(f"\nWrote report to {args.out}", file=sys.stderr)
 
-    return 0 if all_ok else 1
+    return 0 if overall_ok else 1
 
 
 if __name__ == "__main__":

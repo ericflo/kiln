@@ -2653,6 +2653,11 @@ pub fn gqa_attention_paged(
         )?;
         (q_raw, k, v)
     };
+    // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
+    // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
+    let _ = crate::mtp_debug::capture_subop("post_q_proj_raw", &q_raw);
+    let _ = crate::mtp_debug::capture_subop("post_k_proj", &k);
+    let _ = crate::mtp_debug::capture_subop("post_v_proj", &v);
 
     let (q, gate) = {
         kiln_nvtx::range!(c"kiln/proj/qkv_split");
@@ -2669,6 +2674,11 @@ pub fn gqa_attention_paged(
             (q, None)
         }
     };
+    // After the gate split, q is the rotation target.
+    let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
+    if let Some(ref g) = gate {
+        let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
+    }
 
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
     let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
@@ -2680,6 +2690,8 @@ pub fn gqa_attention_paged(
         let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
         (q, k)
     };
+    let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
+    let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
 
     // RoPE — only rotate first rotary_dim dimensions
     // Use the GPU tensor variant so positions remain at a stable GPU address
@@ -2688,6 +2700,8 @@ pub fn gqa_attention_paged(
         kiln_nvtx::range!(c"kiln/attn/rope");
         rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
     };
+    let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
+    let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
 
     // Transpose to [batch, heads, seq_len, head_dim]
     let (q, k, v) = {
@@ -2915,6 +2929,7 @@ pub fn gqa_attention_paged(
             .transpose(1, 2)?
             .contiguous()?
             .reshape((batch, 1, num_heads * head_dim))?;
+        let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
         let attn_output = if let Some(ref gate) = gate {
             let sigmoid_gate = cuda_sigmoid(gate)?;
@@ -2922,6 +2937,7 @@ pub fn gqa_attention_paged(
         } else {
             attn_output
         };
+        let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
             linear_with_lora_t(
@@ -2931,6 +2947,7 @@ pub fn gqa_attention_paged(
                 lora_scale,
             )?
         };
+        let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
         return Ok(out);
     }
 
@@ -2968,6 +2985,7 @@ pub fn gqa_attention_paged(
             .transpose(1, 2)?
             .contiguous()?
             .reshape(((), seq_len, num_heads * head_dim))?;
+    let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
     let attn_output = if let Some(ref gate) = gate {
         let sigmoid_gate = cuda_sigmoid(gate)?;
@@ -2975,6 +2993,7 @@ pub fn gqa_attention_paged(
     } else {
         attn_output
     };
+    let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
@@ -2985,6 +3004,7 @@ pub fn gqa_attention_paged(
             lora_scale,
         )?
     };
+    let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(out)
 }
 
@@ -3155,6 +3175,7 @@ pub fn transformer_block_paged(
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
+    let _ = crate::mtp_debug::capture_subop("post_pre_attn_norm", &normed);
 
     // Self-attention with paged cache
     let attn_out = gqa_attention_paged(
@@ -3175,27 +3196,33 @@ pub fn transformer_block_paged(
         config.attn_output_gate,
         lora,
     )?;
+    let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
 
     // Residual connection
     let x = {
         kiln_nvtx::range!(c"kiln/residual");
         (x + attn_out)?
     };
+    let _ = crate::mtp_debug::capture_subop("post_attn_residual", &x);
 
     // Post-attention norm
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_mlp");
         rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
     };
+    let _ = crate::mtp_debug::capture_subop("post_pre_mlp_norm", &normed);
 
     // Feed-forward network
     let ffn_out = swiglu_ffn(&normed, &layer.mlp, lora)?;
+    let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
 
     // Residual connection
     let out = {
         kiln_nvtx::range!(c"kiln/residual");
         (x + ffn_out)?
     };
+    // Note: the final block output (`out`) is dumped as `post_layer` at the
+    // outer MTP call site, so we do not re-capture it here.
     Ok(out)
 }
 
@@ -3714,11 +3741,29 @@ pub fn mtp_forward_step(
         concat.broadcast_matmul(&mtp.fc_t)?
     };
 
+    // Phase B7 dump pre-flight: decide whether this draft step should
+    // dump for the current `mtp_pos` and whether to capture per-sub-op
+    // taps inside the inner transformer block. Both decisions happen
+    // BEFORE we run the block so that arming the sub-op capture window
+    // and running the block are bracketed correctly.
+    //
+    // `should_dump` is true at most once per (process, mtp_pos) pair
+    // (see `try_consume_dump_slot_for_pos`). `dump_subops` is a strict
+    // subset: only true when KILN_MTP_DUMP_SUBOPS=1 AND we are about to
+    // dump anyway. This keeps the production path entirely free of
+    // sub-op capture overhead — the TLS check inside `capture_subop`
+    // is a no-op when the window is closed.
+    let should_dump = crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos);
+    let dump_subops = should_dump && crate::mtp_debug::is_dump_subops_enabled();
+    if dump_subops {
+        crate::mtp_debug::arm_subop_capture();
+    }
+
     // 5. Single full-attention transformer block with its own paged cache.
     //    Build a one-element position tensor since MTP has its own position
     //    space (distinct from the base model's) and is not CUDA-graph-captured.
     let positions = Tensor::new(&[mtp_pos as f32][..], device)?;
-    let mtp_hidden = transformer_block_paged(
+    let mtp_hidden_result = transformer_block_paged(
         backend,
         &fused,
         &mtp.layer,
@@ -3735,8 +3780,17 @@ pub fn mtp_forward_step(
         mtp_block_table,
         /* full_attn_layer_idx = */ 0,
         /* lora = */ None,
-    )
-    .context("mtp transformer block")?;
+    );
+
+    // Drain the sub-op capture window in BOTH success and error paths so the
+    // TLS slot is not left armed for the next draft step (which would corrupt
+    // the next dump or leak captures into other transformer block calls).
+    let extra_subops = if dump_subops {
+        crate::mtp_debug::drain_subop_capture()
+    } else {
+        Vec::new()
+    };
+    let mtp_hidden = mtp_hidden_result.context("mtp transformer block")?;
 
     // 6. Final RMSNorm + weight-tied LM head (reuses base embed_tokens_t).
     //
@@ -3753,17 +3807,24 @@ pub fn mtp_forward_step(
         normed.broadcast_matmul(&weights.embed_tokens_t)?
     };
 
-    // Phase B6 numerical-bisect dump. Fires once per process when
-    // `KILN_MTP_DUMP_PATH` is set and this is the first draft call that
-    // reaches this point. Writes a single safetensors file with the 8
+    // Phase B6/B7 numerical-bisect dump. Fires once per (process, mtp_pos)
+    // pair when `KILN_MTP_DUMP_PATH` is set and the current `mtp_pos` is
+    // listed in `KILN_MTP_DUMP_POS` (defaults to "0" for B6 compatibility).
+    // Writes one safetensors file per targeted position with the 8 outer
     // taps enumerated in `write_mtp_dump` plus integer metadata (draft
-    // token id, `mtp_pos`, `swap_fc_norms`). The companion Python
-    // reference implementation (`scripts/mtp_reference_dump.py`) produces
-    // the same-shaped file for the same prompt + seed; `scripts/mtp_compare.py`
-    // prints a per-tap first-divergence table. Failure to dump is logged
-    // but non-fatal — we never want an instrumentation bug to break decode.
-    if crate::mtp_debug::try_consume_dump_slot() {
-        if let Some(path) = crate::mtp_debug::dump_path() {
+    // token id, `mtp_pos`, `swap_fc_norms`). When `KILN_MTP_DUMP_SUBOPS=1`
+    // is also set, per-sub-op activations from inside the MTP transformer
+    // block are appended (Phase B7b).
+    //
+    // Use `KILN_MTP_DUMP_PATH=/path/dump_pos{pos}.st` plus
+    // `KILN_MTP_DUMP_POS=0,1,2` to capture three positions in one process.
+    // The companion Python reference (`scripts/mtp_reference_dump.py`)
+    // produces same-shaped files for the same prompt + seed;
+    // `scripts/mtp_compare.py` prints a per-tap first-divergence table.
+    // Failure to dump is logged but non-fatal — we never want an
+    // instrumentation bug to break decode.
+    if should_dump {
+        if let Some(path) = crate::mtp_debug::dump_path_for_pos(mtp_pos) {
             let taps: [(&str, &Tensor); 8] = [
                 ("h_main", h_prev),
                 ("tok_embed", &token_emb),
@@ -3780,18 +3841,20 @@ pub fn mtp_forward_step(
                 mtp_pos,
                 swap_fc_norms,
                 &taps,
+                &extra_subops,
             ) {
                 Ok(()) => tracing::info!(
                     target: "kiln::mtp_debug",
                     path = %path,
                     draft_token_id,
                     mtp_pos,
-                    "mtp_b6_dump_written"
+                    subops = extra_subops.len(),
+                    "mtp_b7_dump_written"
                 ),
                 Err(e) => tracing::warn!(
                     target: "kiln::mtp_debug",
                     error = %e,
-                    "mtp_b6_dump_failed"
+                    "mtp_b7_dump_failed"
                 ),
             }
         }

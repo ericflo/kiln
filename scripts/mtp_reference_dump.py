@@ -306,12 +306,19 @@ def apply_rope_partial(
     x: torch.Tensor, position: int, head_dim: int, rotary_dim: int, rope_theta: float
 ) -> torch.Tensor:
     """Apply rotary embedding to the first `rotary_dim` dimensions of each
-    head. `x` is `[batch, num_heads, seq_len, head_dim]`.
+    head. `x` is `[batch, num_heads, seq_len, head_dim]` (legacy callers) or
+    `[batch, seq_len, num_heads, head_dim]` (Phase B7b kiln-aligned form —
+    same per-element semantics regardless of the head/seq order).
 
     Qwen3-Next uses partial rotary (default 0.25 of head_dim → 64-dim rotary
     for head_dim=256). Rotate on the leading `rotary_dim`, leave the tail
     untouched. `position` is the absolute position index for the single-token
     step we're modelling (MTP has seq_len=1).
+
+    Verified against kiln in forward.rs:1108-1148 — both use **half-rotate**
+    (split into first half + second half, recombine `[r1, r2, pass]`). Earlier
+    versions of this docstring claimed kiln used interleaved rotation; that
+    was wrong and has been corrected.
     """
     if rotary_dim == 0:
         return x
@@ -325,17 +332,21 @@ def apply_rope_partial(
     # Split rotary half. Shape: [..., rotary_dim]
     x_rot = x[..., :rotary_dim]
     x_pass = x[..., rotary_dim:]
-    # Pair up the dims. `candle` uses interleaved even/odd; HF commonly uses
-    # half-rotate (first half vs second half). Qwen3-Next MTP in kiln uses
-    # interleaved rotation — see `apply_rotary_emb` in forward.rs. We model
-    # the "half-rotate" variant here; if the comparison surfaces a mismatch
-    # at `post_layer`, an interleave-vs-halves swap is the single most
-    # likely cause and will print clearly in the divergence table.
     half = rotary_dim // 2
     x1 = x_rot[..., :half]
     x2 = x_rot[..., half:]
     x_rot_new = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
     return torch.cat([x_rot_new, x_pass], dim=-1)
+
+
+def _capture(buf: Optional[Dict[str, torch.Tensor]], name: str, t: torch.Tensor) -> None:
+    """Best-effort sub-op capture. No-op when `buf` is None (production path
+    when --capture-subops is not set). Always stores a contiguous F32 clone so
+    the writer can serialize without later in-place ops corrupting the buffer.
+    """
+    if buf is None:
+        return
+    buf[name] = t.detach().to(torch.float32).contiguous().clone()
 
 
 def mtp_inner_block(
@@ -345,6 +356,7 @@ def mtp_inner_block(
     rope_theta: float,
     rotary_frac: float,
     eps: float,
+    capture_subops: Optional[Dict[str, torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Single MTP transformer block with self-attention over exactly one
     position. `x` shape: `[1, 1, H]`. Returns `[1, 1, H]` (pre-final-norm).
@@ -354,6 +366,13 @@ def mtp_inner_block(
     rotations on Q and K cancel in the Q·K^T product (same position, same
     rotation), so this path is a pretty good sanity-check for the MTP inner
     layer.
+
+    Phase B7b: when `capture_subops` is a dict, every named tap below is
+    written into it under the same name kiln captures (see
+    `gqa_attention_paged` and `transformer_block_paged` in forward.rs). The
+    tensor layouts at each tap match kiln's exactly so per-element comparison
+    is meaningful — see in particular the per-head Q/gate narrow that
+    replaces the older flat-half chunk.
     """
     cfg = w.config
     H = x.shape[-1]
@@ -362,82 +381,119 @@ def mtp_inner_block(
     head_dim = cfg.get("head_dim", H // num_heads)
     rotary_dim = int(head_dim * rotary_frac)
 
-    # Pre-attn norm.
+    # Pre-attn norm. Tap matches transformer_block_paged in forward.rs:3122-3126.
     residual = x
     h = rms_norm(x, w.input_layernorm, eps)  # [1,1,H]
+    _capture(capture_subops, "post_pre_attn_norm", h)
 
-    # Q/K/V projections. The Qwen3-Next gated Q has shape [2*num_heads*head_dim, H]
-    # (kiln's loader splits into Q and a gate). Here we emulate it by taking
-    # the first half as Q (the ungated stream) and discarding the gate — this
-    # is wrong for the full gated-attn semantics but a faithful reproduction
-    # of that would pull in another ~100 LOC. For Phase B6, we flag
-    # gated-attn as a known *reference* simplification; if `post_layer`
-    # diverges by exactly this amount, the bug isn't real. See the compare
-    # script output for this caveat.
-    q_full = torch.matmul(h, w.q_proj_weight.t())  # [1,1, 2*num_heads*head_dim] if gated, else [1,1, num_heads*head_dim]
-    if q_full.shape[-1] == 2 * num_heads * head_dim:
-        q, q_gate = q_full.chunk(2, dim=-1)
-        q_gated = True
+    # Q/K/V projections. q_proj is gated for Qwen3-Next when q_proj.weight has
+    # shape [num_heads*head_dim*2, H]; the trailing 2H output is split into
+    # the rotation target (Q) and a sigmoid gate applied post-attention. Tap
+    # name matches gqa_attention_paged in forward.rs:2620-2622.
+    q_raw = torch.matmul(h, w.q_proj_weight.t())  # [1, 1, num_heads*head_dim*2 if gated else num_heads*head_dim]
+    k = torch.matmul(h, w.k_proj_weight.t())       # [1, 1, num_kv_heads*head_dim]
+    v = torch.matmul(h, w.v_proj_weight.t())       # [1, 1, num_kv_heads*head_dim]
+    _capture(capture_subops, "post_q_proj_raw", q_raw)
+    _capture(capture_subops, "post_k_proj", k)
+    _capture(capture_subops, "post_v_proj", v)
+
+    # Per-head Q/gate split — must mirror kiln's narrow exactly. Kiln does:
+    #   q_pair = q_raw.reshape((batch, seq_len, num_heads, head_dim*2))
+    #   q      = q_pair.narrow(3, 0,        head_dim)         # [B, S, H, D]
+    #   gate   = q_pair.narrow(3, head_dim, head_dim)         # [B, S, H, D]
+    #   gate   = gate.reshape((batch, seq_len, num_heads*head_dim))
+    # An earlier reference used `q_full.chunk(2, dim=-1)` which splits the
+    # *flat* trailing dim in half — that produces a DIFFERENT q tensor for
+    # any weight layout that pairs (q_dim, gate_dim) per head. The flat
+    # chunk was a known-wrong simplification noted in PR #271; this is the
+    # corrected per-head split.
+    q_gated = (q_raw.shape[-1] == 2 * num_heads * head_dim)
+    if q_gated:
+        q_pair = q_raw.view(1, 1, num_heads, head_dim * 2)
+        q = q_pair[..., :head_dim].contiguous()                             # [1, 1, num_heads, head_dim]
+        gate = q_pair[..., head_dim:].contiguous().view(1, 1, num_heads * head_dim)  # [1, 1, num_heads*head_dim]
     else:
-        q = q_full
-        q_gate = None
-        q_gated = False
-    k = torch.matmul(h, w.k_proj_weight.t())
-    v = torch.matmul(h, w.v_proj_weight.t())
+        q = q_raw.view(1, 1, num_heads, head_dim)                           # [1, 1, num_heads, head_dim]
+        gate = None
+    _capture(capture_subops, "post_q_split", q)
+    if gate is not None:
+        _capture(capture_subops, "post_gate_split", gate)
 
-    # Reshape to heads: [1, 1, num_heads, head_dim] → [1, num_heads, 1, head_dim]
-    q = q.view(1, 1, num_heads, head_dim).transpose(1, 2)
-    k = k.view(1, 1, num_kv_heads, head_dim).transpose(1, 2)
-    v = v.view(1, 1, num_kv_heads, head_dim).transpose(1, 2)
+    k = k.view(1, 1, num_kv_heads, head_dim)  # [1, 1, num_kv_heads, head_dim]
+    v = v.view(1, 1, num_kv_heads, head_dim)  # [1, 1, num_kv_heads, head_dim]
 
-    # Per-head RMSNorm on Q and K (Qwen3-Next style).
+    # Per-head RMSNorm on Q and K (Qwen3-Next style). Same shape in/out.
     q = rms_norm(q, w.q_norm_weight, eps)
     k = rms_norm(k, w.k_norm_weight, eps)
+    _capture(capture_subops, "post_q_norm", q)
+    _capture(capture_subops, "post_k_norm", k)
 
-    # RoPE on rotary_dim prefix.
+    # RoPE on rotary_dim prefix in the [B, S, H, D] layout — matches kiln's
+    # `rotary_embedding_from_tensor` call site in forward.rs:2661-2666 (both
+    # use half-rotate; see `apply_rope_partial` docstring above).
     q = apply_rope_partial(q, mtp_pos, head_dim, rotary_dim, rope_theta)
     k = apply_rope_partial(k, mtp_pos, head_dim, rotary_dim, rope_theta)
+    _capture(capture_subops, "post_q_rope", q)
+    _capture(capture_subops, "post_k_rope", k)
 
-    # Expand KV heads for GQA.
+    # Transpose to [batch, num_heads, seq_len, head_dim] for the attention
+    # matmuls. This mirrors forward.rs:2669-2675 (the qkv_transpose block).
+    q_t = q.transpose(1, 2).contiguous()  # [1, num_heads,    1, head_dim]
+    k_t = k.transpose(1, 2).contiguous()  # [1, num_kv_heads, 1, head_dim]
+    v_t = v.transpose(1, 2).contiguous()  # [1, num_kv_heads, 1, head_dim]
+
+    # Expand KV for GQA. seq_len=1 so this is a no-op cost-wise; included
+    # only so the math matches the gqa-grouped path in forward.rs:2837-2879
+    # without having to reproduce the per-group reshape.
     repeat = num_heads // num_kv_heads
     if repeat > 1:
-        k = k.repeat_interleave(repeat, dim=1)
-        v = v.repeat_interleave(repeat, dim=1)
+        k_full = k_t.repeat_interleave(repeat, dim=1)
+        v_full = v_t.repeat_interleave(repeat, dim=1)
+    else:
+        k_full = k_t
+        v_full = v_t
 
-    # Single-token self-attention reduces to attn_out == V (softmax of a
-    # single scalar == 1.0), so Q·K^T /√d · softmax · V simplifies to V when
-    # seq_len = 1 — modulo rounding. We still compute the full path for
-    # faithfulness to kiln's op order.
+    # Single-token self-attention.
     scale = 1.0 / math.sqrt(head_dim)
-    scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # [1, num_heads, 1, 1]
-    attn = torch.softmax(scores.to(torch.float32), dim=-1).to(v.dtype)
-    attn_out = torch.matmul(attn, v)  # [1, num_heads, 1, head_dim]
+    scores = torch.matmul(q_t, k_full.transpose(-2, -1)) * scale  # [1, num_heads, 1, 1]
+    attn = torch.softmax(scores.to(torch.float32), dim=-1).to(v_full.dtype)
+    attn_out = torch.matmul(attn, v_full)  # [1, num_heads, 1, head_dim]
 
-    # Apply gated-attn sigmoid(q_gate) if present. We skip a proper
-    # gated-attn implementation (see caveat above); reported divergence at
-    # `post_layer` is expected to include this component.
+    # Reshape into kiln's `post_attn_raw` form: [1, 1, num_heads * head_dim].
+    # Mirrors forward.rs:2875-2879 (the attn_output reshape after softmax/V).
     attn_out = attn_out.transpose(1, 2).contiguous().view(1, 1, num_heads * head_dim)
-    if q_gated:
-        # Kiln applies sigmoid gate per-head post-attn before o_proj (see
-        # `transformer_block_paged` branch on `attn_output_gate=true`). We
-        # model that here.
-        q_gate = q_gate.view(1, 1, num_heads, head_dim).transpose(1, 2).contiguous()
-        q_gate = q_gate.transpose(1, 2).contiguous().view(1, 1, num_heads * head_dim)
-        attn_out = attn_out * torch.sigmoid(q_gate.to(attn_out.dtype))
-    attn_out = torch.matmul(attn_out, w.o_proj_weight.t())
+    _capture(capture_subops, "post_attn_raw", attn_out)
 
-    # Residual.
-    h = residual + attn_out
+    # Gated-attn: per-element sigmoid(gate) * attn_out, both flat last dim.
+    if gate is not None:
+        attn_out = attn_out * torch.sigmoid(gate.to(attn_out.dtype))
+    _capture(capture_subops, "post_attn_gated", attn_out)
 
-    # MLP.
+    # Output projection. Tap matches forward.rs:2898 / 2955.
+    o = torch.matmul(attn_out, w.o_proj_weight.t())  # [1, 1, H]
+    _capture(capture_subops, "post_o_proj", o)
+
+    # Capture the inner-attn-block output BEFORE the residual add.
+    # Matches forward.rs:3147 (`post_attn_block`).
+    _capture(capture_subops, "post_attn_block", o)
+
+    # Residual. Tap matches forward.rs:3154.
+    h = residual + o
+    _capture(capture_subops, "post_attn_residual", h)
+
+    # MLP path.
     residual = h
     h2 = rms_norm(h, w.post_attention_layernorm, eps)
-    gate = torch.matmul(h2, w.gate_proj_weight.t())
-    up = torch.matmul(h2, w.up_proj_weight.t())
-    act = torch.nn.functional.silu(gate) * up
-    down = torch.matmul(act, w.down_proj_weight.t())
-    h = residual + down
+    _capture(capture_subops, "post_pre_mlp_norm", h2)
 
+    gate_p = torch.matmul(h2, w.gate_proj_weight.t())
+    up_p = torch.matmul(h2, w.up_proj_weight.t())
+    act = torch.nn.functional.silu(gate_p) * up_p
+    down = torch.matmul(act, w.down_proj_weight.t())
+    _capture(capture_subops, "post_mlp", down)
+
+    # Final residual; outer caller dumps this as `post_layer`.
+    h = residual + down
     return h
 
 
@@ -461,11 +517,22 @@ def load_kiln_dump(path: str) -> Dict[str, torch.Tensor | int]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Phase B6 reference MTP dump")
+    ap = argparse.ArgumentParser(description="Phase B6/B7 reference MTP dump")
     ap.add_argument("--checkpoint", required=True, help="Qwen3.5-4B checkpoint directory")
     ap.add_argument("--kiln-dump", required=True, help="Path to kiln's mtp dump (safetensors)")
     ap.add_argument("--out", required=True, help="Output path for reference dump")
     ap.add_argument("--rms-eps", type=float, default=1e-6)
+    ap.add_argument(
+        "--capture-subops",
+        action="store_true",
+        help="Phase B7b: capture per-sub-op taps inside mtp_inner_block and write them into the output safetensors alongside the 8 standard taps.",
+    )
+    ap.add_argument(
+        "--mtp-pos-override",
+        type=int,
+        default=None,
+        help="Phase B7a sweep: override the mtp_pos used for RoPE without re-running kiln. Lets one kiln dump be replayed against the reference at different positions.",
+    )
     args = ap.parse_args()
 
     print(f"[mtp_ref] loading kiln dump from {args.kiln_dump}", file=sys.stderr)
@@ -473,9 +540,20 @@ def main() -> int:
     for name in ["h_main", "tok_embed", "fc_input", "fc_output", "pre_layer", "post_layer", "post_final_ln", "mtp_logits"]:
         assert name in kiln, f"kiln dump missing expected tap `{name}`"
     draft_token_id = kiln["meta__draft_token_id"]
-    mtp_pos = kiln["meta__mtp_pos"]
+    kiln_mtp_pos = int(kiln["meta__mtp_pos"])
     swap = kiln["meta__swap_fc_norms"]
-    print(f"[mtp_ref] draft_token_id={draft_token_id} mtp_pos={mtp_pos} swap_fc_norms={swap}", file=sys.stderr)
+    if args.mtp_pos_override is not None:
+        mtp_pos = int(args.mtp_pos_override)
+        print(
+            f"[mtp_ref] draft_token_id={draft_token_id} kiln_mtp_pos={kiln_mtp_pos} -> overridden mtp_pos={mtp_pos} swap_fc_norms={swap}",
+            file=sys.stderr,
+        )
+    else:
+        mtp_pos = kiln_mtp_pos
+        print(
+            f"[mtp_ref] draft_token_id={draft_token_id} mtp_pos={mtp_pos} swap_fc_norms={swap}",
+            file=sys.stderr,
+        )
 
     print(f"[mtp_ref] loading MTP weights from {args.checkpoint}", file=sys.stderr)
     w = load_mtp_weights(args.checkpoint)
@@ -514,14 +592,28 @@ def main() -> int:
     # (called `fc_output`) and `pre_layer`. For safetensors we need them as
     # distinct tensors.
     pre_layer = fc_output.clone()
-    post_layer = mtp_inner_block(pre_layer, w, mtp_pos, rope_theta, rotary_frac, args.rms_eps)
+    capture_subops: Optional[Dict[str, torch.Tensor]] = {} if args.capture_subops else None
+    post_layer = mtp_inner_block(
+        pre_layer,
+        w,
+        mtp_pos,
+        rope_theta,
+        rotary_frac,
+        args.rms_eps,
+        capture_subops=capture_subops,
+    )
+    if capture_subops is not None:
+        print(
+            f"[mtp_ref] captured {len(capture_subops)} sub-op taps: {sorted(capture_subops.keys())}",
+            file=sys.stderr,
+        )
 
     # 6-7. Final norm + tied LM head.
     post_final_ln = rms_norm(post_layer, w.final_layernorm, args.rms_eps)
     mtp_logits = torch.matmul(post_final_ln, w.embed_tokens.t())  # [1, 1, V]
 
     # Write dump.
-    out_dict = {
+    out_dict: Dict[str, torch.Tensor] = {
         "h_main": h_main.contiguous(),
         "tok_embed": tok_embed.contiguous(),
         "fc_input": fc_input.contiguous(),
@@ -533,8 +625,14 @@ def main() -> int:
         # Carry metadata forward so the comparator can cross-check.
         "meta__draft_token_id": torch.tensor([int(draft_token_id)], dtype=torch.int32),
         "meta__mtp_pos": torch.tensor([int(mtp_pos)], dtype=torch.int32),
+        "meta__kiln_mtp_pos": torch.tensor([int(kiln_mtp_pos)], dtype=torch.int32),
         "meta__swap_fc_norms": torch.tensor([int(swap)], dtype=torch.int32),
+        "meta__capture_subops": torch.tensor([int(args.capture_subops)], dtype=torch.int32),
     }
+    if capture_subops is not None:
+        for name, t in capture_subops.items():
+            assert name not in out_dict, f"sub-op tap name `{name}` collides with existing tap"
+            out_dict[name] = t.contiguous()
     save_file(out_dict, args.out)
     print(f"[mtp_ref] wrote {args.out} ({sum(t.numel()*t.element_size() for t in out_dict.values())} bytes)", file=sys.stderr)
     return 0
