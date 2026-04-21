@@ -2161,12 +2161,12 @@ pub fn gated_deltanet_forward(
 
     // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
     //
-    // Decode fast path: a fused CUDA kernel (`backend.causal_conv1d_update`)
-    // collapses the to_f32 / cat / sum / narrow / silu chain into a single
-    // launch per (batch, channel). It returns F32 with SiLU already fused, so
-    // the subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Non-CUDA,
-    // non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D` kill
-    // switch all route through the portable candle path below — which is the
+    // Decode fast path: backend-side `causal_conv1d_update` collapses the
+    // to_f32 / cat / sum / narrow / silu chain into one fused update per
+    // (batch, channel). It returns F32 with SiLU already fused, so the
+    // subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Unsupported
+    // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
+    // kill switch all route through the portable candle path below — which is the
     // parity oracle.
     let mixed_qkv = {
         kiln_nvtx::range!(c"kiln/gdn/conv");
@@ -7051,6 +7051,86 @@ mod tests {
         assert!(
             smax < 1e-5,
             "fused conv1d_update state max_abs_diff={smax:e} exceeds 1e-5"
+        );
+
+        Ok(())
+    }
+
+    /// Metal parity check for `backend.causal_conv1d_update` against the same
+    /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_causal_conv1d_update_matches_fallback_metal() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_causal_conv1d_update_matches_fallback_metal"
+            );
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
+        let kernel_size = 4usize;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DBEEF);
+        let n_x = batch * channels;
+        let n_w = channels * kernel_size;
+        let n_s = batch * channels * (kernel_size - 1);
+
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+
+        let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
+        let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+
+        let x = x_f32.to_dtype(DType::BF16)?;
+        let w = w_f32.to_dtype(DType::BF16)?;
+
+        let mut s_fb = s_init.clone();
+        let out_fb = causal_conv1d_decode(&x, &w, &mut s_fb, kernel_size)?;
+        let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
+
+        let backend = crate::backend::for_device(&device);
+        if !backend.supports_causal_conv1d_update() {
+            eprintln!(
+                "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
+            );
+            return Ok(());
+        }
+        let mut s_k = s_init.clone();
+        let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
+            Some(t) => t,
+            None => {
+                eprintln!("backend declined causal_conv1d_update at Qwen3.5 envelope; skipping");
+                return Ok(());
+            }
+        };
+
+        let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("metal conv1d_update vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 2e-3,
+            "metal conv1d_update output max_abs_diff={max:e} exceeds 2e-3"
+        );
+        assert!(
+            mean < 5e-4,
+            "metal conv1d_update output mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        eprintln!("metal conv1d_update state parity: max_abs_diff={smax:e}");
+        assert!(
+            smax < 1e-5,
+            "metal conv1d_update state max_abs_diff={smax:e} exceeds 1e-5"
         );
 
         Ok(())

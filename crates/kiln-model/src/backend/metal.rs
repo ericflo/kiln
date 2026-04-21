@@ -12,6 +12,8 @@ use candle_core::{DType, Device, Tensor};
 use super::BackendRuntime;
 
 const DISABLE_METAL_CONV1D_PREFILL: &str = "KILN_DISABLE_METAL_CONV1D_PREFILL";
+const DISABLE_FUSED_CONV1D: &str = "KILN_DISABLE_FUSED_CONV1D";
+const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
 const DISABLE_GDN_KERNEL: &str = "KILN_DISABLE_GDN_KERNEL";
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
 
@@ -53,6 +55,10 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
         !metal_conv1d_prefill_disabled()
+    }
+
+    fn supports_causal_conv1d_update(&self) -> bool {
+        !metal_conv1d_update_disabled()
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
@@ -206,6 +212,23 @@ impl BackendRuntime for MetalBackend {
         Ok(Some(out))
     }
 
+    fn causal_conv1d_update(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        conv_state: &mut Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<Tensor>> {
+        if metal_conv1d_update_disabled()
+            || !metal_conv1d_update_supports(x, weight, conv_state, kernel_size)
+        {
+            return Ok(None);
+        }
+        let out = metal_causal_conv1d_update_bf16_f32_k4(x, weight, conv_state, kernel_size)
+            .context("metal causal_conv1d_update kernel failed")?;
+        Ok(Some(out))
+    }
+
     fn gdn_recurrent_step(
         &self,
         q: &Tensor,
@@ -235,6 +258,12 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
 
 fn metal_conv1d_prefill_disabled() -> bool {
     env_truthy(DISABLE_METAL_CONV1D_PREFILL)
+}
+
+fn metal_conv1d_update_disabled() -> bool {
+    // Match the CUDA kill-switch contract for the shared env var: if it is
+    // present at all, the fused decode conv path is disabled.
+    std::env::var(DISABLE_FUSED_CONV1D).is_ok() || env_truthy(DISABLE_METAL_FUSED_CONV1D)
 }
 
 fn metal_gdn_recurrent_disabled() -> bool {
@@ -273,6 +302,45 @@ fn metal_conv1d_prefill_supports(
         return false;
     };
     if seq_len <= 1 {
+        return false;
+    }
+    let weight_ok = match weight.rank() {
+        3 => weight
+            .dims3()
+            .is_ok_and(|(c, one, k)| c == channels && one == 1 && k == kernel_size),
+        2 => weight
+            .dims2()
+            .is_ok_and(|(c, k)| c == channels && k == kernel_size),
+        _ => false,
+    };
+    if !weight_ok {
+        return false;
+    }
+    conv_state
+        .dims3()
+        .is_ok_and(|(b, c, k)| (b, c, k) == (batch, channels, kernel_size - 1))
+}
+
+fn metal_conv1d_update_supports(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &Tensor,
+    kernel_size: usize,
+) -> bool {
+    if kernel_size != 4 {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) {
+        return false;
+    }
+    if x.dtype() != DType::BF16 || weight.dtype() != DType::BF16 || conv_state.dtype() != DType::F32
+    {
+        return false;
+    }
+    let Ok((batch, channels, seq_len)) = x.dims3() else {
+        return false;
+    };
+    if seq_len != 1 {
         return false;
     }
     let weight_ok = match weight.rank() {
@@ -606,6 +674,46 @@ kernel void kiln_causal_conv1d_prefill_bf16_f32_k4(
 }
 "#;
 
+const METAL_CONV1D_UPDATE_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_causal_conv1d_update_bf16_f32_k4(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device float* conv_state [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant uint& batch [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = batch * channels;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint c = gid % channels;
+    const uint state_base = gid * 3;
+    const uint weight_base = c * 4;
+
+    const float s0 = conv_state[state_base + 0];
+    const float s1 = conv_state[state_base + 1];
+    const float s2 = conv_state[state_base + 2];
+    const float x0 = static_cast<float>(x[gid]);
+
+    const float acc =
+        s0 * static_cast<float>(weight[weight_base + 0]) +
+        s1 * static_cast<float>(weight[weight_base + 1]) +
+        s2 * static_cast<float>(weight[weight_base + 2]) +
+        x0 * static_cast<float>(weight[weight_base + 3]);
+
+    out[gid] = acc / (1.0f + exp(-acc));
+    conv_state[state_base + 0] = s1;
+    conv_state[state_base + 1] = s2;
+    conv_state[state_base + 2] = x0;
+}
+"#;
+
 fn metal_conv1d_prefill_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -634,6 +742,38 @@ fn metal_conv1d_prefill_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal conv1d prefill pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_conv1d_update_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal conv1d update pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = device
+        .device()
+        .new_library_with_source(METAL_CONV1D_UPDATE_KERNEL, None)
+        .map_err(|e| anyhow::anyhow!("compile metal conv1d update library: {e:?}"))?;
+    let function = library
+        .get_function("kiln_causal_conv1d_update_bf16_f32_k4", None)
+        .map_err(|e| anyhow::anyhow!("load metal conv1d update function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal conv1d update pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -709,6 +849,92 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
         encoder.set_bytes(4, &batch_u32);
         encoder.set_bytes(5, &channels_u32);
         encoder.set_bytes(6, &seq_len_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: batch * channels,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+fn metal_causal_conv1d_update_bf16_f32_k4(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &mut Tensor,
+    kernel_size: usize,
+) -> Result<Tensor> {
+    anyhow::ensure!(kernel_size == 4, "metal conv1d update only supports K=4");
+    let (batch, channels, seq_len) = x.dims3()?;
+    anyhow::ensure!(seq_len == 1, "metal conv1d update requires seq_len == 1");
+
+    let x = x.contiguous()?;
+    let weight = match weight.rank() {
+        3 => weight.reshape((channels, kernel_size))?,
+        2 => weight.clone(),
+        r => anyhow::bail!("metal conv1d update weight rank must be 2 or 3, got {r}"),
+    }
+    .contiguous()?;
+    if !conv_state.is_contiguous() {
+        *conv_state = conv_state.contiguous()?;
+    }
+    let out = Tensor::zeros((batch, channels, 1usize), DType::F32, x.device())?;
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal conv1d update requires a Metal tensor");
+    };
+    let pipeline = metal_conv1d_update_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_causal_conv1d_update_bf16_f32_k4");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight.storage_and_layout();
+        let (s_storage, s_layout) = conv_state.storage_and_layout();
+        let (o_storage, o_layout) = out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal conv1d update x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal conv1d update weight must be on Metal"),
+        };
+        let s_metal = match &*s_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal conv1d update state must be on Metal"),
+        };
+        let o_metal = match &*o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal conv1d update output must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+        let s_buf =
+            candle_core::metal_backend::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
+        let o_buf = candle_core::metal_backend::buffer_o(o_metal.buffer(), &o_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(s_buf.buffer), s_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(o_buf.buffer), o_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let channels_u32 = channels as u32;
+        encoder.set_bytes(4, &batch_u32);
+        encoder.set_bytes(5, &channels_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: batch * channels,
