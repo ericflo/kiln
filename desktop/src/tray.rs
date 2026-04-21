@@ -474,7 +474,7 @@ fn spawn_state_watcher(
                             .show();
                     }
                 }
-                if kind == "running" && prev_kind != Some("running") {
+                if kind == "running" && should_notify_ready(prev_kind) {
                     let _ = app
                         .notification()
                         .builder()
@@ -550,6 +550,16 @@ pub fn ready_notification_body(port: u16) -> String {
 
 pub fn should_notify_stopped(prev_kind: Option<&str>) -> bool {
     matches!(prev_kind, Some("running") | Some("training"))
+}
+
+/// Return true when the state watcher should fire a "Kiln server ready" native
+/// toast on entry into the `running` kind. Training→Running is a
+/// training-job-finished transition, not a server-startup transition, so
+/// firing the ready toast there would be misleading. `running`→`running` is
+/// already filtered by the caller's equality check but we keep it here so the
+/// predicate is self-contained.
+pub fn should_notify_ready(prev_kind: Option<&str>) -> bool {
+    !matches!(prev_kind, Some("running") | Some("training"))
 }
 
 /// Return true when `settings.model_path` is set to a non-empty, non-whitespace
@@ -760,6 +770,17 @@ mod tests {
         assert!(!should_notify_stopped(Some("starting")));
         assert!(!should_notify_stopped(Some("error")));
         assert!(!should_notify_stopped(Some("stopped")));
+    }
+
+    #[test]
+    fn should_notify_ready_skips_running_and_training() {
+        assert!(should_notify_ready(None));
+        assert!(should_notify_ready(Some("stopped")));
+        assert!(should_notify_ready(Some("starting")));
+        assert!(should_notify_ready(Some("error")));
+        assert!(should_notify_ready(Some("no_binary")));
+        assert!(!should_notify_ready(Some("running")));
+        assert!(!should_notify_ready(Some("training")));
     }
 
     #[test]
