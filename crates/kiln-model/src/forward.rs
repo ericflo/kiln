@@ -1515,6 +1515,21 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
     Ok((relu_x + log_term)?)
 }
 
+fn gated_rms_norm(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f64,
+) -> Result<Tensor> {
+    if backend.supports_gdn_gated_rms_norm() {
+        if let Some(out) = backend.gdn_gated_rms_norm(x, z, weight, eps)? {
+            return Ok(out);
+        }
+    }
+    gated_rms_norm_fallback(x, z, weight, eps)
+}
+
 /// Gated RMSNorm: rms_norm(x, weight) * silu(z).
 ///
 /// Applied per-group on the last dimension. Returns F32.
@@ -1522,7 +1537,7 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
 /// `x`: [..., dim] — attention output
 /// `z`: [..., dim] — output gate (from in_proj_z)
 /// `weight`: [dim] — learnable scale
-fn gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let z_f32 = z.to_dtype(DType::F32)?;
     let w_f32 = weight.to_dtype(DType::F32)?;
@@ -2407,7 +2422,7 @@ pub fn gated_deltanet_forward(
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
-        let attn_out = gated_rms_norm(&attn_out, &z, &weights.norm, config.rms_norm_eps)?;
+        let attn_out = gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?;
         // Reshape to [B, T, v_dim] and cast back to input dtype
         attn_out
             .reshape((batch, seq_len, v_dim))?
@@ -4590,6 +4605,65 @@ mod tests {
         assert!((vals[0][0] - 1.5).abs() < 1e-4);
         assert!((vals[0][1] - 2.0).abs() < 1e-4);
         assert!((vals[0][2] - 3.0).abs() < 1e-4);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_gated_rms_norm_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!("Metal unavailable, skipping test_metal_gated_rms_norm_matches_fallback");
+            return Ok(());
+        };
+        let backend = crate::backend::for_device(&device);
+        if !backend.supports_gdn_gated_rms_norm() {
+            eprintln!("Metal gated RMSNorm disabled, skipping parity test");
+            return Ok(());
+        }
+
+        let batch = 1usize;
+        let seq_len = 3usize;
+        let heads = 32usize;
+        let hidden = 128usize;
+        let elems = batch * seq_len * heads * hidden;
+
+        let mut rng = StdRng::seed_from_u64(0x6A7E_DA75);
+        let x_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let z_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-2.0f32..2.0f32)).collect();
+        let w_data: Vec<f32> = (0..hidden).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+
+        let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
+        let fused = backend
+            .gdn_gated_rms_norm(&x, &z, &weight, 1e-6)?
+            .context("Metal backend declined gated RMSNorm test shape")?;
+
+        assert_eq!(fused.dims(), fallback.dims());
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let diff = (fused.to_dtype(DType::F32)?
+            - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("gated_rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 5e-3,
+            "Metal gated_rms_norm max_abs_diff={max:e} exceeds 5e-3"
+        );
+        assert!(
+            mean < 5e-4,
+            "Metal gated_rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
+        );
 
         Ok(())
     }
