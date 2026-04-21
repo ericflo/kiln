@@ -3619,9 +3619,12 @@ pub fn mtp_forward_step(
     };
 
     // 4. Concat along the hidden dim and fuse: [1, 1, 2H] @ fc_t[2H, H] -> [1, 1, H]
+    //
+    // We keep the concat alive (named `concat`) so the Phase B6 dump can
+    // capture the exact bytes fed into `fc.weight` as `fc_input`.
+    let concat = Tensor::cat(&[&norm_emb, &norm_h], 2)?.contiguous()?;
     let fused = {
         kiln_nvtx::range!(c"kiln/mtp/fc");
-        let concat = Tensor::cat(&[&norm_emb, &norm_h], 2)?.contiguous()?;
         concat.broadcast_matmul(&mtp.fc_t)?
     };
 
@@ -3650,11 +3653,63 @@ pub fn mtp_forward_step(
     .context("mtp transformer block")?;
 
     // 6. Final RMSNorm + weight-tied LM head (reuses base embed_tokens_t).
+    //
+    // We split `normed` out as a distinct bind (rather than inlining into the
+    // `logits` block) so the Phase B6 dump can capture `post_final_ln` ahead
+    // of the `lm_head` matmul. No semantic change vs the previous inlined
+    // form: `rms_norm` has no side effects, and `normed` is only used once.
+    let normed = {
+        kiln_nvtx::range!(c"kiln/mtp/final_layernorm");
+        rms_norm(&mtp_hidden, &mtp.final_layernorm, config.rms_norm_eps)?
+    };
     let logits = {
         kiln_nvtx::range!(c"kiln/mtp/lm_head");
-        let normed = rms_norm(&mtp_hidden, &mtp.final_layernorm, config.rms_norm_eps)?;
         normed.broadcast_matmul(&weights.embed_tokens_t)?
     };
+
+    // Phase B6 numerical-bisect dump. Fires once per process when
+    // `KILN_MTP_DUMP_PATH` is set and this is the first draft call that
+    // reaches this point. Writes a single safetensors file with the 8
+    // taps enumerated in `write_mtp_dump` plus integer metadata (draft
+    // token id, `mtp_pos`, `swap_fc_norms`). The companion Python
+    // reference implementation (`scripts/mtp_reference_dump.py`) produces
+    // the same-shaped file for the same prompt + seed; `scripts/mtp_compare.py`
+    // prints a per-tap first-divergence table. Failure to dump is logged
+    // but non-fatal — we never want an instrumentation bug to break decode.
+    if crate::mtp_debug::try_consume_dump_slot() {
+        if let Some(path) = crate::mtp_debug::dump_path() {
+            let taps: [(&str, &Tensor); 8] = [
+                ("h_main", h_prev),
+                ("tok_embed", &token_emb),
+                ("fc_input", &concat),
+                ("fc_output", &fused),
+                ("pre_layer", &fused),
+                ("post_layer", &mtp_hidden),
+                ("post_final_ln", &normed),
+                ("mtp_logits", &logits),
+            ];
+            match crate::mtp_debug::write_mtp_dump(
+                &path,
+                draft_token_id,
+                mtp_pos,
+                swap_fc_norms,
+                &taps,
+            ) {
+                Ok(()) => tracing::info!(
+                    target: "kiln::mtp_debug",
+                    path = %path,
+                    draft_token_id,
+                    mtp_pos,
+                    "mtp_b6_dump_written"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "kiln::mtp_debug",
+                    error = %e,
+                    "mtp_b6_dump_failed"
+                ),
+            }
+        }
+    }
 
     // Optional Phase B instrumentation. Off by default; enabled with
     // `KILN_MTP_DEBUG=1`. See `crate::mtp_debug` for the rate-limited path.

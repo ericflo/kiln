@@ -22,12 +22,13 @@
 //! tensor or layout bug appears) or document the runtime evidence in a Tier 2
 //! diagnostic update to `PROFILING.md`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static DUMP_DONE: AtomicBool = AtomicBool::new(false);
 
 const DEFAULT_MAX_CALLS: usize = 16;
 
@@ -106,6 +107,130 @@ pub fn is_swap_fc_norms_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Path to which `mtp_forward_step` should dump all 8 Phase B6 numerical
+/// bisect taps on the first draft call, if set. Unset → no dump. Set →
+/// after the first call with valid tensors, the file is written and any
+/// subsequent call is a no-op (see `try_consume_dump_slot`).
+///
+/// Paired with a Python reference implementation (see
+/// `scripts/mtp_reference_dump.py`) that produces an identically-named
+/// safetensors file for the same fixed prompt + seed. A post-hoc
+/// per-tap `allclose` sweep (see `scripts/mtp_compare.py`) localizes
+/// the first divergence and narrows the remaining runtime hypotheses.
+pub fn dump_path() -> Option<String> {
+    std::env::var("KILN_MTP_DUMP_PATH").ok().filter(|s| !s.is_empty())
+}
+
+/// First call after the path env var is set returns `true`; all later
+/// calls return `false` so we only write the file once. Idempotent across
+/// the whole process.
+pub fn try_consume_dump_slot() -> bool {
+    if dump_path().is_none() {
+        return false;
+    }
+    DUMP_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Reset the dump latch. Test-only helper.
+#[cfg(test)]
+fn reset_dump_latch() {
+    DUMP_DONE.store(false, Ordering::SeqCst);
+}
+
+/// Convert a tensor to a contiguous host float32 `Vec<f32>` plus shape.
+/// Used by [`write_mtp_dump`] to serialize taps uniformly regardless of
+/// whether the source is BF16 on CUDA or F32 on CPU.
+fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
+    let shape = t.dims().to_vec();
+    let flat = t.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    Ok((shape, flat))
+}
+
+/// Write the Phase B6 per-tap dump to the path from `KILN_MTP_DUMP_PATH`.
+///
+/// Output format is `safetensors` (same format kiln's loader already
+/// supports, so the Python side can read it with the stock `safetensors`
+/// package). All tensors are written as `F32` regardless of source dtype —
+/// precision loss from BF16→F32 is one-directional (upcast) and keeps the
+/// comparison numerically faithful.
+///
+/// The named taps correspond one-to-one with the 8 steps in the task brief:
+///
+/// | Tap name          | Meaning                                              |
+/// | ----------------- | ---------------------------------------------------- |
+/// | `h_main`          | Last-hidden-state from main model at position t.     |
+/// | `tok_embed`       | `embed_tokens(draft_token_t-1)` (pre-norm).          |
+/// | `fc_input`        | `concat([norm_emb, norm_h])` (input to `mtp.fc`).    |
+/// | `fc_output`       | Post-`mtp.fc` linear projection.                     |
+/// | `pre_layer`       | Input to the MTP inner transformer block (== `fc_output`). |
+/// | `post_layer`      | Output of the MTP inner transformer block.           |
+/// | `post_final_ln`   | Output of `mtp.final_layernorm` (pre-LM head).       |
+/// | `mtp_logits`      | Output of `lm_head` on `post_final_ln`.              |
+///
+/// Plus metadata: `draft_token_id`, `mtp_pos`, `swap_fc_norms`.
+pub fn write_mtp_dump(
+    path: &str,
+    draft_token_id: u32,
+    mtp_pos: usize,
+    swap_fc_norms: bool,
+    taps: &[(&str, &Tensor)],
+) -> Result<()> {
+    use safetensors::tensor::{Dtype, TensorView};
+
+    // Materialize every tensor to a host byte buffer first so the
+    // TensorViews we build below can borrow from a stable backing store.
+    let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> =
+        Vec::with_capacity(taps.len() + 3);
+    for (name, t) in taps {
+        let (shape, flat) = tensor_to_f32_host(t)
+            .with_context(|| format!("dump tap `{name}`: tensor→f32 host copy"))?;
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in &flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push(((*name).to_string(), shape, Dtype::F32, bytes));
+    }
+
+    // Metadata as 1-element I32 tensors so the Python side can read them
+    // with one loader. Widened to i32 because safetensors 0.5 lacks U32 in
+    // its serialization path on some builds; I32 is always available.
+    let dti = draft_token_id as i32;
+    backings.push((
+        "meta__draft_token_id".into(),
+        vec![1],
+        Dtype::I32,
+        dti.to_le_bytes().to_vec(),
+    ));
+    let mpi = mtp_pos as i32;
+    backings.push((
+        "meta__mtp_pos".into(),
+        vec![1],
+        Dtype::I32,
+        mpi.to_le_bytes().to_vec(),
+    ));
+    let swf = if swap_fc_norms { 1i32 } else { 0i32 };
+    backings.push((
+        "meta__swap_fc_norms".into(),
+        vec![1],
+        Dtype::I32,
+        swf.to_le_bytes().to_vec(),
+    ));
+
+    let mut views: Vec<(String, TensorView)> = Vec::with_capacity(backings.len());
+    for (name, shape, dtype, bytes) in &backings {
+        let view = TensorView::new(*dtype, shape.clone(), bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("safetensors TensorView::new for `{name}`: {e:?}"))?;
+        views.push((name.clone(), view));
+    }
+
+    let serialized = safetensors::serialize(views, &None)
+        .map_err(|e| anyhow::anyhow!("safetensors::serialize MTP dump: {e:?}"))?;
+    std::fs::write(path, serialized).with_context(|| format!("write MTP dump to {path}"))?;
+    Ok(())
+}
+
 /// Format a top-K list as `"[(id=42, l=12.34), (id=1, l=11.20), ...]"`.
 pub fn format_top_k(top: &[(u32, f32)]) -> String {
     let parts: Vec<String> = top
@@ -153,5 +278,60 @@ mod tests {
         }
         reset_counter();
         assert!(!should_log());
+    }
+
+    #[test]
+    fn dump_slot_fires_once_then_never() {
+        // SAFETY: single-threaded test; scoped env mutation.
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_slot_once.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_PATH", &tmp_s);
+        }
+        reset_dump_latch();
+        assert_eq!(dump_path().as_deref(), Some(tmp_s.as_str()));
+        assert!(try_consume_dump_slot());
+        assert!(!try_consume_dump_slot());
+        assert!(!try_consume_dump_slot());
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_PATH");
+        }
+    }
+
+    #[test]
+    fn write_and_reparse_mtp_dump_round_trips() {
+        use safetensors::SafeTensors;
+
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[0.5_f32, -0.25][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_round_trip.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 561,
+            /* mtp_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            &[("h_main", &a), ("mtp_logits", &b)],
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"h_main"));
+        assert!(names.contains(&"mtp_logits"));
+        assert!(names.contains(&"meta__draft_token_id"));
+        assert!(names.contains(&"meta__mtp_pos"));
+        assert!(names.contains(&"meta__swap_fc_norms"));
+
+        let h = st.tensor("h_main").unwrap();
+        assert_eq!(h.dtype(), safetensors::Dtype::F32);
+        assert_eq!(h.shape(), &[4]);
+        let meta = st.tensor("meta__draft_token_id").unwrap();
+        assert_eq!(meta.dtype(), safetensors::Dtype::I32);
+        let v = i32::from_le_bytes(meta.data()[0..4].try_into().unwrap());
+        assert_eq!(v, 561);
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }
