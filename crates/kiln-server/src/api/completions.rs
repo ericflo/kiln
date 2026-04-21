@@ -13,6 +13,7 @@ use std::path::Path;
 
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
+use kiln_core::token::TokenId;
 use kiln_core::tokenizer::ChatMessage;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{GenerationOutput, ModelRunner, SpeculativeConfig, StreamEvent};
@@ -247,6 +248,10 @@ async fn chat_completions_inner(
         .tokenizer
         .apply_chat_template(&chat_messages)
         .map_err(ApiError::chat_template_failed)?;
+    let prompt_tokens = state
+        .tokenizer
+        .encode(&prompt_text)
+        .map_err(ApiError::tokenization_failed)?;
 
     let sampling = SamplingParams {
         temperature: req.temperature.unwrap_or(1.0),
@@ -276,6 +281,7 @@ async fn chat_completions_inner(
                     block_manager,
                     paged_cache,
                     &prompt_text,
+                    &prompt_tokens,
                     &sampling,
                     &req,
                 )
@@ -296,6 +302,7 @@ async fn chat_completions_inner(
                     block_manager,
                     paged_cache,
                     &prompt_text,
+                    &prompt_tokens,
                     &sampling,
                     &req,
                 )
@@ -395,15 +402,11 @@ async fn generate_real(
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prompt_text: &str,
+    prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
 ) -> Result<ChatCompletionResponse, ApiError> {
-    // Count prompt tokens for usage stats.
-    let prompt_token_count = state
-        .tokenizer
-        .encode(prompt_text)
-        .map_err(ApiError::tokenization_failed)?
-        .len();
+    let prompt_token_count = prompt_tokens.len();
 
     let (mtp_supported, has_active_lora) = {
         let guard = runner.read().unwrap();
@@ -418,6 +421,7 @@ async fn generate_real(
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
     let prompt = prompt_text.to_owned();
+    let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
 
     let gpu_lock = state.gpu_lock.clone();
@@ -428,9 +432,12 @@ async fn generate_real(
         let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
         match speculative_mode {
-            ResolvedSpeculativeMode::Off => {
-                runner_guard.generate_paged_shared(&prompt, &params, bm.as_ref(), pc.as_ref())
-            }
+            ResolvedSpeculativeMode::Off => runner_guard.generate_paged_shared_tokens(
+                &prompt_tokens,
+                &params,
+                bm.as_ref(),
+                pc.as_ref(),
+            ),
             ResolvedSpeculativeMode::SkipLayer(spec_config) => {
                 runner_guard.generate_speculative(&prompt, &params, &spec_config)
             }
@@ -501,6 +508,7 @@ async fn generate_real_streaming(
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prompt_text: &str,
+    prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
@@ -515,6 +523,7 @@ async fn generate_real_streaming(
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
     let prompt = prompt_text.to_owned();
+    let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
     let model = req
         .model
@@ -562,8 +571,8 @@ async fn generate_real_streaming(
                         // Acquire GPU coordination read lock
                         let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
-                        runner_guard.generate_streaming_paged_shared(
-                            &prompt,
+                        runner_guard.generate_streaming_paged_shared_tokens(
+                            &prompt_tokens,
                             &params,
                             bm.as_ref(),
                             pc.as_ref(),
