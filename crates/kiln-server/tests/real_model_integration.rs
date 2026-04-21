@@ -329,19 +329,17 @@ async fn test_real_model_streaming_chat_completion() {
     assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
     assert!(first["choices"][0]["finish_reason"].is_null());
 
-    // Middle chunks should have content
-    let mut saw_content = false;
+    // Middle chunks may contain content, but tiny random weights can also
+    // produce an EOS or empty-decoding token immediately. Keep this test about
+    // streaming protocol correctness rather than random text quality.
     for line in &data_lines[1..data_lines.len() - 1] {
         if *line == "[DONE]" {
             continue;
         }
         let chunk: Value = serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("failed to parse chunk: {e}\nraw: {line}"));
-        if chunk["choices"][0]["delta"]["content"].is_string() {
-            saw_content = true;
-        }
+        assert_eq!(chunk["object"], "chat.completion.chunk");
     }
-    assert!(saw_content, "expected at least one content chunk");
 
     // Last line should be [DONE]
     assert_eq!(

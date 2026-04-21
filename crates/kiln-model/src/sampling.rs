@@ -15,12 +15,13 @@
 //!   (value, index) pairs are transferred. If the on-device sort fails (e.g. shared
 //!   memory limits on very large vocab), we fall back to transferring the full
 //!   distribution and sorting on host — behaviourally identical, just slower.
-//! * Top-p (nucleus) filtering and categorical sampling remain on host because
-//!   candle lacks a GPU RNG for categorical draws. The final multinomial stage
-//!   only inspects a tiny truncated distribution.
+//! * The default full-vocab temperature path can stay on-device on GPU
+//!   backends with Gumbel-max + argmax, so only the final scalar token ID
+//!   crosses PCIe. CPU keeps the existing host sampler.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Device, Tensor};
+use candle_nn::sampling::gumbel_softmax;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -79,7 +80,20 @@ pub fn sample_with_params(
     let vocab_size = flat.dims1()?;
 
     // Apply temperature on-device; result stays on the original device.
-    let scaled = flat.to_dtype(DType::F32)?.affine(1.0 / temperature as f64, 0.0)?;
+    let scaled = flat
+        .to_dtype(DType::F32)?
+        .affine(1.0 / temperature as f64, 0.0)?;
+
+    // Default sampling stays on-device for GPU backends. This keeps the
+    // default desktop path off the full-vocab DtoH transfer.
+    if seed.is_none()
+        && top_p >= 1.0
+        && (top_k == 0 || top_k as usize >= vocab_size)
+        && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
+    {
+        let sampled = gumbel_softmax(&scaled, 1.0, 0)?;
+        return Ok(sampled.to_scalar::<u32>()?);
+    }
 
     // The default sampling shape is full-vocab temperature sampling
     // (`top_k=0`, `top_p=1`). It still needs one host transfer for categorical
@@ -245,6 +259,8 @@ fn topk_via_host_sort(scaled: &Tensor, top_k: Option<usize>) -> Result<Vec<(u32,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "metal")]
+    use crate::backend::metal::try_new_metal;
     use candle_core::Device;
 
     #[test]
@@ -263,8 +279,8 @@ mod tests {
         let logits = Tensor::new(
             &[
                 1.0_f32, 2.0, 3.0, 4.0, // position 0
-                5.0, 6.0, 7.0, 8.0,     // position 1
-                0.1, 0.2, 9.0, 0.3,     // position 2 (last) — max at index 2
+                5.0, 6.0, 7.0, 8.0, // position 1
+                0.1, 0.2, 9.0, 0.3, // position 2 (last) — max at index 2
             ],
             &device,
         )?
@@ -281,7 +297,7 @@ mod tests {
         let logits = Tensor::new(
             &[
                 1.0_f32, 2.0, 3.0, // position 0
-                7.0, 5.0, 6.0,     // position 1 (last) — max at index 0
+                7.0, 5.0, 6.0, // position 1 (last) — max at index 0
             ],
             &device,
         )?
@@ -327,7 +343,10 @@ mod tests {
         let logits = Tensor::new(&[1.0_f32, 10.0, 3.0, 2.0], &device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 0.01, 1.0, 0, Some(seed))?;
-            assert_eq!(token, 1, "with temp=0.01 and seed={seed}, expected greedy result");
+            assert_eq!(
+                token, 1,
+                "with temp=0.01 and seed={seed}, expected greedy result"
+            );
         }
         Ok(())
     }
@@ -352,14 +371,16 @@ mod tests {
         // The on-device sort + narrow path must select the same top-k set as a
         // naive host-side sort over the full vocab.
         let device = Device::Cpu;
-        let values: Vec<f32> = vec![
-            1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.5,
-        ];
+        let values: Vec<f32> = vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.5];
         let logits = Tensor::new(values.as_slice(), &device)?;
 
         // Expected top-3 indices (descending by logit): 9.0->7, 8.0->3, 7.0->5
-        let mut expected: Vec<(u32, f32)> =
-            values.iter().copied().enumerate().map(|(i, v)| (i as u32, v)).collect();
+        let mut expected: Vec<(u32, f32)> = values
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, v)| (i as u32, v))
+            .collect();
         expected.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let expected_top3: Vec<u32> = expected.iter().take(3).map(|(i, _)| *i).collect();
 
@@ -383,7 +404,10 @@ mod tests {
         for seed in 0..20 {
             let token = sample_with_params(&logits, 1.0, 0.95, 0, Some(seed))?;
             // With top_p=0.95, token 0 alone exceeds the threshold
-            assert_eq!(token, 0, "top_p=0.95 with dominant logit should pick token 0, got {token}");
+            assert_eq!(
+                token, 0,
+                "top_p=0.95 with dominant logit should pick token 0, got {token}"
+            );
         }
         Ok(())
     }
@@ -418,6 +442,34 @@ mod tests {
             let b = sample_with_params(&logits, 1.0, 0.9, 50, Some(seed))?;
             assert_eq!(a, b, "same seed must produce same token (seed={seed})");
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn test_default_path_seed_is_deterministic_on_metal() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let a = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
+        let b = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
+        assert_eq!(
+            a, b,
+            "same seed must yield same token on Metal default path"
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "metal")]
+    fn test_default_path_no_seed_samples_on_metal() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let token = sample_with_params(&logits, 1.0, 1.0, 0, None)?;
+        assert!(token < 4, "sampled token out of range: {token}");
         Ok(())
     }
 }

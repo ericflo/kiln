@@ -195,6 +195,8 @@ pub fn drain_to_csv(path: &str) -> Result<usize> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn sample_row(i: usize, accepted: bool) -> C1Row {
         C1Row {
             step_idx: i,
@@ -231,13 +233,14 @@ mod tests {
 
     #[test]
     fn csv_round_trip_multi_row_via_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = std::env::temp_dir().join(format!(
             "kiln_c1_round_trip_{}.csv",
             std::process::id()
         ));
         let path = tmp.to_str().unwrap().to_string();
-        // SAFETY: tests in this module are serialized by the top-level
-        // `serial` guard below; the env var toggle is the documented way to
+        // SAFETY: ENV_LOCK serializes tests that mutate this process-wide
+        // environment variable; the env var toggle is the documented way to
         // enable / disable the sink.
         unsafe {
             std::env::set_var("KILN_C1_ATTR_PATH", &path);
@@ -269,8 +272,9 @@ mod tests {
 
     #[test]
     fn push_is_no_op_when_disabled() {
-        // SAFETY: serialized by the sink's Mutex, tests in the same module
-        // run on one thread by default.
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: ENV_LOCK serializes tests that mutate this process-wide
+        // environment variable.
         unsafe {
             std::env::remove_var("KILN_C1_ATTR_PATH");
         }
