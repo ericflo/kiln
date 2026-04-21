@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -261,9 +260,6 @@ fn spawn_backend_prewarm(state: AppState) {
     let metrics = state.metrics.clone();
 
     tokio::spawn(async move {
-        // Keep startup user-first: only warm a server that stayed idle long
-        // enough to prove no one is about to interact with it.
-        tokio::time::sleep(Duration::from_secs(30)).await;
         if metrics.request_duration_count.load(Ordering::Relaxed) > 0 {
             tracing::info!(
                 "skipping background inference prewarm because the server has already handled live traffic"
@@ -277,6 +273,7 @@ fn spawn_backend_prewarm(state: AppState) {
             return;
         }
 
+        tracing::info!("starting background inference prewarm");
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             if metrics.request_duration_count.load(Ordering::Relaxed) > 0
                 || metrics.active_requests.load(Ordering::Relaxed) > 0
