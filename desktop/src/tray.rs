@@ -141,13 +141,26 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                         }
                         if let Err(e) = supervisor.start().await {
                             eprintln!("[tray] start_server failed: {}", e);
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Start Server failed")
+                                .body(tray_op_error_body("start", &e.to_string()))
+                                .show();
                         }
                     });
                 }
                 ITEM_STOP => {
+                    let app_for_spawn = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = supervisor.stop().await {
                             eprintln!("[tray] stop_server failed: {}", e);
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Stop Server failed")
+                                .body(tray_op_error_body("stop", &e.to_string()))
+                                .show();
                         }
                     });
                 }
@@ -192,6 +205,12 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
                         }
                         if let Err(e) = supervisor.restart().await {
                             eprintln!("[tray] restart_server failed: {}", e);
+                            let _ = app_for_spawn
+                                .notification()
+                                .builder()
+                                .title("Restart Server failed")
+                                .body(tray_op_error_body("restart", &e.to_string()))
+                                .show();
                         }
                     });
                 }
@@ -548,6 +567,13 @@ pub fn ready_notification_body(port: u16) -> String {
     format!("OpenAI base URL: http://localhost:{}/v1", port)
 }
 
+/// Format the body of a "tray action failed" notification for the three
+/// supervisor-driven tray actions (Start / Stop / Restart). Kept as a pure
+/// helper so it can be unit-tested without GTK/webkit2gtk.
+pub fn tray_op_error_body(op: &str, err: &str) -> String {
+    format!("Could not {} the Kiln server: {}", op, err)
+}
+
 pub fn should_notify_stopped(prev_kind: Option<&str>) -> bool {
     matches!(prev_kind, Some("running") | Some("training"))
 }
@@ -856,5 +882,22 @@ mod tests {
             ptrs.len(),
             "each ServerState must map to a distinct icon slice"
         );
+    }
+
+    #[test]
+    fn tray_op_error_body_includes_op_and_err() {
+        for op in ["start", "stop", "restart"] {
+            let err = "supervisor already running";
+            let body = tray_op_error_body(op, err);
+            assert!(body.contains(op), "body {body:?} should contain op {op:?}");
+            assert!(body.contains(err), "body {body:?} should contain err {err:?}");
+        }
+    }
+
+    #[test]
+    fn tray_op_error_body_empty_err() {
+        let body = tray_op_error_body("start", "");
+        assert!(!body.is_empty(), "body should be non-empty even when err is empty");
+        assert!(body.contains("start"), "body {body:?} should contain op");
     }
 }
