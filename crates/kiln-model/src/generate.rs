@@ -17,8 +17,8 @@ use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_streaming,
-    model_forward_paged_with_last_hidden, streaming_prefill_enabled,
+    model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_streaming, streaming_prefill_enabled,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -1391,7 +1391,7 @@ impl ModelRunner {
         // the last-row pre-final-norm hidden as the seed `h_prev`. Streaming
         // prefill returns logits only, so MTP needs the dedicated path that
         // also yields hidden state.
-        let (prefill_logits, mut h_prev) = model_forward_paged_with_last_hidden(
+        let (prefill_logits, mut h_prev) = model_forward_paged_last_token_with_last_hidden(
             &*self.backend,
             prompt_tokens,
             &self.weights,
@@ -1406,10 +1406,8 @@ impl ModelRunner {
         .context("mtp prefill forward pass failed")?;
 
         // The last-row logits drive the first emitted token (same as the
-        // skip-layer path); slice to [1, V] for greedy_sample.
-        let prefill_last = prefill_logits
-            .narrow(1, prompt_tokens.len() - 1, 1)?
-            .squeeze(1)?;
+        // skip-layer path).
+        let prefill_last = prefill_logits.squeeze(1)?;
         let mut last_token = greedy_sample(&prefill_last)?;
 
         let mut base_pos = prompt_tokens.len();
@@ -1811,7 +1809,7 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        let (prefill_logits, mut h_prev) = model_forward_paged_with_last_hidden(
+        let (prefill_logits, mut h_prev) = model_forward_paged_last_token_with_last_hidden(
             &*self.backend,
             &prompt_tokens,
             &self.weights,
@@ -1825,9 +1823,7 @@ impl ModelRunner {
         )
         .context("mtp prefill forward pass failed")?;
 
-        let prefill_last = prefill_logits
-            .narrow(1, prompt_tokens.len() - 1, 1)?
-            .squeeze(1)?;
+        let prefill_last = prefill_logits.squeeze(1)?;
         let mut last_token = greedy_sample(&prefill_last)?;
 
         let mut base_pos = prompt_tokens.len();

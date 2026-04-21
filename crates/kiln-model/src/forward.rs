@@ -4052,6 +4052,45 @@ pub fn model_forward_paged_with_last_hidden(
     ))
 }
 
+/// Paged-KV forward pass for MTP prefill.
+///
+/// Returns only the last-row logits plus the last-row pre-final-norm hidden
+/// state. MTP prefill does not need per-position logits, so this avoids
+/// projecting every prompt row through the large tied LM head.
+pub fn model_forward_paged_last_token_with_last_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+) -> Result<(Tensor, Tensor)> {
+    crate::mtp_debug::arm_h_main_capture();
+    crate::mtp_debug::stash_h_main_prompt_tokens(token_ids);
+    crate::mtp_debug::arm_b11_layer0_capture();
+    let (logits, hidden) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+        LmHeadMode::LastRowWithLastHidden,
+    )?;
+    Ok((
+        logits.expect("LmHeadMode::LastRowWithLastHidden always produces logits"),
+        hidden.expect("LmHeadMode::LastRowWithLastHidden always produces hidden"),
+    ))
+}
+
 /// Single-step native MTP (Multi-Token Prediction) forward pass.
 ///
 /// Implements the Qwen3-Next-style MTP head described in the vLLM reference
@@ -4371,6 +4410,10 @@ enum LmHeadMode {
     /// for MTP speculative verification at position 0 (draft comparison) and
     /// position 1 (bonus), plus `h_prev` for the next MTP step.
     FullWithLastHidden,
+    /// Compute the LM head over the final token only AND return the last-row
+    /// pre-final-norm hidden state. Used by MTP prefill, which only consumes
+    /// the next-token distribution for the prompt's final row.
+    LastRowWithLastHidden,
     /// Skip RMSNorm + LM head entirely and return `None`. Used for non-final
     /// tiles where the caller throws away the logits.
     Skip,
@@ -4563,6 +4606,18 @@ fn model_forward_paged_inner(
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+                normed.broadcast_matmul(&weights.embed_tokens_t)?
+            };
+            Ok((Some(logits), Some(last_hidden)))
+        }
+        LmHeadMode::LastRowWithLastHidden => {
+            let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
+            if crate::mtp_debug::is_h_main_capture_armed() {
+                let _ = crate::mtp_debug::capture_h_main_tap("h_pre_final_norm", &last_hidden);
+            }
+            let logits = {
+                kiln_nvtx::range!(c"kiln/lm_head");
+                let normed = rms_norm(&last_hidden, &weights.final_norm, config.rms_norm_eps)?;
                 normed.broadcast_matmul(&weights.embed_tokens_t)?
             };
             Ok((Some(logits), Some(last_hidden)))
