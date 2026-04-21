@@ -4486,3 +4486,92 @@ gate → mlp_up → mlp_gate → mlp_down` and dump each one.
   bisect report at `/tmp/mtp-compare.txt` (copied to
   `mtp-compare-phase-b6.txt` in the session workspace), and this PR.
   **No fix included.** Scope is bisect-only per the task brief.
+
+
+## Phase C12 — fp32 draft-head kill switch + activation-weighted probe (2026-04-21)
+
+### Goal
+
+Test whether forcing the MTP draft head's q/k/v/o + fc projections to fp32
+(`KILN_MTP_FP32_HEAD=1`) recovers α toward the 0.72 ship floor. Hypothesis
+from C9/C11 audit: bf16 matmul accumulation noise on W4A16-dequanted weights
+shifts the draft head's top-1 enough to explain α == 0.058-0.124 observed
+in C5 after the C3 RoPE fix landed.
+
+### Implementation
+
+Narrow, TLS-gated chokepoint — no behavior change when flag unset.
+
+- `crates/kiln-model/src/mtp_debug.rs` — `KILN_MTP_FP32_HEAD` env reader +
+  `MTP_FP32_HEAD_ARMED` TLS `RefCell<bool>` + arm/disarm helpers.
+- `crates/kiln-model/src/lora_loader.rs::linear_with_lora_t` — when armed,
+  upcast `x` and transposed base weight to `DType::F32`, matmul, cast
+  back. LoRA and bias adds left untouched. Single chokepoint covers q/k/v/o
+  and MLP base matmuls in one branch.
+- `crates/kiln-model/src/forward.rs::mtp_forward_step` — reads flag once;
+  arms TLS around the draft-head `transformer_block_paged`; disarms on
+  exit. OR's into the existing `KILN_MTP_FC_FP32_ACCUM` branch so the new
+  flag subsumes C9's fc-only knob.
+
+### Results
+
+Median-of-3 on A6000, Qwen3.5-4B, `--paged --prompt-tokens 512
+--max-output-tokens 128 --skip-training --seed {42,43,44}`, MTP on
+(`KILN_SPEC_ENABLED=1 KILN_SPEC_METHOD=mtp`):
+
+| Config           | env                                      | Median α | Median tok/s |
+|------------------|------------------------------------------|----------|--------------|
+| baseline         | `KILN_W4A16=1`                           | 0.0325   | 41.09        |
+| **primary**      | `KILN_W4A16=1 KILN_MTP_FP32_HEAD=1`      | 0.0325   | 37.66        |
+| sanity_nomarlin  | `KILN_W4A16=0`                           | 0.0583   | 36.76        |
+
+Per-seed α is bitwise identical across configs for 2/3 seeds (seed 42:
+4/123 for all three configs; seed 43: 4/123 for baseline and primary).
+
+### Verdict
+
+**PRIMARY-NEGATIVE.** fp32 draft-head projections do not recover α. The
+bf16 matmul-accumulation hypothesis is refuted: dtype of the head's
+projections is not a contributor of meaningful magnitude to α under greedy
+decode. The failure mode is structural — the MTP head deterministically
+picks a different top-1 token from the main head, across W4A16-bf16,
+W4A16-fp32, and no-Marlin-at-all.
+
+Combined with C5 (Class C = 0, Class B = 87.6%) and C3 (bitwise-identical
+α pre/post RoPE fix), the surviving hypothesis space is now entirely
+upstream of the head's projections: MTP token-embedding lookup, MTP
+pre-norm γ application, MTP hidden-state splicing from the main stack, or
+weight-loading for `mtp_head.fc_input` / `mtp_head.fc_output` /
+q-k-v-o. **C13 should investigate weight-loading policy and the splice
+input to the draft head first** — mis-tied or mis-loaded weights produce
+exactly this symptom (deterministic wrong top-1, dtype-insensitive).
+
+Decode cost: `KILN_MTP_FP32_HEAD=1` costs ≈ 8.3% of tok/s on A6000
+(41.09 → 37.66). Do not gate on by default.
+
+### Activation-weighted probe (sidecar, main-model MLP)
+
+`scripts/c12_activation_weighted_probe.py` audited 104 main-model
+projections on 32 prompts × 595 total tokens. Top weighted drift:
+`L6.down_proj` at 1.447e-01; many MLPs in the 11-14% band. This is
+non-trivial drift by magnitude, but it doesn't propagate into main-head
+top-1 flips on the bench prompts (otherwise sanity_nomarlin and baseline
+main-head trajectories would differ more — they don't). The probe's
+script-level terminal verdict ("Corroborates PRIMARY-POSITIVE…") is stale
+boilerplate; the authoritative C12 verdict is the bench above.
+
+### Budget used
+
+Single A6000 pod (`wl0fyjvqrv0v9b`), warm sccache (hit rate 97.56%). Build
+2m 12s; 9 bench runs ≈ 974s total; one probe run (~160s). All pod-side
+waits used `runpod_api.py wait-file --timeout`; no `until ssh` or
+`while ssh … sleep` polling loops. Well under the 90 min / $40 hard cap.
+
+### Output
+
+- `docs/phase-c12/c12-fp32-head.md` — full verdict report.
+- `c12-out/bench-summary.json` — 3 × 3 trial JSON (seed, α, tok/s, ITL,
+  accept line).
+- `c12-out/probe-report.md` + `c12-out/probe-report.json` — main-model
+  activation-weighted drift audit.
+- `c12-out/bench.log`, `c12-out/probe.log` — runner logs.

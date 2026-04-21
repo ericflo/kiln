@@ -1,0 +1,40 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+
+[config=baseline] env={'KILN_W4A16': '1'}
+    → seed=42 env=KILN_W4A16=1
+    → seed=43 env=KILN_W4A16=1
+    → seed=44 env=KILN_W4A16=1
+  → median α = 0.0325
+  → median decode = 41.09 tok/s
+
+[config=primary] env={'KILN_W4A16': '1', 'KILN_MTP_FP32_HEAD': '1'}
+    → seed=42 env=KILN_W4A16=1 KILN_MTP_FP32_HEAD=1
+    → seed=43 env=KILN_W4A16=1 KILN_MTP_FP32_HEAD=1
+    → seed=44 env=KILN_W4A16=1 KILN_MTP_FP32_HEAD=1
+  → median α = 0.0325
+  → median decode = 37.66 tok/s
+
+[config=sanity_nomarlin] env={'KILN_W4A16': '0'}
+    → seed=42 env=KILN_W4A16=0
+    → seed=43 env=KILN_W4A16=0
+    → seed=44 env=KILN_W4A16=0
+  → median α = 0.0583
+  → median decode = 36.76 tok/s
+
+[bench_runner] wrote /workspace/c12-out/bench-summary.json
+
+=== Median-of-3 Summary ===
+config                   median α  median top1   median tok/s
+-------------------------------------------------------------
+baseline                   0.0325       0.0325          41.09
+primary                    0.0325       0.0325          37.66
+sanity_nomarlin            0.0583       0.0583          36.76
