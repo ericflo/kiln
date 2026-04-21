@@ -207,6 +207,16 @@ def load_mtp_weights(checkpoint_dir: str) -> MtpRefWeights:
 
     get = lambda suf: st_load_tensor(checkpoint_dir, mtp_prefix + suf)
 
+    # Avoid `or` on torch.Tensor (it calls __bool__ which errors for >1 element).
+    # Use a helper that tries candidates in order and returns the first hit.
+    def first_match(*names: str) -> torch.Tensor:
+        last_err: Optional[KeyError] = None
+        for n in names:
+            t = st_load_tensor(checkpoint_dir, n, allow_missing=True)
+            if t is not None:
+                return t
+        raise KeyError(f"None of {names} present in checkpoint")
+
     return MtpRefWeights(
         embed_tokens=embed,
         fc_weight=mtp_fc,
@@ -214,21 +224,57 @@ def load_mtp_weights(checkpoint_dir: str) -> MtpRefWeights:
         pre_fc_norm_hidden=get("pre_fc_norm_hidden.weight"),
         # Either `mtp.norm.weight` or `mtp.final_layernorm.weight` — loader
         # accepts both per PR #253.
-        final_layernorm=(
-            st_load_tensor(checkpoint_dir, mtp_prefix + "norm.weight", allow_missing=True)
-            or st_load_tensor(checkpoint_dir, mtp_prefix + "final_layernorm.weight")
+        final_layernorm=first_match(
+            mtp_prefix + "norm.weight",
+            mtp_prefix + "final_layernorm.weight",
         ),
-        input_layernorm=get("layer.input_layernorm.weight"),
-        post_attention_layernorm=get("layer.post_attention_layernorm.weight"),
-        q_proj_weight=get("layer.self_attn.q_proj.weight"),
-        k_proj_weight=get("layer.self_attn.k_proj.weight"),
-        v_proj_weight=get("layer.self_attn.v_proj.weight"),
-        o_proj_weight=get("layer.self_attn.o_proj.weight"),
-        q_norm_weight=get("layer.self_attn.q_norm.weight"),
-        k_norm_weight=get("layer.self_attn.k_norm.weight"),
-        gate_proj_weight=get("layer.mlp.gate_proj.weight"),
-        up_proj_weight=get("layer.mlp.up_proj.weight"),
-        down_proj_weight=get("layer.mlp.down_proj.weight"),
+        # Actual Qwen3.5-4B checkpoint uses `mtp.layers.0.<...>` naming. Some
+        # alternate checkpoints (and some of the older audit docs) referred to
+        # `mtp.layer.<...>` — we try both to be safe.
+        input_layernorm=first_match(
+            mtp_prefix + "layers.0.input_layernorm.weight",
+            mtp_prefix + "layer.input_layernorm.weight",
+        ),
+        post_attention_layernorm=first_match(
+            mtp_prefix + "layers.0.post_attention_layernorm.weight",
+            mtp_prefix + "layer.post_attention_layernorm.weight",
+        ),
+        q_proj_weight=first_match(
+            mtp_prefix + "layers.0.self_attn.q_proj.weight",
+            mtp_prefix + "layer.self_attn.q_proj.weight",
+        ),
+        k_proj_weight=first_match(
+            mtp_prefix + "layers.0.self_attn.k_proj.weight",
+            mtp_prefix + "layer.self_attn.k_proj.weight",
+        ),
+        v_proj_weight=first_match(
+            mtp_prefix + "layers.0.self_attn.v_proj.weight",
+            mtp_prefix + "layer.self_attn.v_proj.weight",
+        ),
+        o_proj_weight=first_match(
+            mtp_prefix + "layers.0.self_attn.o_proj.weight",
+            mtp_prefix + "layer.self_attn.o_proj.weight",
+        ),
+        q_norm_weight=first_match(
+            mtp_prefix + "layers.0.self_attn.q_norm.weight",
+            mtp_prefix + "layer.self_attn.q_norm.weight",
+        ),
+        k_norm_weight=first_match(
+            mtp_prefix + "layers.0.self_attn.k_norm.weight",
+            mtp_prefix + "layer.self_attn.k_norm.weight",
+        ),
+        gate_proj_weight=first_match(
+            mtp_prefix + "layers.0.mlp.gate_proj.weight",
+            mtp_prefix + "layer.mlp.gate_proj.weight",
+        ),
+        up_proj_weight=first_match(
+            mtp_prefix + "layers.0.mlp.up_proj.weight",
+            mtp_prefix + "layer.mlp.up_proj.weight",
+        ),
+        down_proj_weight=first_match(
+            mtp_prefix + "layers.0.mlp.down_proj.weight",
+            mtp_prefix + "layer.mlp.down_proj.weight",
+        ),
         config=cfg,
     )
 
@@ -238,14 +284,22 @@ def load_mtp_weights(checkpoint_dir: str) -> MtpRefWeights:
 # -----------------------------------------------------------------------------
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    """Root Mean Square LayerNorm. Matches `candle_nn::ops::rms_norm` semantics
-    (float32 accumulation) which kiln uses. Returns same dtype as input.
+    """Qwen3.5-style RMSNorm: `out = (1 + w) * x * rsqrt(mean(x^2) + eps)`.
+
+    This matches kiln's `rms_norm_fallback` in forward.rs (line 936), which
+    the production kernel is validated against. The crucial detail is that
+    Qwen3.5 stores RMSNorm weights **centered around 0** and applies them
+    as `(1 + weight)`, not as bare `weight`. See forward.rs:955–957 and HF
+    Qwen3NextRMSNorm.forward.
+
+    Float32 accumulation throughout; output returned in the input dtype.
     """
     orig_dtype = x.dtype
     x = x.to(torch.float32)
     variance = x.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + eps)
-    return (x * weight.to(torch.float32)).to(orig_dtype)
+    w = weight.to(torch.float32)
+    return (x * (1.0 + w)).to(orig_dtype)
 
 
 def apply_rope_partial(
@@ -427,8 +481,12 @@ def main() -> int:
     w = load_mtp_weights(args.checkpoint)
 
     cfg = w.config
-    rope_theta = float(cfg.get("rope_theta", 10_000_000.0))
-    rotary_frac = float(cfg.get("partial_rotary_factor", 0.25))
+    # Qwen3.5-4B defaults (hardcoded in kiln kiln-core/src/config.rs:80-101 since
+    # the shipped config.json text_config doesn't list them). Let env vars or
+    # explicit CLI override if needed for sensitivity sweeps.
+    rope_theta = float(os.environ.get("KILN_REF_ROPE_THETA", cfg.get("rope_theta", 10_000_000.0)) or 10_000_000.0)
+    rotary_frac = float(os.environ.get("KILN_REF_ROTARY_FRAC", cfg.get("partial_rotary_factor", 0.25)) or 0.25)
+    print(f"[mtp_ref] rope_theta={rope_theta} rotary_frac={rotary_frac}", file=sys.stderr)
 
     # Pull `h_main` and run the full reference forward.
     h_main = kiln["h_main"].to(torch.float32)  # expected shape [1, 1, H]
@@ -452,7 +510,10 @@ def main() -> int:
     fc_output = torch.matmul(fc_input, w.fc_weight.t())  # [1, 1, H]
 
     # 5. Single-layer block.
-    pre_layer = fc_output  # alias; matches kiln's forward exactly
+    # Alias-clone: kiln's forward.rs binds the fused result to BOTH `fused`
+    # (called `fc_output`) and `pre_layer`. For safetensors we need them as
+    # distinct tensors.
+    pre_layer = fc_output.clone()
     post_layer = mtp_inner_block(pre_layer, w, mtp_pos, rope_theta, rotary_frac, args.rms_eps)
 
     # 6-7. Final norm + tied LM head.

@@ -4336,3 +4336,153 @@ If all three runtime hypotheses clear, Phase B5-follow-up should move from struc
 - **Pod:** none. $0 pod spend.
 - **Wall-clock:** ≈ 55 min desk audit (fetching upstream at pinned SHAs, safetensors header probe on both shards, re-reading `loader.rs::load_mtp_if_present` + `load_layer` + `load_full_attention`, cross-checking forward.rs MTP path, writing this appendix).
 - **Output:** this PROFILING.md appendix + this PR. No code changes.
+
+## Phase B6 — MTP numerical dual-dump bisect (per-tap localization, 2026-04-21)
+
+### Goal
+
+Phase B5 disproved the `layer_idx=3` load-time hypothesis and collapsed the
+remaining MTP-α-collapse root-cause candidates to three runtime hypotheses
+(PROFILING.md:4211–4220). This Phase B6 bisect runs a **pure-PyTorch reference
+implementation** of `mtp_forward_step` over the exact same `h_main` +
+`draft_token_id` that kiln's own forward path consumes, and diffs the
+intermediate activations tap-by-tap with `allclose` + cosine similarity. The
+first tap that diverges pinpoints which of the three hypotheses (if any) is
+actually responsible.
+
+### Scope and honest limits
+
+* **Single prompt**, single `mtp_pos=0`. One-shot dump. Does not claim to
+  cover every MTP acceptance path.
+* `h_main` is **taken from the kiln dump** — the reference does not re-run
+  the 24 × GDN + 8 × GQA base stack. If the base model is producing the
+  wrong `h_main`, every downstream tap would match the reference bit-for-bit
+  (since the reference is fed the same bad `h_main`), and Phase B6 would
+  return a clean verdict. That would itself be a signal — pointing
+  upstream of `h_main` to the scheduler / paged KV state / GDN state on
+  the MTP branch.
+* BF16 matmul noise is not a bug: `|Δ|` of order 0.01 at intermediate
+  activations over 5k-dim reductions is normal. The bisect therefore reports
+  cosine similarity alongside `allclose`; a direction-preserving tap (cos≥0.999)
+  with small `|Δ|` is considered a match regardless of strict-`allclose` status.
+
+### Instrumentation
+
+Code added on this branch:
+
+* `crates/kiln-model/src/mtp_debug.rs` — `write_mtp_dump()` writes 8 F32 taps
+  + 3 I32 metadata scalars in safetensors format, gated by `KILN_MTP_DUMP_PATH`.
+  One-shot latch via `AtomicBool` to avoid per-step overhead.
+* `crates/kiln-model/src/forward.rs` — `mtp_forward_step` captures the 8
+  named taps in order. `concat` and `normed` pulled out as named binds so
+  the dump can see them without a second forward pass.
+* `scripts/mtp_reference_dump.py` — pure-PyTorch reference. Loads MTP weights
+  from `/workspace/qwen3.5-4b`, reads `h_main` + `draft_token_id` from the
+  kiln dump, runs the full `embed → dual rms_norm → concat → fc →
+  single transformer block (with RoPE at mtp_pos, per-head Q/K RMSNorm,
+  gated-attn, MLP) → final_layernorm → tied LM head` path, writes the
+  same 8 taps.
+* `scripts/mtp_compare.py` — per-tap diff. Prints a table of
+  (shape, allclose, cos_sim, max|Δ|, mean|Δ|) and maps the first divergence
+  back to the hypothesis it implicates.
+
+Reference RMSNorm uses the Qwen3.5-specific form `out = (1 + w) * x * rsqrt(mean(x²) + ε)`
+(see `forward.rs::rms_norm_fallback` at line 936). This is **not** the
+HF-standard RMSNorm; Qwen3.5 stores RMSNorm weights centered around 0 and
+applies them as `(1 + w)`. Using the standard form here produces a false
+divergence at `fc_input` that masks the real signal — any future additions
+to the reference must use the same semantics.
+
+### Results
+
+Prompt = `PROMPT_POOL[2]`, seed=42, `draft_token_id=561`, `mtp_pos=0`,
+`swap_fc_norms=0`. Kiln built in release mode with `KILN_CUDA_ARCHS=86
+--features cuda --bin kiln-bench`. Reference run with torch 2.x on CPU.
+
+Comparison at `atol=0.05, rtol=0.05` (BF16-realistic):
+
+| tap            | shape           | cos_sim | max\|Δ\|   | mean\|Δ\| | verdict |
+|----------------|-----------------|---------|-----------|-----------|---------|
+| h_main         | 1×1×2560        | 1.000   | 0.00      | 0.00      | match (input) |
+| tok_embed      | 1×1×2560        | 1.000   | 0.00      | 0.00      | match |
+| fc_input       | 1×1×5120        | 1.000   | 2.70e-2   | 7.12e-4   | match (BF16 noise) |
+| fc_output      | 1×1×2560        | 1.000   | 1.16e-2   | 7.06e-4   | match (BF16 noise) |
+| pre_layer      | 1×1×2560        | 1.000   | 1.16e-2   | 7.06e-4   | match |
+| **post_layer** | **1×1×2560**    | **0.600** | **5.37** | **6.95e-1** | **FIRST DIVERGENCE** |
+| post_final_ln  | 1×1×2560        | 0.538   | 21.12     | 2.41      | divergent (propagated) |
+| mtp_logits     | 1×1×248320      | 0.540   | 10.57     | 1.62      | divergent (propagated) |
+
+Metadata checks: `draft_token_id`, `mtp_pos`, `swap_fc_norms` all match.
+
+### Verdict
+
+The first numerically real divergence is at **`post_layer`** — the output of
+the single-layer MTP transformer block. The pipeline is clean through
+`pre_layer` (cos≥1.0, `|Δ|` at BF16-matmul-noise levels), which means:
+
+* **Hypothesis H1 (RoPE `mtp_pos` advancement)**: **STRONG candidate.** The
+  MTP block is the only place `mtp_pos` enters the forward graph. RoPE uses
+  `partial_rotary_factor=0.25` (64 of 256 head dims rotated) and
+  `rope_theta=1e7`. At `mtp_pos=0` the rotation is the identity, so if the
+  divergence persists at `mtp_pos=0`, the root cause is **not** a
+  position-advancement bug per se but something else inside the block
+  (Q/K/V projection layout, per-head Q/K RMSNorm, gated-attn). If on
+  later `mtp_pos > 0` steps the divergence grows with position, H1 is
+  confirmed as an advancement bug.
+* **Hypothesis H2 (tied `embed_tokens_t` transpose vs alias)**: **WEAKENED
+  but not fully eliminated.** `post_final_ln` and `mtp_logits` both end at
+  cos_sim ≈ 0.54 — meaning the `post_final_ln → logits` step preserves the
+  bulk of the direction. A transpose-layout bug in the tied LM head would
+  collapse cos_sim to near-zero, not preserve it. The remaining ~0.6 %
+  cos_sim gap between `post_final_ln` (0.538) and `mtp_logits` (0.540) is
+  within propagation noise for an `[H] → [V]` matmul. The tied transpose
+  is likely fine.
+* **Hypothesis H3 (`mtp.final_layernorm` application site)**: **WEAKENED.**
+  `post_layer` is already divergent, so any mismatch at `post_final_ln` is
+  partly explained by propagation. The `post_layer → post_final_ln`
+  cos_sim drop (0.600 → 0.538) is consistent with a single RMSNorm
+  amplifying an already-divergent input; it does not require an
+  independent bug in the norm application site. This line of inquiry
+  can be parked unless H1 is disproved.
+
+### Narrowed next steps
+
+This bisect collapses the three-hypothesis space to **a single active
+candidate: the MTP inner transformer block itself**, with sub-hypotheses
+ordered by likelihood:
+
+1. **Per-head Q/K RMSNorm** — same `(1 + w)` trap that produced a false
+   divergence in the reference on the first pass. If kiln's Q/K-norm path
+   ever takes a branch that applies bare `w`, it would manifest exactly
+   here.
+2. **Gated attention (`attn_output_gate=true`)** — Qwen3.5-4B applies a
+   sigmoid gate on the attention output. A sign error, wrong split, or
+   missing gate would appear first at `post_layer`.
+3. **Q/K/V projection layout** — `q_proj` is the gated `[8192, 2560]`
+   variant, `k_proj`/`v_proj` are GQA `[1024, 2560]`. A transpose bug
+   here would mangle the attention output specifically.
+4. **RoPE position threading** at `mtp_pos > 0` — not diagnosed by this
+   single-step dump; needs a multi-step variant (Phase B7).
+
+Phase B7 should dump at `mtp_pos = 0, 1, 2` on the same prompt and check
+whether the divergence grows with position (→ H1 confirmed) or is
+position-invariant (→ H1 eliminated, bug is inside the block). If B7
+eliminates H1, the next phase is a **per-sub-op reference inside the MTP
+block**: break down `post_layer` into `q/k/v → rope → attn → out_proj →
+gate → mlp_up → mlp_gate → mlp_down` and dump each one.
+
+### Budget used
+
+- **Pod:** RunPod pool, `s23qwogiqyk76s` (RTX A6000) via lease
+  `pod-37efdfc4f8b4c4bdbcfa0b98`. Hot build (sccache+incremental), two
+  kiln-bench runs for dump capture, one reference-script execution, two
+  compare runs. ≈ 15 min GPU-time. Pod released to pool after PR open.
+- **Wall-clock:** ≈ 80 min total, including one iteration to catch a
+  reference-side RMSNorm bug (`(1 + w)` vs bare `w`) that masqueraded as
+  an `fc_input` divergence on the first pass and would otherwise have
+  produced a false H2-ish verdict.
+- **Output:** this appendix, the `mtp_debug.rs` + `mtp_reference_dump.py`
+  + `mtp_compare.py` scaffold (all preserved for Phase B7), the concrete
+  bisect report at `/tmp/mtp-compare.txt` (copied to
+  `mtp-compare-phase-b6.txt` in the session workspace), and this PR.
+  **No fix included.** Scope is bisect-only per the task brief.
