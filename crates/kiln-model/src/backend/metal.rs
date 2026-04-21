@@ -28,6 +28,35 @@ const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 #[derive(Debug)]
 pub struct MetalBackend {
     device: Device,
+    /// Cached at construction to keep env-var reads off per-token support gates.
+    disable: MetalKernelDisables,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MetalKernelDisables {
+    conv1d_prefill: bool,
+    conv1d_update: bool,
+    gdn_forward_substitution: bool,
+    gdn_recurrent: bool,
+    gdn_gates: bool,
+    gated_rms_norm: bool,
+}
+
+impl MetalKernelDisables {
+    fn from_env() -> Self {
+        let gdn_kernel = env_truthy(DISABLE_GDN_KERNEL);
+        Self {
+            conv1d_prefill: env_truthy(DISABLE_METAL_CONV1D_PREFILL),
+            conv1d_update: env_present(DISABLE_FUSED_CONV1D)
+                || env_truthy(DISABLE_METAL_FUSED_CONV1D),
+            gdn_forward_substitution: gdn_kernel
+                || env_truthy(DISABLE_METAL_GDN_FORWARD_SUBSTITUTION),
+            gdn_recurrent: gdn_kernel || env_truthy(DISABLE_METAL_GDN_RECURRENT),
+            gdn_gates: env_present(DISABLE_FUSED_GDN_GATES)
+                || env_truthy(DISABLE_METAL_GDN_GATES),
+            gated_rms_norm: env_truthy(DISABLE_METAL_GATED_RMSNORM),
+        }
+    }
 }
 
 impl MetalBackend {
@@ -36,7 +65,10 @@ impl MetalBackend {
             matches!(device, Device::Metal(_)),
             "MetalBackend created on non-Metal device"
         );
-        Self { device }
+        Self {
+            device,
+            disable: MetalKernelDisables::from_env(),
+        }
     }
 }
 
@@ -82,27 +114,27 @@ impl BackendRuntime for MetalBackend {
     }
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
-        !metal_conv1d_prefill_disabled()
+        !self.disable.conv1d_prefill
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
-        !metal_conv1d_update_disabled()
+        !self.disable.conv1d_update
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
-        !metal_gdn_forward_substitution_disabled()
+        !self.disable.gdn_forward_substitution
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
-        !metal_gdn_recurrent_disabled()
+        !self.disable.gdn_recurrent
     }
 
     fn supports_gdn_gates(&self) -> bool {
-        !metal_gdn_gates_disabled()
+        !self.disable.gdn_gates
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
-        !metal_gated_rms_norm_disabled()
+        !self.disable.gated_rms_norm
     }
 
     fn flash_attn_prefill(
@@ -242,7 +274,7 @@ impl BackendRuntime for MetalBackend {
         conv_state: &mut Tensor,
         kernel_size: usize,
     ) -> Result<Option<Tensor>> {
-        if metal_conv1d_prefill_disabled()
+        if self.disable.conv1d_prefill
             || !metal_conv1d_prefill_supports(x, weight, conv_state, kernel_size)
         {
             return Ok(None);
@@ -259,7 +291,7 @@ impl BackendRuntime for MetalBackend {
         conv_state: &mut Tensor,
         kernel_size: usize,
     ) -> Result<Option<Tensor>> {
-        if metal_conv1d_update_disabled()
+        if self.disable.conv1d_update
             || !metal_conv1d_update_supports(x, weight, conv_state, kernel_size)
         {
             return Ok(None);
@@ -275,7 +307,7 @@ impl BackendRuntime for MetalBackend {
         v_prime: &Tensor,
         beta: &Tensor,
     ) -> Result<Option<Tensor>> {
-        if metal_gdn_forward_substitution_disabled()
+        if self.disable.gdn_forward_substitution
             || !metal_gdn_forward_substitution_supports(a_strict, v_prime, beta)
         {
             return Ok(None);
@@ -294,8 +326,7 @@ impl BackendRuntime for MetalBackend {
         g: &Tensor,
         state: &mut Tensor,
     ) -> Result<Option<Tensor>> {
-        if metal_gdn_recurrent_disabled() || !metal_gdn_recurrent_supports(q, k, v, beta, g, state)
-        {
+        if self.disable.gdn_recurrent || !metal_gdn_recurrent_supports(q, k, v, beta, g, state) {
             return Ok(None);
         }
         let out = metal_gdn_recurrent_bf16(q, k, v, beta, g, state)
@@ -310,7 +341,7 @@ impl BackendRuntime for MetalBackend {
         a_log: &Tensor,
         dt_bias: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        if metal_gdn_gates_disabled() || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
+        if self.disable.gdn_gates || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
             return Ok(None);
         }
         let out = metal_gdn_gates_bf16(a, b, a_log, dt_bias)
@@ -325,7 +356,7 @@ impl BackendRuntime for MetalBackend {
         weight: &Tensor,
         eps: f64,
     ) -> Result<Option<Tensor>> {
-        if metal_gated_rms_norm_disabled() || !metal_gated_rms_norm_supports(x, z, weight) {
+        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(x, z, weight) {
             return Ok(None);
         }
         let out = metal_gated_rms_norm_bf16(x, z, weight, eps as f32)
@@ -342,38 +373,16 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
     matches!(head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256 | 512)
 }
 
-fn metal_conv1d_prefill_disabled() -> bool {
-    env_truthy(DISABLE_METAL_CONV1D_PREFILL)
-}
-
-fn metal_conv1d_update_disabled() -> bool {
-    // Match the CUDA kill-switch contract for the shared env var: if it is
-    // present at all, the fused decode conv path is disabled.
-    std::env::var(DISABLE_FUSED_CONV1D).is_ok() || env_truthy(DISABLE_METAL_FUSED_CONV1D)
-}
-
-fn metal_gdn_recurrent_disabled() -> bool {
-    env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
-}
-
-fn metal_gdn_forward_substitution_disabled() -> bool {
-    env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_FORWARD_SUBSTITUTION)
-}
-
-fn metal_gdn_gates_disabled() -> bool {
-    std::env::var(DISABLE_FUSED_GDN_GATES).is_ok() || env_truthy(DISABLE_METAL_GDN_GATES)
-}
-
-fn metal_gated_rms_norm_disabled() -> bool {
-    env_truthy(DISABLE_METAL_GATED_RMSNORM)
-}
-
 fn metal_gdn_qk_norm_disabled() -> bool {
     env_truthy(DISABLE_METAL_GDN_QK_NORM)
 }
 
 fn metal_rms_norm_disabled() -> bool {
-    std::env::var(DISABLE_RMSNORM_KERNEL).is_ok() || env_truthy(DISABLE_METAL_RMSNORM)
+    env_present(DISABLE_RMSNORM_KERNEL) || env_truthy(DISABLE_METAL_RMSNORM)
+}
+
+fn env_present(var: &str) -> bool {
+    std::env::var(var).is_ok()
 }
 
 fn env_truthy(var: &str) -> bool {

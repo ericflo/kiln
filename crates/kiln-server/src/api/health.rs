@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 
 use crate::state::{AppState, ModelBackend};
 
@@ -125,7 +126,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     // Training info
-    let (active_job, running_count) = {
+    let (active_job, _running_count) = {
         let jobs = state.training_jobs.read().unwrap();
         let active = jobs.values().find(|j| {
             j.state == kiln_train::TrainingState::Running
@@ -146,6 +147,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
     // Health checks
     let scheduler_responsive = scheduler_stats.is_some();
+    let inference_prewarm_complete = state.inference_prewarm_complete.load(Ordering::Acquire);
     let checks = vec![
         HealthCheck {
             name: "model_loaded",
@@ -154,6 +156,10 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         HealthCheck {
             name: "scheduler_responsive",
             pass: scheduler_responsive,
+        },
+        HealthCheck {
+            name: "inference_prewarm_complete",
+            pass: inference_prewarm_complete,
         },
     ];
 

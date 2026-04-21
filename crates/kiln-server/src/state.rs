@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -190,6 +191,8 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     /// Server startup time — used to compute uptime in health checks.
     pub started_at: std::time::Instant,
+    /// True once startup inference prewarm has finished or was not needed.
+    pub inference_prewarm_complete: Arc<AtomicBool>,
     /// Server-level default for adapter checkpoint interval during training.
     /// Per-job config overrides this. None = only save at the end.
     pub checkpoint_interval: Option<usize>,
@@ -228,6 +231,7 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
+            inference_prewarm_complete: Arc::new(AtomicBool::new(true)),
             checkpoint_interval: None,
             served_model_id,
         }
@@ -422,6 +426,10 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
+            inference_prewarm_complete: Arc::new(AtomicBool::new(!matches!(
+                device,
+                candle_core::Device::Metal(_)
+            ))),
             checkpoint_interval: None,
             served_model_id,
         }
