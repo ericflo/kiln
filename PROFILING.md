@@ -3566,7 +3566,7 @@ With that change the Mtp bench no longer fails at `linear attention state requir
 #### Findings
 
 1. **State threading is correct.** The bench path that previously crashed at decode step 0 now completes all three runs with 128 tokens each, stable tok/s across runs, and sane α.
-2. **α = 0.411 is well below the 0.72 stop-ship floor.** Preflight Check 2 math-ceilings α=0.75 at 1.571× and sets ≥1.5× as the target. At α=0.411 with k=1, mean accepted tokens per verify call is 1.411; the verify-pass overhead (two-token forward + draft-head forward + snapshot/restore dToD) is larger than the 0.411-token savings, so:
+2. **α = 0.411 is well below any viable ship gate, including the paper's aggregate α≈0.72 reference.** Later C39/C40 work showed that `0.72` is a prose-heavy aggregate benchmark reference, not a blanket code-domain stop-ship threshold: current-main HumanEval distributions sit around `0.69` under both W4A16 and BF16, while GSM8K clears the paper floor. That nuance does not change the local conclusion here. At α=0.411 with k=1, mean accepted tokens per verify call is 1.411; the verify-pass overhead (two-token forward + draft-head forward + snapshot/restore dToD) is larger than the 0.411-token savings, so:
 3. **Mtp is 15.7% SLOWER than Off on Qwen3.5-4B at this α** (41.16 vs 48.87 tok/s median decode). p99 ITL also widens from 23.13 → 39.31 ms.
 4. **The MTP path is functional but not yet shippable.** This PR unblocks the measurement path; the low-α investigation is a separate follow-up.
 
@@ -3591,7 +3591,7 @@ With that change the Mtp bench no longer fails at `linear attention state requir
 
 ## MTP low-α root cause — Phase A static audit + Phase B instrumentation (2026-04-21)
 
-Follow-up to "Phase X — native MTP spec-decode results" above. PR #257 unblocked the MTP measurement path; Mtp arm now runs to completion at α=0.411, well below the 0.72 stop-ship floor. This update lands the Phase B instrumentation patch and records the Phase A static-audit findings.
+Follow-up to "Phase X — native MTP spec-decode results" above. PR #257 unblocked the MTP measurement path; Mtp arm now runs to completion at α=0.411, well below the paper's aggregate α≈0.72 reference and also well below the workload-aware ranges later documented in C39/C40. This update lands the Phase B instrumentation patch and records the Phase A static-audit findings.
 
 ### Tier classification
 
