@@ -1573,9 +1573,9 @@ mod tests {
                 let in_proj_z = Tensor::randn(0.0f32, 0.02, (v_dim, h), device)?;
                 let out_proj = Tensor::randn(0.0f32, 0.02, (h, v_dim), device)?;
                 let in_proj_a =
-                    Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
+                    Tensor::randn(0.0f32, 0.02, (config.linear_num_value_heads, h), device)?;
                 let in_proj_b =
-                    Tensor::randn(0.0f32, 0.02, (config.linear_num_key_heads, h), device)?;
+                    Tensor::randn(0.0f32, 0.02, (config.linear_num_value_heads, h), device)?;
                 let in_proj_qkv_t = in_proj_qkv.t()?.contiguous()?;
                 let in_proj_z_t = in_proj_z.t()?.contiguous()?;
                 let in_proj_a_t = in_proj_a.t()?.contiguous()?;
@@ -1594,8 +1594,8 @@ mod tests {
                         device,
                     )?,
                     norm: Tensor::zeros(config.linear_key_head_dim, DType::F32, device)?,
-                    a_log: Tensor::randn(0.0f32, 0.5, (config.linear_num_key_heads,), device)?,
-                    dt_bias: Tensor::zeros(config.linear_num_key_heads, DType::F32, device)?,
+                    a_log: Tensor::randn(0.0f32, 0.5, (config.linear_num_value_heads,), device)?,
+                    dt_bias: Tensor::zeros(config.linear_num_value_heads, DType::F32, device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,
                     in_proj_a_t,

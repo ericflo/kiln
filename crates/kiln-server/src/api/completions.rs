@@ -150,6 +150,7 @@ enum ResolvedSpeculativeMode {
 }
 
 const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
+const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
 
 fn resolve_skip_layer_config(
     model_config: &kiln_core::config::ModelConfig,
@@ -179,12 +180,19 @@ fn resolve_speculative_mode_from_config(
             .map(ResolvedSpeculativeMode::SkipLayer)
             .unwrap_or(ResolvedSpeculativeMode::Off),
         SpecMethod::Mtp => {
+            let greedy_without_lora = sampling.temperature == 0.0 && !has_active_lora;
             if mtp_supported
-                && sampling.temperature == 0.0
-                && !has_active_lora
+                && greedy_without_lora
                 && prompt_tokens <= MTP_MAX_PROMPT_TOKENS_DEFAULT
             {
                 ResolvedSpeculativeMode::Mtp
+            } else if greedy_without_lora
+                && prompt_tokens > MTP_MAX_PROMPT_TOKENS_DEFAULT
+                && sampling.max_tokens >= LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT
+            {
+                skip_layer
+                    .map(ResolvedSpeculativeMode::SkipLayer)
+                    .unwrap_or(ResolvedSpeculativeMode::Off)
             } else {
                 ResolvedSpeculativeMode::Off
             }
@@ -471,7 +479,21 @@ async fn generate_real(
                 pc.as_ref(),
             ),
             ResolvedSpeculativeMode::SkipLayer(spec_config) => {
-                runner_guard.generate_speculative(&prompt, &params, &spec_config)
+                if params.temperature == 0.0 {
+                    runner_guard.generate_paged_speculative_shared_tokens(
+                        &prompt_tokens,
+                        &params,
+                        bm.as_ref(),
+                        pc.as_ref(),
+                        &spec_config,
+                    )
+                } else {
+                    let flat_spec_config = SpeculativeConfig {
+                        num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
+                        draft_layers: spec_config.draft_layers,
+                    };
+                    runner_guard.generate_speculative(&prompt, &params, &flat_spec_config)
+                }
             }
             ResolvedSpeculativeMode::Mtp => {
                 let output = runner_guard.generate_mtp_speculative(&prompt, &params)?;
@@ -628,7 +650,25 @@ async fn generate_real_streaming(
                     match tokio::task::spawn_blocking(move || {
                         let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
-                        runner_guard.generate_streaming_speculative(&prompt, &params, &spec_config)
+                        if params.temperature == 0.0 {
+                            runner_guard.generate_streaming_paged_speculative_shared_tokens(
+                                &prompt_tokens,
+                                &params,
+                                bm.as_ref(),
+                                pc.as_ref(),
+                                &spec_config,
+                            )
+                        } else {
+                            let flat_spec_config = SpeculativeConfig {
+                                num_speculative_tokens: spec_config.num_speculative_tokens.min(4),
+                                draft_layers: spec_config.draft_layers,
+                            };
+                            runner_guard.generate_streaming_speculative(
+                                &prompt,
+                                &params,
+                                &flat_spec_config,
+                            )
+                        }
                     })
                     .await
                     {
@@ -1036,7 +1076,22 @@ mod tests {
             true,
             false,
         );
-        assert!(matches!(long_prompt, ResolvedSpeculativeMode::Off));
+        assert!(matches!(long_prompt, ResolvedSpeculativeMode::SkipLayer(_)));
+
+        let mut short_output_sampling = make_sampling(0.0);
+        short_output_sampling.max_tokens = LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT - 1;
+        let long_prompt_short_output = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &short_output_sampling,
+            MTP_MAX_PROMPT_TOKENS_DEFAULT + 1,
+            true,
+            false,
+        );
+        assert!(matches!(
+            long_prompt_short_output,
+            ResolvedSpeculativeMode::Off
+        ));
     }
 
     #[test]

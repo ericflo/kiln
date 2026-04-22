@@ -172,7 +172,7 @@ pub struct SpeculativeDecodingConfig {
     pub enabled: bool,
     /// Which speculative-decoding method to use. Default: `Off`.
     pub method: SpecMethod,
-    /// Number of tokens the draft proposes per step (default: 4).
+    /// Number of tokens the draft proposes per step (default: 256).
     /// Ignored by `Mtp` when the checkpoint has fewer MTP layers than this.
     pub num_speculative_tokens: usize,
     /// Number of layers to use for the `SkipLayer` draft (default: 8).
@@ -291,7 +291,7 @@ impl Default for SpeculativeDecodingConfig {
         Self {
             enabled: false,
             method: SpecMethod::Off,
-            num_speculative_tokens: 4,
+            num_speculative_tokens: 256,
             draft_layers: 8,
         }
     }
@@ -382,8 +382,8 @@ impl KilnConfig {
             toml::from_str(&contents)
                 .with_context(|| format!("failed to parse config file: {p}"))?
         } else if Path::new("kiln.toml").exists() {
-            let contents = std::fs::read_to_string("kiln.toml")
-                .context("failed to read kiln.toml")?;
+            let contents =
+                std::fs::read_to_string("kiln.toml").context("failed to read kiln.toml")?;
             toml::from_str(&contents).context("failed to parse kiln.toml")?
         } else {
             Self::default()
@@ -548,9 +548,7 @@ impl KilnConfig {
 
         let f = self.memory.inference_memory_fraction;
         if !(0.0..=1.0).contains(&f) {
-            anyhow::bail!(
-                "memory.inference_memory_fraction must be between 0.0 and 1.0, got {f}"
-            );
+            anyhow::bail!("memory.inference_memory_fraction must be between 0.0 and 1.0, got {f}");
         }
 
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
@@ -572,9 +570,7 @@ impl KilnConfig {
             }
         }
 
-        if self.streaming_prefill.tile_tokens == 0
-            || self.streaming_prefill.tile_tokens % 64 != 0
-        {
+        if self.streaming_prefill.tile_tokens == 0 || self.streaming_prefill.tile_tokens % 64 != 0 {
             anyhow::bail!(
                 "streaming_prefill.tile_tokens must be a positive multiple of 64, got {}",
                 self.streaming_prefill.tile_tokens
@@ -611,7 +607,7 @@ mod tests {
         assert!(config.prefix_cache.enabled);
         assert!(config.prefix_cache.max_blocks.is_none());
         assert!(!config.speculative.enabled);
-        assert_eq!(config.speculative.num_speculative_tokens, 4);
+        assert_eq!(config.speculative.num_speculative_tokens, 256);
         assert_eq!(config.speculative.draft_layers, 8);
         assert!(!config.streaming_prefill.enabled);
         assert_eq!(config.streaming_prefill.tile_tokens, 8192);
