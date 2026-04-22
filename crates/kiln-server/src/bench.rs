@@ -91,6 +91,12 @@ struct LatencyResult {
     /// `off` and `skip_layer` since those have no comparable single-α metric.
     #[serde(skip_serializing_if = "Option::is_none")]
     acceptance_rate: Option<f64>,
+    /// Phase C39 domain isolation tag. `"all"` for every pre-C39 arm and for
+    /// off/skip-layer (which still pull from the full pool). `"gsm8k"` /
+    /// `"humaneval"` / `"c4"` only when the MTP arm ran with `--prompt-subset`
+    /// set explicitly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_subset: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +105,69 @@ struct TrainingResult {
     total_time_secs: f64,
     secs_per_step: f64,
     peak_vram_mb: u64,
+}
+
+/// Which PROMPT_POOL subset the MTP bench draws from.
+///
+/// Phase C39 isolates per-domain α after C38's N=30 all-domain re-bench
+/// showed strong heterogeneity (GSM8K 0.789, HumanEval 0.689, C4 0.716).
+/// `All` preserves C38 behavior (full 30-prompt pool, seed % 30 indexing).
+/// Single-domain variants index the 10-prompt contiguous subslice so seeds
+/// 0..9 hit each prompt once and N=20 covers every prompt twice.
+///
+/// Only affects the MTP bench arm (`KILN_SPEC_METHOD=mtp`); ignored by
+/// off / skip-layer, throughput, and training benches, which keep the C38
+/// full-pool indexing to avoid surprising existing numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptSubset {
+    /// All 30 prompts (C38 anchor; `seed % 30`).
+    All,
+    /// GSM8K-style grade-school math word problems (prompts 0-9).
+    Gsm8k,
+    /// HumanEval-style Python function signatures + docstrings (prompts 10-19).
+    HumanEval,
+    /// C4-style natural English text fragments (prompts 20-29).
+    C4,
+}
+
+impl PromptSubset {
+    /// Contiguous indices into `PROMPT_POOL` that this subset covers.
+    fn indices(self) -> &'static [usize] {
+        // Indices deliberately hand-listed so a PROMPT_POOL re-ordering
+        // breaks the compile rather than silently mixing domains.
+        const ALL: &[usize] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29,
+        ];
+        const GSM8K: &[usize] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        const HUMAN_EVAL: &[usize] = &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+        const C4: &[usize] = &[20, 21, 22, 23, 24, 25, 26, 27, 28, 29];
+        match self {
+            PromptSubset::All => ALL,
+            PromptSubset::Gsm8k => GSM8K,
+            PromptSubset::HumanEval => HUMAN_EVAL,
+            PromptSubset::C4 => C4,
+        }
+    }
+
+    fn as_tag(self) -> &'static str {
+        match self {
+            PromptSubset::All => "all",
+            PromptSubset::Gsm8k => "gsm8k",
+            PromptSubset::HumanEval => "humaneval",
+            PromptSubset::C4 => "c4",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "all" => Some(PromptSubset::All),
+            "gsm8k" => Some(PromptSubset::Gsm8k),
+            "humaneval" => Some(PromptSubset::HumanEval),
+            "c4" => Some(PromptSubset::C4),
+            _ => None,
+        }
+    }
 }
 
 /// Parse command-line arguments.
@@ -127,6 +196,9 @@ struct BenchArgs {
     /// Only affects the MTP bench arm (`KILN_SPEC_METHOD=mtp`); ignored for
     /// skip-layer and off.
     chat_template: bool,
+    /// Which subset of PROMPT_POOL the MTP bench draws from (default: all).
+    /// Phase C39 domain isolation — see `PromptSubset` docs.
+    prompt_subset: PromptSubset,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -140,6 +212,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut latency_only = false;
     let mut seed: u64 = 42;
     let mut chat_template = false;
+    let mut prompt_subset = PromptSubset::All;
 
     let mut i = 1;
     while i < args.len() {
@@ -176,6 +249,15 @@ fn parse_args() -> Result<BenchArgs> {
             "--chat-template" => {
                 chat_template = true;
             }
+            "--prompt-subset" => {
+                i += 1;
+                let s = args.get(i).cloned().unwrap_or_default();
+                prompt_subset = PromptSubset::parse(&s).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid --prompt-subset value '{s}' (expected all|gsm8k|humaneval|c4)"
+                    )
+                })?;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -205,6 +287,12 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!(
                     "                            (Phase C35 H13 A/B; MTP arm only; no-op for off/skip-layer)"
                 );
+                eprintln!(
+                    "  --prompt-subset <name>    Filter PROMPT_POOL for MTP bench: all|gsm8k|humaneval|c4"
+                );
+                eprintln!(
+                    "                            (default: all; Phase C39 domain isolation; MTP arm only)"
+                );
                 std::process::exit(0);
             }
             _ => {}
@@ -226,6 +314,7 @@ fn parse_args() -> Result<BenchArgs> {
         latency_only,
         seed,
         chat_template,
+        prompt_subset,
     })
 }
 
@@ -337,7 +426,23 @@ const PROMPT_POOL: [&str; 30] = [
 /// Seed 0 reproduces the original Phase B2 baseline; other seeds use distinct content
 /// so a multi-prompt A/B actually varies the token distribution seen by the model.
 fn build_prompt(tokenizer: &KilnTokenizer, target_tokens: usize, seed: u64) -> String {
-    let base = PROMPT_POOL[(seed % PROMPT_POOL.len() as u64) as usize];
+    build_prompt_with_subset(tokenizer, target_tokens, seed, PromptSubset::All)
+}
+
+/// Like `build_prompt` but restricts selection to the subset's indices.
+///
+/// `seed` indexes `subset.indices()` modulo its length. With the 10-prompt
+/// domain subsets, N=10 covers each prompt once and N=20 covers each twice,
+/// which keeps per-seed variance a pure sampling effect rather than a prompt
+/// re-hit artifact (the bug C37/C38 exposed in the old 8-prompt pool).
+fn build_prompt_with_subset(
+    tokenizer: &KilnTokenizer,
+    target_tokens: usize,
+    seed: u64,
+    subset: PromptSubset,
+) -> String {
+    let idxs = subset.indices();
+    let base = PROMPT_POOL[idxs[(seed % idxs.len() as u64) as usize]];
 
     let mut prompt = String::new();
     loop {
@@ -567,6 +672,7 @@ fn bench_latency(
         decode_tokens_per_sec: decode_tok_per_sec,
         spec_method: "off".to_string(),
         acceptance_rate: None,
+        prompt_subset: None,
     })
 }
 
@@ -772,6 +878,7 @@ fn bench_latency_paged(
         decode_tokens_per_sec: decode_tok_per_sec,
         spec_method: "off".to_string(),
         acceptance_rate: None,
+        prompt_subset: None,
     })
 }
 
@@ -1006,6 +1113,7 @@ fn bench_latency_skiplayer(
         decode_tokens_per_sec: decode_tok_per_sec,
         spec_method: "skip_layer".to_string(),
         acceptance_rate: None,
+        prompt_subset: None,
     })
 }
 
@@ -1246,6 +1354,7 @@ fn bench_latency_paged_skiplayer(
         decode_tokens_per_sec: decode_tok_per_sec,
         spec_method: "skip_layer_paged".to_string(),
         acceptance_rate,
+        prompt_subset: None,
     })
 }
 
@@ -1279,6 +1388,7 @@ fn bench_latency_paged_mtp(
     max_output_tokens: usize,
     seed: u64,
     chat_template: bool,
+    prompt_subset: PromptSubset,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -1295,7 +1405,7 @@ fn bench_latency_paged_mtp(
     // Jinja template is loaded). Prompt budget (`prompt_tokens`) is still
     // targeted on the raw prose; the framing adds ~10-20 tokens of overhead,
     // which is fine for α measurement.
-    let raw_prompt = build_prompt(tokenizer, prompt_tokens, seed);
+    let raw_prompt = build_prompt_with_subset(tokenizer, prompt_tokens, seed, prompt_subset);
     let prompt = if chat_template {
         let messages = [ChatMessage {
             role: "user".to_string(),
@@ -1537,6 +1647,7 @@ fn bench_latency_paged_mtp(
         decode_tokens_per_sec: decode_tok_per_sec,
         spec_method: "mtp".to_string(),
         acceptance_rate: Some(alpha),
+        prompt_subset: Some(prompt_subset.as_tag().to_string()),
     })
 }
 
@@ -1791,6 +1902,7 @@ fn main() -> Result<()> {
                 args.max_output_tokens,
                 args.seed,
                 args.chat_template,
+                args.prompt_subset,
             )
             .context("MTP latency benchmark failed")?
         }
