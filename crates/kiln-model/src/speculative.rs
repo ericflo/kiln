@@ -30,6 +30,38 @@ use crate::kv_cache::KvCache;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
+/// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
+/// via `OnceLock`. When enabled, logits are promoted to FP32 before each
+/// greedy argmax inside `speculative_mtp_decode_step` (draft / verify / bonus).
+/// This matches vLLM's `rejection_sampler.py` which casts
+/// `raw_target_logits.to(torch.float32)` prior to argmax — BF16 argmax can
+/// flip top-1 under ties when two candidates share the same BF16 bucket.
+/// The bench prefill seed in `kiln-server::bench` mirrors this flag so every
+/// sampling site in the MTP path picks the same dtype.
+pub fn mtp_argmax_fp32_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("KILN_MTP_ARGMAX_FP32")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
+/// Helper for `mtp_argmax_fp32_enabled` — cast a logit tensor to FP32 when
+/// the flag is set, otherwise return it unchanged via `clone()`. The clone is
+/// cheap (tensor refcount bump, no data copy) and keeps the caller's borrow
+/// of the original tensor intact for downstream uses (e.g. C1 attribution
+/// top-k extraction, MTP debug logging).
+fn argmax_input(logits: &Tensor) -> Result<Tensor> {
+    if mtp_argmax_fp32_enabled() {
+        Ok(logits.to_dtype(DType::F32)?)
+    } else {
+        Ok(logits.clone())
+    }
+}
+
 /// Configuration for speculative decoding.
 #[derive(Debug, Clone)]
 pub struct SpeculativeConfig {
@@ -756,7 +788,14 @@ pub fn speculative_mtp_decode_step(
         mtp_pos,
     )
     .context("mtp draft step failed")?;
-    let draft_token = greedy_sample(&mtp_logits).context("mtp draft sampling failed")?;
+    // Phase C35 H13 A/B — optional FP32 promotion before argmax. See
+    // `mtp_argmax_fp32_enabled` for motivation (vLLM parity). The original
+    // `mtp_logits` tensor is still borrowed downstream by C1 attribution and
+    // MTP debug top-k extraction, so `argmax_input` returns a cloned / cast
+    // view rather than consuming it.
+    let mtp_logits_for_argmax = argmax_input(&mtp_logits).context("mtp draft argmax cast")?;
+    let draft_token =
+        greedy_sample(&mtp_logits_for_argmax).context("mtp draft sampling failed")?;
 
     // 2. Verify the draft with one two-token base-model pass. This is the only
     // k=1 MTP shape that can amortize base-model overhead: on accept the pass
@@ -784,7 +823,10 @@ pub fn speculative_mtp_decode_step(
     // Position 0 predicts what follows `last_token`; position 1 predicts what
     // follows the accepted draft token (the speculative bonus).
     let verify_pos0 = verify_logits.narrow(1, 0, 1)?.squeeze(1)?;
-    let target_at_0 = greedy_sample(&verify_pos0).context("verify pos-0 sampling failed")?;
+    let verify_pos0_for_argmax =
+        argmax_input(&verify_pos0).context("mtp verify pos-0 argmax cast")?;
+    let target_at_0 =
+        greedy_sample(&verify_pos0_for_argmax).context("verify pos-0 sampling failed")?;
 
     // 3. Accept / reject decision. Greedy compare.
     let mut accepted_tokens: Vec<TokenId> = Vec::new();
@@ -860,7 +902,10 @@ pub fn speculative_mtp_decode_step(
         } else {
             accepted_tokens.push(draft_token);
             let verify_pos1 = verify_logits.narrow(1, 1, 1)?.squeeze(1)?;
-            let bonus = greedy_sample(&verify_pos1).context("bonus sampling failed")?;
+            let verify_pos1_for_argmax =
+                argmax_input(&verify_pos1).context("mtp verify pos-1 argmax cast")?;
+            let bonus =
+                greedy_sample(&verify_pos1_for_argmax).context("bonus sampling failed")?;
             if eos_token_ids.contains(&bonus) {
                 hit_eos = true;
             } else {

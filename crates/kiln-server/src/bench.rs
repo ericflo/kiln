@@ -13,7 +13,7 @@ use serde::Serialize;
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
-use kiln_core::tokenizer::KilnTokenizer;
+use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_core::vram::detect_vram;
 use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
@@ -121,6 +121,12 @@ struct BenchArgs {
     /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
     /// this across {0..=7} to get independent prompt/sampling trajectories.
     seed: u64,
+    /// When true, wrap the MTP bench prompt in the tokenizer's chat template
+    /// (Qwen ChatML framing) before encoding. Phase C35 H13 residual A/B —
+    /// tests whether raw-prose prompts cause the α degradation vs the paper.
+    /// Only affects the MTP bench arm (`KILN_SPEC_METHOD=mtp`); ignored for
+    /// skip-layer and off.
+    chat_template: bool,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -133,6 +139,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut paged = false;
     let mut latency_only = false;
     let mut seed: u64 = 42;
+    let mut chat_template = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -166,6 +173,9 @@ fn parse_args() -> Result<BenchArgs> {
                 i += 1;
                 seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(42);
             }
+            "--chat-template" => {
+                chat_template = true;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -189,6 +199,12 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!(
                     "  --seed <u64>              RNG seed + prompt selector from 8-prompt pool (default: 42)"
                 );
+                eprintln!(
+                    "  --chat-template           Wrap MTP bench prompt in Qwen ChatML framing before encoding"
+                );
+                eprintln!(
+                    "                            (Phase C35 H13 A/B; MTP arm only; no-op for off/skip-layer)"
+                );
                 std::process::exit(0);
             }
             _ => {}
@@ -209,6 +225,7 @@ fn parse_args() -> Result<BenchArgs> {
         paged,
         latency_only,
         seed,
+        chat_template,
     })
 }
 
@@ -1199,6 +1216,21 @@ fn bench_latency_paged_skiplayer(
     })
 }
 
+/// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
+/// via `OnceLock`. Matches the identically-named helper in kiln-model so both
+/// the speculative decode path and the bench prefill seed agree on whether to
+/// promote logits to FP32 before argmax.
+fn mtp_argmax_fp32_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("KILN_MTP_ARGMAX_FP32")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
 /// Benchmark latency along the NATIVE-MTP speculative path.
 ///
 /// Uses two `PagedKvCache` instances (base + 1-layer MTP), threads `h_prev`
@@ -1213,6 +1245,7 @@ fn bench_latency_paged_mtp(
     prompt_tokens: usize,
     max_output_tokens: usize,
     seed: u64,
+    chat_template: bool,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -1222,7 +1255,25 @@ fn bench_latency_paged_mtp(
          (Qwen3.5-4B includes them)"
     );
 
-    let prompt = build_prompt(tokenizer, prompt_tokens, seed);
+    // Phase C35 H13 A/B — optional chat-template framing. The base prompt
+    // comes from the 8-prompt pool via `build_prompt`; when `chat_template`
+    // is set we re-wrap it as a single `user` turn via the tokenizer's
+    // chat template (falls back to plain ChatML in tokenizer.rs when no
+    // Jinja template is loaded). Prompt budget (`prompt_tokens`) is still
+    // targeted on the raw prose; the framing adds ~10-20 tokens of overhead,
+    // which is fine for α measurement.
+    let raw_prompt = build_prompt(tokenizer, prompt_tokens, seed);
+    let prompt = if chat_template {
+        let messages = [ChatMessage {
+            role: "user".to_string(),
+            content: raw_prompt,
+        }];
+        tokenizer
+            .apply_chat_template(&messages)
+            .map_err(|e| anyhow::anyhow!("chat template application failed: {e}"))?
+    } else {
+        raw_prompt
+    };
     let prompt_token_ids = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1294,7 +1345,16 @@ fn bench_latency_paged_mtp(
 
     // prefill_logits is already [1, 1, V].
     let prefill_last = prefill_logits.squeeze(1)?;
-    let mut last_token = greedy_sample(&prefill_last)?;
+    // Phase C35 H13 A/B — optionally cast logits to FP32 before argmax so the
+    // bench prefill matches vLLM's sampler contract (rejection_sampler.py
+    // casts `raw_target_logits` to float32 before greedy). BF16 argmax can
+    // flip top-1 under ties when two candidates share the same BF16 bucket.
+    let mut last_token = if mtp_argmax_fp32_enabled() {
+        let prefill_last_fp32 = prefill_last.to_dtype(candle_core::DType::F32)?;
+        greedy_sample(&prefill_last_fp32)?
+    } else {
+        greedy_sample(&prefill_last)?
+    };
     let prefill_time = prefill_start.elapsed();
 
     eprintln!(
@@ -1697,6 +1757,7 @@ fn main() -> Result<()> {
                 args.prompt_tokens,
                 args.max_output_tokens,
                 args.seed,
+                args.chat_template,
             )
             .context("MTP latency benchmark failed")?
         }
