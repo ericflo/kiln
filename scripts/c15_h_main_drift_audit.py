@@ -198,7 +198,10 @@ def run_hf_reference(
             return_dict=True,
         )
     hs = list(out.hidden_states)
-    # hs[-1] is output after final decoder layer = pre-final-norm hidden
+    # Phase C18: HF's `output_hidden_states` returns the **post-final-norm**
+    # hidden state as `hs[-1]` (equivalent to `last_hidden_state`). Variable
+    # name kept as `pre_final` for downstream compatibility — it is now the
+    # post-final-norm tensor despite the legacy name.
     pre_final = hs[-1].detach()
     return pre_final.to(torch.float32).cpu()
 
