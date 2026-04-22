@@ -1,0 +1,61 @@
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA L40S",
+    "total_vram_mb": 46068,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 22.925385288,
+    "model_vram_mb": 18173
+  },
+  "inference": [
+    {
+      "batch_size": 1,
+      "prompt_tokens": 497,
+      "output_tokens": 128,
+      "total_time_secs": 2.922683804,
+      "tokens_per_sec": 43.79536363968574,
+      "peak_vram_mb": 18469
+    },
+    {
+      "batch_size": 4,
+      "prompt_tokens": 497,
+      "output_tokens": 512,
+      "total_time_secs": 11.667643428,
+      "tokens_per_sec": 43.88204037597711,
+      "peak_vram_mb": 18469
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 497,
+      "output_tokens": 1024,
+      "total_time_secs": 22.511686208,
+      "tokens_per_sec": 45.48748550146813,
+      "peak_vram_mb": 18469
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 497,
+      "output_tokens": 2048,
+      "total_time_secs": 45.211816788,
+      "tokens_per_sec": 45.29789213300481,
+      "peak_vram_mb": 18469
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 497,
+    "prefill_time_ms": 276.637193,
+    "prefill_tokens_per_sec": 1796.5769338904477,
+    "time_to_first_token_ms": 276.637193,
+    "mean_inter_token_ms": 39.932393992126,
+    "p50_inter_token_ms": 55.61591,
+    "p99_inter_token_ms": 69.927382,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 25.042325291020198,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.30927835051546393,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}
