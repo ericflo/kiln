@@ -62,6 +62,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_chunk_scan(&self) -> bool {
+        false
+    }
+
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
     ///
     /// `q`, `k`, `v`: `[batch, seq_len, num_heads, head_dim]` bf16 contiguous.
@@ -185,6 +189,18 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _ks_entry: &Tensor,
         _q_s: &Tensor,
     ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)>> {
+        Ok(None)
+    }
+
+    fn gdn_chunk_scan(
+        &self,
+        _a_strict: &Tensor,
+        _b_mask: &Tensor,
+        _v_prime: &Tensor,
+        _q_s_scaled: &Tensor,
+        _beta: &Tensor,
+        _decay_last_col: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
         Ok(None)
     }
 

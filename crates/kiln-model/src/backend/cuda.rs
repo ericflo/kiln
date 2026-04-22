@@ -68,6 +68,10 @@ impl BackendRuntime for CudaBackend {
         self.gdn_enabled
     }
 
+    fn supports_gdn_chunk_scan(&self) -> bool {
+        self.gdn_enabled
+    }
+
     fn flash_attn_prefill(
         &self,
         q: &Tensor,
@@ -158,6 +162,37 @@ impl BackendRuntime for CudaBackend {
         }
         let out = kiln_gdn_kernel::gdn_chunk_prep(g, v, kkt, qkt, ks_entry, q_s)
             .context("gdn_chunk_prep kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn gdn_chunk_scan(
+        &self,
+        a_strict: &Tensor,
+        b_mask: &Tensor,
+        v_prime: &Tensor,
+        q_s_scaled: &Tensor,
+        beta: &Tensor,
+        decay_last_col: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        if !kiln_gdn_kernel::gdn_chunk_scan_supports(
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
+        ) {
+            return Ok(None);
+        }
+        let out = kiln_gdn_kernel::gdn_chunk_scan(
+            a_strict,
+            b_mask,
+            v_prime,
+            q_s_scaled,
+            beta,
+            decay_last_col,
+        )
+        .context("gdn_chunk_scan kernel failed")?;
         Ok(Some(out))
     }
 
