@@ -18,7 +18,7 @@ use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
     model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_streaming, streaming_prefill_enabled,
+    model_forward_paged_streaming, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -850,7 +850,7 @@ impl ModelRunner {
 
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled() {
+            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -986,7 +986,7 @@ impl ModelRunner {
 
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled() {
+            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -1165,9 +1165,9 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: forward pass on all prompt tokens (never uses CUDA graphs).
-        // When KILN_STREAMING_PREFILL=1, iterate in tiles to cap peak activation
-        // memory for long contexts; otherwise use the monolithic path.
-        let logits = if streaming_prefill_enabled() {
+        // Long Metal prompts use tiled streaming prefill by default; env
+        // overrides can force either path.
+        let logits = if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
             model_forward_paged_streaming(
                 &*self.backend,
                 prompt_tokens,
@@ -2363,7 +2363,7 @@ impl ModelRunner {
 
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled() {
+            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -2491,7 +2491,7 @@ impl ModelRunner {
 
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled() {
+            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -2687,9 +2687,9 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        // Prefill. When KILN_STREAMING_PREFILL=1, use the tiled streaming path
-        // to cap peak activation memory for long contexts.
-        let prefill_result = if streaming_prefill_enabled() {
+        // Prefill. Long Metal prompts use tiled streaming prefill by default;
+        // env overrides can force either path.
+        let prefill_result = if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
             model_forward_paged_streaming(
                 &*self.backend,
                 &prompt_tokens,
