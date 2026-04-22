@@ -1,0 +1,28 @@
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA A40",
+    "total_vram_mb": 46068,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 3.54802743,
+    "model_vram_mb": 16791
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 496,
+    "prefill_time_ms": 8288.628155,
+    "prefill_tokens_per_sec": 59.84102444031041,
+    "time_to_first_token_ms": 8288.628155,
+    "mean_inter_token_ms": 22.540412645669303,
+    "p50_inter_token_ms": 17.440901500000002,
+    "p99_inter_token_ms": 60.152981000000004,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 44.36476011862765,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.7887323943661971,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}
