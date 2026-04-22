@@ -1,0 +1,6 @@
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --chat-template --skip-training --latency-only \
+  --prompt-tokens 512 --max-output-tokens 128 \
+  --prompt-subset humaneval \
+  --seed <SEED> --temperature 0.0

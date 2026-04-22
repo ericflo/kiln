@@ -1,0 +1,28 @@
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 1.943760901,
+    "model_vram_mb": 16795
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 510,
+    "prefill_time_ms": 331.038187,
+    "prefill_tokens_per_sec": 1540.6077607596371,
+    "time_to_first_token_ms": 331.038187,
+    "mean_inter_token_ms": 23.289789173228343,
+    "p50_inter_token_ms": 17.7380155,
+    "p99_inter_token_ms": 59.070189,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 42.93727146098436,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.7397260273972602,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}

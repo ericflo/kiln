@@ -1,0 +1,56 @@
+=== C40f analysis (docs/phase-c40f) ===
+
+Per-seed metrics:
+  seed | alpha      | decode_tps | mean_itl_ms
+  -----+------------+------------+------------
+     0 | 0.7887323944 |    45.8126 |    21.8281
+     1 | 0.6842105263 |    37.5755 |    26.6131
+     2 | 0.6282051282 |    35.7954 |    27.9366
+     3 | 0.7066666667 |    40.8491 |    24.4803
+     4 | 0.6410256410 |    31.0214 |    32.2358
+     5 | 0.7397260274 |    35.3660 |    28.2758
+     6 | 0.6623376623 |    37.8225 |    26.4393
+     7 | 0.6410256410 |    35.3006 |    28.3281
+     8 | 0.6933333333 |    42.4089 |    23.5799
+     9 | 0.7534246575 |    44.2104 |    22.6191
+    10 | 0.7887323944 |    37.4989 |    26.6675
+    11 | 0.6842105263 |    35.9969 |    27.7802
+    12 | 0.6282051282 |    38.2936 |    26.1140
+    13 | 0.7066666667 |    38.9331 |    25.6851
+    14 | 0.6410256410 |    35.2459 |    28.3721
+    15 | 0.7397260274 |    42.9373 |    23.2898
+    16 | 0.6623376623 |    35.9644 |    27.8052
+    17 | 0.6410256410 |    33.7404 |    29.6381
+    18 | 0.6933333333 |    38.9687 |    25.6616
+    19 | 0.7534246575 |    39.2624 |    25.4697
+
+Summary:
+  N                         = 20
+  median alpha              = 0.6887719298
+  mean alpha                = 0.6938687678
+  stdev alpha               = 0.0521101775
+  min / max alpha           = 0.6282051282 / 0.7887323944
+  95% CI on median alpha    = [0.6516816517, 0.7231963470] (bootstrap, 10000 resamples, rng=12345)
+  seeds clearing 0.72       = 6/20
+  median decode tok/s       = 37.6990270692
+  median mean ITL ms        = 26.5261682480
+
+Comparison vs C39 W4A16 N=20:
+  median delta              = -0.0045280702
+  mean delta                = +0.0070687678
+  stdev delta               = +0.0022101775
+  lower-bound delta         = -0.0085183483
+  upper-bound delta         = +0.0069963470
+  clears delta              = +2
+  median decode delta       = -3.9009729308
+  median ITL delta          = +2.5261682480
+
+Comparison vs C40e paired seed 0:
+  seed-0 alpha              = 0.7887323944
+  seed-0 BF16 delta         = +0.0000000000
+  seed-0 vs W4A16 delta     = +0.1605272662
+
+Verdict:
+  BF16 does not beat the C39 W4A16 distribution on the median;
+  the seed-0 win from C40e does not generalize cleanly across N=20.
+  The CI still straddles 0.72, so the distributional floor question remains ambiguous.
