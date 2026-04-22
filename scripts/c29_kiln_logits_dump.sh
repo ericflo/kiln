@@ -48,8 +48,14 @@ echo "[c29_kiln] out_root=$OUT_ROOT" >&2
 for seed in $SEEDS; do
     seed_dir="$OUT_ROOT/seed-$seed"
     mkdir -p "$seed_dir"
-    echo "[c29_kiln] === seed $seed -> $seed_dir ===" >&2
-    KILN_MTP_DUMP_PATH="$seed_dir" \
+    # Pre-create per-position subdirs because the kiln writer doesn't mkdir -p the
+    # template's parent paths; just the leaf file.
+    for p in $(echo "$POSITIONS" | tr ',' ' '); do
+        mkdir -p "$seed_dir/mtp_pos-$p"
+    done
+    dump_template="$seed_dir/mtp_pos-{pos}/step-{step}.safetensors"
+    echo "[c29_kiln] === seed $seed -> $dump_template ===" >&2
+    KILN_MTP_DUMP_PATH="$dump_template" \
     KILN_MTP_DUMP_SPLICE=1 \
     KILN_MTP_DUMP_SPLICE_POS="$POSITIONS" \
     KILN_MTP_DUMP_SPLICE_MAX_STEPS="$MAX_STEPS" \
