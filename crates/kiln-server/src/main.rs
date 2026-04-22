@@ -261,11 +261,14 @@ fn spawn_backend_prewarm(state: AppState) {
     tokio::spawn(async move {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // Hold the exclusive GPU lock so prewarm never races real
-            // generation. If a request starts first, this blocks until that
-            // request is done, then still warms the backend for the next one.
-            let _gpu_guard = gpu_lock.write().unwrap();
+            // Prewarm is opportunistic. If a live request or training job has
+            // the GPU first, skip prewarm rather than sitting in front of it.
+            let Ok(_gpu_guard) = gpu_lock.try_write() else {
+                tracing::info!("skipping inference prewarm because GPU is already busy");
+                return Ok(());
+            };
 
             let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
@@ -302,13 +305,6 @@ fn spawn_backend_prewarm(state: AppState) {
                 &mut block_manager,
                 &mut paged_cache,
             )?;
-            if runner_guard.weights.mtp.is_some() {
-                let mtp_params = SamplingParams {
-                    max_tokens: 4,
-                    ..params.clone()
-                };
-                runner_guard.generate_from_tokens_mtp_speculative(&prompt_tokens, &mtp_params)?;
-            }
             Ok(())
         })
         .await;

@@ -28,7 +28,7 @@ use crate::forward::{
 };
 use crate::kv_cache::KvCache;
 use crate::paged_kv_cache::PagedKvCache;
-use crate::sampling::{greedy_sample, sample_with_params};
+use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
 /// Configuration for speculative decoding.
 #[derive(Debug, Clone)]
@@ -370,20 +370,31 @@ pub fn speculative_decode_step(
     // The verify_logits has shape [1, K+1, vocab_size].
     // Position i gives logits for predicting token at position i+1.
     // So verify_logits[0] predicts what should follow last_token (i.e., verifies draft_tokens[0]).
+    let greedy_target_tokens = if temperature == 0.0 {
+        let tokens = greedy_sample_rows(&verify_logits)
+            .context("batched verification greedy sampling failed")?;
+        anyhow::ensure!(
+            tokens.len() == k + 1,
+            "verifier returned {} target tokens for window {}",
+            tokens.len(),
+            k + 1
+        );
+        Some(tokens)
+    } else {
+        None
+    };
 
     let mut accepted_tokens: Vec<TokenId> = Vec::new();
     let mut hit_eos = false;
 
     for i in 0..k {
-        // Extract target probabilities for position i
-        let pos_logits = verify_logits.narrow(1, i, 1)?.squeeze(1)?;
         let draft_token = draft_tokens[i];
 
         // Check EOS before acceptance
         if eos_token_ids.contains(&draft_token) {
             // If draft proposed EOS, check if target agrees
             if temperature == 0.0 {
-                let target_token = greedy_sample(&pos_logits)?;
+                let target_token = greedy_target_tokens.as_ref().expect("greedy tokens")[i];
                 if eos_token_ids.contains(&target_token) {
                     hit_eos = true;
                     break;
@@ -391,6 +402,7 @@ pub fn speculative_decode_step(
                 // Target disagrees with EOS — accept target's token instead
                 accepted_tokens.push(target_token);
             } else {
+                let pos_logits = verify_logits.narrow(1, i, 1)?.squeeze(1)?;
                 let target_probs = logits_to_probs(&pos_logits, temperature)?;
                 let (accepted, resampled) =
                     rejection_sample(draft_token, &draft_probs_list[i], &target_probs, rng)?;
@@ -411,7 +423,7 @@ pub fn speculative_decode_step(
 
         if temperature == 0.0 {
             // Greedy verification: accept if target agrees
-            let target_token = greedy_sample(&pos_logits)?;
+            let target_token = greedy_target_tokens.as_ref().expect("greedy tokens")[i];
             if target_token == draft_token {
                 accepted_tokens.push(draft_token);
             } else {
@@ -425,6 +437,7 @@ pub fn speculative_decode_step(
             }
         } else {
             // Stochastic verification via rejection sampling
+            let pos_logits = verify_logits.narrow(1, i, 1)?.squeeze(1)?;
             let target_probs = logits_to_probs(&pos_logits, temperature)?;
             let (accepted, resampled) =
                 rejection_sample(draft_token, &draft_probs_list[i], &target_probs, rng)?;
@@ -447,10 +460,10 @@ pub fn speculative_decode_step(
     // Bonus token: if ALL K draft tokens were accepted, sample one more from
     // the last verification position (position K).
     if accepted_tokens.len() == k && !hit_eos {
-        let bonus_logits = verify_logits.narrow(1, k, 1)?.squeeze(1)?;
         let bonus_token = if temperature == 0.0 {
-            greedy_sample(&bonus_logits)?
+            greedy_target_tokens.as_ref().expect("greedy tokens")[k]
         } else {
+            let bonus_logits = verify_logits.narrow(1, k, 1)?.squeeze(1)?;
             sample_with_params(&bonus_logits, temperature, params.top_p, params.top_k, None)?
         };
 
@@ -552,6 +565,14 @@ pub fn speculative_decode_step_paged_greedy(
         None,
     )
     .context("paged skip-layer verification forward pass failed")?;
+    let target_tokens = greedy_sample_rows(&verify_logits)
+        .context("paged skip-layer batched verification greedy sampling failed")?;
+    anyhow::ensure!(
+        target_tokens.len() == k + 1,
+        "paged skip-layer verifier returned {} target tokens for window {}",
+        target_tokens.len(),
+        k + 1
+    );
 
     let mut accepted_tokens: Vec<TokenId> = Vec::with_capacity(k + 1);
     let mut hit_eos = false;
@@ -559,8 +580,7 @@ pub fn speculative_decode_step_paged_greedy(
     let mut replay_input_len: Option<usize> = None;
 
     for (i, &draft_token) in draft_tokens.iter().enumerate() {
-        let pos_logits = verify_logits.narrow(1, i, 1)?.squeeze(1)?;
-        let target_token = greedy_sample(&pos_logits)?;
+        let target_token = target_tokens[i];
 
         if target_token == draft_token {
             accepted_draft_tokens += 1;
@@ -581,8 +601,7 @@ pub fn speculative_decode_step_paged_greedy(
     }
 
     if accepted_draft_tokens == k && !hit_eos {
-        let bonus_logits = verify_logits.narrow(1, k, 1)?.squeeze(1)?;
-        let bonus_token = greedy_sample(&bonus_logits)?;
+        let bonus_token = target_tokens[k];
         if eos_token_ids.contains(&bonus_token) {
             hit_eos = true;
         } else {

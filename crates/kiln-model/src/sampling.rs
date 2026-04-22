@@ -55,6 +55,20 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
     Ok(idx)
 }
 
+/// Greedy sampling for every row in a `[..., vocab_size]` logits tensor.
+///
+/// This runs one on-device argmax over the vocab dimension and transfers only
+/// the resulting token IDs. It is useful for batched verification paths where
+/// repeatedly narrowing rows and scalar-sampling would add one device op and
+/// one synchronization per verified position.
+pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
+    let dims = logits.dims();
+    anyhow::ensure!(!dims.is_empty(), "logits tensor must have at least one dim");
+    let vocab_dim = dims.len() - 1;
+    let ids = logits.argmax(vocab_dim)?.flatten_all()?;
+    Ok(ids.to_vec1::<u32>()?)
+}
+
 /// Parameterized sampling with temperature, top-k, and top-p (nucleus) filtering.
 ///
 /// `logits`: tensor of shape `[..., vocab_size]`. Only the last position is sampled.
@@ -304,6 +318,39 @@ mod tests {
         .reshape((1, 2, 3))?;
         let token = greedy_sample(&logits)?;
         assert_eq!(token, 0); // index of 7.0 in last row
+        Ok(())
+    }
+
+    #[test]
+    fn test_greedy_sample_rows_2d() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(
+            &[
+                0.1_f32, 0.9, 0.2, // max index 1
+                3.0, 1.0, 2.0, // max index 0
+                -1.0, -0.5, -0.25, // max index 2
+            ],
+            &device,
+        )?
+        .reshape((3, 3))?;
+        assert_eq!(greedy_sample_rows(&logits)?, vec![1, 0, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_greedy_sample_rows_3d_flattens_prefix_dims() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(
+            &[
+                0.1_f32, 0.9, 0.2, // max index 1
+                3.0, 1.0, 2.0, // max index 0
+                -1.0, -0.5, -0.25, // max index 2
+                4.0, 5.0, 1.0, // max index 1
+            ],
+            &device,
+        )?
+        .reshape((2, 2, 3))?;
+        assert_eq!(greedy_sample_rows(&logits)?, vec![1, 0, 2, 1]);
         Ok(())
     }
 
