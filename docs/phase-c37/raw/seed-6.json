@@ -1,0 +1,61 @@
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 26.221793551,
+    "model_vram_mb": 18006
+  },
+  "inference": [
+    {
+      "batch_size": 1,
+      "prompt_tokens": 507,
+      "output_tokens": 128,
+      "total_time_secs": 2.720315102,
+      "tokens_per_sec": 47.05337256918997,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 4,
+      "prompt_tokens": 507,
+      "output_tokens": 512,
+      "total_time_secs": 10.993575505999999,
+      "tokens_per_sec": 46.5726550675496,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 507,
+      "output_tokens": 1024,
+      "total_time_secs": 21.841312158,
+      "tokens_per_sec": 46.88363009476658,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 507,
+      "output_tokens": 2048,
+      "total_time_secs": 43.294299578,
+      "tokens_per_sec": 47.30414904415479,
+      "peak_vram_mb": 18280
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 515,
+    "prefill_time_ms": 355.324739,
+    "prefill_tokens_per_sec": 1449.3783952374902,
+    "time_to_first_token_ms": 355.324739,
+    "mean_inter_token_ms": 26.35104636614172,
+    "p50_inter_token_ms": 16.782433,
+    "p99_inter_token_ms": 55.747952000000005,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 37.94915716458581,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.5609756097560976
+  },
+  "training": null
+}
+
