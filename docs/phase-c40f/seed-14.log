@@ -1,0 +1,37 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA A40 (46068 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-22T18:20:12.655251Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-22T18:20:12.656913Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-22T18:20:12.657229Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected and loaded (k=1 draft depth)
+[2m2026-04-22T18:20:12.657244Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4326M parameters (8252 MB) across 32 layers
+[2m2026-04-22T18:20:12.657374Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+Model loaded in 1.97s (backend: cuda, VRAM: 16791 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=48] (502 prompt tokens)...
+    Prefill (MTP): 370.7ms (1354 tok/s)
+    Decode (MTP): 128 tokens, mean ITL 31.2ms (32.0 tok/s), α = 0.641 (50/78)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA A40 (46068 MB VRAM, source: nvidia-smi)
+Model load time: 1.97s (VRAM: 16791 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         502
+Prefill time:          370.7 ms (1354 tok/s)
+Time to first token:   370.7 ms
+Mean inter-token:      31.2 ms (32.0 tok/s)
+P50 inter-token:       22.0 ms
+P99 inter-token:       68.8 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.641
+

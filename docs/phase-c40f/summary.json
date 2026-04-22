@@ -1,0 +1,221 @@
+{
+  "rows": [
+    {
+      "acceptance_rate": 0.7887323943661971,
+      "decode_tokens_per_sec": 44.36476011862765,
+      "mean_inter_token_ms": 22.540412645669303,
+      "model_load_secs": 3.54802743,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 8288.628155,
+      "prefill_tokens_per_sec": 59.84102444031041,
+      "seed": 0
+    },
+    {
+      "acceptance_rate": 0.6842105263157895,
+      "decode_tokens_per_sec": 38.983048387930594,
+      "mean_inter_token_ms": 25.65217553149606,
+      "model_load_secs": 1.6237456940000001,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 336.06063,
+      "prefill_tokens_per_sec": 1532.4615680212228,
+      "seed": 1
+    },
+    {
+      "acceptance_rate": 0.6282051282051282,
+      "decode_tokens_per_sec": 36.51618143862697,
+      "mean_inter_token_ms": 27.385119708661424,
+      "model_load_secs": 1.642854174,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 317.953317,
+      "prefill_tokens_per_sec": 1604.009056461581,
+      "seed": 2
+    },
+    {
+      "acceptance_rate": 0.7066666666666667,
+      "decode_tokens_per_sec": 34.29393833319664,
+      "mean_inter_token_ms": 29.15967219291337,
+      "model_load_secs": 1.6761947990000001,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 368.95498100000003,
+      "prefill_tokens_per_sec": 1338.9167390045345,
+      "seed": 3
+    },
+    {
+      "acceptance_rate": 0.6410256410256411,
+      "decode_tokens_per_sec": 36.83819872866493,
+      "mean_inter_token_ms": 27.145735527559044,
+      "model_load_secs": 1.675666351,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 355.098897,
+      "prefill_tokens_per_sec": 1413.6906767130847,
+      "seed": 4
+    },
+    {
+      "acceptance_rate": 0.7397260273972602,
+      "decode_tokens_per_sec": 40.79685273675393,
+      "mean_inter_token_ms": 24.51169472440944,
+      "model_load_secs": 1.7968282599999998,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 351.23817299999996,
+      "prefill_tokens_per_sec": 1452.0061861271554,
+      "seed": 5
+    },
+    {
+      "acceptance_rate": 0.6623376623376623,
+      "decode_tokens_per_sec": 37.55610929488971,
+      "mean_inter_token_ms": 26.62682633464566,
+      "model_load_secs": 1.653605269,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 360.334547,
+      "prefill_tokens_per_sec": 1429.2273785227703,
+      "seed": 6
+    },
+    {
+      "acceptance_rate": 0.6410256410256411,
+      "decode_tokens_per_sec": 34.84507663956621,
+      "mean_inter_token_ms": 28.6984589055118,
+      "model_load_secs": 2.034400927,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 362.92571699999996,
+      "prefill_tokens_per_sec": 1427.2893204754625,
+      "seed": 7
+    },
+    {
+      "acceptance_rate": 0.6933333333333334,
+      "decode_tokens_per_sec": 39.30738912068147,
+      "mean_inter_token_ms": 25.44050933858267,
+      "model_load_secs": 1.939420887,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 341.31660899999997,
+      "prefill_tokens_per_sec": 1479.5646818347477,
+      "seed": 8
+    },
+    {
+      "acceptance_rate": 0.7534246575342466,
+      "decode_tokens_per_sec": 41.441207875830614,
+      "mean_inter_token_ms": 24.130570783464567,
+      "model_load_secs": 1.6440564119999999,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 366.671107,
+      "prefill_tokens_per_sec": 1404.528445705977,
+      "seed": 9
+    },
+    {
+      "acceptance_rate": 0.7887323943661971,
+      "decode_tokens_per_sec": 43.94108734827354,
+      "mean_inter_token_ms": 22.757743614173222,
+      "model_load_secs": 1.571164335,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 313.35938000000004,
+      "prefill_tokens_per_sec": 1582.8471450256252,
+      "seed": 10
+    },
+    {
+      "acceptance_rate": 0.6842105263157895,
+      "decode_tokens_per_sec": 38.942708117799725,
+      "mean_inter_token_ms": 25.6787483031496,
+      "model_load_secs": 1.835424817,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 336.147911,
+      "prefill_tokens_per_sec": 1532.063663486518,
+      "seed": 11
+    },
+    {
+      "acceptance_rate": 0.6282051282051282,
+      "decode_tokens_per_sec": 36.18222344017729,
+      "mean_inter_token_ms": 27.637881393700773,
+      "model_load_secs": 1.652966537,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 346.524726,
+      "prefill_tokens_per_sec": 1471.7564483407166,
+      "seed": 12
+    },
+    {
+      "acceptance_rate": 0.7066666666666667,
+      "decode_tokens_per_sec": 37.22644864377359,
+      "mean_inter_token_ms": 26.86262150787402,
+      "model_load_secs": 2.72084252,
+      "model_vram_mb": 16790,
+      "prefill_time_ms": 367.46268999999995,
+      "prefill_tokens_per_sec": 1344.3541710316224,
+      "seed": 13
+    },
+    {
+      "acceptance_rate": 0.6410256410256411,
+      "decode_tokens_per_sec": 32.00370128097264,
+      "mean_inter_token_ms": 31.246385885826783,
+      "model_load_secs": 1.9740690060000001,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 370.73648599999996,
+      "prefill_tokens_per_sec": 1354.0614936939335,
+      "seed": 14
+    },
+    {
+      "acceptance_rate": 0.7397260273972602,
+      "decode_tokens_per_sec": 41.815695018744265,
+      "mean_inter_token_ms": 23.914465598425203,
+      "model_load_secs": 1.7359101799999999,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 348.03964399999995,
+      "prefill_tokens_per_sec": 1465.3503093457941,
+      "seed": 15
+    },
+    {
+      "acceptance_rate": 0.6623376623376623,
+      "decode_tokens_per_sec": 36.8754382524249,
+      "mean_inter_token_ms": 27.11832177165354,
+      "model_load_secs": 1.847749561,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 363.193896,
+      "prefill_tokens_per_sec": 1417.9753725817022,
+      "seed": 16
+    },
+    {
+      "acceptance_rate": 0.6410256410256411,
+      "decode_tokens_per_sec": 36.340370732827566,
+      "mean_inter_token_ms": 27.5176058976378,
+      "model_load_secs": 1.752136429,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 343.417349,
+      "prefill_tokens_per_sec": 1508.3687574561063,
+      "seed": 17
+    },
+    {
+      "acceptance_rate": 0.6933333333333334,
+      "decode_tokens_per_sec": 39.515705372105515,
+      "mean_inter_token_ms": 25.30639376377952,
+      "model_load_secs": 1.7285419960000001,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 336.393715,
+      "prefill_tokens_per_sec": 1501.2171080544713,
+      "seed": 18
+    },
+    {
+      "acceptance_rate": 0.7534246575342466,
+      "decode_tokens_per_sec": 39.062588915689396,
+      "mean_inter_token_ms": 25.59994172834644,
+      "model_load_secs": 1.894029803,
+      "model_vram_mb": 16791,
+      "prefill_time_ms": 369.562552,
+      "prefill_tokens_per_sec": 1393.5394622991996,
+      "seed": 19
+    }
+  ],
+  "summary": {
+    "bootstrap_median_ci_95": {
+      "hi": 0.7231963470319634,
+      "lo": 0.6516816516816517,
+      "resamples": 10000,
+      "rng_seed": 12345
+    },
+    "max_alpha": 0.7887323943661971,
+    "mean_alpha": 0.6938687678207566,
+    "median_alpha": 0.6887719298245614,
+    "median_decode_tokens_per_sec": 38.24940870634472,
+    "median_mean_inter_token_ms": 26.15278731889763,
+    "min_alpha": 0.6282051282051282,
+    "n": 20,
+    "num_alpha_ge_0_72": 6,
+    "stdev_alpha": 0.05211017751915568
+  }
+}
