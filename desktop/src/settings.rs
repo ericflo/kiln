@@ -37,7 +37,7 @@ impl Default for Settings {
             fp8_kv_cache: false,
             cuda_graphs: !cfg!(target_os = "macos"),
             prefix_cache: true,
-            speculative_decoding: false,
+            speculative_decoding: cfg!(target_os = "macos"),
             adapter_dir: None,
             served_model_id: None,
             auto_start: true,
@@ -171,6 +171,10 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
         "KILN_SPEC_ENABLED".to_string(),
         bool_env(s.speculative_decoding),
     ));
+    envs.push((
+        "KILN_SPEC_METHOD".to_string(),
+        if s.speculative_decoding { "mtp" } else { "off" }.to_string(),
+    ));
     if let Some(dir) = &s.adapter_dir {
         envs.push(("KILN_ADAPTER_DIR".to_string(), dir.display().to_string()));
     }
@@ -196,7 +200,11 @@ pub fn apply_to_supervisor_config(s: &Settings, cfg: &mut SupervisorConfig) {
 }
 
 fn bool_env(b: bool) -> String {
-    if b { "1".into() } else { "0".into() }
+    if b {
+        "1".into()
+    } else {
+        "0".into()
+    }
 }
 
 #[cfg(test)]
@@ -213,7 +221,7 @@ mod tests {
         assert!(!s.fp8_kv_cache);
         assert_eq!(s.cuda_graphs, !cfg!(target_os = "macos"));
         assert!(s.prefix_cache);
-        assert!(!s.speculative_decoding);
+        assert_eq!(s.speculative_decoding, cfg!(target_os = "macos"));
         assert!(s.auto_start);
         assert!(s.auto_restart);
         assert!(!s.launch_at_login);
@@ -254,7 +262,18 @@ mod tests {
             Some(if cfg!(target_os = "macos") { "0" } else { "1" })
         );
         assert_eq!(env_get("KILN_PREFIX_CACHE_ENABLED"), Some("1")); // default true
-        assert_eq!(env_get("KILN_SPEC_ENABLED"), Some("0")); // default false
+        assert_eq!(
+            env_get("KILN_SPEC_ENABLED"),
+            Some(if cfg!(target_os = "macos") { "1" } else { "0" })
+        );
+        assert_eq!(
+            env_get("KILN_SPEC_METHOD"),
+            Some(if cfg!(target_os = "macos") {
+                "mtp"
+            } else {
+                "off"
+            })
+        );
         assert_eq!(env_get("KILN_MODEL_PATH"), Some("/models/foo"));
         assert_eq!(env_get("KILN_ADAPTER_DIR"), Some("/adapters"));
         assert_eq!(env_get("KILN_SERVED_MODEL_ID"), Some("custom-id"));

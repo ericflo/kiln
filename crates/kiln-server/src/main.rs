@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use clap::Parser;
@@ -302,6 +302,13 @@ fn spawn_backend_prewarm(state: AppState) {
                 &mut block_manager,
                 &mut paged_cache,
             )?;
+            if runner_guard.weights.mtp.is_some() {
+                let mtp_params = SamplingParams {
+                    max_tokens: 4,
+                    ..params.clone()
+                };
+                runner_guard.generate_from_tokens_mtp_speculative(&prompt_tokens, &mtp_params)?;
+            }
             Ok(())
         })
         .await;
