@@ -1,0 +1,40 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-22T18:02:35.286254Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-22T18:02:35.287949Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-22T18:02:35.288333Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected and loaded (k=1 draft depth)
+[2m2026-04-22T18:02:35.288354Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4326M parameters (8252 MB) across 32 layers
+[2m2026-04-22T18:02:35.288516Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+[2m2026-04-22T18:02:57.303349Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m marlin batch pack complete [3mn_inputs[0m[2m=[0m104 [3mn_packed[0m[2m=[0m104 [3mpack_elapsed_ms[0m[2m=[0m18596 [3mparallel[0m[2m=[0mtrue
+[kiln] marlin batch pack: 104/104 projections in 18596 ms (parallel)
+Model loaded in 22.19s (backend: cuda, VRAM: 18011 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=47] (496 prompt tokens)...
+    Prefill (MTP): 8222.4ms (60 tok/s)
+    Decode (MTP): 128 tokens, mean ITL 26.1ms (38.3 tok/s), α = 0.628 (49/78)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 22.19s (VRAM: 18011 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         496
+Prefill time:          8222.4 ms (60 tok/s)
+Time to first token:   8222.4 ms
+Mean inter-token:      26.1 ms (38.3 tok/s)
+P50 inter-token:       18.0 ms
+P99 inter-token:       56.8 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.628
+
+
