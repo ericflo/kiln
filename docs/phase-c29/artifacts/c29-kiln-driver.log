@@ -1,0 +1,181 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.08
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+[c29_kiln] driving 4 prompts × 4 positions × 4 steps
+[c29_kiln] out_root=/workspace/c29-out/kiln
+[c29_kiln] === seed 0 -> /workspace/c29-out/kiln/seed-0/mtp_pos-{pos}/step-{step}.safetensors ===
+    {
+      "batch_size": 4,
+      "prompt_tokens": 506,
+      "output_tokens": 128,
+      "total_time_secs": 3.43435602,
+      "tokens_per_sec": 37.27045165224309,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 506,
+      "output_tokens": 256,
+      "total_time_secs": 6.753181469,
+      "tokens_per_sec": 37.908058768322725,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 506,
+      "output_tokens": 512,
+      "total_time_secs": 13.563336021,
+      "tokens_per_sec": 37.74882515682533,
+      "peak_vram_mb": 18280
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 506,
+    "prefill_time_ms": 325.032012,
+    "prefill_tokens_per_sec": 1556.7697374989637,
+    "time_to_first_token_ms": 325.032012,
+    "mean_inter_token_ms": 30.41607704838709,
+    "p50_inter_token_ms": 28.1478025,
+    "p99_inter_token_ms": 54.668890999999995,
+    "num_tokens_generated": 32,
+    "decode_tokens_per_sec": 32.877349646674055,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.23076923076923078
+  },
+  "training": null
+}
+[c29_kiln] seed 0 produced 12 dumps
+[c29_kiln] === seed 1 -> /workspace/c29-out/kiln/seed-1/mtp_pos-{pos}/step-{step}.safetensors ===
+    {
+      "batch_size": 4,
+      "prompt_tokens": 496,
+      "output_tokens": 128,
+      "total_time_secs": 3.36440629,
+      "tokens_per_sec": 38.04534558755685,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 496,
+      "output_tokens": 256,
+      "total_time_secs": 6.675494764,
+      "tokens_per_sec": 38.34921740641186,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 496,
+      "output_tokens": 512,
+      "total_time_secs": 13.291900632,
+      "tokens_per_sec": 38.51969813612431,
+      "peak_vram_mb": 18280
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 496,
+    "prefill_time_ms": 332.664857,
+    "prefill_tokens_per_sec": 1490.990074734585,
+    "time_to_first_token_ms": 332.664857,
+    "mean_inter_token_ms": 31.438259,
+    "p50_inter_token_ms": 31.640066,
+    "p99_inter_token_ms": 56.954933,
+    "num_tokens_generated": 32,
+    "decode_tokens_per_sec": 31.808377175084665,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.10714285714285714
+  },
+  "training": null
+}
+[c29_kiln] seed 1 produced 9 dumps
+[c29_kiln] === seed 2 -> /workspace/c29-out/kiln/seed-2/mtp_pos-{pos}/step-{step}.safetensors ===
+    {
+      "batch_size": 4,
+      "prompt_tokens": 512,
+      "output_tokens": 128,
+      "total_time_secs": 3.384715203,
+      "tokens_per_sec": 37.817066524991176,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 512,
+      "output_tokens": 256,
+      "total_time_secs": 6.638542896,
+      "tokens_per_sec": 38.562679191882715,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 512,
+      "output_tokens": 512,
+      "total_time_secs": 13.348204168,
+      "tokens_per_sec": 38.35721970955696,
+      "peak_vram_mb": 18280
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 512,
+    "prefill_time_ms": 331.423182,
+    "prefill_tokens_per_sec": 1544.852707376396,
+    "time_to_first_token_ms": 331.423182,
+    "mean_inter_token_ms": 31.94359119354839,
+    "p50_inter_token_ms": 31.521257,
+    "p99_inter_token_ms": 59.092805,
+    "num_tokens_generated": 32,
+    "decode_tokens_per_sec": 31.305184002040725,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.10714285714285714
+  },
+  "training": null
+}
+[c29_kiln] seed 2 produced 16 dumps
+[c29_kiln] === seed 3 -> /workspace/c29-out/kiln/seed-3/mtp_pos-{pos}/step-{step}.safetensors ===
+    {
+      "batch_size": 4,
+      "prompt_tokens": 503,
+      "output_tokens": 128,
+      "total_time_secs": 3.370080621,
+      "tokens_per_sec": 37.98128721384081,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 503,
+      "output_tokens": 256,
+      "total_time_secs": 6.717444556,
+      "tokens_per_sec": 38.10973025022464,
+      "peak_vram_mb": 18280
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 503,
+      "output_tokens": 512,
+      "total_time_secs": 13.392355552,
+      "tokens_per_sec": 38.230765156435716,
+      "peak_vram_mb": 18280
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 503,
+    "prefill_time_ms": 340.623551,
+    "prefill_tokens_per_sec": 1476.70352952195,
+    "time_to_first_token_ms": 340.623551,
+    "mean_inter_token_ms": 31.45276770967742,
+    "p50_inter_token_ms": 31.043798000000002,
+    "p99_inter_token_ms": 57.241432,
+    "num_tokens_generated": 32,
+    "decode_tokens_per_sec": 31.793704427871987,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.06896551724137931
+  },
+  "training": null
+}
+[c29_kiln] seed 3 produced 12 dumps
+[c29_kiln] DONE — 49 total kiln dumps under /workspace/c29-out/kiln

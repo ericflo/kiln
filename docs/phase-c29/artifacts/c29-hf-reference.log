@@ -1,0 +1,89 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.08
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+[c29_hf_ref] dispatching HF reference for 4 prompt seeds
+[c29_hf_ref] === seed-0: invoking c14 wrapper ===
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-0/step-0.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-0/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-0/step-1.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-0/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-0/step-2.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-0/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-0/step-3.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-0/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-1/step-0.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-1/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-1/step-1.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-1/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-1/step-2.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-1/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-1/step-3.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-1/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-2/step-0.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-2/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-2/step-1.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-2/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-3/step-0.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-3/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-0/mtp_pos-3/step-1.safetensors --out /workspace/c29-out/ref/seed-0/mtp_pos-3/step-1.safetensors --capture-subops
+[c14_hf_ref] wrote summary to /workspace/c29-out/ref/seed-0/c29-c14-summary.json
+[c14_hf_ref] total files: 12  errors: 0  missing-taps: 0  flagged sites: 36
+                h_main: median cos=1.000000  min cos=1.000000  median |Δ|_max=0.000e+00  max |Δ|_max=0.000e+00  n=12
+       c14__post_block: median cos=0.999974  min cos=0.999954  median |Δ|_max=4.469e-02  max |Δ|_max=1.006e-01  n=12
+        c14__post_norm: median cos=0.999971  min cos=0.999961  median |Δ|_max=1.837e-01  max |Δ|_max=2.852e-01  n=12
+           c14__logits: median cos=0.999980  min cos=0.999972  median |Δ|_max=1.120e-01  max |Δ|_max=1.298e-01  n=12
+[c29_hf_ref] === seed-1: invoking c14 wrapper ===
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-0/step-0.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-0/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-0/step-1.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-0/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-0/step-2.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-0/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-0/step-3.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-0/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-1/step-0.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-1/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-2/step-0.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-2/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-2/step-1.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-2/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-2/step-2.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-2/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-1/mtp_pos-2/step-3.safetensors --out /workspace/c29-out/ref/seed-1/mtp_pos-2/step-3.safetensors --capture-subops
+[c14_hf_ref] wrote summary to /workspace/c29-out/ref/seed-1/c29-c14-summary.json
+[c14_hf_ref] total files: 9  errors: 0  missing-taps: 0  flagged sites: 27
+                h_main: median cos=1.000000  min cos=1.000000  median |Δ|_max=0.000e+00  max |Δ|_max=0.000e+00  n=9
+       c14__post_block: median cos=0.999975  min cos=0.999970  median |Δ|_max=3.843e-02  max |Δ|_max=1.081e-01  n=9
+        c14__post_norm: median cos=0.999972  min cos=0.999967  median |Δ|_max=1.396e-01  max |Δ|_max=2.210e-01  n=9
+           c14__logits: median cos=0.999968  min cos=0.999953  median |Δ|_max=1.009e-01  max |Δ|_max=1.211e-01  n=9
+[c29_hf_ref] === seed-2: invoking c14 wrapper ===
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-0/step-0.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-0/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-0/step-1.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-0/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-0/step-2.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-0/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-0/step-3.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-0/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-1/step-0.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-1/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-1/step-1.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-1/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-1/step-2.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-1/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-1/step-3.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-1/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-2/step-0.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-2/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-2/step-1.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-2/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-2/step-2.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-2/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-2/step-3.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-2/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-3/step-0.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-3/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-3/step-1.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-3/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-3/step-2.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-3/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-2/mtp_pos-3/step-3.safetensors --out /workspace/c29-out/ref/seed-2/mtp_pos-3/step-3.safetensors --capture-subops
+[c14_hf_ref] wrote summary to /workspace/c29-out/ref/seed-2/c29-c14-summary.json
+[c14_hf_ref] total files: 16  errors: 0  missing-taps: 0  flagged sites: 48
+                h_main: median cos=1.000000  min cos=1.000000  median |Δ|_max=0.000e+00  max |Δ|_max=0.000e+00  n=16
+       c14__post_block: median cos=0.999968  min cos=0.999958  median |Δ|_max=5.575e-02  max |Δ|_max=8.595e-02  n=16
+        c14__post_norm: median cos=0.999966  min cos=0.999958  median |Δ|_max=1.731e-01  max |Δ|_max=3.104e-01  n=16
+           c14__logits: median cos=0.999978  min cos=0.999934  median |Δ|_max=1.133e-01  max |Δ|_max=1.870e-01  n=16
+[c29_hf_ref] === seed-3: invoking c14 wrapper ===
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-0/step-0.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-0/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-0/step-1.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-0/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-0/step-2.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-0/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-0/step-3.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-0/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-1/step-0.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-1/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-1/step-1.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-1/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-1/step-2.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-1/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-1/step-3.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-1/step-3.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-2/step-0.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-2/step-0.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-2/step-1.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-2/step-1.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-2/step-2.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-2/step-2.safetensors --capture-subops
+[c14_hf_ref] running: /usr/bin/python3 /workspace/kiln/scripts/mtp_reference_dump.py --checkpoint /workspace/qwen3.5-4b --kiln-dump /workspace/c29-out/kiln/seed-3/mtp_pos-2/step-3.safetensors --out /workspace/c29-out/ref/seed-3/mtp_pos-2/step-3.safetensors --capture-subops
+[c14_hf_ref] wrote summary to /workspace/c29-out/ref/seed-3/c29-c14-summary.json
+[c14_hf_ref] total files: 12  errors: 0  missing-taps: 0  flagged sites: 36
+                h_main: median cos=1.000000  min cos=1.000000  median |Δ|_max=0.000e+00  max |Δ|_max=0.000e+00  n=12
+       c14__post_block: median cos=0.999968  min cos=0.999960  median |Δ|_max=4.301e-02  max |Δ|_max=8.997e-02  n=12
+        c14__post_norm: median cos=0.999967  min cos=0.999960  median |Δ|_max=1.769e-01  max |Δ|_max=2.894e-01  n=12
+           c14__logits: median cos=0.999977  min cos=0.999955  median |Δ|_max=1.163e-01  max |Δ|_max=1.448e-01  n=12
+[c29_hf_ref] DONE — produced reference dumps for 4 seeds under /workspace/c29-out/ref
