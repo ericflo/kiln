@@ -3451,6 +3451,42 @@ pub fn gqa_attention_paged(
         (k, v, total_seq_len)
     };
 
+    // Multi-token append / speculative verify with prefix history. `read`
+    // already returns head-major K/V; on Metal, keep Q/K/V in that layout and
+    // avoid token-major transposes plus GQA K/V expansion.
+    if seq_len > 1
+        && backend.supports_flash_attn_prefill_head_major()
+        && !crate::mtp_debug::is_c7_sdpa_capture_armed()
+    {
+        kiln_nvtx::range!(c"kiln/attn/full/prefill_head_major");
+        if let Some(attn_output) =
+            flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)?
+        {
+            let attn_output = if let Some(ref gate) = gate {
+                let sigmoid_gate = cuda_sigmoid(gate)?;
+                (attn_output * sigmoid_gate)?
+            } else {
+                attn_output
+            };
+            if crate::mtp_debug::current_b12_layer_is_31() {
+                crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
+            }
+            let out = {
+                kiln_nvtx::range!(c"kiln/proj/o");
+                linear_with_lora_t(
+                    &attn_output,
+                    &attn_weights.o_proj_t,
+                    lora_layer.and_then(|l| l.o_proj.as_ref()),
+                    lora_scale,
+                )?
+            };
+            if crate::mtp_debug::current_b12_layer_is_31() {
+                crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
+            }
+            return Ok(out);
+        }
+    }
+
     // Fused-attention path for prefill with existing prefix history
     // (`start_pos > 0`). Initial prefill is special-cased above so we do not
     // materialize the same K/V we just produced.
