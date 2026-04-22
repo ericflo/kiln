@@ -1476,6 +1476,28 @@ pub fn rotary_embedding_from_tensor(
     Ok((rotated_q, rotated_k))
 }
 
+fn rotary_tables_from_tensor(
+    positions_tensor: &Tensor,
+    inv_freq: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let pos = positions_tensor.unsqueeze(1)?;
+    let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
+    Ok((freqs.cos()?, freqs.sin()?))
+}
+
+fn rotary_embedding_from_tables(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<(Tensor, Tensor)> {
+    let rotated_q = apply_rope(q, cos, sin, head_dim, rotary_dim)?;
+    let rotated_k = apply_rope(k, cos, sin, head_dim, rotary_dim)?;
+    Ok((rotated_q, rotated_k))
+}
+
 /// Apply the rotation to a single tensor, supporting partial rotary embeddings.
 /// `x`: [batch, seq_len, num_heads, head_dim]
 /// `cos`, `sin`: [seq_len, half_rotary]
@@ -2986,13 +3008,6 @@ fn try_flash_attn_paged_decode(
         return Ok(None);
     }
 
-    // Reshape Q for the fused-attention APIs: [batch, num_heads, 1, head_dim]
-    // -> [batch, 1, num_heads, head_dim].
-    let q_fa = {
-        kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
-        q.transpose(1, 2)?.contiguous()?
-    };
-
     let (k_pool, v_pool) = match paged_cache.pool_tensors(full_attn_layer_idx) {
         Some(p) => p,
         None => return Ok(None),
@@ -3025,6 +3040,13 @@ fn try_flash_attn_paged_decode(
             let attn_output = if attn_output.is_some() {
                 attn_output
             } else {
+                // Reshape Q for the fused-attention APIs only when the
+                // head-major path declined. The common Metal desktop path
+                // returns above and should not pay this transpose/copy.
+                let q_fa = {
+                    kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
+                    q.transpose(1, 2)?.contiguous()?
+                };
                 flash_attention_forward(
                     backend,
                     &q_fa,
@@ -3123,6 +3145,14 @@ fn try_flash_attn_paged_decode(
 
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
 
+    // Reshape Q for the fused paged-decode APIs: [batch, num_heads, 1, head_dim]
+    // -> [batch, 1, num_heads, head_dim]. Build it lazily so the contiguous-KV
+    // Metal path above can avoid a dead transpose/copy per full-attention layer.
+    let q_fa = {
+        kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
+        q.transpose(1, 2)?.contiguous()?
+    };
+
     let attn_out = match backend.flash_attn_paged_decode(
         &q_fa,
         k_pool,
@@ -3183,6 +3213,47 @@ pub fn gqa_attention_paged(
     head_dim: usize,
     rotary_dim: usize,
     inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    full_attn_layer_idx: usize,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    gqa_attention_paged_with_rope_tables(
+        backend,
+        x,
+        attn_weights,
+        positions,
+        start_pos,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rotary_dim,
+        inv_freq,
+        None,
+        rms_norm_eps,
+        paged_cache,
+        block_table,
+        full_attn_layer_idx,
+        attn_output_gate,
+        lora,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gqa_attention_paged_with_rope_tables(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &Tensor,
+    start_pos: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rope_tables: Option<(&Tensor, &Tensor)>,
     rms_norm_eps: f64,
     paged_cache: &mut PagedKvCache,
     block_table: &BlockTable,
@@ -3296,7 +3367,11 @@ pub fn gqa_attention_paged(
     // (critical for CUDA graph replay correctness)
     let (q, k) = {
         kiln_nvtx::range!(c"kiln/attn/rope");
-        rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+        if let Some((cos, sin)) = rope_tables {
+            rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
+        } else {
+            rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+        }
     };
     let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
     let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
@@ -3899,6 +3974,47 @@ pub fn transformer_block_paged(
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
+    transformer_block_paged_with_rope_tables(
+        backend,
+        x,
+        layer,
+        config,
+        positions,
+        start_pos,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rotary_dim,
+        inv_freq,
+        None,
+        rms_norm_eps,
+        paged_cache,
+        block_table,
+        full_attn_layer_idx,
+        lora,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transformer_block_paged_with_rope_tables(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &Tensor,
+    start_pos: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rope_tables: Option<(&Tensor, &Tensor)>,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
         GpuAttentionWeights::Linear(_) => {
@@ -3922,7 +4038,7 @@ pub fn transformer_block_paged(
     }
 
     // Self-attention with paged cache
-    let attn_out = gqa_attention_paged(
+    let attn_out = gqa_attention_paged_with_rope_tables(
         backend,
         &normed,
         attn_weights,
@@ -3933,6 +4049,7 @@ pub fn transformer_block_paged(
         head_dim,
         rotary_dim,
         inv_freq,
+        rope_tables,
         rms_norm_eps,
         paged_cache,
         block_table,
@@ -5036,6 +5153,17 @@ fn model_forward_paged_inner(
             &positions_owned
         }
     };
+    let rope_tables_owned = if positions_gpu.is_none() {
+        Some(rotary_tables_from_tensor(
+            positions,
+            &weights.rotary_inv_freq,
+        )?)
+    } else {
+        None
+    };
+    let rope_tables = rope_tables_owned
+        .as_ref()
+        .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor));
 
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
@@ -5053,7 +5181,7 @@ fn model_forward_paged_inner(
                 // this TLS slot + the armed capture window so that only
                 // layer 31 emits sub-op taps. No-op on the production path.
                 crate::mtp_debug::enter_b12_layer_scope(i);
-                let block_result = transformer_block_paged(
+                let block_result = transformer_block_paged_with_rope_tables(
                     backend,
                     &hidden,
                     layer,
@@ -5065,6 +5193,7 @@ fn model_forward_paged_inner(
                     config.head_dim,
                     config.rotary_dim(),
                     &weights.rotary_inv_freq,
+                    rope_tables,
                     config.rms_norm_eps,
                     paged_cache,
                     block_table,
