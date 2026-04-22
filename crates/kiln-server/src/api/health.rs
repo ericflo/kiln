@@ -63,11 +63,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let uptime_seconds = state.started_at.elapsed().as_secs();
 
     // Adapter info
-    let active_adapter = state
-        .active_adapter_name
-        .read()
-        .unwrap()
-        .clone();
+    let active_adapter = state.active_adapter_name.read().unwrap().clone();
 
     let adapters_loaded = std::fs::read_dir(&state.adapter_dir)
         .map(|entries| {
@@ -128,9 +124,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Training info
     let (active_job, _running_count) = {
         let jobs = state.training_jobs.read().unwrap();
-        let active = jobs.values().find(|j| {
-            j.state == kiln_train::TrainingState::Running
-        });
+        let active = jobs
+            .values()
+            .find(|j| j.state == kiln_train::TrainingState::Running);
         let active_info = active.map(|j| ActiveJobInfo {
             job_id: j.job_id.clone(),
             progress: j.progress,
@@ -140,10 +136,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     };
     let queued = state.training_queue.lock().unwrap().len();
 
-    let training = TrainingInfo {
-        active_job,
-        queued,
-    };
+    let training = TrainingInfo { active_job, queued };
 
     // Health checks
     let scheduler_responsive = scheduler_stats.is_some();
@@ -163,8 +156,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         },
     ];
 
-    let all_pass = checks.iter().all(|c| c.pass);
-    let status = if all_pass { "ok" } else { "degraded" };
+    let serving_ready = model_loaded && scheduler_responsive;
+    let status = if serving_ready { "ok" } else { "degraded" };
 
     let response = HealthResponse {
         status,
@@ -186,7 +179,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         checks,
     };
 
-    if all_pass {
+    if serving_ready {
         (StatusCode::OK, Json(response)).into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, Json(response)).into_response()
@@ -240,7 +233,12 @@ mod tests {
         let app = routes().with_state(state);
 
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -285,12 +283,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_health_ok_while_inference_prewarm_is_running() {
+        let state = make_test_state();
+        state
+            .inference_prewarm_complete
+            .store(false, Ordering::Release);
+        let app = routes().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["status"], "ok");
+        let checks = json["checks"].as_array().unwrap();
+        let prewarm = checks
+            .iter()
+            .find(|c| c["name"] == "inference_prewarm_complete")
+            .unwrap();
+        assert_eq!(prewarm["pass"], false);
+    }
+
+    #[tokio::test]
     async fn test_health_scheduler_stats_present() {
         let state = make_test_state();
         let app = routes().with_state(state);
 
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
