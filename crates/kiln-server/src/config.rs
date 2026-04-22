@@ -191,13 +191,15 @@ pub struct SpeculativeDecodingConfig {
 ///
 /// Dispatch is driven by reading these environment variables directly from
 /// `kiln-model` helpers; this struct is the documentation / TOML-config
-/// mirror. Defaults keep streaming OFF.
+/// mirror. The generic config default keeps streaming OFF, while the runtime
+/// Metal policy enables streaming by default for long desktop prompts.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StreamingPrefillConfig {
     /// Enable tiled/streaming prefill (default: false).
     pub enabled: bool,
-    /// Tile size in tokens (default: 8192). Must be a positive multiple of 64.
+    /// Tile size in tokens (generic default: 8192). Must be a positive
+    /// multiple of 64.
     pub tile_tokens: usize,
     /// On the final tile, compute the LM head only for the last row instead
     /// of the full hidden state. Safe for inference because RMSNorm is

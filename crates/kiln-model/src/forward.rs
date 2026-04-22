@@ -822,8 +822,8 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
 /// chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 4096;
-pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 8192;
+pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 512;
+pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 4096;
 
 fn streaming_prefill_env_override() -> Option<bool> {
     std::env::var("KILN_STREAMING_PREFILL")
