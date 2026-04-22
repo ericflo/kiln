@@ -20,7 +20,7 @@ use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
     model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_streaming, streaming_prefill_enabled,
+    model_forward_paged_streaming, streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -597,11 +597,11 @@ fn bench_latency_paged(
          ({actual_prompt_tokens} prompt tokens)..."
     );
 
-    // Prefill: forward pass on all prompt tokens via paged path.
-    // KILN_STREAMING_PREFILL=1 opts into the tiled path that caps peak
-    // activation memory for long contexts.
+    // Prefill: forward pass on all prompt tokens via paged path. Long Metal
+    // prompts use tiled streaming prefill by default; env overrides can force
+    // either path.
     let prefill_start = Instant::now();
-    let logits = if streaming_prefill_enabled() {
+    let logits = if streaming_prefill_enabled_for(device, actual_prompt_tokens) {
         model_forward_paged_streaming(
             &*backend,
             &prompt_token_ids,
@@ -1049,7 +1049,7 @@ fn bench_latency_paged_skiplayer(
     );
 
     let prefill_start = Instant::now();
-    let logits = if streaming_prefill_enabled() {
+    let logits = if streaming_prefill_enabled_for(device, actual_prompt_tokens) {
         model_forward_paged_streaming(
             &*backend,
             &prompt_token_ids,

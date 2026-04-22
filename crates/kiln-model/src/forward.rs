@@ -822,33 +822,65 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
 /// chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
+pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 4096;
+pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 8192;
+
+fn streaming_prefill_env_override() -> Option<bool> {
+    std::env::var("KILN_STREAMING_PREFILL")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .and_then(|v| match v.as_str() {
+            "1" | "true" | "yes" => Some(true),
+            "0" | "false" | "no" => Some(false),
+            _ => None,
+        })
+}
 
 /// Read `KILN_STREAMING_PREFILL` and return whether the streaming prefill
-/// dispatch should be used at all. Defaults to false.
+/// dispatch was explicitly enabled. Defaults to false for compatibility with
+/// tests and non-device-aware callers.
 pub fn streaming_prefill_enabled() -> bool {
-    matches!(
-        std::env::var("KILN_STREAMING_PREFILL")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
+    streaming_prefill_env_override().unwrap_or(false)
+}
+
+/// Device-aware streaming prefill policy for production prefill dispatch.
+///
+/// Env overrides win. Without an override, long Metal prompts use tiled
+/// prefill by default because it reduces peak intermediates and improves TTFT
+/// on the macOS desktop path.
+pub fn streaming_prefill_enabled_for(device: &Device, seq_len: usize) -> bool {
+    if let Some(enabled) = streaming_prefill_env_override() {
+        return enabled;
+    }
+    matches!(device, Device::Metal(_)) && seq_len >= STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+}
+
+fn streaming_tile_tokens_env_override() -> Option<usize> {
+    std::env::var("KILN_STREAMING_TILE_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0 && n % GDN_CHUNK_SIZE == 0)
 }
 
 /// Read `KILN_STREAMING_TILE_TOKENS` (positive multiple of `GDN_CHUNK_SIZE`).
 /// Falls back to `STREAMING_PREFILL_DEFAULT_TILE` when unset, malformed, zero,
-/// or not a multiple of 64. The fallback path matches the documented default
-/// so misconfiguration cannot silently change the tile boundary.
+/// or not a multiple of 64.
 pub fn streaming_tile_tokens() -> usize {
-    match std::env::var("KILN_STREAMING_TILE_TOKENS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        Some(n) if n > 0 && n % GDN_CHUNK_SIZE == 0 => n,
-        _ => STREAMING_PREFILL_DEFAULT_TILE,
-    }
+    streaming_tile_tokens_env_override().unwrap_or(STREAMING_PREFILL_DEFAULT_TILE)
+}
+
+/// Device-aware tile-size default. Env overrides win; otherwise Metal uses a
+/// smaller tile because it measured faster for long desktop TTFT.
+pub fn streaming_tile_tokens_for(device: &Device) -> usize {
+    streaming_tile_tokens_env_override().unwrap_or_else(|| {
+        if matches!(device, Device::Metal(_)) {
+            STREAMING_PREFILL_METAL_DEFAULT_TILE
+        } else {
+            STREAMING_PREFILL_DEFAULT_TILE
+        }
+    })
 }
 
 /// Read `KILN_STREAMING_LAST_TOKEN_LM_HEAD`. Defaults to true: in streaming
@@ -5217,7 +5249,7 @@ pub fn model_forward_paged_streaming(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens(),
+        streaming_tile_tokens_for(weights.embed_tokens.device()),
         streaming_last_token_lm_head(),
     )
 }
@@ -8894,23 +8926,53 @@ mod tests {
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
         assert!(!streaming_prefill_enabled(), "default must be disabled");
+        assert!(!streaming_prefill_enabled_for(
+            &Device::Cpu,
+            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+        ));
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
+        assert_eq!(
+            streaming_tile_tokens_for(&Device::Cpu),
+            STREAMING_PREFILL_DEFAULT_TILE
+        );
         assert!(streaming_last_token_lm_head(), "default must be true");
+
+        #[cfg(feature = "metal")]
+        if let Some(device) = crate::backend::metal::try_new_metal() {
+            assert!(!streaming_prefill_enabled_for(
+                &device,
+                STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD - 1
+            ));
+            assert!(streaming_prefill_enabled_for(
+                &device,
+                STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+            ));
+            assert_eq!(
+                streaming_tile_tokens_for(&device),
+                STREAMING_PREFILL_METAL_DEFAULT_TILE
+            );
+        }
 
         unsafe {
             std::env::set_var("KILN_STREAMING_PREFILL", "1");
         }
         assert!(streaming_prefill_enabled());
+        assert!(streaming_prefill_enabled_for(&Device::Cpu, 1));
 
         unsafe {
             std::env::set_var("KILN_STREAMING_PREFILL", "0");
         }
         assert!(!streaming_prefill_enabled());
+        assert!(!streaming_prefill_enabled_for(
+            &Device::Cpu,
+            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+        ));
 
         unsafe {
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
         }
         assert_eq!(streaming_tile_tokens(), 256);
+        assert_eq!(streaming_tile_tokens_for(&Device::Cpu), 256);
 
         // Bad value (not a multiple of GDN_CHUNK_SIZE) falls back to default.
         unsafe {
