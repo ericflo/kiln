@@ -130,6 +130,38 @@ current-main evidence, not stale queue shape:
 - the prompt-heavy profile says the next materially new win is in **GDN
   prefill kernel vendoring**, not another hand-rolled candle experiment.
 
+### Remaining-work preflight — FlashInfer-style paged GQA decode (2026-04-22)
+
+Task brief checked against fresh `main` after PR #384:
+
+- **PR #384 merged:** yes (`930363e`, on `main` before current HEAD
+  `234c17a`).
+- **No open overlap:** yes. GitHub search over open PRs for
+  `flashinfer`, `paged decode`, and `flash_attn_paged_decode` returned no
+  active implementation PR.
+- **Decode call path still present:** yes.
+  `crates/kiln-model/src/forward.rs` still routes single-token paged
+  full-attention decode through `try_flash_attn_paged_decode(...)`, and
+  `crates/kiln-model/src/backend/cuda.rs` still implements
+  `flash_attn_paged_decode(...)` via
+  `kiln_flash_attn::flash_attn_paged_decode(...)`.
+
+**Decision: no implementation follow-up.** The fresh current-main profile
+above still leaves full-attention at sub-floor share on Qwen3.5-4B:
+
+- decode top-3 remain GDN-only (`gates` 18.0%, `gated_norm` 17.5%,
+  `qk_norm` 15.0%);
+- full-attention projections remain only ~3.8% of decode wall-clock
+  (`:kiln/proj/qkv` 3.0% + `:kiln/proj/o` 0.8%);
+- the inner `:kiln/attn/full/*` kernel region a FlashInfer-class paged
+  decode kernel would replace stays below the reporting floor.
+
+That keeps the overall Amdahl ceiling in the same ~`<=1.038x` range already
+documented by PR #163 and the later frontier audits, still well below the
+Phase 6 reopen bar. Replacing the current CUDA paged-decode backend on this
+model would be redoing a known sub-floor slice, not landing the next queued
+win.
+
 
 ## Phase 7 design: streaming/tiled GDN prefill — 2026-04-20
 
