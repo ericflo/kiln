@@ -1,0 +1,14 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.08
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+[c29_compare] processed 49 dumps (49 valid, 0 errors)
+[c29_compare] median cos=0.999978  top-1 match rate=1.0000  median J@5=1.0000  median J@10=1.0000  median KL(k‖r)=2.057e-05
+[c29_compare] flagged 6 sites (top-1 mismatch OR J@10 < 0.9)
+[c29_compare] wrote /workspace/c29-out/compare/c29-logits-compare.json and /workspace/c29-out/compare/c29-logits-compare.md
