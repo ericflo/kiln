@@ -19,8 +19,8 @@ use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_streaming,
-    model_forward_paged_with_last_hidden, streaming_prefill_enabled,
+    model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_streaming, streaming_prefill_enabled,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -1031,7 +1031,7 @@ fn bench_latency_paged_mtp(
     // Prefill: paged forward returning (logits, last-position hidden state)
     // so we can seed h_prev for the first MTP draft step.
     let prefill_start = Instant::now();
-    let (prefill_logits, mut h_prev) = model_forward_paged_with_last_hidden(
+    let (prefill_logits, mut h_prev) = model_forward_paged_last_token_with_last_hidden(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -1045,10 +1045,8 @@ fn bench_latency_paged_mtp(
     )
     .context("MTP prefill (paged with last-hidden) failed")?;
 
-    // prefill_logits is [1, seq_len, V]; slice the last row before sampling.
-    let prefill_last = prefill_logits
-        .narrow(1, prompt_token_ids.len() - 1, 1)?
-        .squeeze(1)?;
+    // prefill_logits is already [1, 1, V].
+    let prefill_last = prefill_logits.squeeze(1)?;
     let mut last_token = greedy_sample(&prefill_last)?;
     let prefill_time = prefill_start.elapsed();
 
@@ -1119,7 +1117,7 @@ fn bench_latency_paged_mtp(
         }
 
         let per_token_ms = (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
-        for &tok in &step.accepted_tokens {
+        for &_tok in &step.accepted_tokens {
             inter_token_ms.push(per_token_ms);
             num_tokens += 1;
             if num_tokens >= max_output_tokens {

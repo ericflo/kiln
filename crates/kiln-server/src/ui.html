@@ -522,7 +522,7 @@ textarea { resize: vertical; min-height: 80px; }
           <option value="">Base Model</option>
         </select>
         <label style="font-size:12px;color:var(--text2);margin-left:8px;">Temp:</label>
-        <input type="number" id="chat-temp" value="0.7" min="0" max="2" step="0.1" style="width:70px;">
+        <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1" style="width:70px;">
       </div>
       <div class="chat-messages" id="chat-messages"></div>
       <div class="chat-input-row">
@@ -921,7 +921,8 @@ async function sendChat() {
   renderChat();
 
   const adapter = document.getElementById('chat-adapter').value || undefined;
-  const temp = parseFloat(document.getElementById('chat-temp').value) || 0.7;
+  const parsedTemp = parseFloat(document.getElementById('chat-temp').value);
+  const temp = Number.isFinite(parsedTemp) ? parsedTemp : 0.0;
 
   const body = {
     messages: chatMessages.filter(m => m.content).map(m => ({ role: m.role, content: m.content })),

@@ -149,6 +149,8 @@ enum ResolvedSpeculativeMode {
     Mtp,
 }
 
+const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
+
 fn resolve_skip_layer_config(
     model_config: &kiln_core::config::ModelConfig,
     speculative: &SpeculativeDecodingConfig,
@@ -165,6 +167,7 @@ fn resolve_speculative_mode_from_config(
     model_config: &kiln_core::config::ModelConfig,
     speculative: &SpeculativeDecodingConfig,
     sampling: &SamplingParams,
+    prompt_tokens: usize,
     mtp_supported: bool,
     has_active_lora: bool,
 ) -> ResolvedSpeculativeMode {
@@ -176,12 +179,14 @@ fn resolve_speculative_mode_from_config(
             .map(ResolvedSpeculativeMode::SkipLayer)
             .unwrap_or(ResolvedSpeculativeMode::Off),
         SpecMethod::Mtp => {
-            if mtp_supported && sampling.temperature == 0.0 && !has_active_lora {
+            if mtp_supported
+                && sampling.temperature == 0.0
+                && !has_active_lora
+                && prompt_tokens <= MTP_MAX_PROMPT_TOKENS_DEFAULT
+            {
                 ResolvedSpeculativeMode::Mtp
             } else {
-                skip_layer
-                    .map(ResolvedSpeculativeMode::SkipLayer)
-                    .unwrap_or(ResolvedSpeculativeMode::Off)
+                ResolvedSpeculativeMode::Off
             }
         }
     }
@@ -190,6 +195,7 @@ fn resolve_speculative_mode_from_config(
 fn resolve_speculative_mode(
     state: &AppState,
     sampling: &SamplingParams,
+    prompt_tokens: usize,
     mtp_supported: bool,
     has_active_lora: bool,
 ) -> ResolvedSpeculativeMode {
@@ -198,6 +204,7 @@ fn resolve_speculative_mode(
         &state.model_config,
         &speculative,
         sampling,
+        prompt_tokens,
         mtp_supported,
         has_active_lora,
     )
@@ -432,8 +439,13 @@ async fn generate_real(
         let guard = runner.read().unwrap();
         (guard.weights.mtp.is_some(), guard.active_lora().is_some())
     };
-    let speculative_mode =
-        resolve_speculative_mode(state, sampling, mtp_supported, has_active_lora);
+    let speculative_mode = resolve_speculative_mode(
+        state,
+        sampling,
+        prompt_token_count,
+        mtp_supported,
+        has_active_lora,
+    );
 
     // ModelRunner.generate_paged() is CPU-bound; run on a blocking thread to
     // avoid starving the tokio runtime.
@@ -536,8 +548,13 @@ async fn generate_real_streaming(
         let guard = runner.read().unwrap();
         (guard.weights.mtp.is_some(), guard.active_lora().is_some())
     };
-    let speculative_mode =
-        resolve_speculative_mode(state, sampling, mtp_supported, has_active_lora);
+    let speculative_mode = resolve_speculative_mode(
+        state,
+        sampling,
+        prompt_tokens.len(),
+        mtp_supported,
+        has_active_lora,
+    );
 
     let runner = runner.clone();
     let bm = block_manager.clone();
@@ -958,6 +975,7 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(1.0),
+            16,
             false,
             false,
         );
@@ -984,6 +1002,7 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(0.0),
+            16,
             true,
             false,
         );
@@ -993,19 +1012,31 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(0.7),
+            16,
             true,
             false,
         );
-        assert!(matches!(sampled, ResolvedSpeculativeMode::SkipLayer(_)));
+        assert!(matches!(sampled, ResolvedSpeculativeMode::Off));
 
         let with_lora = resolve_speculative_mode_from_config(
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(0.0),
+            16,
             true,
             true,
         );
-        assert!(matches!(with_lora, ResolvedSpeculativeMode::SkipLayer(_)));
+        assert!(matches!(with_lora, ResolvedSpeculativeMode::Off));
+
+        let long_prompt = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            MTP_MAX_PROMPT_TOKENS_DEFAULT + 1,
+            true,
+            false,
+        );
+        assert!(matches!(long_prompt, ResolvedSpeculativeMode::Off));
     }
 
     #[test]
@@ -1020,6 +1051,7 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(1.0),
+            16,
             false,
             false,
         );

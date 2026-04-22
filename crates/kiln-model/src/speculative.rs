@@ -11,8 +11,8 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
+use rand::Rng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
@@ -22,9 +22,8 @@ use kiln_core::token::TokenId;
 use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
-    model_forward, model_forward_embed, model_forward_head,
-    model_forward_paged_with_last_hidden, model_forward_segment, mtp_forward_step, GpuWeights,
-    LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_head,
+    model_forward_paged_with_last_hidden, model_forward_segment, mtp_forward_step,
 };
 use crate::kv_cache::KvCache;
 use crate::paged_kv_cache::PagedKvCache;
@@ -249,7 +248,14 @@ pub fn draft_forward_for_state_init(
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
 ) -> Result<()> {
-    let _ = draft_forward(backend, token_ids, weights, config, draft_layers, linear_state)?;
+    let _ = draft_forward(
+        backend,
+        token_ids,
+        weights,
+        config,
+        draft_layers,
+        linear_state,
+    )?;
     Ok(())
 }
 
@@ -371,12 +377,8 @@ pub fn speculative_decode_step(
                 // Target disagrees with EOS — accept target's token instead
                 accepted_tokens.push(target_token);
             } else {
-                let (accepted, resampled) = rejection_sample(
-                    draft_token,
-                    &draft_probs_list[i],
-                    &target_probs,
-                    rng,
-                )?;
+                let (accepted, resampled) =
+                    rejection_sample(draft_token, &draft_probs_list[i], &target_probs, rng)?;
                 if accepted {
                     hit_eos = true;
                     break;
@@ -408,12 +410,8 @@ pub fn speculative_decode_step(
             }
         } else {
             // Stochastic verification via rejection sampling
-            let (accepted, resampled) = rejection_sample(
-                draft_token,
-                &draft_probs_list[i],
-                &target_probs,
-                rng,
-            )?;
+            let (accepted, resampled) =
+                rejection_sample(draft_token, &draft_probs_list[i], &target_probs, rng)?;
 
             if accepted {
                 accepted_tokens.push(draft_token);
@@ -437,13 +435,7 @@ pub fn speculative_decode_step(
         let bonus_token = if temperature == 0.0 {
             greedy_sample(&bonus_logits)?
         } else {
-            sample_with_params(
-                &bonus_logits,
-                temperature,
-                params.top_p,
-                params.top_k,
-                None,
-            )?
+            sample_with_params(&bonus_logits, temperature, params.top_p, params.top_k, None)?
         };
 
         if eos_token_ids.contains(&bonus_token) {
@@ -469,7 +461,7 @@ pub fn speculative_decode_step(
 /// Result of one native MTP (Multi-Token Prediction) speculative decoding step.
 ///
 /// In addition to the accepted tokens and EOS flag produced by
-/// [`SpeculativeStepResult`], MTP also threads a new `h_prev` (pre-final-norm
+/// [`SpeculativeStepResult`], MTP also threads a new `h_prev` (post-final-norm
 /// hidden state from the base-model verify pass) and advances the MTP
 /// position counter independently of the base position counter.
 #[derive(Debug)]
@@ -479,16 +471,12 @@ pub struct MtpSpeculativeStepResult {
     pub accepted_tokens: Vec<TokenId>,
     /// Whether an EOS token was encountered in the accepted run.
     pub hit_eos: bool,
-    /// Pre-final-norm hidden state to feed into the NEXT MTP step.
+    /// Post-final-norm hidden state to feed into the NEXT MTP step.
     ///
     /// On ACCEPT this is the hidden at the draft token's position in the
-    /// verify pass (correctly predicts the bonus). On REJECT this is also the
-    /// draft position's hidden — a known approximation because the draft was
-    /// rejected, so the true h_prev for the corrected token is one position
-    /// earlier. The staleness typically costs <5% of acceptance rate for k=1
-    /// MTP; extracting both positions from the verify pass is a follow-up
-    /// optimisation that requires returning `[1, seq_len, H]` instead of only
-    /// the last row.
+    /// verify pass, which predicts the bonus. On REJECT this is the hidden
+    /// after replaying only `last_token`, so the next draft starts from exact
+    /// base-model GDN state.
     pub new_h_prev: Tensor,
     /// How many KV-cache slots the BASE model consumed this step
     /// (`= accepted_tokens.len()` when no EOS cut the step short, and
@@ -528,8 +516,8 @@ pub struct MtpSpeculativeStepResult {
 ///    KV slot; the base KV at `base_pos + 1` is also written but stale and is
 ///    overwritten on the next iteration when the corrected token is processed
 ///    as the new `last_token`).
-/// 5. Return the new `h_prev` (hidden at the draft position) so the caller
-///    can thread it into the next MTP step.
+/// 5. Return the new `h_prev`: the draft position on accept, or the replayed
+///    `last_token` position on reject.
 ///
 /// Greedy-only path (temperature == 0). The stochastic rejection-sampling
 /// variant is a follow-up; this implementation takes the minimum viable path
@@ -576,15 +564,18 @@ pub fn speculative_mtp_decode_step(
     .context("mtp draft step failed")?;
     let draft_token = greedy_sample(&mtp_logits).context("mtp draft sampling failed")?;
 
-    // 2. Verify the draft with a one-token base-model step. A single
-    // `[last_token, draft_token]` call is mathematically equivalent for
-    // greedy verification, but it misses Metal's single-token decode fast
-    // paths. Split verification keeps the base model on the normal decode
-    // path and lets us skip the second token entirely on rejection.
-    let verify_input0 = [last_token];
-    let (verify_logits0, hidden_after_last) = model_forward_paged_with_last_hidden(
+    // 2. Verify the draft with one two-token base-model pass. This is the only
+    // k=1 MTP shape that can amortize base-model overhead: on accept the pass
+    // both verifies `draft_token` and produces the bonus-token logits. On
+    // rejection we restore the GDN state snapshot and replay the one committed
+    // token so the base recurrent state remains exact.
+    let linear_state_snapshot = linear_state
+        .snapshot()
+        .context("snapshot linear attention state before MTP verify")?;
+    let verify_input = [last_token, draft_token];
+    let (verify_logits, hidden_after_draft) = model_forward_paged_with_last_hidden(
         backend,
-        &verify_input0,
+        &verify_input,
         weights,
         config,
         base_cache,
@@ -594,13 +585,11 @@ pub fn speculative_mtp_decode_step(
         None, // no LoRA on the verify pass — keep parity with scaffolding.
         None, // positions_gpu: let the forward pass build positions internally.
     )
-    .context("mtp verify position 0 forward failed")?;
+    .context("mtp two-token verify forward failed")?;
 
-    // Position 0 predicts what follows `last_token`; compare it with the MTP
-    // draft. If it rejects, `hidden_after_last` is the correct `h_prev` for
-    // the next MTP step because the accepted token will be consumed as the
-    // next loop's `last_token`.
-    let verify_pos0 = verify_logits0.squeeze(1)?;
+    // Position 0 predicts what follows `last_token`; position 1 predicts what
+    // follows the accepted draft token (the speculative bonus).
+    let verify_pos0 = verify_logits.narrow(1, 0, 1)?.squeeze(1)?;
     let target_at_0 = greedy_sample(&verify_pos0).context("verify pos-0 sampling failed")?;
 
     // 3. Accept / reject decision. Greedy compare.
@@ -666,7 +655,7 @@ pub fn speculative_mtp_decode_step(
         );
     }
 
-    let mut new_h_prev = hidden_after_last;
+    let mut new_h_prev = hidden_after_draft.clone();
     let (base_advance, mtp_advance) = if draft_accepted {
         // ACCEPT: draft_token matches target. Emit [draft, bonus].
         if eos_token_ids.contains(&draft_token) {
@@ -676,22 +665,7 @@ pub fn speculative_mtp_decode_step(
             (1, 1)
         } else {
             accepted_tokens.push(draft_token);
-            let verify_input1 = [draft_token];
-            let (verify_logits1, hidden_after_draft) = model_forward_paged_with_last_hidden(
-                backend,
-                &verify_input1,
-                weights,
-                config,
-                base_cache,
-                base_block_table,
-                base_pos + 1,
-                Some(linear_state),
-                None, // no LoRA on the verify pass — keep parity with scaffolding.
-                None, // positions_gpu: let the forward pass build positions internally.
-            )
-            .context("mtp verify bonus forward failed")?;
-            new_h_prev = hidden_after_draft;
-            let verify_pos1 = verify_logits1.squeeze(1)?;
+            let verify_pos1 = verify_logits.narrow(1, 1, 1)?.squeeze(1)?;
             let bonus = greedy_sample(&verify_pos1).context("bonus sampling failed")?;
             if eos_token_ids.contains(&bonus) {
                 hit_eos = true;
@@ -702,6 +676,29 @@ pub fn speculative_mtp_decode_step(
             (2, 1)
         }
     } else {
+        // Restore to the state before the optimistic two-token verifier, then
+        // replay exactly the committed token. The stale base KV written at
+        // `base_pos + 1` is outside the next attention window and will be
+        // overwritten if that slot becomes live later.
+        linear_state
+            .restore_from(&linear_state_snapshot)
+            .context("restore linear attention state after MTP rejection")?;
+        let verify_input0 = [last_token];
+        let (_verify_logits0, hidden_after_last) = model_forward_paged_with_last_hidden(
+            backend,
+            &verify_input0,
+            weights,
+            config,
+            base_cache,
+            base_block_table,
+            base_pos,
+            Some(linear_state),
+            None,
+            None,
+        )
+        .context("mtp rejection replay forward failed")?;
+        new_h_prev = hidden_after_last;
+
         // REJECT: emit the target's token at position 0.
         if eos_token_ids.contains(&target_at_0) {
             hit_eos = true;
@@ -727,6 +724,7 @@ pub fn speculative_mtp_decode_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     fn make_rng(seed: u64) -> StdRng {
         StdRng::seed_from_u64(seed)
@@ -756,14 +754,20 @@ mod tests {
         // Token 0 should always be accepted (p_target/p_draft = 4.0, clamped to 1.0)
         for _ in 0..50 {
             let (accepted, _) = rejection_sample(0, &draft_probs, &target_probs, &mut rng).unwrap();
-            assert!(accepted, "token 0 should always be accepted when target concentrates on it");
+            assert!(
+                accepted,
+                "token 0 should always be accepted when target concentrates on it"
+            );
         }
 
         // Token 1 should always be rejected (p_target = 0)
         for _ in 0..50 {
             let (accepted, resampled) =
                 rejection_sample(1, &draft_probs, &target_probs, &mut rng).unwrap();
-            assert!(!accepted, "token 1 should always be rejected when target assigns 0 prob");
+            assert!(
+                !accepted,
+                "token 1 should always be rejected when target assigns 0 prob"
+            );
             // Resampled token should always be 0 (the only token with mass in adjusted dist)
             assert_eq!(resampled, Some(0), "resampled should be token 0");
         }
@@ -833,13 +837,10 @@ mod tests {
     fn test_logits_to_probs_2d() {
         let device = candle_core::Device::Cpu;
         // [seq_len=2, vocab_size=3]
-        let logits = Tensor::new(
-            &[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
-            &device,
-        )
-        .unwrap()
-        .reshape((2, 3))
-        .unwrap();
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
+            .unwrap()
+            .reshape((2, 3))
+            .unwrap();
 
         // Should extract last position (4.0, 5.0, 6.0)
         let probs = logits_to_probs(&logits, 1.0).unwrap();
