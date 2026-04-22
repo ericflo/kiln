@@ -1,0 +1,104 @@
+{
+  "verdict": "DRIFT",
+  "strict_cos_threshold": 0.999,
+  "fp32_reference": false,
+  "statuses": {
+    "pos_0": "drift",
+    "pos_2": "no_dumps"
+  },
+  "reports": {
+    "pos_0": {
+      "pos": 0,
+      "status": "drift",
+      "fp32_reference": false,
+      "chained_seq_len": 519,
+      "first_base_pos": 512,
+      "strict_threshold": 0.999,
+      "drift_growth": {
+        "step0_drift": 0.017690420150756836,
+        "stepN_drift": 0.02352982759475708,
+        "ratio": 1.3300886804404373
+      },
+      "steps": [
+        {
+          "step": 0,
+          "base_pos": 512,
+          "cos_sim": 0.9823095798492432,
+          "max_abs_delta": 25.125,
+          "rel_err_mean": 64.69383239746094,
+          "kiln_h_norm": 67.76581573486328,
+          "ref_h_norm": 155.8198699951172
+        },
+        {
+          "step": 1,
+          "base_pos": 513,
+          "cos_sim": 0.9864998459815979,
+          "max_abs_delta": 31.5,
+          "rel_err_mean": 146.31057739257812,
+          "kiln_h_norm": 69.43870544433594,
+          "ref_h_norm": 159.50184631347656
+        },
+        {
+          "step": 2,
+          "base_pos": 514,
+          "cos_sim": 0.963439404964447,
+          "max_abs_delta": 17.6875,
+          "rel_err_mean": 25.056142807006836,
+          "kiln_h_norm": 63.463497161865234,
+          "ref_h_norm": 150.25750732421875
+        },
+        {
+          "step": 3,
+          "base_pos": 515,
+          "cos_sim": 0.9607616662979126,
+          "max_abs_delta": 23.375,
+          "rel_err_mean": 107.38768005371094,
+          "kiln_h_norm": 80.25481414794922,
+          "ref_h_norm": 153.2808837890625
+        },
+        {
+          "step": 4,
+          "base_pos": 516,
+          "cos_sim": 0.9865767955780029,
+          "max_abs_delta": 12.375,
+          "rel_err_mean": 2.8643367290496826,
+          "kiln_h_norm": 70.92362213134766,
+          "ref_h_norm": 158.10577392578125
+        },
+        {
+          "step": 5,
+          "base_pos": 517,
+          "cos_sim": 0.9528228044509888,
+          "max_abs_delta": 21.0625,
+          "rel_err_mean": 9.752317428588867,
+          "kiln_h_norm": 69.10901641845703,
+          "ref_h_norm": 146.5948028564453
+        },
+        {
+          "step": 6,
+          "base_pos": 518,
+          "cos_sim": 0.972762942314148,
+          "max_abs_delta": 22.8125,
+          "rel_err_mean": 0.5952926874160767,
+          "kiln_h_norm": 70.43682098388672,
+          "ref_h_norm": 153.03775024414062
+        },
+        {
+          "step": 7,
+          "base_pos": 519,
+          "cos_sim": 0.9764701724052429,
+          "max_abs_delta": 20.875,
+          "rel_err_mean": 18.934814453125,
+          "kiln_h_norm": 62.71218490600586,
+          "ref_h_norm": 152.6781463623047
+        }
+      ]
+    },
+    "pos_2": {
+      "pos": 2,
+      "status": "no_dumps",
+      "reason": "no captures at /workspace/c15_out/captures/mtp_pos-2/",
+      "steps": []
+    }
+  }
+}
