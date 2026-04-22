@@ -800,7 +800,8 @@ fn bench_latency_skiplayer(
     // forward pass. Near the end of generation those speculative KV writes can
     // extend past the committed token budget before stale slots are overwritten
     // or ignored, so reserve headroom for the verify window.
-    let max_total = actual_prompt_tokens + max_output_tokens + num_speculative_tokens + 1;
+    let max_spec_window = num_speculative_tokens.min(max_output_tokens.max(1));
+    let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
     let mut kv_cache = KvCache::new(
         config.num_full_attention_layers,
         config.num_kv_heads,
@@ -810,7 +811,6 @@ fn bench_latency_skiplayer(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let mut draft_linear_state = LinearAttentionState::new(config, device)?;
     let backend = runtime_backend::for_device(device);
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -834,15 +834,9 @@ fn bench_latency_skiplayer(
     .context("skip-layer prefill forward pass failed")?;
     kv_cache.advance(actual_prompt_tokens);
 
-    // Initialize draft linear state from the prompt (mirrors generate.rs).
-    let _ = kiln_model::speculative::draft_forward_for_state_init(
-        &*backend,
-        &prompt_token_ids,
-        weights,
-        config,
-        draft_layers,
-        &mut draft_linear_state,
-    );
+    let mut draft_linear_state = linear_state
+        .snapshot_for_decode_rollback()
+        .context("clone draft state from skip-layer prefill")?;
 
     let mut last_token = greedy_sample(&logits)?;
     let prefill_time = prefill_start.elapsed();
@@ -1009,7 +1003,8 @@ fn bench_latency_paged_skiplayer(
     // `base_pos`. Reserve headroom so late-generation verify windows do not
     // run off the allocated paged cache before stale speculative slots are
     // overwritten by the next committed step.
-    let max_total = actual_prompt_tokens + max_output_tokens + num_speculative_tokens + 1;
+    let max_spec_window = num_speculative_tokens.min(max_output_tokens.max(1));
+    let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
     let mut paged_cache = PagedKvCache::new(
@@ -1022,7 +1017,6 @@ fn bench_latency_paged_skiplayer(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let mut draft_linear_state = LinearAttentionState::new(config, device)?;
     let backend = runtime_backend::for_device(device);
 
     let mut block_table = BlockTable::new();
@@ -1067,15 +1061,9 @@ fn bench_latency_paged_skiplayer(
         .context("paged skip-layer prefill forward pass failed")?
     };
 
-    kiln_model::speculative::draft_forward_for_state_init(
-        &*backend,
-        &prompt_token_ids,
-        weights,
-        config,
-        draft_layers,
-        &mut draft_linear_state,
-    )
-    .context("paged skip-layer draft state init failed")?;
+    let mut draft_linear_state = linear_state
+        .snapshot_for_decode_rollback()
+        .context("clone draft state from paged skip-layer prefill")?;
 
     let mut last_token = greedy_sample(&logits)?;
     let prefill_time = prefill_start.elapsed();

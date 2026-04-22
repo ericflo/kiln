@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
@@ -18,6 +19,28 @@ const LM_PREFIX: &str = "model.language_model.";
 
 /// Safetensors index file for sharded checkpoints.
 const INDEX_FILENAME: &str = "model.safetensors.index.json";
+
+#[derive(Debug)]
+struct ShardMetadata {
+    path: std::path::PathBuf,
+    size_bytes: u64,
+    modified_ns: u128,
+}
+
+#[derive(Debug)]
+struct LoadedShard {
+    meta: Arc<ShardMetadata>,
+    mmap: Arc<Mmap>,
+}
+
+#[derive(Debug)]
+struct TensorMapEntry<'a> {
+    shard: Arc<ShardMetadata>,
+    mmap: Arc<Mmap>,
+    view: &'a safetensors::tensor::TensorView<'a>,
+}
+
+type TensorMap<'a> = HashMap<&'a str, TensorMapEntry<'a>>;
 
 /// Optional loader toggles for startup-sensitive callers.
 #[derive(Debug, Clone, Copy)]
@@ -83,10 +106,12 @@ fn load_model_dense(
     );
 
     // Memory-map all shards and parse safetensors headers.
-    let mmaps = mmap_shards(&shards)?;
-    let parsed: Vec<SafeTensors<'_>> = mmaps
+    let loaded_shards = mmap_shards(&shards)?;
+    let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
-        .map(|mmap| SafeTensors::deserialize(&mmap[..]).context("Failed to parse safetensors file"))
+        .map(|shard| {
+            SafeTensors::deserialize(&shard.mmap[..]).context("Failed to parse safetensors file")
+        })
         .collect::<Result<Vec<_>>>()?;
 
     // Build a unified name -> (shard_idx, tensor_view) lookup.
@@ -97,10 +122,16 @@ fn load_model_dense(
             all_tensors.push((name, shard_idx, view));
         }
     }
-    let mut tensor_map: HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)> =
-        HashMap::new();
+    let mut tensor_map: TensorMap<'_> = HashMap::new();
     for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(name.as_str(), (Arc::clone(&mmaps[*shard_idx]), view));
+        tensor_map.insert(
+            name.as_str(),
+            TensorMapEntry {
+                shard: Arc::clone(&loaded_shards[*shard_idx].meta),
+                mmap: Arc::clone(&loaded_shards[*shard_idx].mmap),
+                view,
+            },
+        );
     }
 
     // Auto-detect prefix: try "model.language_model." first, fall back to "model.".
@@ -184,10 +215,12 @@ fn load_model_gptq(
         if shards.len() == 1 { "" } else { "s" }
     );
 
-    let mmaps = mmap_shards(&shards)?;
-    let parsed: Vec<SafeTensors<'_>> = mmaps
+    let loaded_shards = mmap_shards(&shards)?;
+    let parsed: Vec<SafeTensors<'_>> = loaded_shards
         .iter()
-        .map(|mmap| SafeTensors::deserialize(&mmap[..]).context("Failed to parse safetensors file"))
+        .map(|shard| {
+            SafeTensors::deserialize(&shard.mmap[..]).context("Failed to parse safetensors file")
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
@@ -196,10 +229,16 @@ fn load_model_gptq(
             all_tensors.push((name, shard_idx, view));
         }
     }
-    let mut tensor_map: HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)> =
-        HashMap::new();
+    let mut tensor_map: TensorMap<'_> = HashMap::new();
     for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(name.as_str(), (Arc::clone(&mmaps[*shard_idx]), view));
+        tensor_map.insert(
+            name.as_str(),
+            TensorMapEntry {
+                shard: Arc::clone(&loaded_shards[*shard_idx].meta),
+                mmap: Arc::clone(&loaded_shards[*shard_idx].mmap),
+                view,
+            },
+        );
     }
 
     let prefix = detect_prefix(&tensor_map);
@@ -318,25 +357,40 @@ fn discover_shards(model_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
 }
 
 /// Memory-map all shard files.
-fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<Arc<Mmap>>> {
+fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
     paths
         .iter()
         .map(|path| {
             let file = fs::File::open(path)
                 .with_context(|| format!("Failed to open {}", path.display()))?;
+            let meta = file
+                .metadata()
+                .with_context(|| format!("Failed to stat {}", path.display()))?;
+            let modified_ns = meta
+                .modified()
+                .ok()
+                .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let shard_meta = Arc::new(ShardMetadata {
+                path: path.clone(),
+                size_bytes: meta.len(),
+                modified_ns,
+            });
             // SAFETY: We assume the file is not modified while mapped.
             // This is standard practice for model weight loading.
             let mmap = unsafe { Mmap::map(&file) }
                 .with_context(|| format!("Failed to mmap {}", path.display()))?;
-            Ok(Arc::new(mmap))
+            Ok(LoadedShard {
+                meta: shard_meta,
+                mmap: Arc::new(mmap),
+            })
         })
         .collect()
 }
 
 /// Detect the weight name prefix by checking which keys exist.
-fn detect_prefix(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
-) -> String {
+fn detect_prefix(tensor_map: &TensorMap<'_>) -> String {
     // Try the VL model prefix first (Qwen3.5-4B ships as VL).
     if tensor_map.contains_key(&format!("{LM_PREFIX}embed_tokens.weight") as &str) {
         return LM_PREFIX.to_string();
@@ -355,7 +409,7 @@ fn detect_prefix(
 
 /// Load one transformer layer's weights.
 fn load_layer(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -397,7 +451,7 @@ fn load_layer(
 
 /// Load full GQA attention weights.
 fn load_full_attention(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -439,7 +493,7 @@ fn load_full_attention(
 
 /// Load Gated DeltaNet linear attention weights.
 fn load_linear_attention(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -528,7 +582,7 @@ fn load_linear_attention(
 
 /// Load FFN/MLP weights.
 fn load_ffn(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -571,10 +625,7 @@ fn load_ffn(
 /// prefix (e.g. `model.language_model.mtp.`). Probe both by checking for
 /// `{candidate}fc.weight`, which is always present when MTP is shipped.
 /// Returns `None` if no MTP tensors are present (checkpoint is MTP-less).
-fn detect_mtp_prefix(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
-    base_prefix: &str,
-) -> Option<String> {
+fn detect_mtp_prefix(tensor_map: &TensorMap<'_>, base_prefix: &str) -> Option<String> {
     let prefixed = format!("{base_prefix}mtp.");
     if tensor_map.contains_key(format!("{prefixed}fc.weight").as_str()) {
         return Some(prefixed);
@@ -610,7 +661,7 @@ fn detect_mtp_prefix(
 /// Returns `Ok(Some(..))` when detected, `Ok(None)` when absent (so older
 /// or MTP-less checkpoints continue to load unchanged).
 fn load_mtp_if_present(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     config: &ModelConfig,
 ) -> Result<Option<MtpWeights>> {
@@ -706,30 +757,45 @@ fn load_mtp_if_present(
 }
 
 /// Extract a tensor by name from the unified tensor map.
-fn extract_tensor(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
-    name: &str,
-) -> Result<WeightTensor> {
-    let (mmap, view) = tensor_map
+fn extract_tensor(tensor_map: &TensorMap<'_>, name: &str) -> Result<WeightTensor> {
+    let entry = tensor_map
         .get(name)
         .with_context(|| format!("Weight tensor not found: {name}"))?;
 
-    let dtype = convert_dtype(view.dtype())
-        .with_context(|| format!("Unsupported dtype {:?} for tensor {name}", view.dtype()))?;
+    let dtype = convert_dtype(entry.view.dtype()).with_context(|| {
+        format!(
+            "Unsupported dtype {:?} for tensor {name}",
+            entry.view.dtype()
+        )
+    })?;
 
-    let shape: Vec<usize> = view.shape().to_vec();
-    let view_data = view.data();
-    let mmap_start = mmap.as_ptr() as usize;
-    let mmap_end = mmap_start + mmap.len();
+    let shape: Vec<usize> = entry.view.shape().to_vec();
+    let view_data = entry.view.data();
+    let mmap_start = entry.mmap.as_ptr() as usize;
+    let mmap_end = mmap_start + entry.mmap.len();
     let data_start = view_data.as_ptr() as usize;
     let data_end = data_start + view_data.len();
     anyhow::ensure!(
         data_start >= mmap_start && data_end <= mmap_end,
         "tensor {name} data does not point into its safetensors mmap"
     );
-    let data = WeightData::mmap_slice(Arc::clone(mmap), data_start - mmap_start, view_data.len());
+    let data = WeightData::mmap_slice(
+        Arc::clone(&entry.mmap),
+        data_start - mmap_start,
+        view_data.len(),
+    );
 
-    Ok(WeightTensor { data, shape, dtype })
+    Ok(WeightTensor {
+        data,
+        shape,
+        dtype,
+        source: Some(WeightSource {
+            shard_path: entry.shard.path.clone(),
+            shard_size: entry.shard.size_bytes,
+            shard_mtime_ns: entry.shard.modified_ns,
+            tensor_name: name.to_owned(),
+        }),
+    })
 }
 
 /// Convert safetensors dtype to our dtype enum.
@@ -763,7 +829,7 @@ fn validate_shape(tensor: &WeightTensor, expected: &[usize], name: &str) -> Resu
 /// loaded from packed INT4 (qweight + scales + qzeros) and dequantized to BF16.
 /// Non-linear weights (norms, conv1d, a_log, dt_bias) are loaded as-is.
 fn load_layer_gptq(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -819,7 +885,7 @@ fn load_layer_gptq(
 /// Looks for `{name}.qweight`, `{name}.scales`, `{name}.qzeros` in the tensor map.
 /// Returns a dense BF16 `WeightTensor` with shape `[out_features, in_features]`.
 fn load_gptq_linear(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     name: &str,
     gptq_config: &GptqConfig,
     ctx: &str,
@@ -844,6 +910,12 @@ fn load_gptq_linear(
         &qzeros.0,
         &qzeros.1,
         gptq_config.group_size,
+        qweight.3.as_ref().map(|source| WeightSource {
+            shard_path: source.shard_path.clone(),
+            shard_size: source.shard_size,
+            shard_mtime_ns: source.shard_mtime_ns,
+            tensor_name: name.to_owned(),
+        }),
     )
     .with_context(|| format!("dequantizing {ctx}"))
 }
@@ -851,18 +923,33 @@ fn load_gptq_linear(
 /// Extract raw tensor data (bytes, shape, dtype) without dtype conversion.
 /// Used for GPTQ tensors which may be I32 (not supported by our TensorDType).
 fn extract_raw_tensor(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     name: &str,
-) -> Result<(Vec<u8>, Vec<usize>, safetensors::Dtype)> {
-    let (_mmap, view) = tensor_map
+) -> Result<(
+    Vec<u8>,
+    Vec<usize>,
+    safetensors::Dtype,
+    Option<WeightSource>,
+)> {
+    let entry = tensor_map
         .get(name)
         .with_context(|| format!("Weight tensor not found: {name}"))?;
-    Ok((view.data().to_vec(), view.shape().to_vec(), view.dtype()))
+    Ok((
+        entry.view.data().to_vec(),
+        entry.view.shape().to_vec(),
+        entry.view.dtype(),
+        Some(WeightSource {
+            shard_path: entry.shard.path.clone(),
+            shard_size: entry.shard.size_bytes,
+            shard_mtime_ns: entry.shard.modified_ns,
+            tensor_name: name.to_owned(),
+        }),
+    ))
 }
 
 /// Load GPTQ-quantized full GQA attention weights.
 fn load_full_attention_gptq(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -926,7 +1013,7 @@ fn load_full_attention_gptq(
 
 /// Load GPTQ-quantized Gated DeltaNet linear attention weights.
 fn load_linear_attention_gptq(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -1042,7 +1129,7 @@ fn load_linear_attention_gptq(
 
 /// Load GPTQ-quantized FFN/MLP weights.
 fn load_ffn_gptq(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     prefix: &str,
     layer_idx: usize,
     config: &ModelConfig,
@@ -1099,7 +1186,7 @@ fn load_ffn_gptq(
 /// Some small projections (e.g., GDN's in_proj_a/b) may not be quantized
 /// in certain GPTQ models. This function handles both cases gracefully.
 fn load_gptq_or_dense(
-    tensor_map: &HashMap<&str, (Arc<Mmap>, &safetensors::tensor::TensorView<'_>)>,
+    tensor_map: &TensorMap<'_>,
     name: &str,
     gptq_config: &GptqConfig,
     ctx: &str,
