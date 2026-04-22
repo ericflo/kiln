@@ -24,7 +24,10 @@ use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
-use crate::speculative::{SpeculativeConfig, speculative_decode_step, speculative_mtp_decode_step};
+use crate::speculative::{
+    SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
+    speculative_mtp_decode_step,
+};
 
 use kiln_core::block::{BlockManager, BlockTable};
 
@@ -772,6 +775,68 @@ impl ModelRunner {
         result
     }
 
+    pub fn generate_paged_speculative_shared_tokens(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        spec_config: &SpeculativeConfig,
+    ) -> Result<GenerationOutput> {
+        anyhow::ensure!(
+            params.temperature == 0.0,
+            "paged skip-layer speculative decode is greedy-only"
+        );
+        spec_config
+            .validate(&self.config)
+            .context("invalid speculative config")?;
+
+        let max_spec_window = spec_config.num_speculative_tokens.min(params.max_tokens.max(1));
+        let max_total = prompt_tokens.len() + params.max_tokens + max_spec_window + 1;
+        let (reservation, block_table) = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let block_size = bm_guard.block_size();
+            let num_blocks = Self::blocks_needed(max_total, block_size);
+            let block_ids = bm_guard
+                .allocate(num_blocks)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut block_table = BlockTable::new();
+            for &block_id in &block_ids {
+                block_table.push(block_id);
+            }
+            (
+                SharedBlockReservation {
+                    block_manager,
+                    block_ids,
+                },
+                block_table,
+            )
+        };
+
+        let output = self.generate_from_tokens_paged_speculative_interleaved(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+            spec_config,
+        );
+
+        drop(reservation);
+
+        let output = output?;
+        let text = self
+            .tokenizer
+            .decode(&output.token_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(GenerationOutput {
+            text,
+            token_ids: output.token_ids,
+            finish_reason: output.finish_reason,
+        })
+    }
+
     fn generate_from_tokens_paged_interleaved(
         &self,
         prompt_tokens: &[TokenId],
@@ -896,6 +961,195 @@ impl ModelRunner {
                     step_seed,
                 )?
             };
+        }
+
+        Ok(GenerationOutput {
+            text: String::new(),
+            token_ids: generated_tokens,
+            finish_reason: FinishReason::MaxTokens,
+        })
+    }
+
+    fn generate_from_tokens_paged_speculative_interleaved(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        spec_config: &SpeculativeConfig,
+    ) -> Result<GenerationOutput> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let mut linear_state = self.new_linear_state()?;
+        let mut draft_linear_state = self.new_linear_state()?;
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill_enabled() {
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+                .context("prefill forward pass (paged skip-layer, streaming) failed")?
+            } else {
+                model_forward_paged_last_token(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged skip-layer) failed")?
+            }
+        };
+
+        crate::speculative::draft_forward_for_state_init(
+            &*self.backend,
+            prompt_tokens,
+            &self.weights,
+            &self.config,
+            spec_config.draft_layers,
+            &mut draft_linear_state,
+        )
+        .context("draft state init for paged skip-layer failed")?;
+
+        let mut base_pos = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut last_token = greedy_sample(&logits)?;
+
+        loop {
+            if generated_tokens.len() >= params.max_tokens {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::MaxTokens,
+                });
+            }
+
+            if self.eos_token_ids.contains(&last_token) {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                });
+            }
+
+            generated_tokens.push(last_token);
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            return Ok(GenerationOutput {
+                                text: String::new(),
+                                token_ids: generated_tokens,
+                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::MaxTokens,
+                });
+            }
+
+            let remaining = params.max_tokens - generated_tokens.len();
+            let effective_config = SpeculativeConfig {
+                num_speculative_tokens: spec_config.num_speculative_tokens.min(remaining),
+                draft_layers: spec_config.draft_layers,
+            };
+
+            let result = {
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                speculative_decode_step_paged_greedy(
+                    &*self.backend,
+                    last_token,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    base_pos,
+                    &mut linear_state,
+                    &mut draft_linear_state,
+                    &effective_config,
+                    params,
+                    &self.eos_token_ids,
+                    self.active_lora.as_ref(),
+                )
+                .context("paged skip-layer speculative decode step failed")?
+            };
+            base_pos += result.base_advance;
+
+            if result.accepted_tokens.is_empty() {
+                if result.hit_eos {
+                    return Ok(GenerationOutput {
+                        text: String::new(),
+                        token_ids: generated_tokens,
+                        finish_reason: FinishReason::Eos,
+                    });
+                }
+                break;
+            }
+
+            for &token in &result.accepted_tokens[..result.accepted_tokens.len() - 1] {
+                generated_tokens.push(token);
+                if !params.stop.is_empty() {
+                    let decoded_so_far = self
+                        .tokenizer
+                        .decode(&generated_tokens)
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                        .ok();
+                    if let Some(text) = &decoded_so_far {
+                        for stop_seq in &params.stop {
+                            if text.contains(stop_seq.as_str()) {
+                                return Ok(GenerationOutput {
+                                    text: String::new(),
+                                    token_ids: generated_tokens,
+                                    finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                                });
+                            }
+                        }
+                    }
+                }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    return Ok(GenerationOutput {
+                        text: String::new(),
+                        token_ids: generated_tokens,
+                        finish_reason: FinishReason::MaxTokens,
+                    });
+                }
+            }
+
+            last_token = *result.accepted_tokens.last().unwrap();
+            if result.hit_eos {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                });
+            }
         }
 
         Ok(GenerationOutput {
@@ -1099,8 +1353,8 @@ impl ModelRunner {
         // Verification writes the full speculative window (`last_token + k`)
         // before the loop commits accepted tokens, so flat KV needs temporary
         // headroom beyond the user-visible max token budget.
-        let max_total =
-            prompt_tokens.len() + params.max_tokens + spec_config.num_speculative_tokens + 1;
+        let max_spec_window = spec_config.num_speculative_tokens.min(params.max_tokens.max(1));
+        let max_total = prompt_tokens.len() + params.max_tokens + max_spec_window + 1;
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
         let mut draft_linear_state = self.new_linear_state()?;
@@ -1728,6 +1982,10 @@ impl ModelRunner {
                 }
             }
 
+            if !matches!(finish_reason, FinishReason::MaxTokens) {
+                break;
+            }
+
             if generated_tokens.len() >= params.max_tokens {
                 break;
             }
@@ -1931,6 +2189,10 @@ impl ModelRunner {
                 }
             }
 
+            if !matches!(finish_reason, FinishReason::MaxTokens) {
+                break;
+            }
+
             if generated_tokens.len() >= params.max_tokens {
                 break;
             }
@@ -1993,6 +2255,56 @@ impl ModelRunner {
             block_manager,
             paged_cache,
         )
+    }
+
+    pub fn generate_streaming_paged_speculative_shared_tokens(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        spec_config: &SpeculativeConfig,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        anyhow::ensure!(
+            params.temperature == 0.0,
+            "paged skip-layer speculative streaming is greedy-only"
+        );
+        spec_config
+            .validate(&self.config)
+            .context("invalid speculative config")?;
+
+        let max_total =
+            prompt_tokens.len() + params.max_tokens + spec_config.num_speculative_tokens + 1;
+        let (reservation, block_table) = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let block_size = bm_guard.block_size();
+            let num_blocks = Self::blocks_needed(max_total, block_size);
+            let block_ids = bm_guard
+                .allocate(num_blocks)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut block_table = BlockTable::new();
+            for &block_id in &block_ids {
+                block_table.push(block_id);
+            }
+            (
+                SharedBlockReservation {
+                    block_manager,
+                    block_ids,
+                },
+                block_table,
+            )
+        };
+
+        let result = self.generate_from_tokens_streaming_paged_speculative_interleaved(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+            spec_config,
+        );
+
+        drop(reservation);
+        result
     }
 
     fn generate_from_tokens_streaming_paged_shared(
@@ -2169,6 +2481,172 @@ impl ModelRunner {
                     step_seed,
                 )?
             };
+        }
+
+        let _ = tx.send(StreamEvent::Done(StreamDone {
+            finish_reason,
+            completion_tokens: generated_tokens.len(),
+        }));
+
+        Ok(rx)
+    }
+
+    fn generate_from_tokens_streaming_paged_speculative_interleaved(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        spec_config: &SpeculativeConfig,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let (tx, rx) = mpsc::channel();
+        let mut linear_state = self.new_linear_state()?;
+        let mut draft_linear_state = self.new_linear_state()?;
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill_enabled() {
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+                .context("prefill forward pass (streaming paged skip-layer, streaming) failed")?
+            } else {
+                model_forward_paged_last_token(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (streaming paged skip-layer) failed")?
+            }
+        };
+
+        crate::speculative::draft_forward_for_state_init(
+            &*self.backend,
+            prompt_tokens,
+            &self.weights,
+            &self.config,
+            spec_config.draft_layers,
+            &mut draft_linear_state,
+        )
+        .context("draft state init for streaming paged skip-layer failed")?;
+
+        let mut base_pos = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut finish_reason = FinishReason::MaxTokens;
+        let mut last_token = greedy_sample(&logits)?;
+
+        loop {
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            if self.eos_token_ids.contains(&last_token) {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
+
+            match emit_stream_token(
+                &tx,
+                &self.tokenizer,
+                &mut generated_tokens,
+                last_token,
+                &params.stop,
+            ) {
+                StreamTokenDisposition::Continue => {}
+                StreamTokenDisposition::Finished(reason) => {
+                    finish_reason = reason;
+                    break;
+                }
+                StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            let remaining = params.max_tokens - generated_tokens.len();
+            let effective_config = SpeculativeConfig {
+                num_speculative_tokens: spec_config.num_speculative_tokens.min(remaining),
+                draft_layers: spec_config.draft_layers,
+            };
+
+            let result = {
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                speculative_decode_step_paged_greedy(
+                    &*self.backend,
+                    last_token,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    base_pos,
+                    &mut linear_state,
+                    &mut draft_linear_state,
+                    &effective_config,
+                    params,
+                    &self.eos_token_ids,
+                    self.active_lora.as_ref(),
+                )
+                .context("streaming paged skip-layer speculative decode step failed")?
+            };
+            base_pos += result.base_advance;
+
+            if result.accepted_tokens.is_empty() {
+                if result.hit_eos {
+                    finish_reason = FinishReason::Eos;
+                }
+                break;
+            }
+
+            for &token in &result.accepted_tokens[..result.accepted_tokens.len() - 1] {
+                match emit_stream_token(
+                    &tx,
+                    &self.tokenizer,
+                    &mut generated_tokens,
+                    token,
+                    &params.stop,
+                ) {
+                    StreamTokenDisposition::Continue => {}
+                    StreamTokenDisposition::Finished(reason) => {
+                        finish_reason = reason;
+                        break;
+                    }
+                    StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+                }
+
+                if generated_tokens.len() >= params.max_tokens {
+                    break;
+                }
+            }
+
+            if !matches!(finish_reason, FinishReason::MaxTokens) {
+                break;
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            last_token = *result.accepted_tokens.last().unwrap();
+            if result.hit_eos {
+                finish_reason = FinishReason::Eos;
+                break;
+            }
         }
 
         let _ = tx.send(StreamEvent::Done(StreamDone {

@@ -387,6 +387,23 @@ impl LinearAttentionState {
         })
     }
 
+    /// Snapshot for decode rollback.
+    ///
+    /// Recurrent tensors are replaced on update, so Arc-cloning their handles
+    /// preserves the pre-step value without a device copy. Conv state is mutated
+    /// in-place by the Metal/CUDA update kernels, so it must still be copied.
+    pub fn snapshot_for_decode_rollback(&self) -> Result<Self> {
+        let recurrent_states = self.recurrent_states.clone();
+        let mut conv_states = Vec::with_capacity(self.conv_states.len());
+        for t in &self.conv_states {
+            conv_states.push(t.copy().context("snapshot conv state")?);
+        }
+        Ok(Self {
+            recurrent_states,
+            conv_states,
+        })
+    }
+
     /// Restore this state from a previously captured [`Self::snapshot`].
     ///
     /// Checks that the shapes/counts match — a mismatch indicates the caller
@@ -420,6 +437,29 @@ impl LinearAttentionState {
         for (dst, src) in self.conv_states.iter_mut().zip(snapshot.conv_states.iter()) {
             *dst = src.copy().context("restore conv state")?;
         }
+        Ok(())
+    }
+
+    /// Restore from [`Self::snapshot_for_decode_rollback`] without recopying
+    /// recurrent state. The snapshot owns fresh conv-state copies, so assigning
+    /// their tensor handles is enough to restore the old conv buffers as well.
+    pub fn restore_from_decode_rollback(&mut self, snapshot: &Self) -> Result<()> {
+        if self.recurrent_states.len() != snapshot.recurrent_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState::restore_from_decode_rollback: recurrent_states len mismatch ({} vs {})",
+                self.recurrent_states.len(),
+                snapshot.recurrent_states.len()
+            );
+        }
+        if self.conv_states.len() != snapshot.conv_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState::restore_from_decode_rollback: conv_states len mismatch ({} vs {})",
+                self.conv_states.len(),
+                snapshot.conv_states.len()
+            );
+        }
+        self.recurrent_states.clone_from(&snapshot.recurrent_states);
+        self.conv_states.clone_from(&snapshot.conv_states);
         Ok(())
     }
 }
@@ -902,8 +942,8 @@ impl GpuWeights {
                 .context("embed_tokens stub")?;
             (embed_tokens, embed_tokens_t)
         } else {
-            let embed_tokens =
-                weight_to_tensor(&weights.embedding.embed_tokens, device).context("embed_tokens")?;
+            let embed_tokens = weight_to_tensor(&weights.embedding.embed_tokens, device)
+                .context("embed_tokens")?;
             let embed_tokens_t =
                 cached_transpose_for_weight(&weights.embedding.embed_tokens, &embed_tokens, device)
                     .context("embed_tokens cached transpose")?;
@@ -1630,13 +1670,8 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     #[cfg(feature = "metal")]
     {
         if input_dtype == DType::BF16 && crate::backend::metal::metal_gdn_qk_norm_supports(q, k) {
-            return crate::backend::metal::metal_gdn_qk_norm_f32_bf16(
-                q,
-                k,
-                scale as f32,
-                1e-6,
-            )
-            .context("metal gdn qk_norm kernel failed");
+            return crate::backend::metal::metal_gdn_qk_norm_f32_bf16(q, k, scale as f32, 1e-6)
+                .context("metal gdn qk_norm kernel failed");
         }
     }
 
@@ -3480,8 +3515,7 @@ pub fn gqa_attention_paged(
             crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_q", &q)?;
             crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_k", &k)?;
             crate::mtp_debug::capture_c7_sdpa_tap("pre_sdpa_v", &v)?;
-            let empty_mask =
-                candle_core::Tensor::zeros((), candle_core::DType::F32, q.device())?;
+            let empty_mask = candle_core::Tensor::zeros((), candle_core::DType::F32, q.device())?;
             crate::mtp_debug::capture_c7_sdpa_tap("causal_mask", &empty_mask)?;
         }
 
@@ -4448,8 +4482,7 @@ pub fn mtp_forward_step(
     } else {
         crate::mtp_debug::try_consume_dump_slot_for_pos(mtp_pos)
     };
-    let dump_pre_rope =
-        should_dump && crate::mtp_debug::is_dump_pre_rope_effectively_enabled();
+    let dump_pre_rope = should_dump && crate::mtp_debug::is_dump_pre_rope_effectively_enabled();
     if dump_pre_rope {
         crate::mtp_debug::arm_pre_rope_capture();
     }
@@ -4545,9 +4578,7 @@ pub fn mtp_forward_step(
             let in_dtype = concat.dtype();
             let concat_f32 = concat.to_dtype(candle_core::DType::F32)?;
             let fc_t_f32 = mtp.fc_t.to_dtype(candle_core::DType::F32)?;
-            concat_f32
-                .broadcast_matmul(&fc_t_f32)?
-                .to_dtype(in_dtype)?
+            concat_f32.broadcast_matmul(&fc_t_f32)?.to_dtype(in_dtype)?
         } else {
             concat.broadcast_matmul(&mtp.fc_t)?
         }
@@ -4703,8 +4734,7 @@ pub fn mtp_forward_step(
         // can substitute `{step}` alongside `{pos}` so each of the up-to-8
         // per-position dumps lands in its own file. Falls back to the legacy
         // `{pos}`-only substitution when splice is off.
-        let dump_path_opt =
-            crate::mtp_debug::dump_path_for_pos_and_step(mtp_pos, splice_step);
+        let dump_path_opt = crate::mtp_debug::dump_path_for_pos_and_step(mtp_pos, splice_step);
         // Always drain the C7 TLS slot before returning. If we entered the
         // armed C7 path above but `dump_path_for_pos` returned None (pos not
         // listed in `KILN_MTP_DUMP_POS`), the slot would otherwise leak
@@ -4999,7 +5029,8 @@ fn model_forward_paged_inner(
                     config,
                     &mut state.recurrent_states[linear_attn_idx],
                     &mut state.conv_states[linear_attn_idx],
-                    /* capture_b11_taps = */ crate::mtp_debug::should_capture_b11_tap_for_layer(i),
+                    /* capture_b11_taps = */
+                    crate::mtp_debug::should_capture_b11_tap_for_layer(i),
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
@@ -6151,8 +6182,7 @@ mod tests {
         for col in 0..cols {
             for row in 0..rows {
                 let got_offset = (col * rows + row) * 2;
-                let got =
-                    u16::from_le_bytes([transposed[got_offset], transposed[got_offset + 1]]);
+                let got = u16::from_le_bytes([transposed[got_offset], transposed[got_offset + 1]]);
                 assert_eq!(got, values[row * cols + col]);
             }
         }

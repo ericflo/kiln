@@ -26,7 +26,8 @@ use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
-    SpeculativeConfig, speculative_decode_step, speculative_mtp_decode_step,
+    SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
+    speculative_mtp_decode_step,
 };
 use kiln_server::config::SpecMethod;
 
@@ -112,6 +113,10 @@ struct BenchArgs {
     /// non-paged contiguous KvCache + model_forward path so prior numbers stay
     /// comparable.
     paged: bool,
+    /// When true, stop after latency and emit JSON with empty throughput
+    /// results and no training result. This keeps rapid decode-path iteration
+    /// from paying unrelated benchmark costs.
+    latency_only: bool,
     /// RNG seed threaded through `SamplingParams` and `StdRng` sites so bench
     /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
     /// this across {0..=7} to get independent prompt/sampling trajectories.
@@ -126,6 +131,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut training_steps = 10;
     let mut skip_training = false;
     let mut paged = false;
+    let mut latency_only = false;
     let mut seed: u64 = 42;
 
     let mut i = 1;
@@ -153,6 +159,9 @@ fn parse_args() -> Result<BenchArgs> {
             "--paged" => {
                 paged = true;
             }
+            "--latency-only" => {
+                latency_only = true;
+            }
             "--seed" => {
                 i += 1;
                 seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(42);
@@ -175,6 +184,9 @@ fn parse_args() -> Result<BenchArgs> {
                     "                            (matches the HTTP/scheduler production path)"
                 );
                 eprintln!(
+                    "  --latency-only            Stop after latency and skip training/throughput"
+                );
+                eprintln!(
                     "  --seed <u64>              RNG seed + prompt selector from 8-prompt pool (default: 42)"
                 );
                 std::process::exit(0);
@@ -195,6 +207,7 @@ fn parse_args() -> Result<BenchArgs> {
         training_steps,
         skip_training,
         paged,
+        latency_only,
         seed,
     })
 }
@@ -748,7 +761,7 @@ fn read_spec_method_from_env() -> SpecMethod {
 /// each step's wall time is divided across the tokens emitted that step,
 /// giving a per-emitted-token ITL distribution comparable to the `Off` arm.
 ///
-/// Reads `KILN_SPEC_NUM_TOKENS` (default 4) and `KILN_SPEC_DRAFT_LAYERS`
+/// Reads `KILN_SPEC_NUM_TOKENS` (default 256) and `KILN_SPEC_DRAFT_LAYERS`
 /// (default 8). Greedy-only (`temperature = 0`) since the bench harness is
 /// deterministic.
 fn bench_latency_skiplayer(
@@ -764,7 +777,7 @@ fn bench_latency_skiplayer(
     let num_speculative_tokens = std::env::var("KILN_SPEC_NUM_TOKENS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(4usize);
+        .unwrap_or(256usize);
     let draft_layers = std::env::var("KILN_SPEC_DRAFT_LAYERS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -949,6 +962,252 @@ fn bench_latency_skiplayer(
         decode_tokens_per_sec: decode_tok_per_sec,
         spec_method: "skip_layer".to_string(),
         acceptance_rate: None,
+    })
+}
+
+/// Benchmark latency along the PAGED SKIP-LAYER speculative path.
+///
+/// This is benchmark-only scaffolding for the production-style paged
+/// self-speculative implementation. It keeps the paged prefill/cache/block-table
+/// setup in this harness and delegates each decode iteration to
+/// `speculative_decode_step_paged_greedy`, which is expected to verify against
+/// `PagedKvCache` at the caller-provided `base_pos`.
+///
+/// Enable with `KILN_SPEC_METHOD=skip_layer --paged`. Without `--paged`, the
+/// legacy flat-KV skip-layer benchmark remains available for comparisons.
+fn bench_latency_paged_skiplayer(
+    weights: &GpuWeights,
+    config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+    prompt_tokens: usize,
+    max_output_tokens: usize,
+    seed: u64,
+) -> Result<LatencyResult> {
+    let num_speculative_tokens = std::env::var("KILN_SPEC_NUM_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256usize);
+    let draft_layers = std::env::var("KILN_SPEC_DRAFT_LAYERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8usize);
+
+    let prompt = build_prompt(tokenizer, prompt_tokens, seed);
+    let prompt_token_ids = tokenizer
+        .encode(&prompt)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let actual_prompt_tokens = prompt_token_ids.len();
+
+    let device = weights.embed_tokens.device();
+    let dtype = match config.dtype {
+        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
+        kiln_core::config::DType::FP16 => candle_core::DType::F16,
+        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+    };
+
+    // Verification writes `[last_token, draft_0, ..., draft_k-1]` starting at
+    // `base_pos`. Reserve headroom so late-generation verify windows do not
+    // run off the allocated paged cache before stale speculative slots are
+    // overwritten by the next committed step.
+    let max_total = actual_prompt_tokens + max_output_tokens + num_speculative_tokens + 1;
+    let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
+
+    let mut paged_cache = PagedKvCache::new(
+        config.num_full_attention_layers,
+        num_blocks,
+        PAGED_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        dtype,
+        device,
+    )?;
+    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut draft_linear_state = LinearAttentionState::new(config, device)?;
+    let backend = runtime_backend::for_device(device);
+
+    let mut block_table = BlockTable::new();
+    for i in 0..num_blocks as u32 {
+        block_table.push(i);
+    }
+
+    let eos_token_ids = tokenizer.eos_token_ids();
+
+    eprintln!(
+        "  Measuring latency [SKIP-LAYER, paged, k={num_speculative_tokens}, \
+         draft_layers={draft_layers}, blocks={num_blocks}] ({actual_prompt_tokens} prompt tokens)..."
+    );
+
+    let prefill_start = Instant::now();
+    let logits = if streaming_prefill_enabled() {
+        model_forward_paged_streaming(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+        )
+        .context("paged skip-layer prefill forward pass (streaming) failed")?
+    } else {
+        model_forward_paged_last_token(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            None,
+        )
+        .context("paged skip-layer prefill forward pass failed")?
+    };
+
+    kiln_model::speculative::draft_forward_for_state_init(
+        &*backend,
+        &prompt_token_ids,
+        weights,
+        config,
+        draft_layers,
+        &mut draft_linear_state,
+    )
+    .context("paged skip-layer draft state init failed")?;
+
+    let mut last_token = greedy_sample(&logits)?;
+    let prefill_time = prefill_start.elapsed();
+
+    eprintln!(
+        "    Prefill (skip-layer paged): {:.1}ms ({:.0} tok/s)",
+        prefill_time.as_secs_f64() * 1000.0,
+        actual_prompt_tokens as f64 / prefill_time.as_secs_f64()
+    );
+
+    let mut inter_token_ms: Vec<f64> = Vec::new();
+    let mut num_tokens = 1usize; // counting the first token from prefill
+    let mut base_pos = actual_prompt_tokens;
+    let mut accepted_draft_tokens = 0usize;
+    let mut attempted_draft_tokens = 0usize;
+    let params = SamplingParams {
+        temperature: 0.0,
+        top_p: 1.0,
+        top_k: 0,
+        max_tokens: max_output_tokens,
+        repetition_penalty: 1.0,
+        stop: vec![],
+        seed: Some(seed),
+    };
+
+    while num_tokens < max_output_tokens {
+        if eos_token_ids.contains(&last_token) {
+            break;
+        }
+
+        let remaining = max_output_tokens - num_tokens;
+        let effective_config = SpeculativeConfig {
+            num_speculative_tokens: num_speculative_tokens.min(remaining.max(1)),
+            draft_layers,
+        };
+
+        let step_start = Instant::now();
+        let step = speculative_decode_step_paged_greedy(
+            &*backend,
+            last_token,
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            base_pos,
+            &mut linear_state,
+            &mut draft_linear_state,
+            &effective_config,
+            &params,
+            &eos_token_ids,
+            None,
+        )
+        .context("skip-layer speculative_decode_step_paged_greedy failed")?;
+        let step_time = step_start.elapsed();
+
+        if step.accepted_tokens.is_empty() {
+            break;
+        }
+        accepted_draft_tokens += step.accepted_draft_tokens;
+        attempted_draft_tokens += step.attempted_draft_tokens;
+
+        let accepted_len = step.accepted_tokens.len();
+        let per_token_ms = (step_time.as_secs_f64() * 1000.0) / accepted_len as f64;
+        for &tok in &step.accepted_tokens {
+            inter_token_ms.push(per_token_ms);
+            num_tokens += 1;
+            if num_tokens >= max_output_tokens {
+                break;
+            }
+            if eos_token_ids.contains(&tok) {
+                break;
+            }
+        }
+
+        last_token = *step.accepted_tokens.last().unwrap();
+        base_pos += step.base_advance;
+
+        if step.hit_eos {
+            break;
+        }
+    }
+
+    let mean_itl = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        inter_token_ms.iter().sum::<f64>() / inter_token_ms.len() as f64
+    };
+    let mut sorted = inter_token_ms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p50 = if sorted.is_empty() {
+        0.0
+    } else {
+        sorted[sorted.len() / 2]
+    };
+    let p99 = if sorted.is_empty() {
+        0.0
+    } else {
+        let idx = ((sorted.len() as f64 * 0.99) as usize).min(sorted.len() - 1);
+        sorted[idx]
+    };
+    let decode_tok_per_sec = if inter_token_ms.is_empty() {
+        0.0
+    } else {
+        let total_decode_ms: f64 = inter_token_ms.iter().sum();
+        inter_token_ms.len() as f64 / (total_decode_ms / 1000.0)
+    };
+
+    eprintln!(
+        "    Decode (skip-layer paged): {num_tokens} tokens, mean ITL {:.1}ms ({:.1} tok/s)",
+        mean_itl, decode_tok_per_sec
+    );
+    let acceptance_rate = if attempted_draft_tokens > 0 {
+        Some(accepted_draft_tokens as f64 / attempted_draft_tokens as f64)
+    } else {
+        None
+    };
+    if let Some(rate) = acceptance_rate {
+        eprintln!("    Acceptance (skip-layer paged): {:.3}", rate);
+    }
+
+    Ok(LatencyResult {
+        prompt_tokens: actual_prompt_tokens,
+        prefill_time_ms: prefill_time.as_secs_f64() * 1000.0,
+        prefill_tokens_per_sec: actual_prompt_tokens as f64 / prefill_time.as_secs_f64(),
+        time_to_first_token_ms: prefill_time.as_secs_f64() * 1000.0,
+        mean_inter_token_ms: mean_itl,
+        p50_inter_token_ms: p50,
+        p99_inter_token_ms: p99,
+        num_tokens_generated: num_tokens,
+        decode_tokens_per_sec: decode_tok_per_sec,
+        spec_method: "skip_layer_paged".to_string(),
+        acceptance_rate,
     })
 }
 
@@ -1435,7 +1694,9 @@ fn main() -> Result<()> {
     // Latency benchmark (uses model_forward directly — must run before runner takes ownership).
     // Dispatch order:
     //   * KILN_SPEC_METHOD=mtp        → bench_latency_paged_mtp (paged + MTP)
-    //   * KILN_SPEC_METHOD=skip_layer → bench_latency_skiplayer (flat KV + skip-layer)
+    //   * KILN_SPEC_METHOD=skip_layer → bench_latency_paged_skiplayer when
+    //                                   --paged, else bench_latency_skiplayer
+    //                                   (flat KV + skip-layer)
     //   * default / off               → bench_latency_paged (paged Off) when
     //                                   --paged, else bench_latency (flat Off).
     let latency = match spec_method {
@@ -1452,16 +1713,29 @@ fn main() -> Result<()> {
             .context("MTP latency benchmark failed")?
         }
         SpecMethod::SkipLayer => {
-            eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
-            bench_latency_skiplayer(
-                &gpu_weights,
-                &model_config,
-                &tokenizer,
-                args.prompt_tokens,
-                args.max_output_tokens,
-                args.seed,
-            )
-            .context("skip-layer latency benchmark failed")?
+            if args.paged {
+                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, paged) ---");
+                bench_latency_paged_skiplayer(
+                    &gpu_weights,
+                    &model_config,
+                    &tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                    args.seed,
+                )
+                .context("paged skip-layer latency benchmark failed")?
+            } else {
+                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
+                bench_latency_skiplayer(
+                    &gpu_weights,
+                    &model_config,
+                    &tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                    args.seed,
+                )
+                .context("skip-layer latency benchmark failed")?
+            }
         }
         SpecMethod::Off => {
             if args.paged {
@@ -1487,6 +1761,24 @@ fn main() -> Result<()> {
             }
         }
     };
+
+    if args.latency_only {
+        let results = BenchmarkResults {
+            backend: backend_name.to_string(),
+            gpu_info,
+            model_load,
+            inference: Vec::new(),
+            latency,
+            training: None,
+        };
+
+        print_summary(&results);
+
+        let json = serde_json::to_string_pretty(&results)?;
+        println!("{json}");
+
+        return Ok(());
+    }
 
     // Training benchmark (borrows gpu_weights — must run before runner takes ownership)
     let training = if args.skip_training {

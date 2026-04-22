@@ -23,7 +23,8 @@ use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_head,
-    model_forward_paged_with_last_hidden, model_forward_segment, mtp_forward_step,
+    model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
+    mtp_forward_step,
 };
 use crate::kv_cache::KvCache;
 use crate::paged_kv_cache::PagedKvCache;
@@ -34,7 +35,8 @@ use crate::sampling::{greedy_sample, sample_with_params};
 pub struct SpeculativeConfig {
     /// Number of tokens the draft model proposes per speculation step.
     /// Higher values amortize verification cost but risk more rejections.
-    /// Typical range: 3-8. Default: 4.
+    /// Typical range depends on the verifier path. The paged greedy path uses
+    /// a large default window to amortize full-model verification.
     pub num_speculative_tokens: usize,
 
     /// Number of layers to use for the draft model (skip-layer approach).
@@ -46,7 +48,7 @@ pub struct SpeculativeConfig {
 impl Default for SpeculativeConfig {
     fn default() -> Self {
         Self {
-            num_speculative_tokens: 4,
+            num_speculative_tokens: 256,
             draft_layers: 8,
         }
     }
@@ -83,7 +85,7 @@ pub struct SpeculativeStepResult {
 ///
 /// This produces lower-quality logits but runs much faster since it skips
 /// most of the model's layers.
-fn draft_forward(
+fn draft_forward_hidden(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
     weights: &GpuWeights,
@@ -107,7 +109,25 @@ fn draft_forward(
         None, // no LoRA for draft (speed over quality)
     )?;
 
-    // Project to vocab
+    Ok(hidden)
+}
+
+fn draft_forward(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &ModelConfig,
+    draft_layers: usize,
+    linear_state: &mut LinearAttentionState,
+) -> Result<Tensor> {
+    let hidden = draft_forward_hidden(
+        backend,
+        token_ids,
+        weights,
+        config,
+        draft_layers,
+        linear_state,
+    )?;
     model_forward_head(&hidden, weights, config)
 }
 
@@ -248,7 +268,7 @@ pub fn draft_forward_for_state_init(
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
 ) -> Result<()> {
-    let _ = draft_forward(
+    let _ = draft_forward_hidden(
         backend,
         token_ids,
         weights,
@@ -291,7 +311,11 @@ pub fn speculative_decode_step(
     // linear state but don't use a KV cache for the draft (it uses the segment
     // forward which doesn't need one).
     let mut draft_tokens: Vec<TokenId> = Vec::with_capacity(k);
-    let mut draft_probs_list: Vec<Vec<f32>> = Vec::with_capacity(k);
+    let mut draft_probs_list: Vec<Vec<f32>> = if temperature > 0.0 {
+        Vec::with_capacity(k)
+    } else {
+        Vec::new()
+    };
     let mut current_token = last_token;
 
     for _ in 0..k {
@@ -304,12 +328,6 @@ pub fn speculative_decode_step(
             draft_linear_state,
         )
         .context("draft forward pass failed")?;
-
-        let probs = if temperature > 0.0 {
-            logits_to_probs(&draft_logits, temperature)?
-        } else {
-            logits_to_probs(&draft_logits, 1.0)?
-        };
 
         // Sample from draft
         let draft_token = if temperature == 0.0 {
@@ -324,7 +342,9 @@ pub fn speculative_decode_step(
             )?
         };
 
-        draft_probs_list.push(probs);
+        if temperature > 0.0 {
+            draft_probs_list.push(logits_to_probs(&draft_logits, temperature)?);
+        }
         draft_tokens.push(draft_token);
         current_token = draft_token;
     }
@@ -357,12 +377,6 @@ pub fn speculative_decode_step(
     for i in 0..k {
         // Extract target probabilities for position i
         let pos_logits = verify_logits.narrow(1, i, 1)?.squeeze(1)?;
-        let target_probs = if temperature > 0.0 {
-            logits_to_probs(&pos_logits, temperature)?
-        } else {
-            logits_to_probs(&pos_logits, 1.0)?
-        };
-
         let draft_token = draft_tokens[i];
 
         // Check EOS before acceptance
@@ -377,6 +391,7 @@ pub fn speculative_decode_step(
                 // Target disagrees with EOS — accept target's token instead
                 accepted_tokens.push(target_token);
             } else {
+                let target_probs = logits_to_probs(&pos_logits, temperature)?;
                 let (accepted, resampled) =
                     rejection_sample(draft_token, &draft_probs_list[i], &target_probs, rng)?;
                 if accepted {
@@ -410,6 +425,7 @@ pub fn speculative_decode_step(
             }
         } else {
             // Stochastic verification via rejection sampling
+            let target_probs = logits_to_probs(&pos_logits, temperature)?;
             let (accepted, resampled) =
                 rejection_sample(draft_token, &draft_probs_list[i], &target_probs, rng)?;
 
@@ -455,6 +471,165 @@ pub fn speculative_decode_step(
     Ok(SpeculativeStepResult {
         accepted_tokens,
         hit_eos,
+    })
+}
+
+/// Result of one paged greedy skip-layer speculative decoding step.
+#[derive(Debug)]
+pub struct PagedSpeculativeStepResult {
+    pub accepted_tokens: Vec<TokenId>,
+    pub hit_eos: bool,
+    pub base_advance: usize,
+    pub accepted_draft_tokens: usize,
+    pub attempted_draft_tokens: usize,
+}
+
+/// Greedy-only skip-layer speculative decode on the production paged KV path.
+///
+/// This mirrors [`speculative_decode_step`] but avoids the flat `KvCache` path
+/// and skips probability-vector materialization that greedy acceptance does not
+/// use. On rejection it restores both base and draft linear-attention state,
+/// then replays only the committed prefix so the next step is exact.
+#[allow(clippy::too_many_arguments)]
+pub fn speculative_decode_step_paged_greedy(
+    backend: &dyn BackendRuntime,
+    last_token: TokenId,
+    weights: &GpuWeights,
+    config: &ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    base_pos: usize,
+    linear_state: &mut LinearAttentionState,
+    draft_linear_state: &mut LinearAttentionState,
+    spec_config: &SpeculativeConfig,
+    params: &SamplingParams,
+    eos_token_ids: &[TokenId],
+    lora: Option<&crate::lora_loader::LoraWeights>,
+) -> Result<PagedSpeculativeStepResult> {
+    anyhow::ensure!(
+        params.temperature == 0.0,
+        "paged skip-layer speculative decode is greedy-only"
+    );
+
+    let k = spec_config.num_speculative_tokens;
+    let base_state_snapshot = linear_state
+        .snapshot_for_decode_rollback()
+        .context("snapshot base linear attention state before paged skip-layer verify")?;
+    let draft_state_snapshot = draft_linear_state
+        .snapshot_for_decode_rollback()
+        .context("snapshot draft linear attention state before paged skip-layer draft")?;
+
+    let mut draft_tokens: Vec<TokenId> = Vec::with_capacity(k);
+    let mut current_token = last_token;
+    for _ in 0..k {
+        let draft_logits = draft_forward(
+            backend,
+            &[current_token],
+            weights,
+            config,
+            spec_config.draft_layers,
+            draft_linear_state,
+        )
+        .context("paged skip-layer draft forward pass failed")?;
+        let draft_token = greedy_sample(&draft_logits)?;
+        draft_tokens.push(draft_token);
+        current_token = draft_token;
+    }
+
+    let mut verify_input: Vec<TokenId> = Vec::with_capacity(k + 1);
+    verify_input.push(last_token);
+    verify_input.extend_from_slice(&draft_tokens);
+    let verify_logits = model_forward_paged(
+        backend,
+        &verify_input,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        base_pos,
+        Some(linear_state),
+        lora,
+        None,
+    )
+    .context("paged skip-layer verification forward pass failed")?;
+
+    let mut accepted_tokens: Vec<TokenId> = Vec::with_capacity(k + 1);
+    let mut hit_eos = false;
+    let mut accepted_draft_tokens = 0usize;
+    let mut replay_input_len: Option<usize> = None;
+
+    for (i, &draft_token) in draft_tokens.iter().enumerate() {
+        let pos_logits = verify_logits.narrow(1, i, 1)?.squeeze(1)?;
+        let target_token = greedy_sample(&pos_logits)?;
+
+        if target_token == draft_token {
+            accepted_draft_tokens += 1;
+            if eos_token_ids.contains(&draft_token) {
+                hit_eos = true;
+                break;
+            }
+            accepted_tokens.push(draft_token);
+        } else {
+            replay_input_len = Some(i + 1);
+            if eos_token_ids.contains(&target_token) {
+                hit_eos = true;
+            } else {
+                accepted_tokens.push(target_token);
+            }
+            break;
+        }
+    }
+
+    if accepted_draft_tokens == k && !hit_eos {
+        let bonus_logits = verify_logits.narrow(1, k, 1)?.squeeze(1)?;
+        let bonus_token = greedy_sample(&bonus_logits)?;
+        if eos_token_ids.contains(&bonus_token) {
+            hit_eos = true;
+        } else {
+            accepted_tokens.push(bonus_token);
+        }
+    }
+
+    if let Some(replay_len) = replay_input_len {
+        linear_state
+            .restore_from_decode_rollback(&base_state_snapshot)
+            .context("restore base linear attention state after paged skip-layer rejection")?;
+        draft_linear_state
+            .restore_from_decode_rollback(&draft_state_snapshot)
+            .context("restore draft linear attention state after paged skip-layer rejection")?;
+
+        let committed_prefix = &verify_input[..replay_len];
+        let _ = model_forward_paged(
+            backend,
+            committed_prefix,
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            base_pos,
+            Some(linear_state),
+            lora,
+            None,
+        )
+        .context("replay base prefix after paged skip-layer rejection failed")?;
+        draft_forward_for_state_init(
+            backend,
+            committed_prefix,
+            weights,
+            config,
+            spec_config.draft_layers,
+            draft_linear_state,
+        )
+        .context("replay draft prefix after paged skip-layer rejection failed")?;
+    }
+
+    let base_advance = accepted_tokens.len();
+    Ok(PagedSpeculativeStepResult {
+        accepted_tokens,
+        hit_eos,
+        base_advance,
+        accepted_draft_tokens,
+        attempted_draft_tokens: k,
     })
 }
 
@@ -570,7 +745,7 @@ pub fn speculative_mtp_decode_step(
     // rejection we restore the GDN state snapshot and replay the one committed
     // token so the base recurrent state remains exact.
     let linear_state_snapshot = linear_state
-        .snapshot()
+        .snapshot_for_decode_rollback()
         .context("snapshot linear attention state before MTP verify")?;
     let verify_input = [last_token, draft_token];
     let (verify_logits, hidden_after_draft) = model_forward_paged_with_last_hidden(
@@ -681,7 +856,7 @@ pub fn speculative_mtp_decode_step(
         // `base_pos + 1` is outside the next attention window and will be
         // overwritten if that slot becomes live later.
         linear_state
-            .restore_from(&linear_state_snapshot)
+            .restore_from_decode_rollback(&linear_state_snapshot)
             .context("restore linear attention state after MTP rejection")?;
         let verify_input0 = [last_token];
         let (_verify_logits0, hidden_after_last) = model_forward_paged_with_last_hidden(
