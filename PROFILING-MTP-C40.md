@@ -106,8 +106,8 @@ code number, consistent with what we measure.
 ## Implication for gating
 
 A single flat α ≥ 0.72 gate is the wrong acceptance criterion for kiln
-MTP in code-heavy workloads. Options for C40a+ (empirical) and for
-documentation (this file):
+MTP in code-heavy workloads. After the full C40 sequence, the right
+read is:
 
 - **Per-domain floors**, derived from the observed distribution and
   the paper floor:
@@ -120,37 +120,42 @@ documentation (this file):
 
 **Important:** these numbers are floors on what kiln **currently**
 delivers. They are not a claim that 0.72 is unreachable on code; they
-are the empirical baseline against which any C40a+ intervention should
-be compared. If `--chat-template off` on HumanEval clears 0.72, or a
-re-tuned quantization recipe lifts the code CI above 0.70, the per-
-domain floors here become stale and should be re-derived.
+are the empirical baseline against which any future intervention should
+be compared. C40's completed follow-ups narrowed the interpretation:
 
-## Open questions / C40a+ queue
+## Post-C40f synthesis
 
-The C39 writeup surfaced three credible single-knob interventions for
-closing the HumanEval α gap, plus one documentation-only path. Ordered
-by expected leverage / cost:
+1. **C40a falsified the easiest framing explanation.** Removing
+   `--chat-template` on HumanEval did not recover the gap; it collapsed
+   alpha instead, so chat templating is load-bearing for code-domain MTP
+   on this bench surface rather than a hindrance.
+2. **C40b falsified the easy sampling explanation.** Switching to
+   `temperature=0.1` on the same HumanEval anchor lowered the median to
+   `0.6558` with CI `[0.6452, 0.6933]`, so greedy decoding is not the
+   simple bottleneck and this queue item should not remain presented as
+   an obvious pending fix.
+3. **C40e established a real paired seed-0 BF16 win.** On the same
+   binary, same pod, same flags, flipping only `KILN_W4A16` moved
+   HumanEval alpha from `0.6282` to `0.7887`.
+4. **C40f showed that C40e result does not generalize distributionally.**
+   The BF16 HumanEval N=20 sweep on current main landed at median
+   `0.6888`, bootstrap 95% CI `[0.6517, 0.7232]`, which does not
+   materially beat the already-landed C39 W4A16 distribution
+   (median `0.6933`, CI `[0.6602, 0.7162]`).
 
-1. **C40a — HumanEval + `--chat-template` off (highest leverage).**
-   The chat-template wraps code in a natural-language user turn
-   ("Please continue the following Python function: ..."), which may
-   shift the MTP draft off its training distribution for code tokens.
-   Flip one flag, re-run the C39 N=20 subset bench. If α rises to the
-   0.72 floor, the paper floor is reachable via prompt framing and we
-   should stop applying chat-template to code workloads. $0 code
-   change; estimated ~$5 pod spend, 60 min wall-clock.
-2. **C40b — HumanEval + `temperature=0.1` sampling.** MTP heads are
-   trained over sampled distributions, and greedy decoding can land
-   off-manifold for low-entropy tokens (Python keywords, indentation,
-   punctuation). Tests whether greedy is uniquely harmful for code.
-3. **C40c — HumanEval + non-W4A16 (BF16).** Marlin's W4 quantization
-   may be non-trivially hurting code α specifically. If α rises more
-   than the C39 stdev (≈ 0.05) under BF16, document a "use BF16 for
-   code" mode.
+## Recommendation
 
-**Prerequisite:** all three of C40a/b/c reuse the `--prompt-subset
-humaneval` plumbing shipped in C39 (PR #371). Each is a single bench
-sweep, no code change beyond the flag flip.
+Do **not** treat BF16 as the resolved HumanEval load-mode winner from
+the current evidence. The durable conclusion after C40f is narrower:
+
+- the HumanEval gap is **not** explained by "chat-template hurts code";
+- BF16 can produce a strong paired single-seed win;
+- that win is **not** enough to replace the C39/C40 distributional read.
+
+So this document should retire the old C40a/b/c "open queue" framing
+and keep the gate discussion anchored on workload-aware distributions,
+not on an unresolved assumption that one single-knob follow-up must
+still close the HumanEval gap.
 
 ## Data provenance
 
@@ -172,10 +177,8 @@ rng=12345.
 ## What this PR does not do
 
 - No bench runs. No pod acquisition. No code, config, or kernel change.
-- No update to the single-floor gate in PROFILING.md — the per-domain
-  floors above are proposed; formal gate change should wait on C40a+
-  data to see whether the HumanEval gap is framing-induced or
-  structural.
+- No benchmark reruns in this document. The conclusions above are a
+  synthesis of the already-landed C39/C40a/C40e/C40f evidence.
 - No new agent note; existing notes
   (`kiln-mtp-humaneval-code-domain-deficit`,
   `mtp-alpha-variance-is-domain-heterogeneity`,
