@@ -4256,7 +4256,9 @@ pub fn model_forward_paged_with_last_hidden(
     // when `KILN_MTP_DUMP_HIDDEN_STATES=1`. The arm is a no-op when the env
     // var is unset, so production cost is a single TLS borrow + env lookup.
     // The inner forward pass fills the window with boundary-layer last-row
-    // slices plus `h_pre_final_norm`; the window is drained in
+    // slices plus `h_post_final_norm` (C18 — formerly `h_pre_final_norm`
+    // before kiln started returning post-final-norm `h_prev`); the window
+    // is drained in
     // `mtp_forward_step`'s dump block so the taps appear alongside the
     // standard 8 MTP taps in the same safetensors file. The next call to
     // this function re-arms the window, overwriting any stale buffer from
@@ -5033,38 +5035,44 @@ fn model_forward_paged_inner(
             Ok((Some(logits), None))
         }
         LmHeadMode::FullWithLastHidden => {
-            // Extract the last-row pre-final-norm hidden BEFORE normalising.
-            // MTP needs `h_prev` as the base model's output between the final
-            // transformer block and the final RMSNorm (matches vLLM's
-            // Qwen3-Next reference where `previous_hidden_states` is passed
-            // into the MTP head before `final_layernorm`). Logits are
-            // produced over every position so speculative verification can
-            // compare draft predictions at position 0 and sample a bonus at
-            // position 1 in a single pass.
-            let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
-            // Phase B10: `h_pre_final_norm` is the same tensor the MTP head
-            // receives as `h_prev`. Captured under a distinct name so the
-            // comparator can verify the final-layer → h_main handoff
-            // independently from `h_layer_31`.
+            // Phase C18: `h_prev` must be returned POST-final-norm.
+            // vLLM (`Qwen3_5MultiTokenPredictor.forward`) and SGLang consume
+            // the base model's `last_hidden_state` (post-`model.norm`) as the
+            // input to `pre_fc_norm_hidden`. C17 cross-referenced the upstream
+            // contract and the C15 numerical fingerprint (2.0–2.4× kiln/HF
+            // magnitude ratio) confirmed kiln was one RMSNorm behind. We now
+            // apply `final_norm` ONCE and slice the last row from the normed
+            // tensor for both the logits projection and the returned h_prev.
+            let normed = {
+                kiln_nvtx::range!(c"kiln/final_norm");
+                rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
+            };
+            let last_hidden = normed.narrow(1, seq_len - 1, 1)?.contiguous()?;
             if crate::mtp_debug::is_h_main_capture_armed() {
-                let _ = crate::mtp_debug::capture_h_main_tap("h_pre_final_norm", &last_hidden);
+                let _ = crate::mtp_debug::capture_h_main_tap("h_post_final_norm", &last_hidden);
             }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
                 normed.broadcast_matmul(&weights.embed_tokens_t)?
             };
             Ok((Some(logits), Some(last_hidden)))
         }
         LmHeadMode::LastRowWithLastHidden => {
-            let last_hidden = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
+            // Phase C18: same frame fix as `FullWithLastHidden`. For the
+            // single-row variant we still only materialise the last row before
+            // `final_norm` (cheap) — that row, once normed, is the canonical
+            // post-final-norm `h_prev` the MTP head expects.
+            let last_pre_norm = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
+            let last_hidden = {
+                kiln_nvtx::range!(c"kiln/final_norm");
+                rms_norm(&last_pre_norm, &weights.final_norm, config.rms_norm_eps)?
+            };
             if crate::mtp_debug::is_h_main_capture_armed() {
-                let _ = crate::mtp_debug::capture_h_main_tap("h_pre_final_norm", &last_hidden);
+                let _ = crate::mtp_debug::capture_h_main_tap("h_post_final_norm", &last_hidden);
             }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                let normed = rms_norm(&last_hidden, &weights.final_norm, config.rms_norm_eps)?;
-                normed.broadcast_matmul(&weights.embed_tokens_t)?
+                last_hidden.broadcast_matmul(&weights.embed_tokens_t)?
             };
             Ok((Some(logits), Some(last_hidden)))
         }

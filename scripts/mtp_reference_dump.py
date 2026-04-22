@@ -18,9 +18,11 @@ Design
 The Qwen3.5-4B main model is a hybrid 24×GDN + 8×GQA stack that we do **not**
 re-implement here — doing so in a single script would be large, slow, and
 itself a new source of bugs. Instead, the reference script takes `h_main`
-(last-row pre-final-norm hidden state from the base model, `[1, 1, H]`) and
-`draft_token_id` **from the kiln dump itself**, and runs a *pure-tensor*
-reference implementation of every op that lives inside `mtp_forward_step`:
+(last-row **post-final-norm** hidden state from the base model, `[1, 1, H]`;
+Phase C18 — prior to the fix this was pre-final-norm, which broke the
+vLLM/SGLang MTP contract) and `draft_token_id` **from the kiln dump itself**,
+and runs a *pure-tensor* reference implementation of every op that lives
+inside `mtp_forward_step`:
 
     1. token_emb   = embed_tokens[draft_token_id]           # [1, 1, H]
     2. norm_emb    = rms_norm(token_emb, pre_fc_norm_embedding)
@@ -642,6 +644,11 @@ def main() -> int:
     print(f"[mtp_ref] rope_theta={rope_theta} rotary_frac={rotary_frac}", file=sys.stderr)
 
     # Pull `h_main` and run the full reference forward.
+    # Phase C18: `h_main` is the post-final-norm last-row hidden state (the
+    # vLLM/SGLang `last_hidden_state` contract). Prior to C18 the kiln dumps
+    # here were pre-final-norm; that was the root cause of α ≈ 0 and is fixed
+    # upstream in forward.rs. No frame-conversion is applied here — the kiln
+    # dump is treated as already post-final-norm.
     h_main = kiln["h_main"].to(torch.float32)  # expected shape [1, 1, H]
     assert h_main.ndim == 3, f"h_main expected 3-D, got {h_main.shape}"
 

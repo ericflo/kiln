@@ -50,7 +50,8 @@ thread_local! {
         const { RefCell::new(None) };
 
     /// Phase B10: separate thread-local sink for base-model per-layer hidden
-    /// states (`h_layer_*` + `h_pre_final_norm`). Kept distinct from
+    /// states (`h_layer_*` + `h_post_final_norm`, renamed from
+    /// `h_pre_final_norm` in Phase C18). Kept distinct from
     /// [`SUBOP_CAPTURE`] so the base-model forward can run while the MTP
     /// inner-block capture window is closed (and vice versa), and so each
     /// buffer can be drained without conflation.
@@ -431,17 +432,18 @@ pub fn capture_subop(name: &str, t: &Tensor) -> Result<()> {
 
 /// Boundary layer indices captured when `KILN_MTP_DUMP_HIDDEN_STATES=1`.
 /// Spans the full 32-layer Qwen3.5-4B stack: three GDN samples (0, 8, 16)
-/// plus two GQA samples (23, 31). Layer 31's output IS the pre-final-norm
-/// hidden state, but the comparator still writes a separate `h_pre_final_norm`
-/// tap so the final-layer → h_main handoff can be verified independently.
+/// plus two GQA samples (23, 31). Layer 31's output is still the
+/// pre-final-norm hidden state; the comparator also writes the
+/// `h_post_final_norm` tap (Phase C18) so the final-layer → final_norm →
+/// h_main handoff can be verified independently.
 pub const B10_BOUNDARY_LAYERS: [usize; 5] = [0, 8, 16, 23, 31];
 
 /// True when `KILN_MTP_DUMP_HIDDEN_STATES=1` (or `true`) is set. Phase B10
 /// opt-in: when enabled alongside `KILN_MTP_DUMP_PATH`, the base-model
 /// forward records the last-row hidden state at each boundary layer and at
-/// the pre-final-norm site, and appends them to the MTP dump safetensors
-/// under names `h_layer_0`, `h_layer_8`, `h_layer_16`, `h_layer_23`,
-/// `h_layer_31`, and `h_pre_final_norm`.
+/// the post-final-norm site (Phase C18), and appends them to the MTP dump
+/// safetensors under names `h_layer_0`, `h_layer_8`, `h_layer_16`,
+/// `h_layer_23`, `h_layer_31`, and `h_post_final_norm`.
 pub fn is_dump_hidden_states_enabled() -> bool {
     std::env::var("KILN_MTP_DUMP_HIDDEN_STATES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -471,7 +473,7 @@ pub fn should_capture_hidden_state_for_layer(layer_idx: usize) -> bool {
 }
 
 /// True if the Phase B10 hidden-state capture window is currently armed on
-/// this thread. Used to gate `h_pre_final_norm` capture (which is not
+/// this thread. Used to gate `h_post_final_norm` capture (Phase C18; not
 /// indexed by layer).
 pub fn is_h_main_capture_armed() -> bool {
     H_MAIN_CAPTURE.with(|c| c.borrow().is_some())
@@ -1845,13 +1847,13 @@ mod tests {
         assert!(should_capture_hidden_state_for_layer(31));
         assert!(!should_capture_hidden_state_for_layer(5));
         capture_h_main_tap("h_layer_0", &a).unwrap();
-        capture_h_main_tap("h_pre_final_norm", &b).unwrap();
+        capture_h_main_tap("h_post_final_norm", &b).unwrap();
         let drained = drain_h_main_capture();
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].0, "h_layer_0");
         assert_eq!(drained[0].1, vec![3]);
         assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
-        assert_eq!(drained[1].0, "h_pre_final_norm");
+        assert_eq!(drained[1].0, "h_post_final_norm");
         // Drain disarms.
         assert!(!is_h_main_capture_armed());
         capture_h_main_tap("h_layer_16", &a).unwrap();
