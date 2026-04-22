@@ -261,7 +261,6 @@ fn spawn_backend_prewarm(state: AppState) {
     tokio::spawn(async move {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             // Prewarm is opportunistic. If a live request or training job has
             // the GPU first, skip prewarm rather than sitting in front of it.
