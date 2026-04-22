@@ -1601,6 +1601,17 @@ fn mlp_proj_forward(
     linear_with_lora_t(x, weight_t, lora, lora_scale)
 }
 
+fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_lm_head_supports(x, embed_tokens_t) {
+            return crate::backend::metal::metal_lm_head_bf16(x, embed_tokens_t)
+                .context("metal lm_head kernel failed");
+        }
+    }
+    Ok(x.broadcast_matmul(embed_tokens_t)?)
+}
+
 // ---------------------------------------------------------------------------
 // Gated DeltaNet (GDN) linear attention primitives
 // ---------------------------------------------------------------------------
@@ -3986,7 +3997,7 @@ pub fn model_forward(
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head");
         hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        hidden.broadcast_matmul(&weights.embed_tokens_t)?
+        lm_head_forward(&hidden, &weights.embed_tokens_t)?
     };
 
     Ok(logits)
@@ -4115,7 +4126,7 @@ pub fn model_forward_head(
 ) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/lm_head");
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
-    let logits = normed.broadcast_matmul(&weights.embed_tokens_t)?;
+    let logits = lm_head_forward(&normed, &weights.embed_tokens_t)?;
     Ok(logits)
 }
 
@@ -4664,7 +4675,7 @@ pub fn mtp_forward_step(
     }
     let logits = {
         kiln_nvtx::range!(c"kiln/mtp/lm_head");
-        normed.broadcast_matmul(&weights.embed_tokens_t)?
+        lm_head_forward(&normed, &weights.embed_tokens_t)?
     };
     // Phase C14 tap 3/3: post-lm_head logits, pre-softmax / pre-sampler.
     if dump_c14_post_block {
@@ -5039,7 +5050,7 @@ fn model_forward_paged_inner(
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-                hidden.broadcast_matmul(&weights.embed_tokens_t)?
+                lm_head_forward(&hidden, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), None))
         }
@@ -5048,7 +5059,7 @@ fn model_forward_paged_inner(
                 kiln_nvtx::range!(c"kiln/lm_head");
                 let last = hidden.narrow(1, seq_len - 1, 1)?;
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
-                normed.broadcast_matmul(&weights.embed_tokens_t)?
+                lm_head_forward(&normed, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), None))
         }
@@ -5071,7 +5082,7 @@ fn model_forward_paged_inner(
             }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                normed.broadcast_matmul(&weights.embed_tokens_t)?
+                lm_head_forward(&normed, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), Some(last_hidden)))
         }
@@ -5090,7 +5101,7 @@ fn model_forward_paged_inner(
             }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                last_hidden.broadcast_matmul(&weights.embed_tokens_t)?
+                lm_head_forward(&last_hidden, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), Some(last_hidden)))
         }

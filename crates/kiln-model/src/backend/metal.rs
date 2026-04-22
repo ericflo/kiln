@@ -89,6 +89,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_gdn_forward_substitution_pipeline(metal_device)?;
     metal_conv1d_prefill_pipeline(metal_device)?;
     metal_conv1d_update_pipeline(metal_device)?;
+    metal_lm_head_pipeline(metal_device)?;
     Ok(())
 }
 
@@ -751,6 +752,30 @@ kernel void kiln_gdn_qk_norm_f32_bf16(
 }
 "#;
 
+const METAL_LM_HEAD_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_lm_head_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    constant uint& vocab [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= vocab) {
+        return;
+    }
+
+    float acc = 0.0f;
+    for (uint i = 0; i < hidden; ++i) {
+        acc += static_cast<float>(x[i]) * static_cast<float>(weight_t[i * vocab + gid]);
+    }
+    out[gid] = static_cast<bfloat>(acc);
+}
+"#;
+
 fn metal_shared_library(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::Library> {
@@ -776,6 +801,7 @@ fn metal_shared_library(
         METAL_GDN_RECURRENT_KERNEL,
         METAL_CONV1D_PREFILL_KERNEL,
         METAL_CONV1D_UPDATE_KERNEL,
+        METAL_LM_HEAD_KERNEL,
     ]
     .join("");
     let library = device
@@ -842,6 +868,125 @@ fn metal_gdn_qk_norm_pipeline(
         .map_err(|e| anyhow::anyhow!("build metal gdn qk norm pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
+}
+
+fn metal_lm_head_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+pub(crate) fn metal_lm_head_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+    if !matches!(x.dtype(), DType::BF16) || !matches!(weight_t.dtype(), DType::BF16) {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !x.is_contiguous() || !weight_t.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return false;
+    };
+    let Ok((weight_hidden, vocab)) = weight_t.dims2() else {
+        return false;
+    };
+    batch == 1
+        && seq_len == 1
+        && hidden == weight_hidden
+        && hidden <= u32::MAX as usize
+        && vocab <= u32::MAX as usize
+}
+
+pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_lm_head_supports(x, weight_t),
+        "metal lm head supports only BF16 [1,1,H] x [H,V] on Metal"
+    );
+    let (_, _, hidden) = x.dims3()?;
+    let (_, vocab) = weight_t.dims2()?;
+
+    let out = Tensor::zeros((1usize, 1usize, vocab), DType::BF16, x.device())?;
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal lm head requires Metal tensors");
+    };
+    let pipeline = metal_lm_head_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_lm_head_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight_t.storage_and_layout();
+        let (o_storage, o_layout) = out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head weight must be on Metal"),
+        };
+        let out_metal = match &*o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let hidden_u32 = hidden as u32;
+        let vocab_u32 = vocab as u32;
+        encoder.set_bytes(3, &hidden_u32);
+        encoder.set_bytes(4, &vocab_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: vocab,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
@@ -2142,6 +2287,47 @@ mod tests {
             .flatten_all()?
             .mean(D::Minus1)?
             .to_scalar::<f32>()?)
+    }
+
+    #[test]
+    fn test_lm_head_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let hidden = 128usize;
+        let vocab = 257usize;
+        let x_data: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.03125)
+            .collect();
+        let weight_data: Vec<f32> = (0..(hidden * vocab))
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.015625)
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight_t =
+            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+
+        assert!(metal_lm_head_supports(&x, &weight_t));
+        let reference = x.broadcast_matmul(&weight_t)?;
+        let fused = metal_lm_head_bf16(&x, &weight_t)?;
+
+        assert_eq!(fused.dims(), &[1usize, 1usize, vocab]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal LM-head max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal LM-head mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        Ok(())
     }
 
     fn gdn_gates_reference(
