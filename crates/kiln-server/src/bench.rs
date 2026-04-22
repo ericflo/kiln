@@ -199,6 +199,11 @@ struct BenchArgs {
     /// Which subset of PROMPT_POOL the MTP bench draws from (default: all).
     /// Phase C39 domain isolation — see `PromptSubset` docs.
     prompt_subset: PromptSubset,
+    /// Sampling temperature threaded through `SamplingParams` at every bench
+    /// site. Default 0.0 preserves greedy decode (byte-identical to all prior
+    /// bench numbers). Phase C40b — tests greedy-is-uniquely-harmful hypothesis
+    /// on code MTP α (HumanEval).
+    temperature: f32,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -213,6 +218,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut seed: u64 = 42;
     let mut chat_template = false;
     let mut prompt_subset = PromptSubset::All;
+    let mut temperature: f32 = 0.0;
 
     let mut i = 1;
     while i < args.len() {
@@ -258,6 +264,10 @@ fn parse_args() -> Result<BenchArgs> {
                     )
                 })?;
             }
+            "--temperature" => {
+                i += 1;
+                temperature = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -293,6 +303,12 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!(
                     "                            (default: all; Phase C39 domain isolation; MTP arm only)"
                 );
+                eprintln!(
+                    "  --temperature <f32>       Sampling temperature threaded to all bench arms (default: 0.0 = greedy)"
+                );
+                eprintln!(
+                    "                            (Phase C40b — tests greedy-is-uniquely-harmful hypothesis on code MTP α)"
+                );
                 std::process::exit(0);
             }
             _ => {}
@@ -315,6 +331,7 @@ fn parse_args() -> Result<BenchArgs> {
         seed,
         chat_template,
         prompt_subset,
+        temperature,
     })
 }
 
@@ -473,6 +490,7 @@ fn bench_inference(
     prompt_tokens: usize,
     max_output_tokens: usize,
     seed: u64,
+    temperature: f32,
 ) -> Result<InferenceBenchResult> {
     let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let actual_prompt_tokens = tokenizer
@@ -481,7 +499,7 @@ fn bench_inference(
         .len();
 
     let params = SamplingParams {
-        temperature: 0.0,
+        temperature,
         top_p: 1.0,
         top_k: 0,
         max_tokens: max_output_tokens,
@@ -919,8 +937,9 @@ fn read_spec_method_from_env() -> SpecMethod {
 /// giving a per-emitted-token ITL distribution comparable to the `Off` arm.
 ///
 /// Reads `KILN_SPEC_NUM_TOKENS` (default 256) and `KILN_SPEC_DRAFT_LAYERS`
-/// (default 8). Greedy-only (`temperature = 0`) since the bench harness is
-/// deterministic.
+/// (default 8). `temperature` defaults to 0 (greedy) for deterministic
+/// per-seed reproducibility; Phase C40b threads `--temperature` through to
+/// support sampled-decode α probes.
 fn bench_latency_skiplayer(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -928,6 +947,7 @@ fn bench_latency_skiplayer(
     prompt_tokens: usize,
     max_output_tokens: usize,
     seed: u64,
+    temperature: f32,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -1011,7 +1031,7 @@ fn bench_latency_skiplayer(
     let mut num_tokens = 1usize; // counting the first token from prefill
     let mut emitted: Vec<u32> = vec![last_token];
     let params = SamplingParams {
-        temperature: 0.0,
+        temperature,
         top_p: 1.0,
         top_k: 0,
         max_tokens: max_output_tokens,
@@ -1134,6 +1154,7 @@ fn bench_latency_paged_skiplayer(
     prompt_tokens: usize,
     max_output_tokens: usize,
     seed: u64,
+    temperature: f32,
 ) -> Result<LatencyResult> {
     let num_speculative_tokens = std::env::var("KILN_SPEC_NUM_TOKENS")
         .ok()
@@ -1238,7 +1259,7 @@ fn bench_latency_paged_skiplayer(
     let mut accepted_draft_tokens = 0usize;
     let mut attempted_draft_tokens = 0usize;
     let params = SamplingParams {
-        temperature: 0.0,
+        temperature,
         top_p: 1.0,
         top_k: 0,
         max_tokens: max_output_tokens,
@@ -1389,6 +1410,7 @@ fn bench_latency_paged_mtp(
     seed: u64,
     chat_template: bool,
     prompt_subset: PromptSubset,
+    temperature: f32,
 ) -> Result<LatencyResult> {
     use rand::SeedableRng;
 
@@ -1515,7 +1537,7 @@ fn bench_latency_paged_mtp(
     let mut draft_accepted_count = 0usize;
     let mut total_draft_attempts = 0usize;
     let params = SamplingParams {
-        temperature: 0.0,
+        temperature,
         top_p: 1.0,
         top_k: 0,
         max_tokens: max_output_tokens,
@@ -1903,6 +1925,7 @@ fn main() -> Result<()> {
                 args.seed,
                 args.chat_template,
                 args.prompt_subset,
+                args.temperature,
             )
             .context("MTP latency benchmark failed")?
         }
@@ -1916,6 +1939,7 @@ fn main() -> Result<()> {
                     args.prompt_tokens,
                     args.max_output_tokens,
                     args.seed,
+                    args.temperature,
                 )
                 .context("paged skip-layer latency benchmark failed")?
             } else {
@@ -1927,6 +1951,7 @@ fn main() -> Result<()> {
                     args.prompt_tokens,
                     args.max_output_tokens,
                     args.seed,
+                    args.temperature,
                 )
                 .context("skip-layer latency benchmark failed")?
             }
@@ -2022,6 +2047,7 @@ fn main() -> Result<()> {
             args.prompt_tokens,
             args.max_output_tokens,
             args.seed,
+            args.temperature,
         ) {
             Ok(result) => {
                 eprintln!("  => {:.1} tok/s aggregate", result.tokens_per_sec);
