@@ -1,5 +1,135 @@
 # Kiln Profiling Report
 
+## Phase 6 current-main re-profile — 2026-04-22
+
+**Scope:** refresh the current-`main` performance source of truth after the
+post-#204 code-path drift and name the top-3 **decode** and **prefill**
+wall-clock hotspots separately from fresh current-main captures. This run
+stops the planning loop from leaning on stale pre-`main` hotspot data.
+
+**Preflight outcome:** proceed. There is no newer merged PR than #204 that
+already lands a current-main re-profile with separate decode/prefill top-3
+lists, no open PR covering this exact scope, and the `#204..HEAD` range is
+not docs-only. Forward-path drift is real in `crates/kiln-model/src/forward.rs`,
+`generate.rs`, `loader.rs`, `paged_kv_cache.rs`, `transposed_weight_cache.rs`,
+and `crates/kiln-server/src/bench.rs`, so a no-pod redirect would have been
+incorrect.
+
+**Hardware / image:** Kiln pool A6000 lease `sl53yvx5seviyx`
+(`$0.49/hr`), `ghcr.io/ericflo/kiln-runpod:latest`, Driver 580.95.05, CUDA
+12.8 runtime. The warm pool pod came up with baked `nsys 2023.4.4`; that
+version reproduced the known `EventCollection::CheckOrder` importer failure
+on the prompt-heavy prefill trace, so this run upgrades profiler userspace to
+`nsys 2024.5.1` via `apt-get install -y libxcb-cursor0 cuda-nsight-systems-12-6`
+before the final prefill capture. Decode and prefill CSVs committed under
+`profiling-artifacts/currentmain_20260422_*`.
+
+**Build / validation:** `cargo build --release --features cuda,nvtx --bin kiln-bench`
+and `cargo test -p kiln-model -p kiln-server --features cuda --no-run`, both
+with `KILN_CUDA_ARCHS=86`. Validation completed cleanly on the pod before any
+profiling runs.
+
+**Methodology:** production paged path, `KILN_W4A16=1 KILN_CUDA_GRAPHS=true`,
+Qwen3.5-4B from `/workspace/qwen3.5-4b`.
+
+- **Decode uncaptured runs:** `./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only`
+  run 3x back-to-back.
+- **Decode nsys capture:** `nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/decode-20245-main ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
+- **Prompt-heavy prefill timing:** `./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only`
+- **Prefill nsys capture:** `nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=22 --duration=8 -o /workspace/phase6-profile/prefill-20245-main ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only`
+
+### Decode uncaptured runs — canonical paged 512/128
+
+| run | decode tok/s | mean ITL ms | p50 ITL ms | p99 ITL ms | prefill ms |
+| --- | -----------: | ----------: | ---------: | ---------: | ---------: |
+| 1 | 50.86 | 19.66 | 19.55 | 24.48 | 320.2 |
+| 2 | 40.88 | 24.46 | 24.49 | 27.99 | 333.3 |
+| 3 | 41.65 | 24.01 | 24.08 | 26.87 | 345.6 |
+| median | **41.65** | **24.01** | **24.08** | **26.87** | **333.3** |
+
+Run 1 remained the fastest by a wide margin, so the stable central tendency
+for this refresh is runs 2-3 rather than the warm-start outlier. The median
+decode result to carry forward is therefore **41.65 tok/s** at **24.01 ms**
+mean ITL.
+
+### Prompt-heavy prefill timing — paged 8192/1
+
+One uncaptured prompt-heavy latency run on current `main` produced:
+
+- prompt tokens: **8180**
+- prefill time: **2702.7 ms**
+- prefill throughput: **3026.6 tok/s**
+
+The one-token decode tail on this run is not the target metric; this arm is
+only here to anchor the separate prefill hotspot capture on a genuinely
+prompt-heavy path.
+
+### Top-3 NVTX hotspots — decode
+
+Source: `profiling-artifacts/currentmain_20260422_decode_nvtx.csv`
+
+| rank | % | region |
+| ---: | -: | --- |
+| 1 | **18.0** | `:kiln/gdn/gates` |
+| 2 | **17.5** | `:kiln/gdn/gated_norm` |
+| 3 | **15.0** | `:kiln/gdn/qk_norm` |
+
+These three regions still dominate decode together at **50.5%** of wall-clock.
+The fresh current-main profile therefore does **not** move the next decode
+target away from the GDN gate/norm path.
+
+### Top-3 NVTX hotspots — prefill
+
+Source: `profiling-artifacts/currentmain_20260422_prefill_nvtx.csv`
+
+| rank | % | region |
+| ---: | -: | --- |
+| 1 | **46.9** | `:kiln/attn/gdn/chunk_prep` |
+| 2 | **19.0** | `:kiln/gdn/in_proj` |
+| 3 | **14.6** | `:kiln/attn/gdn/chunk` |
+
+Prefill is even more concentrated than decode: the top-3 prefill regions sum
+to **80.5%** of prompt-heavy wall-clock, and two of the three are squarely in
+the chunkwise GDN prefill path rather than the decode-only recurrence path.
+
+### Kernel callouts
+
+- **Decode top kernels** (`profiling-artifacts/currentmain_20260422_decode_kern.csv`):
+  `Marlin<256,1,8,8,4,8>` 14.5%, `cutlass_80_tensorop_bf16...256x64...` 11.8%
+  (`lm_head`), `ampere_bf16_s16816gemm...128x64...` 9.8%, `ucopy_bf16` 8.3%.
+- **Prefill top kernels** (`profiling-artifacts/currentmain_20260422_prefill_kern.csv`):
+  `Marlin<256,4,16,4,4,8>` 14.3%, `bmul_f32` 11.4%, `ucopy_bf16` 11.1%,
+  `gdn_fwd_sub_kernel` 6.5%, `gdn_chunk_prep_kernel<64>` 4.0%.
+
+### Comparison to #204
+
+Only the shared uncaptured 512/128 paged arm is directly comparable to the
+fresh-profile baseline in PR #204, because #204 was bench-only and did **not**
+land separate decode/prefill hotspot tables. On that shared arm, current-main
+median decode is **41.65 tok/s** versus **51.37 tok/s** in #204. I am not
+claiming a hotspot delta against #204 because there is no same-shape NVTX
+table in that PR to compare against.
+
+The important current-main conclusion is instead structural: the decode top-3
+ordering remains the familiar GDN gate/norm stack, while the fresh prefill
+capture shows an even larger wall-clock opportunity in the chunkwise GDN
+prefill path.
+
+### Recommendation
+
+**Single next optimization target:** vendor the minimal prefill-side
+`chunk_gla_fwd`-class GDN kernel path, starting with
+`:kiln/attn/gdn/chunk_prep` and its immediately-adjacent chunk execution
+(`:kiln/attn/gdn/chunk`). That recommendation is now grounded in fresh
+current-main evidence, not stale queue shape:
+
+- decode top-3 still justify GDN-focused work, but they are a cluster of
+  already-known decode regions;
+- prefill presents the larger fresh concentration (**80.5%** in the top-3,
+  **46.9%** in `chunk_prep` alone);
+- the prompt-heavy profile says the next materially new win is in **GDN
+  prefill kernel vendoring**, not another hand-rolled candle experiment.
+
 
 ## Phase 7 design: streaming/tiled GDN prefill — 2026-04-20
 
