@@ -1905,7 +1905,9 @@ kernel void kiln_causal_conv1d_prefill_bf16_f32_k4(
     constant uint& batch [[buffer(4)]],
     constant uint& channels [[buffer(5)]],
     constant uint& seq_len [[buffer(6)]],
-    uint gid [[thread_position_in_grid]]
+    constant uint& threadgroup_width [[buffer(7)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
     const uint total_channels = batch * channels;
     if (gid >= total_channels) {
@@ -1918,13 +1920,19 @@ kernel void kiln_causal_conv1d_prefill_bf16_f32_k4(
     const uint state_base = (b * channels + c) * 3;
     const uint weight_base = c * 4;
 
-    for (uint t = 0; t < seq_len; ++t) {
+    threadgroup float s_state[3];
+    if (tid < 3) {
+        s_state[tid] = conv_state[state_base + tid];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint t = tid; t < seq_len; t += threadgroup_width) {
         float acc = 0.0f;
         for (uint j = 0; j < 4; ++j) {
             const uint padded_idx = t + j;
             float v;
             if (padded_idx < 3) {
-                v = conv_state[state_base + padded_idx];
+                v = s_state[padded_idx];
             } else {
                 v = static_cast<float>(x[x_base + padded_idx - 3]);
             }
@@ -1932,19 +1940,22 @@ kernel void kiln_causal_conv1d_prefill_bf16_f32_k4(
         }
         out[x_base + t] = acc / (1.0f + exp(-acc));
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    if (seq_len >= 3) {
-        conv_state[state_base + 0] = static_cast<float>(x[x_base + seq_len - 3]);
-        conv_state[state_base + 1] = static_cast<float>(x[x_base + seq_len - 2]);
-        conv_state[state_base + 2] = static_cast<float>(x[x_base + seq_len - 1]);
-    } else if (seq_len == 2) {
-        conv_state[state_base + 0] = conv_state[state_base + 2];
-        conv_state[state_base + 1] = static_cast<float>(x[x_base + 0]);
-        conv_state[state_base + 2] = static_cast<float>(x[x_base + 1]);
-    } else if (seq_len == 1) {
-        conv_state[state_base + 0] = conv_state[state_base + 1];
-        conv_state[state_base + 1] = conv_state[state_base + 2];
-        conv_state[state_base + 2] = static_cast<float>(x[x_base]);
+    if (tid == 0) {
+        if (seq_len >= 3) {
+            conv_state[state_base + 0] = static_cast<float>(x[x_base + seq_len - 3]);
+            conv_state[state_base + 1] = static_cast<float>(x[x_base + seq_len - 2]);
+            conv_state[state_base + 2] = static_cast<float>(x[x_base + seq_len - 1]);
+        } else if (seq_len == 2) {
+            conv_state[state_base + 0] = s_state[2];
+            conv_state[state_base + 1] = static_cast<float>(x[x_base + 0]);
+            conv_state[state_base + 2] = static_cast<float>(x[x_base + 1]);
+        } else if (seq_len == 1) {
+            conv_state[state_base + 0] = s_state[1];
+            conv_state[state_base + 1] = s_state[2];
+            conv_state[state_base + 2] = static_cast<float>(x[x_base]);
+        }
     }
 }
 "#;
@@ -2115,21 +2126,24 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
         let batch_u32 = batch as u32;
         let channels_u32 = channels as u32;
         let seq_len_u32 = seq_len as u32;
+        let threads = seq_len.next_power_of_two().clamp(32, 256);
+        let threads_u32 = threads as u32;
         encoder.set_bytes(4, &batch_u32);
         encoder.set_bytes(5, &channels_u32);
         encoder.set_bytes(6, &seq_len_u32);
+        encoder.set_bytes(7, &threads_u32);
 
-        let threads_per_grid = objc2_metal::MTLSize {
+        let threadgroups_per_grid = objc2_metal::MTLSize {
             width: batch * channels,
             height: 1,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
-            width: 256,
+            width: threads,
             height: 1,
             depth: 1,
         };
-        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
     }
 
     Ok(out)
