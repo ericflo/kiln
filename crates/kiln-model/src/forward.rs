@@ -16,6 +16,7 @@ use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, linear_with_lora_t,
 };
 use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
+use crate::transposed_weight_cache::transposed_weight_bytes_2d_cached;
 use crate::weights::{ModelWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
@@ -609,7 +610,7 @@ fn transpose_weight_bytes_generic(
     }
 }
 
-fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])> {
+pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])> {
     anyhow::ensure!(
         w.shape.len() == 2,
         "direct transposed weight upload requires a rank-2 tensor, got shape {:?}",
@@ -645,7 +646,7 @@ fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [usize; 2])>
 }
 
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let (data, shape) = transposed_weight_bytes_2d(w)?;
+    let (data, shape) = transposed_weight_bytes_2d_cached(w)?;
     Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, device)
         .context("failed to create transposed tensor from raw buffer")
 }
@@ -750,7 +751,7 @@ fn projection_tensors_for_load_batch(
     let transposed: Result<Vec<(Vec<u8>, [usize; 2])>> = weights
         .par_iter()
         .map(|(name, w)| {
-            transposed_weight_bytes_2d(w)
+            transposed_weight_bytes_2d_cached(w)
                 .with_context(|| format!("{name} transposed projection bytes"))
         })
         .collect();
@@ -6105,6 +6106,7 @@ mod tests {
             data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::F32,
+            source: None,
         };
 
         let t = weight_to_tensor(&wt, &device)?;
@@ -6127,6 +6129,7 @@ mod tests {
             data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::F32,
+            source: None,
         };
 
         let direct = weight_to_transposed_tensor_2d(&wt, &device)?;
@@ -6150,6 +6153,7 @@ mod tests {
             data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::BF16,
+            source: None,
         };
 
         let (transposed, shape) = transposed_weight_bytes_2d(&wt)?;
@@ -6174,6 +6178,7 @@ mod tests {
             data: crate::weights::WeightData::owned(bytes),
             shape: vec![rows, cols],
             dtype: TensorDType::BF16,
+            source: None,
         };
 
         let (transposed, shape) = transposed_weight_bytes_2d(&wt)?;
@@ -6202,6 +6207,7 @@ mod tests {
             data: crate::weights::WeightData::owned(bytes),
             shape: vec![2, 3],
             dtype: TensorDType::F32,
+            source: None,
         };
 
         let direct = weight_to_transposed_tensor_2d(&wt, &device)?.to_device(&cpu)?;

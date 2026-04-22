@@ -16,6 +16,7 @@ pub mod paged_kv_cache;
 pub mod quantized;
 pub mod sampling;
 pub mod speculative;
+mod transposed_weight_cache;
 pub mod weights;
 
 pub use backend::{BackendRuntime, for_device as backend_for_device};

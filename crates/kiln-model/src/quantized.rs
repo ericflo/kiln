@@ -22,7 +22,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::weights::{TensorDType, WeightTensor};
+use crate::weights::{TensorDType, WeightSource, WeightTensor};
 
 /// GPTQ quantization configuration from `quantize_config.json`.
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +76,7 @@ pub fn dequantize_gptq_weight(
     qzeros_data: &[u8],
     qzeros_shape: &[usize],
     group_size: usize,
+    source: Option<WeightSource>,
 ) -> Result<WeightTensor> {
     let pack_factor = 8usize; // 32 / 4 bits
 
@@ -157,6 +158,7 @@ pub fn dequantize_gptq_weight(
         data: crate::weights::WeightData::owned(output_bytes),
         shape: vec![out_features, in_features],
         dtype: TensorDType::BF16,
+        source,
     })
 }
 
@@ -345,6 +347,7 @@ mod tests {
             &qzeros_bytes,
             &[num_groups, out_features / pack_factor],
             group_size,
+            None,
         )
         .unwrap();
 
@@ -394,6 +397,7 @@ mod tests {
             &qzeros_bytes,
             &[1, 1],
             group_size,
+            None,
         )
         .unwrap();
 

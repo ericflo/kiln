@@ -791,7 +791,9 @@ impl ModelRunner {
             .validate(&self.config)
             .context("invalid speculative config")?;
 
-        let max_spec_window = spec_config.num_speculative_tokens.min(params.max_tokens.max(1));
+        let max_spec_window = spec_config
+            .num_speculative_tokens
+            .min(params.max_tokens.max(1));
         let max_total = prompt_tokens.len() + params.max_tokens + max_spec_window + 1;
         let (reservation, block_table) = {
             let mut bm_guard = lock_block_manager(block_manager)?;
@@ -981,7 +983,6 @@ impl ModelRunner {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
         let mut linear_state = self.new_linear_state()?;
-        let mut draft_linear_state = self.new_linear_state()?;
 
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
@@ -1015,15 +1016,9 @@ impl ModelRunner {
             }
         };
 
-        crate::speculative::draft_forward_for_state_init(
-            &*self.backend,
-            prompt_tokens,
-            &self.weights,
-            &self.config,
-            spec_config.draft_layers,
-            &mut draft_linear_state,
-        )
-        .context("draft state init for paged skip-layer failed")?;
+        let mut draft_linear_state = linear_state
+            .snapshot_for_decode_rollback()
+            .context("clone draft state from paged skip-layer prefill")?;
 
         let mut base_pos = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -1353,11 +1348,12 @@ impl ModelRunner {
         // Verification writes the full speculative window (`last_token + k`)
         // before the loop commits accepted tokens, so flat KV needs temporary
         // headroom beyond the user-visible max token budget.
-        let max_spec_window = spec_config.num_speculative_tokens.min(params.max_tokens.max(1));
+        let max_spec_window = spec_config
+            .num_speculative_tokens
+            .min(params.max_tokens.max(1));
         let max_total = prompt_tokens.len() + params.max_tokens + max_spec_window + 1;
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
-        let mut draft_linear_state = self.new_linear_state()?;
 
         // Prefill: full model forward pass on all prompt tokens
         let logits = model_forward(
@@ -1372,16 +1368,9 @@ impl ModelRunner {
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
-        // Also run draft layers on prompt to initialize draft linear state
-        // (we don't need the output, just the state update)
-        let _ = crate::speculative::draft_forward_for_state_init(
-            &*self.backend,
-            prompt_tokens,
-            &self.weights,
-            &self.config,
-            spec_config.draft_layers,
-            &mut draft_linear_state,
-        );
+        let mut draft_linear_state = linear_state
+            .snapshot_for_decode_rollback()
+            .context("clone draft state from skip-layer prefill")?;
 
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut rng = match params.seed {
@@ -1848,11 +1837,12 @@ impl ModelRunner {
         // Verification writes the full speculative window (`last_token + k`)
         // before the loop commits accepted tokens, so flat KV needs temporary
         // headroom beyond the user-visible max token budget.
-        let max_total =
-            prompt_tokens.len() + params.max_tokens + spec_config.num_speculative_tokens + 1;
+        let max_spec_window = spec_config
+            .num_speculative_tokens
+            .min(params.max_tokens.max(1));
+        let max_total = prompt_tokens.len() + params.max_tokens + max_spec_window + 1;
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
-        let mut draft_linear_state = self.new_linear_state()?;
 
         let logits = model_forward(
             &*self.backend,
@@ -1866,14 +1856,9 @@ impl ModelRunner {
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
-        let _ = crate::speculative::draft_forward_for_state_init(
-            &*self.backend,
-            &prompt_tokens,
-            &self.weights,
-            &self.config,
-            spec_config.draft_layers,
-            &mut draft_linear_state,
-        );
+        let mut draft_linear_state = linear_state
+            .snapshot_for_decode_rollback()
+            .context("clone draft state from streaming skip-layer prefill")?;
 
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut finish_reason = FinishReason::MaxTokens;
@@ -2273,8 +2258,10 @@ impl ModelRunner {
             .validate(&self.config)
             .context("invalid speculative config")?;
 
-        let max_total =
-            prompt_tokens.len() + params.max_tokens + spec_config.num_speculative_tokens + 1;
+        let max_spec_window = spec_config
+            .num_speculative_tokens
+            .min(params.max_tokens.max(1));
+        let max_total = prompt_tokens.len() + params.max_tokens + max_spec_window + 1;
         let (reservation, block_table) = {
             let mut bm_guard = lock_block_manager(block_manager)?;
             let block_size = bm_guard.block_size();
@@ -2501,7 +2488,6 @@ impl ModelRunner {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
-        let mut draft_linear_state = self.new_linear_state()?;
 
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
@@ -2535,15 +2521,9 @@ impl ModelRunner {
             }
         };
 
-        crate::speculative::draft_forward_for_state_init(
-            &*self.backend,
-            prompt_tokens,
-            &self.weights,
-            &self.config,
-            spec_config.draft_layers,
-            &mut draft_linear_state,
-        )
-        .context("draft state init for streaming paged skip-layer failed")?;
+        let mut draft_linear_state = linear_state
+            .snapshot_for_decode_rollback()
+            .context("clone draft state from streaming paged skip-layer prefill")?;
 
         let mut base_pos = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();

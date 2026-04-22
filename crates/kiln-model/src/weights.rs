@@ -1,5 +1,6 @@
 use std::fmt;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use memmap2::Mmap;
@@ -90,6 +91,18 @@ impl fmt::Debug for WeightData {
     }
 }
 
+/// Provenance for a loaded weight tensor.
+///
+/// This is used by the persistent transpose cache to key entries by the exact
+/// checkpoint shard that supplied the bytes.
+#[derive(Debug, Clone)]
+pub struct WeightSource {
+    pub shard_path: PathBuf,
+    pub shard_size: u64,
+    pub shard_mtime_ns: u128,
+    pub tensor_name: String,
+}
+
 /// A loaded tensor: raw bytes with shape and dtype metadata.
 ///
 /// This is a CPU-side representation. The forward pass will convert these
@@ -98,6 +111,7 @@ pub struct WeightTensor {
     pub data: WeightData,
     pub shape: Vec<usize>,
     pub dtype: TensorDType,
+    pub source: Option<WeightSource>,
 }
 
 impl WeightTensor {
@@ -119,13 +133,14 @@ impl WeightTensor {
 
 impl fmt::Debug for WeightTensor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "WeightTensor({:?}, {}, {} bytes)",
-            self.shape,
-            self.dtype,
-            self.data.len()
-        )
+        let mut ds = f.debug_struct("WeightTensor");
+        ds.field("shape", &self.shape)
+            .field("dtype", &self.dtype)
+            .field("bytes", &self.data.len());
+        if let Some(source) = &self.source {
+            ds.field("source", source);
+        }
+        ds.finish()
     }
 }
 
