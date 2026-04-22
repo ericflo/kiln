@@ -132,47 +132,38 @@ paper floor is ~0.027 in the median, and ~0.06 at the CI upper bound.
 
 ## C40 recommendation
 
-Two credible directions; both assume the anchor stays at Cell D.
+The original C40 queue from this phase is now complete enough to close
+the "easy gap-closer" branch and keep only the documentation update.
 
-### (1) Accept domain-specific α targets (documentation-only)
+### What the completed C40 work says
 
-The Qwen3.5 paper floor of 0.72 is reported as a single number, but the
-distribution C39 and C38 surface is clearly heterogeneous. A
-documentation-only phase could:
+- **C40a falsified the prompt-framing hypothesis.** Removing
+  `--chat-template` collapsed HumanEval α from the C39 anchor rather
+  than recovering it, so chat-template is load-bearing for code.
+- **C40b falsified the low-temperature hypothesis.**
+  `temperature=0.1` did not rescue HumanEval α, so there is no cheap
+  sampler knob that closes the gap.
+- **C40e found a real paired seed-0 BF16 win.** On the same binary/pod
+  and flags, BF16 beat W4A16 materially for that one HumanEval seed.
+- **C40f showed that C40e does not generalize distributionally.** The
+  BF16 N=20 HumanEval distribution on current `main` landed at median
+  `0.6888`, mean `0.6939`, bootstrap 95% CI `[0.6517, 0.7232]`, with
+  only `6/20` seeds at or above `0.72`. That does not materially beat
+  the C39 W4A16 HumanEval distribution.
 
-- Replace the single floor gate with per-domain floors derived from the
-  observed distribution (e.g. GSM8K ≥ 0.78, C4 ≥ 0.70, HumanEval ≥ 0.65).
-- Note in MTP_PHASE_B12.md / PROFILING.md that the published 0.85 α in
-  the paper is an aggregate over a heavily natural-language-weighted
-  eval, and our code-heavy workloads should expect lower acceptance.
-- Cost: $0. Ship as a writeup PR.
+### Updated recommendation
 
-### (2) Investigate the HumanEval-specific α gap (bench + single knob)
-
-The open question: is the HumanEval gap a systematic MTP-head weakness
-on token-level Python (less training exposure?) or a prompt-framing
-issue (the chat-template wraps code in a natural-language user turn,
-which may confuse the MTP head)?
-
-Minimal sequential experiment:
-
-- **C40a:** HumanEval + `--chat-template` off (raw prose). If α rises
-  significantly, the paper floor is reachable via prompt framing, and
-  we should stop applying chat-template to code workloads.
-- **C40b:** HumanEval + temperature=0.1 sampling instead of greedy.
-  Tests whether greedy decoding is uniquely harmful for code (MTP
-  heads are trained over sampled distributions, and greedy can land
-  off-manifold for low-entropy tokens like Python keywords).
-- **C40c:** HumanEval + non-W4A16 (full-precision bench). If α rises
-  more than the C39 stdev, Marlin's W4 quantization is non-trivially
-  hurting code α and we should document a "use BF16 for code" mode.
-
-Each sub-cell: N=20, same Cell D otherwise. Estimated cost ≈ $5–8
-total on A6000. Budget 60–90 min per cell.
-
-**Recommended:** ship **(1)** first as a cheap documentation PR, then
-queue **C40a** as the single highest-leverage follow-up (flag-flip,
-no code change, directly actionable).
+- Keep the documentation conclusion from C39/C40: the paper's `0.72`
+  reference is an aggregate, prose-heavy benchmark anchor, while the
+  current-main HumanEval code distribution sits lower.
+- Do **not** present C40a/C40b/C40c as still-pending next steps. Those
+  branches are now either falsified or superseded by C40d/C40e/C40f.
+- Do **not** treat BF16 as the resolved HumanEval load-mode winner.
+  C40e remains an important paired single-seed result, but C40f is the
+  correct distributional readout for the BF16 question on current
+  `main`.
+- Keep the code-domain issue open as a modeling / implementation
+  investigation, not as an unresolved queue of cheap benchmark toggles.
 
 ## Artifacts
 
