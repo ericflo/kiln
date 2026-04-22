@@ -2930,16 +2930,34 @@ fn try_flash_attn_paged_decode(
         {
             let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
             let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-            if let Some(attn_output) = flash_attention_forward(
-                backend,
-                &q_fa,
-                &k_live,
-                &v_live,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-            )? {
-                // `flash_attention_forward` already reshapes to
+            let attn_output = if backend.supports_flash_attn_prefill_head_major() {
+                // Q is already head-major at the call site. Keep K/V grouped
+                // instead of routing through `flash_attention_forward`, which
+                // expands GQA K/V before Metal SDPA and defeats Candle's
+                // native vector-attention GQA path.
+                let k_head = k_live.transpose(1, 2)?.contiguous()?;
+                let v_head = v_live.transpose(1, 2)?.contiguous()?;
+                flash_attention_forward_head_major(
+                    backend, q, &k_head, &v_head, num_heads, head_dim,
+                )?
+            } else {
+                None
+            };
+            let attn_output = if attn_output.is_some() {
+                attn_output
+            } else {
+                flash_attention_forward(
+                    backend,
+                    &q_fa,
+                    &k_live,
+                    &v_live,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                )?
+            };
+            if let Some(attn_output) = attn_output {
+                // The flash-attention helpers already reshape to
                 // [batch, seq_len, num_heads * head_dim].
                 let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
