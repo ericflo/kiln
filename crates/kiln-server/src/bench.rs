@@ -252,51 +252,84 @@ fn current_vram_used_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-/// 8 distinct prompt bases, indexed by `seed % 8`. Seed 0 is the historical
-/// default (the Phase B2 baseline), preserved verbatim for comparability.
-/// Seeds 1-7 give the multi-prompt A/B enough content diversity to exercise
-/// MTP draft behavior across different token distributions.
-const PROMPT_POOL: [&str; 8] = [
-    // 0: canonical B2 baseline — do not edit
-    "The quick brown fox jumps over the lazy dog near the river bank. \
-     Scientists discovered a new species of deep-sea fish in the Pacific Ocean. \
-     The quantum computer solved the optimization problem in record time. \
-     She wrote a comprehensive analysis of market trends for the quarterly report. ",
-    // 1: software / algorithms
-    "A red-black tree balances itself on every insertion and deletion to keep operations logarithmic. \
-     The compiler lowered the expression into three-address code before register allocation. \
-     Pagination in a distributed system needs a stable sort key or the client will see duplicates. \
-     An idempotent retry policy is the simplest defense against transient network failures. ",
-    // 2: history / biography
-    "The library at Alexandria housed an estimated half million scrolls before the great fire. \
-     Marie Curie remains the only person to win Nobel prizes in two distinct scientific fields. \
-     The printing press transformed European literacy faster than any single invention before it. \
-     Ancient Sumerian accountants pressed wedge-shaped marks into damp clay to track grain shipments. ",
-    // 3: nature / geography
-    "The Mariana Trench descends nearly eleven kilometers below the surface of the western Pacific. \
-     Alpine glaciers carve U-shaped valleys whose walls record the slow movement of compacted ice. \
-     Monarch butterflies navigate thousands of miles to the same Mexican forests their ancestors left. \
-     The Amazon basin exchanges more moisture with the atmosphere than any other river system on Earth. ",
-    // 4: philosophy
-    "Stoic ethics ground virtue in accepting what is outside the rational agent's direct control. \
-     Hume argued that no description of the world by itself entails any obligation about what ought to be. \
-     Phenomenology studies the structures of conscious experience from the first-person point of view. \
-     A thought experiment about swapped qualia probes whether subjective color really supervenes on function. ",
-    // 5: cooking / food science
-    "A pinch of salt in caramel suppresses perceived sweetness and sharpens the roasted sugar flavor. \
-     Bread dough becomes elastic because kneading aligns the gluten strands formed by wheat proteins. \
-     Emulsifying lemon juice into olive oil yields a stable vinaigrette only when whisked vigorously. \
-     Slow braising converts tough connective tissue into gelatin, tenderizing an otherwise unpromising cut. ",
-    // 6: space / astronomy
-    "A binary pulsar's timing drift confirmed general relativity's prediction of gravitational waves. \
-     The Parker Solar Probe samples the corona from closer than any spacecraft has previously flown. \
-     Tidally locked exoplanets have a permanent dayside whose climate differs from the eternal night side. \
-     Supernova remnants seed the interstellar medium with the heavier elements later rocky worlds inherit. ",
-    // 7: music / craft
-    "Equal temperament tuning slightly detunes every interval except the octave to enable free modulation. \
-     A violin luthier planes the spruce top until tap tones resonate in the correct pitch relationship. \
-     Polyrhythms layer pulses that only align at measure boundaries, driving much West African drumming. \
-     The overtone series produced by a bowed string determines the characteristic timbre of each instrument. ",
+/// 30 distinct prompt bases spanning three domains, indexed by `seed % 30`.
+/// Replaces the 8-prompt prose-only pool used in Phases B2-C37 after Phase C37
+/// (kiln PR #369) found that seed variance was dominated by prompt re-sampling
+/// (seeds 8+ wrapped back to seed 0's prompt), so the N=10 α CI was a prompt-
+/// variance CI rather than a true seed-variance CI. C38 expands the pool to 30
+/// prompts so seeds 0-29 each hit a distinct base prompt, and adds domain
+/// diversity across three structural token distributions:
+///   - 0-9:   GSM8K-style grade-school math word problems (prose format)
+///   - 10-19: HumanEval-style Python function signatures + docstrings
+///   - 20-29: C4-style natural English text fragments
+/// This exercises MTP acceptance across math prose, source code, and
+/// general-domain English, producing a true domain-balanced variance band.
+const PROMPT_POOL: [&str; 30] = [
+    // === 0-9: GSM8K-style grade-school math word problems ===
+    // 0: eggs-per-day revenue
+    "Janet's ducks lay sixteen eggs per day. She eats three for breakfast every morning and bakes muffins for her friends with four more. She sells the remainder at the local farmers' market daily for two dollars per fresh duck egg. We want to know how much she makes every day at the farmers' market. First subtract eaten and baked eggs from the daily lay, then multiply the leftover count by the per-egg price. ",
+    // 1: robe bolts
+    "A robe takes two bolts of blue fiber and half that much white fiber. The bolts are purchased separately from two different mills, each with its own shipping schedule. We need the total number of bolts required to make a single robe for one customer at the shop. Half of two bolts is one bolt of white fiber, and that amount is added to the original two bolts of blue. ",
+    // 2: house flip profit
+    "Josh buys a run-down property for eighty thousand dollars and then spends fifty thousand more on repairs. The renovation increases the value of the house by one hundred and fifty percent over the original purchase price. We want the profit after selling at the appreciated market price. Compute the new value using the percentage increase, then subtract the purchase price and the repair cost to find the net profit. ",
+    // 3: weekly sprint distance
+    "James decides to run three sprints three times each week as part of his off-season training plan. He runs sixty meters during each individual sprint, without rest intervals counted in the distance. We want the total meters he runs each week across every sprint session combined. Three sprints multiplied by sixty meters gives a per-session distance, which is multiplied by the three weekly sessions. ",
+    // 4: chicken feed cups
+    "Every day, Wendi feeds each of her chickens three cups of mixed feed in three separate meals. Her flock has twenty chickens in total, all fed identically. In the morning she gives the flock fifteen cups, and in the afternoon she gives twenty-five cups. We want the number of cups in the final evening meal. Compute the full daily requirement, then subtract the cups already served to find the remainder. ",
+    // 5: glass shelves discount
+    "Kylar goes to the store to buy glasses for his new apartment. One glass costs five dollars, but every second glass costs only sixty percent of the regular price. Kylar wants to buy sixteen glasses in total, arranging them across two open shelves. We need the total cost after applying the alternating discount pattern. Count full-price and discounted positions separately, then sum the two partial totals. ",
+    // 6: bakery dozens
+    "Toula went to the bakery and bought three dozen donuts at sixty-eight dollars per dozen, two dozen mini cupcakes at eighty dollars per dozen, and six dozen mini cheesecakes at fifty-five dollars per dozen. We want the total cost of her whole pastry order as it appears on the receipt. Compute each line separately by multiplying quantity by unit price, then add the three line totals. ",
+    // 7: lemon tree break-even
+    "Carlos plants a lemon tree that costs ninety dollars to plant, including labor and the sapling. Each year the tree yields seven lemons, which he sells at the market for one dollar and fifty cents each. Watering and feeding the tree cost him three dollars per year during the growing season. We want the number of years before he starts earning net money on the tree overall. ",
+    // 8: vacuum starting count
+    "Melanie is a door-to-door saleswoman. She sold a third of her vacuum cleaners at a neighborhood on the east side of town during her morning route. She then sold two more to her cousin, who runs a small rental business. She is left with five vacuum cleaners in the boot of her car. We want the number she started with at the beginning of the day. ",
+    // 9: mountain round trips
+    "Stephen made ten round trips up and down a forty thousand foot tall mountain over the course of the last week. He reached three quarters of the mountain's height on each of his round trips before turning around. We want the total distance in feet he covered across every round trip combined. Compute the effective height per trip, double it for the round trip, then multiply by the number of trips. ",
+
+    // === 10-19: HumanEval-style Python function signatures with docstrings ===
+    // 10: has_close_elements
+    "from typing import List\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\"Check whether any two numbers in the input list are closer together than the given threshold. Return True if such a pair exists, otherwise return False. Both arguments are guaranteed to be valid, and the threshold is always positive. \"\"\"\n",
+    // 11: separate_paren_groups
+    "from typing import List\n\ndef separate_paren_groups(paren_string: str) -> List[str]:\n    \"\"\"Split the input string of balanced parenthesis groups into the individual groups. Ignore any whitespace in the input. Each returned group is balanced on its own and contains no outer whitespace characters. \"\"\"\n",
+    // 12: truncate_number
+    "def truncate_number(number: float) -> float:\n    \"\"\"Return the fractional part of a positive floating point number. For instance, calling truncate_number on three point five yields zero point five. The return value is always in the half open interval from zero to one. \"\"\"\n",
+    // 13: below_zero
+    "from typing import List\n\ndef below_zero(operations: List[int]) -> bool:\n    \"\"\"Given a list of bank account deposit and withdrawal integers applied in order, return True if the running balance ever drops below zero. Otherwise return False when the balance stays non-negative throughout the whole sequence. \"\"\"\n",
+    // 14: mean_absolute_deviation
+    "from typing import List\n\ndef mean_absolute_deviation(numbers: List[float]) -> float:\n    \"\"\"Compute the mean absolute deviation of a non-empty list of real numbers. The result is the average absolute difference between each element and the arithmetic mean of the entire list. The list is never empty. \"\"\"\n",
+    // 15: intersperse
+    "from typing import List\n\ndef intersperse(numbers: List[int], delimiter: int) -> List[int]:\n    \"\"\"Insert the delimiter integer between every pair of consecutive numbers from the input list. The delimiter is not added before the first element or after the last element. Empty input yields an empty list. \"\"\"\n",
+    // 16: parse_nested_parens
+    "from typing import List\n\ndef parse_nested_parens(paren_string: str) -> List[int]:\n    \"\"\"Given a space separated string of parenthesis groups, return the maximum nesting depth of each group as a list of integers. Each group is independently balanced. The returned list has one entry per space separated group. \"\"\"\n",
+    // 17: filter_by_substring
+    "from typing import List\n\ndef filter_by_substring(strings: List[str], substring: str) -> List[str]:\n    \"\"\"Return only the strings from the input that contain the given substring. Preserve the original order of occurrence. An empty input list yields an empty output list. \"\"\"\n",
+    // 18: sum_product
+    "from typing import List, Tuple\n\ndef sum_product(numbers: List[int]) -> Tuple[int, int]:\n    \"\"\"Return a tuple consisting of the sum and the product of all integers in the input list. An empty list must yield a sum of zero and a product of one, matching the standard neutral elements. \"\"\"\n",
+    // 19: rolling_max
+    "from typing import List\n\ndef rolling_max(numbers: List[int]) -> List[int]:\n    \"\"\"Return a list of rolling maxima ending at each prefix of the input sequence. The i-th element of the output is the maximum of all input numbers from index zero through index i inclusive. \"\"\"\n",
+
+    // === 20-29: C4-style natural English text fragments ===
+    // 20: weather forecast
+    "The forecast for next Tuesday calls for widespread thunderstorms across the central plains, with scattered severe cells developing through the late afternoon. Meteorologists have already raised the flood watch for several counties along the river corridor. Local emergency coordinators are urging residents near low-lying creeks to prepare sandbags and monitor updated guidance from the national weather service. ",
+    // 21: bus rapid transit
+    "The city council voted narrowly on Tuesday to approve a new bus rapid transit corridor that will connect the downtown district to the eastern suburbs over the next four years. Supporters described the plan as a critical step toward reducing highway congestion. Opponents raised concerns about impacts on small businesses along the proposed route and the source of matching federal dollars. ",
+    // 22: sea turtle migration
+    "Researchers at the coastal marine institute have documented an unusual migration pattern in juvenile sea turtles this season. Using satellite tags attached to the rear carapace, the team tracked individual animals crossing two major gyre systems earlier than in any previous recorded year. The preliminary data will be presented at an international conservation conference in the fall. ",
+    // 23: theater renovation
+    "A quiet renovation of the historic downtown theater has drawn praise from preservation advocates and a few complaints from nearby residents. The restoration preserves the original art deco ceiling mural and the marble foyer while adding a modern climate control system behind the existing plaster walls. The theater will reopen with a retrospective film festival the weekend after the holiday. ",
+    // 24: healthcare cybersecurity
+    "New federal guidance published this week outlines updated cybersecurity requirements for medium and large healthcare providers across the country. The rules focus on access logging, encryption of patient records at rest, and mandatory quarterly vulnerability assessments. Industry groups have requested a longer implementation window, arguing that smaller hospital networks will struggle to meet the initial compliance deadline. ",
+    // 25: garden tour
+    "The annual community garden tour drew a record turnout on Saturday as visitors walked through more than two dozen backyard plots across three neighborhoods. Organizers highlighted water conservation strategies, native pollinator beds, and the growing popularity of no till methods among first year gardeners. Proceeds from ticket sales will fund the community seed library for the following growing season. ",
+    // 26: small model conference
+    "A regional technology conference in the mountain states this month focused on the practical application of small language models to field service and logistics problems. Several vendors demonstrated on device assistants running on laptop class hardware. Conference organizers said registration exceeded last year's total by roughly one third, with attendance skewing toward smaller enterprise operators. ",
+    // 27: stone fruit harvest
+    "Local farmers are reporting mixed results for this year's stone fruit harvest after a colder than usual spring. Peaches and nectarines show strong volume in the northern orchards, while apricot yields in the southern valley are down by almost a quarter compared to the five year average. The state agricultural commission plans to release a full post harvest summary in late October. ",
+    // 28: steam launch restoration
+    "The maritime museum unveiled a fully restored steam launch on Friday morning in front of a small crowd gathered at the main pier. Volunteers spent more than four years documenting and rebuilding the hull, original boiler, and brass fittings to their original working condition. Short demonstration cruises are planned on the first Saturday of each month throughout the summer. ",
+    // 29: remote work vacancy study
+    "A new study from the university economics department examines the long term effect of remote work on mid size commercial real estate vacancy rates. Using lease data from twenty three cities, the researchers observed a clear divergence between coastal and interior markets beginning in the middle of the decade. The full paper is scheduled for peer reviewed publication later this year. ",
 ];
 
 /// Build a prompt string of approximately `target_tokens` tokens by repeating sentences.
