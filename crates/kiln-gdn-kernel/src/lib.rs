@@ -109,6 +109,21 @@ unsafe extern "C" {
         dv: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_gdn_chunk_scan(
+        a_strict: *const core::ffi::c_void,
+        b_mask: *const core::ffi::c_void,
+        v_prime: *const core::ffi::c_void,
+        q_s_scaled: *const core::ffi::c_void,
+        beta: *const core::ffi::c_void,
+        decay_last_col: *const core::ffi::c_void,
+        out_chunk: *mut core::ffi::c_void,
+        w_weighted: *mut core::ffi::c_void,
+        batch_heads: i32,
+        chunk_size: i32,
+        dv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Run the fused GDN forward-substitution kernel.
@@ -853,4 +868,198 @@ pub fn gdn_chunk_prep(
     }
 
     Ok((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last))
+}
+
+pub fn gdn_chunk_scan_supports(
+    a_strict: &Tensor,
+    b_mask: &Tensor,
+    v_prime: &Tensor,
+    q_s_scaled: &Tensor,
+    beta: &Tensor,
+    decay_last_col: &Tensor,
+) -> bool {
+    if !matches!(a_strict.device(), candle_core::Device::Cuda(_)) {
+        return false;
+    }
+    if a_strict.dtype() != DType::BF16
+        || b_mask.dtype() != DType::BF16
+        || v_prime.dtype() != DType::BF16
+        || q_s_scaled.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+        || decay_last_col.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((b, h, c, c2)) = a_strict.dims4() else {
+        return false;
+    };
+    if c != c2 || c == 0 || c > 64 {
+        return false;
+    }
+    let Ok((b2, h2, c3, c4)) = b_mask.dims4() else {
+        return false;
+    };
+    if (b2, h2, c3, c4) != (b, h, c, c) {
+        return false;
+    }
+    let Ok((b3, h3, c5, dv)) = v_prime.dims4() else {
+        return false;
+    };
+    if (b3, h3, c5) != (b, h, c) || dv == 0 || dv > 128 {
+        return false;
+    }
+    let Ok((b4, h4, c6, dv2)) = q_s_scaled.dims4() else {
+        return false;
+    };
+    if (b4, h4, c6, dv2) != (b, h, c, dv) {
+        return false;
+    }
+    let Ok((b5, h5, c7)) = beta.dims3() else {
+        return false;
+    };
+    if (b5, h5, c7) != (b, h, c) {
+        return false;
+    }
+    let Ok((b6, h6, c8)) = decay_last_col.dims3() else {
+        return false;
+    };
+    (b6, h6, c8) == (b, h, c)
+}
+
+pub fn gdn_chunk_scan(
+    a_strict: &Tensor,
+    b_mask: &Tensor,
+    v_prime: &Tensor,
+    q_s_scaled: &Tensor,
+    beta: &Tensor,
+    decay_last_col: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    if !gdn_chunk_scan_supports(
+        a_strict,
+        b_mask,
+        v_prime,
+        q_s_scaled,
+        beta,
+        decay_last_col,
+    ) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: gdn_chunk_scan: envelope violation \
+             (a={:?}, b={:?}, v_prime={:?}, q_s_scaled={:?}, beta={:?}, decay_last_col={:?})",
+            a_strict.shape(),
+            b_mask.shape(),
+            v_prime.shape(),
+            q_s_scaled.shape(),
+            beta.shape(),
+            decay_last_col.shape()
+        );
+    }
+
+    let (b, h, c, _) = a_strict.dims4()?;
+    let dv = v_prime.dim(3)?;
+    let device = a_strict.device();
+
+    let a_c = a_strict.contiguous()?;
+    let b_c = b_mask.contiguous()?;
+    let vp_c = v_prime.contiguous()?;
+    let qss_c = q_s_scaled.contiguous()?;
+    let beta_c = beta.contiguous()?;
+    let dlast_c = decay_last_col.contiguous()?;
+
+    let out_chunk = Tensor::zeros((b, h, c, dv), DType::BF16, device)?;
+    let w_weighted = Tensor::zeros((b, h, c, dv), DType::BF16, device)?;
+
+    {
+        let (a_storage, a_layout) = a_c.storage_and_layout();
+        let (b_storage, b_layout) = b_c.storage_and_layout();
+        let (vp_storage, vp_layout) = vp_c.storage_and_layout();
+        let (qss_storage, qss_layout) = qss_c.storage_and_layout();
+        let (beta_storage, beta_layout) = beta_c.storage_and_layout();
+        let (dlast_storage, dlast_layout) = dlast_c.storage_and_layout();
+        let (out_storage, out_layout) = out_chunk.storage_and_layout();
+        let (ww_storage, ww_layout) = w_weighted.storage_and_layout();
+
+        let a_cuda = match &*a_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: a_strict must be on CUDA"),
+        };
+        let b_cuda = match &*b_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: b_mask must be on CUDA"),
+        };
+        let vp_cuda = match &*vp_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: v_prime must be on CUDA"),
+        };
+        let qss_cuda = match &*qss_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: q_s_scaled must be on CUDA"),
+        };
+        let beta_cuda = match &*beta_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: beta must be on CUDA"),
+        };
+        let dlast_cuda = match &*dlast_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: decay_last_col must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: out_chunk must be on CUDA"),
+        };
+        let ww_cuda = match &*ww_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: w_weighted must be on CUDA"),
+        };
+
+        let stream = a_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let a_slice = a_cuda.as_cuda_slice::<bf16>()?.slice(a_layout.start_offset()..);
+        let b_slice = b_cuda.as_cuda_slice::<bf16>()?.slice(b_layout.start_offset()..);
+        let vp_slice = vp_cuda.as_cuda_slice::<bf16>()?.slice(vp_layout.start_offset()..);
+        let qss_slice = qss_cuda.as_cuda_slice::<bf16>()?.slice(qss_layout.start_offset()..);
+        let beta_slice = beta_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(beta_layout.start_offset()..);
+        let dlast_slice = dlast_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dlast_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+        let ww_slice = ww_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ww_layout.start_offset()..);
+
+        unsafe {
+            let (a_ptr, _g1) = a_slice.device_ptr(&stream);
+            let (b_ptr, _g2) = b_slice.device_ptr(&stream);
+            let (vp_ptr, _g3) = vp_slice.device_ptr(&stream);
+            let (qss_ptr, _g4) = qss_slice.device_ptr(&stream);
+            let (beta_ptr, _g5) = beta_slice.device_ptr(&stream);
+            let (dlast_ptr, _g6) = dlast_slice.device_ptr(&stream);
+            let (out_ptr, _g7) = out_slice.device_ptr(&stream);
+            let (ww_ptr, _g8) = ww_slice.device_ptr(&stream);
+
+            let status = kiln_gdn_chunk_scan(
+                a_ptr as *const _,
+                b_ptr as *const _,
+                vp_ptr as *const _,
+                qss_ptr as *const _,
+                beta_ptr as *const _,
+                dlast_ptr as *const _,
+                out_ptr as *mut _,
+                ww_ptr as *mut _,
+                (b * h) as i32,
+                c as i32,
+                dv as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("kiln_gdn_chunk_scan failed with status {status}");
+            }
+        }
+    }
+
+    Ok((out_chunk, w_weighted))
 }

@@ -2041,6 +2041,22 @@ fn compute_w_chunk_fallback(
     Ok(Tensor::cat(&w_rows, 2)?)
 }
 
+fn compute_chunk_body_reference(
+    a_strict: &Tensor,
+    b_mask: &Tensor,
+    v_prime: &Tensor,
+    q_s_scaled: &Tensor,
+    beta_c: &Tensor,
+    decay_last_col_u: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let c = v_prime.dim(2)?;
+    let w = compute_w_chunk_fallback(a_strict, v_prime, beta_c, c)?;
+    let intra = b_mask.matmul(&w)?;
+    let out_chunk = (q_s_scaled + &intra)?;
+    let w_weighted = w.broadcast_mul(decay_last_col_u)?.contiguous()?;
+    Ok((out_chunk, w_weighted))
+}
+
 /// Specialized single-token GDN recurrence.
 ///
 /// This is the non-CUDA fast path for `seq_len == 1`, avoiding the chunkwise
@@ -2306,24 +2322,43 @@ fn gdn_chunkwise_recurrence(
             }
         };
 
-        // Forward substitution for W[t]:
-        //   W[t] = beta[t] * ( V'[t] - Σ_{i<t} a_strict[t, i] * W[i] )
-        //
-        // Dispatch: on CUDA/Metal + bf16 + supported chunk envelope, use the
-        // backend fused kernel. On CPU or outside that envelope, fall back to
-        // the per-token candle loop.
-        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?; // [B, nv, C, dv]
+        let decay_last_col = decay_last_col_u.squeeze(3)?;
+        let (out_chunk, w_weighted) = {
+            kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
+            if backend.supports_gdn_chunk_scan() && dtype == DType::BF16 {
+                match backend.gdn_chunk_scan(
+                    &a_strict,
+                    &b_mask,
+                    &v_prime,
+                    &q_s_scaled,
+                    &beta_c,
+                    &decay_last_col,
+                )? {
+                    Some((out_chunk, w_weighted)) => (out_chunk, w_weighted),
+                    None => {
+                        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?;
+                        let intra = b_mask.matmul(&w)?;
+                        let out_chunk = (&q_s_scaled + &intra)?;
+                        let w_weighted =
+                            w.broadcast_mul(&decay_last_col_u)?.contiguous()?;
+                        (out_chunk, w_weighted)
+                    }
+                }
+            } else {
+                let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?;
+                let intra = b_mask.matmul(&w)?;
+                let out_chunk = (&q_s_scaled + &intra)?;
+                let w_weighted = w.broadcast_mul(&decay_last_col_u)?.contiguous()?;
+                (out_chunk, w_weighted)
+            }
+        };
 
-        // Intra-chunk output contribution: B_mask @ W
-        let intra = b_mask.matmul(&w)?; // [B, nv, C, dv]
-
-        out_chunks.push((q_s_scaled + intra)?); // [B, nv, C, dv]
+        out_chunks.push(out_chunk); // [B, nv, C, dv]
 
         // State update:
         //   S_new = exp(G[C-1]) * S_entry
         //         + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
         let state_scaled = state.broadcast_mul(&p_last_u)?; // [B, nv, dk, dv]
-        let w_weighted = w.broadcast_mul(&decay_last_col_u)?.contiguous()?; // [B,nv,C,dv]
         let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
     }
@@ -8006,6 +8041,97 @@ mod tests {
         check("decay_last_col", &decay_last_col_k, &decay_last_col_ref)?;
         check("p_last", &p_last_k, &p_last_ref)?;
 
+        Ok(())
+    }
+
+    /// Parity check for the fused post-prep prefill chunk body.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_chunk_body_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("CUDA not available, skipping test_gdn_chunk_body_matches_fallback");
+                return Ok(());
+            }
+        };
+
+        let b = 1usize;
+        let nv = 32usize;
+        let c = 64usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xFACE1234_u64);
+        let n_cc = b * nv * c * c;
+        let n_cdv = b * nv * c * dv;
+        let n_c = b * nv * c;
+
+        let a_data: Vec<f32> = (0..n_cc)
+            .map(|idx| {
+                let t = (idx / c) % c;
+                let i = idx % c;
+                if i < t {
+                    rng.gen_range(-0.15f32..0.15f32)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let b_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.2f32..0.2f32)).collect();
+        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let qss_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.3f32..1.1f32)).collect();
+        let decay_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.6f32..1.0f32)).collect();
+
+        let a_strict =
+            Tensor::from_slice(&a_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let b_mask = Tensor::from_slice(&b_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let v_prime =
+            Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let q_s_scaled =
+            Tensor::from_slice(&qss_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let beta =
+            Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let decay_last_col =
+            Tensor::from_slice(&decay_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+
+        let (out_kernel, ww_kernel) = kiln_gdn_kernel::gdn_chunk_scan(
+            &a_strict,
+            &b_mask,
+            &v_prime,
+            &q_s_scaled,
+            &beta,
+            &decay_last_col,
+        )?;
+
+        let (out_ref, ww_ref) = compute_chunk_body_reference(
+            &a_strict,
+            &b_mask,
+            &v_prime,
+            &q_s_scaled,
+            &beta,
+            &decay_last_col.unsqueeze(3)?,
+        )?;
+
+        let check = |name: &str, got: &Tensor, want: &Tensor| -> Result<()> {
+            let diff = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!("gdn-chunk-body {name}: max={max:e} mean={mean:e}");
+            assert!(max < 2e-2, "chunk-body {name} max_abs_diff {max:e} exceeds 2e-2");
+            assert!(
+                mean < 2e-3,
+                "chunk-body {name} mean_abs_diff {mean:e} exceeds 2e-3"
+            );
+            Ok(())
+        };
+
+        check("out_chunk", &out_kernel, &out_ref)?;
+        check("w_weighted", &ww_kernel, &ww_ref)?;
         Ok(())
     }
 
