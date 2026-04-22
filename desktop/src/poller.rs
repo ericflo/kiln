@@ -47,18 +47,30 @@ pub fn spawn_health_poller(
                     }
 
                     let health_url = format!("http://{}:{}/v1/health", host, port);
-                    let health_ok = match client.get(&health_url).send().await {
-                        Ok(resp) => resp.status().is_success(),
-                        Err(_) => false,
-                    };
+                    let (health_reachable, inference_ready) =
+                        match client.get(&health_url).send().await {
+                            Ok(resp) => {
+                                let status_success = resp.status().is_success();
+                                let body = if status_success {
+                                    resp.json::<serde_json::Value>().await.ok()
+                                } else {
+                                    None
+                                };
+                                (
+                                    status_success,
+                                    health_response_ready(status_success, body.as_ref()),
+                                )
+                            }
+                            Err(_) => (false, false),
+                        };
 
-                    if health_ok {
+                    if health_reachable {
                         consecutive_failures = 0;
                     } else {
                         consecutive_failures = consecutive_failures.saturating_add(1);
                     }
 
-                    let train_status = if health_ok {
+                    let train_status = if inference_ready {
                         let train_url =
                             format!("http://{}:{}/v1/train/status", host, port);
                         match client.get(&train_url).send().await {
@@ -73,7 +85,7 @@ pub fn spawn_health_poller(
 
                     let mut s = state.lock().await;
                     let new_state = derive_state(
-                        health_ok,
+                        inference_ready,
                         consecutive_failures,
                         train_status.as_ref(),
                         &s,
@@ -90,8 +102,8 @@ pub fn spawn_health_poller(
 ///
 /// Rules:
 /// - `Stopped` is terminal from the poller's perspective — never overwrite it.
-/// - `Starting` is only exited by a successful health check; health failures
-///   keep us in `Starting` to accommodate slow server boot.
+/// - `Starting` is only exited by an inference-ready health response; socket
+///   readiness without prewarm keeps us in `Starting`.
 /// - Otherwise, after `MAX_CONSECUTIVE_FAILURES` consecutive health failures,
 ///   transition to `Error`. Before that, preserve the prior state.
 /// - On health success, transition to `TrainingActive` if any entry in
@@ -127,6 +139,29 @@ pub fn derive_state(
     ServerState::Running
 }
 
+fn health_response_ready(status_success: bool, body: Option<&serde_json::Value>) -> bool {
+    if !status_success {
+        return false;
+    }
+
+    let Some(body) = body else {
+        return false;
+    };
+
+    inference_prewarm_complete(body).unwrap_or(true)
+}
+
+fn inference_prewarm_complete(body: &serde_json::Value) -> Option<bool> {
+    body.get("checks")?
+        .as_array()?
+        .iter()
+        .find(|check| {
+            check.get("name").and_then(|name| name.as_str()) == Some("inference_prewarm_complete")
+        })?
+        .get("pass")?
+        .as_bool()
+}
+
 fn has_running_job(status: &serde_json::Value) -> bool {
     let Some(arr) = status.as_array() else {
         return false;
@@ -152,6 +187,51 @@ mod tests {
         // successful health check can transition Starting into Running.
         let got = derive_state(false, 10, None, &ServerState::Starting);
         assert!(matches!(got, ServerState::Starting), "got {:?}", got);
+    }
+
+    #[test]
+    fn health_ready_waits_for_inference_prewarm() {
+        let health = json!({
+            "status": "ok",
+            "checks": [
+                {"name": "model_loaded", "pass": true},
+                {"name": "scheduler_responsive", "pass": true},
+                {"name": "inference_prewarm_complete", "pass": false}
+            ]
+        });
+        assert!(!health_response_ready(true, Some(&health)));
+    }
+
+    #[test]
+    fn health_ready_accepts_completed_inference_prewarm() {
+        let health = json!({
+            "status": "ok",
+            "checks": [
+                {"name": "model_loaded", "pass": true},
+                {"name": "scheduler_responsive", "pass": true},
+                {"name": "inference_prewarm_complete", "pass": true}
+            ]
+        });
+        assert!(health_response_ready(true, Some(&health)));
+    }
+
+    #[test]
+    fn health_ready_accepts_older_health_without_prewarm_check() {
+        let health = json!({
+            "status": "ok",
+            "checks": [
+                {"name": "model_loaded", "pass": true},
+                {"name": "scheduler_responsive", "pass": true}
+            ]
+        });
+        assert!(health_response_ready(true, Some(&health)));
+    }
+
+    #[test]
+    fn health_ready_rejects_failed_status_or_missing_body() {
+        let health = json!({"status": "degraded", "checks": []});
+        assert!(!health_response_ready(false, Some(&health)));
+        assert!(!health_response_ready(true, None));
     }
 
     #[test]
