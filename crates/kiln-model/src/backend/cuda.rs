@@ -72,6 +72,10 @@ impl BackendRuntime for CudaBackend {
         self.gdn_enabled
     }
 
+    fn supports_gdn_full_chunk_prefill(&self) -> bool {
+        self.gdn_enabled
+    }
+
     fn flash_attn_prefill(
         &self,
         q: &Tensor,
@@ -193,6 +197,30 @@ impl BackendRuntime for CudaBackend {
             decay_last_col,
         )
         .context("gdn_chunk_scan kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn gdn_full_chunk_prefill(
+        &self,
+        g: &Tensor,
+        v: &Tensor,
+        kkt: &Tensor,
+        qkt: &Tensor,
+        ks_entry: &Tensor,
+        q_s: &Tensor,
+        beta: &Tensor,
+        k_t: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        if !kiln_gdn_kernel::gdn_full_chunk_prefill_supports(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        ) {
+            return Ok(None);
+        }
+        let out = kiln_gdn_kernel::gdn_full_chunk_prefill(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        )
+        .context("gdn_full_chunk_prefill kernel failed")?;
         Ok(Some(out))
     }
 

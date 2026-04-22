@@ -66,6 +66,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_full_chunk_prefill(&self) -> bool {
+        false
+    }
+
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
     ///
     /// `q`, `k`, `v`: `[batch, seq_len, num_heads, head_dim]` bf16 contiguous.
@@ -201,6 +205,22 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _beta: &Tensor,
         _decay_last_col: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_full_chunk_prefill(
+        &self,
+        _g: &Tensor,
+        _v: &Tensor,
+        _kkt: &Tensor,
+        _qkt: &Tensor,
+        _ks_entry: &Tensor,
+        _q_s: &Tensor,
+        _beta: &Tensor,
+        _k_t: &Tensor,
+        _state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
         Ok(None)
     }
 

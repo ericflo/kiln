@@ -45,6 +45,7 @@ fn main() {
     build.file(csrc_dir.join("gdn_gates.cu"));
     build.file(csrc_dir.join("gdn_chunk_prep.cu"));
     build.file(csrc_dir.join("gdn_chunk_scan.cu"));
+    build.file(csrc_dir.join("gdn_full_chunk.cu"));
 
     build.compile("kiln_gdn_kernel");
 

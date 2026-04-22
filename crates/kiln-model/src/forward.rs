@@ -2079,6 +2079,59 @@ fn compute_chunk_body_reference(
     Ok((out_chunk, w_weighted))
 }
 
+fn compute_full_chunk_prefill_reference(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta_c: &Tensor,
+    k_t_mat: &Tensor,
+    state: &mut Tensor,
+) -> Result<Tensor> {
+    let dtype = g.dtype();
+    let c = g.dim(2)?;
+
+    let g_f32 = g.to_dtype(DType::F32)?;
+    let big_g = g_f32.cumsum(candle_core::D::Minus1)?;
+    let big_g_col = big_g.unsqueeze(3)?;
+    let big_g_row = big_g.unsqueeze(2)?;
+    let decay = big_g_col.broadcast_sub(&big_g_row)?.exp()?.to_dtype(dtype)?;
+    let p = big_g.exp()?.to_dtype(dtype)?;
+    let p_col = p.unsqueeze(3)?;
+
+    let strict_mask = strict_lower_tri_mask(c, dtype, g.device())?;
+    let causal_mask = causal_lower_tri_mask(c, dtype, g.device())?;
+
+    let v_prime = (v - ks_entry.broadcast_mul(&p_col)?)?;
+    let a_strict = kkt.broadcast_mul(&decay)?.broadcast_mul(&strict_mask)?.contiguous()?;
+    let b_mask = qkt.broadcast_mul(&decay)?.broadcast_mul(&causal_mask)?.contiguous()?;
+    let q_s_scaled = q_s.broadcast_mul(&p_col)?;
+
+    let g_last = big_g.narrow(2, c - 1, 1)?;
+    let decay_last_col_u = g_last
+        .broadcast_sub(&big_g)?
+        .exp()?
+        .to_dtype(dtype)?
+        .unsqueeze(3)?;
+    let p_last_u = g_last.exp()?.to_dtype(dtype)?.unsqueeze(3)?;
+
+    let (out_chunk, w_weighted) = compute_chunk_body_reference(
+        &a_strict,
+        &b_mask,
+        &v_prime,
+        &q_s_scaled,
+        beta_c,
+        &decay_last_col_u,
+    )?;
+
+    let state_scaled = state.broadcast_mul(&p_last_u)?;
+    let delta_state = k_t_mat.matmul(&w_weighted)?;
+    *state = (state_scaled + delta_state)?;
+    Ok(out_chunk)
+}
+
 /// Specialized single-token GDN recurrence.
 ///
 /// This is the non-CUDA fast path for `seq_len == 1`, avoiding the chunkwise
@@ -2259,6 +2312,15 @@ fn gdn_chunkwise_recurrence(
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
+
+        if !is_tail && dtype == DType::BF16 && backend.supports_gdn_full_chunk_prefill() {
+            if let Some(out_chunk) = backend.gdn_full_chunk_prefill(
+                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
+            )? {
+                out_chunks.push(out_chunk);
+                continue;
+            }
+        }
 
         // Fused prep: cumsum + decay + exp + masked scales + v_prime +
         // q_s_scaled + decay_last_col + p_last in a single CUDA launch.
@@ -8261,6 +8323,107 @@ mod tests {
 
         check("out_chunk", &out_kernel, &out_ref)?;
         check("w_weighted", &ww_kernel, &ww_ref)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_gdn_full_chunk_prefill_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_gdn_full_chunk_prefill_matches_fallback"
+                );
+                return Ok(());
+            }
+        };
+
+        let b = 1usize;
+        let nv = 32usize;
+        let c = 64usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let mut rng = StdRng::seed_from_u64(0xF00DCAFE_u64);
+        let n_c = b * nv * c;
+        let n_cc = b * nv * c * c;
+        let n_cdv = b * nv * c * dv;
+        let n_dkc = b * nv * dk * c;
+        let n_dkdv = b * nv * dk * dv;
+
+        let g_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(-0.15f32..0.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.3f32..1.1f32)).collect();
+        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.25f32..0.25f32)).collect();
+        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.25f32..0.25f32)).collect();
+        let ks_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let qs_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let kt_data: Vec<f32> = (0..n_dkc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let state_data: Vec<f32> = (0..n_dkdv).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+
+        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let beta =
+            Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let kkt =
+            Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let qkt =
+            Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let ks_entry =
+            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let q_s =
+            Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+        let k_t =
+            Tensor::from_slice(&kt_data, (b, nv, dk, c), &device)?.to_dtype(DType::BF16)?;
+        let state0 =
+            Tensor::from_slice(&state_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+
+        let mut state_kernel = state0.clone();
+        let out_kernel = kiln_gdn_kernel::gdn_full_chunk_prefill(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_kernel,
+        )?;
+
+        let mut state_ref = state0.clone();
+        let out_ref = compute_full_chunk_prefill_reference(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_ref,
+        )?;
+
+        let check = |name: &str, got: &Tensor, want: &Tensor| -> Result<()> {
+            let diff = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!("gdn-full-chunk {name}: max={max:e} mean={mean:e}");
+            assert!(max < 3e-2, "full-chunk {name} max_abs_diff {max:e} exceeds 3e-2");
+            assert!(
+                mean < 3e-3,
+                "full-chunk {name} mean_abs_diff {max:e} exceeds 3e-3"
+            );
+            Ok(())
+        };
+
+        check("out_chunk", &out_kernel, &out_ref)?;
+        check("state", &state_kernel, &state_ref)?;
         Ok(())
     }
 
