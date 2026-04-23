@@ -4675,9 +4675,6 @@ pub fn model_forward_segment(
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
-                let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
-                let capture_c41_taps =
-                    crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
@@ -5614,6 +5611,9 @@ fn model_forward_paged_inner(
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
+                let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
+                let capture_c41_taps =
+                    crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
