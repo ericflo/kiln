@@ -72,6 +72,7 @@ Exit code:
 """
 
 import argparse
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -431,20 +432,52 @@ def _compare_tap(
     return row
 
 
-def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, int]]:
+def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
     try:
         tensors = load_file(path)
     except Exception as e:
         print(f"ERROR: failed to load {path}: {e}", file=sys.stderr)
         sys.exit(2)
-    meta: Dict[str, int] = {}
+    meta: Dict[str, object] = {}
     arrays: Dict[str, np.ndarray] = {}
     for key, val in tensors.items():
         if key in META_KEYS or key.startswith("meta__"):
-            meta[key] = int(val.item()) if val.size == 1 else int(val.flatten()[0])
+            if val.size == 1:
+                meta[key] = int(val.item())
+            else:
+                meta[key] = [int(x) for x in val.reshape(-1).tolist()]
         else:
             arrays[key] = val
     return arrays, meta
+
+
+def _extract_h_layer_idx(name: str) -> Optional[int]:
+    m = re.fullmatch(r"h_layer_(\d+)", name)
+    if m is None:
+        return None
+    return int(m.group(1))
+
+
+def _sorted_h_layer_tap_names(names) -> List[str]:
+    layers = sorted(
+        idx
+        for idx in (_extract_h_layer_idx(name) for name in names)
+        if idx is not None
+    )
+    return [f"h_layer_{idx}" for idx in layers]
+
+
+def _meta_boundary_layers(meta: Dict[str, object]) -> List[int]:
+    raw = meta.get("meta__boundary_layers")
+    if isinstance(raw, list):
+        return sorted(int(v) for v in raw)
+    return []
+
+
+def _fmt_meta_value(v: object) -> str:
+    if isinstance(v, list):
+        return "[" + ", ".join(str(int(x)) for x in v) + "]"
+    return str(v)
 
 
 def _ordered_taps(
@@ -462,7 +495,10 @@ def _ordered_taps(
     for name in SUBOP_ORDER:
         if name in common:
             out.append(name)
-    for name in B10_LAYER_TAPS:
+    for name in _sorted_h_layer_tap_names(common):
+        if name in common and name not in out:
+            out.append(name)
+    for name in ("h_pre_final_norm", "h_post_final_norm"):
         if name in common and name not in out:
             out.append(name)
     for name in B11_LAYER0_TAP_NAMES:
@@ -496,7 +532,7 @@ def _compare_pair(
     atol: float,
     rtol: float,
     emit,
-) -> Tuple[bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]:
+) -> Tuple[bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]:
     """Compare a single (kiln, ref) pair. Returns (all_ok, first_divergence,
     rows, kiln_meta, ref_meta). `label` is shown in headers for multi-pair
     runs."""
@@ -513,6 +549,14 @@ def _compare_pair(
         rv = ref_meta.get(k, "<missing>")
         match = "OK" if kv == rv else "MISMATCH"
         emit(f"  {k}: kiln={kv} ref={rv} [{match}]")
+    if "meta__boundary_layers" in kiln_meta or "meta__boundary_layers" in ref_meta:
+        kv = kiln_meta.get("meta__boundary_layers", "<missing>")
+        rv = ref_meta.get("meta__boundary_layers", "<missing>")
+        match = "OK" if kv == rv else "MISMATCH"
+        emit(
+            "  meta__boundary_layers: "
+            f"kiln={_fmt_meta_value(kv)} ref={_fmt_meta_value(rv)} [{match}]"
+        )
     emit("")
 
     header = (
@@ -582,7 +626,7 @@ def _parse_pair_arg(s: str) -> Tuple[str, str, str]:
 
 
 def _emit_b7a_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     emit,
 ) -> None:
     """Print per-position cos_sim summary for the B7a decision: H1 confirmed
@@ -641,7 +685,7 @@ def _emit_b7a_summary(
 
 
 def _emit_b9_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
     rtol: float,
     emit,
@@ -764,8 +808,36 @@ def _emit_b9_summary(
         emit("  -> Re-check the full sub-op table above for the first non-zone divergence.")
 
 
+def _b10_layer_taps_for_pair_results(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
+) -> List[str]:
+    names = set()
+    boundary_layers = set()
+    final_norm_name: Optional[str] = None
+    for _label, _ok, _first_div, rows, kiln_meta, ref_meta in pair_results:
+        boundary_layers.update(_meta_boundary_layers(kiln_meta))
+        boundary_layers.update(_meta_boundary_layers(ref_meta))
+        for row in rows:
+            name = row["name"]
+            if not isinstance(name, str):
+                continue
+            names.add(name)
+            idx = _extract_h_layer_idx(name)
+            if idx is not None:
+                boundary_layers.add(idx)
+            elif name in ("h_pre_final_norm", "h_post_final_norm"):
+                final_norm_name = name
+
+    taps = [f"h_layer_{idx}" for idx in sorted(boundary_layers)]
+    if not taps:
+        taps = [name for name in B10_LAYER_TAPS if name in names]
+    if final_norm_name is not None:
+        taps.append(final_norm_name)
+    return taps
+
+
 def _emit_b10_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
     rtol: float,
     emit,
@@ -785,9 +857,10 @@ def _emit_b10_summary(
     emit("=" * 78)
 
     labels = [pr[0] for pr in pair_results]
+    b10_layer_taps = _b10_layer_taps_for_pair_results(pair_results)
 
     cell: Dict[str, Dict[str, Tuple[float, float, bool, Tuple[int, ...]]]] = {
-        n: {} for n in B10_LAYER_TAPS
+        n: {} for n in b10_layer_taps
     }
     for label, _ok, _fd, rows, _km, _rm in pair_results:
         for r in rows:
@@ -806,7 +879,7 @@ def _emit_b10_summary(
     emit(header)
     emit("  " + "-" * (len(header) - 2))
     captured_any = False
-    for tap in B10_LAYER_TAPS:
+    for tap in b10_layer_taps:
         cells = []
         for lab in labels:
             entry = cell[tap].get(lab)
@@ -831,7 +904,7 @@ def _emit_b10_summary(
     first_div_tap: Optional[str] = None
     first_div_pos: Optional[str] = None
     last_match_tap: Optional[str] = None
-    for tap in B10_LAYER_TAPS:
+    for tap in b10_layer_taps:
         any_div_here = False
         for lab in labels:
             entry = cell[tap].get(lab)
@@ -858,36 +931,49 @@ def _emit_b10_summary(
     if last_match_tap is not None:
         emit(f"  last matching tap before divergence: '{last_match_tap}'")
 
+    first_div_idx = _extract_h_layer_idx(first_div_tap) if first_div_tap is not None else None
+    last_match_idx = _extract_h_layer_idx(last_match_tap) if last_match_tap is not None else None
+    exact_first_bad_layer = (
+        first_div_idx is not None
+        and last_match_idx is not None
+        and first_div_idx == last_match_idx + 1
+    )
+
     if first_div_tap == "h_layer_0":
         emit("Phase B10 verdict: DIVERGENCE AT LAYER 0")
         emit("  -> Input-path bug: embedding lookup, rotary_inv_freq build, first")
         emit("     block's Q/K/V proj or GDN sub-op, OR prompt-token construction")
         emit("     mismatch between kiln and reference. Verify `prompt_tokens` meta")
         emit("     matches exactly, then narrow to layer 0's sub-ops.")
-    elif first_div_tap in ("h_layer_8", "h_layer_16"):
+    elif exact_first_bad_layer:
+        emit(f"Phase B10 verdict: DIVERGENCE FIRST APPEARS AT LAYER {first_div_idx}")
+        emit(f"  -> `{last_match_tap}` still matches, but `{first_div_tap}` is the first")
+        emit("     post-layer tap below tolerance. This localizes the earliest shared")
+        emit(f"     upstream drift to transformer block {first_div_idx}.")
+    elif first_div_idx is not None and first_div_idx <= 16:
         emit("Phase B10 verdict: DIVERGENCE IN EARLY GDN STACK")
         emit(f"  -> The first bad transformer block lies between {last_match_tap or 'start'}")
         emit(f"     and {first_div_tap}. Narrow by capturing intermediate layers")
-        emit("     (e.g. layers 4 and 12) and re-running B10 on the new dump.")
+        emit("     inside that span and re-running B10 on the new dump.")
     elif first_div_tap == "h_layer_23":
         emit("Phase B10 verdict: DIVERGENCE IN MID-STACK (GDN→GQA transition zone)")
         emit(f"  -> The first bad block lies between {last_match_tap or 'start'} and 23.")
         emit("     Layer 23 is a GQA block (full_attention_interval=4). Narrow by")
         emit("     capturing layers 20, 21, 22 on the next dump.")
-    elif first_div_tap == "h_layer_31":
+    elif first_div_idx is not None:
         emit("Phase B10 verdict: DIVERGENCE IN LATE STACK")
-        emit(f"  -> The first bad block lies between {last_match_tap or 'start'} and 31.")
-        emit("     Narrow by capturing layers 24, 27, 29 on the next dump.")
-    elif first_div_tap == "h_pre_final_norm":
+        emit(f"  -> The first bad block lies between {last_match_tap or 'start'} and {first_div_tap}.")
+        emit("     Narrow by capturing additional layers inside that span.")
+    elif first_div_tap in ("h_pre_final_norm", "h_post_final_norm"):
         emit("Phase B10 verdict: DIVERGENCE AT FINAL-LAYER → h_main HANDOFF")
-        emit("  -> All 32 layers match, but `h_pre_final_norm` (what MTP consumes")
+        emit(f"  -> All 32 layers match, but `{first_div_tap}` (what MTP consumes")
         emit("     as `h_prev`) diverges. The bug is in the last-row extraction")
         emit("     (`narrow(1, seq_len-1, 1)`), the residual add at layer 31, or")
         emit("     how the base-model main path routes hidden into the MTP head.")
 
 
 def _emit_b11_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
     rtol: float,
     emit,
@@ -1018,7 +1104,7 @@ def _emit_b11_summary(
 
 
 def _emit_b12_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
     rtol: float,
     emit,
@@ -1234,7 +1320,7 @@ def _emit_b12_summary(
 
 
 def _emit_c6_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
     rtol: float,
     emit,
@@ -1362,7 +1448,7 @@ def _emit_c6_summary(
 
 
 def _emit_c7_summary(
-    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]],
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
     rtol: float,
     emit,
@@ -1618,7 +1704,7 @@ def main() -> int:
     emit(f"MTP numerical bisect — mode: {mode}, atol={args.atol}, rtol={args.rtol}")
 
     pair_results: List[
-        Tuple[str, bool, str, List[Dict[str, object]], Dict[str, int], Dict[str, int]]
+        Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]
     ] = []
     overall_ok = True
     for label, kpath, rpath in pairs:

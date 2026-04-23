@@ -127,6 +127,13 @@ from safetensors.torch import save_file
 #   - layer 31: GQA (last layer; its output IS `h_pre_final_norm`)
 B10_BOUNDARY_LAYERS: Tuple[int, ...] = (0, 8, 16, 23, 31)
 
+# Phase C40 — optional dense early-stack sweep used to localize the first
+# shared upstream drift inside C39's coarse `h_layer_0 -> h_layer_8` span.
+# The kiln dump now serializes the actual boundary set in
+# `meta__boundary_layers`; this tuple is the fallback when that metadata is
+# absent.
+C40_EARLY_BOUNDARY_LAYERS: Tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+
 
 # Phase B11b — ordered layer-0 GDN sub-op tap names. Must stay in lock-step
 # with `B11_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs`. The comparator
@@ -193,10 +200,24 @@ def load_kiln_dump(path: str) -> Dict[str, object]:
                 # Token IDs — keep integral.
                 out[name] = t.to(torch.int64).contiguous()
             elif name.startswith("meta__"):
-                out[name] = int(t.flatten()[0].item())
+                if t.numel() == 1:
+                    out[name] = int(t.flatten()[0].item())
+                else:
+                    out[name] = [int(v) for v in t.view(-1).tolist()]
             else:
                 out[name] = t.to(torch.float32)
     return out
+
+
+def resolve_boundary_layers(kiln_dump: Dict[str, object], capture_b12: bool) -> List[int]:
+    raw = kiln_dump.get("meta__boundary_layers")
+    if isinstance(raw, list) and raw:
+        return sorted({int(v) for v in raw})
+
+    layers = set(B10_BOUNDARY_LAYERS)
+    if capture_b12:
+        layers.update(B12_GQA_LAYERS)
+    return sorted(layers)
 
 
 # -----------------------------------------------------------------------------
@@ -752,6 +773,7 @@ def run_reference_forward(
     checkpoint: str,
     input_ids: torch.Tensor,
     device: torch.device,
+    boundary_layers: Optional[List[int]] = None,
     capture_b11_layer0: bool = False,
     capture_b12: bool = False,
     fp32: bool = False,
@@ -763,6 +785,9 @@ def run_reference_forward(
       shape [1, 1, H].
     - `capture_b11_layer0=True`: 11 full-tensor layer-0 GDN sub-op taps
       under keys in `B11_LAYER0_TAP_NAMES`.
+    - `boundary_layers`: explicit ordered list of `h_layer_<idx>` taps to
+      emit. When omitted, falls back to the legacy B10 set (and the B12 tail
+      extension when `capture_b12=True`).
     - `capture_b12=True`: per-layer `h_layer_{24..30}` taps plus layer-31
       GQA sub-op taps under `b12__<name>` keys.
     - `fp32=True`: load the HF model in float32 (instead of bfloat16) so the
@@ -890,7 +915,9 @@ def run_reference_forward(
     )
 
     taps: Dict[str, torch.Tensor] = {}
-    layers_to_emit: List[int] = list(B10_BOUNDARY_LAYERS)
+    layers_to_emit: List[int] = (
+        sorted(set(boundary_layers)) if boundary_layers is not None else list(B10_BOUNDARY_LAYERS)
+    )
     if capture_b12:
         layers_to_emit = sorted(set(layers_to_emit) | set(B12_GQA_LAYERS))
     for li in layers_to_emit:
@@ -1015,6 +1042,7 @@ def main() -> int:
 
     print(f"[mtp_h_main_ref] loading kiln dump from {args.kiln_dump}", file=sys.stderr)
     kiln = load_kiln_dump(args.kiln_dump)
+    boundary_layers = resolve_boundary_layers(kiln, capture_b12=args.b12_taps)
     draft_token_id = int(kiln.get("meta__draft_token_id", -1))
     mtp_pos = int(kiln.get("meta__mtp_pos", -1))
     print(
@@ -1076,6 +1104,7 @@ def main() -> int:
         args.checkpoint,
         prompt_tokens,
         device,
+        boundary_layers=boundary_layers,
         capture_b11_layer0=args.b11_taps,
         capture_b12=args.b12_taps,
         fp32=args.fp32,
@@ -1098,9 +1127,6 @@ def main() -> int:
     out_dict["meta__replay_tokens_len"] = torch.tensor(
         [int(prompt_tokens.shape[-1])], dtype=torch.int32
     )
-    boundary_layers = list(B10_BOUNDARY_LAYERS)
-    if args.b12_taps:
-        boundary_layers = sorted(set(boundary_layers) | set(B12_GQA_LAYERS))
     out_dict["meta__boundary_layers"] = torch.tensor(
         boundary_layers, dtype=torch.int32
     )

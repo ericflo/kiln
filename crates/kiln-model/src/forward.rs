@@ -4871,8 +4871,10 @@ pub fn model_forward_paged_with_last_hidden(
     // var is unset, so production cost is a single TLS borrow + env lookup.
     // The inner forward pass fills the window with boundary-layer last-row
     // slices plus `h_post_final_norm` (C18 — formerly `h_pre_final_norm`
-    // before kiln started returning post-final-norm `h_prev`); the window
-    // is drained in
+    // before kiln started returning post-final-norm `h_prev`). Phase C40
+    // can opt into a denser early sweep (layers 1..8) via
+    // `KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1`; default B10/B12 behavior is
+    // unchanged when that flag is unset. The window is drained in
     // `mtp_forward_step`'s dump block so the taps appear alongside the
     // standard 8 MTP taps in the same safetensors file. The next call to
     // this function re-arms the window, overwriting any stale buffer from
@@ -5346,6 +5348,7 @@ pub fn mtp_forward_step(
                 mtp_pos,
                 base_pos,
                 swap_fc_norms,
+                &crate::mtp_debug::current_h_main_boundary_layers(),
                 &taps,
                 &extra_subops,
                 &prompt_tokens,
