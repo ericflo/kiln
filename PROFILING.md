@@ -252,6 +252,74 @@ tap on the standard workload, using the existing hidden-state dump path and a
 layer/sub-op comparator. Seed 1's failure is already visible before the
 accept/reject seam.
 
+## Phase C38 post-#422 seed1-only upstream `h_main` bisect (2026-04-23)
+
+**Scope:** rerun the standard native-MTP workload on fresh `main`, then use
+the existing B10/B12 hidden-state dump + HF reference + comparator path to
+name the first seed1-only divergence upstream of `h_main`.
+
+**Preflight outcome:** proceed. Fresh `main` was `c66cf41` (PR #422 itself),
+recent PR history contained no newer open or merged post-#422 upstream-base
+bisect artifact, the standard workload still reproduced the seed split, and
+the latest recommendation in this file still pointed upstream of `h_main`
+rather than at another decode-kernel retry.
+
+| Seed | prompt tokens | decode tok/s | α |
+| --- | ---: | ---: | ---: |
+| 0 | 494 | 41.9 | 0.7397 |
+| 1 | 508 | 22.5 | 0.3093 |
+
+**Hardware:** direct RunPod fallback on `NVIDIA RTX A6000` with
+`ghcr.io/ericflo/kiln-runpod:latest`. Pool resume failed on the first try, but
+direct launch succeeded on A6000, so no fallback GPU was needed.
+
+### Result
+
+The fresh artifact does **not** localize a seed1-only first divergence with
+the current B10/B12 path.
+
+- **B10:** both seeds first diverge at the same boundary: last clean tap
+  `h_layer_8`, first divergent tap `h_layer_16`. That means the existing
+  per-layer boundary scan does **not** distinguish the trapped seed from the
+  escaping seed by first-divergent layer.
+- **B12:** both seeds again name `h_layer_31` as the first divergent GQA-tail
+  layer. Seed 1 is worse (`median cos_sim 0.9710` vs `0.9795` for seed 0),
+  but the first divergent layer is still the same.
+- **Sub-op blocker:** the kiln-side dumps contained **zero** `b12__*` tensors
+  and no `h_pre_final_norm` tensor even with
+  `KILN_MTP_DUMP_B12_GQA_TAPS=1`. The HF reference wrote 11 `b12__*` tensors
+  plus `h_pre_final_norm`, but still could not emit `rope_q`, `rope_k`, or
+  `attn_out` because those taps remain hook-unreachable in the current Python
+  reference path. So the current B12 route is structurally unable to produce a
+  trustworthy first-sub-op verdict on fresh `main`.
+
+### Execution notes
+
+- The task brief's `step-{step}.safetensors` path template did not work for
+  this direct B10/B12 run because `{step}` is only substituted when the splice
+  capture path is armed. The effective capture path here was the fixed file
+  `.../step-0.safetensors`.
+- The baked RunPod image had `torch` and `huggingface-hub`, but not
+  `transformers`; installing it on-pod was required for
+  `scripts/mtp_h_main_reference_dump.py`.
+- The raw comparator footer still prints `Overall verdict: divergence(s) at:
+  ['h_main']` because the B10/B12 mode walks the legacy primary taps first and
+  the reference dump intentionally omits them. The B10/B12 summary tables are
+  the authoritative verdicts for this phase.
+
+### Recommendation
+
+Do **not** guess a kernel fix from this artifact. The honest next task is to
+repair or re-verify the current B12 tap plumbing first: kiln must actually
+emit the `b12__*` tensors it advertises, and the HF reference still needs the
+remaining `rope_q` / `rope_k` / `attn_out` taps. Only after that should the
+project retry a narrower seed1-only upstream bisect. As captured here, the
+existing source-of-truth path stops at:
+
+- shared first boundary divergence at `h_layer_16`, and
+- shared first GQA-tail divergence at `h_layer_31`, with seed 1 only worse in
+  magnitude, not different in first-divergent layer.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled

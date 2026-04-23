@@ -1,0 +1,70 @@
+MTP numerical bisect — mode: layer-31 drift bisect (B12), atol=0.01, rtol=0.1
+
+=== seed1 ===
+  kiln dump : profiling-artifacts/post422_20260423_seed1_captures/step-0.safetensors
+  ref  dump : profiling-artifacts/post422_20260423_seed1_ref.safetensors
+Metadata:
+  meta__draft_token_id: kiln=25015 ref=25015 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 MISSING IN REF DUMP
+tok_embed              MISSING IN REF DUMP
+fc_input               MISSING IN REF DUMP
+fc_output              MISSING IN REF DUMP
+pre_layer              MISSING IN REF DUMP
+post_layer             MISSING IN REF DUMP
+post_final_ln          MISSING IN REF DUMP
+mtp_logits             MISSING IN REF DUMP
+h_layer_0              1x1x2560               True     True     1.00e+00   1.56e-02     1.02e-04    
+h_layer_8              1x1x2560               True     True     1.00e+00   3.12e-02     1.73e-03    
+h_layer_16             1x1x2560               True     False    1.00e+00   2.51e-02     4.30e-03    
+h_layer_23             1x1x2560               True     False    9.99e-01   3.12e-01     1.33e-02    
+h_layer_31             1x1x2560               True     False    9.71e-01   2.11e+01     1.05e+00    
+h_layer_24             1x1x2560               True     False    9.99e-01   2.50e-01     1.42e-02    
+h_layer_25             1x1x2560               True     False    9.99e-01   2.50e-01     1.49e-02    
+h_layer_26             1x1x2560               True     False    1.00e+00   1.25e-01     1.54e-02    
+h_layer_27             1x1x2560               True     False    1.00e+00   2.50e-01     1.64e-02    
+h_layer_28             1x1x2560               True     False    1.00e+00   1.25e-01     2.27e-02    
+h_layer_29             1x1x2560               True     False    9.99e-01   2.50e-01     2.53e-02    
+h_layer_30             1x1x2560               True     False    9.99e-01   2.50e-01     2.94e-02    
+prompt_tokens          508                    True     True     1.00e+00   0.00e+00     0.00e+00    
+
+  pair verdict: first divergence at tap 'h_main'.
+    Most-likely cause: upstream (base model) — this ref takes h_main FROM kiln, so shouldn't differ
+
+==============================================================================
+Phase B12 layer-31 drift bisect — per-layer cos_sim + max|Δ|
+==============================================================================
+  tap                   pos=seed1                       
+  ------------------------------------------------------
+  h_layer_24            cos=9.99e-01   max|Δ|=2.50e-01   ok   
+  h_layer_25            cos=9.99e-01   max|Δ|=2.50e-01   ok   
+  h_layer_26            cos=1.00e+00   max|Δ|=1.25e-01   ok   
+  h_layer_27            cos=1.00e+00   max|Δ|=2.50e-01   ok   
+  h_layer_28            cos=1.00e+00   max|Δ|=1.25e-01   ok   
+  h_layer_29            cos=9.99e-01   max|Δ|=2.50e-01   ok   
+  h_layer_30            cos=9.99e-01   max|Δ|=2.50e-01   ok   
+  h_layer_31            cos=9.71e-01   max|Δ|=2.11e+01   DIV  
+  h_pre_final_norm      <missing>                       
+
+  per-layer median cos_sim across positions:
+    h_layer_24             median=9.99e-01     ok
+    h_layer_25             median=9.99e-01     ok
+    h_layer_26             median=1.00e+00     ok
+    h_layer_27             median=1.00e+00     ok
+    h_layer_28             median=1.00e+00     ok
+    h_layer_29             median=9.99e-01     ok
+    h_layer_30             median=9.99e-01     ok
+    h_layer_31             median=9.71e-01     DIV
+
+  first layer with MEDIAN cos_sim < 0.995: 'h_layer_31' (median = 0.971042)
+Phase B12 verdict: LAYER 31 IS THE FIRST DIVERGENT LAYER, but no b12__
+  sub-op taps were captured, so no localized target is available.
+  -> Re-run both dumps with the b12__ sub-op tap env flags set.
+
+Overall verdict: divergence(s) at: ['h_main']
