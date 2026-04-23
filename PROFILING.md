@@ -413,6 +413,85 @@ post-change profile for a change that was already disqualified. The capture
 note for this decision is recorded in
 `profiling-artifacts/post401_20260423_prefill_kern.csv`.
 
+### Post-#403 bounded front-half triangular mask packing — 2026-04-23
+
+Fresh-`main` preflight passed before editing:
+
+- PR `#403` is merged and remains doc-only: it updated `PROFILING.md` plus
+  `profiling-artifacts/post401_20260423_prefill_kern.csv`, with **no** source
+  change under `crates/kiln-gdn-kernel/`.
+- No newer open or merged PR already changes
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this post-`#403`
+  front-half follow-up scope. PR `#404` only touches
+  `crates/kiln-server/src/bench.rs`, and there were no open PRs at preflight.
+- The validated post-`#392` refined prefill capture above still shows
+  `gdn_full_chunk_forward_kernel` at **34.6%** of prompt-heavy prefill kernel
+  time, with the hot slice centered on the fused full-chunk prefill body
+  rather than decode.
+
+This retry targeted the **front half** of `gdn_full_chunk_forward_kernel`
+instead of the already-exhausted recurrent-state update. The bounded idea was:
+pack `s_a` and `s_b` as the exact triangular regions the algorithm reads
+(strict-lower for `a`, lower-with-diagonal for `b`) instead of reserving full
+`64 x 64` shared tiles whose upper halves are always zero. The expected upside
+was lower shared-memory footprint for the `big_g` / decay / mask / `out_chunk`
+path while keeping the math and synchronization structure unchanged.
+
+**Attempted code path**
+
+- `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`
+
+**Parity**
+
+RunPod on-demand RTX A6000, `ghcr.io/ericflo/kiln-runpod:latest`.
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+export CARGO_PROFILE_DEV_DEBUG=0
+cargo test -p kiln-model --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+```
+
+Result: **pass**.
+
+- `out_chunk` max abs diff: **1.5625e-2**
+- `state` max abs diff: **3.125e-2**
+
+**8192/1 prompt-heavy prefill**
+
+Required same-pod order:
+
+- fresh `main` control first: **4785.1 ms**, **1709 tok/s**
+- branch second (triangular mask packing): **3348.3 ms**, **2443 tok/s**
+
+That looked like a keep, but the branch ran second on the same warmed pod and
+the gain was much larger than the expected 5-15% range, so I ran one extra
+sanity control on the same pod after rebuilding `main` again:
+
+- fresh `main` warm rerun after the branch: **3347.1 ms**, **2444 tok/s**
+
+That warm-`main` rerun is effectively identical to the branch. So the apparent
+`4785 -> 3348 ms` improvement was a second-arm warm effect, not a durable
+kernel win. The real same-pod delta after controlling for warmth is below the
+task's keep bar, so the kernel diff was reverted before opening the PR.
+
+**Keep / revert decision**
+
+Revert. This section documents the failed front-half attempt; it does **not**
+land a source change in `gdn_full_chunk_forward.cu`.
+
+**Capture note**
+
+I did not spend additional pod time on a post-change Nsight capture once the
+warm-`main` rerun showed parity with the branch. The measurement record for the
+control, branch, and warm-control sanity rerun is stored in
+`profiling-artifacts/post403_20260423_prefill_kern.csv`.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
