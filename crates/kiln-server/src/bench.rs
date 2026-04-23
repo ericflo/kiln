@@ -13,6 +13,7 @@ use serde::Serialize;
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
+use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_core::vram::detect_vram;
 use kiln_model::backend as runtime_backend;
