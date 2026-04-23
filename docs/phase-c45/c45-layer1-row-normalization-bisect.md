@@ -189,3 +189,34 @@ The next exact target is therefore the upstream operand drift budget feeding
 this multiply, starting with the row-local RMS scalar / selected last-row
 provenance under a tighter C45 tolerance or a new operand-error-budget tap, not
 a production `broadcast_mul` code change.
+
+## 2026-04-23 operand drift budget diagnostic (WIP)
+
+This follow-up adds a comparator-only C45 operand budget diagnostic for the
+row-shaped broadcast-multiply boundary. It preserves the existing C45 report and
+adds, for the captured `layer_1_input_norm_last_row_flat_values`,
+`layer_1_input_norm_rms_inv_scalar_extracted_values`, and
+`layer_1_input_norm_pre_weight_row_broadcast_output` tensors:
+
+- row-side, scalar-side, predicted-product, and observed-output max / mean /
+  relative-L2 error;
+- a first-order contribution budget that decomposes the predicted product drift
+  into row term, scalar term, and row×scalar interaction, then labels the
+  dominant side as row-side, scalar-side, or both;
+- a tighter mask check at `atol=1e-3`, `rtol=1e-2`, plus current/tight tolerance
+  ratios for the row, scalar, and predicted product.
+
+Validation status on 2026-04-23: zero-cost local syntax and tap-contract checks
+passed, but fresh GPU reruns for `profiling-artifacts/c45_operand_budget_seed0_compare.txt`
+and `profiling-artifacts/c45_operand_budget_seed1_compare.txt` were blocked by
+RunPod capacity across the required pool/direct fallback list (`NVIDIA RTX A6000`,
+`NVIDIA A40`, `NVIDIA A100 80GB PCIe`, `NVIDIA RTX 6000 Ada`, `NVIDIA L40S`).
+The checked-in compare reports do not include the raw safetensors captures, so
+no fresh operand-budget seed verdict is claimed in this WIP revision.
+
+Pending verdict: rerun the new `scripts/mtp_compare.py --c45-operand-budget`
+diagnostic on fresh seed 0/1 C45 captures. If same-side residual remains tiny and
+predicted product still matches observed output, use the new contribution budget
+to name the next exact upstream boundary as row-side, scalar-side, both, or only
+a comparator tolerance artifact. No production math change is justified until
+that fresh evidence identifies a real mismatch.

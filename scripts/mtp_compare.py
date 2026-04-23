@@ -388,6 +388,9 @@ C45_HYPOTHESIS: Dict[str, str] = {
     "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-local scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
 }
 
+C45_TIGHT_ATOL = 1e-3
+C45_TIGHT_RTOL = 1e-2
+
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
 # residual drift is small (0.97-0.98) and the goal is to localize it. A
 # per-layer median below this threshold marks the first layer of interest; if
@@ -596,6 +599,43 @@ def _same_side_c45_product_diagnostic(
     return max_abs, mean_abs
 
 
+
+def _diff_l2(diff: np.ndarray) -> float:
+    return float(np.linalg.norm(diff.reshape(-1))) if diff.size else 0.0
+
+
+def _rel_l2(diff: np.ndarray, ref: np.ndarray) -> float:
+    ref_norm = float(np.linalg.norm(ref.reshape(-1)))
+    if ref_norm == 0.0 or not diff.size:
+        return float("nan")
+    return _diff_l2(diff) / ref_norm
+
+
+def _max_tolerance_ratio(
+    diff: np.ndarray, ref: np.ndarray, atol: float, rtol: float
+) -> float:
+    if not diff.size:
+        return 0.0
+    allowed = atol + rtol * np.abs(ref)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratios = np.divide(
+            diff,
+            allowed,
+            out=np.full_like(diff, np.inf),
+            where=allowed != 0.0,
+        )
+    return float(np.nanmax(ratios))
+
+
+def _component_stats(component: np.ndarray, ref: np.ndarray) -> Dict[str, float]:
+    abs_component = np.abs(component)
+    return {
+        "max": float(abs_component.max()) if abs_component.size else 0.0,
+        "mean": float(abs_component.mean()) if abs_component.size else 0.0,
+        "l2": _diff_l2(abs_component),
+        "rel_l2": _rel_l2(abs_component, ref),
+    }
+
 def _c45_operand_product_bound_diagnostic(
     kiln_tensors: Dict[str, np.ndarray],
     ref_tensors: Dict[str, np.ndarray],
@@ -632,19 +672,82 @@ def _c45_operand_product_bound_diagnostic(
 
     predicted_kiln = kr * ks
     predicted_ref = rr * rs
-    product_diff = np.abs(predicted_kiln - predicted_ref)
-    output_diff = np.abs(ko - ro)
-    row_diff = np.abs(kr - rr)
-    scalar_diff = np.abs(ks - rs)
+    signed_row_diff = kr - rr
+    signed_scalar_diff = ks - rs
+    signed_product_diff = predicted_kiln - predicted_ref
+    signed_output_diff = ko - ro
+    product_diff = np.abs(signed_product_diff)
+    output_diff = np.abs(signed_output_diff)
+    row_diff = np.abs(signed_row_diff)
+    scalar_diff = np.abs(signed_scalar_diff)
+    row_component = signed_row_diff * rs
+    scalar_component = rr * signed_scalar_diff
+    interaction_component = signed_row_diff * signed_scalar_diff
     bound = row_diff * np.abs(ks) + np.abs(rr) * scalar_diff
     side_residual = np.maximum(np.abs(predicted_kiln - ko), np.abs(predicted_ref - ro))
+    row_stats = _component_stats(row_component, predicted_ref)
+    scalar_stats = _component_stats(scalar_component, predicted_ref)
+    interaction_stats = _component_stats(interaction_component, predicted_ref)
+    if scalar_stats["l2"] > row_stats["l2"] * 2.0:
+        dominant = "scalar-side"
+    elif row_stats["l2"] > scalar_stats["l2"] * 2.0:
+        dominant = "row-side"
+    else:
+        dominant = "both"
     return {
         "row_max_abs_diff": float(row_diff.max()) if row_diff.size else 0.0,
+        "row_mean_abs_diff": float(row_diff.mean()) if row_diff.size else 0.0,
+        "row_rel_l2": _rel_l2(row_diff, rr),
         "scalar_max_abs_diff": float(scalar_diff.max()) if scalar_diff.size else 0.0,
+        "scalar_mean_abs_diff": float(scalar_diff.mean()) if scalar_diff.size else 0.0,
+        "scalar_rel_l2": _rel_l2(scalar_diff, rs),
         "product_max_abs_diff": float(product_diff.max()) if product_diff.size else 0.0,
+        "product_mean_abs_diff": float(product_diff.mean()) if product_diff.size else 0.0,
+        "product_rel_l2": _rel_l2(product_diff, predicted_ref),
         "output_max_abs_diff": float(output_diff.max()) if output_diff.size else 0.0,
+        "output_mean_abs_diff": float(output_diff.mean()) if output_diff.size else 0.0,
+        "output_rel_l2": _rel_l2(output_diff, ro),
         "operand_bound_max": float(bound.max()) if bound.size else 0.0,
         "side_residual_max": float(side_residual.max()) if side_residual.size else 0.0,
+        "row_component_max": row_stats["max"],
+        "row_component_mean": row_stats["mean"],
+        "row_component_l2": row_stats["l2"],
+        "row_component_rel_l2": row_stats["rel_l2"],
+        "scalar_component_max": scalar_stats["max"],
+        "scalar_component_mean": scalar_stats["mean"],
+        "scalar_component_l2": scalar_stats["l2"],
+        "scalar_component_rel_l2": scalar_stats["rel_l2"],
+        "interaction_component_max": interaction_stats["max"],
+        "interaction_component_mean": interaction_stats["mean"],
+        "interaction_component_l2": interaction_stats["l2"],
+        "interaction_component_rel_l2": interaction_stats["rel_l2"],
+        "dominant_operand_side": dominant,
+        "row_tight_allclose": float(
+            np.allclose(kr, rr, atol=C45_TIGHT_ATOL, rtol=C45_TIGHT_RTOL)
+        ),
+        "scalar_tight_allclose": float(
+            np.allclose(ks, rs, atol=C45_TIGHT_ATOL, rtol=C45_TIGHT_RTOL)
+        ),
+        "product_tight_allclose": float(
+            np.allclose(
+                predicted_kiln,
+                predicted_ref,
+                atol=C45_TIGHT_ATOL,
+                rtol=C45_TIGHT_RTOL,
+            )
+        ),
+        "row_current_tol_ratio": _max_tolerance_ratio(row_diff, rr, 1e-2, 1e-1),
+        "scalar_current_tol_ratio": _max_tolerance_ratio(scalar_diff, rs, 1e-2, 1e-1),
+        "product_current_tol_ratio": _max_tolerance_ratio(product_diff, predicted_ref, 1e-2, 1e-1),
+        "row_tight_tol_ratio": _max_tolerance_ratio(
+            row_diff, rr, C45_TIGHT_ATOL, C45_TIGHT_RTOL
+        ),
+        "scalar_tight_tol_ratio": _max_tolerance_ratio(
+            scalar_diff, rs, C45_TIGHT_ATOL, C45_TIGHT_RTOL
+        ),
+        "product_tight_tol_ratio": _max_tolerance_ratio(
+            product_diff, predicted_ref, C45_TIGHT_ATOL, C45_TIGHT_RTOL
+        ),
     }
 
 def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
@@ -866,16 +969,50 @@ def _compare_pair(
             )
         emit(
             "    cross-side operand drift: "
-            f"row max={_fmt_sci(c45_product_bound['row_max_abs_diff'])}; "
-            f"scalar max={_fmt_sci(c45_product_bound['scalar_max_abs_diff'])}; "
-            f"predicted product max={_fmt_sci(c45_product_bound['product_max_abs_diff'])}; "
-            f"observed output max={_fmt_sci(c45_product_bound['output_max_abs_diff'])}; "
+            f"row max={_fmt_sci(c45_product_bound['row_max_abs_diff'])} "
+            f"mean={_fmt_sci(c45_product_bound['row_mean_abs_diff'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['row_rel_l2'])}; "
+            f"scalar max={_fmt_sci(c45_product_bound['scalar_max_abs_diff'])} "
+            f"mean={_fmt_sci(c45_product_bound['scalar_mean_abs_diff'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['scalar_rel_l2'])}; "
+            f"predicted product max={_fmt_sci(c45_product_bound['product_max_abs_diff'])} "
+            f"mean={_fmt_sci(c45_product_bound['product_mean_abs_diff'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['product_rel_l2'])}; "
+            f"observed output max={_fmt_sci(c45_product_bound['output_max_abs_diff'])} "
+            f"mean={_fmt_sci(c45_product_bound['output_mean_abs_diff'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['output_rel_l2'])}; "
             f"operand-bound max={_fmt_sci(c45_product_bound['operand_bound_max'])}"
+        )
+        emit(
+            "    operand contribution budget: "
+            f"row-term max={_fmt_sci(c45_product_bound['row_component_max'])} "
+            f"mean={_fmt_sci(c45_product_bound['row_component_mean'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['row_component_rel_l2'])}; "
+            f"scalar-term max={_fmt_sci(c45_product_bound['scalar_component_max'])} "
+            f"mean={_fmt_sci(c45_product_bound['scalar_component_mean'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['scalar_component_rel_l2'])}; "
+            f"interaction max={_fmt_sci(c45_product_bound['interaction_component_max'])} "
+            f"mean={_fmt_sci(c45_product_bound['interaction_component_mean'])} "
+            f"rel_l2={_fmt_sci(c45_product_bound['interaction_component_rel_l2'])}; "
+            f"dominant={c45_product_bound['dominant_operand_side']}"
+        )
+        emit(
+            f"    tighter tolerance mask check (atol={C45_TIGHT_ATOL:g}, rtol={C45_TIGHT_RTOL:g}): "
+            f"row allclose={bool(c45_product_bound['row_tight_allclose'])} "
+            f"current-ratio={_fmt_sci(c45_product_bound['row_current_tol_ratio'])} "
+            f"tight-ratio={_fmt_sci(c45_product_bound['row_tight_tol_ratio'])}; "
+            f"scalar allclose={bool(c45_product_bound['scalar_tight_allclose'])} "
+            f"current-ratio={_fmt_sci(c45_product_bound['scalar_current_tol_ratio'])} "
+            f"tight-ratio={_fmt_sci(c45_product_bound['scalar_tight_tol_ratio'])}; "
+            f"product allclose={bool(c45_product_bound['product_tight_allclose'])} "
+            f"current-ratio={_fmt_sci(c45_product_bound['product_current_tol_ratio'])} "
+            f"tight-ratio={_fmt_sci(c45_product_bound['product_tight_tol_ratio'])}"
         )
         emit(
             "    interpretation: if same-side residual is near zero and observed output "
             "matches the predicted product, this boundary is operand-drift amplification, "
-            "not an independent broadcast multiply mismatch."
+            "not an independent broadcast multiply mismatch; the contribution budget names "
+            "which tolerated operand dominates the exposed product error."
         )
 
     return all_ok, first_div, rows, kiln_meta, ref_meta
@@ -2559,6 +2696,14 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c45-operand-budget",
+        action="store_true",
+        help=(
+            "Alias for --c45 that emphasizes the row/scalar operand "
+            "contribution and tighter-tolerance budget diagnostic."
+        ),
+    )
+    ap.add_argument(
         "--c6",
         action="store_true",
         help=(
@@ -2609,6 +2754,7 @@ def main() -> int:
         or args.c44
         or args.c45
         or args.c45_row_scalar
+        or args.c45_operand_budget
     )
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
@@ -2637,8 +2783,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
-    elif args.c45 or args.c45_row_scalar:
-        mode = "layer-1 row-local scalar-multiply audit (C45)"
+    elif args.c45 or args.c45_row_scalar or args.c45_operand_budget:
+        mode = "layer-1 row-local operand drift budget (C45)"
     elif args.c44:
         mode = "layer-1 row-level audit (C44)"
     elif args.c43:
@@ -2666,7 +2812,7 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c45 or args.c45_row_scalar:
+    if args.c45 or args.c45_row_scalar or args.c45_operand_budget:
         focus_keys = [f"c45__{name}" for name in C45_LAYER1_ROW_TAP_NAMES]
     elif args.c44:
         focus_keys = [f"c44__{name}" for name in C44_LAYER1_F32_ROW_TAP_NAMES]
@@ -2686,7 +2832,7 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
-    elif args.c45 or args.c45_row_scalar:
+    elif args.c45 or args.c45_row_scalar or args.c45_operand_budget:
         _emit_c45_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c44:
         _emit_c44_summary(pair_results, args.atol, args.rtol, emit)
