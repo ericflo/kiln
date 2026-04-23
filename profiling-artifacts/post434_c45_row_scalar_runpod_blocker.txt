@@ -1,0 +1,106 @@
+Phase C45 post-#434 narrowed row-scalar rerun blocker
+Date: 2026-04-23
+Branch: ce/post434-c45-row-scalar-rerun
+Repo: ericflo/kiln
+Image: ghcr.io/ericflo/kiln-runpod:latest
+Launch name: kiln-post434-c45-row-scalar
+
+Remaining-work preflight:
+- PR #434 present on origin/main: yes (merge commit 7808adf1d60d3ff3bc9b300e0a3ca1a09106e17d)
+- newer PR already records narrowed three-tap verdict: no
+- separate pending/running task already covers this rerun: no
+
+Allowed GPU attempts:
+
+1. NVIDIA RTX A6000
+   Result: launch failed immediately.
+   Exact error:
+   RunPodError: GraphQL errors: [{"message": "There are no longer any instances available with the requested specifications. Please refresh and try again.", "path": ["podFindAndDeployOnDemand"], "extensions": {"code": "SUPPLY_CONSTRAINT", "userId": "auth0|6358da09bf70f1182ebd8138"}}]
+
+2. NVIDIA A40
+   Result: pod launched but never exposed SSH.
+   Pod id: jbagv24mf1f31l
+   Launch summary:
+   - desiredStatus: RUNNING
+   - gpuDisplayName: A40
+   - costPerHr: 0.44
+   - runtime: null
+   Wait evidence:
+   Waiting for pod jbagv24mf1f31l to be ready (timeout: 300s)...
+     [0s] status=RUNNING, uptime=N/As
+     [10s] status=RUNNING, uptime=N/As
+     [21s] status=RUNNING, uptime=N/As
+     [31s] status=RUNNING, uptime=N/As
+     [41s] status=RUNNING, uptime=N/As
+     [52s] status=RUNNING, uptime=N/As
+     [62s] status=RUNNING, uptime=N/As
+     [73s] status=RUNNING, uptime=N/As
+     [83s] status=RUNNING, uptime=N/As
+     [94s] status=RUNNING, uptime=N/As
+     [104s] status=RUNNING, uptime=N/As
+     [115s] status=RUNNING, uptime=N/As
+     [125s] status=RUNNING, uptime=N/As
+     [136s] status=RUNNING, uptime=N/As
+     [146s] status=RUNNING, uptime=N/As
+   Final error after termination:
+   AttributeError: 'NoneType' object has no attribute 'get'
+
+3. NVIDIA A100 80GB PCIe
+   Result: launch failed immediately.
+   Exact error:
+   RunPodError: GraphQL errors: [{"message": "There are no longer any instances available with the requested specifications. Please refresh and try again.", "path": ["podFindAndDeployOnDemand"], "extensions": {"code": "SUPPLY_CONSTRAINT", "userId": "auth0|6358da09bf70f1182ebd8138"}}]
+
+4. NVIDIA RTX 6000 Ada Generation
+   Result: launch failed immediately.
+   Exact error:
+   RunPodError: GraphQL errors: [{"message": "There are no longer any instances available with the requested specifications. Please refresh and try again.", "path": ["podFindAndDeployOnDemand"], "extensions": {"code": "SUPPLY_CONSTRAINT", "userId": "auth0|6358da09bf70f1182ebd8138"}}]
+
+5. NVIDIA L40S
+   Result: launch failed immediately.
+   Exact error:
+   RunPodError: GraphQL errors: [{"message": "There are no longer any instances available with enough disk space.", "path": ["podFindAndDeployOnDemand"], "extensions": {"code": "SUPPLY_CONSTRAINT", "userId": "auth0|6358da09bf70f1182ebd8138"}}]
+
+6. NVIDIA H100 PCIe
+   Result: pod launched but never exposed SSH.
+   Pod id: zh6zr8z5v0g1tn
+   Launch summary:
+   - desiredStatus: RUNNING
+   - gpuDisplayName: H100 PCIe
+   - costPerHr: 2.39
+   - runtime: null
+   Info check at 2026-04-23T16:33:08Z:
+   {
+     "id": "zh6zr8z5v0g1tn",
+     "name": "kiln-post434-c45-row-scalar",
+     "desiredStatus": "RUNNING",
+     "costPerHr": 2.39,
+     "gpuCount": 1,
+     "imageName": "ghcr.io/ericflo/kiln-runpod:latest",
+     "containerDiskInGb": 80,
+     "volumeInGb": 0,
+     "machine": {
+       "gpuDisplayName": "H100 PCIe"
+     },
+     "runtime": null
+   }
+   Wait evidence:
+   Waiting for pod zh6zr8z5v0g1tn to be ready (timeout: 300s)...
+     [0s] status=RUNNING, uptime=N/As
+     [10s] status=RUNNING, uptime=N/As
+     [20s] status=RUNNING, uptime=N/As
+     [31s] status=RUNNING, uptime=N/As
+     [41s] status=RUNNING, uptime=N/As
+     [51s] status=RUNNING, uptime=N/As
+     [61s] status=RUNNING, uptime=N/As
+     [71s] status=RUNNING, uptime=N/As
+   Final error after termination:
+   AttributeError: 'NoneType' object has no attribute 'get'
+
+Impact:
+- No allowed pod reached a usable SSH endpoint.
+- None of the required on-pod validation commands could be run.
+- No post-#434 narrowed C45 bench or compare artifacts were produced.
+
+Recommendation:
+- Re-run the exact post-#434 narrowed C45 workload on the next healthy allowed on-demand pod.
+- Do not change the narrowed tap contract before a healthy pod exists.
