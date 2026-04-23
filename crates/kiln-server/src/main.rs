@@ -129,7 +129,6 @@ async fn main() -> Result<()> {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
         let device = select_device()?;
-        spawn_metal_kernel_precompile(&device);
         let model_weights = kiln_model::load_model_with_options(
             Path::new(mp),
             &model_config,
@@ -238,12 +237,10 @@ fn spawn_backend_prewarm(state: AppState) {
         return;
     };
 
-    let is_metal = {
+    let (is_metal, device) = {
         let runner_guard = runner.read().unwrap();
-        matches!(
-            runner_guard.weights.embed_tokens.device(),
-            candle_core::Device::Metal(_)
-        )
+        let device = runner_guard.weights.embed_tokens.device().clone();
+        (matches!(device, candle_core::Device::Metal(_)), device)
     };
     if !is_metal {
         return;
@@ -263,6 +260,8 @@ fn spawn_backend_prewarm(state: AppState) {
                 tracing::info!("skipping inference prewarm because GPU is already busy");
                 return Ok(());
             };
+
+            precompile_metal_custom_kernels(&device);
 
             let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
@@ -345,29 +344,26 @@ fn warm_tokenizer(tokenizer: &KilnTokenizer) {
 }
 
 #[cfg(feature = "metal")]
-fn spawn_metal_kernel_precompile(device: &candle_core::Device) {
+fn precompile_metal_custom_kernels(device: &candle_core::Device) {
     if !matches!(device, candle_core::Device::Metal(_)) {
         return;
     }
 
-    let device = device.clone();
-    let _ = std::thread::spawn(move || {
-        let start = std::time::Instant::now();
-        match kiln_model::backend::metal::precompile_custom_kernels(&device) {
-            Ok(()) => tracing::info!(
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "Metal custom kernels precompiled in background"
-            ),
-            Err(err) => tracing::warn!(
-                error = %err,
-                "Metal custom kernel precompile failed; falling back to lazy compilation"
-            ),
-        }
-    });
+    let start = std::time::Instant::now();
+    match kiln_model::backend::metal::precompile_custom_kernels(device) {
+        Ok(()) => tracing::info!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Metal custom kernels precompiled during background prewarm"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            "Metal custom kernel precompile failed; falling back to lazy compilation"
+        ),
+    }
 }
 
 #[cfg(not(feature = "metal"))]
-fn spawn_metal_kernel_precompile(_device: &candle_core::Device) {}
+fn precompile_metal_custom_kernels(_device: &candle_core::Device) {}
 
 fn prewarm_kv_dtype(config: &ModelConfig) -> candle_core::DType {
     match config.dtype {
