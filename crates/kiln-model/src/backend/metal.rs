@@ -85,6 +85,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_gdn_gates_pipeline(metal_device)?;
     metal_gated_rms_norm_pipeline(metal_device)?;
     metal_gdn_recurrent_pipeline(metal_device)?;
+    metal_gdn_recurrent_prefill_head_last_pipeline(metal_device)?;
     metal_gdn_forward_substitution_pipeline(metal_device)?;
     metal_gdn_chunk_prep_pipeline(metal_device)?;
     metal_gdn_full_chunk_forward_pipeline(metal_device)?;
@@ -141,6 +142,14 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_gdn_full_chunk_forward_head_last(&self) -> bool {
         !self.disable.gdn_forward_substitution
+    }
+
+    fn supports_gdn_recurrent_prefill_head_last(&self) -> bool {
+        !self.disable.gdn_recurrent
+    }
+
+    fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
+        !self.disable.gdn_recurrent
     }
 
     fn supports_gdn_gates(&self) -> bool {
@@ -420,6 +429,44 @@ impl BackendRuntime for MetalBackend {
         )
         .context("metal gdn_full_chunk_forward_head_last_into kernel failed")?;
         Ok(true)
+    }
+
+    fn gdn_recurrent_prefill_head_last(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        if self.disable.gdn_recurrent
+            || !metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state)
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_recurrent_prefill_head_last_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_prefill_head_last kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn gdn_recurrent_prefill_native_head_last(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        if self.disable.gdn_recurrent
+            || !metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state)
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
+        Ok(Some(out))
     }
 
     fn gdn_gates(
@@ -828,6 +875,126 @@ fn metal_gdn_recurrent_supports(
         && dv <= 1024
 }
 
+const METAL_GDN_RECURRENT_PREFILL_MAX_SEQ_LEN: usize = 2048;
+
+fn metal_gdn_recurrent_prefill_head_last_supports(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+) -> bool {
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+        || !matches!(beta.device(), Device::Metal(_))
+        || !matches!(g.device(), Device::Metal(_))
+        || !matches!(state.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+        || g.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((batch, q_heads, seq_len, dk)) = q.dims4() else {
+        return false;
+    };
+    let Ok((b_k, h_k, t_k, dk_k)) = k.dims4() else {
+        return false;
+    };
+    let Ok((b_v, v_heads, t_v, dv)) = v.dims4() else {
+        return false;
+    };
+    let Ok((b_beta, h_beta, t_beta)) = beta.dims3() else {
+        return false;
+    };
+    let Ok((b_g, h_g, t_g)) = g.dims3() else {
+        return false;
+    };
+    let Ok((b_state, h_state, dk_state, dv_state)) = state.dims4() else {
+        return false;
+    };
+    (b_k, h_k, t_k, dk_k) == (batch, q_heads, seq_len, dk)
+        && (b_v, t_v) == (batch, seq_len)
+        && (b_beta, h_beta, t_beta) == (batch, v_heads, seq_len)
+        && (b_g, h_g, t_g) == (batch, v_heads, seq_len)
+        && (b_state, h_state, dk_state, dv_state) == (batch, v_heads, dk, dv)
+        && v_heads >= q_heads
+        && v_heads % q_heads == 0
+        && seq_len > 1
+        && seq_len <= METAL_GDN_RECURRENT_PREFILL_MAX_SEQ_LEN
+        && dk == 128
+        && dv > 0
+        && dv <= 128
+        && state.is_contiguous()
+}
+
+fn metal_gdn_recurrent_prefill_native_head_last_supports(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+) -> bool {
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+        || !matches!(beta.device(), Device::Metal(_))
+        || !matches!(g.device(), Device::Metal(_))
+        || !matches!(state.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || beta.dtype() != DType::BF16
+        || g.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
+        return false;
+    };
+    let Ok((b_k, t_k, h_k, dk_k)) = k.dims4() else {
+        return false;
+    };
+    let Ok((b_v, t_v, value_heads, dv)) = v.dims4() else {
+        return false;
+    };
+    let Ok((b_beta, t_beta, h_beta)) = beta.dims3() else {
+        return false;
+    };
+    let Ok((b_g, t_g, h_g)) = g.dims3() else {
+        return false;
+    };
+    let Ok((b_state, h_state, dk_state, dv_state)) = state.dims4() else {
+        return false;
+    };
+    (b_k, t_k, h_k, dk_k) == (batch, seq_len, q_heads, dk)
+        && (b_v, t_v) == (batch, seq_len)
+        && (b_beta, t_beta, h_beta) == (batch, seq_len, value_heads)
+        && (b_g, t_g, h_g) == (batch, seq_len, value_heads)
+        && (b_state, h_state, dk_state, dv_state) == (batch, value_heads, dk, dv)
+        && value_heads >= q_heads
+        && value_heads % q_heads == 0
+        && seq_len > 1
+        && seq_len <= METAL_GDN_RECURRENT_PREFILL_MAX_SEQ_LEN
+        && dk == 128
+        && dv > 0
+        && dv <= 128
+        && state.is_contiguous()
+}
+
 fn metal_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> bool {
     if !matches!(x.device(), Device::Metal(_))
         || !matches!(z.device(), Device::Metal(_))
@@ -1115,6 +1282,7 @@ fn metal_shared_library(
         METAL_GDN_GATES_KERNEL,
         METAL_GATED_RMSNORM_KERNEL,
         METAL_GDN_RECURRENT_KERNEL,
+        METAL_GDN_RECURRENT_PREFILL_HEAD_LAST_KERNEL,
         METAL_GDN_FULL_CHUNK_FORWARD_KERNEL,
         METAL_CONV1D_PREFILL_KERNEL,
         METAL_CONV1D_UPDATE_KERNEL,
@@ -2157,6 +2325,103 @@ kernel void kiln_gdn_chunk_prep_bf16(
 }
 "#;
 
+const METAL_GDN_RECURRENT_PREFILL_HEAD_LAST_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_recurrent_prefill_head_last_bf16(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k [[buffer(1)]],
+    device const bfloat* v [[buffer(2)]],
+    device const bfloat* beta [[buffer(3)]],
+    device const bfloat* g [[buffer(4)]],
+    device bfloat* state [[buffer(5)]],
+    device bfloat* out [[buffer(6)]],
+    constant uint& batch_heads [[buffer(7)]],
+    constant uint& seq_len [[buffer(8)]],
+    constant uint& dk [[buffer(9)]],
+    constant uint& dv [[buffer(10)]],
+    constant uint& value_heads [[buffer(11)]],
+    constant uint& q_heads [[buffer(12)]],
+    constant uint& input_mode [[buffer(13)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    constexpr uint NSG = 4;
+    constexpr uint LANES = 32;
+    if (gid >= batch_heads * dv || tid >= LANES || dk != 128) {
+        return;
+    }
+
+    const uint bh = gid / dv;
+    const uint d = gid - bh * dv;
+    const uint batch_idx = bh / value_heads;
+    const uint head_idx = bh - batch_idx * value_heads;
+    const uint q_group = value_heads / q_heads;
+    const uint q_head_idx = head_idx / q_group;
+    const uint qk_base = (batch_idx * q_heads + q_head_idx) * seq_len * dk;
+    const uint v_base = bh * seq_len * dv;
+    const uint gate_base = bh * seq_len;
+    const uint state_base = bh * dk * dv;
+
+    float ls[NSG];
+    for (uint j = 0; j < NSG; ++j) {
+        const uint is = tid * NSG + j;
+        ls[j] = static_cast<float>(state[state_base + is * dv + d]);
+    }
+
+    for (uint t = 0; t < seq_len; ++t) {
+        const uint qk_t = (input_mode == 0)
+            ? qk_base + t * dk
+            : ((batch_idx * seq_len + t) * q_heads + q_head_idx) * dk;
+        const uint v_t = (input_mode == 0)
+            ? v_base + t * dv
+            : ((batch_idx * seq_len + t) * value_heads + head_idx) * dv;
+        const uint gate_t = (input_mode == 0)
+            ? gate_base + t
+            : (batch_idx * seq_len + t) * value_heads + head_idx;
+        const float decay = static_cast<float>(static_cast<bfloat>(
+            exp(static_cast<float>(g[gate_t]))
+        ));
+
+        float s_k = 0.0f;
+        for (uint j = 0; j < NSG; ++j) {
+            const uint is = tid * NSG + j;
+            const float decayed = static_cast<float>(static_cast<bfloat>(ls[j] * decay));
+            ls[j] = decayed;
+            s_k += decayed * static_cast<float>(k[qk_t + is]);
+        }
+        s_k = simd_sum(s_k);
+
+        const float delta = static_cast<float>(static_cast<bfloat>(
+            (static_cast<float>(v[v_t + d]) - s_k) *
+            static_cast<float>(beta[gate_t])
+        ));
+
+        float y = 0.0f;
+        for (uint j = 0; j < NSG; ++j) {
+            const uint is = tid * NSG + j;
+            const float new_s = static_cast<float>(static_cast<bfloat>(
+                ls[j] + static_cast<float>(k[qk_t + is]) * delta
+            ));
+            ls[j] = new_s;
+            y += new_s * static_cast<float>(q[qk_t + is]);
+        }
+        y = simd_sum(y);
+
+        if (tid == 0) {
+            const uint out_idx = ((batch_idx * seq_len + t) * value_heads + head_idx) * dv + d;
+            out[out_idx] = static_cast<bfloat>(y);
+        }
+    }
+
+    for (uint j = 0; j < NSG; ++j) {
+        const uint is = tid * NSG + j;
+        state[state_base + is * dv + d] = static_cast<bfloat>(ls[j]);
+    }
+}
+"#;
+
 const METAL_GDN_FULL_CHUNK_FORWARD_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -2323,6 +2588,35 @@ fn metal_gdn_recurrent_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn recurrent pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_recurrent_prefill_head_last_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn recurrent prefill pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_recurrent_prefill_head_last_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn recurrent prefill function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn recurrent prefill pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -3129,6 +3423,275 @@ fn metal_gdn_recurrent_bf16(
             depth: 1,
         };
         encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+fn metal_gdn_recurrent_prefill_head_last_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &mut Tensor,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state),
+        "metal gdn recurrent prefill unsupported shape"
+    );
+    let (batch, q_heads, seq_len, dk) = q.dims4()?;
+    let (_, value_heads, _, _) = v.dims4()?;
+    let dv = v.dim(3)?;
+    let batch_heads = batch * value_heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize
+            && seq_len <= u32::MAX as usize
+            && dk <= u32::MAX as usize
+            && dv <= u32::MAX as usize
+            && value_heads <= u32::MAX as usize
+            && q_heads <= u32::MAX as usize,
+        "metal gdn recurrent prefill shape too large"
+    );
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let beta = beta.contiguous()?;
+    let g = g.contiguous()?;
+    if !state.is_contiguous() {
+        *state = state.contiguous()?;
+    }
+    let out = Tensor::zeros((batch, seq_len, value_heads, dv), DType::BF16, q.device())?;
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal gdn recurrent prefill requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_recurrent_prefill_head_last_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_recurrent_prefill_head_last_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (g_storage, g_layout) = g.storage_and_layout();
+        let (state_storage, state_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill k must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill v must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill beta must be on Metal"),
+        };
+        let g_metal = match &*g_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill g must be on Metal"),
+        };
+        let state_metal = match &*state_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill state must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent prefill out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let state_buf = candle_core::metal_backend::buffer_o(
+            state_metal.buffer(),
+            &state_layout,
+            state.dtype(),
+        );
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(g_buf.buffer), g_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(state_buf.buffer), state_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let seq_len_u32 = seq_len as u32;
+        let dk_u32 = dk as u32;
+        let dv_u32 = dv as u32;
+        let value_heads_u32 = value_heads as u32;
+        let q_heads_u32 = q_heads as u32;
+        let input_mode_u32 = 0u32;
+        encoder.set_bytes(7, &batch_heads_u32);
+        encoder.set_bytes(8, &seq_len_u32);
+        encoder.set_bytes(9, &dk_u32);
+        encoder.set_bytes(10, &dv_u32);
+        encoder.set_bytes(11, &value_heads_u32);
+        encoder.set_bytes(12, &q_heads_u32);
+        encoder.set_bytes(13, &input_mode_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch_heads * dv,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+fn metal_gdn_recurrent_prefill_native_head_last_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &mut Tensor,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state),
+        "metal gdn recurrent native prefill unsupported shape"
+    );
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
+    let (_, _, value_heads, dv) = v.dims4()?;
+    let batch_heads = batch * value_heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize
+            && seq_len <= u32::MAX as usize
+            && dk <= u32::MAX as usize
+            && dv <= u32::MAX as usize
+            && value_heads <= u32::MAX as usize
+            && q_heads <= u32::MAX as usize,
+        "metal gdn recurrent native prefill shape too large"
+    );
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let beta = beta.contiguous()?;
+    let g = g.contiguous()?;
+    if !state.is_contiguous() {
+        *state = state.contiguous()?;
+    }
+    let out = Tensor::zeros((batch, seq_len, value_heads, dv), DType::BF16, q.device())?;
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal gdn recurrent native prefill requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_recurrent_prefill_head_last_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_recurrent_prefill_native_head_last_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (g_storage, g_layout) = g.storage_and_layout();
+        let (state_storage, state_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill k must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill v must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill beta must be on Metal"),
+        };
+        let g_metal = match &*g_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill g must be on Metal"),
+        };
+        let state_metal = match &*state_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill state must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn recurrent native prefill out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let state_buf = candle_core::metal_backend::buffer_o(
+            state_metal.buffer(),
+            &state_layout,
+            state.dtype(),
+        );
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(g_buf.buffer), g_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(state_buf.buffer), state_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let seq_len_u32 = seq_len as u32;
+        let dk_u32 = dk as u32;
+        let dv_u32 = dv as u32;
+        let value_heads_u32 = value_heads as u32;
+        let q_heads_u32 = q_heads as u32;
+        let input_mode_u32 = 1u32;
+        encoder.set_bytes(7, &batch_heads_u32);
+        encoder.set_bytes(8, &seq_len_u32);
+        encoder.set_bytes(9, &dk_u32);
+        encoder.set_bytes(10, &dv_u32);
+        encoder.set_bytes(11, &value_heads_u32);
+        encoder.set_bytes(12, &q_heads_u32);
+        encoder.set_bytes(13, &input_mode_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch_heads * dv,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
     }
 
     Ok(out)
@@ -3988,6 +4551,172 @@ mod tests {
         assert!(
             head_last_state_mean < 2e-3,
             "GDN full-chunk head-last state mean_abs_diff={head_last_state_mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_recurrent_prefill_head_last_matches_sequential() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let q_heads = 1usize;
+        let value_heads = 2usize;
+        let gqa_ratio = value_heads / q_heads;
+        let seq_len = 8usize;
+        let dk = 128usize;
+        let dv = 16usize;
+        let qk_elems = batch * q_heads * seq_len * dk;
+        let v_elems = batch * value_heads * seq_len * dv;
+        let gate_elems = batch * value_heads * seq_len;
+        let state_elems = batch * value_heads * dk * dv;
+
+        let q_data: Vec<f32> = (0..qk_elems)
+            .map(|idx| ((idx % 31) as f32 - 15.0) * 0.004)
+            .collect();
+        let k_data: Vec<f32> = (0..qk_elems)
+            .map(|idx| ((idx % 29) as f32 - 14.0) * 0.004)
+            .collect();
+        let v_data: Vec<f32> = (0..v_elems)
+            .map(|idx| ((idx % 37) as f32 - 18.0) * 0.006)
+            .collect();
+        let beta_data: Vec<f32> = (0..gate_elems)
+            .map(|idx| 0.2 + ((idx % 7) as f32) * 0.03)
+            .collect();
+        let g_data: Vec<f32> = (0..gate_elems)
+            .map(|idx| -0.08 + ((idx % 11) as f32) * 0.003)
+            .collect();
+        let state_data: Vec<f32> = (0..state_elems)
+            .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
+            .collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, q_heads, seq_len, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (batch, q_heads, seq_len, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, value_heads, seq_len, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, value_heads, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (batch, value_heads, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut state_ref = Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut state_fused =
+            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        let mut state_native =
+            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        let q_ref = q
+            .unsqueeze(2)?
+            .expand(&[batch, q_heads, gqa_ratio, seq_len, dk])?
+            .contiguous()?
+            .reshape((batch, value_heads, seq_len, dk))?;
+        let k_ref = k
+            .unsqueeze(2)?
+            .expand(&[batch, q_heads, gqa_ratio, seq_len, dk])?
+            .contiguous()?
+            .reshape((batch, value_heads, seq_len, dk))?;
+
+        let mut out_chunks = Vec::with_capacity(seq_len);
+        for t in 0..seq_len {
+            let q_t = q_ref.narrow(2, t, 1)?.contiguous()?;
+            let k_t = k_ref.narrow(2, t, 1)?.contiguous()?;
+            let v_t = v.narrow(2, t, 1)?.contiguous()?;
+            let beta_t = beta.narrow(2, t, 1)?.contiguous()?;
+            let g_t = g.narrow(2, t, 1)?.contiguous()?;
+            let p = g_t.to_dtype(DType::F32)?.exp()?.to_dtype(DType::BF16)?;
+            let p_u = p.unsqueeze(3)?;
+            let k_t_mat = k_t.transpose(2, 3)?.contiguous()?;
+            let ks_entry = k_t.matmul(&state_ref)?;
+            let q_s = q_t.matmul(&state_ref)?;
+            let v_prime = (v_t - ks_entry.broadcast_mul(&p_u)?)?;
+            let w = v_prime.broadcast_mul(&beta_t.unsqueeze(3)?)?;
+            let qk = q_t.matmul(&k_t_mat)?;
+            let out_t = (q_s.broadcast_mul(&p_u)? + qk.matmul(&w)?)?;
+            let state_scaled = state_ref.broadcast_mul(&p_u)?;
+            let delta_state = k_t_mat.matmul(&w)?;
+            state_ref = (state_scaled + delta_state)?;
+            out_chunks.push(out_t);
+        }
+        let out_ref = Tensor::cat(&out_chunks, 2)?.transpose(1, 2)?.contiguous()?;
+
+        assert!(metal_gdn_recurrent_prefill_head_last_supports(
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            &state_fused
+        ));
+        let out_fused =
+            metal_gdn_recurrent_prefill_head_last_bf16(&q, &k, &v, &beta, &g, &mut state_fused)?;
+
+        let out_max = max_abs_diff(&out_ref, &out_fused)?;
+        let out_mean = mean_abs_diff(&out_ref, &out_fused)?;
+        let state_max = max_abs_diff(&state_ref, &state_fused)?;
+        let state_mean = mean_abs_diff(&state_ref, &state_fused)?;
+        assert!(
+            out_max < 3e-2,
+            "GDN recurrent prefill out max_abs_diff={out_max:e} exceeds tolerance"
+        );
+        assert!(
+            out_mean < 3e-3,
+            "GDN recurrent prefill out mean_abs_diff={out_mean:e} exceeds tolerance"
+        );
+        assert!(
+            state_max < 3e-2,
+            "GDN recurrent prefill state max_abs_diff={state_max:e} exceeds tolerance"
+        );
+        assert!(
+            state_mean < 3e-3,
+            "GDN recurrent prefill state mean_abs_diff={state_mean:e} exceeds tolerance"
+        );
+
+        let q_native = q.transpose(1, 2)?.contiguous()?;
+        let k_native = k.transpose(1, 2)?.contiguous()?;
+        let v_native = v.transpose(1, 2)?.contiguous()?;
+        let beta_native = beta.transpose(1, 2)?.contiguous()?;
+        let g_native = g.transpose(1, 2)?.contiguous()?;
+        assert!(metal_gdn_recurrent_prefill_native_head_last_supports(
+            &q_native,
+            &k_native,
+            &v_native,
+            &beta_native,
+            &g_native,
+            &state_native
+        ));
+        let out_native = metal_gdn_recurrent_prefill_native_head_last_bf16(
+            &q_native,
+            &k_native,
+            &v_native,
+            &beta_native,
+            &g_native,
+            &mut state_native,
+        )?;
+        let native_out_max = max_abs_diff(&out_ref, &out_native)?;
+        let native_out_mean = mean_abs_diff(&out_ref, &out_native)?;
+        let native_state_max = max_abs_diff(&state_ref, &state_native)?;
+        let native_state_mean = mean_abs_diff(&state_ref, &state_native)?;
+        assert!(
+            native_out_max < 3e-2,
+            "GDN recurrent native prefill out max_abs_diff={native_out_max:e} exceeds tolerance"
+        );
+        assert!(
+            native_out_mean < 3e-3,
+            "GDN recurrent native prefill out mean_abs_diff={native_out_mean:e} exceeds tolerance"
+        );
+        assert!(
+            native_state_max < 3e-2,
+            "GDN recurrent native prefill state max_abs_diff={native_state_max:e} exceeds tolerance"
+        );
+        assert!(
+            native_state_mean < 3e-3,
+            "GDN recurrent native prefill state mean_abs_diff={native_state_mean:e} exceeds tolerance"
         );
 
         Ok(())

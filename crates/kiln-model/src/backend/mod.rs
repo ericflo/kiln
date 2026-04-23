@@ -74,6 +74,14 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_recurrent_prefill_head_last(&self) -> bool {
+        false
+    }
+
+    fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
+        false
+    }
+
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
     ///
     /// `q`, `k`, `v`: `[batch, seq_len, num_heads, head_dim]` bf16 contiguous.
@@ -244,6 +252,30 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _seq_len: usize,
     ) -> Result<bool> {
         Ok(false)
+    }
+
+    fn gdn_recurrent_prefill_head_last(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _beta: &Tensor,
+        _g: &Tensor,
+        _state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    fn gdn_recurrent_prefill_native_head_last(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _beta: &Tensor,
+        _g: &Tensor,
+        _state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
     }
 
     fn supports_gdn_gates(&self) -> bool {

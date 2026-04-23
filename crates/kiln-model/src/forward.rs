@@ -822,7 +822,7 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
 /// chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 512;
+pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 4096;
 
 fn streaming_prefill_env_override() -> Option<bool> {
@@ -1927,6 +1927,7 @@ fn causal_conv1d_decode(
 ///   - a small-enough forward-substitution inner loop so the Vec<Tensor> cat
 ///     churn stays bounded.
 const GDN_CHUNK_SIZE: usize = 64;
+const GDN_RECURRENT_PREFILL_MAX_TOKENS: usize = 2048;
 
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row > col else 0.0.
 /// Used for the strictly lower-triangular `A_strict` mask (i < t, exclusive).
@@ -2322,6 +2323,46 @@ fn gdn_chunkwise_recurrence(
     Ok(Tensor::cat(&out_chunks, 2)?)
 }
 
+fn gdn_recurrent_prefill_head_last(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,         // [B, nv, T, dk]
+    k: &Tensor,         // [B, nv, T, dk]
+    v: &Tensor,         // [B, nv, T, dv]
+    beta: &Tensor,      // [B, nv, T]
+    g: &Tensor,         // [B, nv, T]
+    state: &mut Tensor, // [B, nv, dk, dv]
+) -> Result<Option<Tensor>> {
+    let (_, _, seq_len, _) = q.dims4()?;
+    if seq_len <= 1
+        || q.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+        || !backend.supports_gdn_recurrent_prefill_head_last()
+    {
+        return Ok(None);
+    }
+    backend.gdn_recurrent_prefill_head_last(q, k, v, beta, g, state)
+}
+
+fn gdn_recurrent_prefill_native_head_last(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,         // [B, T, nk, dk]
+    k: &Tensor,         // [B, T, nk, dk]
+    v: &Tensor,         // [B, T, nv, dv]
+    beta: &Tensor,      // [B, T, nv]
+    g: &Tensor,         // [B, T, nv]
+    state: &mut Tensor, // [B, nv, dk, dv]
+) -> Result<Option<Tensor>> {
+    let (_, seq_len, _, _) = q.dims4()?;
+    if seq_len <= 1
+        || q.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+        || !backend.supports_gdn_recurrent_prefill_native_head_last()
+    {
+        return Ok(None);
+    }
+    backend.gdn_recurrent_prefill_native_head_last(q, k, v, beta, g, state)
+}
+
 /// Metal BF16 fast path for full 64-token chunks.
 ///
 /// Returns a contiguous head-last `[B, T, nv, dv]` tensor so the caller can feed
@@ -2572,10 +2613,21 @@ pub fn gated_deltanet_forward(
     // parity oracle exercised by `kiln-rmsnorm-kernel`'s
     // `parity_l2_qk_norm_*` tests.
     let scale = 1.0 / (dk as f64).sqrt();
-    let (q, k) = {
+    let recurrent_prefill_unexpanded_qk = input_dtype == DType::BF16
+        && seq_len > 1
+        && seq_len <= GDN_RECURRENT_PREFILL_MAX_TOKENS
+        && dk == 128
+        && gqa_ratio > 1
+        && !capture_b11_taps
+        && backend.supports_gdn_recurrent_prefill_head_last();
+    let (q, k, qk_expanded) = {
         #[cfg(feature = "metal")]
         {
-            if input_dtype == DType::BF16
+            if recurrent_prefill_unexpanded_qk {
+                kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
+                let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                (q, k, false)
+            } else if input_dtype == DType::BF16
                 && gqa_ratio > 1
                 && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
             {
@@ -2587,7 +2639,8 @@ pub fn gated_deltanet_forward(
                     scale as f32,
                     1e-6,
                 )
-                .context("metal gdn qk_norm gqa kernel failed")?
+                .context("metal gdn qk_norm gqa kernel failed")
+                .map(|(q, k)| (q, k, true))?
             } else {
                 let (q, k) = {
                     kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -2608,7 +2661,8 @@ pub fn gated_deltanet_forward(
                     }
                 };
                 kiln_nvtx::range!(c"kiln/gdn/qk_norm");
-                gdn_qk_norm(&q, &k, input_dtype, scale)?
+                let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                (q, k, true)
             }
         }
         #[cfg(not(feature = "metal"))]
@@ -2632,7 +2686,8 @@ pub fn gated_deltanet_forward(
                 }
             };
             kiln_nvtx::range!(c"kiln/gdn/qk_norm");
-            gdn_qk_norm(&q, &k, input_dtype, scale)?
+            let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+            (q, k, true)
         }
     };
 
@@ -2640,7 +2695,7 @@ pub fn gated_deltanet_forward(
     // normalization (+ Q scaled by 1/sqrt(dk)). Shapes [B, T, nv, dk] (the
     // GQA head-expand above brought nk→nv). HF mirror: `query` / `key` after
     // `query.normalize(dim=-1)` / `key.normalize(dim=-1)` and the Q-scale.
-    if capture_b11_taps {
+    if capture_b11_taps && qk_expanded {
         crate::mtp_debug::capture_b11_layer0_tap("gdn_qk_norm_q", &q)?;
         crate::mtp_debug::capture_b11_layer0_tap("gdn_qk_norm_k", &k)?;
     }
@@ -2702,37 +2757,48 @@ pub fn gated_deltanet_forward(
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
+    let native_recurrent_prefill = if recurrent_prefill_unexpanded_qk {
+        let v_recur = v.to_dtype(input_dtype)?;
+        gdn_recurrent_prefill_native_head_last(
+            backend,
+            &q,
+            &k,
+            &v_recur,
+            &beta,
+            &g,
+            recurrent_state,
+        )?
+    } else {
+        None
+    };
+
     // Cast v back to input_dtype so the recurrence stays in bf16. The
     // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
     // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
     // hits a dtype mismatch on bf16 GPU runs, because the state-derived
     // tensor inherits the (now bf16) state dtype.
-    let (q, k, v, beta, g) = {
-        kiln_nvtx::range!(c"kiln/gdn/recur_prep");
-        let v = v.to_dtype(input_dtype)?;
+    let (attn_out, attn_out_head_last) = if let Some(attn_out) = native_recurrent_prefill {
+        (attn_out, true) // [B, T, nv, dv], contiguous
+    } else {
+        let (q, k, v, beta, g) = {
+            kiln_nvtx::range!(c"kiln/gdn/recur_prep");
+            let v = v.to_dtype(input_dtype)?;
 
-        // Transpose to [B, nv, T, dim] for per-head processing.
-        let q = q.transpose(1, 2)?; // [B, nv, T, dk]
-        let k = k.transpose(1, 2)?; // [B, nv, T, dk]
-        let v = v.transpose(1, 2)?; // [B, nv, T, dv]
-        let beta = beta.transpose(1, 2)?; // [B, nv, T]
-        let g = g.transpose(1, 2)?; // [B, nv, T]
-        (q, k, v, beta, g)
-    };
+            // Transpose to [B, nv, T, dim] for per-head processing.
+            let q = q.transpose(1, 2)?; // [B, nv, T, dk]
+            let k = k.transpose(1, 2)?; // [B, nv, T, dk]
+            let v = v.transpose(1, 2)?; // [B, nv, T, dv]
+            let beta = beta.transpose(1, 2)?; // [B, nv, T]
+            let g = g.transpose(1, 2)?; // [B, nv, T]
+            (q, k, v, beta, g)
+        };
 
-    let (attn_out, attn_out_head_last) = match gdn_chunkwise_recurrence_head_last_full_chunks(
-        backend,
-        &q,
-        &k,
-        &v,
-        &beta,
-        &g,
-        recurrent_state,
-        GDN_CHUNK_SIZE,
-    )? {
-        Some(attn_out) => (attn_out, true), // [B, T, nv, dv], contiguous
-        None => (
-            gdn_chunkwise_recurrence(
+        if let Some(attn_out) =
+            gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)?
+        {
+            (attn_out, true) // [B, T, nv, dv], contiguous
+        } else {
+            match gdn_chunkwise_recurrence_head_last_full_chunks(
                 backend,
                 &q,
                 &k,
@@ -2741,9 +2807,23 @@ pub fn gated_deltanet_forward(
                 &g,
                 recurrent_state,
                 GDN_CHUNK_SIZE,
-            )?,
-            false,
-        ), // [B, nv, T, dv]
+            )? {
+                Some(attn_out) => (attn_out, true), // [B, T, nv, dv], contiguous
+                None => (
+                    gdn_chunkwise_recurrence(
+                        backend,
+                        &q,
+                        &k,
+                        &v,
+                        &beta,
+                        &g,
+                        recurrent_state,
+                        GDN_CHUNK_SIZE,
+                    )?,
+                    false,
+                ), // [B, nv, T, dv]
+            }
+        }
     };
 
     // Restore state to its original dtype so the caller's F32 invariant holds
