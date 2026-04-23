@@ -1832,13 +1832,7 @@ fn c45_layer1_row_replay_tensors(
     let last_row_values = last_row.reshape((batch, hidden))?.contiguous()?;
     let broadcast_output = last_row.broadcast_mul(&rms_inv_row)?.contiguous()?;
 
-    let mut flat_rows = Vec::with_capacity(batch);
-    for batch_idx in 0..batch {
-        let row = last_row_values.narrow(0, batch_idx, 1)?;
-        flat_rows.push(row.affine(extracted_scalar_values[batch_idx] as f64, 0.0)?);
-    }
-    let flat_row_refs: Vec<&Tensor> = flat_rows.iter().collect();
-    let scalar_values = Tensor::cat(&flat_row_refs, 0)?.contiguous()?;
+    let scalar_values = broadcast_output.reshape((batch, hidden))?.contiguous()?;
     let reconstructed = scalar_values.reshape((batch, 1, hidden))?.contiguous()?;
     Ok((
         rms_inv_row,
@@ -1853,9 +1847,9 @@ fn c45_layer1_row_replay_tensors(
 /// Phase C45: keep the audit strictly inside the previously-bad row-local
 /// scalar multiply so the replay dump can distinguish "the row-local scalar
 /// tensor is fine", "the scalar extraction path already drifts", "the actual
-/// multiply introduces the drift", or "the multiplied flat row stays
-/// shared-good and divergence only appears when reconstructing the row-shaped
-/// output".
+/// multiply introduces the drift", or "the flattened production multiply
+/// output stays shared-good and divergence only appears when reconstructing the
+/// row-shaped output".
 fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     let (
         rms_inv_row,

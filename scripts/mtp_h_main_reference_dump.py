@@ -1148,7 +1148,7 @@ def _arm_c45_layer1_row_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List
         broadcast_output = (residual[:, -1:, :] * rms_inv_row).contiguous()
         taps_out["layer_1_input_norm_pre_weight_row_broadcast_output"] = broadcast_output
 
-        scalar_values = (residual_row * rms_inv_row.reshape(-1, 1)).contiguous()
+        scalar_values = broadcast_output.reshape(residual.shape[0], residual.shape[-1]).contiguous()
         taps_out["layer_1_input_norm_pre_weight_row_scalar_values"] = scalar_values
         taps_out["layer_1_input_norm_pre_weight_row_reconstructed"] = (
             scalar_values.reshape(residual.shape[0], 1, residual.shape[-1]).contiguous()
