@@ -150,6 +150,7 @@ enum ResolvedSpeculativeMode {
 
 const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
 const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
+const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
 const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
 
 fn native_mtp_enabled_for_metal() -> bool {
@@ -167,6 +168,17 @@ fn native_mtp_allowed_for_state(state: &AppState) -> bool {
     match runner_guard.weights.embed_tokens.device() {
         candle_core::Device::Metal(_) => native_mtp_enabled_for_metal(),
         _ => true,
+    }
+}
+
+fn long_prompt_skip_layer_min_prompt_tokens_for_state(state: &AppState) -> usize {
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+        return LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT;
+    };
+    let runner_guard = runner.read().unwrap();
+    match runner_guard.weights.embed_tokens.device() {
+        candle_core::Device::Metal(_) => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+        _ => LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
     }
 }
 
@@ -190,6 +202,7 @@ fn resolve_speculative_mode_from_config(
     mtp_supported: bool,
     has_active_lora: bool,
     native_mtp_allowed: bool,
+    long_prompt_skip_layer_min_prompt_tokens: usize,
 ) -> ResolvedSpeculativeMode {
     let skip_layer = resolve_skip_layer_config(model_config, speculative);
 
@@ -207,7 +220,7 @@ fn resolve_speculative_mode_from_config(
             {
                 ResolvedSpeculativeMode::Mtp
             } else if greedy_without_lora
-                && prompt_tokens >= LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT
+                && prompt_tokens >= long_prompt_skip_layer_min_prompt_tokens
                 && sampling.max_tokens >= LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT
             {
                 skip_layer
@@ -236,6 +249,7 @@ fn resolve_speculative_mode(
         mtp_supported,
         has_active_lora,
         native_mtp_allowed_for_state(state),
+        long_prompt_skip_layer_min_prompt_tokens_for_state(state),
     )
 }
 
@@ -1021,6 +1035,7 @@ mod tests {
             false,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
 
         match mode {
@@ -1049,6 +1064,7 @@ mod tests {
             true,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(greedy, ResolvedSpeculativeMode::Mtp));
 
@@ -1060,6 +1076,7 @@ mod tests {
             true,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(sampled, ResolvedSpeculativeMode::Off));
 
@@ -1071,6 +1088,7 @@ mod tests {
             true,
             true,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(with_lora, ResolvedSpeculativeMode::Off));
 
@@ -1082,6 +1100,7 @@ mod tests {
             true,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(long_prompt, ResolvedSpeculativeMode::SkipLayer(_)));
 
@@ -1093,6 +1112,7 @@ mod tests {
             true,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(medium_prompt, ResolvedSpeculativeMode::Off));
 
@@ -1106,6 +1126,7 @@ mod tests {
             true,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(
             long_prompt_short_output,
@@ -1130,6 +1151,7 @@ mod tests {
             true,
             false,
             false,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
         assert!(matches!(mode, ResolvedSpeculativeMode::Off));
     }
@@ -1150,8 +1172,53 @@ mod tests {
             false,
             false,
             true,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
         );
 
         assert!(matches!(mode, ResolvedSpeculativeMode::Off));
+    }
+
+    #[test]
+    fn mtp_metal_medium_prompt_stays_off_until_4096() {
+        let cfg = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Mtp,
+            num_speculative_tokens: 4,
+            draft_layers: 8,
+        };
+
+        let mode = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            2048,
+            true,
+            false,
+            false,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+        );
+        assert!(matches!(mode, ResolvedSpeculativeMode::Off));
+    }
+
+    #[test]
+    fn mtp_metal_4096_prompt_falls_back_to_skip_layer() {
+        let cfg = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Mtp,
+            num_speculative_tokens: 4,
+            draft_layers: 8,
+        };
+
+        let mode = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+            true,
+            false,
+            false,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+        );
+        assert!(matches!(mode, ResolvedSpeculativeMode::SkipLayer(_)));
     }
 }
