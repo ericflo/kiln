@@ -653,6 +653,14 @@ def _ordered_taps(
         key = f"c41__{name}"
         if key in common and key not in out:
             out.append(key)
+    for name in C44_LAYER1_F32_ROW_TAP_NAMES:
+        key = f"c44__{name}"
+        if key in common and key not in out:
+            out.append(key)
+    for name in C45_LAYER1_ROW_TAP_NAMES:
+        key = f"c45__{name}"
+        if key in common and key not in out:
+            out.append(key)
     for name in C6_PRE_ROPE_TAP_NAMES:
         key = f"c6__{name}"
         if key in common and key not in out:
@@ -2027,6 +2035,19 @@ def _emit_c44_summary(
     emit(f"Phase C44 verdict: EARLIEST SHARED BAD ROW-LEVEL TAP = '{first_shared_bad}'.")
     emit(f"    Most-likely cause: {C44_HYPOTHESIS.get(first_shared_bad, '<unknown tap>')}")
 
+    residual_row_ok = all(
+        cell["layer_1_residual_input_f32_row"].get(lab, (0.0, 0.0, 0.0, 0.0, False))[4]
+        for lab in labels
+    )
+    rms_inv_ok = all(
+        cell["layer_1_input_norm_rms_inv_scalar"].get(lab, (0.0, 0.0, 0.0, 0.0, False))[4]
+        for lab in labels
+    )
+    affine_ok = all(
+        cell["layer_1_input_norm_pre_weight_row_scalar_affine"].get(lab, (0.0, 0.0, 0.0, 0.0, False))[4]
+        for lab in labels
+    )
+
     if first_shared_bad == "layer_1_residual_input_f32_row":
         emit(
             "  -> Divergence is already present in the last replay row after "
@@ -2038,11 +2059,11 @@ def _emit_c44_summary(
             "shared-good; divergence first appears only when normalization is "
             "applied to produce the row values."
         )
-    elif (not broadcast_ok) and (not affine_ok):
+    elif residual_row_ok and (not rms_inv_ok) and (not affine_ok):
         emit(
-            "  -> Divergence survives the independent scalar-affine equivalent: "
-            "the earliest bad span stays on the pre-weight values themselves, "
-            "not broadcast/layout alone."
+            "  -> The last replay row itself stays shared-good, but both the "
+            "`rms_inv` scalar and the normalized-row replay are bad. The "
+            "earliest shared span is the row-local normalization scalar path."
         )
     elif last_shared_ok is not None:
         emit(
