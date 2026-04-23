@@ -83,8 +83,10 @@ tap-for-tap.
 Prompt provenance
 -----------------
 
-* If the kiln dump contains a `meta__prompt_tokens_len` scalar and a
-  `prompt_tokens` I32 tensor, we use those directly.
+* If the kiln dump contains a `prompt_tokens` I32 tensor, we treat it as the
+  full replay sequence whose final hidden row produced `h_main`. Newer C39
+  dumps also carry `meta__replay_tokens_len`; older dumps only carry
+  `meta__prompt_tokens_len`.
 * Otherwise we fall back to a canonical 512-token greeting prompt with
   torch seed=42, matching what the kiln bench harness emits by default.
 
@@ -182,7 +184,7 @@ B12_LAYER31_GQA_TAP_NAMES: Tuple[str, ...] = (
 def load_kiln_dump(path: str) -> Dict[str, object]:
     """Load a kiln-side MTP dump. Int tensors with a `meta__` prefix are
     returned as plain Python ints; other tensors as float32 (or int64 for
-    `prompt_tokens`) on CPU."""
+    `prompt_tokens`, which carries the full replay sequence) on CPU."""
     out: Dict[str, object] = {}
     with safe_open(path, framework="pt", device="cpu") as f:
         for name in f.keys():
@@ -1020,8 +1022,9 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    # Resolve the prompt tokens. Prefer kiln-provided `prompt_tokens`, fall
-    # back to the canonical 512-token greeting.
+    # Resolve the replay sequence. Prefer kiln-provided `prompt_tokens`
+    # (full conditioned sequence in C39+ dumps), fall back to the canonical
+    # 512-token greeting for legacy dumps that lack embedded tokens.
     prompt_tokens: Optional[torch.Tensor] = None
     if "prompt_tokens" in kiln:
         raw = kiln["prompt_tokens"]  # type: ignore[assignment]
@@ -1031,8 +1034,15 @@ def main() -> int:
             prompt_tokens = raw.view(1, -1).to(torch.int64).contiguous()
         else:
             prompt_tokens = raw.to(torch.int64).contiguous()
+        expected_len = kiln.get("meta__replay_tokens_len", kiln.get("meta__prompt_tokens_len"))
+        if isinstance(expected_len, int):
+            actual_len = int(prompt_tokens.shape[-1])
+            assert actual_len == expected_len, (
+                f"embedded replay length mismatch: tensor has {actual_len} ids, "
+                f"meta says {expected_len}"
+            )
         print(
-            f"[mtp_h_main_ref] prompt_tokens from kiln dump: shape={tuple(prompt_tokens.shape)}",
+            f"[mtp_h_main_ref] replay tokens from kiln dump: shape={tuple(prompt_tokens.shape)}",
             file=sys.stderr,
         )
     else:
@@ -1079,6 +1089,9 @@ def main() -> int:
     out_dict["meta__draft_token_id"] = torch.tensor([draft_token_id], dtype=torch.int32)
     out_dict["meta__mtp_pos"] = torch.tensor([mtp_pos], dtype=torch.int32)
     out_dict["meta__prompt_tokens_len"] = torch.tensor(
+        [int(prompt_tokens.shape[-1])], dtype=torch.int32
+    )
+    out_dict["meta__replay_tokens_len"] = torch.tensor(
         [int(prompt_tokens.shape[-1])], dtype=torch.int32
     )
     boundary_layers = list(B10_BOUNDARY_LAYERS)

@@ -753,6 +753,7 @@ pub fn speculative_mtp_decode_step(
     backend: &dyn BackendRuntime,
     last_token: TokenId,
     h_prev: &Tensor,
+    h_prev_replay_tokens: &[TokenId],
     weights: &GpuWeights,
     config: &ModelConfig,
     base_cache: &mut PagedKvCache,
@@ -806,6 +807,10 @@ pub fn speculative_mtp_decode_step(
         .snapshot_for_decode_rollback()
         .context("snapshot linear attention state before MTP verify")?;
     let verify_input = [last_token, draft_token];
+    let mut verify_replay_tokens = Vec::with_capacity(h_prev_replay_tokens.len() + verify_input.len());
+    verify_replay_tokens.extend_from_slice(h_prev_replay_tokens);
+    verify_replay_tokens.extend_from_slice(&verify_input);
+    crate::mtp_debug::set_h_main_prompt_tokens_override(&verify_replay_tokens);
     let (verify_logits, hidden_after_draft) = model_forward_paged_with_last_hidden(
         backend,
         &verify_input,
@@ -923,6 +928,10 @@ pub fn speculative_mtp_decode_step(
             .restore_from_decode_rollback(&linear_state_snapshot)
             .context("restore linear attention state after MTP rejection")?;
         let verify_input0 = [last_token];
+        let mut replay_tokens = Vec::with_capacity(h_prev_replay_tokens.len() + 1);
+        replay_tokens.extend_from_slice(h_prev_replay_tokens);
+        replay_tokens.push(last_token);
+        crate::mtp_debug::set_h_main_prompt_tokens_override(&replay_tokens);
         let (_verify_logits0, hidden_after_last) = model_forward_paged_with_last_hidden(
             backend,
             &verify_input0,

@@ -1649,6 +1649,7 @@ fn bench_latency_paged_mtp(
     let mut num_tokens = 1usize; // counting the first token from prefill
     let mut base_pos = actual_prompt_tokens;
     let mut mtp_pos = 0usize;
+    let mut h_prev_replay_tokens = prompt_token_ids.clone();
     let mut draft_accepted_count = 0usize;
     let mut total_draft_attempts = 0usize;
     let params = SamplingParams {
@@ -1678,6 +1679,7 @@ fn bench_latency_paged_mtp(
             &*backend,
             last_token,
             &h_prev,
+            &h_prev_replay_tokens,
             weights,
             config,
             &mut base_cache,
@@ -1703,6 +1705,14 @@ fn bench_latency_paged_mtp(
             draft_accepted_count += 1;
         }
 
+        let mut next_h_prev_replay_tokens = h_prev_replay_tokens.clone();
+        next_h_prev_replay_tokens.push(last_token);
+        if step.draft_accepted {
+            if let Some(&draft_token) = step.accepted_tokens.first() {
+                next_h_prev_replay_tokens.push(draft_token);
+            }
+        }
+
         let per_token_ms = (step_time.as_secs_f64() * 1000.0) / step.accepted_tokens.len() as f64;
         for &_tok in &step.accepted_tokens {
             inter_token_ms.push(per_token_ms);
@@ -1716,6 +1726,7 @@ fn bench_latency_paged_mtp(
         base_pos += step.base_advance;
         mtp_pos += step.mtp_advance;
         h_prev = step.new_h_prev;
+        h_prev_replay_tokens = next_h_prev_replay_tokens;
 
         if step.hit_eos {
             break;

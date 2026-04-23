@@ -1685,6 +1685,7 @@ impl ModelRunner {
 
         let mut base_pos = prompt_tokens.len();
         let mut mtp_pos = 0usize;
+        let mut h_prev_replay_tokens = prompt_tokens.to_vec();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut draft_accepted_count: usize = 0;
         let mut total_draft_attempts: usize = 0;
@@ -1743,6 +1744,7 @@ impl ModelRunner {
                 &*self.backend,
                 last_token,
                 &h_prev,
+                &h_prev_replay_tokens,
                 &self.weights,
                 &self.config,
                 &mut base_cache,
@@ -1761,9 +1763,17 @@ impl ModelRunner {
             if result.draft_accepted {
                 draft_accepted_count += 1;
             }
+            let mut next_h_prev_replay_tokens = h_prev_replay_tokens.clone();
+            next_h_prev_replay_tokens.push(last_token);
+            if result.draft_accepted {
+                if let Some(&draft_token) = result.accepted_tokens.first() {
+                    next_h_prev_replay_tokens.push(draft_token);
+                }
+            }
             base_pos += result.base_advance;
             mtp_pos += result.mtp_advance;
             h_prev = result.new_h_prev;
+            h_prev_replay_tokens = next_h_prev_replay_tokens;
 
             if result.accepted_tokens.is_empty() {
                 if result.hit_eos {
@@ -2120,6 +2130,7 @@ impl ModelRunner {
 
         let mut base_pos = prompt_tokens.len();
         let mut mtp_pos = 0usize;
+        let mut h_prev_replay_tokens = prompt_tokens.to_vec();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut finish_reason = FinishReason::MaxTokens;
         let mut rng = match params.seed {
@@ -2164,6 +2175,7 @@ impl ModelRunner {
                 &*self.backend,
                 last_token,
                 &h_prev,
+                &h_prev_replay_tokens,
                 &self.weights,
                 &self.config,
                 &mut base_cache,
@@ -2179,9 +2191,17 @@ impl ModelRunner {
             )
             .context("mtp speculative decode step failed")?;
 
+            let mut next_h_prev_replay_tokens = h_prev_replay_tokens.clone();
+            next_h_prev_replay_tokens.push(last_token);
+            if result.draft_accepted {
+                if let Some(&draft_token) = result.accepted_tokens.first() {
+                    next_h_prev_replay_tokens.push(draft_token);
+                }
+            }
             base_pos += result.base_advance;
             mtp_pos += result.mtp_advance;
             h_prev = result.new_h_prev;
+            h_prev_replay_tokens = next_h_prev_replay_tokens;
 
             if result.accepted_tokens.is_empty() {
                 if result.hit_eos {

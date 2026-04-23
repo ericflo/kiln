@@ -69,8 +69,17 @@ thread_local! {
     /// serialized alongside the taps (see [`write_mtp_dump`]). The HF
     /// reference (`scripts/mtp_h_main_reference_dump.py`) prefers these
     /// tokens over its canonical greeting, guaranteeing both sides replay
-    /// the exact same prompt during the per-tap bisect.
+    /// the exact same fully-conditioned sequence during the per-tap bisect.
     static H_MAIN_PROMPT_TOKENS: RefCell<Option<Vec<u32>>> =
+        const { RefCell::new(None) };
+
+    /// Optional one-shot override for the replay sequence serialized with the
+    /// next armed h_main capture. When unset, `stash_h_main_prompt_tokens`
+    /// records the local forward-call slice. Native-MTP replay uses this to
+    /// serialize the full conditioned sequence whose final hidden row produced
+    /// the captured `h_main`, rather than only the current `[last_token]` or
+    /// `[last_token, draft_token]` slice.
+    static H_MAIN_PROMPT_TOKENS_OVERRIDE: RefCell<Option<Vec<u32>>> =
         const { RefCell::new(None) };
 
     /// Phase B11b: thread-local sink for layer-0 GDN sub-op taps. Kept
@@ -523,7 +532,16 @@ pub fn stash_h_main_prompt_tokens(tokens: &[u32]) {
     if !is_h_main_capture_armed() {
         return;
     }
-    H_MAIN_PROMPT_TOKENS.with(|c| *c.borrow_mut() = Some(tokens.to_vec()));
+    let replay_tokens = H_MAIN_PROMPT_TOKENS_OVERRIDE
+        .with(|c| c.borrow_mut().take())
+        .unwrap_or_else(|| tokens.to_vec());
+    H_MAIN_PROMPT_TOKENS.with(|c| *c.borrow_mut() = Some(replay_tokens));
+}
+
+/// Override the replay sequence serialized for the next armed h_main
+/// capture. Consumed once by [`stash_h_main_prompt_tokens`].
+pub fn set_h_main_prompt_tokens_override(tokens: &[u32]) {
+    H_MAIN_PROMPT_TOKENS_OVERRIDE.with(|c| *c.borrow_mut() = Some(tokens.to_vec()));
 }
 
 /// Phase B11: drain the stashed prompt tokens. Returns an empty vector when
@@ -1299,15 +1317,16 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// trio. These are written under their captured names alongside the
 /// static taps; an empty slice makes this behave identically to Phase B6.
 ///
-/// Phase B11: `prompt_tokens` carries the base-model input token ids from
-/// the forward pass that produced the h_main value (see
-/// [`stash_h_main_prompt_tokens`] / [`drain_h_main_prompt_tokens`]). When
-/// non-empty, it is serialized as a flat I32 tensor named `prompt_tokens`
-/// plus a 1-element I32 scalar `meta__prompt_tokens_len`. The HF reference
+/// Phase B11/C39: `prompt_tokens` carries the fully-conditioned replay
+/// sequence whose final hidden row produced the captured `h_main` value (see
+/// [`stash_h_main_prompt_tokens`] / [`set_h_main_prompt_tokens_override`] /
+/// [`drain_h_main_prompt_tokens`]). When non-empty, it is serialized as a
+/// flat I32 tensor named `prompt_tokens` plus 1-element I32 scalars
+/// `meta__prompt_tokens_len` and `meta__replay_tokens_len`. The HF reference
 /// (`scripts/mtp_h_main_reference_dump.py`) prefers these tokens over its
-/// canonical greeting so both sides replay the exact same prompt during
-/// the per-tap bisect. Pass `&[]` (or legacy callers using `&extra_subops`
-/// before this param) to skip the prompt-tokens emission.
+/// canonical greeting so both sides replay the exact same conditioned
+/// sequence during the per-tap bisect. Pass `&[]` (or legacy callers using
+/// `&extra_subops` before this param) to skip the replay-tokens emission.
 ///
 /// Phase B11b: `b11_taps` carries the layer-0 GDN sub-op taps captured via
 /// [`arm_b11_layer0_capture`] / [`capture_b11_layer0_tap`] /
@@ -1369,9 +1388,10 @@ pub fn write_mtp_dump(
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
-    // Capacity: static taps + subops + 4 meta + optional (prompt_tokens, len)
+    // Capacity: static taps + subops + 4 meta + optional
+    // (prompt_tokens, prompt_len, replay_len)
     // + b11 taps + b12 taps + c6 taps + c7 taps + c14 taps.
-    let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
+    let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 3 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
@@ -1436,12 +1456,19 @@ pub fn write_mtp_dump(
         swf.to_le_bytes().to_vec(),
     ));
 
-    // Phase B11: serialize the base-model prompt tokens so the HF reference
-    // can replay the exact same input instead of its canonical fallback.
+    // Phase B11/C39: serialize the fully-conditioned replay sequence so the
+    // HF reference can replay the exact same input instead of its canonical
+    // fallback or an under-conditioned local token slice.
     if !prompt_tokens.is_empty() {
         let len_i32 = prompt_tokens.len() as i32;
         backings.push((
             "meta__prompt_tokens_len".into(),
+            vec![1],
+            Dtype::I32,
+            len_i32.to_le_bytes().to_vec(),
+        ));
+        backings.push((
+            "meta__replay_tokens_len".into(),
             vec![1],
             Dtype::I32,
             len_i32.to_le_bytes().to_vec(),
@@ -1904,6 +1931,26 @@ mod tests {
     }
 
     #[test]
+    fn stash_h_main_prompt_tokens_prefers_full_replay_override() {
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
+        }
+        arm_h_main_capture();
+        set_h_main_prompt_tokens_override(&[10, 20, 30, 40, 50]);
+        stash_h_main_prompt_tokens(&[30, 40]);
+        assert_eq!(drain_h_main_prompt_tokens(), vec![10, 20, 30, 40, 50]);
+
+        // The override is one-shot; a second stash falls back to the local slice.
+        stash_h_main_prompt_tokens(&[60, 70]);
+        assert_eq!(drain_h_main_prompt_tokens(), vec![60, 70]);
+
+        let _ = drain_h_main_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
+        }
+    }
+
+    #[test]
     fn write_mtp_dump_emits_prompt_tokens_when_provided() {
         use safetensors::SafeTensors;
 
@@ -1933,6 +1980,7 @@ mod tests {
         let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
         assert!(names.contains(&"prompt_tokens"));
         assert!(names.contains(&"meta__prompt_tokens_len"));
+        assert!(names.contains(&"meta__replay_tokens_len"));
 
         let pt = st.tensor("prompt_tokens").unwrap();
         assert_eq!(pt.dtype(), safetensors::Dtype::I32);
@@ -1947,6 +1995,12 @@ mod tests {
         assert_eq!(len_meta.dtype(), safetensors::Dtype::I32);
         let len_val = i32::from_le_bytes(len_meta.data()[0..4].try_into().unwrap());
         assert_eq!(len_val, prompt.len() as i32);
+
+        let replay_len_meta = st.tensor("meta__replay_tokens_len").unwrap();
+        assert_eq!(replay_len_meta.dtype(), safetensors::Dtype::I32);
+        let replay_len_val =
+            i32::from_le_bytes(replay_len_meta.data()[0..4].try_into().unwrap());
+        assert_eq!(replay_len_val, prompt.len() as i32);
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -2000,6 +2054,7 @@ mod tests {
         // should be serialized.
         assert!(!names.contains(&"prompt_tokens"));
         assert!(!names.contains(&"meta__prompt_tokens_len"));
+        assert!(!names.contains(&"meta__replay_tokens_len"));
         // With b11_taps = &[], no b11__* tensors should appear.
         assert!(!names.iter().any(|n| n.starts_with("b11__")));
         // With b12_taps = &[], no b12__* tensors should appear.
