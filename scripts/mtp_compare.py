@@ -65,6 +65,17 @@ Layer-31 GQA sub-op bisect (Phase B12 — per-layer + per-sub-op drift):
     refs and once with fp32 HF refs (--b12-taps --fp32) — to tell whether
     residual drift at layer 31 exceeds bf16 accumulation noise or is benign.
 
+Transformer block 1 sub-op bisect (Phase C41 — earliest shared bad tap):
+    python3 scripts/mtp_compare.py --c41 \\
+        --pair seed0:/tmp/h-kiln-seed0.safetensors,/tmp/h-ref-seed0.safetensors \\
+        --pair seed1:/tmp/h-kiln-seed1.safetensors,/tmp/h-ref-seed1.safetensors
+
+    --c41 defaults atol=1e-2, rtol=1e-1 (bf16-appropriate) and emits a
+    per-seed table for the explicit `c41__<name>` transformer-block-1 tap
+    set. The verdict identifies the earliest tap that BOTH seeds agree is
+    bad under the requested tolerance bar, plus the last tap both seeds
+    still agree is good.
+
 Exit code:
     0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
@@ -245,6 +256,39 @@ B12_HYPOTHESIS: Dict[str, str] = {
     "mlp_gate": "MLP gate_proj weight/transpose or pre-SiLU bf16 accumulation",
     "mlp_up": "MLP up_proj weight layout or elementwise SiLU(gate)*up path",
     "mlp_down": "MLP down_proj weight layout or bf16 GEMM epilogue cast",
+}
+
+# Phase C41 — transformer block 1 (layer 1) tap set, in forward-graph order.
+# Must stay in lock-step with `C41_LAYER1_TAP_NAMES` in
+# `crates/kiln-model/src/mtp_debug.rs` and `scripts/mtp_h_main_reference_dump.py`.
+C41_LAYER1_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_post_input_norm",
+    "gdn_in_proj",
+    "gdn_conv",
+    "gdn_qk_norm_q",
+    "gdn_qk_norm_k",
+    "gdn_gate_beta",
+    "gdn_gate_g",
+    "gdn_recur_out",
+    "gdn_gated_norm",
+    "gdn_out_proj",
+    "layer_1_post_attn_residual",
+    "layer_1_output",
+)
+
+C41_HYPOTHESIS: Dict[str, str] = {
+    "layer_1_post_input_norm": "layer 1 input_layernorm weight/eps or the layer-1 residual input frame",
+    "gdn_in_proj": "layer 1 in_proj_qkv / z / a / b weight layout, transpose, or dtype",
+    "gdn_conv": "layer 1 causal_conv1d path: kernel packing, conv-state update, or SiLU epilogue",
+    "gdn_qk_norm_q": "layer 1 Q qk_norm: head expansion, L2 norm, or scale-by-1/sqrt(dk)",
+    "gdn_qk_norm_k": "layer 1 K qk_norm: head expansion or L2 norm",
+    "gdn_gate_beta": "layer 1 beta gate: sigmoid(b) projection split / head layout",
+    "gdn_gate_g": "layer 1 g gate: -exp(A_log) * softplus(a + dt_bias) parameterization",
+    "gdn_recur_out": "layer 1 GDN recurrence kernel / chunkwise delta-rule math",
+    "gdn_gated_norm": "layer 1 GatedRMSNorm(core_attn_out, z) weight/eps or z routing",
+    "gdn_out_proj": "layer 1 out_proj weight layout / transpose / residual dtype",
+    "layer_1_post_attn_residual": "layer 1 residual add after GDN out_proj",
+    "layer_1_output": "layer 1 post-MLP residual handoff into layer 2",
 }
 
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
@@ -510,6 +554,10 @@ def _ordered_taps(
             out.append(name)
     for name in B12_LAYER31_GQA_TAP_NAMES:
         key = f"b12__{name}"
+        if key in common and key not in out:
+            out.append(key)
+    for name in C41_LAYER1_TAP_NAMES:
+        key = f"c41__{name}"
         if key in common and key not in out:
             out.append(key)
     for name in C6_PRE_ROPE_TAP_NAMES:
@@ -1447,6 +1495,113 @@ def _emit_c6_summary(
         emit("     and/or re-check the abs_pos threading in the MTP block.")
 
 
+def _emit_c41_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C41 — transformer block 1 sub-op bisect."""
+    emit("")
+    emit("=" * 78)
+    emit("Phase C41 transformer block 1 bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]] = {
+        n: {} for n in C41_LAYER1_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c41__"):
+                continue
+            short = n[len("c41__"):]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+                bool(r["allclose"]),
+            )
+
+    header = "  " + "tap".ljust(28) + " ".join(f"{lab:<52}" for lab in labels)
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C41_LAYER1_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2, ok = entry
+                captured_any = True
+                tag = "ok" if ok else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<28}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C41 verdict: no C41 layer-1 taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C41_LAYER1_TAPS=1 and")
+        emit("     re-run mtp_h_main_reference_dump.py with --c41-taps against")
+        emit("     the same kiln dump.")
+        return
+
+    first_shared_bad: Optional[str] = None
+    last_shared_ok: Optional[str] = None
+    first_per_seed: Dict[str, str] = {}
+    for tap in C41_LAYER1_TAP_NAMES:
+        all_present = True
+        all_ok = True
+        all_bad = True
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                all_present = False
+                all_ok = False
+                all_bad = False
+                continue
+            ok = entry[4]
+            all_ok &= ok
+            all_bad &= not ok
+            if not ok and lab not in first_per_seed:
+                first_per_seed[lab] = tap
+        if all_present and all_ok and first_shared_bad is None:
+            last_shared_ok = tap
+        if all_present and all_bad and first_shared_bad is None:
+            first_shared_bad = tap
+
+    if first_shared_bad is None:
+        emit("Phase C41 verdict: no shared earliest-bad tap across all supplied seeds.")
+        for lab in labels:
+            emit(f"  earliest divergent tap for {lab}: {first_per_seed.get(lab, '<none>')}")
+        emit("  -> Seeds do not yet agree on a single first-bad boundary inside")
+        emit("     transformer block 1. Use the per-seed rows above as the")
+        emit("     narrowest remaining span.")
+        return
+
+    emit(f"  earliest shared bad tap: '{first_shared_bad}'")
+    if last_shared_ok is not None:
+        emit(f"  last shared-good tap: '{last_shared_ok}'")
+    emit(f"Phase C41 verdict: EARLIEST SHARED BAD LAYER-1 TAP = '{first_shared_bad}'.")
+    emit(f"    Most-likely cause: {C41_HYPOTHESIS.get(first_shared_bad, '<unknown tap>')}")
+    if last_shared_ok is not None:
+        emit(
+            "  -> The shared drift is now localized to the boundary between "
+            f"'{last_shared_ok}' and '{first_shared_bad}'."
+        )
+    else:
+        emit("  -> Divergence is already present at the first captured layer-1 boundary.")
+
+
 def _emit_c7_summary(
     pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
@@ -1621,6 +1776,17 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c41",
+        action="store_true",
+        help=(
+            "Phase C41 mode: emit transformer-block-1 bisect over the explicit "
+            "c41__<name> tap set (layer-1 input norm, GDN internals, "
+            "post-attn residual, final layer output). Defaults atol=1e-2, "
+            "rtol=1e-1 (bf16-appropriate). Verdict names the earliest tap "
+            "that ALL supplied seeds agree is bad."
+        ),
+    )
+    ap.add_argument(
         "--c6",
         action="store_true",
         help=(
@@ -1661,7 +1827,7 @@ def main() -> int:
     # noise; the strict bar stays on to catch real structural drops and the
     # comparator report makes bf16-accumulation drift visible via per-position
     # max|Δ| / rel_l2 columns.
-    bf16_mode = args.b10 or args.b11 or args.b12
+    bf16_mode = args.b10 or args.b11 or args.b12 or args.c41
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
     if args.rtol is None:
@@ -1689,6 +1855,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
+    elif args.c41:
+        mode = "transformer block 1 bisect (C41)"
     elif args.c6:
         mode = "pre-RoPE MTP input bisect (C6)"
     elif args.b12:
@@ -1717,6 +1885,8 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.c41:
+        _emit_c41_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c6:
         _emit_c6_summary(pair_results, args.atol, args.rtol, emit)
     elif args.b12:
@@ -1733,7 +1903,7 @@ def main() -> int:
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
     # legacy dumps from before this PR). Skipped in explicit --b10/--b11/--b12/--c6
     # mode so the per-phase report isn't cluttered by unrelated sub-op tables.
-    if not args.b10 and not args.b11 and not args.b12 and not args.c6 and not args.c7:
+    if not args.b10 and not args.b11 and not args.b12 and not args.c41 and not args.c6 and not args.c7:
         have_b9_taps = any(
             any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
             for pr in pair_results
