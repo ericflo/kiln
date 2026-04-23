@@ -371,17 +371,17 @@ C44_HYPOTHESIS: Dict[str, str] = {
 # in `crates/kiln-model/src/mtp_debug.rs` and
 # `scripts/mtp_h_main_reference_dump.py`.
 C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
-    "layer_1_residual_input_f32_row_values",
     "layer_1_input_norm_rms_inv_scalar",
+    "layer_1_input_norm_rms_inv_scalar_extracted_values",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
 )
 
 C45_HYPOTHESIS: Dict[str, str] = {
-    "layer_1_residual_input_f32_row_values": "the selected last-row values are already wrong before row-local normalization is applied",
-    "layer_1_input_norm_rms_inv_scalar": "the row-local RMS inverse scalar diverges even though C44 kept the same scalar shared-good",
-    "layer_1_input_norm_pre_weight_row_scalar_values": "the selected row values and scalar stay shared-good; drift first appears in the flat row-scalar multiply values",
-    "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
+    "layer_1_input_norm_rms_inv_scalar": "the row-local RMS inverse scalar tensor itself diverges even though PR #433 kept this boundary shared-good",
+    "layer_1_input_norm_rms_inv_scalar_extracted_values": "the row-local scalar tensor stays shared-good, but the scalar extraction path diverges before the multiply runs",
+    "layer_1_input_norm_pre_weight_row_scalar_values": "the scalar tensor and extracted scalar stay shared-good; drift first appears in the actual row-local scalar multiply values",
+    "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-local scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
 }
 
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
@@ -749,7 +749,7 @@ def _compare_pair(
         emit("  pair verdict: all taps match within tolerance.")
     else:
         base_first_div = first_div
-        for prefix in ("b11__", "b12__", "c41__", "c6__", "c7__"):
+        for prefix in ("b11__", "b12__", "c41__", "c45__", "c6__", "c7__"):
             if base_first_div.startswith(prefix):
                 base_first_div = base_first_div[len(prefix) :]
                 break
@@ -759,6 +759,7 @@ def _compare_pair(
             or B11_HYPOTHESIS.get(base_first_div)
             or B12_HYPOTHESIS.get(base_first_div)
             or C41_HYPOTHESIS.get(base_first_div)
+            or C45_HYPOTHESIS.get(base_first_div)
             or C6_HYPOTHESIS.get(base_first_div)
             or C7_HYPOTHESIS.get(base_first_div)
             or "<unknown tap>"
@@ -2056,10 +2057,10 @@ def _emit_c45_summary(
     rtol: float,
     emit,
 ) -> None:
-    """Phase C45 — layer-1 row-level normalization bisect."""
+    """Phase C45 — layer-1 row-local scalar-multiply bisect."""
     emit("")
     emit("=" * 78)
-    emit("Phase C45 layer-1 row normalization audit — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("Phase C45 layer-1 row-local scalar-multiply audit — cos_sim / max|Δ| / mean|Δ| / rel_l2")
     emit("=" * 78)
 
     labels = [pr[0] for pr in pair_results]
@@ -2104,7 +2105,7 @@ def _emit_c45_summary(
 
     emit("")
     if not captured_any:
-        emit("Phase C45 verdict: no C45 row-level taps present in dumps.")
+        emit("Phase C45 verdict: no C45 row-local scalar-multiply taps present in dumps.")
         emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 and")
         emit("     re-run mtp_h_main_reference_dump.py with --c45-taps against")
         emit("     the same kiln dump.")
@@ -2138,31 +2139,37 @@ def _emit_c45_summary(
         emit("Phase C45 verdict: no shared earliest-bad tap across all supplied seeds.")
         for lab in labels:
             emit(f"  earliest divergent tap for {lab}: {first_per_seed.get(lab, '<none>')}")
-        emit("  -> Seeds do not yet agree on a single first-bad C45 boundary.")
+        emit("  -> Seeds do not yet agree on a single first-bad row-local scalar-multiply boundary.")
         return
 
     emit(f"  earliest shared bad tap: '{first_shared_bad}'")
     if last_shared_ok is not None:
         emit(f"  last shared-good tap: '{last_shared_ok}'")
-    emit(f"Phase C45 verdict: EARLIEST SHARED BAD ROW-LEVEL TAP = '{first_shared_bad}'.")
+    emit(f"Phase C45 verdict: EARLIEST SHARED BAD ROW-LOCAL SCALAR-MULTIPLY TAP = '{first_shared_bad}'.")
     emit(f"    Most-likely cause: {C45_HYPOTHESIS.get(first_shared_bad, '<unknown tap>')}")
 
-    if first_shared_bad == "layer_1_residual_input_f32_row_values":
+    if first_shared_bad == "layer_1_input_norm_rms_inv_scalar":
         emit(
-            "  -> Divergence is already present in the selected last-row "
-            "values before row-local normalization is applied."
+            "  -> Divergence is already present on the row-local `rms_inv` "
+            "tensor before any scalar extraction or multiply replay runs."
+        )
+    elif first_shared_bad == "layer_1_input_norm_rms_inv_scalar_extracted_values":
+        emit(
+            "  -> The row-local `rms_inv` tensor stays shared-good; drift "
+            "first appears when replay extracts one scalar per batch row for "
+            "the Rust-side scalar-affine equivalent."
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_scalar_values":
         emit(
-            "  -> The selected row values and `rms_inv` scalar stay "
-            "shared-good; divergence first appears in the flat row-scalar "
-            "multiply values."
+            "  -> The row-local `rms_inv` tensor and its extracted scalar "
+            "stay shared-good; divergence first appears in the flat "
+            "row-local scalar multiply values."
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_reconstructed":
         emit(
-            "  -> The flat row-scalar multiply stays shared-good; divergence "
-            "appears only when reconstructing the row-shaped output right "
-            "before the existing post-input-norm path."
+            "  -> The flat row-local scalar multiply stays shared-good; "
+            "divergence appears only when reconstructing the row-shaped "
+            "output right before the existing post-input-norm path."
         )
     elif last_shared_ok is not None:
         emit(
@@ -2396,13 +2403,22 @@ def main() -> int:
         "--c45",
         action="store_true",
         help=(
-            "Phase C45 mode: emit the narrowed layer-1 row normalization "
-            "audit over the explicit c45__<name> tap set (selected row "
-            "values, matching RMS inverse scalar, flat row-scalar multiply "
-            "values, reconstructed row-shaped output). Defaults atol=1e-2, "
-            "rtol=1e-1 (bf16-appropriate). Verdict names whether divergence "
-            "first appears in the selected row values, the scalar multiply, "
-            "or only after reconstruction."
+            "Phase C45 mode: emit the narrowed layer-1 row-local scalar-"
+            "multiply audit over the explicit c45__<name> tap set (row-local "
+            "RMS inverse scalar tensor, extracted scalar values, flat "
+            "row-scalar multiply values, reconstructed row-shaped output). "
+            "Defaults atol=1e-2, rtol=1e-1 (bf16-appropriate). Verdict names "
+            "whether divergence first appears in the scalar tensor, the "
+            "scalar extraction path, the multiply, or only after "
+            "reconstruction."
+        ),
+    )
+    ap.add_argument(
+        "--c45-row-scalar",
+        action="store_true",
+        help=(
+            "Alias for --c45 with wording that matches the narrowed Phase C45 "
+            "row-local scalar-multiply follow-up."
         ),
     )
     ap.add_argument(
@@ -2455,6 +2471,7 @@ def main() -> int:
         or args.c43
         or args.c44
         or args.c45
+        or args.c45_row_scalar
     )
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
@@ -2483,8 +2500,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
-    elif args.c45:
-        mode = "layer-1 row normalization audit (C45)"
+    elif args.c45 or args.c45_row_scalar:
+        mode = "layer-1 row-local scalar-multiply audit (C45)"
     elif args.c44:
         mode = "layer-1 row-level audit (C44)"
     elif args.c43:
@@ -2512,7 +2529,7 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c45:
+    if args.c45 or args.c45_row_scalar:
         focus_keys = [f"c45__{name}" for name in C45_LAYER1_ROW_TAP_NAMES]
     elif args.c44:
         focus_keys = [f"c44__{name}" for name in C44_LAYER1_F32_ROW_TAP_NAMES]
@@ -2532,7 +2549,7 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
-    elif args.c45:
+    elif args.c45 or args.c45_row_scalar:
         _emit_c45_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c44:
         _emit_c44_summary(pair_results, args.atol, args.rtol, emit)

@@ -238,8 +238,8 @@ C44_LAYER1_F32_ROW_TAP_NAMES: Tuple[str, ...] = (
 # stay in lock-step with `C45_LAYER1_ROW_TAP_NAMES` in
 # `crates/kiln-model/src/mtp_debug.rs`.
 C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
-    "layer_1_residual_input_f32_row_values",
     "layer_1_input_norm_rms_inv_scalar",
+    "layer_1_input_norm_rms_inv_scalar_extracted_values",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
 )
@@ -1121,7 +1121,7 @@ def _arm_c44_layer1_f32_row_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> 
 
 
 def _arm_c45_layer1_row_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List[object]:
-    """Attach hooks for the narrowed Phase C45 row-level normalization audit."""
+    """Attach hooks for the narrowed Phase C45 row-local scalar-multiply audit."""
     handles: List[object] = []
     layer = base.layers[1]
     norm = getattr(layer, "input_layernorm", None)
@@ -1134,11 +1134,13 @@ def _arm_c45_layer1_row_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List
         tensor = inputs[0][0] if isinstance(inputs[0], tuple) else inputs[0]
         residual = tensor.detach().clone().to(torch.float32)
         residual_row = residual[:, -1, :].contiguous()
-        taps_out["layer_1_residual_input_f32_row_values"] = residual_row
 
         rms_inv = torch.rsqrt(residual.square().mean(dim=-1, keepdim=True) + eps)
         rms_inv_row = rms_inv[:, -1:, :].contiguous()
         taps_out["layer_1_input_norm_rms_inv_scalar"] = rms_inv_row
+        taps_out["layer_1_input_norm_rms_inv_scalar_extracted_values"] = (
+            rms_inv_row.reshape(-1).contiguous()
+        )
 
         scalar_values = (residual_row * rms_inv_row.reshape(-1, 1)).contiguous()
         taps_out["layer_1_input_norm_pre_weight_row_scalar_values"] = scalar_values
@@ -1192,8 +1194,8 @@ def run_reference_forward(
       taps under `c43__<name>` keys.
     - `capture_c44=True`: layer-1 last-row F32 row + scalar + normalized row
       taps under `c44__<name>` keys.
-    - `capture_c45=True`: layer-1 row values + scalar + flat scalar-multiply
-      + reconstructed row taps under `c45__<name>` keys.
+    - `capture_c45=True`: layer-1 row-local scalar tensor + extracted scalar
+      + flat scalar-multiply + reconstructed row taps under `c45__<name>` keys.
     - `fp32=True`: load the HF model in float32 (instead of bfloat16) so the
       comparator can distinguish bf16-accumulation noise from real divergence.
     """
@@ -1330,8 +1332,8 @@ def run_reference_forward(
     elif capture_c45:
         hook_handles.extend(_arm_c45_layer1_row_hooks(base, c45_captures))
         print(
-            "[mtp_h_main_ref] C45 instrumentation armed: layer 1 row-value / "
-            "scalar-multiply / reconstruction audit hooks",
+            "[mtp_h_main_ref] C45 instrumentation armed: layer 1 row-local "
+            "scalar / extracted-scalar / multiply / reconstruction audit hooks",
             file=sys.stderr,
         )
 
