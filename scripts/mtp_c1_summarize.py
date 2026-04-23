@@ -126,6 +126,23 @@ def bucket_by_mtp_pos(rows: list[Row], n_buckets: int = 8) -> list[tuple[int, in
     return out
 
 
+def identity_stats(rows: list[Row]) -> dict[str, float | int]:
+    total = len(rows)
+    identity = sum(1 for r in rows if r.mtp_top1 == r.last_token)
+    accepted_rows = [r for r in rows if r.accepted]
+    rejected_rows = [r for r in rows if not r.accepted]
+    accepted_identity = sum(1 for r in accepted_rows if r.mtp_top1 == r.last_token)
+    rejected_identity = sum(1 for r in rejected_rows if r.mtp_top1 == r.last_token)
+    return {
+        "draft_equals_last_token_count": identity,
+        "draft_equals_last_token_rate": rate(identity, total),
+        "accept_conditioned_count": accepted_identity,
+        "accept_conditioned_rate": rate(accepted_identity, len(accepted_rows)),
+        "reject_conditioned_count": rejected_identity,
+        "reject_conditioned_rate": rate(rejected_identity, len(rejected_rows)),
+    }
+
+
 def summarize_file(path: str, rows: list[Row]) -> dict:
     n = len(rows)
     accepted = sum(1 for r in rows if r.accepted)
@@ -143,6 +160,7 @@ def summarize_file(path: str, rows: list[Row]) -> dict:
 
     mtp_logits = [r.mtp_top1_logit for r in rows]
     main_logits = [r.main_top1_logit for r in rows]
+    id_stats = identity_stats(rows)
 
     return {
         "file": os.path.basename(path),
@@ -163,14 +181,64 @@ def summarize_file(path: str, rows: list[Row]) -> dict:
             for k, v in sorted(by_pos_in_k.items())
         },
         "mtp_pos_buckets": [
-            {"lo": lo, "hi": hi, "n": n_b, "accepted": a_b, "alpha": rate(a_b, n_b)}
-            for (lo, hi, n_b, a_b) in bucket_by_mtp_pos(rows)
+            {
+                "lo": lo,
+                "hi": hi,
+                "n": len(bucket),
+                "accepted": sum(1 for r in bucket if r.accepted),
+                "alpha": rate(sum(1 for r in bucket if r.accepted), len(bucket)),
+                "draft_equals_last_token_count": sum(
+                    1 for r in bucket if r.mtp_top1 == r.last_token
+                ),
+                "draft_equals_last_token_rate": rate(
+                    sum(1 for r in bucket if r.mtp_top1 == r.last_token), len(bucket)
+                ),
+            }
+            for (lo, hi, _n_b, _a_b) in bucket_by_mtp_pos(rows)
+            for bucket in [[r for r in rows if lo <= r.mtp_pos <= hi]]
         ],
+        "identity_bias": id_stats,
         "logit_stats": {
             "mtp_top1_logit_median": median(mtp_logits) if mtp_logits else float("nan"),
             "main_top1_logit_median": median(main_logits) if main_logits else float("nan"),
             "mtp_top1_logit_min": min(mtp_logits) if mtp_logits else float("nan"),
             "mtp_top1_logit_max": max(mtp_logits) if mtp_logits else float("nan"),
+        },
+    }
+
+
+def aggregate_summaries(summaries: list[dict]) -> dict:
+    total = sum(s["total_rows"] for s in summaries)
+    accepted = sum(s["accepted"] for s in summaries)
+    topk_match = sum(s["topk_match"] for s in summaries)
+    class_a = sum(s["class_a_rows"] for s in summaries)
+    class_b = sum(s["class_b_rows"] for s in summaries)
+    identity_count = sum(
+        s["identity_bias"]["draft_equals_last_token_count"] for s in summaries
+    )
+    accept_identity_count = sum(
+        s["identity_bias"]["accept_conditioned_count"] for s in summaries
+    )
+    reject_identity_count = sum(
+        s["identity_bias"]["reject_conditioned_count"] for s in summaries
+    )
+    rejected = total - accepted
+    return {
+        "total_rows": total,
+        "accepted": accepted,
+        "topk_match": topk_match,
+        "alpha": rate(accepted, total),
+        "topk_match_rate": rate(topk_match, total),
+        "alpha_given_match": rate(accepted, topk_match) if topk_match else 0.0,
+        "class_a_rows": class_a,
+        "class_b_rows": class_b,
+        "identity_bias": {
+            "draft_equals_last_token_count": identity_count,
+            "draft_equals_last_token_rate": rate(identity_count, total),
+            "accept_conditioned_count": accept_identity_count,
+            "accept_conditioned_rate": rate(accept_identity_count, accepted),
+            "reject_conditioned_count": reject_identity_count,
+            "reject_conditioned_rate": rate(reject_identity_count, rejected),
         },
     }
 
@@ -188,11 +256,12 @@ def verdict(summaries: list[dict]) -> tuple[str, str]:
     """
     # Aggregate across files (sum counts, not mean rates — seeds have unequal
     # token counts).
-    total = sum(s["total_rows"] for s in summaries)
-    accepted = sum(s["accepted"] for s in summaries)
-    topk_match = sum(s["topk_match"] for s in summaries)
-    alpha = rate(accepted, total)
-    topk_rate = rate(topk_match, total)
+    aggregate = aggregate_summaries(summaries)
+    total = aggregate["total_rows"]
+    accepted = aggregate["accepted"]
+    topk_match = aggregate["topk_match"]
+    alpha = aggregate["alpha"]
+    topk_rate = aggregate["topk_match_rate"]
     # Alpha conditioned on topk_match — the "verification consistency" ratio.
     alpha_given_match = rate(accepted, topk_match) if topk_match else 0.0
 
@@ -258,6 +327,13 @@ def print_summary(summaries: list[dict], v_code: str, v_text: str) -> None:
             f"Class A (match, !accept) = {s['class_a_rows']}   "
             f"Class B (!match) = {s['class_b_rows']}"
         )
+        print(
+            "  identity bias: draft==last_token "
+            f"{s['identity_bias']['draft_equals_last_token_count']}/{s['total_rows']} "
+            f"({fmt_pct(s['identity_bias']['draft_equals_last_token_rate'])})   "
+            f"reject-conditioned = {fmt_pct(s['identity_bias']['reject_conditioned_rate'])}   "
+            f"accept-conditioned = {fmt_pct(s['identity_bias']['accept_conditioned_rate'])}"
+        )
         if s["class_b_accepted_rows"] > 0:
             print(
                 f"  ⚠ {s['class_b_accepted_rows']} rows accepted despite "
@@ -277,7 +353,9 @@ def print_summary(summaries: list[dict], v_code: str, v_text: str) -> None:
                 continue
             print(
                 f"    mtp_pos∈[{b['lo']:4d}..{b['hi']:4d}]  "
-                f"n={b['n']:4d}  α={fmt_pct(b['alpha'])}"
+                f"n={b['n']:4d}  α={fmt_pct(b['alpha'])}  "
+                f"identity={b['draft_equals_last_token_count']:4d} "
+                f"({fmt_pct(b['draft_equals_last_token_rate'])})"
             )
         print(
             "  logit medians: mtp={:.3f}  main={:.3f}".format(
@@ -287,20 +365,28 @@ def print_summary(summaries: list[dict], v_code: str, v_text: str) -> None:
         )
 
     # Aggregate
-    total = sum(s["total_rows"] for s in summaries)
-    accepted = sum(s["accepted"] for s in summaries)
-    topk_match = sum(s["topk_match"] for s in summaries)
-    class_a = sum(s["class_a_rows"] for s in summaries)
-    class_b = sum(s["class_b_rows"] for s in summaries)
+    aggregate = aggregate_summaries(summaries)
     print()
     print("-" * 78)
     print("Aggregate across files:")
-    print(f"  rows            = {total}")
-    print(f"  α               = {fmt_pct(rate(accepted, total))}")
-    print(f"  topk_match_rate = {fmt_pct(rate(topk_match, total))}")
-    print(f"  α | match       = {fmt_pct(rate(accepted, topk_match)) if topk_match else '  n/a '}")
-    print(f"  Class A rows    = {class_a}  (topk_match=True, accepted=False)")
-    print(f"  Class B rows    = {class_b}  (topk_match=False)")
+    print(f"  rows            = {aggregate['total_rows']}")
+    print(f"  α               = {fmt_pct(aggregate['alpha'])}")
+    print(f"  topk_match_rate = {fmt_pct(aggregate['topk_match_rate'])}")
+    print(f"  α | match       = {fmt_pct(aggregate['alpha_given_match']) if aggregate['topk_match'] else '  n/a '}")
+    print(f"  Class A rows    = {aggregate['class_a_rows']}  (topk_match=True, accepted=False)")
+    print(f"  Class B rows    = {aggregate['class_b_rows']}  (topk_match=False)")
+    print(
+        "  identity bias   = "
+        f"{aggregate['identity_bias']['draft_equals_last_token_count']}/"
+        f"{aggregate['total_rows']} "
+        f"({fmt_pct(aggregate['identity_bias']['draft_equals_last_token_rate'])})"
+    )
+    print(
+        "  reject | identity = "
+        f"{fmt_pct(aggregate['identity_bias']['reject_conditioned_rate'])}   "
+        "accept | identity = "
+        f"{fmt_pct(aggregate['identity_bias']['accept_conditioned_rate'])}"
+    )
     print()
     print(f"VERDICT CODE: {v_code}")
     print(v_text)
@@ -326,6 +412,7 @@ def main() -> int:
             json.dump(
                 {
                     "files": summaries,
+                    "aggregate": aggregate_summaries(summaries),
                     "verdict_code": v_code,
                     "verdict_text": v_text,
                 },
