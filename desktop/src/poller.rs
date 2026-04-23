@@ -6,14 +6,15 @@ use tokio::task::JoinHandle;
 
 use crate::supervisor::ServerState;
 
-const POLL_INTERVAL_SECS: u64 = 2;
+const STEADY_POLL_INTERVAL_SECS: u64 = 2;
+const STARTING_POLL_INTERVAL_MS: u64 = 500;
 const REQUEST_TIMEOUT_SECS: u64 = 1;
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
 /// Spawn a background task that polls `/v1/health` and `/v1/train/status` on
-/// the managed kiln server every `POLL_INTERVAL_SECS` seconds and drives
-/// `state` transitions accordingly. Exits when `shutdown` changes or when the
-/// observed state is `Stopped`.
+/// the managed kiln server and drives `state` transitions accordingly. Polling
+/// is faster while the server is starting so the tray does not sit stale after
+/// kiln becomes ready, then returns to the steady cadence once running.
 pub fn spawn_health_poller(
     state: Arc<Mutex<ServerState>>,
     host: String,
@@ -29,8 +30,7 @@ pub fn spawn_health_poller(
             Err(_) => return,
         };
 
-        let mut interval = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut next_delay = Duration::ZERO;
         let mut consecutive_failures: u32 = 0;
 
         loop {
@@ -38,7 +38,7 @@ pub fn spawn_health_poller(
                 _ = shutdown.changed() => {
                     return;
                 }
-                _ = interval.tick() => {
+                _ = tokio::time::sleep(next_delay) => {
                     {
                         let s = state.lock().await;
                         if matches!(*s, ServerState::Stopped) {
@@ -90,6 +90,7 @@ pub fn spawn_health_poller(
                         train_status.as_ref(),
                         &s,
                     );
+                    next_delay = poll_delay_for(&new_state);
                     *s = new_state;
                 }
             }
@@ -139,27 +140,20 @@ pub fn derive_state(
     ServerState::Running
 }
 
+fn poll_delay_for(state: &ServerState) -> Duration {
+    if matches!(state, ServerState::Starting) {
+        Duration::from_millis(STARTING_POLL_INTERVAL_MS)
+    } else {
+        Duration::from_secs(STEADY_POLL_INTERVAL_SECS)
+    }
+}
+
 fn health_response_ready(status_success: bool, body: Option<&serde_json::Value>) -> bool {
     if !status_success {
         return false;
     }
 
-    let Some(body) = body else {
-        return false;
-    };
-
-    inference_prewarm_complete(body).unwrap_or(true)
-}
-
-fn inference_prewarm_complete(body: &serde_json::Value) -> Option<bool> {
-    body.get("checks")?
-        .as_array()?
-        .iter()
-        .find(|check| {
-            check.get("name").and_then(|name| name.as_str()) == Some("inference_prewarm_complete")
-        })?
-        .get("pass")?
-        .as_bool()
+    body.is_some()
 }
 
 fn has_running_job(status: &serde_json::Value) -> bool {
@@ -190,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn health_ready_waits_for_inference_prewarm() {
+    fn health_ready_does_not_wait_for_inference_prewarm() {
         let health = json!({
             "status": "ok",
             "checks": [
@@ -199,7 +193,7 @@ mod tests {
                 {"name": "inference_prewarm_complete", "pass": false}
             ]
         });
-        assert!(!health_response_ready(true, Some(&health)));
+        assert!(health_response_ready(true, Some(&health)));
     }
 
     #[test]
@@ -232,6 +226,18 @@ mod tests {
         let health = json!({"status": "degraded", "checks": []});
         assert!(!health_response_ready(false, Some(&health)));
         assert!(!health_response_ready(true, None));
+    }
+
+    #[test]
+    fn poll_delay_is_short_only_while_starting() {
+        assert_eq!(
+            poll_delay_for(&ServerState::Starting),
+            Duration::from_millis(STARTING_POLL_INTERVAL_MS)
+        );
+        assert_eq!(
+            poll_delay_for(&ServerState::Running),
+            Duration::from_secs(STEADY_POLL_INTERVAL_SECS)
+        );
     }
 
     #[test]

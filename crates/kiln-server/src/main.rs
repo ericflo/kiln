@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use clap::Parser;
@@ -19,7 +19,6 @@ use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
 use kiln_model::paged_kv_cache::PagedKvCache;
-use kiln_model::speculative::SpeculativeConfig;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
 
@@ -289,41 +288,11 @@ fn spawn_backend_prewarm(state: AppState) {
             // on the first live request.
             let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
             let num_blocks = 2;
-            // Warm the base paged/speculative path used by long desktop
-            // prompts. Native MTP is only selected for a narrow short-prompt
-            // subset, so exercising it during startup makes readiness slower
-            // without warming the common long-prompt route.
+            // Warm the base paged path used by every desktop request. The
+            // previous speculative-first prewarm made readiness wait on
+            // skip-layer draft/verify work; live greedy requests can still
+            // compile speculative kernels on demand without blocking startup.
             let prewarm_result = {
-                let block_manager = Mutex::new(BlockManager::new(num_blocks, 16));
-                let paged_cache = Mutex::new(PagedKvCache::new_uninit(
-                    runner_guard.config.num_full_attention_layers,
-                    num_blocks,
-                    16,
-                    runner_guard.config.num_kv_heads,
-                    runner_guard.config.head_dim,
-                    prewarm_kv_dtype(&runner_guard.config),
-                    runner_guard.weights.embed_tokens.device(),
-                )?);
-                let spec_config = SpeculativeConfig {
-                    num_speculative_tokens: 4,
-                    draft_layers: 8,
-                };
-                runner_guard
-                    .generate_paged_speculative_shared_tokens(
-                        &prompt_tokens,
-                        &params,
-                        &block_manager,
-                        &paged_cache,
-                        &spec_config,
-                    )
-                    .map(|_| ())
-            };
-
-            if let Err(err) = prewarm_result {
-                tracing::warn!(
-                    error = %err,
-                    "speculative inference prewarm failed; falling back to base paged prewarm"
-                );
                 let mut block_manager = BlockManager::new(num_blocks, 16);
                 let mut paged_cache = PagedKvCache::new_uninit(
                     runner_guard.config.num_full_attention_layers,
@@ -339,7 +308,11 @@ fn spawn_backend_prewarm(state: AppState) {
                     &params,
                     &mut block_manager,
                     &mut paged_cache,
-                )?;
+                )
+            };
+
+            if let Err(err) = prewarm_result {
+                anyhow::bail!("base paged inference prewarm failed: {err}");
             }
             Ok(())
         })
