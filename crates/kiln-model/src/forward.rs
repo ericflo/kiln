@@ -2322,6 +2322,64 @@ fn gdn_chunkwise_recurrence(
     Ok(Tensor::cat(&out_chunks, 2)?)
 }
 
+/// Metal BF16 fast path for full 64-token chunks.
+///
+/// Returns a contiguous head-last `[B, T, nv, dv]` tensor so the caller can feed
+/// Metal gated RMSNorm without the `[B,nv,T,dv]` cat + transpose + contiguous
+/// copy chain.
+fn gdn_chunkwise_recurrence_head_last_full_chunks(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,         // [B, nv, T, dk]
+    k: &Tensor,         // [B, nv, T, dk]
+    v: &Tensor,         // [B, nv, T, dv]
+    beta: &Tensor,      // [B, nv, T]
+    g: &Tensor,         // [B, nv, T]
+    state: &mut Tensor, // [B, nv, dk, dv]
+    chunk_size: usize,
+) -> Result<Option<Tensor>> {
+    let (batch, heads, seq_len, _) = q.dims4()?;
+    let dtype = q.dtype();
+    if chunk_size != 64
+        || seq_len <= 1
+        || seq_len % chunk_size != 0
+        || dtype != DType::BF16
+        || state.dtype() != DType::BF16
+        || !backend.supports_gdn_full_chunk_forward_head_last()
+    {
+        return Ok(None);
+    }
+
+    let dv = v.dim(3)?;
+    let out = Tensor::zeros((batch, seq_len, heads, dv), DType::BF16, q.device())?;
+
+    for ci in 0..(seq_len / chunk_size) {
+        let t_start = ci * chunk_size;
+        let q_c = q.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let k_c = k.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let v_c = v.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let beta_c = beta.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let g_c = g.narrow(2, t_start, chunk_size)?.contiguous()?;
+
+        let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
+        let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
+        let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
+        let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
+        let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
+
+        if !backend.gdn_full_chunk_forward_head_last_into(
+            &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state, &out, t_start,
+            seq_len,
+        )? {
+            if ci == 0 {
+                return Ok(None);
+            }
+            anyhow::bail!("backend declined GDN head-last full-chunk path mid-sequence");
+        }
+    }
+
+    Ok(Some(out))
+}
+
 /// Gated DeltaNet (GDN) linear attention forward pass.
 ///
 /// Implements the recurrent linear attention mechanism used by 24/32 layers in Qwen3.5-4B.
@@ -2662,7 +2720,7 @@ pub fn gated_deltanet_forward(
         (q, k, v, beta, g)
     };
 
-    let attn_out = gdn_chunkwise_recurrence(
+    let (attn_out, attn_out_head_last) = match gdn_chunkwise_recurrence_head_last_full_chunks(
         backend,
         &q,
         &k,
@@ -2671,7 +2729,22 @@ pub fn gated_deltanet_forward(
         &g,
         recurrent_state,
         GDN_CHUNK_SIZE,
-    )?; // [B, nv, T, dv]
+    )? {
+        Some(attn_out) => (attn_out, true), // [B, T, nv, dv], contiguous
+        None => (
+            gdn_chunkwise_recurrence(
+                backend,
+                &q,
+                &k,
+                &v,
+                &beta,
+                &g,
+                recurrent_state,
+                GDN_CHUNK_SIZE,
+            )?,
+            false,
+        ), // [B, nv, T, dv]
+    };
 
     // Restore state to its original dtype so the caller's F32 invariant holds
     // across layer calls and across prefill/decode steps.
@@ -2679,10 +2752,15 @@ pub fn gated_deltanet_forward(
         *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
     }
 
-    // Transpose to [B, T, nv, dv]
+    // Transpose to [B, T, nv, dv] unless the Metal full-chunk path already
+    // wrote that contiguous layout directly.
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/post_transpose");
-        attn_out.transpose(1, 2)?
+        if attn_out_head_last {
+            attn_out
+        } else {
+            attn_out.transpose(1, 2)?
+        }
     };
 
     // Phase B11b tap: `gdn_recur_out`. Captured post-transpose (shape

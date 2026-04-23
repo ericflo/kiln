@@ -139,6 +139,10 @@ impl BackendRuntime for MetalBackend {
         !self.disable.gdn_forward_substitution
     }
 
+    fn supports_gdn_full_chunk_forward_head_last(&self) -> bool {
+        !self.disable.gdn_forward_substitution
+    }
+
     fn supports_gdn_gates(&self) -> bool {
         !self.disable.gdn_gates
     }
@@ -382,11 +386,40 @@ impl BackendRuntime for MetalBackend {
         {
             return Ok(None);
         }
-        let out = metal_gdn_full_chunk_forward_bf16(
-            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
-        )
-        .context("metal gdn_full_chunk_forward kernel failed")?;
+        let out =
+            metal_gdn_full_chunk_forward_bf16(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state)
+                .context("metal gdn_full_chunk_forward kernel failed")?;
         Ok(Some(out))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_full_chunk_forward_head_last_into(
+        &self,
+        g: &Tensor,
+        v: &Tensor,
+        kkt: &Tensor,
+        qkt: &Tensor,
+        ks_entry: &Tensor,
+        q_s: &Tensor,
+        beta: &Tensor,
+        k_t: &Tensor,
+        state: &mut Tensor,
+        out: &Tensor,
+        t_start: usize,
+        seq_len: usize,
+    ) -> Result<bool> {
+        if self.disable.gdn_forward_substitution
+            || !metal_gdn_full_chunk_forward_head_last_supports(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+            )
+        {
+            return Ok(false);
+        }
+        metal_gdn_full_chunk_forward_head_last_into_bf16(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+        )
+        .context("metal gdn_full_chunk_forward_head_last_into kernel failed")?;
+        Ok(true)
     }
 
     fn gdn_gates(
@@ -705,6 +738,41 @@ fn metal_gdn_full_chunk_forward_supports(
         && dv > 0
         && dv <= 128
         && state.is_contiguous()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metal_gdn_full_chunk_forward_head_last_supports(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    state: &Tensor,
+    out: &Tensor,
+    t_start: usize,
+    seq_len: usize,
+) -> bool {
+    if !metal_gdn_full_chunk_forward_supports(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state)
+        || !matches!(out.device(), Device::Metal(_))
+        || out.dtype() != DType::BF16
+        || !out.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((batch, heads, chunk)) = g.dims3() else {
+        return false;
+    };
+    let Ok((_, _, _, dv)) = v.dims4() else {
+        return false;
+    };
+    out.dims4()
+        .is_ok_and(|dims| dims == (batch, seq_len, heads, dv))
+        && chunk == 64
+        && t_start <= seq_len
+        && t_start + chunk <= seq_len
 }
 
 fn metal_gdn_recurrent_supports(
@@ -2103,10 +2171,14 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
     device const bfloat* beta [[buffer(6)]],
     device const bfloat* k_t [[buffer(7)]],
     device bfloat* state [[buffer(8)]],
-    device bfloat* out_chunk [[buffer(9)]],
+    device bfloat* out [[buffer(9)]],
     constant uint& batch_heads [[buffer(10)]],
     constant uint& dk [[buffer(11)]],
     constant uint& dv [[buffer(12)]],
+    constant uint& output_mode [[buffer(13)]],
+    constant uint& t_start [[buffer(14)]],
+    constant uint& seq_len [[buffer(15)]],
+    constant uint& heads [[buffer(16)]],
     uint bh [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]
 ) {
@@ -2193,7 +2265,16 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
             const float qss = static_cast<float>(static_cast<bfloat>(
                 static_cast<float>(q_s[cdv_base + td]) * p_t
             ));
-            out_chunk[cdv_base + td] = static_cast<bfloat>(qss + acc_b);
+            const bfloat out_val = static_cast<bfloat>(qss + acc_b);
+            if (output_mode == 0) {
+                out[cdv_base + td] = out_val;
+            } else {
+                const uint batch_idx = bh / heads;
+                const uint head_idx = bh - batch_idx * heads;
+                const uint out_t = t_start + t;
+                const uint out_idx = ((batch_idx * seq_len + out_t) * heads + head_idx) * dv + tid;
+                out[out_idx] = out_val;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -2739,9 +2820,17 @@ fn metal_gdn_full_chunk_forward_bf16(
         let batch_heads_u32 = batch_heads as u32;
         let dk_u32 = dk as u32;
         let dv_u32 = dv as u32;
+        let output_mode_u32 = 0u32;
+        let t_start_u32 = 0u32;
+        let seq_len_u32 = chunk_size as u32;
+        let heads_u32 = heads as u32;
         encoder.set_bytes(10, &batch_heads_u32);
         encoder.set_bytes(11, &dk_u32);
         encoder.set_bytes(12, &dv_u32);
+        encoder.set_bytes(13, &output_mode_u32);
+        encoder.set_bytes(14, &t_start_u32);
+        encoder.set_bytes(15, &seq_len_u32);
+        encoder.set_bytes(16, &heads_u32);
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: batch_heads,
@@ -2757,6 +2846,175 @@ fn metal_gdn_full_chunk_forward_bf16(
     }
 
     Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn metal_gdn_full_chunk_forward_head_last_into_bf16(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    state: &mut Tensor,
+    out: &Tensor,
+    t_start: usize,
+    seq_len: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        metal_gdn_full_chunk_forward_head_last_supports(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+        ),
+        "metal gdn full-chunk head-last unsupported shape"
+    );
+    let (batch, heads, _) = g.dims3()?;
+    let (_, _, dk, _) = k_t.dims4()?;
+    let dv = v.dim(3)?;
+    let batch_heads = batch * heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize
+            && dk <= u32::MAX as usize
+            && dv <= u32::MAX as usize
+            && t_start <= u32::MAX as usize
+            && seq_len <= u32::MAX as usize
+            && heads <= u32::MAX as usize,
+        "metal gdn full-chunk head-last shape too large"
+    );
+
+    let g = g.contiguous()?;
+    let v = v.contiguous()?;
+    let kkt = kkt.contiguous()?;
+    let qkt = qkt.contiguous()?;
+    let ks_entry = ks_entry.contiguous()?;
+    let q_s = q_s.contiguous()?;
+    let beta = beta.contiguous()?;
+    let k_t = k_t.contiguous()?;
+
+    let Device::Metal(device) = g.device() else {
+        anyhow::bail!("metal gdn full-chunk head-last requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_full_chunk_forward_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_full_chunk_forward_head_last_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (g_storage, g_layout) = g.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (kkt_storage, kkt_layout) = kkt.storage_and_layout();
+        let (qkt_storage, qkt_layout) = qkt.storage_and_layout();
+        let (ks_storage, ks_layout) = ks_entry.storage_and_layout();
+        let (qs_storage, qs_layout) = q_s.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (kt_storage, kt_layout) = k_t.storage_and_layout();
+        let (state_storage, state_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let g_metal = match &*g_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last g must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last v must be on Metal"),
+        };
+        let kkt_metal = match &*kkt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last kkt must be on Metal"),
+        };
+        let qkt_metal = match &*qkt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last qkt must be on Metal"),
+        };
+        let ks_metal = match &*ks_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last ks_entry must be on Metal"),
+        };
+        let qs_metal = match &*qs_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last q_s must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last beta must be on Metal"),
+        };
+        let kt_metal = match &*kt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last k_t must be on Metal"),
+        };
+        let state_metal = match &*state_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last state must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk head-last out must be on Metal"),
+        };
+
+        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let kkt_buf =
+            candle_core::metal_backend::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
+        let qkt_buf =
+            candle_core::metal_backend::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
+        let ks_buf =
+            candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
+        let qs_buf =
+            candle_core::metal_backend::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let kt_buf =
+            candle_core::metal_backend::buffer_o(kt_metal.buffer(), &kt_layout, k_t.dtype());
+        let state_buf = candle_core::metal_backend::buffer_o(
+            state_metal.buffer(),
+            &state_layout,
+            state.dtype(),
+        );
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(g_buf.buffer), g_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(kkt_buf.buffer), kkt_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(qkt_buf.buffer), qkt_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(qs_buf.buffer), qs_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(7, Some(kt_buf.buffer), kt_buf.offset_in_bytes);
+        encoder.set_buffer(8, Some(state_buf.buffer), state_buf.offset_in_bytes);
+        encoder.set_buffer(9, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let dk_u32 = dk as u32;
+        let dv_u32 = dv as u32;
+        let output_mode_u32 = 1u32;
+        let t_start_u32 = t_start as u32;
+        let seq_len_u32 = seq_len as u32;
+        let heads_u32 = heads as u32;
+        encoder.set_bytes(10, &batch_heads_u32);
+        encoder.set_bytes(11, &dk_u32);
+        encoder.set_bytes(12, &dv_u32);
+        encoder.set_bytes(13, &output_mode_u32);
+        encoder.set_bytes(14, &t_start_u32);
+        encoder.set_bytes(15, &seq_len_u32);
+        encoder.set_bytes(16, &heads_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch_heads,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(())
 }
 
 fn metal_gdn_recurrent_bf16(
@@ -3311,11 +3569,7 @@ mod tests {
                 .map(|idx| {
                     let t = idx / chunk;
                     let i = idx % chunk;
-                    if i < t {
-                        1.0f32
-                    } else {
-                        0.0f32
-                    }
+                    if i < t { 1.0f32 } else { 0.0f32 }
                 })
                 .collect::<Vec<_>>(),
             (chunk, chunk),
@@ -3327,11 +3581,7 @@ mod tests {
                 .map(|idx| {
                     let t = idx / chunk;
                     let i = idx % chunk;
-                    if i <= t {
-                        1.0f32
-                    } else {
-                        0.0f32
-                    }
+                    if i <= t { 1.0f32 } else { 0.0f32 }
                 })
                 .collect::<Vec<_>>(),
             (chunk, chunk),
@@ -3623,13 +3873,15 @@ mod tests {
             .to_dtype(DType::BF16)?;
         let q_s = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
             .to_dtype(DType::BF16)?;
-        let beta =
-            Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?
+            .to_dtype(DType::BF16)?;
         let k_t = Tensor::from_slice(&kt_data, (batch, heads, dk, chunk), &device)?
             .to_dtype(DType::BF16)?;
         let state_entry = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
             .to_dtype(DType::BF16)?;
         let mut state_fused = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut state_head_last = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
             .to_dtype(DType::BF16)?;
 
         assert!(metal_gdn_full_chunk_forward_supports(
@@ -3664,11 +3916,47 @@ mod tests {
             &k_t,
             &mut state_fused,
         )?;
+        let seq_len = chunk * 2;
+        let t_start = chunk;
+        let out_head_last = Tensor::zeros((batch, seq_len, heads, dv), DType::BF16, &device)?;
+        assert!(metal_gdn_full_chunk_forward_head_last_supports(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &state_head_last,
+            &out_head_last,
+            t_start,
+            seq_len
+        ));
+        metal_gdn_full_chunk_forward_head_last_into_bf16(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_head_last,
+            &out_head_last,
+            t_start,
+            seq_len,
+        )?;
+        let out_head_last_chunk = out_head_last.narrow(1, t_start, chunk)?.transpose(1, 2)?;
 
         let out_max = max_abs_diff(&out_ref, &out_fused)?;
         let out_mean = mean_abs_diff(&out_ref, &out_fused)?;
         let state_max = max_abs_diff(&state_ref, &state_fused)?;
         let state_mean = mean_abs_diff(&state_ref, &state_fused)?;
+        let head_last_out_max = max_abs_diff(&out_ref, &out_head_last_chunk)?;
+        let head_last_out_mean = mean_abs_diff(&out_ref, &out_head_last_chunk)?;
+        let head_last_state_max = max_abs_diff(&state_ref, &state_head_last)?;
+        let head_last_state_mean = mean_abs_diff(&state_ref, &state_head_last)?;
         assert!(
             out_max < 2e-2,
             "GDN full-chunk out max_abs_diff={out_max:e} exceeds tolerance"
@@ -3684,6 +3972,22 @@ mod tests {
         assert!(
             state_mean < 2e-3,
             "GDN full-chunk state mean_abs_diff={state_mean:e} exceeds tolerance"
+        );
+        assert!(
+            head_last_out_max < 2e-2,
+            "GDN full-chunk head-last out max_abs_diff={head_last_out_max:e} exceeds tolerance"
+        );
+        assert!(
+            head_last_out_mean < 2e-3,
+            "GDN full-chunk head-last out mean_abs_diff={head_last_out_mean:e} exceeds tolerance"
+        );
+        assert!(
+            head_last_state_max < 2e-2,
+            "GDN full-chunk head-last state max_abs_diff={head_last_state_max:e} exceeds tolerance"
+        );
+        assert!(
+            head_last_state_mean < 2e-3,
+            "GDN full-chunk head-last state mean_abs_diff={head_last_state_mean:e} exceeds tolerance"
         );
 
         Ok(())
