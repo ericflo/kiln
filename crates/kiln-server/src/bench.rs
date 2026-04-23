@@ -929,8 +929,17 @@ fn read_spec_method_from_env() -> SpecMethod {
 }
 
 const BENCH_MTP_MAX_PROMPT_TOKENS: usize = 128;
-const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS: usize = 1024;
+const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
+const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL: usize = 4096;
 const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS: usize = 32;
+
+fn bench_long_prompt_skip_layer_min_prompt_tokens(backend_name: &str) -> usize {
+    if backend_name == "metal" {
+        BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL
+    } else {
+        BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT
+    }
+}
 
 fn bench_native_mtp_allowed(backend_name: &str) -> bool {
     if backend_name == "metal" {
@@ -970,6 +979,7 @@ fn resolve_bench_spec_method(
         temperature,
         mtp_supported,
         bench_native_mtp_allowed(backend_name),
+        bench_long_prompt_skip_layer_min_prompt_tokens(backend_name),
         bench_force_raw_mtp(),
     )
 }
@@ -981,6 +991,7 @@ fn resolve_bench_spec_method_with_force(
     temperature: f32,
     mtp_supported: bool,
     native_mtp_allowed: bool,
+    long_prompt_skip_layer_min_prompt_tokens: usize,
     force_raw_mtp: bool,
 ) -> SpecMethod {
     match configured {
@@ -998,7 +1009,7 @@ fn resolve_bench_spec_method_with_force(
             {
                 SpecMethod::Mtp
             } else if greedy
-                && requested_prompt_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS
+                && requested_prompt_tokens >= long_prompt_skip_layer_min_prompt_tokens
                 && max_output_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS
             {
                 SpecMethod::SkipLayer
@@ -1016,7 +1027,16 @@ mod tests {
     #[test]
     fn bench_mtp_short_prompt_stays_mtp() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 128, 64, 0.0, true, true, false),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                128,
+                64,
+                0.0,
+                true,
+                true,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                false
+            ),
             SpecMethod::Mtp
         );
     }
@@ -1026,11 +1046,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 64,
                 0.0,
                 true,
                 true,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 false
             ),
             SpecMethod::SkipLayer
@@ -1042,11 +1063,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 31,
                 0.0,
                 true,
                 true,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 false
             ),
             SpecMethod::Off
@@ -1054,11 +1076,12 @@ mod tests {
         assert_eq!(
             resolve_bench_spec_method_with_force(
                 SpecMethod::Mtp,
-                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 64,
                 0.7,
                 true,
                 true,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
                 false
             ),
             SpecMethod::Off
@@ -1068,7 +1091,16 @@ mod tests {
     #[test]
     fn bench_mtp_medium_prompt_stays_off_until_skip_layer_crossover() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 512, 64, 0.0, true, true, false),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                512,
+                64,
+                0.0,
+                true,
+                true,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                false
+            ),
             SpecMethod::Off
         );
     }
@@ -1076,7 +1108,16 @@ mod tests {
     #[test]
     fn bench_mtp_short_prompt_stays_off_when_native_mtp_is_disallowed() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 64, 64, 0.0, true, false, false),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                64,
+                64,
+                0.0,
+                true,
+                false,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                false
+            ),
             SpecMethod::Off
         );
     }
@@ -1084,8 +1125,51 @@ mod tests {
     #[test]
     fn bench_force_raw_mtp_bypasses_shape_routing() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.0, true, false, true),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                8192,
+                64,
+                0.0,
+                true,
+                false,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
+                true
+            ),
             SpecMethod::Mtp
+        );
+    }
+
+    #[test]
+    fn bench_mtp_metal_medium_prompt_stays_off_until_4096() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                2048,
+                64,
+                0.0,
+                true,
+                false,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                false
+            ),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_mtp_metal_4096_prompt_falls_back_to_skip_layer() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                64,
+                0.0,
+                true,
+                false,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
+                false
+            ),
+            SpecMethod::SkipLayer
         );
     }
 }
