@@ -1531,6 +1531,25 @@ pub fn rms_norm_fallback(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor
     Ok(out.to_dtype(x.dtype())?)
 }
 
+/// Phase C42: capture the minimal layer-1 input-layernorm intermediates needed
+/// to distinguish "bad residual input arrives at block 1" from "the residual
+/// input is clean but the RMSNorm math diverges". This intentionally mirrors
+/// the fallback RMSNorm formula instead of widening the general tracing API.
+fn capture_c42_layer1_input_norm_taps(x: &Tensor, weight: &Tensor, eps: f64) -> Result<()> {
+    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_residual_input", x)?;
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_input_norm_rms_inv", &rms_inv)?;
+    let pre_weight = x_f32.broadcast_mul(&rms_inv)?;
+    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_input_norm_pre_weight", &pre_weight)?;
+    let w_f32 = weight.to_dtype(DType::F32)?;
+    let w_plus_one = (w_f32.ones_like()? + w_f32)?;
+    let post = pre_weight.broadcast_mul(&w_plus_one)?.to_dtype(x.dtype())?;
+    crate::mtp_debug::capture_c42_layer1_norm_tap("layer_1_post_input_norm", &post)?;
+    Ok(())
+}
+
 /// Apply Rotary Position Embeddings (RoPE) to query and key tensors.
 ///
 /// `q`: [batch, seq_len, num_heads, head_dim]
@@ -4924,6 +4943,7 @@ pub fn model_forward_paged_with_last_hidden(
     // tail and per-sub-op taps inside layer 31.
     crate::mtp_debug::arm_b12_gqa_capture();
     crate::mtp_debug::arm_c41_layer1_capture();
+    crate::mtp_debug::arm_c42_layer1_norm_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -4964,6 +4984,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     crate::mtp_debug::stash_h_main_replay_context(token_ids);
     crate::mtp_debug::arm_b11_layer0_capture();
     crate::mtp_debug::arm_c41_layer1_capture();
+    crate::mtp_debug::arm_c42_layer1_norm_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5358,6 +5379,10 @@ pub fn mtp_forward_step(
             // the base-model forward. Empty when
             // `KILN_MTP_DUMP_C41_LAYER1_TAPS` is unset.
             let c41_taps = crate::mtp_debug::drain_c41_layer1_capture();
+            // Phase C42: drain any layer-1 pre-norm / input-layernorm taps
+            // stashed during the base-model forward. Empty when
+            // `KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS` is unset.
+            let c42_taps = crate::mtp_debug::drain_c42_layer1_norm_capture();
             // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
             // norm_emb, norm_h, concat, fused) captured above. Empty when
             // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
@@ -5389,6 +5414,7 @@ pub fn mtp_forward_step(
                 &b11_taps,
                 &b12_taps,
                 &c41_taps,
+                &c42_taps,
                 &c6_taps,
                 &c7_taps,
                 &c14_taps,
@@ -5405,6 +5431,7 @@ pub fn mtp_forward_step(
                     b11_taps = b11_taps.len(),
                     b12_taps = b12_taps.len(),
                     c41_taps = c41_taps.len(),
+                    c42_taps = c42_taps.len(),
                     c6_taps = c6_taps.len(),
                     c7_taps = c7_taps.len(),
                     c14_taps = c14_taps.len(),
@@ -5614,6 +5641,15 @@ fn model_forward_paged_inner(
                 let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
                 let capture_c41_taps =
                     crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
+                let capture_c42_taps =
+                    crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i);
+                if capture_c42_taps {
+                    capture_c42_layer1_input_norm_taps(
+                        &hidden,
+                        &layer.input_layernorm,
+                        config.rms_norm_eps,
+                    )?;
+                }
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
