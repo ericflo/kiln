@@ -1,5 +1,184 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#392 current-main re-profile — 2026-04-23
+
+**Scope:** refresh the Phase 6 performance source of truth on fresh `main`
+after PR [#392](https://github.com/ericflo/kiln/pull/392) landed and name the
+single next optimization target from current evidence, not from the old
+post-`#384` assumption that `:kiln/attn/gdn/chunk_prep` and
+`:kiln/attn/gdn/chunk` still define the frontier.
+
+**Preflight outcome:** proceed. On fresh `main` at `c392cf1` (2026-04-23),
+PR #392 is merged (`57f67ae`), there is no newer merged or open PR that
+already lands a post-#392 re-profile, `PROFILING.md` still ends with the
+post-`#384` / current-main sections plus a short post-change note rather than
+a full post-#392 refresh, and
+`crates/kiln-model/src/forward.rs` still routes full 64-token BF16 prefill
+chunks through `backend.gdn_full_chunk_forward(...)`.
+
+**Hardware / image:** RunPod on-demand RTX A6000 (`$0.49/hr`),
+`ghcr.io/ericflo/kiln-runpod:latest`, driver `550.127.08`, CUDA toolkit
+`12.4`.
+
+**Build / validation commands:**
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+cargo build --release --features cuda,nvtx --bin kiln-bench
+CARGO_PROFILE_DEV_DEBUG=0 cargo test -p kiln-model -p kiln-server --features cuda --no-run
+```
+
+**Profiling commands run:**
+
+```bash
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --latency-only
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=70 --duration=20 -o /workspace/phase6-profile/post392-decode ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=3 --duration=4 -o /workspace/phase6-profile/post392-prefill ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+```
+
+The baked image still ships `nsys 2023.4.4`, so this run upgraded Nsight
+userspace and used
+`/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys` for all final
+captures and exports.
+
+The literal prompt-heavy prefill command above did **not** capture usable
+prefill NVTX on this pod: with current `main`, model load still takes
+~26-28 s, so `--delay=3 --duration=4` samples startup instead of the
+`8192/1` prefill region. For the committed prefill CSVs below I reran that
+same `8192/1 --latency-only` arm with a capture window shifted onto the
+actual prefill span:
+
+```bash
+/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=26 --duration=4 -o /workspace/phase6-profile/post392-prefill-refined ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+```
+
+### Decode uncaptured runs — paged 512/128
+
+| run | decode tok/s | mean ITL ms | p50 ITL ms | p99 ITL ms | prefill ms |
+| --- | -----------: | ----------: | ---------: | ---------: | ---------: |
+| 1 | 51.18 | 19.54 | 19.49 | 25.30 | 374.7 |
+| 2 | 50.94 | 19.63 | 19.50 | 24.43 | 372.6 |
+| 3 | 51.97 | 19.24 | 19.14 | 21.40 | 369.8 |
+| median | **51.18** | **19.54** | **19.49** | **24.43** | **372.6** |
+
+Decode on fresh post-#392 `main` is materially faster than the post-`#384`
+refresh (`43.8 tok/s`, `22.8 ms` mean ITL). The decode hotspot ordering,
+however, is unchanged.
+
+### Prompt-heavy prefill timing — paged 8192/1
+
+The uncaptured prompt-heavy timing run on current `main` produced:
+
+- prompt tokens: **8180**
+- prefill time: **3277.7 ms**
+- prefill throughput: **2495.6 tok/s**
+
+That is a regression against the post-`#384` baseline already recorded in
+this file (**2831.2 ms / 2889.3 tok/s** uncaptured,
+**2947.8 ms / 2775.0 tok/s** captured).
+
+### Top-3 NVTX hotspots — decode
+
+Source: `profiling-artifacts/post392_20260423_decode_nvtx.csv`
+
+| rank | % | region |
+| ---: | -: | --- |
+| 1 | **17.8** | `:kiln/gdn/gates` |
+| 2 | **17.3** | `:kiln/gdn/gated_norm` |
+| 3 | **14.9** | `:kiln/gdn/qk_norm` |
+
+Decode remains the same story as post-`#384`: GDN gate/norm work still owns
+the top of the decode profile, and FlashInfer-style paged decode still fails
+the reopen bar.
+
+### Top-3 NVTX hotspots — prefill
+
+Source: `profiling-artifacts/post392_20260423_prefill_nvtx.csv`
+
+| rank | % | region |
+| ---: | -: | --- |
+| 1 | **53.9** | `:kiln/gdn/in_proj` |
+| 2 | **22.6** | `:kiln/attn/full/prefill_initial` |
+| 3 | **9.3** | `:kiln/mlp/gate` |
+
+The important post-#392 prefill fact is not the exact late-prefill NVTX
+ordering above; it is that the old chunkwise frontier is gone from the top of
+the table. In the refined capture, `:kiln/attn/gdn/chunk_prep` and
+`:kiln/attn/gdn/chunk` have collapsed to **0.1% / 0.1%**. That is a real
+ordering change versus post-`#384`, where those same ranges were
+**51.1% / 25.1%**.
+
+### Kernel callouts
+
+- **Decode top kernels** (`profiling-artifacts/post392_20260423_decode_kern.csv`):
+  Marlin GEMM at **14.7%**, large CUTLASS BF16 GEMMs at **11.9%**, **10.0%**,
+  and **9.2%**, `ucopy_bf16` at **8.0%**, and
+  `gdn_full_chunk_forward_kernel` at **2.3%**.
+- **Prefill top kernels** (`profiling-artifacts/post392_20260423_prefill_kern.csv`):
+  `gdn_full_chunk_forward_kernel` at **34.6%**, Marlin at **10.6%**,
+  `bmul_f32` at **10.0%**, `ucopy_bf16` at **7.5%**, `badd_f32` at **4.4%**,
+  and `ucopy_f32` at **4.0%**. The old chunkwise pair is effectively gone:
+  `gdn_chunk_scan_kernel<64>` is **0.1%** and `gdn_chunk_prep_kernel<64>` is
+  **0.0%** in this refined post-#392 prefill window.
+
+This is the core post-#392 result: the fused full-chunk path **did**
+materially change hotspot ordering, but it did **not** deliver an end-to-end
+prefill win. The dominant prefill work is now inside the fused
+`gdn_full_chunk_forward_kernel` and the HBM-heavy elementwise traffic around
+it, not in the old `chunk_prep` / `chunk` Candle path.
+
+### Comparison vs the post-#384 section
+
+Against the post-`#384` current-main re-profile already in this file:
+
+- decode median improved from **43.8 tok/s** to **51.18 tok/s**;
+- decode mean ITL improved from **22.8 ms** to **19.54 ms**;
+- decode top-3 ordering stayed the same (`gates`, `gated_norm`, `qk_norm`);
+- prompt-heavy uncaptured prefill regressed from **2831.2 ms / 2889.3 tok/s**
+  to **3277.7 ms / 2495.6 tok/s**;
+- prefill NVTX ordering changed materially:
+  `chunk_prep` + `chunk` fell from **76.2%** combined to **~0.2%** combined in
+  the refined post-#392 window;
+- prefill kernel ordering changed materially:
+  `gdn_chunk_scan_kernel<64>` fell from **18.4%** to **0.1%**, while
+  `gdn_full_chunk_forward_kernel` rose to **34.6%** and became the dominant
+  prompt-heavy prefill kernel.
+
+So the fresh post-#392 evidence says two things at once:
+
+1. **#392 changed the hotspot ranking.** The pre-#392 "finish chunk_prep /
+   chunk" queue shape is stale.
+2. **#392 is still a regression on uncaptured prompt-heavy prefill.** The
+   new top bottleneck is the fused full-chunk kernel path itself, not the old
+   chunkwise fallback around it.
+
+### Recommendation
+
+**Single next optimization target:** treat
+`gdn_full_chunk_forward_kernel` as the new Phase 6 prefill frontier and port
+the best available upstream fused-GDN kernel work into that path, rather than
+retrying the old `chunk_prep` / `chunk` optimization loop and rather than
+reopening FlashInfer decode.
+
+Concretely, the next task should target the vendored fused full-chunk GDN
+kernel itself: compare kiln's `gdn_full_chunk_forward_kernel` against vLLM's
+newer `fused_recurrent_gated_delta_rule` / tuned GDN path, then port the
+missing wins into kiln. Fresh post-#392 evidence supports that specific
+direction:
+
+- old chunkwise kernels are no longer the bottleneck;
+- the fused full-chunk kernel alone is **34.6%** of refined prompt-heavy
+  prefill kernel time;
+- the surrounding `ucopy_bf16` / `ucopy_f32` / `bmul_f32` traffic is still
+  large enough that a kernel-internal memory-traffic reduction has a credible
+  ceiling;
+- decode full attention remains far below the >5% reopen bar.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
