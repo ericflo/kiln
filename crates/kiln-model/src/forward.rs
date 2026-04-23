@@ -1032,6 +1032,7 @@ fn marlin_bf16_drop_disabled() -> bool {
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 4096;
+const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
 
 fn streaming_prefill_env_override() -> Option<bool> {
     std::env::var("KILN_STREAMING_PREFILL")
@@ -3679,13 +3680,14 @@ fn gqa_attention_paged_with_rope_tables(
     let k_cache_token_major = k.clone();
     let v_cache_token_major = v.clone();
 
-    // Transpose to [batch, heads, seq_len, head_dim]
-    let (q, k, v) = {
+    // Transpose Q to [batch, heads, seq_len, head_dim]. K/V are transposed
+    // lazily only on paths that consume the current tile directly; later
+    // prefill tiles and speculative verifier windows read full head-major K/V
+    // back from the paged cache instead.
+    let q = {
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
         let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
-        let v = v.transpose(1, 2)?.contiguous()?;
-        (q, k, v)
+        q
     };
 
     let total_seq_len = start_pos + seq_len;
@@ -3702,14 +3704,16 @@ fn gqa_attention_paged_with_rope_tables(
             || backend.supports_flash_attn_prefill())
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
+        let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+        let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
         let attn_output = if let Some(attn_output) =
-            flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)?
+            flash_attention_forward_head_major(backend, &q, &k_head, &v_head, num_heads, head_dim)?
         {
             Some(attn_output)
         } else if backend.supports_flash_attn_prefill() {
             let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
-            let k_prefill = k.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
-            let v_prefill = v.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_kv_heads, head_dim]
+            let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
+            let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
             flash_attention_forward(
                 backend,
                 &q_prefill,
@@ -3734,7 +3738,7 @@ fn gqa_attention_paged_with_rope_tables(
                     &v_cache_token_major,
                 )? {
                     paged_cache
-                        .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+                        .write(full_attn_layer_idx, block_table, start_pos, &k_head, &v_head)
                         .context("paged KV cache write failed")?;
                 }
             }
@@ -3788,8 +3792,10 @@ fn gqa_attention_paged_with_rope_tables(
             &k_cache_token_major,
             &v_cache_token_major,
         )? {
+            let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+            let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
             paged_cache
-                .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+                .write(full_attn_layer_idx, block_table, start_pos, &k_head, &v_head)
                 .context("paged KV cache write failed")?;
         }
     }
@@ -3860,11 +3866,38 @@ fn gqa_attention_paged_with_rope_tables(
     // This matches the Qwen3-Next MTP reference contract where the inner
     // block performs single-token self-attention without a growing KV history.
     let (k, v, kv_len) = if single_token_self_attn {
-        (k, v, 1usize)
+        (
+            k_cache_token_major.transpose(1, 2)?.contiguous()?,
+            v_cache_token_major.transpose(1, 2)?.contiguous()?,
+            1usize,
+        )
     } else {
-        let (k, v) = paged_cache
-            .read(full_attn_layer_idx, block_table, total_seq_len)
-            .context("paged KV cache read failed")?;
+        let fast_read = if seq_len > 1
+            && seq_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
+            && !paged_cache.is_fp8()
+            && backend.supports_paged_kv_head_major_read()
+            && backend.supports_flash_attn_prefill_head_major()
+        {
+            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, total_seq_len)
+                .and_then(|start_slot| {
+                    paged_cache
+                        .pool_tensors(full_attn_layer_idx)
+                        .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
+                })
+                .map(|(start_slot, k_pool, v_pool)| {
+                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, total_seq_len)
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let (k, v) = match fast_read {
+            Some((k, v)) => (k, v),
+            None => paged_cache
+                .read(full_attn_layer_idx, block_table, total_seq_len)
+                .context("paged KV cache read failed")?,
+        };
         (k, v, total_seq_len)
     };
 
