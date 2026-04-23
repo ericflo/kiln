@@ -289,15 +289,11 @@ fn spawn_backend_prewarm(state: AppState) {
             // on the first live request.
             let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
             let num_blocks = 2;
-            let spec_method =
-                kiln_server::config::SpeculativeDecodingConfig::from_env().effective_method();
-            let prewarm_result = if matches!(spec_method, kiln_server::config::SpecMethod::Mtp)
-                && runner_guard.weights.mtp.is_some()
-            {
-                runner_guard
-                    .generate_from_tokens_mtp_speculative(&prompt_tokens, &params)
-                    .map(|_| ())
-            } else {
+            // Warm the base paged/speculative path used by long desktop
+            // prompts. Native MTP is only selected for a narrow short-prompt
+            // subset, so exercising it during startup makes readiness slower
+            // without warming the common long-prompt route.
+            let prewarm_result = {
                 let block_manager = Mutex::new(BlockManager::new(num_blocks, 16));
                 let paged_cache = Mutex::new(PagedKvCache::new_uninit(
                     runner_guard.config.num_full_attention_layers,
