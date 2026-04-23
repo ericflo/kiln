@@ -3940,7 +3940,9 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
     if !state.is_contiguous() {
         *state = state.contiguous()?;
     }
-    let out = Tensor::zeros((batch, seq_len, value_heads, dv), DType::BF16, q.device())?;
+    // SAFETY: the kernel dispatch covers every (batch, token, value-head, dv)
+    // output element exactly once via `gid=batch_head*dv+d` and the token loop.
+    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
 
     let Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent prefill requires a Metal tensor");
@@ -4074,7 +4076,9 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
     if !state.is_contiguous() {
         *state = state.contiguous()?;
     }
-    let out = Tensor::zeros((batch, seq_len, value_heads, dv), DType::BF16, q.device())?;
+    // SAFETY: the kernel dispatch covers every (batch, token, value-head, dv)
+    // output element exactly once via `gid=batch_head*dv+d` and the token loop.
+    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
 
     let Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent native prefill requires a Metal tensor");
