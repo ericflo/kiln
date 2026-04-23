@@ -1,0 +1,7 @@
+measurement,branch,prefill_ms,prefill_tok_s,out_max_abs_diff,state_max_abs_diff,delta_vs_warm_main_pct,notes
+parity,patched,,,,1.5625e-2,3.125e-2,,release cuda parity on A6000
+bench_cold_main,main,4735.522176,1727.370224,,,,"first control run after build/model download"
+bench_cold_branch,patched,3145.292759,2600.711802,,,,"looked faster before warm control"
+bench_warm_main,main,3112.696670,2627.946397,,,,same-pod warm control rerun
+bench_warm_branch,patched,3167.535250,2582.449556,,,-1.761329,same-pod warmed candidate rerun
+capture_changed_build,patched,,,,,,gdn_full_chunk_forward_kernel remained top at 29.7% in post406_20260423_tiled_prefill_kern.csv
