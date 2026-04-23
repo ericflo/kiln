@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -78,8 +78,8 @@ fn cache_key(weight: &WeightTensor) -> Option<CacheKey> {
 }
 
 fn try_read_cached(cache_key: &CacheKey) -> Result<Option<Vec<u8>>> {
-    let bytes = match fs::read(&cache_key.file_path) {
-        Ok(bytes) => bytes,
+    let mut file = match fs::File::open(&cache_key.file_path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(err).with_context(|| {
@@ -91,7 +91,7 @@ fn try_read_cached(cache_key: &CacheKey) -> Result<Option<Vec<u8>>> {
         }
     };
 
-    match parse_cached_bytes(cache_key, &bytes) {
+    match read_cached_payload(cache_key, &mut file) {
         Ok(payload) => Ok(Some(payload)),
         Err(err) => {
             tracing::debug!(
@@ -105,24 +105,34 @@ fn try_read_cached(cache_key: &CacheKey) -> Result<Option<Vec<u8>>> {
     }
 }
 
-fn parse_cached_bytes(cache_key: &CacheKey, bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut cursor = 0usize;
-    let magic = take_chunk(bytes, &mut cursor, CACHE_MAGIC.len())?;
-    anyhow::ensure!(magic == CACHE_MAGIC, "cache entry magic mismatch");
+fn read_cached_payload<R: Read>(cache_key: &CacheKey, reader: &mut R) -> Result<Vec<u8>> {
+    let mut magic = [0u8; CACHE_MAGIC.len()];
+    reader
+        .read_exact(&mut magic)
+        .context("cache entry truncated before magic")?;
+    anyhow::ensure!(&magic == CACHE_MAGIC, "cache entry magic mismatch");
 
-    let version = u32::from_le_bytes(take_chunk(bytes, &mut cursor, 4)?.try_into().unwrap());
+    let version = read_u32_le(reader).context("reading cache entry version")?;
     anyhow::ensure!(version == CACHE_VERSION, "cache entry version mismatch");
 
-    let key_len =
-        u32::from_le_bytes(take_chunk(bytes, &mut cursor, 4)?.try_into().unwrap()) as usize;
-    let cached_key = take_chunk(bytes, &mut cursor, key_len)?;
+    let key_len = read_u32_le(reader).context("reading cache entry key length")? as usize;
     anyhow::ensure!(
-        cached_key == cache_key.key_bytes.as_slice(),
+        key_len == cache_key.key_bytes.len(),
+        "cache key length mismatch: expected {}, got {}",
+        cache_key.key_bytes.len(),
+        key_len
+    );
+    let mut cached_key = vec![0u8; key_len];
+    reader
+        .read_exact(&mut cached_key)
+        .context("cache entry truncated in key")?;
+    anyhow::ensure!(
+        cached_key.as_slice() == cache_key.key_bytes.as_slice(),
         "cache key mismatch"
     );
 
-    let data_len =
-        u64::from_le_bytes(take_chunk(bytes, &mut cursor, 8)?.try_into().unwrap()) as usize;
+    let data_len_u64 = read_u64_le(reader).context("reading cache entry payload length")?;
+    let data_len = usize::try_from(data_len_u64).context("cache payload length overflows usize")?;
     anyhow::ensure!(
         data_len == cache_key.expected_len,
         "cache payload length mismatch: expected {}, got {}",
@@ -130,19 +140,32 @@ fn parse_cached_bytes(cache_key: &CacheKey, bytes: &[u8]) -> Result<Vec<u8>> {
         data_len
     );
 
-    let payload = take_chunk(bytes, &mut cursor, data_len)?;
-    anyhow::ensure!(cursor == bytes.len(), "cache entry contains trailing bytes");
-    Ok(payload.to_vec())
+    let mut payload = vec![0u8; data_len];
+    reader
+        .read_exact(&mut payload)
+        .context("cache entry truncated in payload")?;
+
+    let mut trailing = [0u8; 1];
+    anyhow::ensure!(
+        reader
+            .read(&mut trailing)
+            .context("checking cache entry trailing bytes")?
+            == 0,
+        "cache entry contains trailing bytes"
+    );
+    Ok(payload)
 }
 
-fn take_chunk<'a>(bytes: &'a [u8], cursor: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let start = *cursor;
-    let end = start
-        .checked_add(n)
-        .context("cache entry length overflow")?;
-    anyhow::ensure!(end <= bytes.len(), "cache entry truncated");
-    *cursor = end;
-    Ok(&bytes[start..end])
+fn read_u32_le(reader: &mut impl Read) -> Result<u32> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64_le(reader: &mut impl Read) -> Result<u64> {
+    let mut bytes = [0u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 fn try_write_cached(cache_key: &CacheKey, data: &[u8]) -> Result<()> {
@@ -258,4 +281,79 @@ fn unique_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    fn test_cache_key(expected_len: usize) -> CacheKey {
+        CacheKey {
+            file_path: PathBuf::from("unused.bin"),
+            key_bytes: b"test-key".to_vec(),
+            expected_len,
+            shape: [2, 2],
+        }
+    }
+
+    fn cache_entry(cache_key: &CacheKey, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CACHE_MAGIC);
+        bytes.extend_from_slice(&CACHE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(cache_key.key_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&cache_key.key_bytes);
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn read_cached_payload_returns_payload_without_trailing_bytes() -> Result<()> {
+        let cache_key = test_cache_key(4);
+        let payload = [1u8, 2, 3, 4];
+        let bytes = cache_entry(&cache_key, &payload);
+
+        let got = read_cached_payload(&cache_key, &mut Cursor::new(bytes))?;
+
+        assert_eq!(got, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn read_cached_payload_rejects_trailing_bytes() {
+        let cache_key = test_cache_key(4);
+        let payload = [1u8, 2, 3, 4];
+        let mut bytes = cache_entry(&cache_key, &payload);
+        bytes.push(5);
+
+        let err = read_cached_payload(&cache_key, &mut Cursor::new(bytes)).unwrap_err();
+
+        assert!(err.to_string().contains("trailing bytes"));
+    }
+
+    #[test]
+    fn read_cached_payload_rejects_key_length_before_allocating_key() {
+        let cache_key = test_cache_key(4);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(CACHE_MAGIC);
+        bytes.extend_from_slice(&CACHE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let err = read_cached_payload(&cache_key, &mut Cursor::new(bytes)).unwrap_err();
+
+        assert!(err.to_string().contains("cache key length mismatch"));
+    }
+
+    #[test]
+    fn read_cached_payload_rejects_payload_length_mismatch() {
+        let cache_key = test_cache_key(4);
+        let payload = [1u8, 2, 3];
+        let bytes = cache_entry(&cache_key, &payload);
+
+        let err = read_cached_payload(&cache_key, &mut Cursor::new(bytes)).unwrap_err();
+
+        assert!(err.to_string().contains("cache payload length mismatch"));
+    }
 }
