@@ -328,6 +328,63 @@ by serializing the full chained prompt history into every splice dump or by
 teaching the HF reference side to reconstruct the chained history C15-style
 before re-running the existing comparators.
 
+## Phase C39 full replay context for post-#423 seed bisect (2026-04-23)
+
+**Scope:** land the missing replay-contract fix from C38/PR #423, rerun the
+standard native-MTP seed-0 / seed-1 workload on fresh `main`, and verify
+whether fully conditioned B10/B11/B12 replays expose a seed-1-only first
+upstream boundary or sub-op.
+
+**Contract result:** fixed. The dump now serializes the full replay sequence
+whose final hidden row produced each captured `h_main`, and the fresh rerun
+shows monotonically growing lengths instead of collapsing to the local verifier
+slice:
+
+- seed 0: `494 -> 495 -> 496 -> 497`, then `502 -> 503 -> 504` at `mtp_pos=2`
+- seed 1: `508 -> 509 -> 510 -> 511 -> 512 -> 513 -> 514 -> 515`, then
+  `520 -> 521 -> 522` at `mtp_pos=2`
+
+Source-of-truth artifact: `docs/phase-c39/replay_lengths.json`
+
+**Fresh workload check (A6000, kiln image):**
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 445.2 | 36.88 | 0.7067 |
+| 1 | 508 | 453.1 | 24.03 | 0.2929 |
+
+The seed split still reproduces after the replay fix.
+
+### Verdict
+
+**No seed-1-only first upstream boundary was found.** With the replay bug
+removed, both seeds land on the same comparator verdicts in both bf16 and
+fp32:
+
+- B10: first diverging boundary tap = `h_layer_8` at `0_s0`
+- B11b: all layer-0 GDN sub-ops remain clean (`cos_sim >= 0.95`)
+- B12: late-stack drift first appears at `h_layer_24`, not layer 31
+
+Artifacts:
+
+- `docs/phase-c39/seed0_compare_bf16.txt`
+- `docs/phase-c39/seed0_compare_fp32.txt`
+- `docs/phase-c39/seed1_compare_bf16.txt`
+- `docs/phase-c39/seed1_compare_fp32.txt`
+
+### Recommendation
+
+Do **not** queue another "seed-1-only upstream replay" task from this state.
+C39 turns C38's blocker into a concrete negative result: the seed split does
+not separate at a distinct first B10/B11/B12 boundary on the current build.
+The next narrow task should either:
+
+1. bisect the **shared** early-GDN drift between `h_layer_0` and `h_layer_8`,
+   or
+2. treat the seed-specific behaviour as downstream of this shared `h_main`
+   boundary and move back into acceptance / verification dynamics instead of
+   another replay-contract rerun.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled

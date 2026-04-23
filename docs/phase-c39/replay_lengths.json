@@ -1,0 +1,78 @@
+{
+  "seed0": [
+    {
+      "path": "mtp_pos-0/step-0.safetensors",
+      "replay_tokens_len": 494
+    },
+    {
+      "path": "mtp_pos-0/step-1.safetensors",
+      "replay_tokens_len": 495
+    },
+    {
+      "path": "mtp_pos-0/step-2.safetensors",
+      "replay_tokens_len": 496
+    },
+    {
+      "path": "mtp_pos-0/step-3.safetensors",
+      "replay_tokens_len": 497
+    },
+    {
+      "path": "mtp_pos-2/step-0.safetensors",
+      "replay_tokens_len": 502
+    },
+    {
+      "path": "mtp_pos-2/step-1.safetensors",
+      "replay_tokens_len": 503
+    },
+    {
+      "path": "mtp_pos-2/step-2.safetensors",
+      "replay_tokens_len": 504
+    }
+  ],
+  "seed1": [
+    {
+      "path": "mtp_pos-0/step-0.safetensors",
+      "replay_tokens_len": 508
+    },
+    {
+      "path": "mtp_pos-0/step-1.safetensors",
+      "replay_tokens_len": 509
+    },
+    {
+      "path": "mtp_pos-0/step-2.safetensors",
+      "replay_tokens_len": 510
+    },
+    {
+      "path": "mtp_pos-0/step-3.safetensors",
+      "replay_tokens_len": 511
+    },
+    {
+      "path": "mtp_pos-0/step-4.safetensors",
+      "replay_tokens_len": 512
+    },
+    {
+      "path": "mtp_pos-0/step-5.safetensors",
+      "replay_tokens_len": 513
+    },
+    {
+      "path": "mtp_pos-0/step-6.safetensors",
+      "replay_tokens_len": 514
+    },
+    {
+      "path": "mtp_pos-0/step-7.safetensors",
+      "replay_tokens_len": 515
+    },
+    {
+      "path": "mtp_pos-2/step-0.safetensors",
+      "replay_tokens_len": 520
+    },
+    {
+      "path": "mtp_pos-2/step-1.safetensors",
+      "replay_tokens_len": 521
+    },
+    {
+      "path": "mtp_pos-2/step-2.safetensors",
+      "replay_tokens_len": 522
+    }
+  ]
+}
