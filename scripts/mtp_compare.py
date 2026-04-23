@@ -373,6 +373,8 @@ C44_HYPOTHESIS: Dict[str, str] = {
 C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
     "layer_1_input_norm_rms_inv_scalar",
     "layer_1_input_norm_rms_inv_scalar_extracted_values",
+    "layer_1_input_norm_last_row_flat_values",
+    "layer_1_input_norm_pre_weight_row_broadcast_output",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
 )
@@ -380,6 +382,8 @@ C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
 C45_HYPOTHESIS: Dict[str, str] = {
     "layer_1_input_norm_rms_inv_scalar": "the row-local RMS inverse scalar tensor itself diverges even though PR #433 kept this boundary shared-good",
     "layer_1_input_norm_rms_inv_scalar_extracted_values": "the row-local scalar tensor stays shared-good, but the scalar extraction path diverges before the multiply runs",
+    "layer_1_input_norm_last_row_flat_values": "the extracted scalar stays shared-good, but the selected last-row flat values already drift before the multiply runs",
+    "layer_1_input_norm_pre_weight_row_broadcast_output": "the selected row and extracted scalar stay shared-good; drift first appears in the row-shaped production broadcast_mul output",
     "layer_1_input_norm_pre_weight_row_scalar_values": "the scalar tensor and extracted scalar stay shared-good; drift first appears in the actual row-local scalar multiply values",
     "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-local scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
 }
@@ -2179,6 +2183,18 @@ def _emit_c45_summary(
             "  -> The row-local `rms_inv` tensor stays shared-good; drift "
             "first appears when replay extracts one scalar per batch row for "
             "the Rust-side scalar-affine equivalent."
+        )
+    elif first_shared_bad == "layer_1_input_norm_last_row_flat_values":
+        emit(
+            "  -> The extracted scalar stays shared-good; drift is already "
+            "present in the selected flat last-row values before either "
+            "multiply path runs."
+        )
+    elif first_shared_bad == "layer_1_input_norm_pre_weight_row_broadcast_output":
+        emit(
+            "  -> The selected flat last row and extracted scalar stay "
+            "shared-good; divergence first appears in the row-shaped "
+            "production `broadcast_mul` output."
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_scalar_values":
         emit(
