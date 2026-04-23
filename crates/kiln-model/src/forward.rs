@@ -1687,13 +1687,10 @@ fn capture_c44_layer1_f32_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     Ok(())
 }
 
-/// Phase C45: keep the audit strictly inside the previously-bad row-local
-/// scalar multiply so the replay dump can distinguish "the row-local scalar
-/// tensor is fine", "the scalar extraction path already drifts", "the actual
-/// multiply introduces the drift", or "the multiplied flat row stays
-/// shared-good and divergence only appears when reconstructing the row-shaped
-/// output".
-fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
+fn c45_layer1_row_replay_tensors(
+    x: &Tensor,
+    eps: f64,
+) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let (batch, seq_len, hidden) = x_f32
         .dims3()
@@ -1701,21 +1698,12 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     anyhow::ensure!(seq_len > 0, "C45 row audit requires non-empty sequence");
 
     let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
-    let residual_values = last_row.reshape((batch, hidden))?.contiguous()?;
-
     let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
     let rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_input_norm_rms_inv_scalar",
-        &rms_inv_row,
-    )?;
 
     let mut extracted_scalars = Vec::with_capacity(batch);
-    let mut row_values = Vec::with_capacity(batch);
-    let mut reconstructed_rows = Vec::with_capacity(batch);
     for batch_idx in 0..batch {
-        let row = residual_values.narrow(0, batch_idx, 1)?;
         let scale = rms_inv_row.narrow(0, batch_idx, 1)?;
         let scale_vals = scale.flatten_all()?.to_vec1::<f32>()?;
         anyhow::ensure!(
@@ -1723,29 +1711,37 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
             "C45 row audit expected one rms_inv scalar per batch row, got {}",
             scale_vals.len()
         );
-        let extracted = scale_vals[0];
-        extracted_scalars.push(extracted);
-        let scaled_values = row.affine(extracted as f64, 0.0)?.contiguous()?;
-        row_values.push(scaled_values.clone());
-        reconstructed_rows.push(scaled_values.reshape((1, 1, hidden))?);
+        extracted_scalars.push(scale_vals[0]);
     }
 
     let extracted_scalars =
         Tensor::from_slice(&extracted_scalars, (batch,), &Device::Cpu)?.contiguous()?;
+    let reconstructed = last_row.broadcast_mul(&rms_inv_row)?.contiguous()?;
+    let scalar_values = reconstructed.reshape((batch, hidden))?.contiguous()?;
+    Ok((rms_inv_row, extracted_scalars, scalar_values, reconstructed))
+}
+
+/// Phase C45: keep the audit strictly inside the previously-bad row-local
+/// scalar multiply so the replay dump can distinguish "the row-local scalar
+/// tensor is fine", "the scalar extraction path already drifts", "the actual
+/// multiply introduces the drift", or "the multiplied flat row stays
+/// shared-good and divergence only appears when reconstructing the row-shaped
+/// output".
+fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
+    let (rms_inv_row, extracted_scalars, scalar_values, reconstructed) =
+        c45_layer1_row_replay_tensors(x, eps)?;
+    crate::mtp_debug::capture_c45_layer1_row_tap(
+        "layer_1_input_norm_rms_inv_scalar",
+        &rms_inv_row,
+    )?;
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_rms_inv_scalar_extracted_values",
         &extracted_scalars,
     )?;
-
-    let row_value_refs: Vec<&Tensor> = row_values.iter().collect();
-    let scalar_values = Tensor::cat(&row_value_refs, 0)?;
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_pre_weight_row_scalar_values",
         &scalar_values,
     )?;
-
-    let reconstructed_refs: Vec<&Tensor> = reconstructed_rows.iter().collect();
-    let reconstructed = Tensor::cat(&reconstructed_refs, 0)?;
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_pre_weight_row_reconstructed",
         &reconstructed,
@@ -6419,6 +6415,44 @@ mod tests {
         assert!((vals[0][0] - 1.5).abs() < 1e-4);
         assert!((vals[0][1] - 2.0).abs() < 1e-4);
         assert!((vals[0][2] - 3.0).abs() < 1e-4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_c45_row_replay_matches_production_broadcast_mul_last_row() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 2usize;
+        let seq_len = 3usize;
+        let hidden = 4usize;
+        let eps = 1e-6;
+        let x = Tensor::from_slice(
+            &[
+                1.0_f32, 2.0, 3.0, 4.0, 0.5, 1.5, 2.5, 3.5, 4.0, 3.0, 2.0, 1.0, -1.0, -2.0,
+                -3.0, -4.0, 1.0, -1.5, 2.0, -2.5, 0.25, -0.5, 0.75, -1.0,
+            ],
+            (batch, seq_len, hidden),
+            &device,
+        )?;
+
+        let (_rms_inv_row, _extracted_scalars, scalar_values, reconstructed) =
+            c45_layer1_row_replay_tensors(&x, eps)?;
+
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+        let production = x_f32.broadcast_mul(&rms_inv)?;
+        let production_last_row = production.narrow(1, seq_len - 1, 1)?.contiguous()?;
+        let production_scalar_values = production_last_row.reshape((batch, hidden))?.contiguous()?;
+
+        assert_eq!(
+            reconstructed.to_vec3::<f32>()?,
+            production_last_row.to_vec3::<f32>()?
+        );
+        assert_eq!(
+            scalar_values.to_vec2::<f32>()?,
+            production_scalar_values.to_vec2::<f32>()?
+        );
 
         Ok(())
     }
