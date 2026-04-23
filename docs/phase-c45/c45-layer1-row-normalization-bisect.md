@@ -1,12 +1,14 @@
-# Phase C45 — layer 1 row normalization bisect after PR #431
+# Phase C45 — post-#432 healthy-RunPod rerun
 
 ## Remaining-work preflight
 
-Fresh `origin/main` on 2026-04-23 still satisfied the task gate:
+Fresh `origin/main` on 2026-04-23 still satisfied the rerun gate:
 
-1. PR #431 / Phase C44 was present on `origin/main`.
-2. No newer open or merged kiln PR already localized the shared layer-1
-   row-level normalization boundary beyond C44.
+1. PR #432 / Phase C45 instrumentation was present on `origin/main`
+   (`5574aed`, merged 2026-04-23 14:34 UTC).
+2. No newer open or merged kiln PR had already recorded a successful post-#432
+   C45 rerun or an earlier shared-bad C45 tap.
+3. No separate pending or running kiln task already covered this exact rerun.
 
 So this task proceeded.
 
@@ -44,9 +46,19 @@ python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.p
 
 Both passed on 2026-04-23.
 
-## Planned GPU validation
+## GPU validation
 
-The intended source-of-truth workload stayed exactly aligned with the task:
+The rerun completed on the first healthy allowed pod:
+
+- `NVIDIA RTX A6000`: `SUPPLY_CONSTRAINT`
+- `NVIDIA A40`: healthy on-demand pod, SSH ready, final verdict source
+
+Pod / image:
+
+- image: `ghcr.io/ericflo/kiln-runpod:latest`
+- GPU: `NVIDIA A40` (`46068 MB` VRAM from `nvidia-smi`)
+
+Validation commands run on pod:
 
 ```bash
 python3 $RP bg $POD_ID /tmp/build.log \
@@ -54,46 +66,117 @@ python3 $RP bg $POD_ID /tmp/build.log \
 python3 $RP wait-file $POD_ID /workspace/kiln/target/release/kiln-bench --timeout 3600
 
 python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && cargo test --locked -p kiln-model c45 -- --nocapture'
-
-python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && export KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 && ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training > profiling-artifacts/post431_c45_seed0.bench.json 2> profiling-artifacts/post431_c45_seed0.bench.stderr'
-python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && export KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 KILN_SEED=1 && ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training > profiling-artifacts/post431_c45_seed1.bench.json 2> profiling-artifacts/post431_c45_seed1.bench.stderr'
-
-python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && python3 scripts/mtp_h_main_reference_dump.py --c45-taps profiling-artifacts/<fresh-kiln-dump>.safetensors profiling-artifacts/post431_c45_seed0_ref.safetensors'
-python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && python3 scripts/mtp_compare.py --c45 profiling-artifacts/post431_c45_seed0_compare.txt profiling-artifacts/post431_c45_seed1_compare.txt'
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py'
 ```
 
-## RunPod blocker
+All three passed.
 
-GPU validation did **not** complete on 2026-04-23 because RunPod never
-provided a healthy on-demand pod with a usable runtime / SSH endpoint.
+Model / Python prep required on the healthy pod:
 
-Observed failures:
+```bash
+python3 $RP ssh $POD_ID 'hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b'
+python3 $RP ssh $POD_ID 'python3 -m pip install transformers sentencepiece'
+```
 
-- direct launches for `NVIDIA RTX A6000`, `NVIDIA A40`, `NVIDIA A100 80GB PCIe`,
-  `NVIDIA RTX 6000 Ada Generation`, and `NVIDIA L40S` all failed immediately
-  with `SUPPLY_CONSTRAINT`
-- fallback launches on `NVIDIA H200 NVL`, `NVIDIA RTX PRO 4500 Blackwell`, and
-  `NVIDIA H100 PCIe` did create pods, but each pod stayed in:
-  `desiredStatus=RUNNING` with `runtime: null`, so `runpod_api.py wait` never
-  returned an SSH endpoint
+The exact C45 dump rerun that produced the verdict was:
 
-That means no build, no bench run, no kiln dump, no HF replay dump, and no C45
-compare report were produced in this task.
+```bash
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && \
+  KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
+  KILN_MTP_DUMP_SPLICE=1 KILN_MTP_DUMP_SPLICE_POS=0,2 KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+  KILN_MTP_DUMP_HIDDEN_STATES=1 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+  KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+  KILN_MTP_DUMP_PATH=profiling-artifacts/post432_c45_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors \
+  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 0 \
+  > profiling-artifacts/post432_c45_seed0.bench.json \
+  2> profiling-artifacts/post432_c45_seed0.bench.stderr'
 
-The raw launch / provisioning evidence is committed in:
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && \
+  KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
+  KILN_MTP_DUMP_SPLICE=1 KILN_MTP_DUMP_SPLICE_POS=0,2 KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+  KILN_MTP_DUMP_HIDDEN_STATES=1 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+  KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+  KILN_MTP_DUMP_PATH=profiling-artifacts/post432_c45_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors \
+  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 1 \
+  > profiling-artifacts/post432_c45_seed1.bench.json \
+  2> profiling-artifacts/post432_c45_seed1.bench.stderr'
+```
 
-- `profiling-artifacts/post431_c45_20260423_local_validation.txt`
-- `profiling-artifacts/post431_c45_20260423_runpod_blocker.txt`
+Representative compare inputs:
+
+- seed 0 kiln dump:
+  `profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors`
+- seed 1 kiln dump:
+  `profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors`
+
+Reference generation + compare:
+
+```bash
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && \
+  python3 scripts/mtp_h_main_reference_dump.py \
+    --checkpoint /workspace/qwen3.5-4b \
+    --kiln-dump profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors \
+    --out profiling-artifacts/post432_c45_seed0_ref.safetensors \
+    --device cuda \
+    --c45-taps'
+
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && \
+  python3 scripts/mtp_compare.py --c45 \
+    --kiln profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors \
+    --ref profiling-artifacts/post432_c45_seed0_ref.safetensors \
+    > profiling-artifacts/post432_c45_seed0_compare.txt'
+
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && \
+  python3 scripts/mtp_h_main_reference_dump.py \
+    --checkpoint /workspace/qwen3.5-4b \
+    --kiln-dump profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors \
+    --out profiling-artifacts/post432_c45_seed1_ref.safetensors \
+    --device cuda \
+    --c45-taps'
+
+python3 $RP ssh $POD_ID 'source /root/.kiln-build-env && cd /workspace/kiln && \
+  python3 scripts/mtp_compare.py --c45 \
+    --kiln profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors \
+    --ref profiling-artifacts/post432_c45_seed1_ref.safetensors \
+    > profiling-artifacts/post432_c45_seed1_compare.txt'
+```
+
+## Fresh workload check
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 384.8 | 36.8 | 0.740 |
+| 1 | 508 | 393.4 | 24.2 | 0.296 |
 
 ## Verdict
 
-No fresh C45 verdict yet.
+The post-#432 rerun produced a stable two-seed verdict:
 
-The code plumbing and local validation are complete, but the required GPU
-artifact capture was blocked by RunPod provisioning failures on 2026-04-23.
+- seed 0 earliest shared bad tap:
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- seed 1 earliest shared bad tap:
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- last shared-good tap on both seeds:
+  `layer_1_input_norm_rms_inv_scalar`
+
+So the first shared C45 drift is **not** in the selected row values and **not**
+in the row-local `rms_inv` scalar. It first appears in the flat row-scalar
+multiply values, then remains bad in the reconstructed row-shaped output.
 
 ## Recommendation
 
-Re-run the committed C45 workflow on the next healthy on-demand RunPod pod and
-fill in the earliest shared bad C45 tap. The code changes in this PR are ready
-for that rerun; the missing piece is infrastructure, not instrumentation.
+Do not widen to C46 or expand the tap contract. The next audit should stay
+inside the row-local scalar multiply that produces
+`layer_1_input_norm_pre_weight_row_scalar_values`; row selection and the
+row-local `rms_inv` scalar are provisionally cleared on current `main`.
+
+## Evidence
+
+- `profiling-artifacts/post432_c45_seed0.bench.json`
+- `profiling-artifacts/post432_c45_seed0.bench.stderr`
+- `profiling-artifacts/post432_c45_seed1.bench.json`
+- `profiling-artifacts/post432_c45_seed1.bench.stderr`
+- `profiling-artifacts/post432_c45_seed0_compare.txt`
+- `profiling-artifacts/post432_c45_seed1_compare.txt`
