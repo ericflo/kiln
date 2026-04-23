@@ -6726,3 +6726,56 @@ Evidence:
 - `profiling-artifacts/post432_c45_seed1.bench.stderr`
 - `profiling-artifacts/post432_c45_seed0_compare.txt`
 - `profiling-artifacts/post432_c45_seed1_compare.txt`
+
+## Phase C45 post-#434 narrowed row-scalar rerun blocker (2026-04-23)
+
+Goal: rerun the already-merged narrowed C45 instrumentation from PR #434 on the
+first healthy allowed on-demand RunPod pod and capture the earliest shared bad
+tap among:
+
+- `layer_1_input_norm_rms_inv_scalar_extracted_values`
+- `layer_1_input_norm_pre_weight_row_scalar_values`
+- `layer_1_input_norm_pre_weight_row_reconstructed`
+
+Remaining-work preflight:
+
+- PR #434 was present on `origin/main` (`7808adf`, merged 2026-04-23 15:44 UTC)
+- no newer open or merged kiln PR had already recorded the narrowed
+  three-tap C45 verdict
+- no separate pending or running kiln task overlapped this exact post-#434
+  rerun
+
+RunPod outcome:
+
+- `NVIDIA RTX A6000` failed immediately with `SUPPLY_CONSTRAINT`
+- `NVIDIA A40` launched pod `jbagv24mf1f31l` on
+  `ghcr.io/ericflo/kiln-runpod:latest`, but the pod remained
+  `desiredStatus=RUNNING` with `"runtime": null`; `python3 $RP wait` never
+  reached SSH and ended with `AttributeError: 'NoneType' object has no
+  attribute 'get'` after termination
+- `NVIDIA A100 80GB PCIe` failed immediately with `SUPPLY_CONSTRAINT`
+- `NVIDIA RTX 6000 Ada Generation` failed immediately with `SUPPLY_CONSTRAINT`
+- `NVIDIA L40S` failed immediately with `SUPPLY_CONSTRAINT` ("no longer any
+  instances available with enough disk space")
+- `NVIDIA H100 PCIe` launched pod `zh6zr8z5v0g1tn`, but it also remained
+  `desiredStatus=RUNNING` with `"runtime": null`; `python3 $RP wait` never
+  reached SSH and ended with the same `AttributeError` after termination
+
+Validation outcome:
+
+- none of the required on-pod commands could run because no allowed pod reached
+  SSH:
+  - `cargo build --release --features cuda --bin kiln-bench`
+  - `cargo test --locked -p kiln-model c45 -- --nocapture`
+  - `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+  - either narrowed `scripts/mtp_compare.py --c45-row-scalar ...` run
+
+Verdict:
+
+- no post-#434 narrowed C45 numerical verdict yet
+- the blocker is RunPod availability/pod health, not missing instrumentation
+- do not change the narrowed tap contract before a healthy allowed pod exists
+
+Evidence:
+
+- `profiling-artifacts/post434_c45_row_scalar_runpod_blocker.txt`
