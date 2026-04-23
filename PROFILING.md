@@ -6243,3 +6243,140 @@ waits used `runpod_api.py wait-file --timeout`; no `until ssh` or
 - `c12-out/probe-report.md` + `c12-out/probe-report.json` — main-model
   activation-weighted drift audit.
 - `c12-out/bench.log`, `c12-out/probe.log` — runner logs.
+
+## Phase C42 post-#428 layer-1 pre-norm vs input-layernorm bisect (2026-04-23)
+
+**Scope:** resolve the post-C41 remaining span by asking one narrower
+question on fresh `main`: is the first shared bad tensor already present in
+the residual input entering transformer block 1, or is it introduced inside
+layer 1 `input_layernorm` itself?
+
+**Preflight outcome:** proceed. Fresh `origin/main` at `e569d22` (PR #428
+merged) still had
+[`docs/phase-c41/c41-layer1-subop-bisect.md`](docs/phase-c41/c41-layer1-subop-bisect.md)
+as the latest committed source of truth for this path, and that doc still
+recorded `layer_1_post_input_norm` as the earliest shared bad C41 tap for both
+seeds. Fresh main did not already contain committed C42 taps or a doc that
+localized the remaining span any further.
+
+**Hardware / image:** RunPod on-demand fallback `NVIDIA A100-SXM4-80GB`,
+`ghcr.io/ericflo/kiln-runpod:latest`. A6000 and A40 capacity were unavailable
+at the time of the run, so the project-policy fallback order was used.
+
+**Code change:** add a dedicated opt-in C42 capture path behind
+`KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS=1`, serialize the emitted tap ids as
+`meta__c42_tap_ids`, mirror the same four taps in the HF reference dump under
+`--c42-taps`, and add a focused `scripts/mtp_compare.py --c42` mode.
+The explicit tap set is:
+
+- `layer_1_residual_input`
+- `layer_1_input_norm_rms_inv`
+- `layer_1_input_norm_pre_weight`
+- `layer_1_post_input_norm`
+
+No generalized tracing was added; production decode stays on the current fast
+path when the env var is unset.
+
+**Validation commands run:**
+
+```bash
+cd /workspace/kiln
+python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py
+source /root/.kiln-build-env
+cargo test -p kiln-model mtp_debug --lib -- --test-threads=1
+```
+
+**Standard workload rerun:** same C41 replay contract plus the new C42 tap
+flag. Build and setup on the fallback A100:
+
+```bash
+cd /workspace/kiln
+source /root/.kiln-build-env
+export KILN_CUDA_ARCHS=80
+cargo build --release --features cuda --bin kiln-bench
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+python3 -m pip install transformers safetensors sentencepiece
+```
+
+Then rerun the standard native-MTP workload for seeds `0` and `1`:
+
+```bash
+for seed in 0 1; do
+  root=/workspace/kiln/profiling-artifacts/post428_c42_20260423_seed${seed}_captures
+  rm -rf "$root"
+  mkdir -p "$root"/mtp_pos-0 "$root"/mtp_pos-2
+
+  KILN_W4A16=1 \
+  KILN_CUDA_GRAPHS=true \
+  KILN_SPEC_METHOD=mtp \
+  KILN_BENCH_FORCE_MTP=1 \
+  KILN_MTP_DUMP_SPLICE=1 \
+  KILN_MTP_DUMP_SPLICE_POS=0,2 \
+  KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+  KILN_MTP_DUMP_HIDDEN_STATES=1 \
+  KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+  KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS=1 \
+  KILN_MTP_DUMP_PATH=$root/mtp_pos-{pos}/step-{step}.safetensors \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+    --seed ${seed} \
+    > /workspace/kiln/profiling-artifacts/post428_c42_20260423_seed${seed}.bench.json \
+    2> /workspace/kiln/profiling-artifacts/post428_c42_20260423_seed${seed}.bench.stderr
+done
+```
+
+Representative compare dumps:
+
+- seed 0: `profiling-artifacts/post428_c42_20260423_seed0_captures/mtp_pos-0/step-1.safetensors`
+- seed 1: `profiling-artifacts/post428_c42_20260423_seed1_captures/mtp_pos-2/step-1.safetensors`
+
+HF references were regenerated in bf16 and fp32 with
+`scripts/mtp_h_main_reference_dump.py --c42-taps`, then compared with:
+
+```bash
+python3 scripts/mtp_compare.py --c42 \
+  --pair seed0:profiling-artifacts/post428_c42_20260423_seed0_captures/mtp_pos-0/step-1.safetensors,profiling-artifacts/post428_c42_20260423_seed0_ref_bf16.safetensors \
+  --pair seed1:profiling-artifacts/post428_c42_20260423_seed1_captures/mtp_pos-2/step-1.safetensors,profiling-artifacts/post428_c42_20260423_seed1_ref_bf16.safetensors \
+  --out profiling-artifacts/post428_c42_20260423_compare_bf16.txt
+
+python3 scripts/mtp_compare.py --c42 \
+  --pair seed0:profiling-artifacts/post428_c42_20260423_seed0_captures/mtp_pos-0/step-1.safetensors,profiling-artifacts/post428_c42_20260423_seed0_ref_fp32.safetensors \
+  --pair seed1:profiling-artifacts/post428_c42_20260423_seed1_captures/mtp_pos-2/step-1.safetensors,profiling-artifacts/post428_c42_20260423_seed1_ref_fp32.safetensors \
+  --out profiling-artifacts/post428_c42_20260423_compare_fp32.txt
+```
+
+### Fresh workload check
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 10116.0 | 35.3 | 0.716 |
+| 1 | 508 | 395.3 | 21.2 | 0.293 |
+
+The post-#428 seed split still reproduces.
+
+### Verdict
+
+The first shared bad tensor is **not** already present in the residual input
+entering block 1. Across both bf16 and fp32 comparisons:
+
+- `layer_1_residual_input` remains `ok` for both seeds
+- `layer_1_input_norm_rms_inv` remains `ok` for both seeds
+- `layer_1_input_norm_pre_weight` is the earliest shared `DIV` tap
+- `layer_1_post_input_norm` remains bad, but it is downstream of the first
+  failing C42 boundary
+
+So the shared drift is now localized to the boundary between
+`layer_1_input_norm_rms_inv` and `layer_1_input_norm_pre_weight`. The
+remaining culprit space is inside layer-1 `input_layernorm` numerics,
+specifically the normalization / pre-weight scaling path before the final
+`(1 + weight)` application.
+
+### Evidence
+
+- `profiling-artifacts/post428_c42_20260423_seed0.bench.json`
+- `profiling-artifacts/post428_c42_20260423_seed0.bench.stderr`
+- `profiling-artifacts/post428_c42_20260423_seed1.bench.json`
+- `profiling-artifacts/post428_c42_20260423_seed1.bench.stderr`
+- `profiling-artifacts/post428_c42_20260423_compare_bf16.txt`
+- `profiling-artifacts/post428_c42_20260423_compare_fp32.txt`
