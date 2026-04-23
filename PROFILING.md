@@ -1,5 +1,115 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#442 vLLM full-chunk GDN audit (2026-04-23)
+
+**Scope:** audit current vLLM Gated DeltaNet kernels against Kiln's vendored
+CUDA full-chunk prefill path after PR #444 refreshed the post-#442 profile and
+kept `gdn_full_chunk_forward_kernel` as the largest prompt-heavy prefill
+GPU-kernel bucket (**33.6%**).
+
+**Preflight outcome:** proceed with a doc-only audit. Fresh `origin/main`
+contains the post-#442 / PR #444 section above, no pending or running Cloud Eric
+task matched this vLLM full-chunk audit, and no PR newer than #444 already
+audits or ports vLLM `fused_recurrent_gated_delta_rule` /
+`chunk_gated_delta_rule` ideas into
+`crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`. The CUDA file still
+exists and remains the full-chunk CUDA prefill path called from
+`crates/kiln-model/src/forward.rs`.
+
+**Upstream reviewed:**
+
+- vLLM commit `7ff65b19003be4955d2d5d1428e7d94d082559d0`
+- `vllm/model_executor/layers/fla/ops/chunk.py`
+  (`chunk_gated_delta_rule_fwd`)
+- `vllm/model_executor/layers/fla/ops/chunk_delta_h.py`
+  (`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`)
+- `vllm/model_executor/layers/fla/ops/fused_recurrent.py`
+  (`fused_recurrent_gated_delta_rule_fwd_kernel`)
+
+**Audit result:** no new bounded, portable win exists inside this task's
+envelope (`chunk_size=64`, bf16, `dk/dv<=128`, forward-only, existing C ABI).
+
+Current vLLM still gets its full-chunk advantage from a different structure:
+the chunk path builds WY-style intermediates, then
+`chunk_gated_delta_rule_fwd_kernel_h_blockdim64` keeps FP32 recurrent-state
+tiles (`[BV, 64]`, split by K blocks) in registers and updates those tiles with
+Triton dot products after loading `b_k` once per chunk tile. Its recurrent
+decode kernel follows the same tile-owned-state pattern. Kiln's
+`gdn_full_chunk_forward_kernel` intentionally fuses the existing cuBLAS-side
+chunk matmuls (`kkt`, `qkt`, `ks_entry`, `q_s`) with chunk-local orchestration
+and a scalar-thread state epilogue over `(k_idx, dv)`.
+
+The remaining vLLM delta is therefore a structural re-vendor/rewrite of the
+full-chunk state/update ownership, not a single kernel-local cleanup. The
+bounded sub-ideas implied by that upstream design have already been attempted
+and disqualified before this post-#442 refresh:
+
+- post-#397: remove recurrent-state bf16 scalar round trips -> parity failure
+- post-#399: hoist decay weighting into shared `W` rows -> slower
+- post-#401: stage shared `k_t` rows -> slower
+- post-#403: triangular front-half packing -> warm-pod artifact, no durable win
+- post-#406: tiled recurrent-state epilogue -> warmed same-pod control was
+  **1.8% slower** than main
+
+**Keep / revert decision:** no CUDA change. Porting the remaining vLLM idea
+would require replacing the current scalar-thread full-chunk/state-update
+layout with a tile-owned FP32 state design, which is outside this task's "at
+most one minimal improvement" scope and would duplicate the already-failed
+micro-port frontier.
+
+**RunPod validation:** allowed fallback H100 NVL pool pod
+(`ghcr.io/ericflo/kiln-runpod:latest`). The requested A6000 pool resume failed
+with host capacity, A40 reached pod creation but remained runtime-null and was
+released, A100 / RTX 6000 Ada / L40S were unavailable, and H100 NVL was the
+first reachable fallback. Because H100 is `sm_90`, validation used
+`KILN_CUDA_ARCHS=90` instead of the A6000/A40 `sm_86` setting.
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=90
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+
+cargo build --release --features cuda,nvtx --bin kiln-bench
+cargo test -p kiln-model --release --features cuda \
+  test_gdn_full_chunk_forward_matches_fallback -- --nocapture
+cargo test -p kiln-gdn-kernel --release -- --nocapture
+```
+
+Results:
+
+- `kiln-bench` release build: passed
+- `test_gdn_full_chunk_forward_matches_fallback`: passed
+  (`out_chunk` max abs diff **1.5625e-2**, `state` max abs diff **3.125e-2**)
+- `kiln-gdn-kernel`: passed (`gdn_gates_parity_vs_candle_reference` passed)
+
+Prompt-heavy `8192/1` validation on the same H100 fallback:
+
+```bash
+KILN_SPEC_METHOD=off ./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 8192 --max-output-tokens 1 \
+  --skip-training --latency-only
+
+KILN_DISABLE_GDN_KERNEL=1 KILN_SPEC_METHOD=off ./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 8192 --max-output-tokens 1 \
+  --skip-training --latency-only
+```
+
+Both H100 latency runs emitted the prefill measurement, then failed in the
+single-token decode tail with `CUDA_ERROR_ILLEGAL_INSTRUCTION`. This appears
+H100-tail specific, not a full-chunk prefill parity failure: the current GDN
+kernel arm reported **3873.8 ms** prefill (**2112 tok/s**) before the decode
+tail failure, and the `KILN_DISABLE_GDN_KERNEL=1` arm reported **25089.5 ms**
+prefill (**326 tok/s**) before the same failure. A diagnostic no-graphs rerun
+of the current GDN arm reported **2459.0 ms** prefill (**3327 tok/s**) before
+the same decode-tail failure.
+
+No Nsight capture was taken because this PR does not change the CUDA kernel.
+The H100 pool lease was released after validation.
+
 ## Phase 6 post-#442 current-main prefill/decode profile refresh (2026-04-23)
 
 **Scope:** refresh the Phase 6 source of truth after PR
