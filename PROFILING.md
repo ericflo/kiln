@@ -1,5 +1,132 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#415 current-main native MTP A/B refresh (2026-04-23)
+
+**Scope:** refresh the current-main source of truth for native MTP after PR
+[#415](https://github.com/ericflo/kiln/pull/415) closed out the stale GDN
+tiled/full-chunk retry queue and reconfirmed FlashInfer decode is still below
+the reopen bar.
+
+**Preflight outcome:** proceed. On fresh `main` at `d94d3c9` (PR #415
+merged), `PROFILING.md` still only had older MTP sections from 2026-04-21 and
+later C-series diagnostic writeups; it did **not** already contain a
+post-#415 warm-pod `off` vs `skip_layer` vs `mtp` comparison on the standard
+`--paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
+workload. `gh pr list --repo ericflo/kiln --state all` showed no newer open or
+merged PR that already landed this exact refresh.
+
+**Hardware / image:** RunPod on-demand RTX A6000 (`$0.49/hr`),
+`ghcr.io/ericflo/kiln-runpod:latest`.
+
+**Build / setup commands:**
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+cargo build --release --features cuda --bin kiln-bench
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+```
+
+The pod did not already have `/workspace/qwen3.5-4b`, so the public HF
+checkpoint had to be downloaded before the bench sweep.
+
+**Benchmark commands run:**
+
+```bash
+for run in 1 2 3; do
+  KILN_SPEC_METHOD=off \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+    > profiling-artifacts/post415_20260423_off_run${run}.json
+
+  KILN_SPEC_METHOD=skip_layer \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+    > profiling-artifacts/post415_20260423_skip_layer_run${run}.json
+
+  KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+    > profiling-artifacts/post415_20260423_mtp_run${run}.json
+done
+```
+
+`KILN_BENCH_FORCE_MTP=1` is required on current `main` for the 512-token bench
+prompt. Without it, `bench.rs` routes `KILN_SPEC_METHOD=mtp` to the long-prompt
+`skip_layer` fallback instead of timing raw native MTP.
+
+### Medians
+
+Source: `profiling-artifacts/post415_20260423_mtp_ab.json`
+
+| Arm | actual prompt tokens | prefill ms | mean ITL ms | p50 ITL ms | p99 ITL ms | decode tok/s | α |
+| --- | -------------------: | ---------: | ----------: | ---------: | ---------: | -----------: | -: |
+| Off | **494** | **407.7** | **18.56** | **18.35** | **24.23** | **53.87** | — |
+| Skip-layer paged | **502** | **414.3** | **471.30** | **474.63** | **900.47** | **2.12** | **0.000** |
+| Native MTP | **502** | **419.1** | **36.14** | **47.52** | **55.94** | **27.67** | **0.245** |
+
+### Raw run summaries
+
+| Arm | Run | prefill ms | mean ITL ms | decode tok/s | α |
+| --- | --- | ---------: | ----------: | -----------: | -: |
+| Off | 1 | 7374.9 | 18.25 | 54.80 | — |
+| Off | 2 | 401.7 | 18.75 | 53.33 | — |
+| Off | 3 | 407.7 | 18.56 | 53.87 | — |
+| Skip-layer paged | 1 | 417.9 | 470.31 | 2.13 | 0.000 |
+| Skip-layer paged | 2 | 408.3 | 472.38 | 2.12 | 0.000 |
+| Skip-layer paged | 3 | 414.3 | 471.30 | 2.12 | 0.000 |
+| Native MTP | 1 | 415.0 | 36.07 | 27.72 | 0.245 |
+| Native MTP | 2 | 419.1 | 36.29 | 27.55 | 0.245 |
+| Native MTP | 3 | 450.8 | 36.14 | 27.67 | 0.245 |
+
+### Verdict
+
+Native MTP is **not** the next shipping speed lever on current `main`.
+
+- The task's ship bar was `>= 1.5x` `off` decode tok/s with `α >= 0.72`.
+- Measured current-main native MTP is **27.67 tok/s**, only **0.51x** of the
+  `off` median (**53.87 tok/s**), with **α = 0.245**.
+- Paged skip-layer remains dramatically worse at **2.12 tok/s** with
+  **α = 0.000**.
+
+So the blocker is still **low MTP acceptance**, not a missing warm-current-main
+measurement and not a decode-kernel frontier gap. Even with the old
+post-`#415` kernel retries explicitly closed out, current-main MTP remains
+slower than plain decode by roughly **48.6%**.
+
+### Notes
+
+- The first `off` run had a **7374.9 ms** latency prefill outlier while later
+  `off` runs were **401.7 / 407.7 ms**; the median-of-3 rule correctly drops
+  that first-run warmup artifact.
+- Current bench plumbing does not produce identical *actual* prompt token
+  counts across arms on the nominal 512-token workload: `off` logged **494**
+  prompt tokens while `skip_layer` / `mtp` logged **502**. That asymmetry is
+  small compared with the 25.7 tok/s decode gap between `off` and `mtp`, but it
+  is worth keeping in mind when comparing absolute prefill numbers.
+
+### Recommendation
+
+Do **not** queue another GDN tiled/full-chunk retry or a FlashInfer decode
+retry off this result. The current-main answer is now explicit:
+
+1. `skip_layer` is unshippable on the standard workload.
+2. native MTP is also unshippable on the standard workload because α is too
+   low and decode throughput is well below baseline.
+3. the next narrow task should stay on MTP correctness / acceptance-rate root
+   cause, not on another decode-kernel attempt justified by stale assumptions.
+
+**Validation / evidence:** release build completed, nine benchmark JSON outputs
+were produced on the same warm pod, and the committed aggregate artifact
+`profiling-artifacts/post415_20260423_mtp_ab.json` records the per-run and
+median numbers used above.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled
