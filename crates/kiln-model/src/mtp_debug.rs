@@ -64,13 +64,47 @@ thread_local! {
     /// Phase B11: thread-local slot for the base-model input token ids that
     /// fed the forward pass which produced the currently-armed h_main
     /// capture. Populated in `model_forward_paged_with_last_hidden` right
-    /// after [`arm_h_main_capture`] via [`stash_h_main_prompt_tokens`], and
+    /// after [`arm_h_main_capture`] via [`stash_h_main_replay_context`], and
     /// drained in `mtp_forward_step`'s dump block so the tokens can be
     /// serialized alongside the taps (see [`write_mtp_dump`]). The HF
     /// reference (`scripts/mtp_h_main_reference_dump.py`) prefers these
     /// tokens over its canonical greeting, guaranteeing both sides replay
     /// the exact same prompt during the per-tap bisect.
     static H_MAIN_PROMPT_TOKENS: RefCell<Option<Vec<u32>>> =
+        const { RefCell::new(None) };
+
+    /// Phase C39: thread-local slot for the FULL base-model token sequence
+    /// that produced the currently-armed h_main capture. Unlike
+    /// [`H_MAIN_PROMPT_TOKENS`], which preserves the raw per-call slice
+    /// (`[last_token]` or `[last_token, draft_token]` during native-MTP
+    /// verify/replay), this stores the fully-conditioned sequence visible to
+    /// the base-model forward at that step: `prompt ++ accepted_prefix ++
+    /// current_call_suffix`.
+    ///
+    /// The native-MTP loop in `generate.rs` seeds a per-step replay prefix
+    /// before entering `speculative_mtp_decode_step`; the forward dump path
+    /// combines that prefix with the current call tokens and serializes the
+    /// resulting `replay_tokens` tensor. HF-side B10/B11/B12 reference replays
+    /// prefer this full sequence so later step dumps are no longer
+    /// under-conditioned to the current 1-token slice.
+    static H_MAIN_REPLAY_TOKENS: RefCell<Option<Vec<u32>>> =
+        const { RefCell::new(None) };
+
+    /// Phase C39: optional per-step replay prefix injected by the native-MTP
+    /// decode loop. When set, the next [`stash_h_main_replay_context`] call
+    /// combines this prefix with the current base-model call token slice to
+    /// form [`H_MAIN_REPLAY_TOKENS`].
+    ///
+    /// Expected shape in native-MTP:
+    ///   * before verify `[last_token, draft_token]` call:
+    ///       `prompt ++ accepted_tokens_so_far ++ [last_token]`
+    ///   * before reject replay `[last_token]` call:
+    ///       same prefix as above
+    ///
+    /// Combination rule: if the current call's first token already equals the
+    /// prefix tail, we append only `token_ids[1..]` to avoid duplicating the
+    /// just-committed `last_token`.
+    static H_MAIN_REPLAY_PREFIX_TOKENS: RefCell<Option<Vec<u32>>> =
         const { RefCell::new(None) };
 
     /// Phase B11b: thread-local sink for layer-0 GDN sub-op taps. Kept
@@ -519,11 +553,13 @@ pub fn capture_h_main_tap(name: &str, t: &Tensor) -> Result<()> {
 /// Phase B11: stash the base-model prompt tokens for the currently-armed
 /// h_main capture. No-op when the capture window is closed (matches the
 /// semantics of [`arm_h_main_capture`] — callers can invoke unconditionally).
-pub fn stash_h_main_prompt_tokens(tokens: &[u32]) {
+pub fn stash_h_main_replay_context(tokens: &[u32]) {
     if !is_h_main_capture_armed() {
         return;
     }
     H_MAIN_PROMPT_TOKENS.with(|c| *c.borrow_mut() = Some(tokens.to_vec()));
+    let replay_tokens = build_h_main_replay_tokens(tokens);
+    H_MAIN_REPLAY_TOKENS.with(|c| *c.borrow_mut() = Some(replay_tokens));
 }
 
 /// Phase B11: drain the stashed prompt tokens. Returns an empty vector when
@@ -532,6 +568,39 @@ pub fn stash_h_main_prompt_tokens(tokens: &[u32]) {
 /// to skip serializing a `prompt_tokens` tensor.
 pub fn drain_h_main_prompt_tokens() -> Vec<u32> {
     H_MAIN_PROMPT_TOKENS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Phase C39: set the native-MTP replay prefix used to reconstruct the fully
+/// conditioned sequence for the next h_main capture on this thread.
+pub fn set_h_main_replay_prefix_tokens(tokens: &[u32]) {
+    H_MAIN_REPLAY_PREFIX_TOKENS.with(|c| *c.borrow_mut() = Some(tokens.to_vec()));
+}
+
+/// Phase C39: clear the native-MTP replay prefix after the step finishes so a
+/// later unrelated base-model forward does not inherit stale context.
+pub fn clear_h_main_replay_prefix_tokens() {
+    H_MAIN_REPLAY_PREFIX_TOKENS.with(|c| *c.borrow_mut() = None);
+}
+
+/// Phase C39: drain the fully conditioned replay sequence corresponding to the
+/// most recent h_main capture. Empty when nothing was stashed.
+pub fn drain_h_main_replay_tokens() -> Vec<u32> {
+    H_MAIN_REPLAY_TOKENS.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+fn build_h_main_replay_tokens(tokens: &[u32]) -> Vec<u32> {
+    let mut replay = H_MAIN_REPLAY_PREFIX_TOKENS.with(|c| c.borrow().clone().unwrap_or_default());
+    if replay.is_empty() {
+        return tokens.to_vec();
+    }
+    if let Some((&first, rest)) = tokens.split_first() {
+        if replay.last().copied() == Some(first) {
+            replay.extend_from_slice(rest);
+        } else {
+            replay.extend_from_slice(tokens);
+        }
+    }
+    replay
 }
 
 // -----------------------------------------------------------------------------
@@ -1299,15 +1368,18 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// trio. These are written under their captured names alongside the
 /// static taps; an empty slice makes this behave identically to Phase B6.
 ///
-/// Phase B11: `prompt_tokens` carries the base-model input token ids from
-/// the forward pass that produced the h_main value (see
-/// [`stash_h_main_prompt_tokens`] / [`drain_h_main_prompt_tokens`]). When
+/// Phase B11: `prompt_tokens` carries the raw base-model input token ids from
+/// the current forward call that produced the h_main value (see
+/// [`stash_h_main_replay_context`] / [`drain_h_main_prompt_tokens`]). When
 /// non-empty, it is serialized as a flat I32 tensor named `prompt_tokens`
-/// plus a 1-element I32 scalar `meta__prompt_tokens_len`. The HF reference
-/// (`scripts/mtp_h_main_reference_dump.py`) prefers these tokens over its
-/// canonical greeting so both sides replay the exact same prompt during
-/// the per-tap bisect. Pass `&[]` (or legacy callers using `&extra_subops`
-/// before this param) to skip the prompt-tokens emission.
+/// plus a 1-element I32 scalar `meta__prompt_tokens_len`. This legacy field
+/// is kept for older chained-sequence tooling such as the C15 audit.
+///
+/// Phase C39: `replay_tokens` carries the FULLY conditioned token sequence
+/// visible to the base-model forward at that step. The HF-side B10/B11/B12
+/// replay should prefer `replay_tokens` when present and fall back to the
+/// legacy `prompt_tokens` field otherwise. Serialized as flat I32
+/// `replay_tokens` plus `meta__replay_tokens_len`.
 ///
 /// Phase B11b: `b11_taps` carries the layer-0 GDN sub-op taps captured via
 /// [`arm_b11_layer0_capture`] / [`capture_b11_layer0_tap`] /
@@ -1359,6 +1431,7 @@ pub fn write_mtp_dump(
     taps: &[(&str, &Tensor)],
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
     prompt_tokens: &[u32],
+    replay_tokens: &[u32],
     b11_taps: &[(String, Vec<usize>, Vec<f32>)],
     b12_taps: &[(String, Vec<usize>, Vec<f32>)],
     c6_taps: &[(String, Vec<usize>, Vec<f32>)],
@@ -1369,14 +1442,16 @@ pub fn write_mtp_dump(
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
-    // Capacity: static taps + subops + 4 meta + optional (prompt_tokens, len)
-    // + b11 taps + b12 taps + c6 taps + c7 taps + c14 taps.
+    // Capacity: static taps + subops + 4 meta + optional prompt/replay token
+    // tensors + b11 taps + b12 taps + c6 taps + c7 taps + c14 taps.
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
+    let replay_reserve = if replay_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
             + 4
             + prompt_reserve
+            + replay_reserve
             + b11_taps.len()
             + b12_taps.len()
             + c6_taps.len()
@@ -1456,6 +1531,27 @@ pub fn write_mtp_dump(
             vec![prompt_tokens.len()],
             Dtype::I32,
             pt_bytes,
+        ));
+    }
+
+    if !replay_tokens.is_empty() {
+        let len_i32 = replay_tokens.len() as i32;
+        backings.push((
+            "meta__replay_tokens_len".into(),
+            vec![1],
+            Dtype::I32,
+            len_i32.to_le_bytes().to_vec(),
+        ));
+        let mut rt_bytes = Vec::with_capacity(replay_tokens.len() * 4);
+        for &tok in replay_tokens {
+            let as_i32 = tok as i32;
+            rt_bytes.extend_from_slice(&as_i32.to_le_bytes());
+        }
+        backings.push((
+            "replay_tokens".into(),
+            vec![replay_tokens.len()],
+            Dtype::I32,
+            rt_bytes,
         ));
     }
 
@@ -1545,6 +1641,12 @@ pub fn format_top_k(top: &[(u32, f32)]) -> String {
 mod tests {
     use super::*;
     use candle_core::Device;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn test_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn top_k_picks_largest_in_descending_order() {
@@ -1571,6 +1673,7 @@ mod tests {
 
     #[test]
     fn should_log_is_false_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: tests are #[cfg(test)] and run with cargo's default serial
         // dispatch within a process. We only mutate KILN_MTP_DEBUG here, so a
         // single set/unset is fine for this check.
@@ -1583,6 +1686,7 @@ mod tests {
 
     #[test]
     fn dump_slot_fires_once_per_position() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_slot_once.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
@@ -1603,6 +1707,7 @@ mod tests {
 
     #[test]
     fn dump_slot_supports_multi_position_targets() {
+        let _guard = test_env_lock();
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_multi_pos.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         unsafe {
@@ -1630,6 +1735,7 @@ mod tests {
 
     #[test]
     fn dump_path_for_pos_substitutes_placeholder() {
+        let _guard = test_env_lock();
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_PATH", "/tmp/dump_pos{pos}.safetensors");
         }
@@ -1659,6 +1765,7 @@ mod tests {
 
     #[test]
     fn splice_disabled_by_default_and_consumes_no_slot() {
+        let _guard = test_env_lock();
         // SAFETY: single-test scoped env mutation; callers downstream remove
         // vars on success.
         unsafe {
@@ -1676,6 +1783,7 @@ mod tests {
 
     #[test]
     fn splice_defaults_to_positions_0_and_2_with_8_steps() {
+        let _guard = test_env_lock();
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
             std::env::set_var(
@@ -1716,6 +1824,7 @@ mod tests {
 
     #[test]
     fn splice_respects_custom_positions_and_max_steps() {
+        let _guard = test_env_lock();
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
             std::env::set_var("KILN_MTP_DUMP_PATH", "/tmp/c13_custom.safetensors");
@@ -1747,6 +1856,7 @@ mod tests {
 
     #[test]
     fn splice_requires_dump_path_to_fire() {
+        let _guard = test_env_lock();
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_SPLICE", "1");
             std::env::remove_var("KILN_MTP_DUMP_PATH");
@@ -1764,6 +1874,7 @@ mod tests {
 
     #[test]
     fn dump_path_for_pos_and_step_substitutes_both_placeholders() {
+        let _guard = test_env_lock();
         unsafe {
             std::env::set_var(
                 "KILN_MTP_DUMP_PATH",
@@ -1831,6 +1942,7 @@ mod tests {
 
     #[test]
     fn h_main_capture_records_then_drains() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
@@ -1865,6 +1977,7 @@ mod tests {
 
     #[test]
     fn h_main_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
@@ -1877,25 +1990,30 @@ mod tests {
     }
 
     #[test]
-    fn stash_h_main_prompt_tokens_requires_armed_capture() {
+    fn stash_h_main_replay_context_requires_armed_capture() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
         }
         // Disarmed: stash is a silent no-op.
-        stash_h_main_prompt_tokens(&[1, 2, 3]);
+        stash_h_main_replay_context(&[1, 2, 3]);
         assert!(drain_h_main_prompt_tokens().is_empty());
+        assert!(drain_h_main_replay_tokens().is_empty());
 
         // Armed: stash round-trips through drain.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
         }
         arm_h_main_capture();
-        stash_h_main_prompt_tokens(&[10, 20, 30, 40]);
+        stash_h_main_replay_context(&[10, 20, 30, 40]);
         let drained = drain_h_main_prompt_tokens();
         assert_eq!(drained, vec![10, 20, 30, 40]);
+        let replay = drain_h_main_replay_tokens();
+        assert_eq!(replay, vec![10, 20, 30, 40]);
         // Second drain returns empty (moved out).
         assert!(drain_h_main_prompt_tokens().is_empty());
+        assert!(drain_h_main_replay_tokens().is_empty());
         // Clean up capture state.
         let _ = drain_h_main_capture();
         unsafe {
@@ -1920,6 +2038,7 @@ mod tests {
             &[("h_main", &a)],
             &[],
             &prompt,
+            &prompt,
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
@@ -1933,6 +2052,8 @@ mod tests {
         let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
         assert!(names.contains(&"prompt_tokens"));
         assert!(names.contains(&"meta__prompt_tokens_len"));
+        assert!(names.contains(&"replay_tokens"));
+        assert!(names.contains(&"meta__replay_tokens_len"));
 
         let pt = st.tensor("prompt_tokens").unwrap();
         assert_eq!(pt.dtype(), safetensors::Dtype::I32);
@@ -1948,7 +2069,32 @@ mod tests {
         let len_val = i32::from_le_bytes(len_meta.data()[0..4].try_into().unwrap());
         assert_eq!(len_val, prompt.len() as i32);
 
+        let replay = st.tensor("replay_tokens").unwrap();
+        assert_eq!(replay.dtype(), safetensors::Dtype::I32);
+        assert_eq!(replay.shape(), &[prompt.len()]);
+        let replay_len_meta = st.tensor("meta__replay_tokens_len").unwrap();
+        let replay_len_val = i32::from_le_bytes(replay_len_meta.data()[0..4].try_into().unwrap());
+        assert_eq!(replay_len_val, prompt.len() as i32);
+
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn replay_prefix_combines_with_current_call_without_duplicating_last_token() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_HIDDEN_STATES", "1");
+        }
+        arm_h_main_capture();
+        set_h_main_replay_prefix_tokens(&[10, 20, 30]);
+        stash_h_main_replay_context(&[30, 40]);
+        assert_eq!(drain_h_main_prompt_tokens(), vec![30, 40]);
+        assert_eq!(drain_h_main_replay_tokens(), vec![10, 20, 30, 40]);
+        clear_h_main_replay_prefix_tokens();
+        let _ = drain_h_main_capture();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_HIDDEN_STATES");
+        }
     }
 
     #[test]
@@ -1979,6 +2125,7 @@ mod tests {
             &[("h_main", &a), ("mtp_logits", &b)],
             &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
             /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
@@ -2000,6 +2147,8 @@ mod tests {
         // should be serialized.
         assert!(!names.contains(&"prompt_tokens"));
         assert!(!names.contains(&"meta__prompt_tokens_len"));
+        assert!(!names.contains(&"replay_tokens"));
+        assert!(!names.contains(&"meta__replay_tokens_len"));
         // With b11_taps = &[], no b11__* tensors should appear.
         assert!(!names.iter().any(|n| n.starts_with("b11__")));
         // With b12_taps = &[], no b12__* tensors should appear.
@@ -2035,6 +2184,7 @@ mod tests {
 
     #[test]
     fn b11_layer0_capture_records_then_drains() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B11_TAPS", "1");
@@ -2075,6 +2225,7 @@ mod tests {
 
     #[test]
     fn b11_layer0_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_B11_TAPS");
@@ -2115,6 +2266,7 @@ mod tests {
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
             &b11,
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
@@ -2167,6 +2319,7 @@ mod tests {
 
     #[test]
     fn b12_gqa_capture_records_then_drains() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
@@ -2207,6 +2360,7 @@ mod tests {
 
     #[test]
     fn b12_gqa_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
@@ -2247,6 +2401,7 @@ mod tests {
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             &b12,
             /* c6_taps = */ &[],
@@ -2282,6 +2437,7 @@ mod tests {
 
     #[test]
     fn b12_layer_scope_disarmed_returns_false_regardless_of_scope() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
@@ -2296,6 +2452,7 @@ mod tests {
 
     #[test]
     fn b12_layer_scope_armed_without_scope_returns_false() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
@@ -2314,6 +2471,7 @@ mod tests {
 
     #[test]
     fn b12_layer_scope_armed_non_31_layer_returns_false() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
@@ -2335,6 +2493,7 @@ mod tests {
 
     #[test]
     fn b12_layer_scope_armed_layer_31_returns_true() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
@@ -2351,6 +2510,7 @@ mod tests {
 
     #[test]
     fn b12_layer_scope_exit_clears_slot() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
@@ -2383,6 +2543,7 @@ mod tests {
 
     #[test]
     fn c6_pre_rope_capture_records_then_drains() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_PRE_ROPE", "1");
@@ -2420,6 +2581,7 @@ mod tests {
 
     #[test]
     fn c6_pre_rope_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_PRE_ROPE");
@@ -2459,6 +2621,7 @@ mod tests {
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
             &c6,
@@ -2511,6 +2674,7 @@ mod tests {
 
     #[test]
     fn c7_sdpa_capture_records_then_drains() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C7_SDPA", "1");
@@ -2548,6 +2712,7 @@ mod tests {
 
     #[test]
     fn c7_sdpa_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_C7_SDPA");
@@ -2587,6 +2752,7 @@ mod tests {
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
@@ -2640,6 +2806,7 @@ mod tests {
 
     #[test]
     fn c14_post_block_capture_records_then_drains() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::set_var("KILN_MTP_DUMP_C14_POST_BLOCK", "1");
@@ -2677,6 +2844,7 @@ mod tests {
 
     #[test]
     fn c14_post_block_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
         unsafe {
             std::env::remove_var("KILN_MTP_DUMP_C14_POST_BLOCK");
@@ -2691,6 +2859,7 @@ mod tests {
 
     #[test]
     fn c14_post_block_splice_flag_enables_capture() {
+        let _guard = test_env_lock();
         // OR-composition contract: setting the C13 splice meta-flag alone is
         // sufficient to enable C14 capture, without needing a separate
         // explicit per-phase opt-in. This is what lets a single
@@ -2740,6 +2909,7 @@ mod tests {
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
             /* c6_taps = */ &[],
