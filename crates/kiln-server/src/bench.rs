@@ -15,21 +15,21 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_core::vram::detect_vram;
-use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    streaming_prefill_enabled_for,
+    model_forward, model_forward_paged, model_forward_paged_last_token,
+    model_forward_paged_last_token_with_last_hidden, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden, streaming_prefill_enabled_for,
+    GpuWeights, LinearAttentionState,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
-    SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
-    speculative_mtp_decode_step,
+    speculative_decode_step, speculative_decode_step_paged_greedy, speculative_mtp_decode_step,
+    SpeculativeConfig,
 };
+use kiln_model::ModelRunner;
 use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the kiln-core default.
@@ -929,6 +929,107 @@ fn read_spec_method_from_env() -> SpecMethod {
     }
 }
 
+const BENCH_MTP_MAX_PROMPT_TOKENS: usize = 128;
+const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS: usize = 32;
+
+fn bench_force_raw_mtp() -> bool {
+    std::env::var("KILN_BENCH_FORCE_MTP")
+        .ok()
+        .as_deref()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+/// Resolve the benchmark arm the same way the server resolves desktop
+/// requests. Native MTP is only the short greedy no-LoRA path; long greedy
+/// desktop-default requests fall back to skip-layer instead of timing raw MTP.
+fn resolve_bench_spec_method(
+    configured: SpecMethod,
+    requested_prompt_tokens: usize,
+    max_output_tokens: usize,
+    temperature: f32,
+    mtp_supported: bool,
+) -> SpecMethod {
+    resolve_bench_spec_method_with_force(
+        configured,
+        requested_prompt_tokens,
+        max_output_tokens,
+        temperature,
+        mtp_supported,
+        bench_force_raw_mtp(),
+    )
+}
+
+fn resolve_bench_spec_method_with_force(
+    configured: SpecMethod,
+    requested_prompt_tokens: usize,
+    max_output_tokens: usize,
+    temperature: f32,
+    mtp_supported: bool,
+    force_raw_mtp: bool,
+) -> SpecMethod {
+    match configured {
+        SpecMethod::Off => SpecMethod::Off,
+        SpecMethod::SkipLayer => SpecMethod::SkipLayer,
+        SpecMethod::Mtp => {
+            if force_raw_mtp {
+                return SpecMethod::Mtp;
+            }
+            let greedy = temperature == 0.0;
+            if mtp_supported && greedy && requested_prompt_tokens <= BENCH_MTP_MAX_PROMPT_TOKENS {
+                SpecMethod::Mtp
+            } else if greedy
+                && requested_prompt_tokens > BENCH_MTP_MAX_PROMPT_TOKENS
+                && max_output_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS
+            {
+                SpecMethod::SkipLayer
+            } else {
+                SpecMethod::Off
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bench_mtp_short_prompt_stays_mtp() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 128, 64, 0.0, true, false),
+            SpecMethod::Mtp
+        );
+    }
+
+    #[test]
+    fn bench_mtp_long_greedy_prompt_falls_back_to_skip_layer() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.0, true, false),
+            SpecMethod::SkipLayer
+        );
+    }
+
+    #[test]
+    fn bench_mtp_long_short_output_or_sampled_prompt_turns_off() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 31, 0.0, true, false),
+            SpecMethod::Off
+        );
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.7, true, false),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_force_raw_mtp_bypasses_shape_routing() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.0, true, true),
+            SpecMethod::Mtp
+        );
+    }
+}
+
 /// Benchmark latency along the SKIP-LAYER speculative path.
 ///
 /// Uses the same flat `KvCache` + `model_forward` path as the existing
@@ -1387,12 +1488,7 @@ fn bench_latency_paged_skiplayer(
 fn mtp_argmax_fp32_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        std::env::var("KILN_MTP_ARGMAX_FP32")
-            .ok()
-            .as_deref()
-            == Some("1")
-    })
+    *CACHE.get_or_init(|| std::env::var("KILN_MTP_ARGMAX_FP32").ok().as_deref() == Some("1"))
 }
 
 /// Benchmark latency along the NATIVE-MTP speculative path.
@@ -1922,9 +2018,27 @@ fn main() -> Result<()> {
         }
     };
 
+    let requested_spec_method = spec_method;
+    let spec_method = resolve_bench_spec_method(
+        requested_spec_method,
+        args.prompt_tokens,
+        args.max_output_tokens,
+        args.temperature,
+        gpu_weights.mtp.is_some(),
+    );
+    if spec_method != requested_spec_method {
+        eprintln!(
+            "  Resolved KILN_SPEC_METHOD={requested_spec_method:?} to {spec_method:?} \
+             for bench request shape (prompt={}, max_output={}, temperature={})",
+            args.prompt_tokens, args.max_output_tokens, args.temperature
+        );
+    }
+
     // Latency benchmark (uses model_forward directly — must run before runner takes ownership).
     // Dispatch order:
-    //   * KILN_SPEC_METHOD=mtp        → bench_latency_paged_mtp (paged + MTP)
+    //   * KILN_SPEC_METHOD=mtp        → short greedy prompts use native MTP;
+    //                                   long greedy prompts mirror desktop
+    //                                   serving and fall back to skip-layer
     //   * KILN_SPEC_METHOD=skip_layer → bench_latency_paged_skiplayer when
     //                                   --paged, else bench_latency_skiplayer
     //                                   (flat KV + skip-layer)
