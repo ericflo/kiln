@@ -152,6 +152,24 @@ const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
 const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
 const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
 
+fn native_mtp_enabled_for_metal() -> bool {
+    std::env::var("KILN_ENABLE_METAL_NATIVE_MTP")
+        .ok()
+        .as_deref()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn native_mtp_allowed_for_state(state: &AppState) -> bool {
+    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+        return true;
+    };
+    let runner_guard = runner.read().unwrap();
+    match runner_guard.weights.embed_tokens.device() {
+        candle_core::Device::Metal(_) => native_mtp_enabled_for_metal(),
+        _ => true,
+    }
+}
+
 fn resolve_skip_layer_config(
     model_config: &kiln_core::config::ModelConfig,
     speculative: &SpeculativeDecodingConfig,
@@ -171,6 +189,7 @@ fn resolve_speculative_mode_from_config(
     prompt_tokens: usize,
     mtp_supported: bool,
     has_active_lora: bool,
+    native_mtp_allowed: bool,
 ) -> ResolvedSpeculativeMode {
     let skip_layer = resolve_skip_layer_config(model_config, speculative);
 
@@ -182,6 +201,7 @@ fn resolve_speculative_mode_from_config(
         SpecMethod::Mtp => {
             let greedy_without_lora = sampling.temperature == 0.0 && !has_active_lora;
             if mtp_supported
+                && native_mtp_allowed
                 && greedy_without_lora
                 && prompt_tokens <= MTP_MAX_PROMPT_TOKENS_DEFAULT
             {
@@ -215,6 +235,7 @@ fn resolve_speculative_mode(
         prompt_tokens,
         mtp_supported,
         has_active_lora,
+        native_mtp_allowed_for_state(state),
     )
 }
 
@@ -999,6 +1020,7 @@ mod tests {
             16,
             false,
             false,
+            true,
         );
 
         match mode {
@@ -1026,6 +1048,7 @@ mod tests {
             16,
             true,
             false,
+            true,
         );
         assert!(matches!(greedy, ResolvedSpeculativeMode::Mtp));
 
@@ -1036,6 +1059,7 @@ mod tests {
             16,
             true,
             false,
+            true,
         );
         assert!(matches!(sampled, ResolvedSpeculativeMode::Off));
 
@@ -1044,6 +1068,7 @@ mod tests {
             &cfg,
             &make_sampling(0.0),
             16,
+            true,
             true,
             true,
         );
@@ -1056,6 +1081,7 @@ mod tests {
             LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
             true,
             false,
+            true,
         );
         assert!(matches!(long_prompt, ResolvedSpeculativeMode::SkipLayer(_)));
 
@@ -1066,6 +1092,7 @@ mod tests {
             512,
             true,
             false,
+            true,
         );
         assert!(matches!(medium_prompt, ResolvedSpeculativeMode::Off));
 
@@ -1078,11 +1105,33 @@ mod tests {
             LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
             true,
             false,
+            true,
         );
         assert!(matches!(
             long_prompt_short_output,
             ResolvedSpeculativeMode::Off
         ));
+    }
+
+    #[test]
+    fn mtp_short_prompt_stays_off_when_native_mtp_is_disallowed() {
+        let cfg = SpeculativeDecodingConfig {
+            enabled: true,
+            method: SpecMethod::Mtp,
+            num_speculative_tokens: 4,
+            draft_layers: 8,
+        };
+
+        let mode = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            64,
+            true,
+            false,
+            false,
+        );
+        assert!(matches!(mode, ResolvedSpeculativeMode::Off));
     }
 
     #[test]
@@ -1100,6 +1149,7 @@ mod tests {
             16,
             false,
             false,
+            true,
         );
 
         assert!(matches!(mode, ResolvedSpeculativeMode::Off));

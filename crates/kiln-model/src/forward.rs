@@ -903,6 +903,7 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     Ok(Tensor::zeros((1usize,), weight_dtype(w), device)?)
 }
 
+#[derive(Clone)]
 struct ProjectionLoadCache {
     metal_bf16_stub: Option<Tensor>,
     metal_f16_stub: Option<Tensor>,
@@ -992,15 +993,17 @@ fn projection_tensors_for_load_batch(
         })
         .collect();
 
+    let cache = cache.clone();
+    let device = device.clone();
     transposed?
-        .into_iter()
-        .zip(weights.iter())
+        .into_par_iter()
+        .zip(weights.par_iter())
         .map(|((data, shape), (name, w))| {
-            let transposed = Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, device)
+            let transposed = Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, &device)
                 .with_context(|| format!("{name} transposed projection upload"))?;
             let original_stub = match cache.metal_stub_for(weight_dtype(w)) {
                 Some(stub) => stub,
-                None => dropped_weight_stub(w, device)
+                None => dropped_weight_stub(w, &device)
                     .with_context(|| format!("{name} projection stub"))?,
             };
             Ok((original_stub, transposed))
@@ -1638,7 +1641,9 @@ fn capture_c43_layer1_preweight_taps(x: &Tensor, weight: &Tensor, eps: f64) -> R
 
     let w_f32 = weight.to_dtype(DType::F32)?;
     let w_plus_one = (w_f32.ones_like()? + w_f32)?;
-    let post = pre_weight_broadcast.broadcast_mul(&w_plus_one)?.to_dtype(x.dtype())?;
+    let post = pre_weight_broadcast
+        .broadcast_mul(&w_plus_one)?
+        .to_dtype(x.dtype())?;
     crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_post_input_norm", &post)?;
     Ok(())
 }
@@ -5921,8 +5926,7 @@ fn model_forward_paged_inner(
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
                 let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
-                let capture_c41_taps =
-                    crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
+                let capture_c41_taps = crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
                 let capture_c42_taps =
                     crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i);
                 let capture_c43_taps =

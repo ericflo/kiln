@@ -932,6 +932,17 @@ const BENCH_MTP_MAX_PROMPT_TOKENS: usize = 128;
 const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS: usize = 1024;
 const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS: usize = 32;
 
+fn bench_native_mtp_allowed(backend_name: &str) -> bool {
+    if backend_name == "metal" {
+        std::env::var("KILN_ENABLE_METAL_NATIVE_MTP")
+            .ok()
+            .as_deref()
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    } else {
+        true
+    }
+}
+
 fn bench_force_raw_mtp() -> bool {
     std::env::var("KILN_BENCH_FORCE_MTP")
         .ok()
@@ -950,6 +961,7 @@ fn resolve_bench_spec_method(
     max_output_tokens: usize,
     temperature: f32,
     mtp_supported: bool,
+    backend_name: &str,
 ) -> SpecMethod {
     resolve_bench_spec_method_with_force(
         configured,
@@ -957,6 +969,7 @@ fn resolve_bench_spec_method(
         max_output_tokens,
         temperature,
         mtp_supported,
+        bench_native_mtp_allowed(backend_name),
         bench_force_raw_mtp(),
     )
 }
@@ -967,6 +980,7 @@ fn resolve_bench_spec_method_with_force(
     max_output_tokens: usize,
     temperature: f32,
     mtp_supported: bool,
+    native_mtp_allowed: bool,
     force_raw_mtp: bool,
 ) -> SpecMethod {
     match configured {
@@ -977,7 +991,11 @@ fn resolve_bench_spec_method_with_force(
                 return SpecMethod::Mtp;
             }
             let greedy = temperature == 0.0;
-            if mtp_supported && greedy && requested_prompt_tokens <= BENCH_MTP_MAX_PROMPT_TOKENS {
+            if mtp_supported
+                && native_mtp_allowed
+                && greedy
+                && requested_prompt_tokens <= BENCH_MTP_MAX_PROMPT_TOKENS
+            {
                 SpecMethod::Mtp
             } else if greedy
                 && requested_prompt_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS
@@ -998,7 +1016,7 @@ mod tests {
     #[test]
     fn bench_mtp_short_prompt_stays_mtp() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 128, 64, 0.0, true, false),
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 128, 64, 0.0, true, true, false),
             SpecMethod::Mtp
         );
     }
@@ -1011,6 +1029,7 @@ mod tests {
                 BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
                 64,
                 0.0,
+                true,
                 true,
                 false
             ),
@@ -1027,6 +1046,7 @@ mod tests {
                 31,
                 0.0,
                 true,
+                true,
                 false
             ),
             SpecMethod::Off
@@ -1038,6 +1058,7 @@ mod tests {
                 64,
                 0.7,
                 true,
+                true,
                 false
             ),
             SpecMethod::Off
@@ -1047,7 +1068,15 @@ mod tests {
     #[test]
     fn bench_mtp_medium_prompt_stays_off_until_skip_layer_crossover() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 512, 64, 0.0, true, false),
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 512, 64, 0.0, true, true, false),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_mtp_short_prompt_stays_off_when_native_mtp_is_disallowed() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 64, 64, 0.0, true, false, false),
             SpecMethod::Off
         );
     }
@@ -1055,7 +1084,7 @@ mod tests {
     #[test]
     fn bench_force_raw_mtp_bypasses_shape_routing() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.0, true, true),
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.0, true, false, true),
             SpecMethod::Mtp
         );
     }
@@ -2067,6 +2096,7 @@ fn main() -> Result<()> {
         args.max_output_tokens,
         args.temperature,
         gpu_weights.mtp.is_some(),
+        backend_name,
     );
     if spec_method != requested_spec_method {
         eprintln!(
