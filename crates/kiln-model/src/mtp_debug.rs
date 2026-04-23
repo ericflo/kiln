@@ -472,6 +472,13 @@ pub fn capture_subop(name: &str, t: &Tensor) -> Result<()> {
 /// h_main handoff can be verified independently.
 pub const B10_BOUNDARY_LAYERS: [usize; 5] = [0, 8, 16, 23, 31];
 
+/// Phase C40: optional dense early-stack h_main sweep. When enabled, the
+/// base-model forward records every post-layer hidden state for layers 1..8,
+/// turning the coarse C39 `h_layer_0 -> h_layer_8` span into a precise
+/// earliest-layer bisect without changing the legacy B10/B12 dump shape when
+/// the flag is unset.
+pub const C40_EARLY_H_MAIN_LAYERS: [usize; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
 /// True when `KILN_MTP_DUMP_HIDDEN_STATES=1` (or `true`) is set. Phase B10
 /// opt-in: when enabled alongside `KILN_MTP_DUMP_PATH`, the base-model
 /// forward records the last-row hidden state at each boundary layer and at
@@ -482,6 +489,34 @@ pub fn is_dump_hidden_states_enabled() -> bool {
     std::env::var("KILN_MTP_DUMP_HIDDEN_STATES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// True when `KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1` (or `true`) is set. Opt-in
+/// Phase C40 mode that extends the default B10 boundary set with layers 1..8.
+pub fn is_dump_early_hmain_sweep_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_EARLY_HMAIN_SWEEP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Ordered layer indices that the current h_main dump should emit.
+///
+/// Default behavior stays identical to historical B10/B12:
+/// - B10 only: [`B10_BOUNDARY_LAYERS`]
+/// - B10 + B12: [`B10_BOUNDARY_LAYERS`] ∪ [`B12_GQA_LAYERS`]
+///
+/// Phase C40 adds `1..=8` only when the explicit early-sweep env flag is on.
+pub fn current_h_main_boundary_layers() -> Vec<usize> {
+    let mut layers = B10_BOUNDARY_LAYERS.to_vec();
+    if is_dump_early_hmain_sweep_enabled() {
+        layers.extend(C40_EARLY_H_MAIN_LAYERS);
+    }
+    if is_dump_b12_gqa_taps_enabled() {
+        layers.extend(B12_GQA_LAYERS);
+    }
+    layers.sort_unstable();
+    layers.dedup();
+    layers
 }
 
 /// True if the Phase B10 base-model hidden-state capture window is currently
@@ -497,13 +532,7 @@ pub fn should_capture_hidden_state_for_layer(layer_idx: usize) -> bool {
     if !armed {
         return false;
     }
-    if B10_BOUNDARY_LAYERS.contains(&layer_idx) {
-        return true;
-    }
-    if is_dump_b12_gqa_taps_enabled() && B12_GQA_LAYERS.contains(&layer_idx) {
-        return true;
-    }
-    false
+    current_h_main_boundary_layers().contains(&layer_idx)
 }
 
 /// True if the Phase B10 hidden-state capture window is currently armed on
@@ -1428,6 +1457,7 @@ pub fn write_mtp_dump(
     mtp_pos: usize,
     base_pos: usize,
     swap_fc_norms: bool,
+    boundary_layers: &[usize],
     taps: &[(&str, &Tensor)],
     extra_subops: &[(String, Vec<usize>, Vec<f32>)],
     prompt_tokens: &[u32],
@@ -1442,14 +1472,17 @@ pub fn write_mtp_dump(
 
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
-    // Capacity: static taps + subops + 4 meta + optional prompt/replay token
+    // Capacity: static taps + subops + 4 meta + optional boundary-layer meta
+    // + optional prompt/replay token
     // tensors + b11 taps + b12 taps + c6 taps + c7 taps + c14 taps.
+    let boundary_reserve = if boundary_layers.is_empty() { 0 } else { 1 };
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let replay_reserve = if replay_tokens.is_empty() { 0 } else { 2 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
             + 4
+            + boundary_reserve
             + prompt_reserve
             + replay_reserve
             + b11_taps.len()
@@ -1510,6 +1543,20 @@ pub fn write_mtp_dump(
         Dtype::I32,
         swf.to_le_bytes().to_vec(),
     ));
+
+    if !boundary_layers.is_empty() {
+        let mut bytes = Vec::with_capacity(boundary_layers.len() * 4);
+        for &layer in boundary_layers {
+            let as_i32 = layer as i32;
+            bytes.extend_from_slice(&as_i32.to_le_bytes());
+        }
+        backings.push((
+            "meta__boundary_layers".into(),
+            vec![boundary_layers.len()],
+            Dtype::I32,
+            bytes,
+        ));
+    }
 
     // Phase B11: serialize the base-model prompt tokens so the HF reference
     // can replay the exact same input instead of its canonical fallback.
@@ -2035,6 +2082,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[0, 4, 8],
             &[("h_main", &a)],
             &[],
             &prompt,
@@ -2076,6 +2124,16 @@ mod tests {
         let replay_len_val = i32::from_le_bytes(replay_len_meta.data()[0..4].try_into().unwrap());
         assert_eq!(replay_len_val, prompt.len() as i32);
 
+        let boundary = st.tensor("meta__boundary_layers").unwrap();
+        assert_eq!(boundary.dtype(), safetensors::Dtype::I32);
+        assert_eq!(boundary.shape(), &[3]);
+        let layers: Vec<i32> = boundary
+            .data()
+            .chunks_exact(4)
+            .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(layers, vec![0, 4, 8]);
+
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -2109,6 +2167,37 @@ mod tests {
     }
 
     #[test]
+    fn c40_early_hmain_sweep_extends_boundary_layers_only_when_enabled() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_EARLY_HMAIN_SWEEP");
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+        assert_eq!(current_h_main_boundary_layers(), vec![0, 8, 16, 23, 31]);
+
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_EARLY_HMAIN_SWEEP", "1");
+        }
+        assert_eq!(
+            current_h_main_boundary_layers(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31]
+        );
+
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_B12_GQA_TAPS", "1");
+        }
+        assert_eq!(
+            current_h_main_boundary_layers(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_EARLY_HMAIN_SWEEP");
+            std::env::remove_var("KILN_MTP_DUMP_B12_GQA_TAPS");
+        }
+    }
+
+    #[test]
     fn write_and_reparse_mtp_dump_round_trips() {
         use safetensors::SafeTensors;
 
@@ -2122,6 +2211,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
             &[("h_main", &a), ("mtp_logits", &b)],
             &[("post_q_proj".to_string(), vec![2], vec![0.1_f32, 0.2])],
             /* prompt_tokens = */ &[],
@@ -2143,6 +2233,7 @@ mod tests {
         assert!(names.contains(&"meta__mtp_pos"));
         assert!(names.contains(&"meta__base_pos"));
         assert!(names.contains(&"meta__swap_fc_norms"));
+        assert!(!names.contains(&"meta__boundary_layers"));
         // With prompt_tokens = &[], neither the tensor nor its length meta
         // should be serialized.
         assert!(!names.contains(&"prompt_tokens"));
@@ -2263,6 +2354,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
@@ -2398,6 +2490,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
@@ -2618,6 +2711,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
@@ -2749,6 +2843,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],
@@ -2906,6 +3001,7 @@ mod tests {
             /* mtp_pos = */ 0,
             /* base_pos = */ 0,
             /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
             &[("h_main", &h)],
             &[],
             /* prompt_tokens = */ &[],

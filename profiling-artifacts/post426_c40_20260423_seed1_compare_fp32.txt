@@ -1,0 +1,146 @@
+MTP numerical bisect — mode: base-model h_main bisect (B10), atol=0.01, rtol=0.1
+
+=== mtp_pos-0-step-0 ===
+  kiln dump : /workspace/kiln/profiling-artifacts/post426_c40_20260423_seed1_captures/mtp_pos-0/step-0.safetensors
+  ref  dump : /workspace/kiln/profiling-artifacts/post426_c40_20260423_refs_fp32/seed1/mtp_pos-0/step-0.safetensors
+Metadata:
+  meta__draft_token_id: kiln=25015 ref=25015 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 MISSING IN REF DUMP
+tok_embed              MISSING IN REF DUMP
+fc_input               MISSING IN REF DUMP
+fc_output              MISSING IN REF DUMP
+pre_layer              MISSING IN REF DUMP
+post_layer             MISSING IN REF DUMP
+post_final_ln          MISSING IN REF DUMP
+mtp_logits             MISSING IN REF DUMP
+h_layer_0              1x1x2560               True     True     1.00e+00   1.26e-02     7.76e-04    
+h_layer_1              1x1x2560               True     True     9.99e-01   2.32e-02     1.59e-03    
+h_layer_2              1x1x2560               True     False    9.95e-01   1.68e-02     3.35e-03    
+h_layer_3              1x1x2560               True     False    9.91e-01   3.30e-02     7.34e-03    
+h_layer_4              1x1x2560               True     False    9.87e-01   1.01e-01     1.03e-02    
+h_layer_5              1x1x2560               True     False    9.89e-01   1.44e-01     1.20e-02    
+h_layer_6              1x1x2560               True     False    9.85e-01   1.69e-01     1.57e-02    
+h_layer_7              1x1x2560               True     False    9.77e-01   1.41e-01     2.03e-02    
+h_layer_8              1x1x2560               True     False    9.76e-01   1.04e-01     2.10e-02    
+h_layer_16             1x1x2560               True     False    9.43e-01   6.94e-01     5.29e-02    
+h_layer_23             1x1x2560               True     False    9.68e-01   8.16e-01     1.01e-01    
+h_layer_31             1x1x2560               True     False    9.57e-01   2.06e+01     1.16e+00    
+prompt_tokens          508                    True     True     1.00e+00   0.00e+00     0.00e+00    
+replay_tokens          508                    True     True     1.00e+00   0.00e+00     0.00e+00    
+
+  pair verdict: first divergence at tap 'h_main'.
+    Most-likely cause: upstream (base model) — this ref takes h_main FROM kiln, so shouldn't differ
+
+=== mtp_pos-2-step-0 ===
+  kiln dump : /workspace/kiln/profiling-artifacts/post426_c40_20260423_seed1_captures/mtp_pos-2/step-0.safetensors
+  ref  dump : /workspace/kiln/profiling-artifacts/post426_c40_20260423_refs_fp32/seed1/mtp_pos-2/step-0.safetensors
+Metadata:
+  meta__draft_token_id: kiln=23043 ref=23043 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 MISSING IN REF DUMP
+tok_embed              MISSING IN REF DUMP
+fc_input               MISSING IN REF DUMP
+fc_output              MISSING IN REF DUMP
+pre_layer              MISSING IN REF DUMP
+post_layer             MISSING IN REF DUMP
+post_final_ln          MISSING IN REF DUMP
+mtp_logits             MISSING IN REF DUMP
+h_layer_0              1x1x2560               True     True     1.00e+00   1.74e-02     1.29e-03    
+h_layer_1              1x1x2560               True     True     9.99e-01   2.60e-02     2.28e-03    
+h_layer_2              1x1x2560               True     False    9.98e-01   1.62e-02     3.41e-03    
+h_layer_3              1x1x2560               True     False    9.97e-01   6.72e-02     5.84e-03    
+h_layer_4              1x1x2560               True     False    9.96e-01   9.60e-02     7.08e-03    
+h_layer_5              1x1x2560               True     False    9.94e-01   4.11e-02     9.06e-03    
+h_layer_6              1x1x2560               True     False    9.90e-01   9.71e-02     1.31e-02    
+h_layer_7              1x1x2560               True     False    9.89e-01   1.30e-01     1.53e-02    
+h_layer_8              1x1x2560               True     False    9.85e-01   8.64e-02     1.71e-02    
+h_layer_16             1x1x2560               True     False    9.25e-01   2.71e-01     6.18e-02    
+h_layer_23             1x1x2560               True     False    7.25e-01   6.72e+00     2.52e-01    
+h_layer_31             1x1x2560               True     False    8.59e-01   1.86e+01     1.56e+00    
+prompt_tokens          2                      False    False    nan        nan          nan         
+replay_tokens          517                    True     True     1.00e+00   0.00e+00     0.00e+00    
+
+  pair verdict: first divergence at tap 'h_main'.
+    Most-likely cause: upstream (base model) — this ref takes h_main FROM kiln, so shouldn't differ
+
+=== mtp_pos-2-step-1 ===
+  kiln dump : /workspace/kiln/profiling-artifacts/post426_c40_20260423_seed1_captures/mtp_pos-2/step-1.safetensors
+  ref  dump : /workspace/kiln/profiling-artifacts/post426_c40_20260423_refs_fp32/seed1/mtp_pos-2/step-1.safetensors
+Metadata:
+  meta__draft_token_id: kiln=11 ref=11 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+h_main                 MISSING IN REF DUMP
+tok_embed              MISSING IN REF DUMP
+fc_input               MISSING IN REF DUMP
+fc_output              MISSING IN REF DUMP
+pre_layer              MISSING IN REF DUMP
+post_layer             MISSING IN REF DUMP
+post_final_ln          MISSING IN REF DUMP
+mtp_logits             MISSING IN REF DUMP
+h_layer_0              1x1x2560               True     True     9.99e-01   3.40e-02     1.58e-03    
+h_layer_1              1x1x2560               True     False    9.99e-01   2.92e-02     2.96e-03    
+h_layer_2              1x1x2560               True     False    9.96e-01   1.24e-01     4.07e-03    
+h_layer_3              1x1x2560               True     False    9.94e-01   1.64e-01     7.73e-03    
+h_layer_4              1x1x2560               True     False    9.93e-01   2.72e-01     9.26e-03    
+h_layer_5              1x1x2560               True     False    9.93e-01   2.37e-01     1.07e-02    
+h_layer_6              1x1x2560               True     False    9.89e-01   1.10e-01     1.33e-02    
+h_layer_7              1x1x2560               True     False    9.87e-01   9.54e-02     1.63e-02    
+h_layer_8              1x1x2560               True     False    9.85e-01   2.70e-01     1.71e-02    
+h_layer_16             1x1x2560               True     False    9.84e-01   4.63e-01     3.17e-02    
+h_layer_23             1x1x2560               True     False    9.85e-01   4.03e-01     7.16e-02    
+h_layer_31             1x1x2560               True     False    9.23e-01   1.97e+01     1.18e+00    
+prompt_tokens          1                      False    False    nan        nan          nan         
+replay_tokens          518                    True     True     1.00e+00   0.00e+00     0.00e+00    
+
+  pair verdict: first divergence at tap 'h_main'.
+    Most-likely cause: upstream (base model) — this ref takes h_main FROM kiln, so shouldn't differ
+
+==============================================================================
+Phase B10 per-layer base-model h_main bisect — cos_sim + max|Δ|
+==============================================================================
+  tap                   pos=mtp_pos-0-step-0             pos=mtp_pos-2-step-0             pos=mtp_pos-2-step-1            
+  ------------------------------------------------------------------------------------------------------------------------
+  h_layer_0             cos=1.00e+00   max|Δ|=1.26e-02   ok    cos=1.00e+00   max|Δ|=1.74e-02   ok    cos=9.99e-01   max|Δ|=3.40e-02   ok   
+  h_layer_1             cos=9.99e-01   max|Δ|=2.32e-02   ok    cos=9.99e-01   max|Δ|=2.60e-02   ok    cos=9.99e-01   max|Δ|=2.92e-02   DIV  
+  h_layer_2             cos=9.95e-01   max|Δ|=1.68e-02   DIV   cos=9.98e-01   max|Δ|=1.62e-02   DIV   cos=9.96e-01   max|Δ|=1.24e-01   DIV  
+  h_layer_3             cos=9.91e-01   max|Δ|=3.30e-02   DIV   cos=9.97e-01   max|Δ|=6.72e-02   DIV   cos=9.94e-01   max|Δ|=1.64e-01   DIV  
+  h_layer_4             cos=9.87e-01   max|Δ|=1.01e-01   DIV   cos=9.96e-01   max|Δ|=9.60e-02   DIV   cos=9.93e-01   max|Δ|=2.72e-01   DIV  
+  h_layer_5             cos=9.89e-01   max|Δ|=1.44e-01   DIV   cos=9.94e-01   max|Δ|=4.11e-02   DIV   cos=9.93e-01   max|Δ|=2.37e-01   DIV  
+  h_layer_6             cos=9.85e-01   max|Δ|=1.69e-01   DIV   cos=9.90e-01   max|Δ|=9.71e-02   DIV   cos=9.89e-01   max|Δ|=1.10e-01   DIV  
+  h_layer_7             cos=9.77e-01   max|Δ|=1.41e-01   DIV   cos=9.89e-01   max|Δ|=1.30e-01   DIV   cos=9.87e-01   max|Δ|=9.54e-02   DIV  
+  h_layer_8             cos=9.76e-01   max|Δ|=1.04e-01   DIV   cos=9.85e-01   max|Δ|=8.64e-02   DIV   cos=9.85e-01   max|Δ|=2.70e-01   DIV  
+  h_layer_16            cos=9.43e-01   max|Δ|=6.94e-01   DIV   cos=9.25e-01   max|Δ|=2.71e-01   DIV   cos=9.84e-01   max|Δ|=4.63e-01   DIV  
+  h_layer_23            cos=9.68e-01   max|Δ|=8.16e-01   DIV   cos=7.25e-01   max|Δ|=6.72e+00   DIV   cos=9.85e-01   max|Δ|=4.03e-01   DIV  
+  h_layer_31            cos=9.57e-01   max|Δ|=2.06e+01   DIV   cos=8.59e-01   max|Δ|=1.86e+01   DIV   cos=9.23e-01   max|Δ|=1.97e+01   DIV  
+
+  first diverging tap: 'h_layer_1' (pos=mtp_pos-2-step-1)
+  last matching tap before divergence: 'h_layer_0'
+Phase B10 verdict: DIVERGENCE FIRST APPEARS AT LAYER 1
+  -> `h_layer_0` still matches, but `h_layer_1` is the first
+     post-layer tap below tolerance. This localizes the earliest shared
+     upstream drift to transformer block 1.
+
+Overall verdict: divergence(s) at: ['h_main', 'h_main', 'h_main']
+

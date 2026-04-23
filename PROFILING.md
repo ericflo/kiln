@@ -486,6 +486,100 @@ seed1-only fix from this artifact; it is a narrower bisect inside the early
 GDN span between `h_layer_0` and `h_layer_8`, because that is now the first
 shared bad boundary on both seeds.
 
+## Phase C40 dense early h_main sweep (2026-04-23)
+
+**Scope:** densify the shared upstream `h_main` bisect from C39 by adding an
+opt-in early-layer sweep for `h_layer_1..8`, then rerun the standard
+native-MTP workload on fresh `main` after PR #426.
+
+**Preflight outcome:** proceed. Fresh `origin/main` was `4df936c`
+(PR #426), and no open PR already landed the dense early-layer sweep or a
+committed artifact localizing the first shared drift more narrowly than
+`h_layer_0 -> h_layer_8`.
+
+**Code change:** the h_main dump path now supports
+`KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1`, serializes the actual emitted boundary set
+as `meta__boundary_layers`, mirrors that sequence in
+`scripts/mtp_h_main_reference_dump.py`, and teaches
+`scripts/mtp_compare.py --b10` to derive/report the first divergence from the
+real emitted layer order instead of the historical sparse B10 list.
+
+**Validation commands run (RunPod A6000, kiln image):**
+
+```bash
+cd /workspace/kiln
+python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py
+source /root/.kiln-build-env
+cargo test -p kiln-model mtp_debug --lib -- --test-threads=1
+```
+
+**Standard workload rerun:** same C39 shape, but with dense early h_main taps
+enabled:
+
+```bash
+KILN_W4A16=1 \
+KILN_CUDA_GRAPHS=true \
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_SPLICE=1 \
+KILN_MTP_DUMP_SPLICE_POS=0,2 \
+KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+KILN_MTP_DUMP_PATH=.../mtp_pos-{pos}/step-{step}.safetensors \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+  --seed <0|1>
+```
+
+Matched HF reference dumps were regenerated in bf16 and fp32 with
+`scripts/mtp_h_main_reference_dump.py`, then compared with
+`scripts/mtp_compare.py --b10`.
+
+### Fresh workload check
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 8795.4 | 39.57 | 0.6842 |
+| 1 | 508 | 386.8 | 23.95 | 0.2959 |
+
+The seed split still reproduces on fresh `main`.
+
+### Source-of-truth artifacts
+
+- `profiling-artifacts/post426_c40_20260423_seed0.bench.json`
+- `profiling-artifacts/post426_c40_20260423_seed0.bench.stderr`
+- `profiling-artifacts/post426_c40_20260423_seed1.bench.json`
+- `profiling-artifacts/post426_c40_20260423_seed1.bench.stderr`
+- `profiling-artifacts/post426_c40_20260423_seed0_compare_bf16.txt`
+- `profiling-artifacts/post426_c40_20260423_seed0_compare_fp32.txt`
+- `profiling-artifacts/post426_c40_20260423_seed1_compare_bf16.txt`
+- `profiling-artifacts/post426_c40_20260423_seed1_compare_fp32.txt`
+
+### Verdict
+
+**Both seeds now localize to the exact same first bad layer: transformer block
+1.**
+
+Across both bf16 and fp32 HF references:
+
+- seed 0: first diverging tap = `h_layer_1` (`mtp_pos-0-step-1`)
+- seed 1: first diverging tap = `h_layer_1` (`mtp_pos-2-step-1`)
+- last matching tap before divergence = `h_layer_0` for both seeds
+- comparator verdict = `DIVERGENCE FIRST APPEARS AT LAYER 1` for both seeds
+
+So the shared upstream drift no longer spans `0 -> 8`; it starts immediately
+after layer 1, with layer 0 still numerically clean.
+
+### Recommendation
+
+Do **not** keep bisecting across coarse `h_main` boundaries. The remaining
+narrow span is now **inside transformer block 1** itself: layer-1 input norm,
+GDN projections/conv/qk-norm/gates/recurrent kernel, or the layer-1 residual
+handoff. The next diagnostic task should capture layer-1 sub-op taps rather
+than adding another per-layer sweep.
+
 ## Phase 6 post-#392 current-main re-profile — 2026-04-23
 
 **Scope:** refresh the Phase 6 performance source of truth on fresh `main`
