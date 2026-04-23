@@ -1,5 +1,155 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#442 current-main prefill/decode profile refresh (2026-04-23)
+
+**Scope:** refresh the Phase 6 source of truth after PR
+[#442](https://github.com/ericflo/kiln/pull/442) merged, with one fresh
+decode trace and one fresh prompt-heavy prefill trace on current `main`.
+
+**Preflight outcome:** proceed. Fresh GitHub state showed PR #442 merged into
+`main`; the checked-in `PROFILING.md` did not yet contain a post-#442
+current-main section with separate top-3 decode and prefill hotspots; GitHub PR
+search plus Cloud Eric pending/running task search found no overlapping newer
+open/merged PR or pending/running kiln task for this exact profile refresh. The
+profiled checkout was `a203330` (`Batch Metal auxiliary weight uploads (#443)`),
+which is current `main` and includes #442 (`0937e4b`).
+
+**Hardware / image:** RunPod on-demand `NVIDIA RTX A6000`, image
+`ghcr.io/ericflo/kiln-runpod:latest`, driver `550.127.08`, CUDA toolkit
+`12.4`. The pod had the baked `nsys 2023.4.4`, so `nvidia-nsys-cli==2024.5.1`
+was installed from NVIDIA's wheel and `/usr/local/bin/nsys` was used for both
+capture and stats export.
+
+**Build / setup commands:**
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+cargo build --release --features cuda,nvtx --bin kiln-bench
+python3 scripts/c12_bench_runner.py --help
+```
+
+The model checkpoint was already present at `/workspace/qwen3.5-4b`.
+
+**Baseline decode command:**
+
+```bash
+KILN_SPEC_METHOD=off \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+  > profiling-artifacts/post442_decode_baseline.json
+```
+
+Baseline single-request latency arm: **494** prompt tokens, **394.9 ms**
+prefill, **19.7 ms** mean ITL, **50.6 tok/s** decode.
+
+**Nsight commands run:**
+
+```bash
+KILN_SPEC_METHOD=off \
+/usr/local/bin/nsys profile -t cuda,nvtx \
+  --sample=none --cpuctxsw=none --delay=70 --duration=20 \
+  -o /workspace/post442-decode \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training
+
+KILN_SPEC_METHOD=off \
+/usr/local/bin/nsys profile -t cuda,nvtx \
+  --sample=none --cpuctxsw=none --delay=25 --duration=12 \
+  -o /workspace/post442-prefill \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b \
+    --paged --prompt-tokens 8192 --max-output-tokens 1 \
+    --skip-training --latency-only
+
+/usr/local/bin/nsys stats \
+  --report cuda_gpu_kern_sum \
+  --report nvtx_kern_sum \
+  --report nvtx_pushpop_sum \
+  --format csv --output /workspace/post442-decode \
+  /workspace/post442-decode.nsys-rep
+
+/usr/local/bin/nsys stats \
+  --report cuda_gpu_kern_sum \
+  --report nvtx_kern_sum \
+  --report nvtx_pushpop_sum \
+  --format csv --output /workspace/post442-prefill \
+  /workspace/post442-prefill.nsys-rep
+```
+
+The task's literal prefill `--delay=3 --duration=4` window would have captured
+model loading on this pod. The final replacement window above was chosen after
+observing model load in the **25.1-31.6 s** range; the committed run reported
+**8180** prompt tokens, **3423.5 ms** prefill, and **2389 tok/s** prompt
+throughput.
+
+### Decode top hotspots
+
+Source: `profile-out/post442_decode_nvtx_pushpop_sum.csv`.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/gates` | **17.9%** |
+| 2 | `:kiln/gdn/gated_norm` | **17.3%** |
+| 3 | `:kiln/gdn/qk_norm` | **15.0%** |
+
+Decode kernel-level cross-check:
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `Marlin<(256,1,8,8,4,8)>` | **14.4%** |
+| 2 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64...` | **11.6%** |
+| 3 | `ampere_bf16_s16816gemm_bf16_128x64...` | **9.7%** |
+
+### Prefill top hotspots
+
+Source: `profile-out/post442_prefill_nvtx_pushpop_sum.csv`. The table below
+excludes the two-token decode tail `:kiln/lm_head` range from the prefill
+ranking; it is present in the trace at **18.5%** but is not a prefill hotspot.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/in_proj` | **32.0%** |
+| 2 | `:kiln/attn/full/prefill_initial` | **14.4%** |
+| 3 | `:kiln/mlp/gate` | **7.0%** |
+
+Prefill kernel-level cross-check:
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `gdn_full_chunk_forward_kernel` | **33.6%** |
+| 2 | `Marlin<(256,4,16,4,4,8)>` | **11.8%** |
+| 3 | `bmul_f32` | **8.8%** |
+
+### Verdict
+
+Fresh post-#442 evidence does **not** reopen FlashInfer paged decode. The
+decode wall-clock top 3 remains entirely GDN-side, and the full-attention
+projection region is still small (`:kiln/proj/qkv` **3.1%**, `:kiln/proj/o`
+**0.9%** in the decode NVTX table).
+
+Further GDN work remains the supported Phase 6 frontier. Decode is still
+dominated by GDN gate/norm ranges, while prompt-heavy prefill still has
+`gdn_full_chunk_forward_kernel` as the largest GPU-kernel bucket (**33.6%**)
+and GDN-side wall-clock ranges at the top of the prefill NVTX table.
+
+**Committed artifacts:**
+
+- `profile-out/post442_decode_cuda_gpu_kern_sum.csv`
+- `profile-out/post442_decode_nvtx_kern_sum.csv`
+- `profile-out/post442_decode_nvtx_pushpop_sum.csv`
+- `profile-out/post442_prefill_cuda_gpu_kern_sum.csv`
+- `profile-out/post442_prefill_nvtx_kern_sum.csv`
+- `profile-out/post442_prefill_nvtx_pushpop_sum.csv`
+
 ## Phase 6 post-#415 current-main native MTP A/B refresh (2026-04-23)
 
 **Scope:** refresh the current-main source of truth for native MTP after PR
