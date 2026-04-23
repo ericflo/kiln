@@ -50,6 +50,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_paged_kv_head_major_read(&self) -> bool {
+        false
+    }
+
     fn supports_gdn_forward_substitution(&self) -> bool {
         false
     }
@@ -136,6 +140,22 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _softmax_scale: f32,
         _causal: bool,
     ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Materialize a contiguous head-major K/V view from a contiguous paged
+    /// cache slot run.
+    ///
+    /// `k_pool`/`v_pool`: `[total_slots, num_kv_heads, head_dim]`.
+    /// Returns `[1, num_kv_heads, seq_len, head_dim]` tensors suitable for
+    /// head-major SDPA.
+    fn paged_kv_head_major_read(
+        &self,
+        _k_pool: &Tensor,
+        _v_pool: &Tensor,
+        _start_slot: usize,
+        _seq_len: usize,
+    ) -> Result<Option<(Tensor, Tensor)>> {
         Ok(None)
     }
 
