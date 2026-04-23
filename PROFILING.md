@@ -1,5 +1,60 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
+
+**Scope:** re-check the queued "prototype vLLM-style block-tiled
+recurrent-state update in the full-chunk GDN kernel" task on fresh `main`
+after PR [#412](https://github.com/ericflo/kiln/pull/412), and stop at docs if
+current-main evidence already shows this exact slice has been attempted and
+consumed.
+
+**Preflight outcome:** stop with docs only. On fresh `main` at `e516f24`
+(2026-04-23):
+
+- PR [#412](https://github.com/ericflo/kiln/pull/412) is merged and doc-only
+  (`PROFILING.md` only);
+- there is still no **merged or open** PR that lands a kept block-tiled
+  recurrent-state update in
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`;
+- `crates/kiln-model/src/backend/cuda.rs` still routes paged decode through
+  `kiln_flash_attn::flash_attn_paged_decode(...)`;
+- `crates/kiln-gdn-kernel/src/lib.rs` still says the core `chunk_gla_fwd`
+  vendor already landed, so that old queue item remains consumed;
+- but `PROFILING.md` no longer leaves this tiled recurrent-state step as live
+  remaining work: the existing
+  ["Post-#406 tiled full-chunk recurrent-state update"](#post-406-tiled-full-chunk-recurrent-state-update--2026-04-23)
+  section already records the exact same vLLM-style tiled epilogue retry,
+  parity result, warmed same-pod control, and revert verdict.
+
+That last point fails the task's remaining-work precondition. Fresh `main`
+already says this slice was tried and rejected:
+
+- parity passed;
+- fresh-first timing looked faster;
+- warmed control on the same pod measured **3112.7 ms** on `main` vs
+  **3167.5 ms** on the patched branch;
+- the candidate was therefore **1.8% slower**, which missed the `>=3%`
+  keep bar and was reverted before PR [#411](https://github.com/ericflo/kiln/pull/411)
+  merged.
+
+**Decision:** no implementation follow-up and no new RunPod spend.
+
+The honest current-main conclusion is that this exact bounded tiled
+recurrent-state retry is already consumed. Re-running it would duplicate the
+same failed frontier, not advance Phase 6. The broader GDN path is still the
+active area, but this particular structural slice is not remaining work
+anymore on fresh `main`.
+
+For avoidance of doubt: FlashInfer-style paged decode also remains below the
+reopen threshold on Qwen3.5-4B. PR [#412](https://github.com/ericflo/kiln/pull/412)
+already reconfirmed that the decode top hotspots remain GDN-only and that the
+full-attention decode region a FlashInfer port would replace is still
+sub-floor.
+
+**Validation:** no pod launched; no CUDA files changed; no build, test, or
+benchmark commands run because the fresh-main preflight already showed this
+task was obsolete.
+
 ## Phase 6 post-#411 recheck — FlashInfer paged decode still does not reopen (2026-04-23)
 
 **Scope:** re-check the queued "vendor minimal FlashInfer-style paged GQA
