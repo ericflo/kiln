@@ -985,8 +985,8 @@ pub const C44_LAYER1_F32_ROW_TAP_NAMES: &[&str] = &[
 /// reference (`scripts/mtp_h_main_reference_dump.py --c45-taps`) both mirror
 /// this exact order.
 pub const C45_LAYER1_ROW_TAP_NAMES: &[&str] = &[
-    "layer_1_residual_input_f32_row_values",
     "layer_1_input_norm_rms_inv_scalar",
+    "layer_1_input_norm_rms_inv_scalar_extracted_values",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
 ];
@@ -3034,6 +3034,20 @@ mod tests {
     }
 
     #[test]
+    fn c45_layer1_row_tap_names_enumerate_expected_boundaries() {
+        assert_eq!(C45_LAYER1_ROW_TAP_NAMES.len(), 4);
+        assert_eq!(C45_LAYER1_ROW_TAP_NAMES[0], "layer_1_input_norm_rms_inv_scalar");
+        assert_eq!(
+            C45_LAYER1_ROW_TAP_NAMES[1],
+            "layer_1_input_norm_rms_inv_scalar_extracted_values"
+        );
+        assert_eq!(
+            C45_LAYER1_ROW_TAP_NAMES[3],
+            "layer_1_input_norm_pre_weight_row_reconstructed"
+        );
+    }
+
+    #[test]
     fn c41_layer1_capture_records_then_drains() {
         let _guard = test_env_lock();
         unsafe {
@@ -3236,6 +3250,62 @@ mod tests {
         let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
         capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &a).unwrap();
         assert!(drain_c44_layer1_f32_row_capture().is_empty());
+    }
+
+    #[test]
+    fn c45_layer1_row_capture_records_then_drains() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+
+        capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar", &a).unwrap();
+        assert!(drain_c45_layer1_row_capture().is_empty());
+        assert!(!is_c45_layer1_row_capture_armed());
+        assert!(!should_capture_c45_layer1_row_tap_for_layer(1));
+
+        arm_c45_layer1_row_capture();
+        assert!(is_c45_layer1_row_capture_armed());
+        assert!(should_capture_c45_layer1_row_tap_for_layer(1));
+        assert!(!should_capture_c45_layer1_row_tap_for_layer(0));
+        capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar", &b).unwrap();
+        capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar_extracted_values", &a)
+            .unwrap();
+        let drained = drain_c45_layer1_row_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "layer_1_input_norm_rms_inv_scalar");
+        assert_eq!(drained[0].1, vec![1]);
+        assert_eq!(drained[0].2, vec![10.0]);
+        assert_eq!(
+            drained[1].0,
+            "layer_1_input_norm_rms_inv_scalar_extracted_values"
+        );
+        assert_eq!(drained[1].1, vec![3]);
+        assert_eq!(drained[1].2, vec![1.0, 2.0, 3.0]);
+
+        assert!(!is_c45_layer1_row_capture_armed());
+        capture_c45_layer1_row_tap("layer_1_input_norm_pre_weight_row_scalar_values", &a)
+            .unwrap();
+        assert!(drain_c45_layer1_row_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS");
+        }
+    }
+
+    #[test]
+    fn c45_layer1_row_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS");
+        }
+        arm_c45_layer1_row_capture();
+        assert!(!is_c45_layer1_row_capture_armed());
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_c45_layer1_row_tap("layer_1_input_norm_rms_inv_scalar", &a).unwrap();
+        assert!(drain_c45_layer1_row_capture().is_empty());
     }
 
     #[test]
@@ -3635,9 +3705,9 @@ mod tests {
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c45 = vec![
             (
-                "layer_1_residual_input_f32_row_values".to_string(),
-                vec![2],
-                vec![0.31_f32, 0.32],
+                "layer_1_input_norm_rms_inv_scalar".to_string(),
+                vec![1, 1, 1],
+                vec![0.31_f32],
             ),
             (
                 "layer_1_input_norm_pre_weight_row_reconstructed".to_string(),
@@ -3672,7 +3742,7 @@ mod tests {
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
         let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
-        assert!(names.contains(&"c45__layer_1_residual_input_f32_row_values"));
+        assert!(names.contains(&"c45__layer_1_input_norm_rms_inv_scalar"));
         assert!(names.contains(&"c45__layer_1_input_norm_pre_weight_row_reconstructed"));
         assert!(names.contains(&"meta__c45_tap_ids"));
 

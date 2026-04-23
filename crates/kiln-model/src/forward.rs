@@ -1655,11 +1655,12 @@ fn capture_c44_layer1_f32_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     Ok(())
 }
 
-/// Phase C45: split the previously-bad C44 row-level scalar-affine site one
-/// step further so the replay dump can distinguish "selected row values are
-/// already wrong" vs "scalar multiply introduces the drift" vs "flat scalar
-/// multiply stays shared-good and divergence only appears when reconstructing
-/// the row-shaped output".
+/// Phase C45: keep the audit strictly inside the previously-bad row-local
+/// scalar multiply so the replay dump can distinguish "the row-local scalar
+/// tensor is fine", "the scalar extraction path already drifts", "the actual
+/// multiply introduces the drift", or "the multiplied flat row stays
+/// shared-good and divergence only appears when reconstructing the row-shaped
+/// output".
 fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let (batch, seq_len, hidden) = x_f32
@@ -1669,10 +1670,6 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
 
     let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
     let residual_values = last_row.reshape((batch, hidden))?.contiguous()?;
-    crate::mtp_debug::capture_c45_layer1_row_tap(
-        "layer_1_residual_input_f32_row_values",
-        &residual_values,
-    )?;
 
     let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
     let rms_inv = (variance + eps)?.sqrt()?.recip()?;
@@ -1682,6 +1679,7 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
         &rms_inv_row,
     )?;
 
+    let mut extracted_scalars = Vec::with_capacity(batch);
     let mut row_values = Vec::with_capacity(batch);
     let mut reconstructed_rows = Vec::with_capacity(batch);
     for batch_idx in 0..batch {
@@ -1693,10 +1691,19 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
             "C45 row audit expected one rms_inv scalar per batch row, got {}",
             scale_vals.len()
         );
-        let scaled_values = row.affine(scale_vals[0] as f64, 0.0)?.contiguous()?;
+        let extracted = scale_vals[0];
+        extracted_scalars.push(extracted);
+        let scaled_values = row.affine(extracted as f64, 0.0)?.contiguous()?;
         row_values.push(scaled_values.clone());
         reconstructed_rows.push(scaled_values.reshape((1, 1, hidden))?);
     }
+
+    let extracted_scalars =
+        Tensor::from_slice(&extracted_scalars, (batch,), &Device::Cpu)?.contiguous()?;
+    crate::mtp_debug::capture_c45_layer1_row_tap(
+        "layer_1_input_norm_rms_inv_scalar_extracted_values",
+        &extracted_scalars,
+    )?;
 
     let row_value_refs: Vec<&Tensor> = row_values.iter().collect();
     let scalar_values = Tensor::cat(&row_value_refs, 0)?;
