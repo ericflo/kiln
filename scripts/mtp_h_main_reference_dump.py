@@ -1090,7 +1090,10 @@ def run_reference_forward(
             )
         for name in wanted:
             if name in c41_captures:
-                taps[f"c41__{name}"] = c41_captures[name]
+                tensor = c41_captures[name]
+                if tensor.ndim >= 2:
+                    tensor = tensor[:, -1:, ...].contiguous()
+                taps[f"c41__{name}"] = tensor
 
     # Free the model and all retained activations before returning.
     del model, out, hs

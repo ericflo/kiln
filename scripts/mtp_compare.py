@@ -580,6 +580,7 @@ def _compare_pair(
     atol: float,
     rtol: float,
     emit,
+    focus_keys: Optional[List[str]] = None,
 ) -> Tuple[bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]:
     """Compare a single (kiln, ref) pair. Returns (all_ok, first_divergence,
     rows, kiln_meta, ref_meta). `label` is shown in headers for multi-pair
@@ -618,10 +619,13 @@ def _compare_pair(
     all_ok = True
     rows: List[Dict[str, object]] = []
     canonical_order = _ordered_taps(kiln_arr, ref_arr)
+    if focus_keys is not None:
+        canonical_order = [name for name in canonical_order if name in set(focus_keys)]
 
     # Report missing-on-one-side first so the table itself is uniform width.
-    missing_in_kiln = [n for n in (TAP_ORDER + SUBOP_ORDER) if n in ref_arr and n not in kiln_arr]
-    missing_in_ref = [n for n in (TAP_ORDER + SUBOP_ORDER) if n in kiln_arr and n not in ref_arr]
+    missing_probe = focus_keys if focus_keys is not None else (TAP_ORDER + SUBOP_ORDER)
+    missing_in_kiln = [n for n in missing_probe if n in ref_arr and n not in kiln_arr]
+    missing_in_ref = [n for n in missing_probe if n in kiln_arr and n not in ref_arr]
     for n in missing_in_kiln:
         emit(f"{n:<22} MISSING IN KILN DUMP")
         all_ok = False
@@ -651,8 +655,20 @@ def _compare_pair(
     if all_ok:
         emit("  pair verdict: all taps match within tolerance.")
     else:
-        cause = PRIMARY_HYPOTHESIS.get(first_div) or SUBOP_HYPOTHESIS.get(
-            first_div, "<unknown tap>"
+        base_first_div = first_div
+        for prefix in ("b11__", "b12__", "c41__", "c6__", "c7__"):
+            if base_first_div.startswith(prefix):
+                base_first_div = base_first_div[len(prefix) :]
+                break
+        cause = (
+            PRIMARY_HYPOTHESIS.get(first_div)
+            or SUBOP_HYPOTHESIS.get(base_first_div)
+            or B11_HYPOTHESIS.get(base_first_div)
+            or B12_HYPOTHESIS.get(base_first_div)
+            or C41_HYPOTHESIS.get(base_first_div)
+            or C6_HYPOTHESIS.get(base_first_div)
+            or C7_HYPOTHESIS.get(base_first_div)
+            or "<unknown tap>"
         )
         emit(f"  pair verdict: first divergence at tap '{first_div}'.")
         emit(f"    Most-likely cause: {cause}")
@@ -1875,9 +1891,12 @@ def main() -> int:
         Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]
     ] = []
     overall_ok = True
+    focus_keys = None
+    if args.c41:
+        focus_keys = [f"c41__{name}" for name in C41_LAYER1_TAP_NAMES]
     for label, kpath, rpath in pairs:
         ok, first_div, rows, km, rm = _compare_pair(
-            label, kpath, rpath, args.atol, args.rtol, emit
+            label, kpath, rpath, args.atol, args.rtol, emit, focus_keys=focus_keys
         )
         pair_results.append((label, ok, first_div, rows, km, rm))
         if not ok:
