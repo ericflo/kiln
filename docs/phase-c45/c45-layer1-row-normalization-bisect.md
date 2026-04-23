@@ -154,3 +154,38 @@ Evidence:
 
 - `profiling-artifacts/c45_resolution_seed0_compare.txt`
 - `profiling-artifacts/c45_resolution_seed1_compare.txt`
+
+## 2026-04-23 row-shaped broadcast-mul boundary verdict
+
+Fresh preflight on current `origin/main` (`4512877`, with later unrelated Metal
+PR #449 also present) confirmed that PR #448 is merged and that the checked-in
+C45 evidence still names `layer_1_input_norm_pre_weight_row_broadcast_output`
+as the earliest shared bad tap, with
+`layer_1_input_norm_last_row_flat_values` as the last shared-good tap.
+
+A fresh A100 fallback rerun kept that tap ordering on both representative
+seeds, but the added C45 operand diagnostic closes the boundary as operand-drift
+amplification rather than an independent production `broadcast_mul` bug:
+
+- seed 0 (`profiling-artifacts/c45_broadcast_seed0_compare.txt`): earliest
+  shared bad tap = `layer_1_input_norm_pre_weight_row_broadcast_output`; last
+  shared-good tap = `layer_1_input_norm_last_row_flat_values`; same-side product
+  residuals are tiny (`kiln max=8.34e-07`, `ref max=7.15e-07`); predicted
+  product max diff equals observed output max diff (`1.38e-01`); prompt=494,
+  prefill=`7671.88 ms`, decode=`44.90 tok/s`, `alpha=0.6842`.
+- seed 1 (`profiling-artifacts/c45_broadcast_seed1_compare.txt`): earliest
+  shared bad tap = `layer_1_input_norm_pre_weight_row_broadcast_output`; last
+  shared-good tap = `layer_1_input_norm_last_row_flat_values`; same-side product
+  residuals are tiny (`kiln max=1.19e-06`, `ref max=1.73e-06`); predicted
+  product max diff equals observed output max diff (`1.43e-01`); prompt=508,
+  prefill=`361.04 ms`, decode=`28.74 tok/s`, `alpha=0.2929`.
+
+Resolved verdict: the row-shaped broadcast multiply is not currently evidence
+of a production RMSNorm shape/casting bug or an HF mirror mismatch. Both sides'
+`broadcast_mul` outputs are exactly explained by their own captured row and
+scalar operands; the apparent first-bad multiply output is the current C45
+allclose threshold exposing amplified but previously tolerated operand drift.
+The next exact target is therefore the upstream operand drift budget feeding
+this multiply, starting with the row-local RMS scalar / selected last-row
+provenance under a tighter C45 tolerance or a new operand-error-budget tap, not
+a production `broadcast_mul` code change.
