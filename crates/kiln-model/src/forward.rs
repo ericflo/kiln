@@ -2856,7 +2856,7 @@ fn gdn_recurrent_prefill_native_head_last(
     state: &mut Tensor, // [B, nv, dk, dv]
 ) -> Result<Option<Tensor>> {
     let (_, seq_len, _, _) = q.dims4()?;
-    if seq_len <= 1
+    if seq_len == 0
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
         || !backend.supports_gdn_recurrent_prefill_native_head_last()
@@ -3126,17 +3126,18 @@ pub fn gated_deltanet_forward(
     // parity oracle exercised by `kiln-rmsnorm-kernel`'s
     // `parity_l2_qk_norm_*` tests.
     let scale = 1.0 / (dk as f64).sqrt();
-    let recurrent_prefill_unexpanded_qk = input_dtype == DType::BF16
-        && seq_len > 1
+    let recurrent_unexpanded_qk = input_dtype == DType::BF16
+        && seq_len >= 1
         && seq_len <= GDN_RECURRENT_PREFILL_MAX_TOKENS
         && dk == 128
         && gqa_ratio > 1
         && !capture_b11_taps
-        && backend.supports_gdn_recurrent_prefill_head_last();
+        && !capture_c41_taps
+        && backend.supports_gdn_recurrent_prefill_native_head_last();
     let (q, k, qk_expanded) = {
         #[cfg(feature = "metal")]
         {
-            if recurrent_prefill_unexpanded_qk {
+            if recurrent_unexpanded_qk {
                 kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                 let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
                 (q, k, false)
@@ -3278,7 +3279,7 @@ pub fn gated_deltanet_forward(
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
-    let native_recurrent_prefill = if recurrent_prefill_unexpanded_qk {
+    let native_recurrent_prefill = if recurrent_unexpanded_qk {
         let v_recur = v.to_dtype(input_dtype)?;
         gdn_recurrent_prefill_native_head_last(
             backend,
