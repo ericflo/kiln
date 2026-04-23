@@ -189,6 +189,41 @@ as the front-door verdict, then bisect why standard-workload seeds 1 and 2
 stay trapped in the identity-biased reject regime while seed 0 escapes it on
 the same current `main`.
 
+## Phase C37 post-#420 seed0 vs seed1 `h_main` audit (2026-04-23)
+
+**Scope:** after PR [#420](https://github.com/ericflo/kiln/pull/420), rerun the
+standard native-MTP workload on fresh `main` and check whether the escaping
+seed (`0`) vs trapped seed (`1`) split is already visible in the base-model
+`h_main` path at `mtp_pos=0`, using the existing
+`scripts/c15_h_main_drift_audit.py` tooling.
+
+**Preflight:** still live on fresh `main` at `59ea3b5` (2026-04-23). No newer
+open or merged PR already committed this exact post-#420 seed0-vs-seed1
+artifact, and the current-main workload still splits the same way:
+
+| seed | prompt tokens | decode tok/s | alpha |
+| --- | ---: | ---: | ---: |
+| 0 | 494 | 44.27 | 0.7397 |
+| 1 | 508 | 24.23 | 0.3093 |
+
+**Source-of-truth verdict:** the seed split is already visible in `h_main`, but
+it is **not** a worse step-0 mismatch on the trapped seed. Seed 0 stays
+near-clean across its 4 `mtp_pos=0` dumps (min cos **0.998639**, mean cos
+**0.999197**, max|Δ| **0.5999**). Seed 1 starts equally clean at step 0
+(`cos=0.999505`) but diverges materially after repeated `mtp_pos=0`
+iterations: min cos **0.985204** at step 6, mean cos **0.997293**, max|Δ|
+**2.5313**, drift-growth ratio **3.345x**.
+
+That makes the trapped seed's late pos-0 hidden-state evolution the new
+correctness anchor. The split is no longer just "identity bias happens on some
+seeds"; on the trapped workload, the base-model path itself walks away from the
+HF reference before the draft path escapes.
+
+**Recommendation:** do **not** queue new kernel work from this result. Keep the
+next task on MTP correctness and target seed 1's late `mtp_pos=0` window
+(steps 5-6): compare accept/reject bookkeeping, draft-token carry-forward, and
+pos-0 state evolution there before reopening any decode-kernel vendor work.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled

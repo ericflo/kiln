@@ -1,0 +1,68 @@
+{
+  "verdict": "DRIFT",
+  "strict_cos_threshold": 0.999,
+  "fp32_reference": false,
+  "statuses": {
+    "pos_0": "drift",
+    "pos_2": "no_dumps"
+  },
+  "reports": {
+    "pos_0": {
+      "pos": 0,
+      "status": "drift",
+      "fp32_reference": false,
+      "chained_seq_len": 497,
+      "first_base_pos": 494,
+      "strict_threshold": 0.999,
+      "drift_growth": {
+        "step0_drift": 0.001361250877380371,
+        "stepN_drift": 0.0005434751510620117,
+        "ratio": 0.3992468692529994
+      },
+      "steps": [
+        {
+          "step": 0,
+          "base_pos": 494,
+          "cos_sim": 0.9986387491226196,
+          "max_abs_delta": 0.599853515625,
+          "rel_err_mean": 199.07106018066406,
+          "kiln_h_norm": 155.5940399169922,
+          "ref_h_norm": 155.46237182617188
+        },
+        {
+          "step": 1,
+          "base_pos": 495,
+          "cos_sim": 0.9990803003311157,
+          "max_abs_delta": 0.5,
+          "rel_err_mean": 0.19181378185749054,
+          "kiln_h_norm": 153.85545349121094,
+          "ref_h_norm": 153.80259704589844
+        },
+        {
+          "step": 2,
+          "base_pos": 496,
+          "cos_sim": 0.9996134042739868,
+          "max_abs_delta": 0.3125,
+          "rel_err_mean": 0.09821759164333344,
+          "kiln_h_norm": 158.5428466796875,
+          "ref_h_norm": 158.39894104003906
+        },
+        {
+          "step": 3,
+          "base_pos": 497,
+          "cos_sim": 0.999456524848938,
+          "max_abs_delta": 0.375,
+          "rel_err_mean": 0.18770082294940948,
+          "kiln_h_norm": 143.873046875,
+          "ref_h_norm": 143.65789794921875
+        }
+      ]
+    },
+    "pos_2": {
+      "pos": 2,
+      "status": "no_dumps",
+      "reason": "no captures at /workspace/c37/seed0/mtp_pos-2/",
+      "steps": []
+    }
+  }
+}
