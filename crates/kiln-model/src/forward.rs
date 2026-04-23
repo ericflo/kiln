@@ -1611,6 +1611,50 @@ fn capture_c43_layer1_preweight_taps(x: &Tensor, weight: &Tensor, eps: f64) -> R
     Ok(())
 }
 
+/// Phase C44: capture only the last replay row after `x.to_dtype(F32)`, the
+/// matching `rms_inv` scalar for that row, and the normalized row after
+/// applying the shared-good scalar. This distinguishes "bad row before
+/// scaling" from "good row, bad normalization application" without re-dumping
+/// the full C43 tensors.
+fn capture_c44_layer1_f32_row_taps(x: &Tensor, eps: f64) -> Result<()> {
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let (batch, seq_len, _hidden) = x_f32
+        .dims3()
+        .context("C44 row audit expects layer-1 hidden to be [batch, seq, hidden]")?;
+    anyhow::ensure!(seq_len > 0, "C44 row audit requires non-empty sequence");
+
+    let last_row = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
+    crate::mtp_debug::capture_c44_layer1_f32_row_tap("layer_1_residual_input_f32_row", &last_row)?;
+
+    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+    let rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
+    crate::mtp_debug::capture_c44_layer1_f32_row_tap(
+        "layer_1_input_norm_rms_inv_scalar",
+        &rms_inv_row,
+    )?;
+
+    let mut batch_rows = Vec::with_capacity(batch);
+    for batch_idx in 0..batch {
+        let x_row = last_row.narrow(0, batch_idx, 1)?;
+        let scale = rms_inv_row.narrow(0, batch_idx, 1)?;
+        let scale_vals = scale.flatten_all()?.to_vec1::<f32>()?;
+        anyhow::ensure!(
+            scale_vals.len() == 1,
+            "C44 row audit expected one rms_inv scalar per batch row, got {}",
+            scale_vals.len()
+        );
+        batch_rows.push(x_row.affine(scale_vals[0] as f64, 0.0)?);
+    }
+    let batch_refs: Vec<&Tensor> = batch_rows.iter().collect();
+    let normalized_row = Tensor::cat(&batch_refs, 0)?;
+    crate::mtp_debug::capture_c44_layer1_f32_row_tap(
+        "layer_1_input_norm_pre_weight_row_scalar_affine",
+        &normalized_row,
+    )?;
+    Ok(())
+}
+
 /// Apply Rotary Position Embeddings (RoPE) to query and key tensors.
 ///
 /// `q`: [batch, seq_len, num_heads, head_dim]
@@ -5006,6 +5050,7 @@ pub fn model_forward_paged_with_last_hidden(
     crate::mtp_debug::arm_c41_layer1_capture();
     crate::mtp_debug::arm_c42_layer1_norm_capture();
     crate::mtp_debug::arm_c43_layer1_preweight_capture();
+    crate::mtp_debug::arm_c44_layer1_f32_row_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5048,6 +5093,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     crate::mtp_debug::arm_c41_layer1_capture();
     crate::mtp_debug::arm_c42_layer1_norm_capture();
     crate::mtp_debug::arm_c43_layer1_preweight_capture();
+    crate::mtp_debug::arm_c44_layer1_f32_row_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5450,6 +5496,10 @@ pub fn mtp_forward_step(
             // during the base-model forward. Empty when
             // `KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS` is unset.
             let c43_taps = crate::mtp_debug::drain_c43_layer1_preweight_capture();
+            // Phase C44: drain the row-level layer-1 taps stashed during the
+            // base-model forward. Empty when
+            // `KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS` is unset.
+            let c44_taps = crate::mtp_debug::drain_c44_layer1_f32_row_capture();
             // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
             // norm_emb, norm_h, concat, fused) captured above. Empty when
             // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
@@ -5483,6 +5533,7 @@ pub fn mtp_forward_step(
                 &c41_taps,
                 &c42_taps,
                 &c43_taps,
+                &c44_taps,
                 &c6_taps,
                 &c7_taps,
                 &c14_taps,
@@ -5501,6 +5552,7 @@ pub fn mtp_forward_step(
                     c41_taps = c41_taps.len(),
                     c42_taps = c42_taps.len(),
                     c43_taps = c43_taps.len(),
+                    c44_taps = c44_taps.len(),
                     c6_taps = c6_taps.len(),
                     c7_taps = c7_taps.len(),
                     c14_taps = c14_taps.len(),
@@ -5714,6 +5766,8 @@ fn model_forward_paged_inner(
                     crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i);
                 let capture_c43_taps =
                     crate::mtp_debug::should_capture_c43_layer1_preweight_tap_for_layer(i);
+                let capture_c44_taps =
+                    crate::mtp_debug::should_capture_c44_layer1_f32_row_tap_for_layer(i);
                 if capture_c42_taps {
                     capture_c42_layer1_input_norm_taps(
                         &hidden,
@@ -5727,6 +5781,9 @@ fn model_forward_paged_inner(
                         &layer.input_layernorm,
                         config.rms_norm_eps,
                     )?;
+                }
+                if capture_c44_taps {
+                    capture_c44_layer1_f32_row_taps(&hidden, config.rms_norm_eps)?;
                 }
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");

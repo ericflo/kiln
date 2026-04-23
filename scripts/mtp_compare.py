@@ -351,6 +351,21 @@ C43_HYPOTHESIS: Dict[str, str] = {
     "layer_1_post_input_norm": "both pre-weight paths match, but the final (1 + weight) application diverges",
 }
 
+# Phase C44 — narrowed layer-1 row-level audit tap set, in forward-graph
+# order. Must stay in lock-step with `C44_LAYER1_F32_ROW_TAP_NAMES` in
+# `crates/kiln-model/src/mtp_debug.rs` and `scripts/mtp_h_main_reference_dump.py`.
+C44_LAYER1_F32_ROW_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_residual_input_f32_row",
+    "layer_1_input_norm_rms_inv_scalar",
+    "layer_1_input_norm_pre_weight_row_scalar_affine",
+)
+
+C44_HYPOTHESIS: Dict[str, str] = {
+    "layer_1_residual_input_f32_row": "the last replay row is already wrong immediately after x.to_dtype(F32) / row selection",
+    "layer_1_input_norm_rms_inv_scalar": "the row-local RMS inverse scalar diverges despite C43's full-tensor rms_inv matching",
+    "layer_1_input_norm_pre_weight_row_scalar_affine": "the F32 row stays shared-good and divergence first appears when applying normalization to produce the row values",
+}
+
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
 # residual drift is small (0.97-0.98) and the goal is to localize it. A
 # per-layer median below this threshold marks the first layer of interest; if
@@ -1894,6 +1909,116 @@ def _emit_c43_summary(
             "broadcast_mul is bad: layout / row-selection around the "
             "broadcast path is now the lead hypothesis."
         )
+
+
+def _emit_c44_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C44 — layer-1 row-level F32 vs normalized-row audit."""
+    emit("")
+    emit("=" * 78)
+    emit("Phase C44 layer-1 row audit — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]] = {
+        n: {} for n in C44_LAYER1_F32_ROW_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c44__"):
+                continue
+            short = n[len("c44__"):]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+                bool(r["allclose"]),
+            )
+
+    header = "  " + "tap".ljust(42) + " ".join(f"{lab:<52}" for lab in labels)
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C44_LAYER1_F32_ROW_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2, ok = entry
+                captured_any = True
+                tag = "ok" if ok else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<42}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C44 verdict: no C44 row-level taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS=1 and")
+        emit("     re-run mtp_h_main_reference_dump.py with --c44-taps against")
+        emit("     the same kiln dump.")
+        return
+
+    first_shared_bad: Optional[str] = None
+    last_shared_ok: Optional[str] = None
+    first_per_seed: Dict[str, str] = {}
+    for tap in C44_LAYER1_F32_ROW_TAP_NAMES:
+        all_present = True
+        all_ok = True
+        all_bad = True
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                all_present = False
+                all_ok = False
+                all_bad = False
+                continue
+            ok = entry[4]
+            all_ok &= ok
+            all_bad &= not ok
+            if not ok and lab not in first_per_seed:
+                first_per_seed[lab] = tap
+        if all_present and all_ok and first_shared_bad is None:
+            last_shared_ok = tap
+        if all_present and all_bad and first_shared_bad is None:
+            first_shared_bad = tap
+
+    if first_shared_bad is None:
+        emit("Phase C44 verdict: no shared earliest-bad tap across all supplied seeds.")
+        for lab in labels:
+            emit(f"  earliest divergent tap for {lab}: {first_per_seed.get(lab, '<none>')}")
+        emit("  -> Seeds do not yet agree on a single first-bad row-level boundary.")
+        return
+
+    emit(f"  earliest shared bad tap: '{first_shared_bad}'")
+    if last_shared_ok is not None:
+        emit(f"  last shared-good tap: '{last_shared_ok}'")
+    emit(f"Phase C44 verdict: EARLIEST SHARED BAD ROW-LEVEL TAP = '{first_shared_bad}'.")
+    emit(f"    Most-likely cause: {C44_HYPOTHESIS.get(first_shared_bad, '<unknown tap>')}")
+
+    if first_shared_bad == "layer_1_residual_input_f32_row":
+        emit(
+            "  -> Divergence is already present in the last replay row after "
+            "`x.to_dtype(F32)` / row selection, before normalization is applied."
+        )
+    elif first_shared_bad == "layer_1_input_norm_pre_weight_row_scalar_affine":
+        emit(
+            "  -> The F32-cast last replay row and its `rms_inv` scalar stay "
+            "shared-good; divergence first appears only when normalization is "
+            "applied to produce the row values."
+        )
     elif (not broadcast_ok) and (not affine_ok):
         emit(
             "  -> Divergence survives the independent scalar-affine equivalent: "
@@ -2117,6 +2242,18 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c44",
+        action="store_true",
+        help=(
+            "Phase C44 mode: emit the narrowed layer-1 row-level audit over "
+            "the explicit c44__<name> tap set (F32-cast last replay row, "
+            "matching RMS inverse scalar, normalized row after scalar-affine "
+            "application). Defaults atol=1e-2, rtol=1e-1 (bf16-appropriate). "
+            "Verdict names whether divergence is already present in the F32 "
+            "row or first appears only when normalization is applied."
+        ),
+    )
+    ap.add_argument(
         "--c6",
         action="store_true",
         help=(
@@ -2157,7 +2294,7 @@ def main() -> int:
     # noise; the strict bar stays on to catch real structural drops and the
     # comparator report makes bf16-accumulation drift visible via per-position
     # max|Δ| / rel_l2 columns.
-    bf16_mode = args.b10 or args.b11 or args.b12 or args.c41 or args.c42 or args.c43
+    bf16_mode = args.b10 or args.b11 or args.b12 or args.c41 or args.c42 or args.c43 or args.c44
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
     if args.rtol is None:
@@ -2185,6 +2322,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
+    elif args.c44:
+        mode = "layer-1 row-level audit (C44)"
     elif args.c43:
         mode = "layer-1 pre-weight multiply audit (C43)"
     elif args.c42:
@@ -2210,7 +2349,9 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c43:
+    if args.c44:
+        focus_keys = [f"c44__{name}" for name in C44_LAYER1_F32_ROW_TAP_NAMES]
+    elif args.c43:
         focus_keys = [f"c43__{name}" for name in C43_LAYER1_PREWEIGHT_TAP_NAMES]
     elif args.c42:
         focus_keys = [f"c42__{name}" for name in C42_LAYER1_NORM_TAP_NAMES]
@@ -2226,6 +2367,8 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.c44:
+        _emit_c44_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c43:
         _emit_c43_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c42:
