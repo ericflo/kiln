@@ -179,6 +179,27 @@ direction:
   ceiling;
 - decode full attention remains far below the >5% reopen bar.
 
+### Follow-up blocked on RunPod infra — 2026-04-23
+
+Attempted follow-up task `phase6: port one vLLM fused-GDN win into full-chunk
+prefill kernel` stopped before validation because the required RunPod GPU
+environment never became reachable.
+
+- Requested on-demand `NVIDIA RTX A6000` with
+  `ghcr.io/ericflo/kiln-runpod:latest` failed immediately with
+  `SUPPLY_CONSTRAINT`.
+- Fallback launch on on-demand `A40` succeeded at pod creation
+  (`gx9qu9cmmoxrrm`, `$0.44/hr`) but remained `runtime: null` / unreachable for
+  more than 5 minutes and was terminated per task policy.
+- Second launch on on-demand `A100 PCIe` (`i3rgpq7yiehyzo`, `$1.39/hr`) also
+  remained `runtime: null` / unreachable and was terminated. Per the task
+  brief's second-launch rule, this attempt stopped cleanly with a doc-only
+  PR instead of shipping unvalidated CUDA changes.
+
+No parity tests, `8192/1` timing runs, or post-change kernel-share captures
+were executed in this attempt, so the post-`#392` profile above remains the
+current source of truth.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
