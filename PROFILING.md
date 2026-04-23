@@ -492,6 +492,72 @@ warm-`main` rerun showed parity with the branch. The measurement record for the
 control, branch, and warm-control sanity rerun is stored in
 `profiling-artifacts/post403_20260423_prefill_kern.csv`.
 
+### Post-#405 vLLM fused-recurrent audit — 2026-04-23
+
+Fresh-`main` remaining-work preflight passed before deciding whether to edit
+the kernel:
+
+- PR `#405` is merged and doc-only.
+- The recent `#401` / `#403` / `#405` loop did **not** land any source change
+  under `crates/kiln-gdn-kernel/`; `git diff --stat 57f67ae..4ecd7ce -- \
+  crates/kiln-gdn-kernel` is empty on fresh `main`.
+- No newer open or merged PR already audits or edits
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for the same
+  frontier; `gh pr list -R ericflo/kiln --state all --limit 20` tops out at
+  `#405` plus unrelated `#404`.
+
+I then audited the current vLLM upstream source at:
+
+- `vllm/model_executor/layers/fla/ops/fused_recurrent.py`
+- commit `ccaf5ffaa3e1fb2a081b2c9e403ac0e4dfc142c8`
+
+and its recent commits touching the fused recurrent GDN path:
+
+- `22dffca9822987f0e912bfd9635e94bbdd05def3` — raise decode `BV` tile cap from
+  8 to 32
+- `824058076c56164a3772a5f5829bd9662507e5a3` — change recurrent-state layout
+  from `[N, HV, K, V]` to `[N, HV, V, K]`
+- `9e19f8338b4098047175ca3119d5ae0368bcf24a` — add packed recurrent decode fast
+  path
+- `d4cb783c10ffc091af7f09a3b052dceadc06d075` — guard NULL-block decode padding
+
+**Audit verdict:** no single bounded full-chunk prefill win remains to port
+from the current vLLM fused recurrent kernel into
+`crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`.
+
+Why each upstream change does **not** qualify as the requested one-diff port:
+
+- `22dffca9` is decode-only tile sizing. kiln's full-chunk prefill kernel
+  already runs one thread per `dv` lane (`dv <= 128`) and has no analogous
+  `BV=8 -> 32` knob to raise.
+- `82405807` is a cross-cutting recurrent-state ABI/layout refactor, not a
+  narrow kernel diff. Porting it would require coordinated state-layout changes
+  across decode, prefill, bindings, and parity tests.
+- `9e19f833` is a packed **decode** fast path built around mixed-QKV inputs and
+  scalar gate inputs. kiln's full-chunk prefill path consumes chunk matrices
+  (`kkt`, `qkt`, `ks_entry`, `q_s`) instead, so there is no thin plumbing-only
+  transplant.
+- `d4cb783c` fixes continuous-batching decode padding (`NULL_BLOCK_ID=0`).
+  kiln's full-chunk prefill kernel has no equivalent state-index input.
+
+This upstream audit also explains why the recent direct reuse attempts already
+failed to produce a keepable prefill win:
+
+- `#401` weighted-`W` / `decay_last` hoist: parity-safe but slower
+  (`3277.7 ms` baseline vs `3566.0 ms` / `3686.3 ms` branch reruns).
+- `#403` shared-`k_t` row staging: same-pod regression
+  (`3272.4 ms` control vs `4704.0 ms` branch).
+- `#405` front-half triangular packing: warm-arm artifact only
+  (`4785.1 ms` cold control, `3348.3 ms` branch, `3347.1 ms` warm-`main` rerun).
+
+So the current kiln full-chunk code does predate some newer vLLM
+`fused_recurrent_gated_delta_rule` commits, but the remaining diffs are either
+decode-only or too wide to fit this task's "exactly one bounded win" scope. The
+correct outcome for this cycle is therefore doc-only: do **not** make another
+`gdn_full_chunk_forward.cu` edit off the current vLLM fused recurrent frontier.
+See `profiling-artifacts/vllm_audit_20260423.md` for the detailed portability
+table used for this decision.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
