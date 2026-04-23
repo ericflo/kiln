@@ -83,7 +83,9 @@ tap-for-tap.
 Prompt provenance
 -----------------
 
-* If the kiln dump contains a `meta__prompt_tokens_len` scalar and a
+* If the kiln dump contains a `meta__replay_tokens_len` scalar and a
+  `replay_tokens` I32 tensor, we use those directly.
+* Otherwise if the kiln dump contains a `meta__prompt_tokens_len` scalar and a
   `prompt_tokens` I32 tensor, we use those directly.
 * Otherwise we fall back to a canonical 512-token greeting prompt with
   torch seed=42, matching what the kiln bench harness emits by default.
@@ -187,7 +189,7 @@ def load_kiln_dump(path: str) -> Dict[str, object]:
     with safe_open(path, framework="pt", device="cpu") as f:
         for name in f.keys():
             t = f.get_tensor(name)
-            if name == "prompt_tokens":
+            if name in ("prompt_tokens", "replay_tokens"):
                 # Token IDs — keep integral.
                 out[name] = t.to(torch.int64).contiguous()
             elif name.startswith("meta__"):
@@ -1020,13 +1022,25 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    # Resolve the prompt tokens. Prefer kiln-provided `prompt_tokens`, fall
-    # back to the canonical 512-token greeting.
+    # Resolve the replay tokens. Prefer the fully conditioned `replay_tokens`
+    # contract added in C39; fall back to legacy `prompt_tokens`, then to the
+    # canonical 512-token greeting.
     prompt_tokens: Optional[torch.Tensor] = None
-    if "prompt_tokens" in kiln:
+    if "replay_tokens" in kiln:
+        raw = kiln["replay_tokens"]  # type: ignore[assignment]
+        assert isinstance(raw, torch.Tensor), f"replay_tokens must be a tensor, got {type(raw)}"
+        # Kiln writes it as a flat I32 vector; reshape to [1, N].
+        if raw.ndim == 1:
+            prompt_tokens = raw.view(1, -1).to(torch.int64).contiguous()
+        else:
+            prompt_tokens = raw.to(torch.int64).contiguous()
+        print(
+            f"[mtp_h_main_ref] replay_tokens from kiln dump: shape={tuple(prompt_tokens.shape)}",
+            file=sys.stderr,
+        )
+    elif "prompt_tokens" in kiln:
         raw = kiln["prompt_tokens"]  # type: ignore[assignment]
         assert isinstance(raw, torch.Tensor), f"prompt_tokens must be a tensor, got {type(raw)}"
-        # Kiln writes it as a flat I32 vector; reshape to [1, N].
         if raw.ndim == 1:
             prompt_tokens = raw.view(1, -1).to(torch.int64).contiguous()
         else:
@@ -1081,6 +1095,9 @@ def main() -> int:
     out_dict["meta__prompt_tokens_len"] = torch.tensor(
         [int(prompt_tokens.shape[-1])], dtype=torch.int32
     )
+    out_dict["meta__replay_tokens_len"] = torch.tensor(
+        [int(prompt_tokens.shape[-1])], dtype=torch.int32
+    )
     boundary_layers = list(B10_BOUNDARY_LAYERS)
     if args.b12_taps:
         boundary_layers = sorted(set(boundary_layers) | set(B12_GQA_LAYERS))
@@ -1090,6 +1107,7 @@ def main() -> int:
     # Also write the resolved prompt tokens so later reruns can reproduce
     # bit-exactly even if the kiln dump gets rotated.
     out_dict["prompt_tokens"] = prompt_tokens.view(-1).to(torch.int32).contiguous()
+    out_dict["replay_tokens"] = prompt_tokens.view(-1).to(torch.int32).contiguous()
 
     save_file(out_dict, args.out)
     total_bytes = sum(t.numel() * t.element_size() for t in out_dict.values())

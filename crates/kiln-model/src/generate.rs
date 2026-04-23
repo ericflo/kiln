@@ -1739,6 +1739,11 @@ impl ModelRunner {
             }
 
             total_draft_attempts += 1;
+            let mut replay_prefix =
+                Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
+            replay_prefix.extend_from_slice(prompt_tokens);
+            replay_prefix.extend_from_slice(&generated_tokens);
+            crate::mtp_debug::set_h_main_replay_prefix_tokens(&replay_prefix);
             let result = speculative_mtp_decode_step(
                 &*self.backend,
                 last_token,
@@ -1755,8 +1760,9 @@ impl ModelRunner {
                 params,
                 &self.eos_token_ids,
                 &mut rng,
-            )
-            .context("mtp speculative decode step failed")?;
+            );
+            crate::mtp_debug::clear_h_main_replay_prefix_tokens();
+            let result = result.context("mtp speculative decode step failed")?;
 
             if result.draft_accepted {
                 draft_accepted_count += 1;
@@ -2160,6 +2166,11 @@ impl ModelRunner {
                 break;
             }
 
+            let mut replay_prefix =
+                Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
+            replay_prefix.extend_from_slice(&prompt_tokens);
+            replay_prefix.extend_from_slice(&generated_tokens);
+            crate::mtp_debug::set_h_main_replay_prefix_tokens(&replay_prefix);
             let result = speculative_mtp_decode_step(
                 &*self.backend,
                 last_token,
@@ -2176,8 +2187,9 @@ impl ModelRunner {
                 params,
                 &self.eos_token_ids,
                 &mut rng,
-            )
-            .context("mtp speculative decode step failed")?;
+            );
+            crate::mtp_debug::clear_h_main_replay_prefix_tokens();
+            let result = result.context("mtp speculative decode step failed")?;
 
             base_pos += result.base_advance;
             mtp_pos += result.mtp_advance;

@@ -4882,7 +4882,7 @@ pub fn model_forward_paged_with_last_hidden(
     // the MTP dump can serialize them, letting the HF reference replay the
     // same prompt instead of its canonical fallback greeting. No-op when
     // h_main capture is disarmed.
-    crate::mtp_debug::stash_h_main_prompt_tokens(token_ids);
+    crate::mtp_debug::stash_h_main_replay_context(token_ids);
     // Phase B11b: arm the layer-0 GDN sub-op capture window in the same
     // place as h_main so both capture modes drain together inside the MTP
     // dump block. No-op unless `KILN_MTP_DUMP_B11_TAPS=1`, so production
@@ -4931,7 +4931,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     positions_gpu: Option<&Tensor>,
 ) -> Result<(Tensor, Tensor)> {
     crate::mtp_debug::arm_h_main_capture();
-    crate::mtp_debug::stash_h_main_prompt_tokens(token_ids);
+    crate::mtp_debug::stash_h_main_replay_context(token_ids);
     crate::mtp_debug::arm_b11_layer0_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
@@ -5313,6 +5313,7 @@ pub fn mtp_forward_step(
             // paths / when h_main capture was never armed, which matches
             // the pre-B11 dump format (no `prompt_tokens` tensor emitted).
             let prompt_tokens = crate::mtp_debug::drain_h_main_prompt_tokens();
+            let replay_tokens = crate::mtp_debug::drain_h_main_replay_tokens();
             // Phase B11b: drain any layer-0 GDN sub-op taps stashed during
             // the base-model forward. Empty when `KILN_MTP_DUMP_B11_TAPS`
             // is unset, which keeps the dump format bit-identical to B11.
@@ -5348,6 +5349,7 @@ pub fn mtp_forward_step(
                 &taps,
                 &extra_subops,
                 &prompt_tokens,
+                &replay_tokens,
                 &b11_taps,
                 &b12_taps,
                 &c6_taps,
@@ -5362,6 +5364,7 @@ pub fn mtp_forward_step(
                     splice_step = ?splice_step,
                     subops = extra_subops.len(),
                     prompt_tokens_len = prompt_tokens.len(),
+                    replay_tokens_len = replay_tokens.len(),
                     b11_taps = b11_taps.len(),
                     b12_taps = b12_taps.len(),
                     c6_taps = c6_taps.len(),
@@ -5809,7 +5812,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
         let is_last_tile = end == total;
         let mode = if is_last_tile {
             crate::mtp_debug::arm_h_main_capture();
-            crate::mtp_debug::stash_h_main_prompt_tokens(token_ids);
+            crate::mtp_debug::stash_h_main_replay_context(token_ids);
             crate::mtp_debug::arm_b11_layer0_capture();
             LmHeadMode::LastRowWithLastHidden
         } else {

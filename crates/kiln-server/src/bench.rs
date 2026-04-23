@@ -13,6 +13,7 @@ use serde::Serialize;
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
+use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_core::vram::detect_vram;
 use kiln_model::backend as runtime_backend;
@@ -1649,6 +1650,7 @@ fn bench_latency_paged_mtp(
     let mut num_tokens = 1usize; // counting the first token from prefill
     let mut base_pos = actual_prompt_tokens;
     let mut mtp_pos = 0usize;
+    let mut generated_tokens: Vec<TokenId> = Vec::new();
     let mut draft_accepted_count = 0usize;
     let mut total_draft_attempts = 0usize;
     let params = SamplingParams {
@@ -1673,6 +1675,11 @@ fn bench_latency_paged_mtp(
             break;
         }
 
+        generated_tokens.push(last_token);
+        let mut replay_prefix = Vec::with_capacity(prompt_token_ids.len() + generated_tokens.len());
+        replay_prefix.extend_from_slice(&prompt_token_ids);
+        replay_prefix.extend_from_slice(&generated_tokens);
+        kiln_model::mtp_debug::set_h_main_replay_prefix_tokens(&replay_prefix);
         let step_start = Instant::now();
         let step = speculative_mtp_decode_step(
             &*backend,
@@ -1690,8 +1697,9 @@ fn bench_latency_paged_mtp(
             &params,
             &eos_token_ids,
             &mut rng,
-        )
-        .context("speculative_mtp_decode_step failed")?;
+        );
+        kiln_model::mtp_debug::clear_h_main_replay_prefix_tokens();
+        let step = step.context("speculative_mtp_decode_step failed")?;
         let step_time = step_start.elapsed();
 
         if step.accepted_tokens.is_empty() {
@@ -1710,6 +1718,10 @@ fn bench_latency_paged_mtp(
             if num_tokens >= max_output_tokens {
                 break;
             }
+        }
+
+        for &tok in &step.accepted_tokens[..step.accepted_tokens.len().saturating_sub(1)] {
+            generated_tokens.push(tok);
         }
 
         last_token = *step.accepted_tokens.last().unwrap();
