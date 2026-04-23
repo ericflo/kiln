@@ -87,6 +87,17 @@ Layer-1 pre-norm / input-layernorm bisect (Phase C42 — earliest shared bad bou
     already the residual input entering block 1 or appears inside the
     `input_layernorm` math itself.
 
+Layer-1 pre-weight multiply audit (Phase C43 — broadcast path vs independent equivalent):
+    python3 scripts/mtp_compare.py --c43 \\
+        --pair seed0:/tmp/h-kiln-seed0.safetensors,/tmp/h-ref-seed0.safetensors \\
+        --pair seed1:/tmp/h-kiln-seed1.safetensors,/tmp/h-ref-seed1.safetensors
+
+    --c43 defaults atol=1e-2, rtol=1e-1 (bf16-appropriate) and emits a
+    per-seed table for the explicit `c43__<name>` layer-1 pre-weight tap
+    set. The verdict identifies whether divergence is isolated to the
+    existing `broadcast_mul` path or survives the independent scalar-affine
+    equivalent too.
+
 Exit code:
     0 — all taps match within tolerance (all positions, in multi mode)
     1 — at least one tap diverges (normal outcome of a bisect)
@@ -318,6 +329,26 @@ C42_HYPOTHESIS: Dict[str, str] = {
     "layer_1_input_norm_rms_inv": "input_layernorm RMS reduction / eps path diverges on otherwise matching input",
     "layer_1_input_norm_pre_weight": "input_layernorm normalization math diverges before applying (1 + weight)",
     "layer_1_post_input_norm": "input_layernorm weight application diverges after a matching normalized pre-weight tensor",
+}
+
+# Phase C43 — narrowed layer-1 pre-weight multiply audit tap set, in
+# forward-graph order. Must stay in lock-step with
+# `C43_LAYER1_PREWEIGHT_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs` and
+# `scripts/mtp_h_main_reference_dump.py`.
+C43_LAYER1_PREWEIGHT_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_residual_input",
+    "layer_1_input_norm_rms_inv",
+    "layer_1_input_norm_pre_weight_broadcast_mul",
+    "layer_1_input_norm_pre_weight_scalar_affine",
+    "layer_1_post_input_norm",
+)
+
+C43_HYPOTHESIS: Dict[str, str] = {
+    "layer_1_residual_input": "upstream drift is already present before layer 1 input_layernorm",
+    "layer_1_input_norm_rms_inv": "input_layernorm RMS reduction / eps path diverges on otherwise matching input",
+    "layer_1_input_norm_pre_weight_broadcast_mul": "existing broadcast_mul pre-weight path diverges before an independent equivalent is consulted",
+    "layer_1_input_norm_pre_weight_scalar_affine": "divergence survives an independent scalar-affine equivalent, so the bug is not isolated to broadcast/layout alone",
+    "layer_1_post_input_norm": "both pre-weight paths match, but the final (1 + weight) application diverges",
 }
 
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
@@ -1752,6 +1783,130 @@ def _emit_c42_summary(
         )
 
 
+def _emit_c43_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C43 — layer-1 pre-weight multiply audit."""
+    emit("")
+    emit("=" * 78)
+    emit("Phase C43 layer-1 pre-weight multiply audit — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]] = {
+        n: {} for n in C43_LAYER1_PREWEIGHT_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c43__"):
+                continue
+            short = n[len("c43__"):]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+                bool(r["allclose"]),
+            )
+
+    header = "  " + "tap".ljust(42) + " ".join(f"{lab:<52}" for lab in labels)
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C43_LAYER1_PREWEIGHT_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2, ok = entry
+                captured_any = True
+                tag = "ok" if ok else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<42}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C43 verdict: no C43 layer-1 pre-weight taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS=1 and")
+        emit("     re-run mtp_h_main_reference_dump.py with --c43-taps against")
+        emit("     the same kiln dump.")
+        return
+
+    first_shared_bad: Optional[str] = None
+    last_shared_ok: Optional[str] = None
+    first_per_seed: Dict[str, str] = {}
+    for tap in C43_LAYER1_PREWEIGHT_TAP_NAMES:
+        all_present = True
+        all_ok = True
+        all_bad = True
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                all_present = False
+                all_ok = False
+                all_bad = False
+                continue
+            ok = entry[4]
+            all_ok &= ok
+            all_bad &= not ok
+            if not ok and lab not in first_per_seed:
+                first_per_seed[lab] = tap
+        if all_present and all_ok and first_shared_bad is None:
+            last_shared_ok = tap
+        if all_present and all_bad and first_shared_bad is None:
+            first_shared_bad = tap
+
+    if first_shared_bad is None:
+        emit("Phase C43 verdict: no shared earliest-bad tap across all supplied seeds.")
+        for lab in labels:
+            emit(f"  earliest divergent tap for {lab}: {first_per_seed.get(lab, '<none>')}")
+        emit("  -> Seeds do not yet agree on a single first-bad pre-weight boundary.")
+        return
+
+    emit(f"  earliest shared bad tap: '{first_shared_bad}'")
+    if last_shared_ok is not None:
+        emit(f"  last shared-good tap: '{last_shared_ok}'")
+    emit(f"Phase C43 verdict: EARLIEST SHARED BAD PRE-WEIGHT TAP = '{first_shared_bad}'.")
+    emit(f"    Most-likely cause: {C43_HYPOTHESIS.get(first_shared_bad, '<unknown tap>')}")
+
+    broadcast_ok = all(
+        cell["layer_1_input_norm_pre_weight_broadcast_mul"].get(lab, (0.0, 0.0, 0.0, 0.0, False))[4]
+        for lab in labels
+    )
+    affine_ok = all(
+        cell["layer_1_input_norm_pre_weight_scalar_affine"].get(lab, (0.0, 0.0, 0.0, 0.0, False))[4]
+        for lab in labels
+    )
+    if (not broadcast_ok) and affine_ok:
+        emit(
+            "  -> Independent scalar-affine equivalent stays clean while "
+            "broadcast_mul is bad: layout / row-selection around the "
+            "broadcast path is now the lead hypothesis."
+        )
+    elif (not broadcast_ok) and (not affine_ok):
+        emit(
+            "  -> Divergence survives the independent scalar-affine equivalent: "
+            "the earliest bad span stays on the pre-weight values themselves, "
+            "not broadcast/layout alone."
+        )
+    elif last_shared_ok is not None:
+        emit(
+            "  -> The shared drift is now localized to the boundary between "
+            f"'{last_shared_ok}' and '{first_shared_bad}'."
+        )
+
+
 def _emit_c7_summary(
     pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
@@ -1949,6 +2104,19 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c43",
+        action="store_true",
+        help=(
+            "Phase C43 mode: emit the narrowed layer-1 pre-weight multiply "
+            "audit over the explicit c43__<name> tap set (residual input, "
+            "RMS inverse, broadcast-mul pre-weight, scalar-affine pre-weight "
+            "equivalent, post-input-norm output). Defaults atol=1e-2, "
+            "rtol=1e-1 (bf16-appropriate). Verdict names whether divergence "
+            "stays on the existing broadcast path or survives the "
+            "independent equivalent."
+        ),
+    )
+    ap.add_argument(
         "--c6",
         action="store_true",
         help=(
@@ -1989,7 +2157,7 @@ def main() -> int:
     # noise; the strict bar stays on to catch real structural drops and the
     # comparator report makes bf16-accumulation drift visible via per-position
     # max|Δ| / rel_l2 columns.
-    bf16_mode = args.b10 or args.b11 or args.b12 or args.c41 or args.c42
+    bf16_mode = args.b10 or args.b11 or args.b12 or args.c41 or args.c42 or args.c43
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
     if args.rtol is None:
@@ -2017,6 +2185,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
+    elif args.c43:
+        mode = "layer-1 pre-weight multiply audit (C43)"
     elif args.c42:
         mode = "layer-1 pre-norm / input-layernorm bisect (C42)"
     elif args.c41:
@@ -2040,7 +2210,9 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c42:
+    if args.c43:
+        focus_keys = [f"c43__{name}" for name in C43_LAYER1_PREWEIGHT_TAP_NAMES]
+    elif args.c42:
         focus_keys = [f"c42__{name}" for name in C42_LAYER1_NORM_TAP_NAMES]
     elif args.c41:
         focus_keys = [f"c41__{name}" for name in C41_LAYER1_TAP_NAMES]
@@ -2054,6 +2226,8 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.c43:
+        _emit_c43_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c42:
         _emit_c42_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c41:

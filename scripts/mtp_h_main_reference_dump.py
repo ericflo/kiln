@@ -6,6 +6,7 @@ Phase B12  — optional per-layer taps for layers 24..31 + GQA sub-op taps at
              layer 31 (`--b12-taps`), plus optional fp32 reference (`--fp32`).
 Phase C41  — optional transformer-block-1 sub-op taps (`--c41-taps`).
 Phase C42  — optional layer-1 pre-norm / input-layernorm taps (`--c42-taps`).
+Phase C43  — optional layer-1 pre-weight multiply audit taps (`--c43-taps`).
 
 This script produces the independent pure-Python reference counterpart to the
 kiln-side main-model forward (the 24×GDN + 8×GQA stack) so that Phase B10 can
@@ -213,6 +214,17 @@ C42_LAYER1_NORM_TAP_NAMES: Tuple[str, ...] = (
     "layer_1_post_input_norm",
 )
 
+# Phase C43 — ordered layer-1 pre-weight multiply audit tap names. Must stay
+# in lock-step with `C43_LAYER1_PREWEIGHT_TAP_NAMES` in
+# `crates/kiln-model/src/mtp_debug.rs`.
+C43_LAYER1_PREWEIGHT_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_residual_input",
+    "layer_1_input_norm_rms_inv",
+    "layer_1_input_norm_pre_weight_broadcast_mul",
+    "layer_1_input_norm_pre_weight_scalar_affine",
+    "layer_1_post_input_norm",
+)
+
 
 # -----------------------------------------------------------------------------
 # Kiln-dump loader (mirrors mtp_reference_dump.py's loader)
@@ -308,6 +320,36 @@ def resolve_c42_tap_names(kiln_dump: Dict[str, object]) -> List[str]:
         return from_keys
 
     return list(C42_LAYER1_NORM_TAP_NAMES)
+
+
+def resolve_c43_tap_names(kiln_dump: Dict[str, object]) -> List[str]:
+    raw = kiln_dump.get("meta__c43_tap_ids")
+    if isinstance(raw, list) and raw:
+        names: List[str] = []
+        for idx in raw:
+            idx_i = int(idx)
+            if 0 <= idx_i < len(C43_LAYER1_PREWEIGHT_TAP_NAMES):
+                names.append(C43_LAYER1_PREWEIGHT_TAP_NAMES[idx_i])
+        if names:
+            return names
+
+    from_keys = sorted(
+        {
+            key[len("c43__") :]
+            for key in kiln_dump.keys()
+            if key.startswith("c43__")
+        },
+        key=lambda name: (
+            C43_LAYER1_PREWEIGHT_TAP_NAMES.index(name)
+            if name in C43_LAYER1_PREWEIGHT_TAP_NAMES
+            else len(C43_LAYER1_PREWEIGHT_TAP_NAMES),
+            name,
+        ),
+    )
+    if from_keys:
+        return from_keys
+
+    return list(C43_LAYER1_PREWEIGHT_TAP_NAMES)
 
 
 # -----------------------------------------------------------------------------
@@ -927,6 +969,44 @@ def _arm_c42_layer1_norm_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> Lis
     return handles
 
 
+def _arm_c43_layer1_preweight_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List[object]:
+    """Attach hooks for the narrowed Phase C43 pre-weight multiply audit."""
+    handles: List[object] = []
+    layer = base.layers[1]
+    norm = getattr(layer, "input_layernorm", None)
+    if norm is None:
+        return handles
+
+    eps = float(getattr(norm, "variance_epsilon", getattr(norm, "eps", 1e-6)))
+
+    def _pre_hook(_mod, inputs):
+        tensor = inputs[0][0] if isinstance(inputs[0], tuple) else inputs[0]
+        residual = tensor.detach().clone()
+        taps_out["layer_1_residual_input"] = residual
+        residual_f32 = residual.to(torch.float32)
+        rms_inv = torch.rsqrt(residual_f32.square().mean(dim=-1, keepdim=True) + eps)
+        taps_out["layer_1_input_norm_rms_inv"] = rms_inv
+        taps_out["layer_1_input_norm_pre_weight_broadcast_mul"] = residual_f32 * rms_inv
+
+        residual_rows = residual_f32.reshape(-1, residual_f32.shape[-1])
+        rms_rows = rms_inv.reshape(-1)
+        scalar_rows = [
+            row.unsqueeze(0) * float(scale.item())
+            for row, scale in zip(residual_rows, rms_rows)
+        ]
+        taps_out["layer_1_input_norm_pre_weight_scalar_affine"] = torch.cat(
+            scalar_rows, dim=0
+        ).reshape_as(residual_f32)
+
+    def _forward_hook(_mod, _inputs, output):
+        tensor = output[0] if isinstance(output, tuple) else output
+        taps_out["layer_1_post_input_norm"] = tensor.detach().clone()
+
+    handles.append(norm.register_forward_pre_hook(_pre_hook))
+    handles.append(norm.register_forward_hook(_forward_hook))
+    return handles
+
+
 # -----------------------------------------------------------------------------
 # Reference forward
 # -----------------------------------------------------------------------------
@@ -943,6 +1023,8 @@ def run_reference_forward(
     c41_tap_names: Optional[List[str]] = None,
     capture_c42: bool = False,
     c42_tap_names: Optional[List[str]] = None,
+    capture_c43: bool = False,
+    c43_tap_names: Optional[List[str]] = None,
     fp32: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Run HF Qwen3-Next / Qwen3.5 forward with `output_hidden_states=True`.
@@ -959,6 +1041,8 @@ def run_reference_forward(
       GQA sub-op taps under `b12__<name>` keys.
     - `capture_c42=True`: layer-1 residual input + explicit input-layernorm
       intermediates under `c42__<name>` keys.
+    - `capture_c43=True`: layer-1 residual input + split pre-weight multiply
+      taps under `c43__<name>` keys.
     - `fp32=True`: load the HF model in float32 (instead of bfloat16) so the
       comparator can distinguish bf16-accumulation noise from real divergence.
     """
@@ -997,14 +1081,17 @@ def run_reference_forward(
         file=sys.stderr,
     )
 
-    if sum(bool(v) for v in (capture_b11_layer0, capture_c41, capture_c42)) > 1:
-        raise ValueError("capture_b11_layer0, capture_c41, and capture_c42 are mutually exclusive")
+    if sum(bool(v) for v in (capture_b11_layer0, capture_c41, capture_c42, capture_c43)) > 1:
+        raise ValueError(
+            "capture_b11_layer0, capture_c41, capture_c42, and capture_c43 are mutually exclusive"
+        )
 
     # Set up B11b/C41 instrumentation + forward hooks BEFORE the forward.
     b11_captures: Dict[str, torch.Tensor] = {}
     b12_captures: Dict[str, torch.Tensor] = {}
     c41_captures: Dict[str, torch.Tensor] = {}
     c42_captures: Dict[str, torch.Tensor] = {}
+    c43_captures: Dict[str, torch.Tensor] = {}
     hook_handles: List[object] = []
     orig_gdn_forward = None
     if capture_b11_layer0:
@@ -1061,6 +1148,13 @@ def run_reference_forward(
         print(
             "[mtp_h_main_ref] C42 instrumentation armed: layer 1 input_layernorm "
             "pre/post hooks + explicit norm-local intermediates",
+            file=sys.stderr,
+        )
+    elif capture_c43:
+        hook_handles.extend(_arm_c43_layer1_preweight_hooks(base, c43_captures))
+        print(
+            "[mtp_h_main_ref] C43 instrumentation armed: layer 1 input_layernorm "
+            "pre-weight multiply audit hooks",
             file=sys.stderr,
         )
 
@@ -1192,6 +1286,21 @@ def run_reference_forward(
                     tensor = tensor[:, -1:, ...].contiguous()
                 taps[f"c42__{name}"] = tensor
 
+    if capture_c43:
+        wanted = c43_tap_names or list(C43_LAYER1_PREWEIGHT_TAP_NAMES)
+        missing = [n for n in wanted if n not in c43_captures]
+        if missing:
+            print(
+                f"[mtp_h_main_ref] WARNING: C43 instrumentation missed taps: {missing}",
+                file=sys.stderr,
+            )
+        for name in wanted:
+            if name in c43_captures:
+                tensor = c43_captures[name]
+                if tensor.ndim >= 2:
+                    tensor = tensor[:, -1:, ...].contiguous()
+                taps[f"c43__{name}"] = tensor
+
     # Free the model and all retained activations before returning.
     del model, out, hs
     if device.type == "cuda":
@@ -1276,6 +1385,19 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c43-taps",
+        action="store_true",
+        help=(
+            "Also capture the explicit Phase C43 layer-1 pre-weight multiply "
+            "tap set (residual input, RMS inverse, broadcast-mul pre-weight, "
+            "scalar-affine pre-weight equivalent, post-input-norm output). "
+            "Output tensors are emitted under `c43__<name>` keys matching "
+            "C43_LAYER1_PREWEIGHT_TAP_NAMES in crates/kiln-model/src/mtp_debug.rs. "
+            "The exact tap order is resolved from the kiln dump's "
+            "`meta__c43_tap_ids` when present."
+        ),
+    )
+    ap.add_argument(
         "--fp32",
         action="store_true",
         help=(
@@ -1297,6 +1419,7 @@ def main() -> int:
     boundary_layers = resolve_boundary_layers(kiln, capture_b12=args.b12_taps)
     c41_tap_names = resolve_c41_tap_names(kiln) if args.c41_taps else None
     c42_tap_names = resolve_c42_tap_names(kiln) if args.c42_taps else None
+    c43_tap_names = resolve_c43_tap_names(kiln) if args.c43_taps else None
     draft_token_id = int(kiln.get("meta__draft_token_id", -1))
     mtp_pos = int(kiln.get("meta__mtp_pos", -1))
     print(
@@ -1365,6 +1488,8 @@ def main() -> int:
         c41_tap_names=c41_tap_names,
         capture_c42=args.c42_taps,
         c42_tap_names=c42_tap_names,
+        capture_c43=args.c43_taps,
+        c43_tap_names=c43_tap_names,
         fp32=args.fp32,
     )
 
@@ -1396,6 +1521,11 @@ def main() -> int:
     if c42_tap_names:
         out_dict["meta__c42_tap_ids"] = torch.tensor(
             [C42_LAYER1_NORM_TAP_NAMES.index(name) for name in c42_tap_names],
+            dtype=torch.int32,
+        )
+    if c43_tap_names:
+        out_dict["meta__c43_tap_ids"] = torch.tensor(
+            [C43_LAYER1_PREWEIGHT_TAP_NAMES.index(name) for name in c43_tap_names],
             dtype=torch.int32,
         )
     # Also write the resolved prompt tokens so later reruns can reproduce

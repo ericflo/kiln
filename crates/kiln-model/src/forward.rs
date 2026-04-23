@@ -1550,6 +1550,67 @@ fn capture_c42_layer1_input_norm_taps(x: &Tensor, weight: &Tensor, eps: f64) -> 
     Ok(())
 }
 
+/// Phase C43: keep the C42 layer-1 norm boundary context, but split the
+/// pre-weight multiply into the existing broadcast path and an independently
+/// computed scalar-affine equivalent so the replay dump can distinguish
+/// "broadcast/layout/row-selection bug" from "the normalized values
+/// themselves are already wrong".
+fn capture_c43_layer1_preweight_taps(x: &Tensor, weight: &Tensor, eps: f64) -> Result<()> {
+    crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_residual_input", x)?;
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let rms_inv = (variance + eps)?.sqrt()?.recip()?;
+    crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_input_norm_rms_inv", &rms_inv)?;
+
+    let pre_weight_broadcast = x_f32.broadcast_mul(&rms_inv)?;
+    crate::mtp_debug::capture_c43_layer1_preweight_tap(
+        "layer_1_input_norm_pre_weight_broadcast_mul",
+        &pre_weight_broadcast,
+    )?;
+
+    let (batch, seq_len, hidden) = x_f32
+        .dims3()
+        .context("C43 pre-weight audit expects layer-1 hidden to be [batch, seq, hidden]")?;
+    let (r_batch, r_seq, r_hidden) = rms_inv
+        .dims3()
+        .context("C43 pre-weight audit expects rms_inv to be [batch, seq, 1]")?;
+    anyhow::ensure!(
+        (batch, seq_len, r_hidden) == (r_batch, r_seq, 1),
+        "C43 pre-weight audit shape mismatch: x={batch}x{seq_len}x{hidden}, rms_inv={r_batch}x{r_seq}x{r_hidden}"
+    );
+    let mut batch_slices = Vec::with_capacity(batch);
+    for batch_idx in 0..batch {
+        let x_batch = x_f32.narrow(0, batch_idx, 1)?;
+        let rms_batch = rms_inv.narrow(0, batch_idx, 1)?;
+        let mut seq_slices = Vec::with_capacity(seq_len);
+        for seq_idx in 0..seq_len {
+            let x_row = x_batch.narrow(1, seq_idx, 1)?;
+            let scale = rms_batch.narrow(1, seq_idx, 1)?;
+            let scale_vals = scale.flatten_all()?.to_vec1::<f32>()?;
+            anyhow::ensure!(
+                scale_vals.len() == 1,
+                "C43 pre-weight audit expected one rms_inv scalar per row, got {}",
+                scale_vals.len()
+            );
+            seq_slices.push(x_row.affine(scale_vals[0] as f64, 0.0)?);
+        }
+        let seq_refs: Vec<&Tensor> = seq_slices.iter().collect();
+        batch_slices.push(Tensor::cat(&seq_refs, 1)?);
+    }
+    let batch_refs: Vec<&Tensor> = batch_slices.iter().collect();
+    let pre_weight_scalar_affine = Tensor::cat(&batch_refs, 0)?;
+    crate::mtp_debug::capture_c43_layer1_preweight_tap(
+        "layer_1_input_norm_pre_weight_scalar_affine",
+        &pre_weight_scalar_affine,
+    )?;
+
+    let w_f32 = weight.to_dtype(DType::F32)?;
+    let w_plus_one = (w_f32.ones_like()? + w_f32)?;
+    let post = pre_weight_broadcast.broadcast_mul(&w_plus_one)?.to_dtype(x.dtype())?;
+    crate::mtp_debug::capture_c43_layer1_preweight_tap("layer_1_post_input_norm", &post)?;
+    Ok(())
+}
+
 /// Apply Rotary Position Embeddings (RoPE) to query and key tensors.
 ///
 /// `q`: [batch, seq_len, num_heads, head_dim]
@@ -4944,6 +5005,7 @@ pub fn model_forward_paged_with_last_hidden(
     crate::mtp_debug::arm_b12_gqa_capture();
     crate::mtp_debug::arm_c41_layer1_capture();
     crate::mtp_debug::arm_c42_layer1_norm_capture();
+    crate::mtp_debug::arm_c43_layer1_preweight_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -4985,6 +5047,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     crate::mtp_debug::arm_b11_layer0_capture();
     crate::mtp_debug::arm_c41_layer1_capture();
     crate::mtp_debug::arm_c42_layer1_norm_capture();
+    crate::mtp_debug::arm_c43_layer1_preweight_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5383,6 +5446,10 @@ pub fn mtp_forward_step(
             // stashed during the base-model forward. Empty when
             // `KILN_MTP_DUMP_C42_LAYER1_NORM_TAPS` is unset.
             let c42_taps = crate::mtp_debug::drain_c42_layer1_norm_capture();
+            // Phase C43: drain the layer-1 pre-weight multiply taps stashed
+            // during the base-model forward. Empty when
+            // `KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS` is unset.
+            let c43_taps = crate::mtp_debug::drain_c43_layer1_preweight_capture();
             // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
             // norm_emb, norm_h, concat, fused) captured above. Empty when
             // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
@@ -5415,6 +5482,7 @@ pub fn mtp_forward_step(
                 &b12_taps,
                 &c41_taps,
                 &c42_taps,
+                &c43_taps,
                 &c6_taps,
                 &c7_taps,
                 &c14_taps,
@@ -5432,6 +5500,7 @@ pub fn mtp_forward_step(
                     b12_taps = b12_taps.len(),
                     c41_taps = c41_taps.len(),
                     c42_taps = c42_taps.len(),
+                    c43_taps = c43_taps.len(),
                     c6_taps = c6_taps.len(),
                     c7_taps = c7_taps.len(),
                     c14_taps = c14_taps.len(),
@@ -5643,8 +5712,17 @@ fn model_forward_paged_inner(
                     crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
                 let capture_c42_taps =
                     crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i);
+                let capture_c43_taps =
+                    crate::mtp_debug::should_capture_c43_layer1_preweight_tap_for_layer(i);
                 if capture_c42_taps {
                     capture_c42_layer1_input_norm_taps(
+                        &hidden,
+                        &layer.input_layernorm,
+                        config.rms_norm_eps,
+                    )?;
+                }
+                if capture_c43_taps {
+                    capture_c43_layer1_preweight_taps(
                         &hidden,
                         &layer.input_layernorm,
                         config.rms_norm_eps,
