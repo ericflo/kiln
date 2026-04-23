@@ -20,7 +20,8 @@ use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
     model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_streaming, streaming_prefill_enabled_for,
+    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -1494,19 +1495,35 @@ fn bench_latency_paged_mtp(
     // Prefill: paged forward returning (logits, last-position hidden state)
     // so we can seed h_prev for the first MTP draft step.
     let prefill_start = Instant::now();
-    let (prefill_logits, mut h_prev) = model_forward_paged_last_token_with_last_hidden(
-        &*backend,
-        &prompt_token_ids,
-        weights,
-        config,
-        &mut base_cache,
-        &base_block_table,
-        0,
-        Some(&mut linear_state),
-        None,
-        None,
-    )
-    .context("MTP prefill (paged with last-hidden) failed")?;
+    let (prefill_logits, mut h_prev) =
+        if streaming_prefill_enabled_for(device, actual_prompt_tokens) {
+            model_forward_paged_streaming_last_token_with_last_hidden(
+                &*backend,
+                &prompt_token_ids,
+                weights,
+                config,
+                &mut base_cache,
+                &base_block_table,
+                0,
+                Some(&mut linear_state),
+                None,
+            )
+            .context("MTP prefill (streaming paged with last-hidden) failed")?
+        } else {
+            model_forward_paged_last_token_with_last_hidden(
+                &*backend,
+                &prompt_token_ids,
+                weights,
+                config,
+                &mut base_cache,
+                &base_block_table,
+                0,
+                Some(&mut linear_state),
+                None,
+                None,
+            )
+            .context("MTP prefill (paged with last-hidden) failed")?
+        };
 
     // prefill_logits is already [1, 1, V].
     let prefill_last = prefill_logits.squeeze(1)?;

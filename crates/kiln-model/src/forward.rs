@@ -5549,6 +5549,113 @@ pub fn model_forward_paged_streaming(
     )
 }
 
+/// Streaming/tiled MTP prefill.
+///
+/// Same tiled execution as [`model_forward_paged_streaming`], but the final
+/// tile returns both last-token logits and the post-final-norm `h_prev` needed
+/// to seed native MTP decoding.
+pub fn model_forward_paged_streaming_last_token_with_last_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<(Tensor, Tensor)> {
+    model_forward_paged_streaming_last_token_with_last_hidden_with(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        streaming_tile_tokens_for(weights.embed_tokens.device()),
+    )
+}
+
+/// Explicit-tile variant of
+/// [`model_forward_paged_streaming_last_token_with_last_hidden`].
+pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    tile_size: usize,
+) -> Result<(Tensor, Tensor)> {
+    let total = token_ids.len();
+    if total == 0 {
+        anyhow::bail!(
+            "model_forward_paged_streaming_last_token_with_last_hidden requires at least one token"
+        );
+    }
+    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+        anyhow::bail!(
+            "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
+            GDN_CHUNK_SIZE
+        );
+    }
+
+    let mut last_logits: Option<Tensor> = None;
+    let mut last_hidden: Option<Tensor> = None;
+    let mut cursor = 0usize;
+    while cursor < total {
+        let end = (cursor + tile_size).min(total);
+        let is_last_tile = end == total;
+        let mode = if is_last_tile {
+            crate::mtp_debug::arm_h_main_capture();
+            crate::mtp_debug::stash_h_main_prompt_tokens(token_ids);
+            crate::mtp_debug::arm_b11_layer0_capture();
+            LmHeadMode::LastRowWithLastHidden
+        } else {
+            LmHeadMode::Skip
+        };
+
+        let state_for_tile: Option<&mut LinearAttentionState> = linear_state.as_deref_mut();
+        let (tile_logits, tile_hidden) = model_forward_paged_inner(
+            backend,
+            &token_ids[cursor..end],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            start_pos + cursor,
+            state_for_tile,
+            lora,
+            None,
+            mode,
+        )
+        .with_context(|| {
+            format!(
+                "streaming MTP prefill tile [{cursor}, {end}) of {total} (start_pos={})",
+                start_pos + cursor
+            )
+        })?;
+
+        if is_last_tile {
+            last_logits = tile_logits;
+            last_hidden = tile_hidden;
+        }
+
+        cursor = end;
+    }
+
+    Ok((
+        last_logits.context("streaming MTP prefill produced no logits")?,
+        last_hidden.context("streaming MTP prefill produced no h_prev")?,
+    ))
+}
+
 /// Explicit-parameter variant of [`model_forward_paged_streaming`] used by
 /// tests that need to exercise specific tile sizes without manipulating
 /// process-wide env vars (which would race under parallel test runners).
@@ -9006,6 +9113,80 @@ mod tests {
         assert_eq!(mono.dims(), &[1, total, config.vocab_size]);
         assert_eq!(stream.dims(), &[1, tile, config.vocab_size]);
         assert_last_tile_matches(&mono, &stream, total, tile, 1e-5)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_last_hidden_matches_monolithic_cpu() -> Result<()> {
+        let config = streaming_test_config();
+        let device = Device::Cpu;
+        let total = GDN_CHUNK_SIZE * 2 + 7;
+        let tile = GDN_CHUNK_SIZE;
+        let tokens = deterministic_tokens(total, config.vocab_size as u32);
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+
+        let (mut mono_cache, mono_bt) = make_paged_setup(&config, total, 64, &device)?;
+        let mut mono_state = LinearAttentionState::new(&config, &device)?;
+        let (mono_logits, mono_hidden) = model_forward_paged_last_token_with_last_hidden(
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut mono_cache,
+            &mono_bt,
+            0,
+            Some(&mut mono_state),
+            None,
+            None,
+        )?;
+
+        let (mut stream_cache, stream_bt) = make_paged_setup(&config, total, 64, &device)?;
+        let mut stream_state = LinearAttentionState::new(&config, &device)?;
+        let (stream_logits, stream_hidden) =
+            model_forward_paged_streaming_last_token_with_last_hidden_with(
+                &backend,
+                &tokens,
+                &weights,
+                &config,
+                &mut stream_cache,
+                &stream_bt,
+                0,
+                Some(&mut stream_state),
+                None,
+                tile,
+            )?;
+
+        assert_eq!(stream_logits.dims(), &[1, 1, config.vocab_size]);
+        assert_eq!(stream_hidden.dims(), &[1, 1, config.hidden_size]);
+        let logits_diff = (&mono_logits - &stream_logits)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let hidden_diff = (&mono_hidden - &stream_hidden)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(
+            logits_diff <= 1e-5,
+            "streaming MTP prefill logits drifted: max_abs_diff={logits_diff:e}"
+        );
+        assert!(
+            hidden_diff <= 1e-5,
+            "streaming MTP prefill h_prev drifted: max_abs_diff={hidden_diff:e}"
+        );
         Ok(())
     }
 
