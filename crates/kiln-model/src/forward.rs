@@ -1946,74 +1946,6 @@ fn causal_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tens
     Ok(rows.ge(&cols)?.to_dtype(dtype)?)
 }
 
-/// Reshape `[B, nv, T, D]` to `[nc, B, nv, C, D]` (contiguous) where
-/// `T = nc * C`. Returns `None` when there are no full chunks. The result
-/// supports zero-copy chunk slicing along the leading axis via
-/// [`slice_chunked_4d`].
-fn preshape_chunked_4d(
-    t: &Tensor,
-    b: usize,
-    nv: usize,
-    nc: usize,
-    c: usize,
-    d: usize,
-) -> Result<Option<Tensor>> {
-    if nc == 0 {
-        return Ok(None);
-    }
-    let prefix_t = nc * c;
-    let head = if t.dim(2)? == prefix_t {
-        t.clone()
-    } else {
-        t.narrow(2, 0, prefix_t)?
-    };
-    // [B, nv, T, D] -> [B, nv, nc, C, D] (free reshape on contiguous input)
-    // -> permute leading chunk axis -> [nc, B, nv, C, D].
-    let chunked = head
-        .contiguous()?
-        .reshape((b, nv, nc, c, d))?
-        .permute((2, 0, 1, 3, 4))?
-        .contiguous()?;
-    Ok(Some(chunked))
-}
-
-/// Same as [`preshape_chunked_4d`] for 3-D `[B, nv, T]` tensors (beta, g).
-fn preshape_chunked_3d(
-    t: &Tensor,
-    b: usize,
-    nv: usize,
-    nc: usize,
-    c: usize,
-) -> Result<Option<Tensor>> {
-    if nc == 0 {
-        return Ok(None);
-    }
-    let prefix_t = nc * c;
-    let head = if t.dim(2)? == prefix_t {
-        t.clone()
-    } else {
-        t.narrow(2, 0, prefix_t)?
-    };
-    let chunked = head
-        .contiguous()?
-        .reshape((b, nv, nc, c))?
-        .permute((2, 0, 1, 3))?
-        .contiguous()?;
-    Ok(Some(chunked))
-}
-
-/// Slice the `ci`-th chunk out of a `[nc, B, nv, C, D]` pre-permuted tensor.
-/// The returned `[B, nv, C, D]` view is contiguous (stride/shape match), so
-/// no copy is required.
-fn slice_chunked_4d(t: &Tensor, ci: usize) -> Result<Tensor> {
-    Ok(t.narrow(0, ci, 1)?.squeeze(0)?)
-}
-
-/// 3-D variant of [`slice_chunked_4d`] for beta / g.
-fn slice_chunked_3d(t: &Tensor, ci: usize) -> Result<Tensor> {
-    Ok(t.narrow(0, ci, 1)?.squeeze(0)?)
-}
-
 /// Compute the chunk-local W = (I + A_strict)^{-1} (beta * V_prime) by
 /// forward substitution. On backends that advertise
 /// `supports_gdn_forward_substitution()` (CUDA/Metal bf16 today), dispatches
@@ -2169,8 +2101,7 @@ fn gdn_chunkwise_recurrence(
     state: &mut Tensor, // [B, nv, dk, dv]
     chunk_size: usize,
 ) -> Result<Tensor> {
-    let (b, nv, seq_len, dk) = q.dims4()?;
-    let dv = v.dim(3)?;
+    let (_, _, seq_len, _) = q.dims4()?;
     let dtype = q.dtype();
     let device = q.device();
 
@@ -2215,16 +2146,8 @@ fn gdn_chunkwise_recurrence(
     let full_chunks = seq_len / chunk_size;
     let tail = seq_len - full_chunks * chunk_size;
 
-    // Pre-permute the full-chunk prefix into a layout where the chunk axis
-    // is leading. After contiguous(), per-chunk slices are zero-copy
-    // (`narrow + squeeze` on the leading dim preserves contiguity), which
-    // turns N tiny per-chunk copies into one big upfront copy and
-    // eliminates the `copy2d_bf16` per-chunk hotspot from PROFILING.md.
-    let q_pre = preshape_chunked_4d(q, b, nv, full_chunks, chunk_size, dk)?;
-    let k_pre = preshape_chunked_4d(k, b, nv, full_chunks, chunk_size, dk)?;
-    let v_pre = preshape_chunked_4d(v, b, nv, full_chunks, chunk_size, dv)?;
-    let beta_pre = preshape_chunked_3d(beta, b, nv, full_chunks, chunk_size)?;
-    let g_pre = preshape_chunked_3d(g, b, nv, full_chunks, chunk_size)?;
+    // Slice full chunks directly. On macOS Metal this avoids the large upfront
+    // pre-permute copies that dominated long-prompt GDN recurrence time.
 
     let mut out_chunks: Vec<Tensor> = Vec::with_capacity(seq_len.div_ceil(chunk_size));
 
@@ -2242,12 +2165,13 @@ fn gdn_chunkwise_recurrence(
                 g.narrow(2, t_start, tail)?.contiguous()?,
             )
         } else {
+            let t_start = ci * chunk_size;
             (
-                slice_chunked_4d(q_pre.as_ref().unwrap(), ci)?,
-                slice_chunked_4d(k_pre.as_ref().unwrap(), ci)?,
-                slice_chunked_4d(v_pre.as_ref().unwrap(), ci)?,
-                slice_chunked_3d(beta_pre.as_ref().unwrap(), ci)?,
-                slice_chunked_3d(g_pre.as_ref().unwrap(), ci)?,
+                q.narrow(2, t_start, chunk_size)?.contiguous()?,
+                k.narrow(2, t_start, chunk_size)?.contiguous()?,
+                v.narrow(2, t_start, chunk_size)?.contiguous()?,
+                beta.narrow(2, t_start, chunk_size)?.contiguous()?,
+                g.narrow(2, t_start, chunk_size)?.contiguous()?,
             )
         };
 
