@@ -987,6 +987,8 @@ pub const C44_LAYER1_F32_ROW_TAP_NAMES: &[&str] = &[
 pub const C45_LAYER1_ROW_TAP_NAMES: &[&str] = &[
     "layer_1_input_norm_rms_inv_scalar",
     "layer_1_input_norm_rms_inv_scalar_extracted_values",
+    "layer_1_input_norm_last_row_flat_values",
+    "layer_1_input_norm_pre_weight_row_broadcast_output",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
 ];
@@ -3041,14 +3043,18 @@ mod tests {
 
     #[test]
     fn c45_layer1_row_tap_names_enumerate_expected_boundaries() {
-        assert_eq!(C45_LAYER1_ROW_TAP_NAMES.len(), 4);
+        assert_eq!(C45_LAYER1_ROW_TAP_NAMES.len(), 6);
         assert_eq!(C45_LAYER1_ROW_TAP_NAMES[0], "layer_1_input_norm_rms_inv_scalar");
         assert_eq!(
             C45_LAYER1_ROW_TAP_NAMES[1],
             "layer_1_input_norm_rms_inv_scalar_extracted_values"
         );
         assert_eq!(
-            C45_LAYER1_ROW_TAP_NAMES[3],
+            C45_LAYER1_ROW_TAP_NAMES[2],
+            "layer_1_input_norm_last_row_flat_values"
+        );
+        assert_eq!(
+            C45_LAYER1_ROW_TAP_NAMES[5],
             "layer_1_input_norm_pre_weight_row_reconstructed"
         );
     }
@@ -3758,7 +3764,7 @@ mod tests {
         let id0 = i32::from_le_bytes(ids.data()[0..4].try_into().unwrap());
         let id1 = i32::from_le_bytes(ids.data()[4..8].try_into().unwrap());
         assert_eq!(id0, 0);
-        assert_eq!(id1, 3);
+        assert_eq!(id1, 5);
 
         let out = st
             .tensor("c45__layer_1_input_norm_pre_weight_row_reconstructed")

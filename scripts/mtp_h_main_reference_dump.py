@@ -240,6 +240,8 @@ C44_LAYER1_F32_ROW_TAP_NAMES: Tuple[str, ...] = (
 C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
     "layer_1_input_norm_rms_inv_scalar",
     "layer_1_input_norm_rms_inv_scalar_extracted_values",
+    "layer_1_input_norm_last_row_flat_values",
+    "layer_1_input_norm_pre_weight_row_broadcast_output",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
 )
@@ -1141,6 +1143,10 @@ def _arm_c45_layer1_row_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List
         taps_out["layer_1_input_norm_rms_inv_scalar_extracted_values"] = (
             rms_inv_row.reshape(-1).contiguous()
         )
+        taps_out["layer_1_input_norm_last_row_flat_values"] = residual_row
+
+        broadcast_output = (residual[:, -1:, :] * rms_inv_row).contiguous()
+        taps_out["layer_1_input_norm_pre_weight_row_broadcast_output"] = broadcast_output
 
         scalar_values = (residual_row * rms_inv_row.reshape(-1, 1)).contiguous()
         taps_out["layer_1_input_norm_pre_weight_row_scalar_values"] = scalar_values

@@ -1695,7 +1695,7 @@ fn capture_c44_layer1_f32_row_taps(x: &Tensor, eps: f64) -> Result<()> {
 fn c45_layer1_row_replay_tensors(
     x: &Tensor,
     eps: f64,
-) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
     let x_f32 = x.to_dtype(DType::F32)?;
     let (batch, seq_len, hidden) = x_f32
         .dims3()
@@ -1719,11 +1719,28 @@ fn c45_layer1_row_replay_tensors(
         extracted_scalars.push(scale_vals[0]);
     }
 
+    let extracted_scalar_values = extracted_scalars;
     let extracted_scalars =
-        Tensor::from_slice(&extracted_scalars, (batch,), &Device::Cpu)?.contiguous()?;
-    let reconstructed = last_row.broadcast_mul(&rms_inv_row)?.contiguous()?;
-    let scalar_values = reconstructed.reshape((batch, hidden))?.contiguous()?;
-    Ok((rms_inv_row, extracted_scalars, scalar_values, reconstructed))
+        Tensor::from_slice(&extracted_scalar_values, (batch,), &Device::Cpu)?.contiguous()?;
+    let last_row_values = last_row.reshape((batch, hidden))?.contiguous()?;
+    let broadcast_output = last_row.broadcast_mul(&rms_inv_row)?.contiguous()?;
+
+    let mut flat_rows = Vec::with_capacity(batch);
+    for batch_idx in 0..batch {
+        let row = last_row_values.narrow(0, batch_idx, 1)?;
+        flat_rows.push(row.affine(extracted_scalar_values[batch_idx] as f64, 0.0)?);
+    }
+    let flat_row_refs: Vec<&Tensor> = flat_rows.iter().collect();
+    let scalar_values = Tensor::cat(&flat_row_refs, 0)?.contiguous()?;
+    let reconstructed = scalar_values.reshape((batch, 1, hidden))?.contiguous()?;
+    Ok((
+        rms_inv_row,
+        extracted_scalars,
+        last_row_values,
+        broadcast_output,
+        scalar_values,
+        reconstructed,
+    ))
 }
 
 /// Phase C45: keep the audit strictly inside the previously-bad row-local
@@ -1733,7 +1750,14 @@ fn c45_layer1_row_replay_tensors(
 /// shared-good and divergence only appears when reconstructing the row-shaped
 /// output".
 fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
-    let (rms_inv_row, extracted_scalars, scalar_values, reconstructed) =
+    let (
+        rms_inv_row,
+        extracted_scalars,
+        last_row_values,
+        broadcast_output,
+        scalar_values,
+        reconstructed,
+    ) =
         c45_layer1_row_replay_tensors(x, eps)?;
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_rms_inv_scalar",
@@ -1742,6 +1766,14 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_rms_inv_scalar_extracted_values",
         &extracted_scalars,
+    )?;
+    crate::mtp_debug::capture_c45_layer1_row_tap(
+        "layer_1_input_norm_last_row_flat_values",
+        &last_row_values,
+    )?;
+    crate::mtp_debug::capture_c45_layer1_row_tap(
+        "layer_1_input_norm_pre_weight_row_broadcast_output",
+        &broadcast_output,
     )?;
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_pre_weight_row_scalar_values",
@@ -6439,16 +6471,41 @@ mod tests {
             &device,
         )?;
 
-        let (_rms_inv_row, _extracted_scalars, scalar_values, reconstructed) =
-            c45_layer1_row_replay_tensors(&x, eps)?;
+        let (
+            rms_inv_row,
+            extracted_scalars,
+            last_row_values,
+            broadcast_output,
+            scalar_values,
+            reconstructed,
+        ) = c45_layer1_row_replay_tensors(&x, eps)?;
 
         let x_f32 = x.to_dtype(DType::F32)?;
         let variance = x_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
         let rms_inv = (variance + eps)?.sqrt()?.recip()?;
         let production = x_f32.broadcast_mul(&rms_inv)?;
         let production_last_row = production.narrow(1, seq_len - 1, 1)?.contiguous()?;
+        let production_last_row_values = x_f32
+            .narrow(1, seq_len - 1, 1)?
+            .contiguous()?
+            .reshape((batch, hidden))?
+            .contiguous()?;
         let production_scalar_values = production_last_row.reshape((batch, hidden))?.contiguous()?;
+        let production_rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
 
+        assert_eq!(rms_inv_row.to_vec3::<f32>()?, production_rms_inv_row.to_vec3::<f32>()?);
+        assert_eq!(
+            extracted_scalars.to_vec1::<f32>()?,
+            production_rms_inv_row.reshape((batch,))?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            last_row_values.to_vec2::<f32>()?,
+            production_last_row_values.to_vec2::<f32>()?
+        );
+        assert_eq!(
+            broadcast_output.to_vec3::<f32>()?,
+            production_last_row.to_vec3::<f32>()?
+        );
         assert_eq!(
             reconstructed.to_vec3::<f32>()?,
             production_last_row.to_vec3::<f32>()?
@@ -6456,6 +6513,14 @@ mod tests {
         assert_eq!(
             scalar_values.to_vec2::<f32>()?,
             production_scalar_values.to_vec2::<f32>()?
+        );
+        assert_eq!(
+            reconstructed.reshape((batch, hidden))?.to_vec2::<f32>()?,
+            scalar_values.to_vec2::<f32>()?
+        );
+        assert_eq!(
+            broadcast_output.reshape((batch, hidden))?.to_vec2::<f32>()?,
+            scalar_values.to_vec2::<f32>()?
         );
 
         Ok(())
