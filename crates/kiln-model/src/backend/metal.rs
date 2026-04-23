@@ -842,6 +842,65 @@ fn metal_gdn_full_chunk_forward_supports(
         && state.is_contiguous()
 }
 
+fn metal_gdn_full_chunk_forward_strided_inputs_support(
+    g: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    heads: usize,
+) -> bool {
+    fn flat_batch_head_ok(stride: &[usize], heads: usize) -> bool {
+        stride.len() >= 2
+            && stride[1] > 0
+            && heads
+                .checked_mul(stride[1])
+                .is_some_and(|expected| stride[0] == expected)
+    }
+
+    fn stride_u32_ok(stride: usize) -> bool {
+        stride > 0 && stride <= u32::MAX as usize
+    }
+
+    let (_g_storage, g_layout) = g.storage_and_layout();
+    let (_v_storage, v_layout) = v.storage_and_layout();
+    let (_beta_storage, beta_layout) = beta.storage_and_layout();
+    let (_kt_storage, kt_layout) = k_t.storage_and_layout();
+    let g_stride = g_layout.stride();
+    let v_stride = v_layout.stride();
+    let beta_stride = beta_layout.stride();
+    let kt_stride = kt_layout.stride();
+
+    if g_stride.len() != 3 || v_stride.len() != 4 || beta_stride.len() != 3 || kt_stride.len() != 4
+    {
+        return false;
+    }
+    if !flat_batch_head_ok(g_stride, heads)
+        || !flat_batch_head_ok(v_stride, heads)
+        || !flat_batch_head_ok(beta_stride, heads)
+        || !flat_batch_head_ok(kt_stride, heads)
+    {
+        return false;
+    }
+
+    // This path only needs to support a time-window narrow. Keep the value
+    // dimension contiguous so the per-value lane remains coalesced.
+    v_stride[3] == 1
+        && [
+            g_stride[1],
+            g_stride[2],
+            v_stride[1],
+            v_stride[2],
+            v_stride[3],
+            beta_stride[1],
+            beta_stride[2],
+            kt_stride[1],
+            kt_stride[2],
+            kt_stride[3],
+        ]
+        .into_iter()
+        .all(stride_u32_ok)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn metal_gdn_full_chunk_forward_head_last_supports(
     g: &Tensor,
@@ -875,6 +934,7 @@ fn metal_gdn_full_chunk_forward_head_last_supports(
         && chunk == 64
         && t_start <= seq_len
         && t_start + chunk <= seq_len
+        && metal_gdn_full_chunk_forward_strided_inputs_support(g, v, beta, k_t, heads)
 }
 
 fn metal_gdn_recurrent_supports(
@@ -3385,6 +3445,16 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
     constant uint& t_start [[buffer(14)]],
     constant uint& seq_len [[buffer(15)]],
     constant uint& heads [[buffer(16)]],
+    constant uint& g_bh_stride [[buffer(17)]],
+    constant uint& g_t_stride [[buffer(18)]],
+    constant uint& v_bh_stride [[buffer(19)]],
+    constant uint& v_t_stride [[buffer(20)]],
+    constant uint& v_d_stride [[buffer(21)]],
+    constant uint& beta_bh_stride [[buffer(22)]],
+    constant uint& beta_t_stride [[buffer(23)]],
+    constant uint& kt_bh_stride [[buffer(24)]],
+    constant uint& kt_k_stride [[buffer(25)]],
+    constant uint& kt_t_stride [[buffer(26)]],
     uint bh [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]
 ) {
@@ -3402,14 +3472,16 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
     threadgroup float sDecayLast[64];
     threadgroup float sPLast;
 
-    const uint g_base = bh * C;
+    const uint g_strided_base = bh * g_bh_stride;
+    const uint v_strided_base = bh * v_bh_stride;
+    const uint beta_base = bh * beta_bh_stride;
     const uint cdv_base = bh * C * dv;
     const uint cc_base = bh * C * C;
-    const uint kt_base = bh * dk * C;
+    const uint kt_strided_base = bh * kt_bh_stride;
     const uint state_base = bh * dk * dv;
 
     for (uint i = tid; i < C; i += 128) {
-        sBigG[i] = static_cast<float>(g[g_base + i]);
+        sBigG[i] = static_cast<float>(g[g_strided_base + i * g_t_stride]);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3440,7 +3512,7 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        const float beta_t = static_cast<float>(beta[g_base + t]);
+        const float beta_t = static_cast<float>(beta[beta_base + t * beta_t_stride]);
         const float p_t = static_cast<float>(static_cast<bfloat>(sP[t]));
 
         if (tid < dv) {
@@ -3452,7 +3524,7 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
 
             const uint td = t * dv + tid;
             const float vp = static_cast<float>(static_cast<bfloat>(
-                static_cast<float>(v[cdv_base + td]) -
+                static_cast<float>(v[v_strided_base + t * v_t_stride + tid * v_d_stride]) -
                 static_cast<float>(ks_entry[cdv_base + td]) * p_t
             ));
             const float w_val = beta_t * (vp - acc_a);
@@ -3490,7 +3562,9 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
         for (uint k_idx = 0; k_idx < dk; ++k_idx) {
             float delta = 0.0f;
             for (uint t = 0; t < C; ++t) {
-                const float kt = static_cast<float>(k_t[kt_base + k_idx * C + t]);
+                const float kt = static_cast<float>(
+                    k_t[kt_strided_base + k_idx * kt_k_stride + t * kt_t_stride]
+                );
                 const float w = static_cast<float>(sW[t * MAX_DV + tid]);
                 const float decay_last = static_cast<float>(static_cast<bfloat>(sDecayLast[t]));
                 const float w_weighted = static_cast<float>(static_cast<bfloat>(w * decay_last));
@@ -4071,6 +4145,20 @@ fn metal_gdn_full_chunk_forward_bf16(
         let t_start_u32 = 0u32;
         let seq_len_u32 = chunk_size as u32;
         let heads_u32 = heads as u32;
+        let g_stride = g_layout.stride();
+        let v_stride = v_layout.stride();
+        let beta_stride = beta_layout.stride();
+        let kt_stride = kt_layout.stride();
+        let g_bh_stride_u32 = g_stride[1] as u32;
+        let g_t_stride_u32 = g_stride[2] as u32;
+        let v_bh_stride_u32 = v_stride[1] as u32;
+        let v_t_stride_u32 = v_stride[2] as u32;
+        let v_d_stride_u32 = v_stride[3] as u32;
+        let beta_bh_stride_u32 = beta_stride[1] as u32;
+        let beta_t_stride_u32 = beta_stride[2] as u32;
+        let kt_bh_stride_u32 = kt_stride[1] as u32;
+        let kt_k_stride_u32 = kt_stride[2] as u32;
+        let kt_t_stride_u32 = kt_stride[3] as u32;
         encoder.set_bytes(10, &batch_heads_u32);
         encoder.set_bytes(11, &dk_u32);
         encoder.set_bytes(12, &dv_u32);
@@ -4078,6 +4166,16 @@ fn metal_gdn_full_chunk_forward_bf16(
         encoder.set_bytes(14, &t_start_u32);
         encoder.set_bytes(15, &seq_len_u32);
         encoder.set_bytes(16, &heads_u32);
+        encoder.set_bytes(17, &g_bh_stride_u32);
+        encoder.set_bytes(18, &g_t_stride_u32);
+        encoder.set_bytes(19, &v_bh_stride_u32);
+        encoder.set_bytes(20, &v_t_stride_u32);
+        encoder.set_bytes(21, &v_d_stride_u32);
+        encoder.set_bytes(22, &beta_bh_stride_u32);
+        encoder.set_bytes(23, &beta_t_stride_u32);
+        encoder.set_bytes(24, &kt_bh_stride_u32);
+        encoder.set_bytes(25, &kt_k_stride_u32);
+        encoder.set_bytes(26, &kt_t_stride_u32);
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: batch_heads,
@@ -4130,14 +4228,10 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
         "metal gdn full-chunk head-last shape too large"
     );
 
-    let g = g.contiguous()?;
-    let v = v.contiguous()?;
     let kkt = kkt.contiguous()?;
     let qkt = qkt.contiguous()?;
     let ks_entry = ks_entry.contiguous()?;
     let q_s = q_s.contiguous()?;
-    let beta = beta.contiguous()?;
-    let k_t = k_t.contiguous()?;
 
     let Device::Metal(device) = g.device() else {
         anyhow::bail!("metal gdn full-chunk head-last requires a Metal tensor");
@@ -4240,6 +4334,20 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
         let t_start_u32 = t_start as u32;
         let seq_len_u32 = seq_len as u32;
         let heads_u32 = heads as u32;
+        let g_stride = g_layout.stride();
+        let v_stride = v_layout.stride();
+        let beta_stride = beta_layout.stride();
+        let kt_stride = kt_layout.stride();
+        let g_bh_stride_u32 = g_stride[1] as u32;
+        let g_t_stride_u32 = g_stride[2] as u32;
+        let v_bh_stride_u32 = v_stride[1] as u32;
+        let v_t_stride_u32 = v_stride[2] as u32;
+        let v_d_stride_u32 = v_stride[3] as u32;
+        let beta_bh_stride_u32 = beta_stride[1] as u32;
+        let beta_t_stride_u32 = beta_stride[2] as u32;
+        let kt_bh_stride_u32 = kt_stride[1] as u32;
+        let kt_k_stride_u32 = kt_stride[2] as u32;
+        let kt_t_stride_u32 = kt_stride[3] as u32;
         encoder.set_bytes(10, &batch_heads_u32);
         encoder.set_bytes(11, &dk_u32);
         encoder.set_bytes(12, &dv_u32);
@@ -4247,6 +4355,16 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
         encoder.set_bytes(14, &t_start_u32);
         encoder.set_bytes(15, &seq_len_u32);
         encoder.set_bytes(16, &heads_u32);
+        encoder.set_bytes(17, &g_bh_stride_u32);
+        encoder.set_bytes(18, &g_t_stride_u32);
+        encoder.set_bytes(19, &v_bh_stride_u32);
+        encoder.set_bytes(20, &v_t_stride_u32);
+        encoder.set_bytes(21, &v_d_stride_u32);
+        encoder.set_bytes(22, &beta_bh_stride_u32);
+        encoder.set_bytes(23, &beta_t_stride_u32);
+        encoder.set_bytes(24, &kt_bh_stride_u32);
+        encoder.set_bytes(25, &kt_k_stride_u32);
+        encoder.set_bytes(26, &kt_t_stride_u32);
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: batch_heads,
@@ -5590,6 +5708,9 @@ mod tests {
             .to_dtype(DType::BF16)?;
         let mut state_head_last = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
             .to_dtype(DType::BF16)?;
+        let mut state_head_last_strided =
+            Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
 
         assert!(metal_gdn_full_chunk_forward_supports(
             &g,
@@ -5656,6 +5777,81 @@ mod tests {
         )?;
         let out_head_last_chunk = out_head_last.narrow(1, t_start, chunk)?.transpose(1, 2)?;
 
+        let mut g_full_data = vec![0.0f32; batch * heads * seq_len];
+        let mut v_full_data = vec![0.0f32; batch * heads * seq_len * dv];
+        let mut beta_full_data = vec![0.0f32; batch * heads * seq_len];
+        let mut k_full_data = vec![0.0f32; batch * heads * seq_len * dk];
+        for b in 0..batch {
+            for h in 0..heads {
+                for t in 0..chunk {
+                    let compact_c = (b * heads + h) * chunk + t;
+                    let full_t = t_start + t;
+                    let full_c = (b * heads + h) * seq_len + full_t;
+                    g_full_data[full_c] = g_data[compact_c];
+                    beta_full_data[full_c] = beta_data[compact_c];
+                    for d in 0..dv {
+                        let compact = ((b * heads + h) * chunk + t) * dv + d;
+                        let full = ((b * heads + h) * seq_len + full_t) * dv + d;
+                        v_full_data[full] = v_data[compact];
+                    }
+                    for k_idx in 0..dk {
+                        let kt_compact = ((b * heads + h) * dk + k_idx) * chunk + t;
+                        let k_full = ((b * heads + h) * seq_len + full_t) * dk + k_idx;
+                        k_full_data[k_full] = kt_data[kt_compact];
+                    }
+                }
+            }
+        }
+        let g_full = Tensor::from_slice(&g_full_data, (batch, heads, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_full = Tensor::from_slice(&v_full_data, (batch, heads, seq_len, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let beta_full = Tensor::from_slice(&beta_full_data, (batch, heads, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let k_full = Tensor::from_slice(&k_full_data, (batch, heads, seq_len, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let g_view = g_full.narrow(2, t_start, chunk)?;
+        let v_view = v_full.narrow(2, t_start, chunk)?;
+        let beta_view = beta_full.narrow(2, t_start, chunk)?;
+        let k_t_view = k_full.narrow(2, t_start, chunk)?.transpose(2, 3)?;
+        assert!(!v_view.is_contiguous());
+        assert!(!beta_view.is_contiguous());
+        assert!(!k_t_view.is_contiguous());
+
+        let out_head_last_strided =
+            Tensor::zeros((batch, seq_len, heads, dv), DType::BF16, &device)?;
+        assert!(metal_gdn_full_chunk_forward_head_last_supports(
+            &g_view,
+            &v_view,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta_view,
+            &k_t_view,
+            &state_head_last_strided,
+            &out_head_last_strided,
+            t_start,
+            seq_len
+        ));
+        metal_gdn_full_chunk_forward_head_last_into_bf16(
+            &g_view,
+            &v_view,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta_view,
+            &k_t_view,
+            &mut state_head_last_strided,
+            &out_head_last_strided,
+            t_start,
+            seq_len,
+        )?;
+        let out_head_last_strided_chunk = out_head_last_strided
+            .narrow(1, t_start, chunk)?
+            .transpose(1, 2)?;
+
         let out_max = max_abs_diff(&out_ref, &out_fused)?;
         let out_mean = mean_abs_diff(&out_ref, &out_fused)?;
         let state_max = max_abs_diff(&state_ref, &state_fused)?;
@@ -5664,6 +5860,10 @@ mod tests {
         let head_last_out_mean = mean_abs_diff(&out_ref, &out_head_last_chunk)?;
         let head_last_state_max = max_abs_diff(&state_ref, &state_head_last)?;
         let head_last_state_mean = mean_abs_diff(&state_ref, &state_head_last)?;
+        let strided_head_last_out_max = max_abs_diff(&out_ref, &out_head_last_strided_chunk)?;
+        let strided_head_last_out_mean = mean_abs_diff(&out_ref, &out_head_last_strided_chunk)?;
+        let strided_head_last_state_max = max_abs_diff(&state_ref, &state_head_last_strided)?;
+        let strided_head_last_state_mean = mean_abs_diff(&state_ref, &state_head_last_strided)?;
         assert!(
             out_max < 2e-2,
             "GDN full-chunk out max_abs_diff={out_max:e} exceeds tolerance"
@@ -5695,6 +5895,22 @@ mod tests {
         assert!(
             head_last_state_mean < 2e-3,
             "GDN full-chunk head-last state mean_abs_diff={head_last_state_mean:e} exceeds tolerance"
+        );
+        assert!(
+            strided_head_last_out_max < 2e-2,
+            "GDN full-chunk strided head-last out max_abs_diff={strided_head_last_out_max:e} exceeds tolerance"
+        );
+        assert!(
+            strided_head_last_out_mean < 2e-3,
+            "GDN full-chunk strided head-last out mean_abs_diff={strided_head_last_out_mean:e} exceeds tolerance"
+        );
+        assert!(
+            strided_head_last_state_max < 2e-2,
+            "GDN full-chunk strided head-last state max_abs_diff={strided_head_last_state_max:e} exceeds tolerance"
+        );
+        assert!(
+            strided_head_last_state_mean < 2e-3,
+            "GDN full-chunk strided head-last state mean_abs_diff={strided_head_last_state_mean:e} exceeds tolerance"
         );
 
         Ok(())

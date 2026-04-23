@@ -2894,17 +2894,19 @@ fn gdn_chunkwise_recurrence_head_last_full_chunks(
     }
 
     let dv = v.dim(3)?;
-    let out = Tensor::zeros((batch, seq_len, heads, dv), DType::BF16, q.device())?;
+    // Full chunks cover the whole sequence and the Metal kernel writes every
+    // head-last output element exactly once.
+    let out = unsafe { Tensor::empty((batch, seq_len, heads, dv), DType::BF16, q.device())? };
 
     for ci in 0..(seq_len / chunk_size) {
         let t_start = ci * chunk_size;
-        let q_c = q.narrow(2, t_start, chunk_size)?.contiguous()?;
-        let k_c = k.narrow(2, t_start, chunk_size)?.contiguous()?;
-        let v_c = v.narrow(2, t_start, chunk_size)?.contiguous()?;
-        let beta_c = beta.narrow(2, t_start, chunk_size)?.contiguous()?;
-        let g_c = g.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let q_c = q.narrow(2, t_start, chunk_size)?;
+        let k_c = k.narrow(2, t_start, chunk_size)?;
+        let v_c = v.narrow(2, t_start, chunk_size)?;
+        let beta_c = beta.narrow(2, t_start, chunk_size)?;
+        let g_c = g.narrow(2, t_start, chunk_size)?;
 
-        let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
+        let k_t_mat = k_c.transpose(2, 3)?; // [B, nv, dk, C]
         let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
