@@ -492,6 +492,66 @@ warm-`main` rerun showed parity with the branch. The measurement record for the
 control, branch, and warm-control sanity rerun is stored in
 `profiling-artifacts/post403_20260423_prefill_kern.csv`.
 
+### Post-#405 vLLM fused recurrent GDN audit verdict — 2026-04-23
+
+Fresh-`main` preflight passed before editing:
+
+- PR `#405` is merged and remains doc-only: it updated `PROFILING.md` plus
+  `profiling-artifacts/post403_20260423_prefill_kern.csv`, with **no** source
+  change under `crates/kiln-gdn-kernel/` or `crates/kiln-model/src/forward.rs`.
+- No newer open or merged PR already audits or edits
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this exact
+  recurrent/full-chunk vLLM follow-up frontier. PR `#404` only touches
+  `crates/kiln-server/src/bench.rs`, and there were no open PRs at preflight.
+- Current `main` still predates the specific upstream vLLM design I audited:
+  `ccaf5ffaa3e1fb2a081b2c9e403ac0e4dfc142c8`
+  (`vllm/model_executor/layers/fla/ops/chunk_delta_h.py`,
+  `chunk_gated_delta_rule_fwd_kernel_h_blockdim64`) and its caller in
+  `vllm/model_executor/layers/fla/ops/chunk.py`.
+
+**Audit result**
+
+No bounded port-worthy recurrent/full-chunk win remains. The current vLLM
+advantage is structural, not another small kernel-local cleanup.
+
+The exact upstream pattern still missing from kiln is the block-tiled state
+update in `chunk_gated_delta_rule_fwd_kernel_h_blockdim64`: vLLM keeps the
+recurrent state in FP32 `[BV, 64]` tiles (`b_h*`) in registers, loads `b_k`
+once per chunk tile, and applies the state update with tiled dot products
+(`b_h += tl.trans(tl.dot(b_k, b_v))`). Kiln's fused full-chunk CUDA kernel is
+still a scalar-thread epilogue over `(k_idx, dv)`:
+
+- shared `s_w[t, dv]`
+- per-thread `delta += k_t[k_idx, t] * (w[t, dv] * decay_last[t])`
+- bf16 store back to `state[k_idx, dv]`
+
+That remaining gap is a different kernel architecture, not one more isolated
+micro-port. The bounded sub-diffs suggested by the same upstream design have
+already been attempted and disqualified on current-main:
+
+- post-`#399`: hoist `decay_last` weighting into shared `W` rows -> slower
+- post-`#401`: stage shared `k_t` rows -> slower
+- post-`#403`: triangular front-half packing -> warm-pod artifact, no durable win
+
+Those measurements are summarized in
+`profiling-artifacts/post405_20260423_vllm_recurrent_audit.csv`.
+
+**Keep / revert decision**
+
+Doc-only redirect. I did **not** edit
+`crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` because the only
+meaningful upstream delta left is a
+larger re-vendor/rewrite of the recurrent-state update, not a single bounded
+win that fits this task's acceptance criteria.
+
+**RunPod / validation**
+
+No pod launched and no CUDA validation ran for this audit. That was deliberate:
+after reading the current kiln kernel against the current vLLM upstream source,
+there was no remaining one-diff candidate to validate. Re-running another
+micro-port on RunPod would have been a duplicate spend against the same
+already-failed frontier.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)

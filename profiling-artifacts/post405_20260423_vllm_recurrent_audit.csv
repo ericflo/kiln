@@ -1,0 +1,5 @@
+attempt,idea,control_ms,branch_ms,warm_main_ms,decision,source
+post399,Hoist decay_last weighting into shared W rows,3277.7,3566.0,,revert slower,PROFILING.md post-#399 bounded W-decay hoist
+post399_profile,Hoist decay_last weighting into shared W rows,3277.7,3686.3,,revert slower,PROFILING.md post-#399 bounded W-decay hoist
+post401,Stage shared k_t row once per dk iteration,3272.4,4704.0,,revert slower,PROFILING.md post-#401 bounded shared-k_t row staging
+post403,Pack front-half triangular mask tiles instead of full 64x64 tiles,4785.1,3348.3,3347.1,revert warm-pod artifact,PROFILING.md post-#403 bounded front-half triangular mask packing
