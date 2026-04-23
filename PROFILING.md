@@ -127,6 +127,68 @@ were produced on the same warm pod, and the committed aggregate artifact
 `profiling-artifacts/post415_20260423_mtp_ab.json` records the per-run and
 median numbers used above.
 
+## Phase C36 post-#417 current-main identity-bias attribution (2026-04-23)
+
+**Scope:** rerun the existing Phase C1 attribution path on fresh current
+`main`, on the same standard native-MTP workload as PR #417, and make the
+`draft_top1 == last_token` signature first-class in committed tooling and
+artifacts.
+
+**Preflight outcome:** proceed. Fresh `main` at `d5c57ed` (PR #417 merged)
+still had no newer open or merged PR that landed a post-#417 current-main
+identity-bias artifact for the standard
+`--paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
+workload. The fresh rerun below also still leaves native MTP below the ship
+bar: median decode tok/s **21.95** and median α **0.3956** across seeds
+`0/1/2`.
+
+**Commands run:** build `kiln-bench` on RunPod A6000, then run the standard
+MTP bench three times with `KILN_BENCH_FORCE_MTP=1` and
+`KILN_C1_ATTR_PATH=docs/phase-c36/c1_seed${seed}.csv`, then summarize with:
+
+```bash
+python3 scripts/mtp_c1_summarize.py \
+  --json profiling-artifacts/post417_20260423_c1_identity.json \
+  docs/phase-c36/c1_seed0.csv docs/phase-c36/c1_seed1.csv docs/phase-c36/c1_seed2.csv
+```
+
+### Fresh metrics
+
+| Seed | decode tok/s | α | C1 rows | identity rate |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 36.61 | 0.7397 | 73 | 10.96% |
+| 1 | 20.00 | 0.3093 | 97 | 59.79% |
+| 2 | 21.95 | 0.3956 | 91 | 52.75% |
+
+Aggregate C1 summary (`profiling-artifacts/post417_20260423_c1_identity.json`):
+
+- total rows: **261**
+- α / top-k match rate: **45.98%**
+- Class A rows: **0**
+- Class B rows: **141**
+- overall `draft_equals_last_token_rate`: **43.68%**
+- reject-conditioned identity-bias rate: **80.85%**
+- accept-conditioned identity-bias rate: **0.00%**
+
+### Verdict
+
+Identity bias still dominates the low-α failure mode on the standard
+current-main native-MTP workload, but it is now **reject-conditioned** rather
+than universal. The current source-of-truth number is that **114 of 141
+rejects (80.85%)** are `draft_top1 == last_token`, while **0 of 120 accepts**
+are. That makes identity bias the right first-class diagnostic to commit in
+`scripts/mtp_c1_summarize.py` and the aggregate JSON artifact, even though the
+overall workload is no longer a uniform collapse: seed 0 nearly clears the
+paper floor (`α=0.7397`) while seeds 1 and 2 still sit in the low-α regime.
+
+### Recommendation
+
+Do **not** reopen FlashInfer or GDN decode work from this result. The next
+bounded task should stay on MTP correctness: use the new identity-bias metrics
+as the front-door verdict, then bisect why standard-workload seeds 1 and 2
+stay trapped in the identity-biased reject regime while seed 0 escapes it on
+the same current `main`.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled
