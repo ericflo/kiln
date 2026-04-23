@@ -580,6 +580,120 @@ GDN projections/conv/qk-norm/gates/recurrent kernel, or the layer-1 residual
 handoff. The next diagnostic task should capture layer-1 sub-op taps rather
 than adding another per-layer sweep.
 
+## Phase C41 post-#427 transformer block 1 sub-op bisect (2026-04-23)
+
+**Scope:** take the post-#427 dense early-layer verdict (`h_layer_0` still ok,
+first shared drift at `h_layer_1`) and narrow it to the earliest shared
+transformer-block-1 sub-op boundary on the same native-MTP replay contract.
+
+**Hardware / image:** RunPod on-demand `NVIDIA A40` (A6000 unavailable; used
+the project fallback order), `ghcr.io/ericflo/kiln-runpod:latest`.
+
+**Code change:** add an opt-in C41 capture path behind
+`KILN_MTP_DUMP_C41_LAYER1_TAPS=1`, serialize the emitted tap ids as
+`meta__c41_tap_ids`, mirror the same tap set in
+`scripts/mtp_h_main_reference_dump.py --c41-taps`, and teach
+`scripts/mtp_compare.py --c41` to report the earliest shared bad layer-1 tap
+from the explicit `c41__*` boundary set. The HF reference path also now slices
+those C41 taps to the final replay token so kiln and HF dump the same shapes.
+
+**Validation commands run (RunPod kiln image):**
+
+```bash
+cd /workspace/kiln
+python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py
+source /root/.kiln-build-env
+cargo test -p kiln-model mtp_debug --lib -- --test-threads=1
+```
+
+**Standard workload rerun:** same C40 workload plus the new C41 tap flag:
+
+```bash
+KILN_W4A16=1 \
+KILN_CUDA_GRAPHS=true \
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_SPLICE=1 \
+KILN_MTP_DUMP_SPLICE_POS=0,2 \
+KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+KILN_MTP_DUMP_C41_LAYER1_TAPS=1 \
+KILN_MTP_DUMP_PATH=.../mtp_pos-{pos}/step-{step}.safetensors \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+  --seed <0|1>
+```
+
+Representative C40 carry-forward positions were re-referenced and compared:
+
+```bash
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump profiling-artifacts/post427_c41_20260423_seed0_captures/mtp_pos-0/step-1.safetensors \
+  --out profiling-artifacts/post427_c41_20260423_seed0_ref_bf16.safetensors \
+  --device cuda \
+  --c41-taps
+
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump profiling-artifacts/post427_c41_20260423_seed1_captures/mtp_pos-2/step-1.safetensors \
+  --out profiling-artifacts/post427_c41_20260423_seed1_ref_fp32.safetensors \
+  --device cuda \
+  --fp32 \
+  --c41-taps
+
+python3 scripts/mtp_compare.py --c41 \
+  --pair seed0:profiling-artifacts/post427_c41_20260423_seed0_captures/mtp_pos-0/step-1.safetensors,profiling-artifacts/post427_c41_20260423_seed0_ref_bf16.safetensors \
+  --pair seed1:profiling-artifacts/post427_c41_20260423_seed1_captures/mtp_pos-2/step-1.safetensors,profiling-artifacts/post427_c41_20260423_seed1_ref_bf16.safetensors
+```
+
+### Fresh workload check
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 8900.8 | 39.0 | 0.740 |
+| 1 | 508 | 479.8 | 42.5 | 0.283 |
+
+The post-#427 seed split still reproduces on fresh main.
+
+### Source-of-truth artifacts
+
+- `profiling-artifacts/post427_c41_20260423_seed0.bench.json`
+- `profiling-artifacts/post427_c41_20260423_seed0.bench.stderr`
+- `profiling-artifacts/post427_c41_20260423_seed1.bench.json`
+- `profiling-artifacts/post427_c41_20260423_seed1.bench.stderr`
+- `profiling-artifacts/post427_c41_20260423_compare_bf16.txt`
+- `profiling-artifacts/post427_c41_20260423_compare_fp32.txt`
+
+### Verdict
+
+**Both seeds and both HF dtypes agree that the earliest bad layer-1 tap is
+`layer_1_post_input_norm`.**
+
+- bf16 compare: earliest shared bad tap = `layer_1_post_input_norm`
+- fp32 compare: earliest shared bad tap = `layer_1_post_input_norm`
+- shared later-good taps still exist (`gdn_gate_beta`, `gdn_recur_out`,
+  `gdn_out_proj`, `layer_1_post_attn_residual`), so this is not a monotonic
+  “everything inside layer 1 is broken” result
+- the first observed bad tensor is already the first explicit C41 boundary
+
+That means the C40 “inside transformer block 1” span is now closed to the
+earliest captured boundary: divergence is already present by the output of
+layer 1 input_layernorm.
+
+### Recommendation
+
+The remaining uncaptured span is now extremely narrow:
+
+- the residual input arriving at transformer block 1
+- the layer-1 `input_layernorm` application itself
+
+Do **not** broaden tracing again. The next task, if needed, should instrument
+the pre-norm residual input and/or audit layer-1 input-layernorm numerics
+directly instead of tracing deeper GDN internals.
+
 ## Phase 6 post-#392 current-main re-profile — 2026-04-23
 
 **Scope:** refresh the Phase 6 performance source of truth on fresh `main`

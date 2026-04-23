@@ -2600,6 +2600,7 @@ pub fn gated_deltanet_forward(
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
     capture_b11_taps: bool,
+    capture_c41_taps: bool,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let input_dtype = x.dtype();
@@ -2631,6 +2632,10 @@ pub fn gated_deltanet_forward(
     if capture_b11_taps {
         let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], candle_core::D::Minus1)?;
         crate::mtp_debug::capture_b11_layer0_tap("gdn_in_proj", &gdn_in_proj)?;
+    }
+    if capture_c41_taps {
+        let gdn_in_proj = Tensor::cat(&[&mixed_qkv, &z, &b, &a], candle_core::D::Minus1)?;
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_in_proj", &gdn_in_proj)?;
     }
 
     // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
@@ -2701,6 +2706,9 @@ pub fn gated_deltanet_forward(
     // `F.silu(...)` (shape [B, T, qkv_dim]).
     if capture_b11_taps {
         crate::mtp_debug::capture_b11_layer0_tap("gdn_conv", &mixed_qkv)?;
+    }
+    if capture_c41_taps {
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_conv", &mixed_qkv)?;
     }
 
     // --- Step 3: Split into Q, K, V and reshape to heads ---
@@ -2831,6 +2839,10 @@ pub fn gated_deltanet_forward(
         crate::mtp_debug::capture_b11_layer0_tap("gdn_qk_norm_q", &q)?;
         crate::mtp_debug::capture_b11_layer0_tap("gdn_qk_norm_k", &k)?;
     }
+    if capture_c41_taps && qk_expanded {
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_qk_norm_q", &q)?;
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_qk_norm_k", &k)?;
+    }
 
     // --- Step 6: Compute gates ---
     //
@@ -2862,6 +2874,10 @@ pub fn gated_deltanet_forward(
     if capture_b11_taps {
         crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_beta", &beta)?;
         crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_g", &g)?;
+    }
+    if capture_c41_taps {
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_beta", &beta)?;
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
     }
 
     // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---
@@ -2984,6 +3000,9 @@ pub fn gated_deltanet_forward(
     if capture_b11_taps {
         crate::mtp_debug::capture_b11_layer0_tap("gdn_recur_out", &attn_out)?;
     }
+    if capture_c41_taps {
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_recur_out", &attn_out)?;
+    }
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
     let attn_out = {
@@ -3002,6 +3021,9 @@ pub fn gated_deltanet_forward(
     if capture_b11_taps {
         crate::mtp_debug::capture_b11_layer0_tap("gdn_gated_norm", &attn_out)?;
     }
+    if capture_c41_taps {
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_gated_norm", &attn_out)?;
+    }
 
     // --- Step 9: Output projection ---
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
@@ -3017,6 +3039,9 @@ pub fn gated_deltanet_forward(
     // stream. HF mirror: `self.out_proj(core_attn_out)`.
     if capture_b11_taps {
         crate::mtp_debug::capture_b11_layer0_tap("gdn_out_proj", &out)?;
+    }
+    if capture_c41_taps {
+        crate::mtp_debug::capture_c41_layer1_tap("gdn_out_proj", &out)?;
     }
 
     Ok(out)
@@ -4551,6 +4576,7 @@ pub fn model_forward(
                     &mut state.recurrent_states[linear_attn_idx],
                     &mut state.conv_states[linear_attn_idx],
                     /* capture_b11_taps = */ false,
+                    /* capture_c41_taps = */ false,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
@@ -4661,6 +4687,7 @@ pub fn model_forward_segment(
                     &mut state.recurrent_states[linear_attn_idx],
                     &mut state.conv_states[linear_attn_idx],
                     /* capture_b11_taps = */ false,
+                    /* capture_c41_taps = */ false,
                 )
                 .with_context(|| format!("segment gated deltanet layer {i}"))?;
                 hidden = {
@@ -4896,6 +4923,7 @@ pub fn model_forward_paged_with_last_hidden(
     // giving the comparator both per-layer h_layer_<idx> taps for the GQA
     // tail and per-sub-op taps inside layer 31.
     crate::mtp_debug::arm_b12_gqa_capture();
+    crate::mtp_debug::arm_c41_layer1_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -4935,6 +4963,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     crate::mtp_debug::arm_h_main_capture();
     crate::mtp_debug::stash_h_main_replay_context(token_ids);
     crate::mtp_debug::arm_b11_layer0_capture();
+    crate::mtp_debug::arm_c41_layer1_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5325,6 +5354,10 @@ pub fn mtp_forward_step(
             // `KILN_MTP_DUMP_B12_GQA_TAPS` is unset, which keeps the dump
             // format bit-identical to the pre-B12 layout.
             let b12_taps = crate::mtp_debug::drain_b12_gqa_capture();
+            // Phase C41: drain any transformer-block-1 taps stashed during
+            // the base-model forward. Empty when
+            // `KILN_MTP_DUMP_C41_LAYER1_TAPS` is unset.
+            let c41_taps = crate::mtp_debug::drain_c41_layer1_capture();
             // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
             // norm_emb, norm_h, concat, fused) captured above. Empty when
             // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
@@ -5355,6 +5388,7 @@ pub fn mtp_forward_step(
                 &replay_tokens,
                 &b11_taps,
                 &b12_taps,
+                &c41_taps,
                 &c6_taps,
                 &c7_taps,
                 &c14_taps,
@@ -5370,6 +5404,7 @@ pub fn mtp_forward_step(
                     replay_tokens_len = replay_tokens.len(),
                     b11_taps = b11_taps.len(),
                     b12_taps = b12_taps.len(),
+                    c41_taps = c41_taps.len(),
                     c6_taps = c6_taps.len(),
                     c7_taps = c7_taps.len(),
                     c14_taps = c14_taps.len(),
@@ -5576,6 +5611,9 @@ fn model_forward_paged_inner(
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
+                let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
+                let capture_c41_taps =
+                    crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
@@ -5584,8 +5622,11 @@ fn model_forward_paged_inner(
                 // layer 0 (the B10 scan localized divergence there) — pre-GDN
                 // input LayerNorm output. Shape [1, T, hidden]. HF mirror:
                 // `hidden_states` after `self.input_layernorm(...)` at layer 0.
-                if crate::mtp_debug::should_capture_b11_tap_for_layer(i) {
+                if capture_b11_taps {
                     crate::mtp_debug::capture_b11_layer0_tap("layer_0_post_input_norm", &normed)?;
+                }
+                if capture_c41_taps {
+                    crate::mtp_debug::capture_c41_layer1_tap("layer_1_post_input_norm", &normed)?;
                 }
                 let attn_out = gated_deltanet_forward(
                     backend,
@@ -5594,14 +5635,20 @@ fn model_forward_paged_inner(
                     config,
                     &mut state.recurrent_states[linear_attn_idx],
                     &mut state.conv_states[linear_attn_idx],
-                    /* capture_b11_taps = */
-                    crate::mtp_debug::should_capture_b11_tap_for_layer(i),
+                    capture_b11_taps,
+                    capture_c41_taps,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + attn_out)?
                 };
+                if capture_c41_taps {
+                    crate::mtp_debug::capture_c41_layer1_tap(
+                        "layer_1_post_attn_residual",
+                        &hidden,
+                    )?;
+                }
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
                     rms_norm(
@@ -5615,6 +5662,9 @@ fn model_forward_paged_inner(
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
                 };
+                if capture_c41_taps {
+                    crate::mtp_debug::capture_c41_layer1_tap("layer_1_output", &hidden)?;
+                }
                 linear_attn_idx += 1;
             }
         }

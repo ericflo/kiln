@@ -4,6 +4,7 @@ Phase B10 — `h_main` base-model reference dump.
 Phase B11b — optional layer-0 GDN sub-op taps (`--b11-taps`).
 Phase B12  — optional per-layer taps for layers 24..31 + GQA sub-op taps at
              layer 31 (`--b12-taps`), plus optional fp32 reference (`--fp32`).
+Phase C41  — optional transformer-block-1 sub-op taps (`--c41-taps`).
 
 This script produces the independent pure-Python reference counterpart to the
 kiln-side main-model forward (the 24×GDN + 8×GQA stack) so that Phase B10 can
@@ -183,6 +184,24 @@ B12_LAYER31_GQA_TAP_NAMES: Tuple[str, ...] = (
 )
 
 
+# Phase C41 — ordered transformer-block-1 tap names. Must stay in lock-step
+# with `C41_LAYER1_TAP_NAMES` in `crates/kiln-model/src/mtp_debug.rs`.
+C41_LAYER1_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_post_input_norm",
+    "gdn_in_proj",
+    "gdn_conv",
+    "gdn_qk_norm_q",
+    "gdn_qk_norm_k",
+    "gdn_gate_beta",
+    "gdn_gate_g",
+    "gdn_recur_out",
+    "gdn_gated_norm",
+    "gdn_out_proj",
+    "layer_1_post_attn_residual",
+    "layer_1_output",
+)
+
+
 # -----------------------------------------------------------------------------
 # Kiln-dump loader (mirrors mtp_reference_dump.py's loader)
 # -----------------------------------------------------------------------------
@@ -218,6 +237,35 @@ def resolve_boundary_layers(kiln_dump: Dict[str, object], capture_b12: bool) -> 
     if capture_b12:
         layers.update(B12_GQA_LAYERS)
     return sorted(layers)
+
+
+def resolve_c41_tap_names(kiln_dump: Dict[str, object]) -> List[str]:
+    raw = kiln_dump.get("meta__c41_tap_ids")
+    if isinstance(raw, list) and raw:
+        names: List[str] = []
+        for idx in raw:
+            idx_i = int(idx)
+            if 0 <= idx_i < len(C41_LAYER1_TAP_NAMES):
+                names.append(C41_LAYER1_TAP_NAMES[idx_i])
+        if names:
+            return names
+
+    from_keys = sorted(
+        {
+            key[len("c41__") :]
+            for key in kiln_dump.keys()
+            if key.startswith("c41__")
+        },
+        key=lambda name: (
+            C41_LAYER1_TAP_NAMES.index(name)
+            if name in C41_LAYER1_TAP_NAMES
+            else len(C41_LAYER1_TAP_NAMES),
+            name,
+        ),
+    )
+    if from_keys:
+        return from_keys
+    return list(C41_LAYER1_TAP_NAMES)
 
 
 # -----------------------------------------------------------------------------
@@ -764,6 +812,51 @@ def _arm_b12_layer31_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List[ob
     return handles
 
 
+def _arm_c41_layer1_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List[object]:
+    """Attach hooks for the explicit non-GDN boundaries in transformer block 1.
+
+    The internal GDN taps are captured by monkey-patching the layer-1
+    GatedDeltaNet forward; these hooks fill in the surrounding block-level
+    boundaries that are naturally visible outside the GDN helper:
+
+    - `layer_1_post_input_norm`: output of layer 1's input_layernorm
+    - `layer_1_post_attn_residual`: hidden state after `hidden + attn_out`,
+      observed as the input to `post_attention_layernorm`
+    - `layer_1_output`: final transformer-block output after the MLP residual
+    """
+    handles: List[object] = []
+    layer = base.layers[1]
+
+    def _forward_hook(name: str):
+        def _fn(_mod, _inputs, output):
+            tensor = output[0] if isinstance(output, tuple) else output
+            taps_out[name] = tensor.detach().clone()
+
+        return _fn
+
+    def _pre_hook(name: str):
+        def _fn(_mod, inputs):
+            tensor = inputs[0][0] if isinstance(inputs[0], tuple) else inputs[0]
+            taps_out[name] = tensor.detach().clone()
+
+        return _fn
+
+    if hasattr(layer, "input_layernorm"):
+        handles.append(
+            layer.input_layernorm.register_forward_hook(
+                _forward_hook("layer_1_post_input_norm")
+            )
+        )
+    if hasattr(layer, "post_attention_layernorm"):
+        handles.append(
+            layer.post_attention_layernorm.register_forward_pre_hook(
+                _pre_hook("layer_1_post_attn_residual")
+            )
+        )
+    handles.append(layer.register_forward_hook(_forward_hook("layer_1_output")))
+    return handles
+
+
 # -----------------------------------------------------------------------------
 # Reference forward
 # -----------------------------------------------------------------------------
@@ -776,6 +869,8 @@ def run_reference_forward(
     boundary_layers: Optional[List[int]] = None,
     capture_b11_layer0: bool = False,
     capture_b12: bool = False,
+    capture_c41: bool = False,
+    c41_tap_names: Optional[List[str]] = None,
     fp32: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Run HF Qwen3-Next / Qwen3.5 forward with `output_hidden_states=True`.
@@ -828,9 +923,13 @@ def run_reference_forward(
         file=sys.stderr,
     )
 
-    # Set up B11b instrumentation + embed/norm forward_hooks BEFORE the forward.
+    if capture_b11_layer0 and capture_c41:
+        raise ValueError("capture_b11_layer0 and capture_c41 are mutually exclusive")
+
+    # Set up B11b/C41 instrumentation + forward hooks BEFORE the forward.
     b11_captures: Dict[str, torch.Tensor] = {}
     b12_captures: Dict[str, torch.Tensor] = {}
+    c41_captures: Dict[str, torch.Tensor] = {}
     hook_handles: List[object] = []
     orig_gdn_forward = None
     if capture_b11_layer0:
@@ -863,6 +962,23 @@ def run_reference_forward(
         print(
             f"[mtp_h_main_ref] B11b instrumentation armed: "
             f"monkey-patched {gdn_klass.__name__}.forward + 2 embed/norm hooks",
+            file=sys.stderr,
+        )
+    elif capture_c41:
+        orig_gdn_forward = gdn_klass.forward  # type: ignore[attr-defined]
+        if gdn_layout == "qwen3_5":
+            instrumented = make_qwen3_5_instrumented_gdn_forward(
+                c41_captures, target_layer_idx=1
+            )
+        else:
+            instrumented = make_qwen3_next_instrumented_gdn_forward(
+                c41_captures, target_layer_idx=1
+            )
+        gdn_klass.forward = instrumented  # type: ignore[assignment]
+        hook_handles.extend(_arm_c41_layer1_hooks(base, c41_captures))
+        print(
+            f"[mtp_h_main_ref] C41 instrumentation armed: "
+            f"monkey-patched {gdn_klass.__name__}.forward at layer 1 + 3 block hooks",
             file=sys.stderr,
         )
 
@@ -964,6 +1080,21 @@ def run_reference_forward(
             if name in b12_captures:
                 taps[f"b12__{name}"] = b12_captures[name]
 
+    if capture_c41:
+        wanted = c41_tap_names or list(C41_LAYER1_TAP_NAMES)
+        missing = [n for n in wanted if n not in c41_captures]
+        if missing:
+            print(
+                f"[mtp_h_main_ref] WARNING: C41 instrumentation missed taps: {missing}",
+                file=sys.stderr,
+            )
+        for name in wanted:
+            if name in c41_captures:
+                tensor = c41_captures[name]
+                if tensor.ndim >= 2:
+                    tensor = tensor[:, -1:, ...].contiguous()
+                taps[f"c41__{name}"] = tensor
+
     # Free the model and all retained activations before returning.
     del model, out, hs
     if device.type == "cuda":
@@ -1024,6 +1155,18 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c41-taps",
+        action="store_true",
+        help=(
+            "Also capture the explicit Phase C41 transformer-block-1 tap set "
+            "(input norm output, layer-1 GDN internals, post-attn residual, "
+            "and final layer output). Output tensors are emitted under "
+            "`c41__<name>` keys matching C41_LAYER1_TAP_NAMES in "
+            "crates/kiln-model/src/mtp_debug.rs. The exact tap order is "
+            "resolved from the kiln dump's `meta__c41_tap_ids` when present."
+        ),
+    )
+    ap.add_argument(
         "--fp32",
         action="store_true",
         help=(
@@ -1043,6 +1186,7 @@ def main() -> int:
     print(f"[mtp_h_main_ref] loading kiln dump from {args.kiln_dump}", file=sys.stderr)
     kiln = load_kiln_dump(args.kiln_dump)
     boundary_layers = resolve_boundary_layers(kiln, capture_b12=args.b12_taps)
+    c41_tap_names = resolve_c41_tap_names(kiln) if args.c41_taps else None
     draft_token_id = int(kiln.get("meta__draft_token_id", -1))
     mtp_pos = int(kiln.get("meta__mtp_pos", -1))
     print(
@@ -1107,6 +1251,8 @@ def main() -> int:
         boundary_layers=boundary_layers,
         capture_b11_layer0=args.b11_taps,
         capture_b12=args.b12_taps,
+        capture_c41=args.c41_taps,
+        c41_tap_names=c41_tap_names,
         fp32=args.fp32,
     )
 
@@ -1130,6 +1276,11 @@ def main() -> int:
     out_dict["meta__boundary_layers"] = torch.tensor(
         boundary_layers, dtype=torch.int32
     )
+    if c41_tap_names:
+        out_dict["meta__c41_tap_ids"] = torch.tensor(
+            [C41_LAYER1_TAP_NAMES.index(name) for name in c41_tap_names],
+            dtype=torch.int32,
+        )
     # Also write the resolved prompt tokens so later reruns can reproduce
     # bit-exactly even if the kiln dump gets rotated.
     out_dict["prompt_tokens"] = prompt_tokens.view(-1).to(torch.int32).contiguous()

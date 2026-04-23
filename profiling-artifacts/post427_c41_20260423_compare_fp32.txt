@@ -1,0 +1,84 @@
+MTP numerical bisect — mode: transformer block 1 bisect (C41), atol=0.01, rtol=0.1
+
+=== seed0 ===
+  kiln dump : profiling-artifacts/post427_c41_20260423_seed0_captures/mtp_pos-0/step-1.safetensors
+  ref  dump : profiling-artifacts/post427_c41_20260423_seed0_ref_fp32.safetensors
+Metadata:
+  meta__draft_token_id: kiln=31192 ref=31192 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+c41__layer_1_post_input_norm 1x1x2560               True     False    9.98e-01   1.46e-01     3.46e-02    
+c41__gdn_in_proj       1x1x12352              True     False    9.98e-01   1.66e-01     2.33e-02    
+c41__gdn_conv          1x1x8192               True     False    9.99e-01   2.94e-02     3.75e-04    
+c41__gdn_qk_norm_q     1x1x32x128             True     False    9.99e-01   7.93e-01     4.40e-02    
+c41__gdn_qk_norm_k     1x1x32x128             True     False    9.98e-01   3.33e-02     3.44e-03    
+c41__gdn_gate_beta     1x1x32                 True     True     1.00e+00   3.22e-02     9.47e-03    
+c41__gdn_gate_g        1x1x32                 True     True     9.99e-01   1.96e-01     3.07e-02    
+c41__gdn_recur_out     1x1x32x128             True     True     1.00e+00   6.76e-04     3.67e-06    
+c41__gdn_gated_norm    1x1x4096               True     False    9.97e-01   1.40e-02     5.05e-04    
+c41__gdn_out_proj      1x1x2560               True     True     9.98e-01   5.02e-03     6.50e-04    
+c41__layer_1_post_attn_residual 1x1x2560               True     True     9.99e-01   1.90e-02     1.70e-03    
+c41__layer_1_output    1x1x2560               True     False    9.98e-01   3.65e-02     2.86e-03    
+
+  pair verdict: first divergence at tap 'c41__layer_1_post_input_norm'.
+    Most-likely cause: <unknown tap>
+
+=== seed1 ===
+  kiln dump : profiling-artifacts/post427_c41_20260423_seed1_captures/mtp_pos-2/step-1.safetensors
+  ref  dump : profiling-artifacts/post427_c41_20260423_seed1_ref_fp32.safetensors
+Metadata:
+  meta__draft_token_id: kiln=3202 ref=3202 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+c41__layer_1_post_input_norm 1x1x2560               True     False    9.98e-01   1.50e-01     3.40e-02    
+c41__gdn_in_proj       1x1x12352              True     False    9.98e-01   2.13e-01     2.29e-02    
+c41__gdn_conv          1x1x8192               True     True     9.99e-01   1.48e-02     4.12e-04    
+c41__gdn_qk_norm_q     1x1x32x128             True     False    9.98e-01   7.75e-01     4.49e-02    
+c41__gdn_qk_norm_k     1x1x32x128             True     False    9.98e-01   2.56e-02     3.70e-03    
+c41__gdn_gate_beta     1x1x32                 True     True     1.00e+00   2.25e-02     7.10e-03    
+c41__gdn_gate_g        1x1x32                 True     False    9.99e-01   5.80e-01     8.38e-02    
+c41__gdn_recur_out     1x1x32x128             True     True     1.00e+00   5.14e-04     4.57e-06    
+c41__gdn_gated_norm    1x1x4096               True     False    9.97e-01   3.12e-02     6.07e-04    
+c41__gdn_out_proj      1x1x2560               True     True     9.98e-01   8.41e-03     7.90e-04    
+c41__layer_1_post_attn_residual 1x1x2560               True     True     9.99e-01   9.23e-03     1.48e-03    
+c41__layer_1_output    1x1x2560               True     False    9.98e-01   2.89e-02     2.94e-03    
+
+  pair verdict: first divergence at tap 'c41__layer_1_post_input_norm'.
+    Most-likely cause: <unknown tap>
+
+==============================================================================
+Phase C41 transformer block 1 bisect — cos_sim / max|Δ| / mean|Δ| / rel_l2
+==============================================================================
+  tap                         seed0                                                seed1                                               
+  -------------------------------------------------------------------------------------------------------------------------------------
+  layer_1_post_input_norm     cos=9.98e-01   max|Δ|=1.46e-01   mean|Δ|=3.46e-02   rel_l2=5.64e-02   DIV cos=9.98e-01   max|Δ|=1.50e-01   mean|Δ|=3.40e-02   rel_l2=5.75e-02   DIV
+  gdn_in_proj                 cos=9.98e-01   max|Δ|=1.66e-01   mean|Δ|=2.33e-02   rel_l2=5.79e-02   DIV cos=9.98e-01   max|Δ|=2.13e-01   mean|Δ|=2.29e-02   rel_l2=6.46e-02   DIV
+  gdn_conv                    cos=9.99e-01   max|Δ|=2.94e-02   mean|Δ|=3.75e-04   rel_l2=3.87e-02   DIV cos=9.99e-01   max|Δ|=1.48e-02   mean|Δ|=4.12e-04   rel_l2=3.60e-02   ok 
+  gdn_qk_norm_q               cos=9.99e-01   max|Δ|=7.93e-01   mean|Δ|=4.40e-02   rel_l2=9.12e-01   DIV cos=9.98e-01   max|Δ|=7.75e-01   mean|Δ|=4.49e-02   rel_l2=9.12e-01   DIV
+  gdn_qk_norm_k               cos=9.98e-01   max|Δ|=3.33e-02   mean|Δ|=3.44e-03   rel_l2=5.66e-02   DIV cos=9.98e-01   max|Δ|=2.56e-02   mean|Δ|=3.70e-03   rel_l2=5.99e-02   DIV
+  gdn_gate_beta               cos=1.00e+00   max|Δ|=3.22e-02   mean|Δ|=9.47e-03   rel_l2=2.83e-02   ok  cos=1.00e+00   max|Δ|=2.25e-02   mean|Δ|=7.10e-03   rel_l2=1.73e-02   ok 
+  gdn_gate_g                  cos=9.99e-01   max|Δ|=1.96e-01   mean|Δ|=3.07e-02   rel_l2=4.13e-02   ok  cos=9.99e-01   max|Δ|=5.80e-01   mean|Δ|=8.38e-02   rel_l2=1.16e-01   DIV
+  gdn_recur_out               cos=1.00e+00   max|Δ|=6.76e-04   mean|Δ|=3.67e-06   rel_l2=2.76e-02   ok  cos=1.00e+00   max|Δ|=5.14e-04   mean|Δ|=4.57e-06   rel_l2=2.47e-02   ok 
+  gdn_gated_norm              cos=9.97e-01   max|Δ|=1.40e-02   mean|Δ|=5.05e-04   rel_l2=8.11e-02   DIV cos=9.97e-01   max|Δ|=3.12e-02   mean|Δ|=6.07e-04   rel_l2=7.97e-02   DIV
+  gdn_out_proj                cos=9.98e-01   max|Δ|=5.02e-03   mean|Δ|=6.50e-04   rel_l2=5.84e-02   ok  cos=9.98e-01   max|Δ|=8.41e-03   mean|Δ|=7.90e-04   rel_l2=6.09e-02   ok 
+  layer_1_post_attn_residual  cos=9.99e-01   max|Δ|=1.90e-02   mean|Δ|=1.70e-03   rel_l2=3.62e-02   ok  cos=9.99e-01   max|Δ|=9.23e-03   mean|Δ|=1.48e-03   rel_l2=3.54e-02   ok 
+  layer_1_output              cos=9.98e-01   max|Δ|=3.65e-02   mean|Δ|=2.86e-03   rel_l2=6.14e-02   DIV cos=9.98e-01   max|Δ|=2.89e-02   mean|Δ|=2.94e-03   rel_l2=6.89e-02   DIV
+
+  earliest shared bad tap: 'layer_1_post_input_norm'
+Phase C41 verdict: EARLIEST SHARED BAD LAYER-1 TAP = 'layer_1_post_input_norm'.
+    Most-likely cause: layer 1 input_layernorm weight/eps or the layer-1 residual input frame
+  -> Divergence is already present at the first captured layer-1 boundary.
+
+Overall verdict: divergence(s) at: ['c41__layer_1_post_input_norm', 'c41__layer_1_post_input_norm']

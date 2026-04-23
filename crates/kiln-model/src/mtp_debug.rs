@@ -130,6 +130,19 @@ thread_local! {
     static B12_GQA_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
 
+    /// Phase C41: thread-local sink for transformer block 1 (layer 1) GDN
+    /// sub-op taps. Distinct from the B11 layer-0 sink because C41 is a new
+    /// bisect contract over a different layer and includes explicit residual
+    /// handoff taps (`layer_1_post_attn_residual`, `layer_1_output`) that do
+    /// not belong in the historical B11 namespace.
+    ///
+    /// Driven by [`arm_c41_layer1_capture`] / [`drain_c41_layer1_capture`] /
+    /// [`capture_c41_layer1_tap`], and gated on
+    /// `KILN_MTP_DUMP_C41_LAYER1_TAPS=1` so production decode stays on the
+    /// current fast path when unset.
+    static C41_LAYER1_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
+
     /// Phase B12: thread-local "current absolute layer index" slot. Set by
     /// the main transformer layer loop around each layer's forward call so
     /// that deep inside `gqa_attention_paged` / `transformer_block_paged`
@@ -796,6 +809,87 @@ pub const B12_GQA_TAP_NAMES: &[&str] = &[
     "mlp_up",
     "mlp_down",
 ];
+
+/// True when `KILN_MTP_DUMP_C41_LAYER1_TAPS=1` (or `true`) is set. Opt-in for
+/// the Phase C41 transformer-block-1 bisect: when enabled alongside
+/// `KILN_MTP_DUMP_PATH` *and* `KILN_MTP_DUMP_HIDDEN_STATES=1`, the base-model
+/// forward records the layer-1 GDN and residual-handoff taps listed in
+/// [`C41_LAYER1_TAP_NAMES`] and appends them to the MTP dump safetensors under
+/// names `c41__<name>`.
+pub fn is_dump_c41_layer1_taps_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_C41_LAYER1_TAPS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Canonical ordered list of Phase C41 transformer-block-1 tap names. The
+/// comparator (`scripts/mtp_compare.py --c41`) and the HF reference
+/// (`scripts/mtp_h_main_reference_dump.py --c41-taps`) both mirror this exact
+/// order. The list is intentionally minimal and explicit: the earliest bad tap
+/// should identify the first bad boundary *inside* layer 1 without turning C41
+/// into a general-purpose tracing framework.
+pub const C41_LAYER1_TAP_NAMES: &[&str] = &[
+    "layer_1_post_input_norm",
+    "gdn_in_proj",
+    "gdn_conv",
+    "gdn_qk_norm_q",
+    "gdn_qk_norm_k",
+    "gdn_gate_beta",
+    "gdn_gate_g",
+    "gdn_recur_out",
+    "gdn_gated_norm",
+    "gdn_out_proj",
+    "layer_1_post_attn_residual",
+    "layer_1_output",
+];
+
+/// True if the Phase C41 layer-1 capture window is currently armed on this
+/// thread. Call sites use this to gate the host copy so disarmed runs pay zero
+/// cost.
+pub fn is_c41_layer1_capture_armed() -> bool {
+    C41_LAYER1_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// True if a C41 transformer-block-1 capture should happen for `layer_idx`.
+/// Exposed as a helper so forward.rs can keep the call sites local to layer 1
+/// without needing another scope-tracking TLS slot.
+pub fn should_capture_c41_layer1_tap_for_layer(layer_idx: usize) -> bool {
+    layer_idx == 1 && is_c41_layer1_capture_armed()
+}
+
+/// Begin a C41 layer-1 capture window. Subsequent
+/// [`capture_c41_layer1_tap`] calls from the same thread record into a fresh
+/// buffer until [`drain_c41_layer1_capture`] is called. Does nothing if
+/// [`is_dump_c41_layer1_taps_enabled`] is false.
+pub fn arm_c41_layer1_capture() {
+    if !is_dump_c41_layer1_taps_enabled() {
+        return;
+    }
+    C41_LAYER1_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured C41 layer-1 taps and disarm. Returns whatever was
+/// recorded since the matching [`arm_c41_layer1_capture`] call, in order.
+pub fn drain_c41_layer1_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    C41_LAYER1_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named C41 transformer-block-1 tap if a capture window is
+/// currently open on this thread.
+pub fn capture_c41_layer1_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = C41_LAYER1_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_c41_layer1_tap `{name}`: tensor→f32 host copy"))?;
+    C41_LAYER1_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
 
 /// True if the Phase B12 layer-31 GQA capture window is currently armed on
 /// this thread. Call sites use this to gate the (relatively cheap) host
@@ -1464,6 +1558,7 @@ pub fn write_mtp_dump(
     replay_tokens: &[u32],
     b11_taps: &[(String, Vec<usize>, Vec<f32>)],
     b12_taps: &[(String, Vec<usize>, Vec<f32>)],
+    c41_taps: &[(String, Vec<usize>, Vec<f32>)],
     c6_taps: &[(String, Vec<usize>, Vec<f32>)],
     c7_taps: &[(String, Vec<usize>, Vec<f32>)],
     c14_taps: &[(String, Vec<usize>, Vec<f32>)],
@@ -1473,11 +1568,12 @@ pub fn write_mtp_dump(
     // Materialize every tensor to a host byte buffer first so the
     // TensorViews we build below can borrow from a stable backing store.
     // Capacity: static taps + subops + 4 meta + optional boundary-layer meta
-    // + optional prompt/replay token
-    // tensors + b11 taps + b12 taps + c6 taps + c7 taps + c14 taps.
+    // + optional prompt/replay token tensors + b11 taps + b12 taps + optional
+    // C41 tap-id meta + c41 taps + c6 taps + c7 taps + c14 taps.
     let boundary_reserve = if boundary_layers.is_empty() { 0 } else { 1 };
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let replay_reserve = if replay_tokens.is_empty() { 0 } else { 2 };
+    let c41_meta_reserve = if c41_taps.is_empty() { 0 } else { 1 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
@@ -1487,6 +1583,8 @@ pub fn write_mtp_dump(
             + replay_reserve
             + b11_taps.len()
             + b12_taps.len()
+            + c41_meta_reserve
+            + c41_taps.len()
             + c6_taps.len()
             + c7_taps.len()
             + c14_taps.len(),
@@ -1623,6 +1721,32 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push((format!("b12__{name}"), shape.clone(), Dtype::F32, bytes));
+    }
+
+    if !c41_taps.is_empty() {
+        let mut bytes = Vec::with_capacity(c41_taps.len() * 4);
+        for (name, _shape, _flat) in c41_taps {
+            let idx = C41_LAYER1_TAP_NAMES
+                .iter()
+                .position(|&tap| tap == name.as_str())
+                .with_context(|| format!("unknown C41 tap `{name}`"))?;
+            let idx_i32 = idx as i32;
+            bytes.extend_from_slice(&idx_i32.to_le_bytes());
+        }
+        backings.push((
+            "meta__c41_tap_ids".into(),
+            vec![c41_taps.len()],
+            Dtype::I32,
+            bytes,
+        ));
+    }
+
+    for (name, shape, flat) in c41_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("c41__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     // Phase C6: serialize the pre-RoPE MTP-input taps under `c6__<name>` so
@@ -2089,6 +2213,7 @@ mod tests {
             &prompt,
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2218,6 +2343,7 @@ mod tests {
             /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2361,6 +2487,7 @@ mod tests {
             /* replay_tokens = */ &[],
             &b11,
             /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2407,6 +2534,65 @@ mod tests {
         assert_eq!(B12_GQA_TAP_NAMES.len(), 14);
         assert_eq!(B12_GQA_TAP_NAMES[0], "post_input_norm");
         assert_eq!(B12_GQA_TAP_NAMES[13], "mlp_down");
+    }
+
+    #[test]
+    fn c41_layer1_tap_names_enumerate_expected_boundaries() {
+        assert_eq!(C41_LAYER1_TAP_NAMES.len(), 12);
+        assert_eq!(C41_LAYER1_TAP_NAMES[0], "layer_1_post_input_norm");
+        assert_eq!(C41_LAYER1_TAP_NAMES[10], "layer_1_post_attn_residual");
+        assert_eq!(C41_LAYER1_TAP_NAMES[11], "layer_1_output");
+    }
+
+    #[test]
+    fn c41_layer1_capture_records_then_drains() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_C41_LAYER1_TAPS", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32, 20.0][..], &Device::Cpu).unwrap();
+
+        capture_c41_layer1_tap("layer_1_post_input_norm", &a).unwrap();
+        assert!(drain_c41_layer1_capture().is_empty());
+        assert!(!is_c41_layer1_capture_armed());
+        assert!(!should_capture_c41_layer1_tap_for_layer(1));
+
+        arm_c41_layer1_capture();
+        assert!(is_c41_layer1_capture_armed());
+        assert!(should_capture_c41_layer1_tap_for_layer(1));
+        assert!(!should_capture_c41_layer1_tap_for_layer(0));
+        capture_c41_layer1_tap("layer_1_post_input_norm", &a).unwrap();
+        capture_c41_layer1_tap("layer_1_output", &b).unwrap();
+        let drained = drain_c41_layer1_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "layer_1_post_input_norm");
+        assert_eq!(drained[0].1, vec![3]);
+        assert_eq!(drained[0].2, vec![1.0, 2.0, 3.0]);
+        assert_eq!(drained[1].0, "layer_1_output");
+        assert_eq!(drained[1].1, vec![2]);
+        assert_eq!(drained[1].2, vec![10.0, 20.0]);
+
+        assert!(!is_c41_layer1_capture_armed());
+        capture_c41_layer1_tap("gdn_in_proj", &a).unwrap();
+        assert!(drain_c41_layer1_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C41_LAYER1_TAPS");
+        }
+    }
+
+    #[test]
+    fn c41_layer1_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C41_LAYER1_TAPS");
+        }
+        arm_c41_layer1_capture();
+        assert!(!is_c41_layer1_capture_armed());
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_c41_layer1_tap("layer_1_post_input_norm", &a).unwrap();
+        assert!(drain_c41_layer1_capture().is_empty());
     }
 
     #[test]
@@ -2497,6 +2683,7 @@ mod tests {
             /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             &b12,
+            /* c41_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2524,6 +2711,67 @@ mod tests {
         let md = st.tensor("b12__mlp_down").unwrap();
         assert_eq!(md.dtype(), safetensors::Dtype::F32);
         assert_eq!(md.shape(), &[3]);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_c41_taps_and_metadata_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c41.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let c41 = vec![
+            (
+                "layer_1_post_input_norm".to_string(),
+                vec![2],
+                vec![0.61_f32, 0.62],
+            ),
+            (
+                "layer_1_output".to_string(),
+                vec![3],
+                vec![0.71_f32, 0.72, 0.73],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 55,
+            /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
+            /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
+            &c41,
+            /* c6_taps = */ &[],
+            /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"c41__layer_1_post_input_norm"));
+        assert!(names.contains(&"c41__layer_1_output"));
+        assert!(names.contains(&"meta__c41_tap_ids"));
+
+        let ids = st.tensor("meta__c41_tap_ids").unwrap();
+        assert_eq!(ids.dtype(), safetensors::Dtype::I32);
+        assert_eq!(ids.shape(), &[2]);
+        let id0 = i32::from_le_bytes(ids.data()[0..4].try_into().unwrap());
+        let id1 = i32::from_le_bytes(ids.data()[4..8].try_into().unwrap());
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 11);
+
+        let out = st.tensor("c41__layer_1_output").unwrap();
+        assert_eq!(out.dtype(), safetensors::Dtype::F32);
+        assert_eq!(out.shape(), &[3]);
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -2718,6 +2966,7 @@ mod tests {
             /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
             &c6,
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2850,6 +3099,7 @@ mod tests {
             /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
             /* c6_taps = */ &[],
             &c7,
             /* c14_taps = */ &[],
@@ -3008,6 +3258,7 @@ mod tests {
             /* replay_tokens = */ &[],
             /* b11_taps = */ &[],
             /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             &c14,
