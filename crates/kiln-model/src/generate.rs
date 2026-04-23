@@ -264,6 +264,19 @@ impl ModelRunner {
         }
     }
 
+    fn snapshot_draft_linear_state(
+        &self,
+        linear_state: &LinearAttentionState,
+        spec_config: &SpeculativeConfig,
+    ) -> Result<LinearAttentionState> {
+        let draft_linear_layers = self
+            .weights
+            .linear_attention_layers_in_prefix(spec_config.draft_layers);
+        linear_state
+            .snapshot_for_decode_rollback_prefix(draft_linear_layers)
+            .context("clone draft linear-attention prefix from skip-layer prefill")
+    }
+
     /// Generate text from a prompt string.
     ///
     /// Tokenizes the prompt, runs the autoregressive generation loop,
@@ -1017,9 +1030,8 @@ impl ModelRunner {
             }
         };
 
-        let mut draft_linear_state = linear_state
-            .snapshot_for_decode_rollback()
-            .context("clone draft state from paged skip-layer prefill")?;
+        let mut draft_linear_state =
+            self.snapshot_draft_linear_state(&linear_state, spec_config)?;
 
         let mut base_pos = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -1369,9 +1381,8 @@ impl ModelRunner {
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
-        let mut draft_linear_state = linear_state
-            .snapshot_for_decode_rollback()
-            .context("clone draft state from skip-layer prefill")?;
+        let mut draft_linear_state =
+            self.snapshot_draft_linear_state(&linear_state, spec_config)?;
 
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut rng = match params.seed {
@@ -1871,9 +1882,8 @@ impl ModelRunner {
         .context("prefill forward pass failed")?;
         kv_cache.advance(prompt_tokens.len());
 
-        let mut draft_linear_state = linear_state
-            .snapshot_for_decode_rollback()
-            .context("clone draft state from streaming skip-layer prefill")?;
+        let mut draft_linear_state =
+            self.snapshot_draft_linear_state(&linear_state, spec_config)?;
 
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut finish_reason = FinishReason::MaxTokens;
@@ -2552,9 +2562,8 @@ impl ModelRunner {
             }
         };
 
-        let mut draft_linear_state = linear_state
-            .snapshot_for_decode_rollback()
-            .context("clone draft state from streaming paged skip-layer prefill")?;
+        let mut draft_linear_state =
+            self.snapshot_draft_linear_state(&linear_state, spec_config)?;
 
         let mut base_pos = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();

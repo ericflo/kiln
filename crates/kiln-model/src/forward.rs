@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
@@ -17,7 +17,7 @@ use crate::lora_loader::{
 };
 use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
 use crate::transposed_weight_cache::transposed_weight_bytes_2d_cached;
-use crate::weights::{ModelWeights, TensorDType, WeightTensor};
+use crate::weights::{ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
 
@@ -173,12 +173,13 @@ pub struct GpuWeights {
     /// so the RoPE hot path can reuse it instead of rebuilding a fresh `Vec<f32>` +
     /// HtoD upload on every layer's attention call (~8 × per token in prefill).
     pub rotary_inv_freq: Tensor,
-    /// Native MTP (Multi-Token Prediction) head tensors on device, when the
-    /// checkpoint shipped them and the loader surfaced a `ModelWeights.mtp`.
-    /// `None` for checkpoints without MTP support; the `KILN_SPEC_METHOD=mtp`
-    /// code path must bail with an error and fall back to `SkipLayer` or
-    /// single-token decode when this is `None`.
-    pub mtp: Option<MtpGpuWeights>,
+    /// Native MTP (Multi-Token Prediction) head tensors, when the checkpoint
+    /// shipped them and the loader surfaced a `ModelWeights.mtp`.
+    ///
+    /// The slot is lazy by default so desktop startup does not upload the MTP
+    /// tensors to Metal unless a request actually resolves to native MTP.
+    /// `None` still means the checkpoint does not support native MTP.
+    pub mtp: Option<MtpGpuWeightsSlot>,
 }
 
 /// GPU-ready native MTP head tensors.
@@ -213,6 +214,189 @@ pub struct MtpGpuWeights {
     pub layer: GpuLayerWeights,
     /// Final RMSNorm weight before the tied lm_head. `[hidden_size]`.
     pub final_layernorm: Tensor,
+}
+
+/// Lazy GPU materialization for native MTP tensors.
+///
+/// Routing only needs to know whether MTP exists; the first actual MTP forward
+/// pays the upload cost. This avoids blocking macOS desktop readiness on an
+/// MTP path that the server uses only for short greedy prompts.
+pub struct MtpGpuWeightsSlot {
+    weights: OnceLock<MtpGpuWeights>,
+    source: Option<MtpWeights>,
+    device: Device,
+    init_lock: Mutex<()>,
+}
+
+impl MtpGpuWeightsSlot {
+    pub fn lazy(source: MtpWeights, device: &Device) -> Self {
+        Self {
+            weights: OnceLock::new(),
+            source: Some(source),
+            device: device.clone(),
+            init_lock: Mutex::new(()),
+        }
+    }
+
+    pub fn eager(weights: MtpGpuWeights, device: &Device) -> Self {
+        let slot = Self {
+            weights: OnceLock::new(),
+            source: None,
+            device: device.clone(),
+            init_lock: Mutex::new(()),
+        };
+        let _ = slot.weights.set(weights);
+        slot
+    }
+
+    pub fn is_uploaded(&self) -> bool {
+        self.weights.get().is_some()
+    }
+
+    pub fn get_or_upload(&self) -> Result<&MtpGpuWeights> {
+        if let Some(weights) = self.weights.get() {
+            return Ok(weights);
+        }
+
+        let _guard = self
+            .init_lock
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock MTP GPU upload slot: {e}"))?;
+        if let Some(weights) = self.weights.get() {
+            return Ok(weights);
+        }
+
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("native MTP GPU slot is empty and has no CPU source"))?;
+        let projection_load_cache =
+            ProjectionLoadCache::new(&self.device).context("mtp projection load cache")?;
+        let upload_start = std::time::Instant::now();
+        let uploaded = upload_mtp_gpu_weights(source, &self.device, &projection_load_cache)
+            .context("lazy native MTP GPU upload")?;
+        let upload_elapsed_ms = upload_start.elapsed().as_millis();
+        self.weights
+            .set(uploaded)
+            .map_err(|_| anyhow::anyhow!("native MTP GPU weights were initialized twice"))?;
+        tracing::info!(
+            upload_elapsed_ms = upload_elapsed_ms as u64,
+            "lazy native MTP GPU upload complete"
+        );
+
+        self.weights
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("native MTP GPU upload completed but slot is empty"))
+    }
+}
+
+fn upload_mtp_gpu_weights(
+    mtp_w: &MtpWeights,
+    device: &Device,
+    projection_load_cache: &ProjectionLoadCache,
+) -> Result<MtpGpuWeights> {
+    let (fc, fc_t) = projection_tensors_for_load(&mtp_w.fc, device, projection_load_cache)
+        .context("mtp.fc projection tensors")?;
+    let pre_fc_norm_embedding = weight_to_tensor(&mtp_w.pre_fc_norm_embedding, device)
+        .context("mtp.pre_fc_norm_embedding")?;
+    let pre_fc_norm_hidden =
+        weight_to_tensor(&mtp_w.pre_fc_norm_hidden, device).context("mtp.pre_fc_norm_hidden")?;
+    let final_layernorm =
+        weight_to_tensor(&mtp_w.final_layernorm, device).context("mtp.final_layernorm")?;
+
+    // The MTP inner transformer layer. Loader guarantees this is a
+    // full-attention layer (bails otherwise). Keep the upload local to MTP
+    // rather than adding it to Marlin packing; native MTP uses one layer and
+    // is not on the long-prompt desktop route.
+    let mtp_layer = {
+        let lw = &mtp_w.layer;
+        let ctx = |name: &str| format!("mtp.layer {name}");
+
+        let input_layernorm =
+            weight_to_tensor(&lw.input_layernorm, device).context(ctx("input_layernorm"))?;
+        let post_attention_layernorm = weight_to_tensor(&lw.post_attention_layernorm, device)
+            .context(ctx("post_attention_layernorm"))?;
+
+        let attention = match &lw.attention {
+            crate::weights::AttentionWeights::Full(attn) => {
+                let attn_proj = projection_tensors_for_load_batch(
+                    &[
+                        ("q_proj", &attn.q_proj),
+                        ("k_proj", &attn.k_proj),
+                        ("v_proj", &attn.v_proj),
+                        ("o_proj", &attn.o_proj),
+                    ],
+                    device,
+                    projection_load_cache,
+                )
+                .context(ctx("attention projection tensors"))?;
+                let mut attn_proj = attn_proj.into_iter();
+                let (q_proj, q_proj_t) = attn_proj.next().context(ctx("q_proj missing"))?;
+                let (k_proj, k_proj_t) = attn_proj.next().context(ctx("k_proj missing"))?;
+                let (v_proj, v_proj_t) = attn_proj.next().context(ctx("v_proj missing"))?;
+                let (o_proj, o_proj_t) = attn_proj.next().context(ctx("o_proj missing"))?;
+                GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
+                    q_norm: weight_to_tensor(&attn.q_norm, device).context(ctx("q_norm"))?,
+                    k_norm: weight_to_tensor(&attn.k_norm, device).context(ctx("k_norm"))?,
+                    q_proj_t,
+                    k_proj_t,
+                    v_proj_t,
+                    o_proj_t,
+                    q_proj_marlin: None,
+                })
+            }
+            crate::weights::AttentionWeights::Linear(_) => {
+                anyhow::bail!(
+                    "MTP layer resolved as linear attention - loader should have caught this"
+                );
+            }
+        };
+
+        let mlp_proj = projection_tensors_for_load_batch(
+            &[
+                ("gate_proj", &lw.mlp.gate_proj),
+                ("up_proj", &lw.mlp.up_proj),
+                ("down_proj", &lw.mlp.down_proj),
+            ],
+            device,
+            projection_load_cache,
+        )
+        .context(ctx("mlp projection tensors"))?;
+        let mut mlp_proj = mlp_proj.into_iter();
+        let (gate_proj, gate_proj_t) = mlp_proj.next().context(ctx("gate_proj missing"))?;
+        let (up_proj, up_proj_t) = mlp_proj.next().context(ctx("up_proj missing"))?;
+        let (down_proj, down_proj_t) = mlp_proj.next().context(ctx("down_proj missing"))?;
+
+        GpuLayerWeights {
+            input_layernorm,
+            post_attention_layernorm,
+            attention,
+            mlp: GpuFfnWeights {
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_proj_t,
+                up_proj_t,
+                down_proj_t,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+            },
+        }
+    };
+
+    Ok(MtpGpuWeights {
+        fc,
+        fc_t,
+        pre_fc_norm_embedding,
+        pre_fc_norm_hidden,
+        layer: mtp_layer,
+        final_layernorm,
+    })
 }
 
 /// Compute the rotary-embedding `inv_freq` tensor once and upload it to `device`.
@@ -394,9 +578,33 @@ impl LinearAttentionState {
     /// preserves the pre-step value without a device copy. Conv state is mutated
     /// in-place by the Metal/CUDA update kernels, so it must still be copied.
     pub fn snapshot_for_decode_rollback(&self) -> Result<Self> {
-        let recurrent_states = self.recurrent_states.clone();
-        let mut conv_states = Vec::with_capacity(self.conv_states.len());
-        for t in &self.conv_states {
+        self.snapshot_for_decode_rollback_prefix(self.recurrent_states.len())
+    }
+
+    /// Snapshot only the linear-attention prefix needed by a draft model.
+    ///
+    /// Skip-layer drafting runs `model_forward_segment(..., 0, draft_layers)`,
+    /// so it never touches GDN states after that layer prefix. Carrying all
+    /// 24 Qwen3.5-4B GDN states in the draft snapshot wastes device copies on
+    /// every speculative step.
+    pub fn snapshot_for_decode_rollback_prefix(&self, num_linear_layers: usize) -> Result<Self> {
+        if num_linear_layers > self.recurrent_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState::snapshot_for_decode_rollback_prefix: requested {} recurrent states, only {} available",
+                num_linear_layers,
+                self.recurrent_states.len()
+            );
+        }
+        if num_linear_layers > self.conv_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState::snapshot_for_decode_rollback_prefix: requested {} conv states, only {} available",
+                num_linear_layers,
+                self.conv_states.len()
+            );
+        }
+        let recurrent_states = self.recurrent_states[..num_linear_layers].to_vec();
+        let mut conv_states = Vec::with_capacity(num_linear_layers);
+        for t in &self.conv_states[..num_linear_layers] {
             conv_states.push(t.copy().context("snapshot conv state")?);
         }
         Ok(Self {
@@ -958,6 +1166,28 @@ fn install_marlin_packed(
 }
 
 impl GpuWeights {
+    pub fn has_mtp(&self) -> bool {
+        self.mtp.is_some()
+    }
+
+    pub fn mtp_weights(&self) -> Result<&MtpGpuWeights> {
+        let mtp = self.mtp.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "native MTP requested but checkpoint has no mtp.* tensors \
+                 (Qwen3.5-4B includes them)"
+            )
+        })?;
+        mtp.get_or_upload()
+    }
+
+    pub fn linear_attention_layers_in_prefix(&self, end_layer: usize) -> usize {
+        self.layers
+            .iter()
+            .take(end_layer.min(self.layers.len()))
+            .filter(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)))
+            .count()
+    }
+
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
     ///
     /// `config` is used to precompute the rotary `inv_freq` tensor once so the RoPE
@@ -1198,123 +1428,14 @@ impl GpuWeights {
             }
         }
 
-        // Upload native MTP head tensors when the checkpoint shipped them.
-        // For WIP scaffolding the MTP transformer layer is kept in BF16 and
-        // is NOT queued for Marlin batch packing: the MTP layer is a single
-        // layer whose projections account for ~3% of total model memory, so
-        // deferring W4A16 coverage costs little and keeps the scaffold
-        // simple. The follow-up PR extends `marlin_pack_inputs` to include
-        // the MTP layer's q_proj + MLP trio.
-        let mtp = if let Some(mtp_w) = &weights.mtp {
-            let (fc, fc_t) = projection_tensors_for_load(&mtp_w.fc, device, &projection_load_cache)
-                .context("mtp.fc projection tensors")?;
-            let pre_fc_norm_embedding = weight_to_tensor(&mtp_w.pre_fc_norm_embedding, device)
-                .context("mtp.pre_fc_norm_embedding")?;
-            let pre_fc_norm_hidden = weight_to_tensor(&mtp_w.pre_fc_norm_hidden, device)
-                .context("mtp.pre_fc_norm_hidden")?;
-            let final_layernorm =
-                weight_to_tensor(&mtp_w.final_layernorm, device).context("mtp.final_layernorm")?;
-
-            // The MTP inner transformer layer. Loader guarantees this is a
-            // full-attention layer (bails otherwise). Keep the upload inline
-            // — duplicating the ~70-line layer-upload block here is a
-            // deliberate scaffolding shortcut; the follow-up PR factors this
-            // and the main per-layer upload into a shared helper.
-            let mtp_layer = {
-                let lw = &mtp_w.layer;
-                let ctx = |name: &str| format!("mtp.layer {name}");
-
-                let input_layernorm = weight_to_tensor(&lw.input_layernorm, device)
-                    .context(ctx("input_layernorm"))?;
-                let post_attention_layernorm =
-                    weight_to_tensor(&lw.post_attention_layernorm, device)
-                        .context(ctx("post_attention_layernorm"))?;
-
-                let attention = match &lw.attention {
-                    crate::weights::AttentionWeights::Full(attn) => {
-                        let attn_proj = projection_tensors_for_load_batch(
-                            &[
-                                ("q_proj", &attn.q_proj),
-                                ("k_proj", &attn.k_proj),
-                                ("v_proj", &attn.v_proj),
-                                ("o_proj", &attn.o_proj),
-                            ],
-                            device,
-                            &projection_load_cache,
-                        )
-                        .context(ctx("attention projection tensors"))?;
-                        let mut attn_proj = attn_proj.into_iter();
-                        let (q_proj, q_proj_t) = attn_proj.next().context(ctx("q_proj missing"))?;
-                        let (k_proj, k_proj_t) = attn_proj.next().context(ctx("k_proj missing"))?;
-                        let (v_proj, v_proj_t) = attn_proj.next().context(ctx("v_proj missing"))?;
-                        let (o_proj, o_proj_t) = attn_proj.next().context(ctx("o_proj missing"))?;
-                        GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                            q_proj,
-                            k_proj,
-                            v_proj,
-                            o_proj,
-                            q_norm: weight_to_tensor(&attn.q_norm, device)
-                                .context(ctx("q_norm"))?,
-                            k_norm: weight_to_tensor(&attn.k_norm, device)
-                                .context(ctx("k_norm"))?,
-                            q_proj_t,
-                            k_proj_t,
-                            v_proj_t,
-                            o_proj_t,
-                            q_proj_marlin: None,
-                        })
-                    }
-                    crate::weights::AttentionWeights::Linear(_) => {
-                        anyhow::bail!(
-                            "MTP layer resolved as linear attention — loader should have caught this"
-                        );
-                    }
-                };
-
-                let mlp_proj = projection_tensors_for_load_batch(
-                    &[
-                        ("gate_proj", &lw.mlp.gate_proj),
-                        ("up_proj", &lw.mlp.up_proj),
-                        ("down_proj", &lw.mlp.down_proj),
-                    ],
-                    device,
-                    &projection_load_cache,
-                )
-                .context(ctx("mlp projection tensors"))?;
-                let mut mlp_proj = mlp_proj.into_iter();
-                let (gate_proj, gate_proj_t) = mlp_proj.next().context(ctx("gate_proj missing"))?;
-                let (up_proj, up_proj_t) = mlp_proj.next().context(ctx("up_proj missing"))?;
-                let (down_proj, down_proj_t) = mlp_proj.next().context(ctx("down_proj missing"))?;
-
-                GpuLayerWeights {
-                    input_layernorm,
-                    post_attention_layernorm,
-                    attention,
-                    mlp: GpuFfnWeights {
-                        gate_proj,
-                        up_proj,
-                        down_proj,
-                        gate_proj_t,
-                        up_proj_t,
-                        down_proj_t,
-                        gate_proj_marlin: None,
-                        up_proj_marlin: None,
-                        down_proj_marlin: None,
-                    },
-                }
-            };
-
-            Some(MtpGpuWeights {
-                fc,
-                fc_t,
-                pre_fc_norm_embedding,
-                pre_fc_norm_hidden,
-                layer: mtp_layer,
-                final_layernorm,
-            })
-        } else {
-            None
-        };
+        // Keep MTP routing support visible but do not upload native MTP tensors
+        // during model load. The macOS desktop default only uses native MTP for
+        // short greedy prompts; long prompts route to skip-layer, so eager MTP
+        // upload slows common startup/readiness without warming the hot path.
+        let mtp = weights
+            .mtp
+            .as_ref()
+            .map(|mtp_w| MtpGpuWeightsSlot::lazy(mtp_w.clone(), device));
 
         Ok(Self {
             embed_tokens,
@@ -4803,11 +4924,7 @@ pub fn mtp_forward_step(
     mtp_pos: usize,
 ) -> Result<(Tensor, Tensor)> {
     kiln_nvtx::range!(c"kiln/mtp/step");
-    let mtp = weights.mtp.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "mtp_forward_step called on GpuWeights without native MTP head (checkpoint missing num_nextn_predict_layers)"
-        )
-    })?;
+    let mtp = weights.mtp_weights()?;
     let device = weights.embed_tokens.device();
 
     // Phase C6 dump pre-flight: consume the dump slot up-front so we can arm
@@ -6184,6 +6301,21 @@ mod tests {
             linear_conv_kernel_dim: 4,
             partial_rotary_factor: 1.0, // tests use full rotation by default
         }
+    }
+
+    #[test]
+    fn test_linear_attention_state_prefix_snapshot_truncates_draft_state() -> Result<()> {
+        let device = Device::Cpu;
+        let config = make_test_config(2, 1, 4, 8);
+        let state = LinearAttentionState::new(&config, &device)?;
+
+        assert_eq!(state.recurrent_states.len(), 3);
+        assert_eq!(state.conv_states.len(), 3);
+
+        let draft = state.snapshot_for_decode_rollback_prefix(1)?;
+        assert_eq!(draft.recurrent_states.len(), 1);
+        assert_eq!(draft.conv_states.len(), 1);
+        Ok(())
     }
 
     fn make_test_attn_weights(
