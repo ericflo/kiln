@@ -1113,9 +1113,10 @@ fn bench_latency_skiplayer(
     .context("skip-layer prefill forward pass failed")?;
     kv_cache.advance(actual_prompt_tokens);
 
+    let draft_linear_layers = weights.linear_attention_layers_in_prefix(draft_layers);
     let mut draft_linear_state = linear_state
-        .snapshot_for_decode_rollback()
-        .context("clone draft state from skip-layer prefill")?;
+        .snapshot_for_decode_rollback_prefix(draft_linear_layers)
+        .context("clone draft linear-attention prefix from skip-layer prefill")?;
 
     let mut last_token = greedy_sample(&logits)?;
     let prefill_time = prefill_start.elapsed();
@@ -1342,9 +1343,10 @@ fn bench_latency_paged_skiplayer(
         .context("paged skip-layer prefill forward pass failed")?
     };
 
+    let draft_linear_layers = weights.linear_attention_layers_in_prefix(draft_layers);
     let mut draft_linear_state = linear_state
-        .snapshot_for_decode_rollback()
-        .context("clone draft state from paged skip-layer prefill")?;
+        .snapshot_for_decode_rollback_prefix(draft_linear_layers)
+        .context("clone draft linear-attention prefix from paged skip-layer prefill")?;
 
     let mut last_token = greedy_sample(&logits)?;
     let prefill_time = prefill_start.elapsed();
