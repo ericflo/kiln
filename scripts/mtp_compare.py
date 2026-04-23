@@ -384,7 +384,7 @@ C45_HYPOTHESIS: Dict[str, str] = {
     "layer_1_input_norm_rms_inv_scalar_extracted_values": "the row-local scalar tensor stays shared-good, but the scalar extraction path diverges before the multiply runs",
     "layer_1_input_norm_last_row_flat_values": "the extracted scalar stays shared-good, but the selected last-row flat values already drift before the multiply runs",
     "layer_1_input_norm_pre_weight_row_broadcast_output": "the selected row and extracted scalar stay shared-good; drift first appears in the row-shaped production broadcast_mul output",
-    "layer_1_input_norm_pre_weight_row_scalar_values": "the scalar tensor and extracted scalar stay shared-good; drift first appears in the actual row-local scalar multiply values",
+    "layer_1_input_norm_pre_weight_row_scalar_values": "the production broadcast output stays shared-good; drift first appears only in the audit-only flattened replay of that output",
     "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-local scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
 }
 
@@ -2198,9 +2198,9 @@ def _emit_c45_summary(
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_scalar_values":
         emit(
-            "  -> The row-local `rms_inv` tensor and its extracted scalar "
-            "stay shared-good; divergence first appears in the flat "
-            "row-local scalar multiply values."
+            "  -> The row-shaped production `broadcast_mul` output stays "
+            "shared-good; divergence first appears only in the flattened "
+            "audit replay of that already-good production output."
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_reconstructed":
         emit(

@@ -115,3 +115,42 @@ So production-op parity for the replay path does **not** move the first-bad
 boundary past the row-local scalar multiply on current `main`; C45 remains
 localized to the multiply itself, and this task stops here without widening the
 tap contract.
+
+## 2026-04-23 row-scalar boundary resolution
+
+Fresh preflight on current `origin/main` (`edcc275`, with PRs #445 and #446)
+confirmed that the latest checked-in C45 verdict still named
+`layer_1_input_norm_pre_weight_row_scalar_values` as the earliest shared bad
+tap after the broadcast-mul parity rerun.
+
+The split-tap ordering added by PR #441 exposed that the previous
+`layer_1_input_norm_pre_weight_row_scalar_values` boundary was partly an
+audit-helper artifact: the helper independently recomputed a flattened
+scalar-affine row even though the production path had already produced the
+row-shaped `broadcast_mul` output. The helper and HF mirror now derive the
+flattened tap directly from that production-shaped output, so the flat tap no
+longer answers a different question from the preceding broadcast tap.
+
+Fresh representative C45 reruns on the fallback A100 pod then moved the
+earliest shared bad tap backward to the real production row-shaped multiply:
+
+- seed 0 (`mtp_pos=0`, `step=1`):
+  `layer_1_input_norm_pre_weight_row_broadcast_output`; last shared-good tap =
+  `layer_1_input_norm_last_row_flat_values`; prompt=494,
+  prefill=`1390.24 ms`, decode=`36.73 tok/s`, `alpha=0.7162`
+- seed 1 (`mtp_pos=2`, `step=1`):
+  `layer_1_input_norm_pre_weight_row_broadcast_output`; last shared-good tap =
+  `layer_1_input_norm_last_row_flat_values`; prompt=508,
+  prefill=`430.97 ms`, decode=`25.00 tok/s`, `alpha=0.2828`
+
+Resolved verdict: the old flat row-scalar boundary should not be treated as a
+standalone production bug, but C45 is not fully cleared. The next real target is
+the production RMSNorm row-shaped `broadcast_mul` result, because both seeds
+agree that the selected last-row values and row-local scalar remain shared-good
+under the current C45 tolerance, while the production multiply output is the
+first shared bad tap.
+
+Evidence:
+
+- `profiling-artifacts/c45_resolution_seed0_compare.txt`
+- `profiling-artifacts/c45_resolution_seed1_compare.txt`
