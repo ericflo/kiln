@@ -185,6 +185,20 @@ thread_local! {
     static C44_LAYER1_F32_ROW_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
 
+    /// Phase C45: thread-local sink for the follow-up layer-1 row-level
+    /// normalization bisect. This stays separate from C44 because the goal is
+    /// narrower again: split the previously-bad
+    /// `layer_1_input_norm_pre_weight_row_scalar_affine` site into the
+    /// selected row values, the row-scalar multiply values, and the
+    /// reconstructed row-shaped output.
+    ///
+    /// Driven by [`arm_c45_layer1_row_capture`] /
+    /// [`drain_c45_layer1_row_capture`] / [`capture_c45_layer1_row_tap`], and
+    /// gated on `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1` so production decode
+    /// stays on the current fast path when unset.
+    static C45_LAYER1_ROW_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
+
     /// Phase B12: thread-local "current absolute layer index" slot. Set by
     /// the main transformer layer loop around each layer's forward call so
     /// that deep inside `gqa_attention_paged` / `transformer_block_paged`
@@ -921,6 +935,18 @@ pub fn is_dump_c44_layer1_f32_row_taps_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// True when `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1` (or `true`) is set.
+/// Opt-in for the Phase C45 layer-1 row-level normalization bisect: when
+/// enabled alongside `KILN_MTP_DUMP_PATH` and `KILN_MTP_DUMP_HIDDEN_STATES=1`,
+/// the base-model forward records the row-local taps listed in
+/// [`C45_LAYER1_ROW_TAP_NAMES`] and appends them to the MTP dump safetensors
+/// under names `c45__<name>`.
+pub fn is_dump_c45_layer1_row_taps_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Canonical ordered list of Phase C42 layer-1 pre-norm / input-layernorm tap
 /// names. The comparator (`scripts/mtp_compare.py --c42`) and the HF
 /// reference (`scripts/mtp_h_main_reference_dump.py --c42-taps`) both mirror
@@ -952,6 +978,17 @@ pub const C44_LAYER1_F32_ROW_TAP_NAMES: &[&str] = &[
     "layer_1_residual_input_f32_row",
     "layer_1_input_norm_rms_inv_scalar",
     "layer_1_input_norm_pre_weight_row_scalar_affine",
+];
+
+/// Canonical ordered list of Phase C45 layer-1 row-level normalization tap
+/// names. The comparator (`scripts/mtp_compare.py --c45`) and the HF
+/// reference (`scripts/mtp_h_main_reference_dump.py --c45-taps`) both mirror
+/// this exact order.
+pub const C45_LAYER1_ROW_TAP_NAMES: &[&str] = &[
+    "layer_1_residual_input_f32_row_values",
+    "layer_1_input_norm_rms_inv_scalar",
+    "layer_1_input_norm_pre_weight_row_scalar_values",
+    "layer_1_input_norm_pre_weight_row_reconstructed",
 ];
 
 /// True if the Phase C41 layer-1 capture window is currently armed on this
@@ -1120,6 +1157,48 @@ pub fn capture_c44_layer1_f32_row_tap(name: &str, t: &Tensor) -> Result<()> {
     let (shape, flat) = tensor_to_f32_host(t)
         .with_context(|| format!("capture_c44_layer1_f32_row_tap `{name}`: tensor→f32 host copy"))?;
     C44_LAYER1_F32_ROW_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
+/// True if the Phase C45 layer-1 row-level normalization capture window is
+/// currently armed on this thread.
+pub fn is_c45_layer1_row_capture_armed() -> bool {
+    C45_LAYER1_ROW_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// True if a C45 layer-1 row-level normalization capture should happen for
+/// `layer_idx`.
+pub fn should_capture_c45_layer1_row_tap_for_layer(layer_idx: usize) -> bool {
+    layer_idx == 1 && is_c45_layer1_row_capture_armed()
+}
+
+/// Begin a C45 layer-1 row-level normalization capture window.
+pub fn arm_c45_layer1_row_capture() {
+    if !is_dump_c45_layer1_row_taps_enabled() {
+        return;
+    }
+    C45_LAYER1_ROW_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured C45 layer-1 row-level normalization taps and disarm.
+pub fn drain_c45_layer1_row_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    C45_LAYER1_ROW_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named C45 layer-1 row-level normalization tap if a capture
+/// window is currently open on this thread.
+pub fn capture_c45_layer1_row_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = C45_LAYER1_ROW_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_c45_layer1_row_tap `{name}`: tensor→f32 host copy"))?;
+    C45_LAYER1_ROW_CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push((name.to_string(), shape, flat));
         }
@@ -1760,12 +1839,12 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// passing `&[]` for both `b11_taps` and `b12_taps` produce the historical
 /// safetensors layout.
 ///
-/// Phase C41 / C42 / C43 / C44: `c41_taps`, `c42_taps`, `c43_taps`, and
-/// `c44_taps` carry the layer-1 bisect taps captured via their phase-specific
-/// arm/capture/drain helpers. Each slice is serialized as F32 under
-/// `c41__<name>` / `c42__<name>` / `c43__<name>` / `c44__<name>`, with an
-/// accompanying ordered tap-id metadata tensor so the Python side can mirror
-/// the exact tap order from the kiln dump.
+/// Phase C41 / C42 / C43 / C44 / C45: `c41_taps`, `c42_taps`, `c43_taps`,
+/// `c44_taps`, and `c45_taps` carry the layer-1 bisect taps captured via
+/// their phase-specific arm/capture/drain helpers. Each slice is serialized
+/// as F32 under `c41__<name>` / `c42__<name>` / `c43__<name>` / `c44__<name>`
+/// / `c45__<name>`, with an accompanying ordered tap-id metadata tensor so
+/// the Python side can mirror the exact tap order from the kiln dump.
 ///
 /// Phase C6: `c6_taps` carries the pre-RoPE MTP-input taps captured via
 /// [`arm_pre_rope_capture`] / [`capture_pre_rope_tap`] /
@@ -1805,6 +1884,7 @@ pub fn write_mtp_dump(
     c42_taps: &[(String, Vec<usize>, Vec<f32>)],
     c43_taps: &[(String, Vec<usize>, Vec<f32>)],
     c44_taps: &[(String, Vec<usize>, Vec<f32>)],
+    c45_taps: &[(String, Vec<usize>, Vec<f32>)],
     c6_taps: &[(String, Vec<usize>, Vec<f32>)],
     c7_taps: &[(String, Vec<usize>, Vec<f32>)],
     c14_taps: &[(String, Vec<usize>, Vec<f32>)],
@@ -1824,6 +1904,7 @@ pub fn write_mtp_dump(
     let c42_meta_reserve = if c42_taps.is_empty() { 0 } else { 1 };
     let c43_meta_reserve = if c43_taps.is_empty() { 0 } else { 1 };
     let c44_meta_reserve = if c44_taps.is_empty() { 0 } else { 1 };
+    let c45_meta_reserve = if c45_taps.is_empty() { 0 } else { 1 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
@@ -1841,6 +1922,8 @@ pub fn write_mtp_dump(
             + c43_taps.len()
             + c44_meta_reserve
             + c44_taps.len()
+            + c45_meta_reserve
+            + c45_taps.len()
             + c6_taps.len()
             + c7_taps.len()
             + c14_taps.len(),
@@ -2081,6 +2164,32 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push((format!("c44__{name}"), shape.clone(), Dtype::F32, bytes));
+    }
+
+    if !c45_taps.is_empty() {
+        let mut bytes = Vec::with_capacity(c45_taps.len() * 4);
+        for (name, _shape, _flat) in c45_taps {
+            let idx = C45_LAYER1_ROW_TAP_NAMES
+                .iter()
+                .position(|&tap| tap == name.as_str())
+                .with_context(|| format!("unknown C45 tap `{name}`"))?;
+            let idx_i32 = idx as i32;
+            bytes.extend_from_slice(&idx_i32.to_le_bytes());
+        }
+        backings.push((
+            "meta__c45_tap_ids".into(),
+            vec![c45_taps.len()],
+            Dtype::I32,
+            bytes,
+        ));
+    }
+
+    for (name, shape, flat) in c45_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("c45__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     // Phase C6: serialize the pre-RoPE MTP-input taps under `c6__<name>` so
@@ -2551,6 +2660,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2684,6 +2794,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2831,6 +2942,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3218,6 +3330,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3285,6 +3398,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3349,6 +3463,7 @@ mod tests {
             &c42,
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3413,6 +3528,7 @@ mod tests {
             /* c42_taps = */ &[],
             &c43,
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3479,6 +3595,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             &c44,
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3505,6 +3622,73 @@ mod tests {
             .unwrap();
         assert_eq!(out.dtype(), safetensors::Dtype::F32);
         assert_eq!(out.shape(), &[3]);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_c45_taps_and_metadata_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c45.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let c45 = vec![
+            (
+                "layer_1_residual_input_f32_row_values".to_string(),
+                vec![2],
+                vec![0.31_f32, 0.32],
+            ),
+            (
+                "layer_1_input_norm_pre_weight_row_reconstructed".to_string(),
+                vec![1, 1, 3],
+                vec![0.41_f32, 0.42, 0.43],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 69,
+            /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
+            /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
+            /* c42_taps = */ &[],
+            /* c43_taps = */ &[],
+            /* c44_taps = */ &[],
+            &c45,
+            /* c6_taps = */ &[],
+            /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"c45__layer_1_residual_input_f32_row_values"));
+        assert!(names.contains(&"c45__layer_1_input_norm_pre_weight_row_reconstructed"));
+        assert!(names.contains(&"meta__c45_tap_ids"));
+
+        let ids = st.tensor("meta__c45_tap_ids").unwrap();
+        assert_eq!(ids.dtype(), safetensors::Dtype::I32);
+        assert_eq!(ids.shape(), &[2]);
+        let id0 = i32::from_le_bytes(ids.data()[0..4].try_into().unwrap());
+        let id1 = i32::from_le_bytes(ids.data()[4..8].try_into().unwrap());
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 3);
+
+        let out = st
+            .tensor("c45__layer_1_input_norm_pre_weight_row_reconstructed")
+            .unwrap();
+        assert_eq!(out.dtype(), safetensors::Dtype::F32);
+        assert_eq!(out.shape(), &[1, 1, 3]);
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -3703,6 +3887,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             &c6,
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3839,6 +4024,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             &c7,
             /* c14_taps = */ &[],
@@ -4001,6 +4187,7 @@ mod tests {
             /* c42_taps = */ &[],
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             &c14,

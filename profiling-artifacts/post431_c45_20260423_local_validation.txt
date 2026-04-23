@@ -1,0 +1,12 @@
+Phase C45 local validation completed on 2026-04-23 UTC.
+
+Commands:
+- cargo test --locked -p kiln-model c45 -- --nocapture
+- python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py
+
+Results:
+- cargo test: passed
+- py_compile: passed
+
+Focused Rust test that ran:
+- mtp_debug::tests::write_mtp_dump_emits_c45_taps_and_metadata_when_provided

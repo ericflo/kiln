@@ -6520,3 +6520,58 @@ Evidence:
 - `profiling-artifacts/post430_c44_20260423_seed1.bench.stderr`
 - `profiling-artifacts/post430_c44_20260423_compare_bf16.txt`
 - `profiling-artifacts/post430_c44_20260423_compare_fp32.txt`
+
+## Phase C45 post-#431 layer-1 row normalization bisect (2026-04-23)
+
+Goal: split the previously-bad C44 row-level scalar-affine site one step
+further so the next replay can distinguish:
+
+- selected residual row values
+- the row-local `rms_inv` scalar
+- the flat row-scalar multiply values
+- the reconstructed row-shaped output before the existing post-input-norm path
+
+Code change:
+
+- add opt-in C45 taps behind `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1`
+- capture:
+  - `layer_1_residual_input_f32_row_values`
+  - `layer_1_input_norm_rms_inv_scalar`
+  - `layer_1_input_norm_pre_weight_row_scalar_values`
+  - `layer_1_input_norm_pre_weight_row_reconstructed`
+- mirror the C45 tap order in `mtp_h_main_reference_dump.py`
+- add `scripts/mtp_compare.py --c45`
+
+Local validation:
+
+- `cargo test --locked -p kiln-model c45 -- --nocapture`
+- `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+
+Both passed on 2026-04-23.
+
+RunPod validation blocker:
+
+- on-demand launches for `NVIDIA RTX A6000`, `NVIDIA A40`, `NVIDIA A100 80GB PCIe`,
+  `NVIDIA RTX 6000 Ada Generation`, and `NVIDIA L40S` all failed with
+  `SUPPLY_CONSTRAINT`
+- fallback launches on `NVIDIA H200 NVL`, `NVIDIA RTX PRO 4500 Blackwell`, and
+  `NVIDIA H100 PCIe` created pods, but every pod stayed in
+  `desiredStatus=RUNNING` with `runtime: null`, so `runpod_api.py wait` never
+  returned SSH
+
+Verdict:
+
+- no fresh C45 numerical verdict yet
+- the instrumentation and local validation are complete
+- the remaining blocker is RunPod provisioning, not missing code plumbing
+
+Recommendation:
+
+- rerun the committed C45 workload on the next healthy on-demand RunPod pod
+- do not change the tap contract before that rerun; the next missing result is
+  the earliest shared bad C45 tap, not another instrumentation edit
+
+Evidence:
+
+- `profiling-artifacts/post431_c45_20260423_local_validation.txt`
+- `profiling-artifacts/post431_c45_20260423_runpod_blocker.txt`
