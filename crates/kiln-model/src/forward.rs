@@ -1011,6 +1011,38 @@ fn projection_tensors_for_load_batch(
         .collect()
 }
 
+fn parallel_aux_load_disabled() -> bool {
+    matches!(
+        std::env::var("KILN_DISABLE_PARALLEL_AUX_LOAD")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn aux_tensors_for_load_batch(
+    weights: &[(&str, &WeightTensor)],
+    device: &Device,
+) -> Result<Vec<Tensor>> {
+    if !matches!(device, Device::Metal(_)) || parallel_aux_load_disabled() {
+        return weights
+            .iter()
+            .map(|(name, w)| weight_to_tensor(w, device).with_context(|| format!("{name} tensor")))
+            .collect();
+    }
+
+    use rayon::prelude::*;
+
+    let device = device.clone();
+    weights
+        .par_iter()
+        .map(|(name, w)| weight_to_tensor(w, &device).with_context(|| format!("{name} tensor")))
+        .collect()
+}
+
 /// Cache a transpose for repeated GEMMs.
 ///
 /// Matmuls on the hot path repeatedly consume these tensors, so materialize
@@ -1265,13 +1297,27 @@ impl GpuWeights {
         for (i, lw) in weights.layers.iter().enumerate() {
             let ctx = |name: &str| format!("layer {i} {name}");
 
-            let input_layernorm =
-                weight_to_tensor(&lw.input_layernorm, device).context(ctx("input_layernorm"))?;
-            let post_attention_layernorm = weight_to_tensor(&lw.post_attention_layernorm, device)
-                .context(ctx("post_attention_layernorm"))?;
-
-            let attention = match &lw.attention {
+            let (input_layernorm, post_attention_layernorm, attention) = match &lw.attention {
                 crate::weights::AttentionWeights::Full(attn) => {
+                    let aux_tensors = aux_tensors_for_load_batch(
+                        &[
+                            ("input_layernorm", &lw.input_layernorm),
+                            ("post_attention_layernorm", &lw.post_attention_layernorm),
+                            ("q_norm", &attn.q_norm),
+                            ("k_norm", &attn.k_norm),
+                        ],
+                        device,
+                    )
+                    .context(ctx("full attention aux tensors"))?;
+                    let mut aux_tensors = aux_tensors.into_iter();
+                    let input_layernorm =
+                        aux_tensors.next().context(ctx("input_layernorm missing"))?;
+                    let post_attention_layernorm = aux_tensors
+                        .next()
+                        .context(ctx("post_attention_layernorm missing"))?;
+                    let q_norm = aux_tensors.next().context(ctx("q_norm missing"))?;
+                    let k_norm = aux_tensors.next().context(ctx("k_norm missing"))?;
+
                     let attn_proj = projection_tensors_for_load_batch(
                         &[
                             ("q_proj", &attn.q_proj),
@@ -1300,21 +1346,48 @@ impl GpuWeights {
                             kind: MarlinPackKind::QProj,
                         });
                     }
-                    GpuAttentionWeights::Full(GpuFullAttentionWeights {
-                        q_proj,
-                        k_proj,
-                        v_proj,
-                        o_proj,
-                        q_norm: weight_to_tensor(&attn.q_norm, device).context(ctx("q_norm"))?,
-                        k_norm: weight_to_tensor(&attn.k_norm, device).context(ctx("k_norm"))?,
-                        q_proj_t,
-                        k_proj_t,
-                        v_proj_t,
-                        o_proj_t,
-                        q_proj_marlin: None,
-                    })
+                    (
+                        input_layernorm,
+                        post_attention_layernorm,
+                        GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                            q_proj,
+                            k_proj,
+                            v_proj,
+                            o_proj,
+                            q_norm,
+                            k_norm,
+                            q_proj_t,
+                            k_proj_t,
+                            v_proj_t,
+                            o_proj_t,
+                            q_proj_marlin: None,
+                        }),
+                    )
                 }
                 crate::weights::AttentionWeights::Linear(attn) => {
+                    let aux_tensors = aux_tensors_for_load_batch(
+                        &[
+                            ("input_layernorm", &lw.input_layernorm),
+                            ("post_attention_layernorm", &lw.post_attention_layernorm),
+                            ("conv1d", &attn.conv1d),
+                            ("gdn_norm", &attn.norm),
+                            ("a_log", &attn.a_log),
+                            ("dt_bias", &attn.dt_bias),
+                        ],
+                        device,
+                    )
+                    .context(ctx("linear attention aux tensors"))?;
+                    let mut aux_tensors = aux_tensors.into_iter();
+                    let input_layernorm =
+                        aux_tensors.next().context(ctx("input_layernorm missing"))?;
+                    let post_attention_layernorm = aux_tensors
+                        .next()
+                        .context(ctx("post_attention_layernorm missing"))?;
+                    let conv1d = aux_tensors.next().context(ctx("conv1d missing"))?;
+                    let norm = aux_tensors.next().context(ctx("gdn_norm missing"))?;
+                    let a_log = aux_tensors.next().context(ctx("a_log missing"))?;
+                    let dt_bias = aux_tensors.next().context(ctx("dt_bias missing"))?;
+
                     let attn_proj = projection_tensors_for_load_batch(
                         &[
                             ("in_proj_qkv", &attn.in_proj_qkv),
@@ -1338,22 +1411,26 @@ impl GpuWeights {
                         attn_proj.next().context(ctx("in_proj_a missing"))?;
                     let (in_proj_b, in_proj_b_t) =
                         attn_proj.next().context(ctx("in_proj_b missing"))?;
-                    GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
-                        in_proj_qkv,
-                        in_proj_z,
-                        out_proj,
-                        in_proj_a,
-                        in_proj_b,
-                        conv1d: weight_to_tensor(&attn.conv1d, device).context(ctx("conv1d"))?,
-                        norm: weight_to_tensor(&attn.norm, device).context(ctx("gdn_norm"))?,
-                        a_log: weight_to_tensor(&attn.a_log, device).context(ctx("a_log"))?,
-                        dt_bias: weight_to_tensor(&attn.dt_bias, device).context(ctx("dt_bias"))?,
-                        in_proj_qkv_t,
-                        in_proj_z_t,
-                        in_proj_a_t,
-                        in_proj_b_t,
-                        out_proj_t,
-                    })
+                    (
+                        input_layernorm,
+                        post_attention_layernorm,
+                        GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                            in_proj_qkv,
+                            in_proj_z,
+                            out_proj,
+                            in_proj_a,
+                            in_proj_b,
+                            conv1d,
+                            norm,
+                            a_log,
+                            dt_bias,
+                            in_proj_qkv_t,
+                            in_proj_z_t,
+                            in_proj_a_t,
+                            in_proj_b_t,
+                            out_proj_t,
+                        }),
+                    )
                 }
             };
 
