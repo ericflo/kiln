@@ -2238,6 +2238,12 @@ pub fn write_mtp_dump(
 
     let serialized = safetensors::serialize(views, &None)
         .map_err(|e| anyhow::anyhow!("safetensors::serialize MTP dump: {e:?}"))?;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create parent dir for MTP dump at {path}"))?;
+        }
+    }
     std::fs::write(path, serialized).with_context(|| format!("write MTP dump to {path}"))?;
     Ok(())
 }

@@ -93,7 +93,7 @@ RUN pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu124 \
         torch==2.4.1 \
     && pip install --no-cache-dir \
-        'b2[full]' huggingface-hub hf-transfer safetensors numpy
+        'b2[full]' huggingface-hub hf-transfer safetensors numpy transformers
 
 # --- SSH server config (RunPod injects $PUBLIC_KEY at pod boot) ---
 # Also bake PATH into /etc/environment. Dockerfile ENV PATH=... only takes

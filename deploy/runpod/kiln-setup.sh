@@ -15,6 +15,8 @@
 #
 # Optional env vars:
 #   KILN_REPO_DIR          — Path to kiln repo checkout (default: /workspace/kiln)
+#   KILN_MODEL_ID          — Hugging Face model ID to download (default: Qwen/Qwen3.5-4B)
+#   KILN_MODEL_DIR         — Local model dir (default: /workspace/qwen3.5-4b)
 #
 # Writes env exports to $KILN_REPO_DIR/.build-cache-env (if repo exists) and
 # also to /root/.kiln-build-env for agents to source directly.
@@ -22,6 +24,8 @@
 set -euo pipefail
 
 KILN_REPO_DIR="${KILN_REPO_DIR:-/workspace/kiln}"
+KILN_MODEL_ID="${KILN_MODEL_ID:-Qwen/Qwen3.5-4B}"
+KILN_MODEL_DIR="${KILN_MODEL_DIR:-/workspace/qwen3.5-4b}"
 B2_BUCKET="clouderic"
 B2_ENDPOINT="https://s3.us-west-002.backblazeb2.com"
 B2_REGION="us-west-002"
@@ -77,6 +81,14 @@ fi
 if [ "$CLONE_REPO" = "1" ] && [ ! -d "${KILN_REPO_DIR}" ]; then
     echo "Cloning kiln into ${KILN_REPO_DIR}..."
     git clone https://github.com/ericflo/kiln.git "${KILN_REPO_DIR}"
+fi
+
+if [ ! -f "${KILN_MODEL_DIR}/config.json" ]; then
+    echo "Downloading ${KILN_MODEL_ID} into ${KILN_MODEL_DIR}..."
+    HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}" \
+        hf download "${KILN_MODEL_ID}" --local-dir "${KILN_MODEL_DIR}"
+else
+    echo "Model already present at ${KILN_MODEL_DIR}"
 fi
 
 # Configure sccache environment

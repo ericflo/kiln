@@ -8,9 +8,8 @@ PR #434 narrowed the remaining C45 question to three row-scalar sub-steps:
 - `layer_1_input_norm_pre_weight_row_scalar_values`
 - `layer_1_input_norm_pre_weight_row_reconstructed`
 
-This rerun attempted to execute that already-merged narrowed tap contract on the
-first healthy allowed on-demand RunPod pod. No code changes were required or
-made in this task; the only goal was to obtain fresh post-#434 evidence.
+This rerun executed that already-merged narrowed tap contract on the first
+healthy allowed on-demand RunPod pod and captured fresh post-#435 evidence.
 
 ## Remaining-work preflight
 
@@ -26,44 +25,75 @@ Those checks passed, so the task proceeded to RunPod execution.
 
 ## Actual RunPod outcome
 
-The rerun never reached a usable SSH endpoint on any allowed GPU class:
+The first healthy allowed pod was:
 
-- `NVIDIA RTX A6000`: launch failed immediately with RunPod
-  `SUPPLY_CONSTRAINT`.
-- `NVIDIA A40`: pod `jbagv24mf1f31l` launched on
-  `ghcr.io/ericflo/kiln-runpod:latest`, but `python3 $RP wait jbagv24mf1f31l`
-  stayed at `status=RUNNING, uptime=N/As` and then crashed after termination
-  because the pod never exposed a runtime/SSH endpoint.
-- `NVIDIA A100 80GB PCIe`: launch failed immediately with RunPod
-  `SUPPLY_CONSTRAINT`.
-- `NVIDIA RTX 6000 Ada Generation`: launch failed immediately with RunPod
-  `SUPPLY_CONSTRAINT`.
-- `NVIDIA L40S`: launch failed immediately with RunPod
-  `SUPPLY_CONSTRAINT` ("no longer any instances available with enough disk
-  space").
-- `NVIDIA H100 PCIe`: pod `zh6zr8z5v0g1tn` launched on the kiln image, but
-  `runpod_api.py info` continued to report `"runtime": null` and
-  `python3 $RP wait zh6zr8z5v0g1tn` never reached SSH before the pod was
-  terminated.
+- GPU: `NVIDIA RTX A6000`
+- image: `ghcr.io/ericflo/kiln-runpod:latest`
+- successful evidence pod: `8d7s7t6zxs827r`
 
-Because no allowed pod reached SSH, none of the required on-pod validation
-commands could be run:
+The first healthy A6000 pod exposed two concrete bootstrap bugs on `main` that
+had to be fixed before the rerun could finish:
+
+- `deploy/runpod/kiln-setup.sh` no longer downloaded
+  `/workspace/qwen3.5-4b`, so the bench failed at model load on the first
+  healthy pod until the setup helper was restored to pull the checkpoint.
+- `crates/kiln-model/src/mtp_debug.rs` serialized the narrowed splice dumps
+  but never created the parent directories for
+  `profiling-artifacts/.../mtp_pos-{pos}/step-{step}.safetensors`, so the
+  C45 dump path warned and produced no safetensors until `create_dir_all(...)`
+  was added.
+- The image also lacked the Python `transformers` package required by
+  `scripts/mtp_h_main_reference_dump.py`; the recovery pod installed it and
+  this PR adds it to the RunPod Dockerfile.
+
+## Verdict
+
+The post-#435 narrowed rerun now has a stable two-seed verdict:
+
+- seed 0 (`mtp_pos=0`, `step=1` compare): earliest shared bad narrowed C45 tap
+  = `layer_1_input_norm_pre_weight_row_scalar_values`
+- seed 1 (`mtp_pos=2`, `step=1` compare): earliest shared bad narrowed C45 tap
+  = `layer_1_input_norm_pre_weight_row_scalar_values`
+- the last shared-good narrowed tap on both seeds is
+  `layer_1_input_norm_rms_inv_scalar_extracted_values`
+- `layer_1_input_norm_pre_weight_row_reconstructed` also diverges, but only
+  after the flat row-local scalar multiply values are already bad
+
+So the narrowed post-#434 rerun clears the extracted scalar replay itself and
+localizes the first shared row-local drift to the actual multiply that produces
+the flat scalar-applied row values.
+
+## Validation
+
+These commands completed on the healthy A6000 pod after the two bootstrap
+fixes above:
 
 - `cargo build --release --features cuda --bin kiln-bench`
 - `cargo test --locked -p kiln-model c45 -- --nocapture`
 - `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
-- either `scripts/mtp_compare.py --c45-row-scalar ...` rerun
+- `python3 scripts/mtp_compare.py --c45-row-scalar ...` for both representative
+  seeds
 
-## Verdict
+Recovered seed metrics from the final artifact-producing pod:
 
-There is still no post-#434 narrowed C45 numerical verdict. The blocker remains
-RunPod availability and pod health, not missing instrumentation:
+- seed 0: prompt=494, prefill=`9587.54 ms`, decode=`39.82 tok/s`,
+  `alpha=0.7397`
+- seed 1: prompt=508, prefill=`404.84 ms`, decode=`23.86 tok/s`,
+  `alpha=0.2959`
 
-- no earliest shared bad narrowed C45 tap was captured
-- no new bench JSON, stderr, or compare outputs exist for the post-#434 rerun
-- the next step is still to rerun the committed workload on the next healthy
-  allowed on-demand pod without changing the tap contract
+## Recommendation
+
+- do not widen to C46 or expand the C45 tap contract further
+- focus the next audit inside the row-local scalar multiply that produces
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- treat the row-local `rms_inv` tensor and its extracted scalar replay as
+  provisionally cleared on current `main`
 
 ## Evidence
 
-- `profiling-artifacts/post434_c45_row_scalar_runpod_blocker.txt`
+- `profiling-artifacts/post435_c45_row_scalar_seed0.bench.json`
+- `profiling-artifacts/post435_c45_row_scalar_seed0.bench.stderr`
+- `profiling-artifacts/post435_c45_row_scalar_seed1.bench.json`
+- `profiling-artifacts/post435_c45_row_scalar_seed1.bench.stderr`
+- `profiling-artifacts/post435_c45_row_scalar_seed0_compare.txt`
+- `profiling-artifacts/post435_c45_row_scalar_seed1_compare.txt`

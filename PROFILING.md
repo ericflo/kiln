@@ -6727,7 +6727,7 @@ Evidence:
 - `profiling-artifacts/post432_c45_seed0_compare.txt`
 - `profiling-artifacts/post432_c45_seed1_compare.txt`
 
-## Phase C45 post-#434 narrowed row-scalar rerun blocker (2026-04-23)
+## Phase C45 post-#435 narrowed row-scalar rerun verdict (2026-04-23)
 
 Goal: rerun the already-merged narrowed C45 instrumentation from PR #434 on the
 first healthy allowed on-demand RunPod pod and capture the earliest shared bad
@@ -6740,42 +6740,132 @@ tap among:
 Remaining-work preflight:
 
 - PR #434 was present on `origin/main` (`7808adf`, merged 2026-04-23 15:44 UTC)
+- PR #435 was present on `origin/main` (`ca474b5`, merged 2026-04-23 16:39 UTC)
 - no newer open or merged kiln PR had already recorded the narrowed
   three-tap C45 verdict
-- no separate pending or running kiln task overlapped this exact post-#434
-  rerun
+- no separate pending or running kiln task overlapped this exact post-#435
+  healthy-pod rerun
 
 RunPod outcome:
 
-- `NVIDIA RTX A6000` failed immediately with `SUPPLY_CONSTRAINT`
-- `NVIDIA A40` launched pod `jbagv24mf1f31l` on
-  `ghcr.io/ericflo/kiln-runpod:latest`, but the pod remained
-  `desiredStatus=RUNNING` with `"runtime": null`; `python3 $RP wait` never
-  reached SSH and ended with `AttributeError: 'NoneType' object has no
-  attribute 'get'` after termination
-- `NVIDIA A100 80GB PCIe` failed immediately with `SUPPLY_CONSTRAINT`
-- `NVIDIA RTX 6000 Ada Generation` failed immediately with `SUPPLY_CONSTRAINT`
-- `NVIDIA L40S` failed immediately with `SUPPLY_CONSTRAINT` ("no longer any
-  instances available with enough disk space")
-- `NVIDIA H100 PCIe` launched pod `zh6zr8z5v0g1tn`, but it also remained
-  `desiredStatus=RUNNING` with `"runtime": null`; `python3 $RP wait` never
-  reached SSH and ended with the same `AttributeError` after termination
+- first healthy allowed pod: `NVIDIA RTX A6000`, image
+  `ghcr.io/ericflo/kiln-runpod:latest`, pod `h2gltnqi6qdjb4`
+- the first healthy pod exposed two concrete bootstrap bugs on current `main`:
+  - `deploy/runpod/kiln-setup.sh` no longer downloaded the expected
+    `/workspace/qwen3.5-4b` checkpoint, so the first seeded bench failed at
+    model load until the setup helper was restored to pull Qwen3.5-4B
+  - `crates/kiln-model/src/mtp_debug.rs` serialized the narrowed splice dump
+    but never created the parent directories for
+    `profiling-artifacts/.../mtp_pos-{pos}/step-{step}.safetensors`, so the
+    C45 dump path warned and emitted no safetensors until the write path grew
+    a `create_dir_all(...)` for its parent directory
+- the reference dump script also required `transformers`, which the current
+  kiln image did not install; the recovery pod installed it ad hoc and this PR
+  adds it to `deploy/runpod/Dockerfile`
+- final artifact-producing recovery pod: `8d7s7t6zxs827r`
+  (`NVIDIA RTX A6000`, same kiln image)
 
-Validation outcome:
+Validation outcome on the healthy A6000 pod after the narrow bootstrap fixes:
 
-- none of the required on-pod commands could run because no allowed pod reached
-  SSH:
-  - `cargo build --release --features cuda --bin kiln-bench`
-  - `cargo test --locked -p kiln-model c45 -- --nocapture`
-  - `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
-  - either narrowed `scripts/mtp_compare.py --c45-row-scalar ...` run
+- `cargo build --release --features cuda --bin kiln-bench`
+- `cargo test --locked -p kiln-model c45 -- --nocapture`
+- `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+- both narrowed `scripts/mtp_compare.py --c45-row-scalar ...` runs completed
+  and emitted the same earliest shared bad tap
+
+Commands used on the artifact-producing pod:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+
+KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_SPLICE=1 KILN_MTP_DUMP_SPLICE_POS=0,2 KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+KILN_MTP_DUMP_PATH=profiling-artifacts/post435_c45_row_scalar_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors \
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 0 \
+  > profiling-artifacts/post435_c45_row_scalar_seed0.bench.json \
+  2> profiling-artifacts/post435_c45_row_scalar_seed0.bench.stderr
+
+KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_SPLICE=1 KILN_MTP_DUMP_SPLICE_POS=0,2 KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+KILN_MTP_DUMP_PATH=profiling-artifacts/post435_c45_row_scalar_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors \
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 1 \
+  > profiling-artifacts/post435_c45_row_scalar_seed1.bench.json \
+  2> profiling-artifacts/post435_c45_row_scalar_seed1.bench.stderr
+
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump profiling-artifacts/post435_c45_row_scalar_seed0_captures/mtp_pos-0/step-1.safetensors \
+  --out profiling-artifacts/post435_c45_row_scalar_seed0_ref.safetensors \
+  --device cuda \
+  --c45-taps
+
+python3 scripts/mtp_compare.py --c45-row-scalar \
+  --kiln profiling-artifacts/post435_c45_row_scalar_seed0_captures/mtp_pos-0/step-1.safetensors \
+  --ref profiling-artifacts/post435_c45_row_scalar_seed0_ref.safetensors \
+  > profiling-artifacts/post435_c45_row_scalar_seed0_compare.txt
+
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump profiling-artifacts/post435_c45_row_scalar_seed1_captures/mtp_pos-2/step-1.safetensors \
+  --out profiling-artifacts/post435_c45_row_scalar_seed1_ref.safetensors \
+  --device cuda \
+  --c45-taps
+
+python3 scripts/mtp_compare.py --c45-row-scalar \
+  --kiln profiling-artifacts/post435_c45_row_scalar_seed1_captures/mtp_pos-2/step-1.safetensors \
+  --ref profiling-artifacts/post435_c45_row_scalar_seed1_ref.safetensors \
+  > profiling-artifacts/post435_c45_row_scalar_seed1_compare.txt
+```
+
+Recovered seed metrics from the final artifact-producing pod:
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 9587.5 | 39.8 | 0.7397 |
+| 1 | 508 | 404.8 | 23.9 | 0.2959 |
 
 Verdict:
 
-- no post-#434 narrowed C45 numerical verdict yet
-- the blocker is RunPod availability/pod health, not missing instrumentation
-- do not change the narrowed tap contract before a healthy allowed pod exists
+- seed 0 compare: earliest shared bad tap =
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- seed 1 compare: earliest shared bad tap =
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- the last shared-good narrowed C45 tap on both seeds is
+  `layer_1_input_norm_rms_inv_scalar_extracted_values`
+- `layer_1_input_norm_pre_weight_row_reconstructed` also diverges on both
+  seeds, but only after the flat row-local scalar multiply values are already
+  bad
+
+So the post-#435 narrowed rerun clears the extracted scalar replay path and
+localizes the first shared row-local drift one step later:
+
+- `layer_1_input_norm_rms_inv_scalar` remains shared-good
+- `layer_1_input_norm_rms_inv_scalar_extracted_values` remains shared-good
+- `layer_1_input_norm_pre_weight_row_scalar_values` is the earliest shared-bad
+  narrowed C45 tap
+- `layer_1_input_norm_pre_weight_row_reconstructed` also diverges, but only
+  after the multiply-values tap is already bad
+
+Recommendation:
+
+- do not widen to C46 or expand the tap contract
+- focus the next audit inside the row-local scalar multiply that produces
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- treat the row-local `rms_inv` tensor and its extracted scalar replay as
+  provisionally cleared on current `main`
 
 Evidence:
 
-- `profiling-artifacts/post434_c45_row_scalar_runpod_blocker.txt`
+- `profiling-artifacts/post435_c45_row_scalar_seed0.bench.json`
+- `profiling-artifacts/post435_c45_row_scalar_seed0.bench.stderr`
+- `profiling-artifacts/post435_c45_row_scalar_seed1.bench.json`
+- `profiling-artifacts/post435_c45_row_scalar_seed1.bench.stderr`
+- `profiling-artifacts/post435_c45_row_scalar_seed0_compare.txt`
+- `profiling-artifacts/post435_c45_row_scalar_seed1_compare.txt`
