@@ -3672,6 +3672,13 @@ fn gqa_attention_paged_with_rope_tables(
         crate::mtp_debug::capture_b12_gqa_tap("rope_k", &k)?;
     }
 
+    // Keep the cache-native token-major K/V views for paged writes. Attention
+    // still wants head-major tensors, but the cache pool stores
+    // `[slot, kv_head, dim]`, so using these avoids a transpose back during
+    // prefill.
+    let k_cache_token_major = k.clone();
+    let v_cache_token_major = v.clone();
+
     // Transpose to [batch, heads, seq_len, head_dim]
     let (q, k, v) = {
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
@@ -3719,9 +3726,17 @@ fn gqa_attention_paged_with_rope_tables(
         if let Some(attn_output) = attn_output {
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
-                paged_cache
-                    .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
-                    .context("paged KV cache write failed")?;
+                if !paged_cache.write_token_major_native(
+                    full_attn_layer_idx,
+                    block_table,
+                    start_pos,
+                    &k_cache_token_major,
+                    &v_cache_token_major,
+                )? {
+                    paged_cache
+                        .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+                        .context("paged KV cache write failed")?;
+                }
             }
 
             // Phase B12 layer-31 GQA tap: attn_out. Captured AFTER the gate
@@ -3766,9 +3781,17 @@ fn gqa_attention_paged_with_rope_tables(
     // Write new K/V into paged cache.
     if !single_token_self_attn {
         kiln_nvtx::range!(c"kiln/kv/copy");
-        paged_cache
-            .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
-            .context("paged KV cache write failed")?;
+        if !paged_cache.write_token_major_native(
+            full_attn_layer_idx,
+            block_table,
+            start_pos,
+            &k_cache_token_major,
+            &v_cache_token_major,
+        )? {
+            paged_cache
+                .write(full_attn_layer_idx, block_table, start_pos, &k, &v)
+                .context("paged KV cache write failed")?;
+        }
     }
 
     // Fast path: fused paged-decode flash-attention kernel.

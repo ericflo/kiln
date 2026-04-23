@@ -198,6 +198,66 @@ impl PagedKvCache {
         }
     }
 
+    /// Write cache-native token-major K/V values without the head-major
+    /// transpose required by [`Self::write`].
+    ///
+    /// Returns `false` when the cache is FP8-backed so callers can fall back to
+    /// [`Self::write`], which owns quantization.
+    ///
+    /// - `k`: `[1, new_len, num_kv_heads, head_dim]`
+    /// - `v`: `[1, new_len, num_kv_heads, head_dim]`
+    pub fn write_token_major_native(
+        &mut self,
+        layer_idx: usize,
+        block_table: &BlockTable,
+        start_pos: usize,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> Result<bool> {
+        if self.fp8 {
+            return Ok(false);
+        }
+
+        let new_len = k.dim(1)?;
+        let (k_pool, v_pool) = &mut self.layers[layer_idx];
+
+        if new_len == 1 {
+            let slot = block_table
+                .slot_for(start_pos, self.block_size)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no slot for position {start_pos} in block table")
+                })?;
+            k_pool.slice_set(&k.squeeze(1)?, 0, slot)?;
+            v_pool.slice_set(&v.squeeze(1)?, 0, slot)?;
+            return Ok(true);
+        }
+
+        let k_flat = k.squeeze(0)?.contiguous()?;
+        let v_flat = v.squeeze(0)?.contiguous()?;
+
+        if let Some(start_slot) =
+            contiguous_slot_run_start(block_table, self.block_size, start_pos, new_len)
+        {
+            k_pool.slice_set(&k_flat, 0, start_slot)?;
+            v_pool.slice_set(&v_flat, 0, start_slot)?;
+            return Ok(true);
+        }
+
+        for i in 0..new_len {
+            let pos = start_pos + i;
+            let slot = block_table
+                .slot_for(pos, self.block_size)
+                .ok_or_else(|| anyhow::anyhow!("no slot for position {pos} in block table"))?;
+
+            let k_row = k_flat.narrow(0, i, 1)?;
+            let v_row = v_flat.narrow(0, i, 1)?;
+            k_pool.slice_set(&k_row, 0, slot)?;
+            v_pool.slice_set(&v_row, 0, slot)?;
+        }
+
+        Ok(true)
+    }
+
     fn write_native(
         &mut self,
         layer_idx: usize,
@@ -547,6 +607,43 @@ mod tests {
         let v_orig = v.flatten_all()?.to_vec1::<f32>()?;
         let v_read = v_out.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(v_orig, v_read, "V roundtrip failed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_token_major_native_then_read_roundtrip() -> Result<()> {
+        let device = Device::Cpu;
+        let mut cache = PagedKvCache::new(1, 4, 4, 2, 3, DType::F32, &device)?;
+
+        let mut bt = BlockTable::new();
+        bt.push(1);
+        bt.push(2);
+
+        // Shape: [1, new_len=3, num_kv_heads=2, head_dim=3].
+        let k = Tensor::new(
+            &[[
+                [[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+                [[13.0, 14.0, 15.0], [16.0, 17.0, 18.0]],
+            ]],
+            &device,
+        )?;
+        let v = (k.clone() + 100.0)?;
+
+        assert!(cache.write_token_major_native(0, &bt, 0, &k, &v)?);
+        let (k_out, v_out) = cache.read(0, &bt, 3)?;
+        let k_expected = k.squeeze(0)?.transpose(0, 1)?.contiguous()?.unsqueeze(0)?;
+        let v_expected = v.squeeze(0)?.transpose(0, 1)?.contiguous()?.unsqueeze(0)?;
+
+        assert_eq!(
+            k_out.flatten_all()?.to_vec1::<f32>()?,
+            k_expected.flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            v_out.flatten_all()?.to_vec1::<f32>()?,
+            v_expected.flatten_all()?.to_vec1::<f32>()?
+        );
 
         Ok(())
     }
