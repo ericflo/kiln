@@ -366,6 +366,24 @@ C44_HYPOTHESIS: Dict[str, str] = {
     "layer_1_input_norm_pre_weight_row_scalar_affine": "the F32 row stays shared-good and divergence first appears when applying normalization to produce the row values",
 }
 
+# Phase C45 — narrowed layer-1 row-level normalization bisect tap set, in
+# forward-graph order. Must stay in lock-step with `C45_LAYER1_ROW_TAP_NAMES`
+# in `crates/kiln-model/src/mtp_debug.rs` and
+# `scripts/mtp_h_main_reference_dump.py`.
+C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_residual_input_f32_row_values",
+    "layer_1_input_norm_rms_inv_scalar",
+    "layer_1_input_norm_pre_weight_row_scalar_values",
+    "layer_1_input_norm_pre_weight_row_reconstructed",
+)
+
+C45_HYPOTHESIS: Dict[str, str] = {
+    "layer_1_residual_input_f32_row_values": "the selected last-row values are already wrong before row-local normalization is applied",
+    "layer_1_input_norm_rms_inv_scalar": "the row-local RMS inverse scalar diverges even though C44 kept the same scalar shared-good",
+    "layer_1_input_norm_pre_weight_row_scalar_values": "the selected row values and scalar stay shared-good; drift first appears in the flat row-scalar multiply values",
+    "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
+}
+
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
 # residual drift is small (0.97-0.98) and the goal is to localize it. A
 # per-layer median below this threshold marks the first layer of interest; if
@@ -2032,6 +2050,127 @@ def _emit_c44_summary(
         )
 
 
+def _emit_c45_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C45 — layer-1 row-level normalization bisect."""
+    emit("")
+    emit("=" * 78)
+    emit("Phase C45 layer-1 row normalization audit — cos_sim / max|Δ| / mean|Δ| / rel_l2")
+    emit("=" * 78)
+
+    labels = [pr[0] for pr in pair_results]
+    cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]] = {
+        n: {} for n in C45_LAYER1_ROW_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, _km, _rm in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c45__"):
+                continue
+            short = n[len("c45__") :]
+            if short not in cell:
+                continue
+            cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+                bool(r["allclose"]),
+            )
+
+    header = "  " + "tap".ljust(48) + " ".join(f"{lab:<52}" for lab in labels)
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C45_LAYER1_ROW_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                cells.append(f"{'<missing>':<52}")
+            else:
+                cs, mxd, mnd, rl2, ok = entry
+                captured_any = True
+                tag = "ok" if ok else "DIV"
+                cells.append(
+                    f"cos={_fmt_sci(cs):<10} max|Δ|={_fmt_sci(mxd):<10} "
+                    f"mean|Δ|={_fmt_sci(mnd):<10} rel_l2={_fmt_sci(rl2):<10} {tag:<3}"
+                )
+        emit(f"  {tap:<48}{' '.join(cells)}")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C45 verdict: no C45 row-level taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 and")
+        emit("     re-run mtp_h_main_reference_dump.py with --c45-taps against")
+        emit("     the same kiln dump.")
+        return
+
+    first_shared_bad: Optional[str] = None
+    last_shared_ok: Optional[str] = None
+    first_per_seed: Dict[str, str] = {}
+    for tap in C45_LAYER1_ROW_TAP_NAMES:
+        all_present = True
+        all_ok = True
+        all_bad = True
+        for lab in labels:
+            entry = cell[tap].get(lab)
+            if entry is None:
+                all_present = False
+                all_ok = False
+                all_bad = False
+                continue
+            ok = entry[4]
+            all_ok &= ok
+            all_bad &= not ok
+            if not ok and lab not in first_per_seed:
+                first_per_seed[lab] = tap
+        if all_present and all_ok and first_shared_bad is None:
+            last_shared_ok = tap
+        if all_present and all_bad and first_shared_bad is None:
+            first_shared_bad = tap
+
+    if first_shared_bad is None:
+        emit("Phase C45 verdict: no shared earliest-bad tap across all supplied seeds.")
+        for lab in labels:
+            emit(f"  earliest divergent tap for {lab}: {first_per_seed.get(lab, '<none>')}")
+        emit("  -> Seeds do not yet agree on a single first-bad C45 boundary.")
+        return
+
+    emit(f"  earliest shared bad tap: '{first_shared_bad}'")
+    if last_shared_ok is not None:
+        emit(f"  last shared-good tap: '{last_shared_ok}'")
+    emit(f"Phase C45 verdict: EARLIEST SHARED BAD ROW-LEVEL TAP = '{first_shared_bad}'.")
+    emit(f"    Most-likely cause: {C45_HYPOTHESIS.get(first_shared_bad, '<unknown tap>')}")
+
+    if first_shared_bad == "layer_1_residual_input_f32_row_values":
+        emit(
+            "  -> Divergence is already present in the selected last-row "
+            "values before row-local normalization is applied."
+        )
+    elif first_shared_bad == "layer_1_input_norm_pre_weight_row_scalar_values":
+        emit(
+            "  -> The selected row values and `rms_inv` scalar stay "
+            "shared-good; divergence first appears in the flat row-scalar "
+            "multiply values."
+        )
+    elif first_shared_bad == "layer_1_input_norm_pre_weight_row_reconstructed":
+        emit(
+            "  -> The flat row-scalar multiply stays shared-good; divergence "
+            "appears only when reconstructing the row-shaped output right "
+            "before the existing post-input-norm path."
+        )
+    elif last_shared_ok is not None:
+        emit(
+            "  -> The shared drift is now localized to the boundary between "
+            f"'{last_shared_ok}' and '{first_shared_bad}'."
+        )
+
+
 def _emit_c7_summary(
     pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
@@ -2254,6 +2393,19 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c45",
+        action="store_true",
+        help=(
+            "Phase C45 mode: emit the narrowed layer-1 row normalization "
+            "audit over the explicit c45__<name> tap set (selected row "
+            "values, matching RMS inverse scalar, flat row-scalar multiply "
+            "values, reconstructed row-shaped output). Defaults atol=1e-2, "
+            "rtol=1e-1 (bf16-appropriate). Verdict names whether divergence "
+            "first appears in the selected row values, the scalar multiply, "
+            "or only after reconstruction."
+        ),
+    )
+    ap.add_argument(
         "--c6",
         action="store_true",
         help=(
@@ -2294,7 +2446,16 @@ def main() -> int:
     # noise; the strict bar stays on to catch real structural drops and the
     # comparator report makes bf16-accumulation drift visible via per-position
     # max|Δ| / rel_l2 columns.
-    bf16_mode = args.b10 or args.b11 or args.b12 or args.c41 or args.c42 or args.c43 or args.c44
+    bf16_mode = (
+        args.b10
+        or args.b11
+        or args.b12
+        or args.c41
+        or args.c42
+        or args.c43
+        or args.c44
+        or args.c45
+    )
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
     if args.rtol is None:
@@ -2322,6 +2483,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
+    elif args.c45:
+        mode = "layer-1 row normalization audit (C45)"
     elif args.c44:
         mode = "layer-1 row-level audit (C44)"
     elif args.c43:
@@ -2349,7 +2512,9 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c44:
+    if args.c45:
+        focus_keys = [f"c45__{name}" for name in C45_LAYER1_ROW_TAP_NAMES]
+    elif args.c44:
         focus_keys = [f"c44__{name}" for name in C44_LAYER1_F32_ROW_TAP_NAMES]
     elif args.c43:
         focus_keys = [f"c43__{name}" for name in C43_LAYER1_PREWEIGHT_TAP_NAMES]
@@ -2367,6 +2532,8 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.c45:
+        _emit_c45_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c44:
         _emit_c44_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c43:
