@@ -1,5 +1,50 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#411 recheck — FlashInfer paged decode still does not reopen (2026-04-23)
+
+**Scope:** re-check the queued "vendor minimal FlashInfer-style paged GQA
+decode" step on fresh `main` after PR
+[#411](https://github.com/ericflo/kiln/pull/411), and stop at docs if the
+existing CUDA paged-decode backend is still the vendored flash-attn path and
+the current profile still leaves full-attention decode below the reopen bar.
+
+**Preflight outcome:** stop with docs only. On fresh `main` at `b9d5b52`
+(2026-04-23):
+
+- there is still **no landed FlashInfer-style paged decode implementation** in
+  kiln; prior related PRs remain doc-only redirects
+  ([#163](https://github.com/ericflo/kiln/pull/163),
+  [#387](https://github.com/ericflo/kiln/pull/387));
+- open-PR search for `flashinfer`, `paged decode`, and
+  `flash_attn_paged_decode` found no active overlapping implementation PR;
+- `crates/kiln-model/src/backend/cuda.rs` still routes CUDA paged decode
+  through `kiln_flash_attn::flash_attn_paged_decode(...)`;
+- the current decode path is still the vendored flash-attn paged-decode path,
+  not a newer minimal FlashInfer port.
+
+**Decision:** no implementation follow-up.
+
+The fresh current-main evidence already at the top of this file still leaves
+FlashInfer-class decode work below the keep bar on Qwen3.5-4B:
+
+- decode top-3 remain GDN-only:
+  `:kiln/gdn/gates` **17.8%**, `:kiln/gdn/gated_norm` **17.3%**,
+  `:kiln/gdn/qk_norm` **14.9%**;
+- full-attention projections remain only ~**3.8%** of decode wall-clock
+  (`:kiln/proj/qkv` ~**3.0%** + `:kiln/proj/o` ~**0.8%** in the latest
+  frontier sections below);
+- the inner `:kiln/attn/full/*` kernel region a FlashInfer-style paged decode
+  kernel would replace is still below the reporting floor.
+
+That keeps the same Amdahl ceiling already documented by the earlier
+redirects: even a heroic replacement of the inner paged-attention kernel
+cannot clear the task's `>=3%` keep bar on this model. After `#411`, the next
+honest Phase 6 work is still in the GDN path, not a reimplementation of the
+full-attention decode backend.
+
+**Validation:** no pod launched; no CUDA files changed; no build or benchmark
+commands run because this is a docs-only redirect on current-main evidence.
+
 ## Phase 6 post-#392 current-main re-profile — 2026-04-23
 
 **Scope:** refresh the Phase 6 performance source of truth on fresh `main`
