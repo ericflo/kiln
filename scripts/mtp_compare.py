@@ -383,7 +383,7 @@ C45_HYPOTHESIS: Dict[str, str] = {
     "layer_1_input_norm_rms_inv_scalar": "the row-local RMS inverse scalar tensor itself diverges even though PR #433 kept this boundary shared-good",
     "layer_1_input_norm_rms_inv_scalar_extracted_values": "the row-local scalar tensor stays shared-good, but the scalar extraction path diverges before the multiply runs",
     "layer_1_input_norm_last_row_flat_values": "the extracted scalar stays shared-good, but the selected last-row flat values already drift before the multiply runs",
-    "layer_1_input_norm_pre_weight_row_broadcast_output": "the selected row and extracted scalar stay shared-good; drift first appears in the row-shaped production broadcast_mul output",
+    "layer_1_input_norm_pre_weight_row_broadcast_output": "the selected row and extracted scalar pass the current tolerance separately; the product exposes operand-drift amplification unless the C45 operand diagnostic shows a same-side multiply residual",
     "layer_1_input_norm_pre_weight_row_scalar_values": "the production broadcast output stays shared-good; drift first appears only in the audit-only flattened replay of that output",
     "layer_1_input_norm_pre_weight_row_reconstructed": "the flat row-local scalar multiply stays shared-good; drift appears only when reconstructing the row-shaped output before the existing post-input-norm path",
 }
@@ -572,6 +572,80 @@ def _compare_tap(
         row["rel_l2"] = float(np.linalg.norm(diff.reshape(-1)) / ref_norm)
     return row
 
+
+
+def _same_side_c45_product_diagnostic(
+    tensors: Dict[str, np.ndarray],
+) -> Optional[Tuple[float, float]]:
+    row = tensors.get("c45__layer_1_input_norm_last_row_flat_values")
+    scalar = tensors.get("c45__layer_1_input_norm_rms_inv_scalar_extracted_values")
+    output = tensors.get("c45__layer_1_input_norm_pre_weight_row_broadcast_output")
+    if row is None or scalar is None or output is None:
+        return None
+    if row.ndim != 2 or scalar.ndim != 1:
+        return None
+    expected_shape = (row.shape[0], 1, row.shape[1])
+    if output.shape != expected_shape or scalar.shape[0] != row.shape[0]:
+        return None
+
+    predicted = row.astype(np.float64) * scalar.astype(np.float64).reshape(-1, 1)
+    actual = output.reshape(row.shape).astype(np.float64)
+    diff = np.abs(predicted - actual)
+    max_abs = float(diff.max()) if diff.size else 0.0
+    mean_abs = float(diff.mean()) if diff.size else 0.0
+    return max_abs, mean_abs
+
+
+def _c45_operand_product_bound_diagnostic(
+    kiln_tensors: Dict[str, np.ndarray],
+    ref_tensors: Dict[str, np.ndarray],
+) -> Optional[Dict[str, float]]:
+    kiln_row = kiln_tensors.get("c45__layer_1_input_norm_last_row_flat_values")
+    kiln_scalar = kiln_tensors.get("c45__layer_1_input_norm_rms_inv_scalar_extracted_values")
+    kiln_output = kiln_tensors.get("c45__layer_1_input_norm_pre_weight_row_broadcast_output")
+    ref_row = ref_tensors.get("c45__layer_1_input_norm_last_row_flat_values")
+    ref_scalar = ref_tensors.get("c45__layer_1_input_norm_rms_inv_scalar_extracted_values")
+    ref_output = ref_tensors.get("c45__layer_1_input_norm_pre_weight_row_broadcast_output")
+    if (
+        kiln_row is None
+        or kiln_scalar is None
+        or kiln_output is None
+        or ref_row is None
+        or ref_scalar is None
+        or ref_output is None
+    ):
+        return None
+    if kiln_row.shape != ref_row.shape or kiln_scalar.shape != ref_scalar.shape:
+        return None
+    if kiln_row.ndim != 2 or kiln_scalar.ndim != 1:
+        return None
+    expected_output_shape = (kiln_row.shape[0], 1, kiln_row.shape[1])
+    if kiln_output.shape != expected_output_shape or ref_output.shape != expected_output_shape:
+        return None
+
+    kr = kiln_row.astype(np.float64)
+    rr = ref_row.astype(np.float64)
+    ks = kiln_scalar.astype(np.float64).reshape(-1, 1)
+    rs = ref_scalar.astype(np.float64).reshape(-1, 1)
+    ko = kiln_output.reshape(kr.shape).astype(np.float64)
+    ro = ref_output.reshape(rr.shape).astype(np.float64)
+
+    predicted_kiln = kr * ks
+    predicted_ref = rr * rs
+    product_diff = np.abs(predicted_kiln - predicted_ref)
+    output_diff = np.abs(ko - ro)
+    row_diff = np.abs(kr - rr)
+    scalar_diff = np.abs(ks - rs)
+    bound = row_diff * np.abs(ks) + np.abs(rr) * scalar_diff
+    side_residual = np.maximum(np.abs(predicted_kiln - ko), np.abs(predicted_ref - ro))
+    return {
+        "row_max_abs_diff": float(row_diff.max()) if row_diff.size else 0.0,
+        "scalar_max_abs_diff": float(scalar_diff.max()) if scalar_diff.size else 0.0,
+        "product_max_abs_diff": float(product_diff.max()) if product_diff.size else 0.0,
+        "output_max_abs_diff": float(output_diff.max()) if output_diff.size else 0.0,
+        "operand_bound_max": float(bound.max()) if bound.size else 0.0,
+        "side_residual_max": float(side_residual.max()) if side_residual.size else 0.0,
+    }
 
 def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
     try:
@@ -778,6 +852,31 @@ def _compare_pair(
         )
         emit(f"  pair verdict: first divergence at tap '{first_div}'.")
         emit(f"    Most-likely cause: {cause}")
+
+    c45_product_bound = _c45_operand_product_bound_diagnostic(kiln_arr, ref_arr)
+    if c45_product_bound is not None:
+        kiln_side = _same_side_c45_product_diagnostic(kiln_arr)
+        ref_side = _same_side_c45_product_diagnostic(ref_arr)
+        emit("  C45 broadcast operand diagnostic:")
+        if kiln_side is not None and ref_side is not None:
+            emit(
+                "    same-side product residual: "
+                f"kiln max={_fmt_sci(kiln_side[0])} mean={_fmt_sci(kiln_side[1])}; "
+                f"ref max={_fmt_sci(ref_side[0])} mean={_fmt_sci(ref_side[1])}"
+            )
+        emit(
+            "    cross-side operand drift: "
+            f"row max={_fmt_sci(c45_product_bound['row_max_abs_diff'])}; "
+            f"scalar max={_fmt_sci(c45_product_bound['scalar_max_abs_diff'])}; "
+            f"predicted product max={_fmt_sci(c45_product_bound['product_max_abs_diff'])}; "
+            f"observed output max={_fmt_sci(c45_product_bound['output_max_abs_diff'])}; "
+            f"operand-bound max={_fmt_sci(c45_product_bound['operand_bound_max'])}"
+        )
+        emit(
+            "    interpretation: if same-side residual is near zero and observed output "
+            "matches the predicted product, this boundary is operand-drift amplification, "
+            "not an independent broadcast multiply mismatch."
+        )
 
     return all_ok, first_div, rows, kiln_meta, ref_meta
 
@@ -2192,9 +2291,10 @@ def _emit_c45_summary(
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_broadcast_output":
         emit(
-            "  -> The selected flat last row and extracted scalar stay "
-            "shared-good; divergence first appears in the row-shaped "
-            "production `broadcast_mul` output."
+            "  -> The selected flat last row and extracted scalar pass the "
+            "current tolerance separately; use the C45 broadcast operand "
+            "diagnostic above to distinguish a real same-side multiply "
+            "residual from operand-drift amplification."
         )
     elif first_shared_bad == "layer_1_input_norm_pre_weight_row_scalar_values":
         emit(
