@@ -1855,7 +1855,8 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
     let (_, _, hidden) = x.dims3()?;
     let (_, vocab) = weight_t.dims2()?;
 
-    let out = Tensor::zeros((1usize, 1usize, vocab), DType::BF16, x.device())?;
+    // The kernel writes every vocab element.
+    let out = unsafe { Tensor::empty((1usize, 1usize, vocab), DType::BF16, x.device())? };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal lm head requires Metal tensors");
@@ -1962,7 +1963,8 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
     let rows = batch * seq_len;
     let total = rows * intermediate;
 
-    let out = Tensor::zeros((batch, seq_len, intermediate), DType::BF16, x.device())?;
+    // The kernel writes every row/intermediate element.
+    let out = unsafe { Tensor::empty((batch, seq_len, intermediate), DType::BF16, x.device())? };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal mlp gate/up requires Metal tensors");
@@ -2451,7 +2453,8 @@ pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Resu
 
     let x = x.contiguous()?;
     let weight = weight.contiguous()?;
-    let out = Tensor::zeros(x_dims.as_slice(), DType::BF16, x.device())?;
+    // The kernel writes every hidden element for every row.
+    let out = unsafe { Tensor::empty(x_dims.as_slice(), DType::BF16, x.device())? };
 
     if rows == 0 {
         return Ok(out);
@@ -2538,8 +2541,9 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
 
     let q = q.contiguous()?;
     let k = k.contiguous()?;
-    let q_out = Tensor::zeros(dims.as_slice(), DType::BF16, q.device())?;
-    let k_out = Tensor::zeros(dims.as_slice(), DType::BF16, q.device())?;
+    // The kernel writes every Q/K element for every row.
+    let q_out = unsafe { Tensor::empty(dims.as_slice(), DType::BF16, q.device())? };
+    let k_out = unsafe { Tensor::empty(dims.as_slice(), DType::BF16, q.device())? };
 
     if rows == 0 {
         return Ok((q_out, k_out));
@@ -2638,8 +2642,9 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
 
     let q = q.contiguous()?;
     let k = k.contiguous()?;
-    let q_out = Tensor::zeros((batch, seq_len, nv, hidden), DType::BF16, q.device())?;
-    let k_out = Tensor::zeros((batch, seq_len, nv, hidden), DType::BF16, q.device())?;
+    // Each source head writes all replicated value-head outputs.
+    let q_out = unsafe { Tensor::empty((batch, seq_len, nv, hidden), DType::BF16, q.device())? };
+    let k_out = unsafe { Tensor::empty((batch, seq_len, nv, hidden), DType::BF16, q.device())? };
 
     if rows == 0 {
         return Ok((q_out, k_out));
@@ -2822,8 +2827,9 @@ fn metal_gdn_gates_bf16(
     let b = b.contiguous()?;
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
-    let beta = Tensor::zeros(shape.clone(), DType::BF16, a.device())?;
-    let g = Tensor::zeros(shape, DType::BF16, a.device())?;
+    // The gates kernel writes every beta/g element.
+    let beta = unsafe { Tensor::empty(shape.clone(), DType::BF16, a.device())? };
+    let g = unsafe { Tensor::empty(shape, DType::BF16, a.device())? };
 
     let Device::Metal(device) = a.device() else {
         anyhow::bail!("metal gdn_gates requires a Metal tensor");
@@ -2997,7 +3003,8 @@ fn metal_gated_rms_norm_bf16(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) 
     let x = x.contiguous()?;
     let z = z.contiguous()?;
     let weight = weight.contiguous()?;
-    let out = Tensor::zeros((batch, seq_len, heads, hidden), DType::BF16, x.device())?;
+    // The kernel writes every hidden element for every row.
+    let out = unsafe { Tensor::empty((batch, seq_len, heads, hidden), DType::BF16, x.device())? };
 
     if rows == 0 {
         return Ok(out);
@@ -3660,11 +3667,14 @@ fn metal_gdn_forward_substitution_bf16(
     let a_strict = a_strict.contiguous()?;
     let v_prime = v_prime.contiguous()?;
     let beta = beta.contiguous()?;
-    let out = Tensor::zeros(
-        (batch, heads, chunk_size, dv),
-        DType::BF16,
-        a_strict.device(),
-    )?;
+    // The kernel writes every chunk/value element.
+    let out = unsafe {
+        Tensor::empty(
+            (batch, heads, chunk_size, dv),
+            DType::BF16,
+            a_strict.device(),
+        )?
+    };
 
     let Device::Metal(device) = a_strict.device() else {
         anyhow::bail!("metal gdn forward-substitution requires a Metal tensor");
@@ -3759,20 +3769,28 @@ fn metal_gdn_chunk_prep_bf16(
     let ks_entry = ks_entry.contiguous()?;
     let q_s = q_s.contiguous()?;
     let device_ref = g.device();
-    let a_strict = Tensor::zeros(
-        (batch, heads, chunk_size, chunk_size),
-        DType::BF16,
-        device_ref,
-    )?;
-    let b_mask = Tensor::zeros(
-        (batch, heads, chunk_size, chunk_size),
-        DType::BF16,
-        device_ref,
-    )?;
-    let v_prime = Tensor::zeros((batch, heads, chunk_size, dv), DType::BF16, device_ref)?;
-    let q_s_scaled = Tensor::zeros((batch, heads, chunk_size, dv), DType::BF16, device_ref)?;
-    let decay_last_col = Tensor::zeros((batch, heads, chunk_size), DType::BF16, device_ref)?;
-    let p_last = Tensor::zeros((batch, heads), DType::BF16, device_ref)?;
+    // The prep kernel fills each temporary completely before any consumer sees it.
+    let a_strict = unsafe {
+        Tensor::empty(
+            (batch, heads, chunk_size, chunk_size),
+            DType::BF16,
+            device_ref,
+        )?
+    };
+    let b_mask = unsafe {
+        Tensor::empty(
+            (batch, heads, chunk_size, chunk_size),
+            DType::BF16,
+            device_ref,
+        )?
+    };
+    let v_prime =
+        unsafe { Tensor::empty((batch, heads, chunk_size, dv), DType::BF16, device_ref)? };
+    let q_s_scaled =
+        unsafe { Tensor::empty((batch, heads, chunk_size, dv), DType::BF16, device_ref)? };
+    let decay_last_col =
+        unsafe { Tensor::empty((batch, heads, chunk_size), DType::BF16, device_ref)? };
+    let p_last = unsafe { Tensor::empty((batch, heads), DType::BF16, device_ref)? };
 
     let Device::Metal(device) = g.device() else {
         anyhow::bail!("metal gdn chunk-prep requires a Metal tensor");
@@ -3949,7 +3967,8 @@ fn metal_gdn_full_chunk_forward_bf16(
     let q_s = q_s.contiguous()?;
     let beta = beta.contiguous()?;
     let k_t = k_t.contiguous()?;
-    let out = Tensor::zeros((batch, heads, chunk_size, dv), DType::BF16, g.device())?;
+    // The full-chunk kernel writes every output token/head/value element.
+    let out = unsafe { Tensor::empty((batch, heads, chunk_size, dv), DType::BF16, g.device())? };
 
     let Device::Metal(device) = g.device() else {
         anyhow::bail!("metal gdn full-chunk requires a Metal tensor");
@@ -4269,7 +4288,8 @@ fn metal_gdn_recurrent_bf16(
     if !state.is_contiguous() {
         *state = state.contiguous()?;
     }
-    let out = Tensor::zeros((batch, heads, dv), DType::BF16, q.device())?;
+    // The recurrent kernel writes every batch/head/value element.
+    let out = unsafe { Tensor::empty((batch, heads, dv), DType::BF16, q.device())? };
 
     let Device::Metal(device) = q.device() else {
         anyhow::bail!("metal gdn recurrent requires a Metal tensor");
@@ -4820,7 +4840,8 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
     if !conv_state.is_contiguous() {
         *conv_state = conv_state.contiguous()?;
     }
-    let out = Tensor::zeros((batch, channels, seq_len), DType::F32, x.device())?;
+    // The conv prefill kernel writes every batch/channel/time element.
+    let out = unsafe { Tensor::empty((batch, channels, seq_len), DType::F32, x.device())? };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal conv1d prefill requires a Metal tensor");
@@ -4911,7 +4932,8 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
     if !conv_state.is_contiguous() {
         *conv_state = conv_state.contiguous()?;
     }
-    let out = Tensor::zeros((batch, channels, 1usize), DType::F32, x.device())?;
+    // The conv update kernel writes every batch/channel element.
+    let out = unsafe { Tensor::empty((batch, channels, 1usize), DType::F32, x.device())? };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal conv1d update requires a Metal tensor");
