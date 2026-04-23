@@ -54,15 +54,10 @@ __global__ void gdn_full_chunk_forward_kernel(
         return;
     }
 
-    extern __shared__ unsigned char smem_raw[];
-    unsigned char *smem = smem_raw;
-    __nv_bfloat16 *s_a = reinterpret_cast<__nv_bfloat16 *>(smem);    // [C, C]
-    smem += (size_t)kChunkSize * kChunkSize * sizeof(__nv_bfloat16);
-    __nv_bfloat16 *s_b = reinterpret_cast<__nv_bfloat16 *>(smem);    // [C, C]
-    smem += (size_t)kChunkSize * kChunkSize * sizeof(__nv_bfloat16);
-    uintptr_t smem_aligned = (reinterpret_cast<uintptr_t>(smem) + alignof(float) - 1) &
-        ~(uintptr_t)(alignof(float) - 1);
-    float *s_w = reinterpret_cast<float *>(smem_aligned);            // [C, dv]
+    extern __shared__ __nv_bfloat16 smem[];
+    __nv_bfloat16 *s_a = smem;                                       // [C, C]
+    __nv_bfloat16 *s_b = s_a + (size_t)kChunkSize * kChunkSize;      // [C, C]
+    __nv_bfloat16 *s_w = s_b + (size_t)kChunkSize * kChunkSize;      // [C, dv]
 
     __shared__ float s_big_g[kChunkSize];
     __shared__ float s_p[kChunkSize];
@@ -115,49 +110,52 @@ __global__ void gdn_full_chunk_forward_kernel(
 
     for (int t = 0; t < kChunkSize; ++t) {
         const float beta_t = bf16_to_f32(beta_base[t]);
-        const float p_t = s_p[t];
+        const float p_t = bf16_to_f32(f32_to_bf16(s_p[t]));
 
         const __nv_bfloat16 *a_row = s_a + (size_t)t * kChunkSize;
         const __nv_bfloat16 *b_row = s_b + (size_t)t * kChunkSize;
-        float *w_row = s_w + (size_t)t * dv;
+        __nv_bfloat16 *w_row = s_w + (size_t)t * dv;
 
         float acc_a = 0.0f;
         #pragma unroll
         for (int i = 0; i < kChunkSize; ++i) {
             if (i < t) {
-                acc_a += bf16_to_f32(a_row[i]) * s_w[(size_t)i * dv + tid];
+                acc_a += bf16_to_f32(a_row[i]) * bf16_to_f32(s_w[(size_t)i * dv + tid]);
             }
         }
 
         const size_t td = (size_t)t * dv + tid;
-        const float vp = bf16_to_f32(v_base[td]) - bf16_to_f32(ks_base[td]) * p_t;
+        const float vp = bf16_to_f32(f32_to_bf16(
+            bf16_to_f32(v_base[td]) - bf16_to_f32(ks_base[td]) * p_t
+        ));
         const float w_val = beta_t * (vp - acc_a);
-        w_row[tid] = w_val;
+        w_row[tid] = f32_to_bf16(w_val);
         __syncthreads();
 
         float acc_b = 0.0f;
         #pragma unroll
         for (int i = 0; i < kChunkSize; ++i) {
             if (i <= t) {
-                acc_b += bf16_to_f32(b_row[i]) * s_w[(size_t)i * dv + tid];
+                acc_b += bf16_to_f32(b_row[i]) * bf16_to_f32(s_w[(size_t)i * dv + tid]);
             }
         }
 
-        const float qss = bf16_to_f32(qs_base[td]) * p_t;
+        const float qss = bf16_to_f32(f32_to_bf16(bf16_to_f32(qs_base[td]) * p_t));
         const float out_val = qss + acc_b;
         out_base[td] = f32_to_bf16(out_val);
         __syncthreads();
     }
 
-    const float p_last = s_p_last;
+    const float p_last = bf16_to_f32(f32_to_bf16(s_p_last));
     for (int k_idx = 0; k_idx < dk; ++k_idx) {
         float delta = 0.0f;
         #pragma unroll
         for (int t = 0; t < kChunkSize; ++t) {
             const float kt = bf16_to_f32(kt_base[(size_t)k_idx * kChunkSize + t]);
-            const float w = s_w[(size_t)t * dv + tid];
-            const float decay_last = s_decay_last[t];
-            delta += kt * (w * decay_last);
+            const float w = bf16_to_f32(s_w[(size_t)t * dv + tid]);
+            const float decay_last = bf16_to_f32(f32_to_bf16(s_decay_last[t]));
+            const float w_weighted = bf16_to_f32(f32_to_bf16(w * decay_last));
+            delta += kt * w_weighted;
         }
         const size_t state_idx = (size_t)k_idx * dv + tid;
         const float prev = bf16_to_f32(state_base[state_idx]);
@@ -194,9 +192,8 @@ extern "C" kiln_gdn_full_chunk_forward_status_t kiln_gdn_full_chunk_forward(
     const int blocks = batch_heads;
     const int threads = 128;
     const size_t smem_bytes =
-        (size_t)kChunkSize * kChunkSize * 2 * sizeof(__nv_bfloat16) +
-        (size_t)kChunkSize * dv * sizeof(float) +
-        alignof(float);
+        ((size_t)kChunkSize * kChunkSize * 2 + (size_t)kChunkSize * dv) *
+        sizeof(__nv_bfloat16);
 
     cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
     gdn_full_chunk_forward_kernel<<<blocks, threads, smem_bytes, s>>>(
