@@ -2,6 +2,31 @@
 
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
+### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
+
+Follow-up A6000 validation for the next minimal fused full-chunk CUDA prefill
+step (`gdn_full_chunk_forward`: fused chunk body + in-kernel state update,
+tail fallback unchanged) showed that correctness is acceptable on the focused
+CUDA parity test, but end-to-end prompt-heavy prefill did **not** improve on
+the `#389` baseline.
+
+- Validation environment: RunPod A6000, `ghcr.io/ericflo/kiln-runpod:latest`,
+  `KILN_W4A16=1`, `KILN_CUDA_GRAPHS=true`, `--paged --prompt-tokens 8192
+  --max-output-tokens 1 --skip-training --latency-only`
+- New focused CUDA parity test:
+  `test_gdn_full_chunk_forward_matches_fallback` — passed
+- Bench runs on the fused branch:
+  - run 1: **3239.3 ms** prefill (**2525 tok/s**)
+  - run 2: **3651.1 ms** prefill (**2240 tok/s**)
+  - run 3: **3254.9 ms** prefill (**2513 tok/s**)
+  - median: **3254.9 ms** (**2513 tok/s**)
+
+Compared with the post-`#384` baseline already recorded in this file
+(**2831.2 ms / 2889 tok/s** uncaptured, **2947.8 ms / 2775 tok/s** profiled),
+this minimal fused full-chunk step is a regression rather than a win. The
+fused path did exercise on the benchmark's full 64-token chunks, but the final
+short tail chunk still fell back by design.
+
 **Scope:** refresh the current-`main` performance source of truth after PR
 [#384](https://github.com/ericflo/kiln/pull/384) and name the next real
 Phase 6 hotspot from fresh evidence instead of the pre-`#384` queue shape.
