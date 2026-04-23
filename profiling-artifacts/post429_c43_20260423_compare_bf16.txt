@@ -1,0 +1,66 @@
+MTP numerical bisect — mode: layer-1 pre-weight multiply audit (C43), atol=0.01, rtol=0.1
+
+=== seed0 ===
+  kiln dump : profiling-artifacts/post429_c43_20260423_seed0_captures/mtp_pos-0/step-1.safetensors
+  ref  dump : profiling-artifacts/post429_c43_20260423_seed0_ref_bf16.safetensors
+Metadata:
+  meta__draft_token_id: kiln=31192 ref=31192 [OK]
+  meta__mtp_pos: kiln=0 ref=0 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+c43__layer_1_input_norm_pre_weight_broadcast_mul 1x1x2560               True     False    9.99e-01   1.35e-01     3.19e-02    
+c43__layer_1_input_norm_pre_weight_scalar_affine 1x1x2560               True     False    9.99e-01   1.35e-01     3.19e-02    
+c43__layer_1_input_norm_rms_inv 1x1x1                  True     True     1.00e+00   1.14e-01     1.14e-01    
+c43__layer_1_post_input_norm 1x1x2560               True     False    9.98e-01   1.46e-01     3.47e-02    
+c43__layer_1_residual_input 1x1x2560               True     True     9.99e-01   1.56e-02     1.59e-03    
+
+  pair verdict: first divergence at tap 'c43__layer_1_input_norm_pre_weight_broadcast_mul'.
+    Most-likely cause: <unknown tap>
+
+=== seed1 ===
+  kiln dump : profiling-artifacts/post429_c43_20260423_seed1_captures/mtp_pos-2/step-1.safetensors
+  ref  dump : profiling-artifacts/post429_c43_20260423_seed1_ref_bf16.safetensors
+Metadata:
+  meta__draft_token_id: kiln=3202 ref=3202 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+c43__layer_1_input_norm_pre_weight_broadcast_mul 1x1x2560               True     False    9.99e-01   1.42e-01     3.14e-02    
+c43__layer_1_input_norm_pre_weight_scalar_affine 1x1x2560               True     False    9.99e-01   1.42e-01     3.14e-02    
+c43__layer_1_input_norm_rms_inv 1x1x1                  True     True     1.00e+00   9.12e-02     9.12e-02    
+c43__layer_1_post_input_norm 1x1x2560               True     False    9.98e-01   1.56e-01     3.41e-02    
+c43__layer_1_residual_input 1x1x2560               True     True     9.99e-01   7.81e-03     1.34e-03    
+
+  pair verdict: first divergence at tap 'c43__layer_1_input_norm_pre_weight_broadcast_mul'.
+    Most-likely cause: <unknown tap>
+
+==============================================================================
+Phase C43 layer-1 pre-weight multiply audit — cos_sim / max|Δ| / mean|Δ| / rel_l2
+==============================================================================
+  tap                                       seed0                                                seed1                                               
+  ---------------------------------------------------------------------------------------------------------------------------------------------------
+  layer_1_residual_input                    cos=9.99e-01   max|Δ|=1.56e-02   mean|Δ|=1.59e-03   rel_l2=4.03e-02   ok  cos=9.99e-01   max|Δ|=7.81e-03   mean|Δ|=1.34e-03   rel_l2=3.93e-02   ok 
+  layer_1_input_norm_rms_inv                cos=1.00e+00   max|Δ|=1.14e-01   mean|Δ|=1.14e-01   rel_l2=5.71e-03   ok  cos=1.00e+00   max|Δ|=9.12e-02   mean|Δ|=9.12e-02   rel_l2=3.90e-03   ok 
+  layer_1_input_norm_pre_weight_broadcast_mulcos=9.99e-01   max|Δ|=1.35e-01   mean|Δ|=3.19e-02   rel_l2=4.01e-02   DIV cos=9.99e-01   max|Δ|=1.42e-01   mean|Δ|=3.14e-02   rel_l2=3.92e-02   DIV
+  layer_1_input_norm_pre_weight_scalar_affinecos=9.99e-01   max|Δ|=1.35e-01   mean|Δ|=3.19e-02   rel_l2=4.01e-02   DIV cos=9.99e-01   max|Δ|=1.42e-01   mean|Δ|=3.14e-02   rel_l2=3.92e-02   DIV
+  layer_1_post_input_norm                   cos=9.98e-01   max|Δ|=1.46e-01   mean|Δ|=3.47e-02   rel_l2=5.65e-02   DIV cos=9.98e-01   max|Δ|=1.56e-01   mean|Δ|=3.41e-02   rel_l2=5.77e-02   DIV
+
+  earliest shared bad tap: 'layer_1_input_norm_pre_weight_broadcast_mul'
+  last shared-good tap: 'layer_1_input_norm_rms_inv'
+Phase C43 verdict: EARLIEST SHARED BAD PRE-WEIGHT TAP = 'layer_1_input_norm_pre_weight_broadcast_mul'.
+    Most-likely cause: existing broadcast_mul pre-weight path diverges before an independent equivalent is consulted
+  -> Divergence survives the independent scalar-affine equivalent: the earliest bad span stays on the pre-weight values themselves, not broadcast/layout alone.
+
+Phase B9 zone bisect: skipped (no H2/H3 zone sub-op taps in dumps).
+
+Overall verdict: divergence(s) at: ['c43__layer_1_input_norm_pre_weight_broadcast_mul', 'c43__layer_1_input_norm_pre_weight_broadcast_mul']
