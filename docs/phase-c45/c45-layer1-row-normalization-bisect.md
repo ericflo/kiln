@@ -190,9 +190,9 @@ this multiply, starting with the row-local RMS scalar / selected last-row
 provenance under a tighter C45 tolerance or a new operand-error-budget tap, not
 a production `broadcast_mul` code change.
 
-## 2026-04-23 operand drift budget diagnostic (WIP)
+## 2026-04-23 operand drift budget diagnostic verdict
 
-This follow-up adds a comparator-only C45 operand budget diagnostic for the
+This follow-up added a comparator-only C45 operand budget diagnostic for the
 row-shaped broadcast-multiply boundary. It preserves the existing C45 report and
 adds, for the captured `layer_1_input_norm_last_row_flat_values`,
 `layer_1_input_norm_rms_inv_scalar_extracted_values`, and
@@ -206,17 +206,45 @@ adds, for the captured `layer_1_input_norm_last_row_flat_values`,
 - a tighter mask check at `atol=1e-3`, `rtol=1e-2`, plus current/tight tolerance
   ratios for the row, scalar, and predicted product.
 
-Validation status on 2026-04-23: zero-cost local syntax and tap-contract checks
-passed, but fresh GPU reruns for `profiling-artifacts/c45_operand_budget_seed0_compare.txt`
-and `profiling-artifacts/c45_operand_budget_seed1_compare.txt` were blocked by
-RunPod capacity across the required pool/direct fallback list (`NVIDIA RTX A6000`,
-`NVIDIA A40`, `NVIDIA A100 80GB PCIe`, `NVIDIA RTX 6000 Ada`, `NVIDIA L40S`).
-The checked-in compare reports do not include the raw safetensors captures, so
-no fresh operand-budget seed verdict is claimed in this WIP revision.
+Fresh GPU validation completed on 2026-04-23 with the mandatory RunPod image:
 
-Pending verdict: rerun the new `scripts/mtp_compare.py --c45-operand-budget`
-diagnostic on fresh seed 0/1 C45 captures. If same-side residual remains tiny and
-predicted product still matches observed output, use the new contribution budget
-to name the next exact upstream boundary as row-side, scalar-side, both, or only
-a comparator tolerance artifact. No production math change is justified until
-that fresh evidence identifies a real mismatch.
+- pod: `flp51y39ddsktx`
+- GPU: `NVIDIA RTX A6000`, driver `550.127.08`, `49140 MiB` VRAM
+- image: `ghcr.io/ericflo/kiln-runpod:latest`
+- CUDA arch: `KILN_CUDA_ARCHS=86`
+- branch: PR #451 (`ce/c45-operand-drift-budget`, commit `9d1ec89`)
+
+Validation commands completed:
+
+- `cargo build --release --features cuda --bin kiln-bench`
+- `cargo test --locked -p kiln-model c45 -- --nocapture`
+- `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+- fresh seed 0/1 C45 captures with `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1`
+- `python3 scripts/mtp_h_main_reference_dump.py --c45-taps ...` for each seed
+- `python3 scripts/mtp_compare.py --c45-operand-budget ...` for each seed
+
+Seed-specific operand-budget evidence:
+
+- seed 0 (`profiling-artifacts/c45_operand_budget_seed0_compare.txt`): earliest
+  bad tap remains `layer_1_input_norm_pre_weight_row_broadcast_output`; last
+  shared-good tap remains `layer_1_input_norm_last_row_flat_values`; same-side
+  product residuals are tiny (`kiln max=9.54e-07`, `ref max=1.01e-06`);
+  predicted product max diff equals observed output max diff (`1.35e-01`);
+  operand contribution budget is row-side dominant (`row-term max=3.13e-01`,
+  `scalar-term max=2.52e-01`, `interaction max=1.79e-03`); prompt=494,
+  prefill=`9942.70 ms`, decode=`34.14 tok/s`, `alpha=0.6623`.
+- seed 1 (`profiling-artifacts/c45_operand_budget_seed1_compare.txt`): earliest
+  bad tap remains `layer_1_input_norm_pre_weight_row_broadcast_output`; last
+  shared-good tap remains `layer_1_input_norm_last_row_flat_values`; same-side
+  product residuals are tiny (`kiln max=9.54e-07`, `ref max=7.15e-07`);
+  predicted product max diff equals observed output max diff (`1.32e-01`);
+  operand contribution budget is row-side dominant (`row-term max=5.05e-01`,
+  `scalar-term max=3.99e-01`, `interaction max=4.39e-03`); prompt=508,
+  prefill=`392.74 ms`, decode=`23.64 tok/s`, `alpha=0.3196`.
+
+Final verdict: **row-side operand drift**, not scalar-side, not both, and not a
+same-side production multiply or HF mirror mismatch. The scalar operand remains
+within the tighter mask on both seeds, while the selected row fails the tighter
+mask and dominates the first-order contribution budget. The next exact target is
+therefore the provenance of `layer_1_input_norm_last_row_flat_values` feeding the
+row-shaped broadcast multiply.

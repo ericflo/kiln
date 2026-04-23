@@ -1,0 +1,51 @@
+MTP numerical bisect — mode: layer-1 row-local operand drift budget (C45), atol=0.01, rtol=0.1
+
+=== seed1 ===
+  kiln dump : profiling-artifacts/c45_operand_budget_seed1_captures/mtp_pos-2/step-1.safetensors
+  ref  dump : profiling-artifacts/c45_operand_budget_seed1_ref_bf16.safetensors
+Metadata:
+  meta__draft_token_id: kiln=11 ref=11 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] ref=[0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+c45__layer_1_input_norm_rms_inv_scalar 1x1x1                  True     True     1.00e+00   1.40e-01     1.40e-01    
+c45__layer_1_input_norm_rms_inv_scalar_extracted_values 1                      True     True     1.00e+00   1.40e-01     1.40e-01    
+c45__layer_1_input_norm_last_row_flat_values 1x2560                 True     True     9.99e-01   3.12e-02     1.59e-03    
+c45__layer_1_input_norm_pre_weight_row_broadcast_output 1x1x2560               True     False    9.99e-01   1.32e-01     2.59e-02    
+c45__layer_1_input_norm_pre_weight_row_scalar_values 1x2560                 True     False    9.99e-01   1.32e-01     2.59e-02    
+c45__layer_1_input_norm_pre_weight_row_reconstructed 1x1x2560               True     False    9.99e-01   1.32e-01     2.59e-02    
+
+  pair verdict: first divergence at tap 'c45__layer_1_input_norm_pre_weight_row_broadcast_output'.
+    Most-likely cause: the selected row and extracted scalar pass the current tolerance separately; the product exposes operand-drift amplification unless the C45 operand diagnostic shows a same-side multiply residual
+  C45 broadcast operand diagnostic:
+    same-side product residual: kiln max=9.54e-07 mean=6.76e-09; ref max=7.15e-07 mean=6.88e-09
+    cross-side operand drift: row max=3.12e-02 mean=1.59e-03 rel_l2=3.35e-02; scalar max=1.40e-01 mean=1.40e-01 rel_l2=8.68e-03; predicted product max=1.32e-01 mean=2.59e-02 rel_l2=3.25e-02; observed output max=1.32e-01 mean=2.59e-02 rel_l2=3.25e-02; operand-bound max=9.09e-01
+    operand contribution budget: row-term max=5.05e-01 mean=2.57e-02 rel_l2=3.35e-02; scalar-term max=3.99e-01 mean=2.76e-03 rel_l2=8.68e-03; interaction max=4.39e-03 mean=2.23e-04 rel_l2=2.91e-04; dominant=row-side
+    tighter tolerance mask check (atol=0.001, rtol=0.01): row allclose=False current-ratio=6.95e-01 tight-ratio=6.95e+00; scalar allclose=True current-ratio=8.62e-02 tight-ratio=8.62e-01; product allclose=False current-ratio=9.39e+00 tight-ratio=9.39e+01
+    interpretation: if same-side residual is near zero and observed output matches the predicted product, this boundary is operand-drift amplification, not an independent broadcast multiply mismatch; the contribution budget names which tolerated operand dominates the exposed product error.
+
+==============================================================================
+Phase C45 layer-1 row-local scalar-multiply audit — cos_sim / max|Δ| / mean|Δ| / rel_l2
+==============================================================================
+  tap                                             seed1                                               
+  ----------------------------------------------------------------------------------------------------
+  layer_1_input_norm_rms_inv_scalar               cos=1.00e+00   max|Δ|=1.40e-01   mean|Δ|=1.40e-01   rel_l2=8.68e-03   ok 
+  layer_1_input_norm_rms_inv_scalar_extracted_valuescos=1.00e+00   max|Δ|=1.40e-01   mean|Δ|=1.40e-01   rel_l2=8.68e-03   ok 
+  layer_1_input_norm_last_row_flat_values         cos=9.99e-01   max|Δ|=3.12e-02   mean|Δ|=1.59e-03   rel_l2=3.35e-02   ok 
+  layer_1_input_norm_pre_weight_row_broadcast_outputcos=9.99e-01   max|Δ|=1.32e-01   mean|Δ|=2.59e-02   rel_l2=3.25e-02   DIV
+  layer_1_input_norm_pre_weight_row_scalar_values cos=9.99e-01   max|Δ|=1.32e-01   mean|Δ|=2.59e-02   rel_l2=3.25e-02   DIV
+  layer_1_input_norm_pre_weight_row_reconstructed cos=9.99e-01   max|Δ|=1.32e-01   mean|Δ|=2.59e-02   rel_l2=3.25e-02   DIV
+
+  earliest shared bad tap: 'layer_1_input_norm_pre_weight_row_broadcast_output'
+  last shared-good tap: 'layer_1_input_norm_last_row_flat_values'
+Phase C45 verdict: EARLIEST SHARED BAD ROW-LOCAL SCALAR-MULTIPLY TAP = 'layer_1_input_norm_pre_weight_row_broadcast_output'.
+    Most-likely cause: the selected row and extracted scalar pass the current tolerance separately; the product exposes operand-drift amplification unless the C45 operand diagnostic shows a same-side multiply residual
+  -> The selected flat last row and extracted scalar pass the current tolerance separately; use the C45 broadcast operand diagnostic above to distinguish a real same-side multiply residual from operand-drift amplification.
+
+Overall verdict: divergence(s) at: ['c45__layer_1_input_norm_pre_weight_row_broadcast_output']
+
