@@ -200,6 +200,49 @@ No parity tests, `8192/1` timing runs, or post-change kernel-share captures
 were executed in this attempt, so the post-`#392` profile above remains the
 current source of truth.
 
+### Follow-up parity retry — 2026-04-23
+
+Retried the same Phase 6 frontier on fresh `main` after `#397`, this time on a
+reachable on-demand A40 fallback pod (same `sm_86` envelope as A6000) with the
+required kiln image. Preflight still passed:
+
+- `#397` is merged on `main` and remains doc-only (`PROFILING.md` only);
+- no newer open or merged PR already modifies
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this exact goal;
+- the post-`#392` section above still shows
+  `gdn_full_chunk_forward_kernel` at **34.6%** of refined prompt-heavy prefill
+  kernel time.
+
+The upstream idea attempted here was the smallest vLLM-style cleanup available
+inside kiln's fused full-chunk kernel: stop redundant bf16 round-trips in the
+final recurrent-state update path while leaving the chunk body and launch
+envelope unchanged.
+
+Validation command on the pod:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export CARGO_PROFILE_DEV_DEBUG=0
+cargo test -p kiln-model --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+```
+
+Result: **fail**. The kernel launched and the output chunk stayed within the
+existing tolerance, but the recurrent-state parity regressed past the test bar:
+
+- `out_chunk` max abs diff: **1.5625e-2**
+- `state` max abs diff: **3.90625e-2**
+- test threshold for `state`: **3.5e-2**
+
+Because the focused CUDA parity check failed, this retry did **not** run the
+`8192/1` timing arm or a new Nsight capture, and it does **not** ship a kernel
+change. The current source of truth therefore remains the post-`#392` profile
+above, and the next Phase 6 retry on this frontier needs a different upstream
+idea than this scalar round-trip cleanup.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
