@@ -1,5 +1,59 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#412 preflight — tiled full-chunk recurrent-state task is obsolete (2026-04-23)
+
+**Scope:** re-check the queued "prototype vLLM-style block-tiled recurrent-state
+update in the full-chunk GDN kernel" task on fresh `main` after PR
+[#412](https://github.com/ericflo/kiln/pull/412), and stop with docs only if
+the exact tiled-recurrent prototype has already been attempted and evaluated on
+the current source of truth.
+
+**Preflight outcome:** stop with docs only. On fresh `main` at `e516f24`
+(2026-04-23):
+
+- PR [#412](https://github.com/ericflo/kiln/pull/412) is merged and doc-only
+  (`PROFILING.md` only), so the post-`#411` FlashInfer redirect is already
+  recorded.
+- `crates/kiln-model/src/backend/cuda.rs` still routes CUDA paged decode
+  through `kiln_flash_attn::flash_attn_paged_decode(...)`.
+- `crates/kiln-gdn-kernel/src/lib.rs` still says the core `chunk_gla_fwd`
+  vendor landed in PR `#80`, so that queue item remains consumed.
+- The exact tiled recurrent-state prototype this task asks for has already been
+  attempted and recorded on current `main`: PR
+  [#411](https://github.com/ericflo/kiln/pull/411) is merged doc-only and
+  documents the reverted code attempt from closed PR
+  [#409](https://github.com/ericflo/kiln/pull/409), which edited
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this same
+  vLLM-style block-tiled recurrent-state update.
+- `PROFILING.md` no longer leaves this as a live bounded frontier: the earlier
+  audit section below says "No bounded port-worthy recurrent/full-chunk win
+  remains", and the post-`#406` tiled retry below records the measured keep-bar
+  failure for the exact prototype.
+
+**Already-recorded result on current main**
+
+The attempted tiled recurrent-state update passed the focused CUDA parity test,
+but it failed the prompt-heavy prefill keep bar on the same warmed A6000 pod:
+
+- parity: `out_chunk` max abs diff **1.5625e-2**, `state` max abs diff
+  **3.125e-2**
+- warm control on fresh `main`: **3112.7 ms**, **2628 tok/s**
+- warm candidate on the tiled branch: **3167.5 ms**, **2582 tok/s**
+- verdict: **1.8% slower** than warmed `main`, so it failed the task's
+  `>=3%` keep bar and was correctly reverted
+
+**Decision:** obsolete task; doc-only redirect.
+
+No CUDA edit is warranted on fresh `main` because the requested prototype is
+already in the history of this frontier, already measured, and already
+rejected. Re-running it would duplicate spend without changing the result.
+FlashInfer decode also remains below the reopen threshold on Qwen3.5-4B, so
+this redirect does **not** reopen that path either.
+
+**Validation:** no pod launched; no CUDA files changed; no build, test, or
+benchmark commands run in this recheck because the fresh-main preflight already
+proved the task obsolete.
+
 ## Phase 6 post-#411 recheck — FlashInfer paged decode still does not reopen (2026-04-23)
 
 **Scope:** re-check the queued "vendor minimal FlashInfer-style paged GQA
