@@ -17,7 +17,7 @@ use crate::lora_loader::{
 };
 use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
 use crate::transposed_weight_cache::transposed_weight_bytes_2d_cached;
-use crate::weights::{ModelWeights, MtpWeights, TensorDType, WeightTensor};
+use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
 
@@ -223,16 +223,31 @@ pub struct MtpGpuWeights {
 /// MTP path that the server uses only for short greedy prompts.
 pub struct MtpGpuWeightsSlot {
     weights: OnceLock<MtpGpuWeights>,
-    source: Option<MtpWeights>,
+    source: Option<MtpGpuSource>,
     device: Device,
     init_lock: Mutex<()>,
+}
+
+#[derive(Clone)]
+enum MtpGpuSource {
+    Loaded(MtpWeights),
+    Deferred(DeferredMtpSource),
 }
 
 impl MtpGpuWeightsSlot {
     pub fn lazy(source: MtpWeights, device: &Device) -> Self {
         Self {
             weights: OnceLock::new(),
-            source: Some(source),
+            source: Some(MtpGpuSource::Loaded(source)),
+            device: device.clone(),
+            init_lock: Mutex::new(()),
+        }
+    }
+
+    pub fn lazy_deferred(source: DeferredMtpSource, device: &Device) -> Self {
+        Self {
+            weights: OnceLock::new(),
+            source: Some(MtpGpuSource::Deferred(source)),
             device: device.clone(),
             init_lock: Mutex::new(()),
         }
@@ -270,10 +285,23 @@ impl MtpGpuWeightsSlot {
             .source
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("native MTP GPU slot is empty and has no CPU source"))?;
+        let mtp_weights = match source {
+            MtpGpuSource::Loaded(weights) => weights.clone(),
+            MtpGpuSource::Deferred(source) => {
+                let load_start = std::time::Instant::now();
+                let loaded = crate::loader::load_deferred_mtp(source)
+                    .context("deferred native MTP CPU load")?;
+                tracing::info!(
+                    load_elapsed_ms = load_start.elapsed().as_millis() as u64,
+                    "deferred native MTP CPU load complete"
+                );
+                loaded
+            }
+        };
         let projection_load_cache =
             ProjectionLoadCache::new(&self.device).context("mtp projection load cache")?;
         let upload_start = std::time::Instant::now();
-        let uploaded = upload_mtp_gpu_weights(source, &self.device, &projection_load_cache)
+        let uploaded = upload_mtp_gpu_weights(&mtp_weights, &self.device, &projection_load_cache)
             .context("lazy native MTP GPU upload")?;
         let upload_elapsed_ms = upload_start.elapsed().as_millis();
         self.weights
@@ -1433,10 +1461,14 @@ impl GpuWeights {
         // during model load. The macOS desktop default only uses native MTP for
         // short greedy prompts; long prompts route to skip-layer, so eager MTP
         // upload slows common startup/readiness without warming the hot path.
-        let mtp = weights
-            .mtp
-            .as_ref()
-            .map(|mtp_w| MtpGpuWeightsSlot::lazy(mtp_w.clone(), device));
+        let mtp = if let Some(mtp_w) = weights.mtp.as_ref() {
+            Some(MtpGpuWeightsSlot::lazy(mtp_w.clone(), device))
+        } else {
+            weights
+                .deferred_mtp
+                .as_ref()
+                .map(|source| MtpGpuWeightsSlot::lazy_deferred(source.clone(), device))
+        };
 
         Ok(Self {
             embed_tokens,
@@ -4109,31 +4141,86 @@ fn gqa_attention_paged_with_rope_tables(
             1usize,
         )
     } else {
-        let fast_read = if seq_len > 1
-            && seq_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
+        let prefix_only_prefill = seq_len > 1
+            && start_pos > 0
             && !paged_cache.is_fp8()
-            && backend.supports_paged_kv_head_major_read()
             && backend.supports_flash_attn_prefill_head_major()
+            && !crate::mtp_debug::is_c7_sdpa_capture_armed();
+        let prefix_append_fast = if prefix_only_prefill
+            && start_pos >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
+            && backend.supports_paged_kv_head_major_read_append_token_major()
         {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, total_seq_len)
+            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, start_pos)
                 .and_then(|start_slot| {
                     paged_cache
                         .pool_tensors(full_attn_layer_idx)
                         .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
                 })
                 .map(|(start_slot, k_pool, v_pool)| {
-                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, total_seq_len)
+                    backend.paged_kv_head_major_read_append_token_major(
+                        k_pool,
+                        v_pool,
+                        start_slot,
+                        start_pos,
+                        &k_cache_token_major,
+                        &v_cache_token_major,
+                    )
                 })
                 .transpose()?
                 .flatten()
         } else {
             None
         };
-        let (k, v) = match fast_read {
-            Some((k, v)) => (k, v),
-            None => paged_cache
-                .read(full_attn_layer_idx, block_table, total_seq_len)
-                .context("paged KV cache read failed")?,
+        let fast_read_len = if prefix_only_prefill {
+            start_pos
+        } else {
+            total_seq_len
+        };
+        let fast_read = if seq_len > 1
+            && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
+            && !paged_cache.is_fp8()
+            && backend.supports_paged_kv_head_major_read()
+            && backend.supports_flash_attn_prefill_head_major()
+        {
+            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, fast_read_len)
+                .and_then(|start_slot| {
+                    paged_cache
+                        .pool_tensors(full_attn_layer_idx)
+                        .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
+                })
+                .map(|(start_slot, k_pool, v_pool)| {
+                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, fast_read_len)
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let (k, v) = if prefix_only_prefill {
+            match prefix_append_fast {
+                Some((k, v)) => (k, v),
+                None => {
+                    let (prefix_k, prefix_v) = match fast_read {
+                        Some((k, v)) => (k, v),
+                        None => paged_cache
+                            .read(full_attn_layer_idx, block_table, start_pos)
+                            .context("paged KV cache prefix read failed")?,
+                    };
+                    let current_k = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+                    let current_v = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+                    (
+                        Tensor::cat(&[&prefix_k, &current_k], 2)?,
+                        Tensor::cat(&[&prefix_v, &current_v], 2)?,
+                    )
+                }
+            }
+        } else {
+            match fast_read {
+                Some((k, v)) => (k, v),
+                None => paged_cache
+                    .read(full_attn_layer_idx, block_table, total_seq_len)
+                    .context("paged KV cache read failed")?,
+            }
         };
         (k, v, total_seq_len)
     };

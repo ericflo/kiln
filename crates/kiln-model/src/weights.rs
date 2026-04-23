@@ -333,6 +333,18 @@ impl MtpWeights {
     }
 }
 
+/// Deferred native-MTP source for startup-sensitive callers.
+///
+/// Keeps enough information to reopen the checkpoint and load only the
+/// `mtp.*` tensors on demand later, instead of materializing them into
+/// `ModelWeights` during process startup.
+#[derive(Debug, Clone)]
+pub struct DeferredMtpSource {
+    pub model_dir: PathBuf,
+    pub mtp_prefix: String,
+    pub config: kiln_core::config::ModelConfig,
+}
+
 /// Complete Qwen3.5-4B language model weights.
 ///
 /// Note: lm_head is tied to embed_tokens (shared weight matrix),
@@ -348,6 +360,10 @@ pub struct ModelWeights {
     /// `mtp.*` tensors are present in the checkpoint. Consumed by
     /// `KILN_SPEC_METHOD=mtp` at serve time.
     pub mtp: Option<MtpWeights>,
+    /// Optional deferred native-MTP source. When present, the checkpoint ships
+    /// `mtp.*` tensors but the caller elected not to materialize them during
+    /// initial model load.
+    pub deferred_mtp: Option<DeferredMtpSource>,
 }
 
 impl ModelWeights {
