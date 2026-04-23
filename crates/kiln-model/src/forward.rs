@@ -1615,6 +1615,17 @@ fn rotary_embedding_from_tables(
     head_dim: usize,
     rotary_dim: usize,
 ) -> Result<(Tensor, Tensor)> {
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_rotary_embedding_supports(
+            q, k, cos, sin, head_dim, rotary_dim,
+        ) {
+            return crate::backend::metal::metal_rotary_embedding_bf16(
+                q, k, cos, sin, head_dim, rotary_dim,
+            )
+            .context("metal rotary embedding kernel failed");
+        }
+    }
     let rotated_q = apply_rope(q, cos, sin, head_dim, rotary_dim)?;
     let rotated_k = apply_rope(k, cos, sin, head_dim, rotary_dim)?;
     Ok((rotated_q, rotated_k))
@@ -2418,8 +2429,7 @@ fn gdn_chunkwise_recurrence(
                         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?;
                         let intra = b_mask.matmul(&w)?;
                         let out_chunk = (&q_s_scaled + &intra)?;
-                        let w_weighted =
-                            w.broadcast_mul(&decay_last_col_u)?.contiguous()?;
+                        let w_weighted = w.broadcast_mul(&decay_last_col_u)?.contiguous()?;
                         (out_chunk, w_weighted)
                     }
                 }
@@ -3738,7 +3748,13 @@ fn gqa_attention_paged_with_rope_tables(
                     &v_cache_token_major,
                 )? {
                     paged_cache
-                        .write(full_attn_layer_idx, block_table, start_pos, &k_head, &v_head)
+                        .write(
+                            full_attn_layer_idx,
+                            block_table,
+                            start_pos,
+                            &k_head,
+                            &v_head,
+                        )
                         .context("paged KV cache write failed")?;
                 }
             }
@@ -3795,7 +3811,13 @@ fn gqa_attention_paged_with_rope_tables(
             let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
             let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
             paged_cache
-                .write(full_attn_layer_idx, block_table, start_pos, &k_head, &v_head)
+                .write(
+                    full_attn_layer_idx,
+                    block_table,
+                    start_pos,
+                    &k_head,
+                    &v_head,
+                )
                 .context("paged KV cache write failed")?;
         }
     }
@@ -6114,6 +6136,62 @@ mod tests {
             mean < 5e-4,
             "Metal rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
         );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_rotary_embedding_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!("Metal unavailable, skipping test_metal_rotary_embedding_matches_fallback");
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let seq_len = 5usize;
+        let q_heads = 4usize;
+        let k_heads = 2usize;
+        let head_dim = 16usize;
+        let rotary_dim = 8usize;
+        let mut rng = StdRng::seed_from_u64(0xA07A_7E55);
+        let q_data: Vec<f32> = (0..batch * seq_len * q_heads * head_dim)
+            .map(|_| rng.gen_range(-1.0f32..1.0f32))
+            .collect();
+        let k_data: Vec<f32> = (0..batch * seq_len * k_heads * head_dim)
+            .map(|_| rng.gen_range(-1.0f32..1.0f32))
+            .collect();
+        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (batch, seq_len, k_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let positions: Vec<f32> = (11..11 + seq_len).map(|p| p as f32).collect();
+        let positions = Tensor::from_slice(&positions, (seq_len,), &device)?;
+        let inv_freq = compute_rotary_inv_freq(rotary_dim, 10_000.0, &device)?;
+        let (cos, sin) = rotary_tables_from_tensor(&positions, &inv_freq)?;
+
+        assert!(crate::backend::metal::metal_rotary_embedding_supports(
+            &q, &k, &cos, &sin, head_dim, rotary_dim,
+        ));
+        let (q_fused, k_fused) = crate::backend::metal::metal_rotary_embedding_bf16(
+            &q, &k, &cos, &sin, head_dim, rotary_dim,
+        )?;
+        let q_ref = apply_rope(&q, &cos, &sin, head_dim, rotary_dim)?;
+        let k_ref = apply_rope(&k, &cos, &sin, head_dim, rotary_dim)?;
+
+        let q_diff = (q_fused.to_dtype(DType::F32)?
+            - q_ref.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?
+        .abs()?;
+        let k_diff = (k_fused.to_dtype(DType::F32)?
+            - k_ref.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?
+        .abs()?;
+        let q_max = q_diff.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let k_max = k_diff.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        assert!(q_max < 1e-6, "Metal rotary Q max_abs_diff={q_max:e}");
+        assert!(k_max < 1e-6, "Metal rotary K max_abs_diff={k_max:e}");
 
         Ok(())
     }
@@ -8648,8 +8726,7 @@ mod tests {
             Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
         let q_s_scaled =
             Tensor::from_slice(&qss_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let beta =
-            Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
         let decay_last_col =
             Tensor::from_slice(&decay_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
 
@@ -8677,7 +8754,10 @@ mod tests {
             let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
             let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
             eprintln!("gdn-chunk-body {name}: max={max:e} mean={mean:e}");
-            assert!(max < 2e-2, "chunk-body {name} max_abs_diff {max:e} exceeds 2e-2");
+            assert!(
+                max < 2e-2,
+                "chunk-body {name} max_abs_diff {max:e} exceeds 2e-2"
+            );
             assert!(
                 mean < 2e-3,
                 "chunk-body {name} mean_abs_diff {mean:e} exceeds 2e-3"
@@ -8728,8 +8808,9 @@ mod tests {
         let qs_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
         let beta_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.3f32..1.1f32)).collect();
         let kt_data: Vec<f32> = (0..n_dkc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let state_data: Vec<f32> =
-            (0..n_dkdv).map(|_| rng.gen_range(-0.25f32..0.25f32)).collect();
+        let state_data: Vec<f32> = (0..n_dkdv)
+            .map(|_| rng.gen_range(-0.25f32..0.25f32))
+            .collect();
 
         let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
         let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
@@ -8738,8 +8819,7 @@ mod tests {
         let ks_entry =
             Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
         let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let beta =
-            Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
         let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c), &device)?.to_dtype(DType::BF16)?;
         let mut state_kernel =
             Tensor::from_slice(&state_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
@@ -8771,22 +8851,23 @@ mod tests {
         let state_expected =
             (state_ref.broadcast_mul(&p_last_u)? + k_t.matmul(&ww_ref)?)?.contiguous()?;
 
-        let check = |name: &str, got: &Tensor, want: &Tensor, max_tol: f32, mean_tol: f32| -> Result<()> {
-            let diff = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?;
-            let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
-            eprintln!("gdn-full-chunk {name}: max={max:e} mean={mean:e}");
-            assert!(
-                max < max_tol,
-                "full-chunk {name} max_abs_diff {max:e} exceeds {max_tol:e}"
-            );
-            assert!(
-                mean < mean_tol,
-                "full-chunk {name} mean_abs_diff {mean:e} exceeds {mean_tol:e}"
-            );
-            Ok(())
-        };
+        let check =
+            |name: &str, got: &Tensor, want: &Tensor, max_tol: f32, mean_tol: f32| -> Result<()> {
+                let diff = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?;
+                let abs = diff.abs()?;
+                let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+                let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+                eprintln!("gdn-full-chunk {name}: max={max:e} mean={mean:e}");
+                assert!(
+                    max < max_tol,
+                    "full-chunk {name} max_abs_diff {max:e} exceeds {max_tol:e}"
+                );
+                assert!(
+                    mean < mean_tol,
+                    "full-chunk {name} mean_abs_diff {mean:e} exceeds {mean_tol:e}"
+                );
+                Ok(())
+            };
 
         check("out_chunk", &out_kernel, &out_ref, 2e-2, 2e-3)?;
         check("state", &state_kernel, &state_expected, 3.5e-2, 4e-3)?;

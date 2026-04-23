@@ -80,6 +80,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
 
     metal_shared_library(metal_device)?;
     metal_rms_norm_pipeline(metal_device)?;
+    metal_rotary_qk_pipeline(metal_device)?;
     metal_gdn_qk_norm_pipeline(metal_device)?;
     metal_gdn_qk_norm_gqa_pipeline(metal_device)?;
     metal_gdn_gates_pipeline(metal_device)?;
@@ -1090,6 +1091,72 @@ pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &Tensor, k: &Tensor, nv: usize) 
         && nv <= u32::MAX as usize
 }
 
+pub(crate) fn metal_rotary_embedding_supports(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> bool {
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(cos.device(), Device::Metal(_))
+        || !matches!(sin.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || cos.dtype() != DType::F32
+        || sin.dtype() != DType::F32
+    {
+        return false;
+    }
+    if !q.is_contiguous() || !k.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, q_heads, q_head_dim)) = q.dims4() else {
+        return false;
+    };
+    let Ok(k_dims) = k.dims4() else {
+        return false;
+    };
+    let half_rotary = rotary_dim / 2;
+    let Some(total_q) = batch
+        .checked_mul(seq_len)
+        .and_then(|n| n.checked_mul(q_heads))
+        .and_then(|n| n.checked_mul(head_dim))
+    else {
+        return false;
+    };
+    let Some(total_k) = batch
+        .checked_mul(seq_len)
+        .and_then(|n| n.checked_mul(k_dims.2))
+        .and_then(|n| n.checked_mul(head_dim))
+    else {
+        return false;
+    };
+    k_dims.0 == batch
+        && k_dims.1 == seq_len
+        && k_dims.3 == head_dim
+        && q_head_dim == head_dim
+        && rotary_dim > 0
+        && rotary_dim <= head_dim
+        && rotary_dim % 2 == 0
+        && cos.dims() == [seq_len, half_rotary].as_slice()
+        && sin.dims() == [seq_len, half_rotary].as_slice()
+        && batch <= u32::MAX as usize
+        && seq_len <= u32::MAX as usize
+        && q_heads <= u32::MAX as usize
+        && k_dims.2 <= u32::MAX as usize
+        && head_dim <= u32::MAX as usize
+        && rotary_dim <= u32::MAX as usize
+        && total_q <= u32::MAX as usize
+        && total_k <= u32::MAX as usize
+        && total_q <= (u32::MAX as usize).saturating_sub(total_k)
+}
+
 const METAL_RMSNORM_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -1134,6 +1201,64 @@ kernel void kiln_rmsnorm_bf16(
         const float scale = 1.0f + static_cast<float>(weight[col]);
         out[base + col] = static_cast<bfloat>(xv * rms_inv * scale);
     }
+}
+"#;
+
+const METAL_ROTARY_QK_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_rotary_qk_bf16(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k [[buffer(1)]],
+    device const float* cos [[buffer(2)]],
+    device const float* sin [[buffer(3)]],
+    device bfloat* q_out [[buffer(4)]],
+    device bfloat* k_out [[buffer(5)]],
+    constant uint& batch [[buffer(6)]],
+    constant uint& seq_len [[buffer(7)]],
+    constant uint& q_heads [[buffer(8)]],
+    constant uint& k_heads [[buffer(9)]],
+    constant uint& head_dim [[buffer(10)]],
+    constant uint& rotary_dim [[buffer(11)]],
+    constant uint& total_q [[buffer(12)]],
+    constant uint& total [[buffer(13)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total) {
+        return;
+    }
+
+    const bool is_q = gid < total_q;
+    const uint local = is_q ? gid : gid - total_q;
+    const uint heads = is_q ? q_heads : k_heads;
+    device const bfloat* src = is_q ? q : k;
+    device bfloat* dst = is_q ? q_out : k_out;
+
+    const uint d = local % head_dim;
+    const uint h = (local / head_dim) % heads;
+    const uint t = (local / (head_dim * heads)) % seq_len;
+    const uint b = local / (head_dim * heads * seq_len);
+    if (b >= batch) {
+        return;
+    }
+
+    if (d >= rotary_dim) {
+        dst[local] = src[local];
+        return;
+    }
+
+    const uint half_rotary = rotary_dim / 2;
+    const bool first_half = d < half_rotary;
+    const uint pair_d = first_half ? d + half_rotary : d - half_rotary;
+    const uint pair_idx = ((b * seq_len + t) * heads + h) * head_dim + pair_d;
+    const uint table_idx = t * half_rotary + (first_half ? d : pair_d);
+    const float x = static_cast<float>(src[local]);
+    const float y = static_cast<float>(src[pair_idx]);
+    const float c = cos[table_idx];
+    const float s = sin[table_idx];
+    const float rotated = first_half ? (x * c - y * s) : (y * s + x * c);
+    dst[local] = static_cast<bfloat>(rotated);
 }
 "#;
 
@@ -1329,6 +1454,7 @@ fn metal_shared_library(
 
     let shared_source = [
         METAL_RMSNORM_KERNEL,
+        METAL_ROTARY_QK_KERNEL,
         METAL_GDN_QK_NORM_KERNEL,
         METAL_GDN_GATES_KERNEL,
         METAL_GATED_RMSNORM_KERNEL,
@@ -1374,6 +1500,35 @@ fn metal_rms_norm_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal rmsnorm pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_rotary_qk_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal rotary qk pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_rotary_qk_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal rotary qk function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal rotary qk pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -1582,6 +1737,122 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
     }
 
     Ok(out)
+}
+
+pub(crate) fn metal_rotary_embedding_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<(Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_rotary_embedding_supports(q, k, cos, sin, head_dim, rotary_dim),
+        "metal rotary qk unsupported shape"
+    );
+    let (batch, seq_len, q_heads, _) = q.dims4()?;
+    let (_, _, k_heads, _) = k.dims4()?;
+    let q_shape = q.dims().to_vec();
+    let k_shape = k.dims().to_vec();
+    // SAFETY: the kernel dispatch writes every Q output element exactly once.
+    let q_out = unsafe { Tensor::empty(q_shape.as_slice(), DType::BF16, q.device())? };
+    // SAFETY: the kernel dispatch writes every K output element exactly once.
+    let k_out = unsafe { Tensor::empty(k_shape.as_slice(), DType::BF16, k.device())? };
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal rotary qk requires Metal tensors");
+    };
+    let pipeline = metal_rotary_qk_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_rotary_qk_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (c_storage, c_layout) = cos.storage_and_layout();
+        let (s_storage, s_layout) = sin.storage_and_layout();
+        let (qo_storage, qo_layout) = q_out.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal rotary q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal rotary k must be on Metal"),
+        };
+        let cos_metal = match &*c_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal rotary cos must be on Metal"),
+        };
+        let sin_metal = match &*s_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal rotary sin must be on Metal"),
+        };
+        let q_out_metal = match &*qo_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal rotary q_out must be on Metal"),
+        };
+        let k_out_metal = match &*ko_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal rotary k_out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let cos_buf =
+            candle_core::metal_backend::buffer_o(cos_metal.buffer(), &c_layout, cos.dtype());
+        let sin_buf =
+            candle_core::metal_backend::buffer_o(sin_metal.buffer(), &s_layout, sin.dtype());
+        let q_out_buf =
+            candle_core::metal_backend::buffer_o(q_out_metal.buffer(), &qo_layout, q_out.dtype());
+        let k_out_buf =
+            candle_core::metal_backend::buffer_o(k_out_metal.buffer(), &ko_layout, k_out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(cos_buf.buffer), cos_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(sin_buf.buffer), sin_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(q_out_buf.buffer), q_out_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(k_out_buf.buffer), k_out_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let seq_len_u32 = seq_len as u32;
+        let q_heads_u32 = q_heads as u32;
+        let k_heads_u32 = k_heads as u32;
+        let head_dim_u32 = head_dim as u32;
+        let rotary_dim_u32 = rotary_dim as u32;
+        let total_q = batch * seq_len * q_heads * head_dim;
+        let total_k = batch * seq_len * k_heads * head_dim;
+        let total = total_q + total_k;
+        let total_q_u32 = total_q as u32;
+        let total_u32 = total as u32;
+        encoder.set_bytes(6, &batch_u32);
+        encoder.set_bytes(7, &seq_len_u32);
+        encoder.set_bytes(8, &q_heads_u32);
+        encoder.set_bytes(9, &k_heads_u32);
+        encoder.set_bytes(10, &head_dim_u32);
+        encoder.set_bytes(11, &rotary_dim_u32);
+        encoder.set_bytes(12, &total_q_u32);
+        encoder.set_bytes(13, &total_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((q_out, k_out))
 }
 
 fn metal_paged_kv_head_major_read_supports(
@@ -4442,12 +4713,10 @@ mod tests {
         let v_data: Vec<f32> = (0..elems)
             .map(|i| ((i % 89) as f32 - 44.0) * 0.03125)
             .collect();
-        let k_pool =
-            Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?;
-        let v_pool =
-            Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
-                .to_dtype(DType::BF16)?;
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
 
         assert!(metal_paged_kv_head_major_read_supports(
             &k_pool, &v_pool, start_slot, seq_len
