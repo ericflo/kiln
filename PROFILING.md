@@ -552,6 +552,128 @@ there was no remaining one-diff candidate to validate. Re-running another
 micro-port on RunPod would have been a duplicate spend against the same
 already-failed frontier.
 
+### Post-#406 tiled recurrent-state update — 2026-04-23
+
+Fresh-`main` preflight passed again before editing:
+
+- PR `#406` is merged and remains doc-only (`PROFILING.md` plus
+  `profiling-artifacts/post405_20260423_vllm_recurrent_audit.csv` only); there
+  is still **no** source change in
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` after `#392`.
+- No newer open or merged PR already changes
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this same
+  recurrent/full-chunk frontier. `#407` was a closed doc-only duplicate and
+  `#408` only touches `crates/kiln-model/`.
+- The validated post-`#392` refined prefill capture above still shows
+  `gdn_full_chunk_forward_kernel` at **34.6%** of prompt-heavy prefill kernel
+  time, so the frontier still exists on fresh `main`.
+
+This retry takes the larger structural step `#406` called out: keep the chunk
+body unchanged, but replace the scalar-thread `(k_idx, dv)` recurrent-state
+epilogue with a cooperative tiled update. The kernel now:
+
+- precomputes the existing bf16-rounded `w * decay_last` rows once after the
+  chunk body, preserving the established parity surface;
+- stages `k_t` in shared memory in `4 x 64` tiles; and
+- maps the final state update over `32 x 4` `(dv, dk)` tiles so each staged
+  `k_t` row is reused across all 32 value lanes before the next tile load.
+
+**Changed code**
+
+- `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`
+
+**Validation commands**
+
+Baseline on fresh `main`:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export CARGO_PROFILE_DEV_DEBUG=0
+
+cargo test -p kiln-model --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+
+cargo build --release --features cuda,nvtx --bin kiln-bench
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+```
+
+Changed branch (`ce/gdn-recurrent-tile`) on the same A6000 pod:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export CARGO_PROFILE_DEV_DEBUG=0
+
+cargo test -p kiln-model --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+
+cargo build --release --features cuda,nvtx --bin kiln-bench
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+```
+
+**Parity**
+
+Passed on both fresh `main` and the changed branch.
+
+- `out_chunk` max abs diff: **1.5625e-2**
+- `state` max abs diff: **3.125e-2**
+
+So the tiled update stayed inside the existing fallback test bar while
+rewriting only the recurrent-state epilogue.
+
+**8192/1 prompt-heavy prefill**
+
+Same on-demand RunPod A6000, same checkpoint at `/workspace/qwen3.5-4b`,
+same `--paged --skip-training --latency-only` arm:
+
+- fresh `main`: **4698.8 ms**, **1741 tok/s**
+- tiled recurrent-state branch: **2905.5 ms**, **2815 tok/s**
+
+That is a **1.62x speedup** on prompt-heavy prefill, or a **38.2% latency
+reduction**, comfortably above the 3% ship floor.
+
+**Refined Nsight attempt**
+
+The requested refined kernel capture hit the same importer failure already seen
+on this pod image's baked `nsys 2023.4.4`.
+
+First, the exact task command with `--delay=26` produced no `.nsys-rep` because
+the workload exits before the delay expires on current `main`. I reran with a
+reduced delay matched to the measured startup envelope:
+
+```bash
+nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none --delay=2 --duration=4 \
+  -o /workspace/phase6-profile/post406-prefill-refined \
+  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+nsys stats --report cuda_gpu_kern_sum --format csv \
+  --output /workspace/phase6-profile/post406-prefill-refined \
+  /workspace/phase6-profile/post406-prefill-refined.nsys-rep
+```
+
+That run produced `post406-prefill-refined.qdstrm`, but `nsys stats` failed to
+import it with the same `Wrong event order has been detected` exception seen in
+earlier Phase 6 retries. So there is **no post-change kernel-share CSV** from
+this pod image, despite the refined capture attempt completing.
+
+**Verdict**
+
+Ship the kernel change. This is the first recurrent/full-chunk follow-up after
+`#406` that clears both required gates:
+
+- parity remains within the existing fallback tolerance; and
+- prompt-heavy prefill on `8192/1` improves far above the 3% threshold.
+
+The concise measurement record for this verdict is committed in
+`profiling-artifacts/post406_20260423_recurrent_tile.csv`.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)

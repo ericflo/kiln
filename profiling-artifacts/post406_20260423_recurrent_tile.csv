@@ -1,0 +1,4 @@
+arm,commit_or_branch,parity_out_max_abs,parity_state_max_abs,prompt_tokens,max_output_tokens,prefill_ms,prefill_tok_per_s,notes
+baseline_main,main,0.015625,0.03125,8180,1,4698.835811,1740.8567417594322,"fresh main on same A6000 pod"
+tiled_recurrent_update,ce/gdn-recurrent-tile,0.015625,0.03125,8180,1,2905.500699,2815.349520588775,"accepted run on same A6000 pod; 1.62x faster than baseline"
+postchange_nsys_attempt,ce/gdn-recurrent-tile,0.015625,0.03125,8180,1,3034.576945,2695.5981503378885,"nsys profile with --delay=2 produced qdstrm only; importer failed with Wrong event order"

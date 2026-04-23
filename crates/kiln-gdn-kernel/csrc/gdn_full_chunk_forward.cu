@@ -25,6 +25,8 @@ namespace {
 
 constexpr int kChunkSize = 64;
 constexpr int kMaxDv = 128;
+constexpr int kStateVTile = 32;
+constexpr int kStateKTile = 4;
 
 __device__ __forceinline__ float bf16_to_f32(__nv_bfloat16 v) {
     return __bfloat162float(v);
@@ -50,9 +52,7 @@ __global__ void gdn_full_chunk_forward_kernel(
 ) {
     const int bh = blockIdx.x;
     const int tid = threadIdx.x;
-    if (tid >= dv) {
-        return;
-    }
+    const bool active_dv = tid < dv;
 
     extern __shared__ __nv_bfloat16 smem[];
     __nv_bfloat16 *s_a = smem;                                       // [C, C]
@@ -109,57 +109,94 @@ __global__ void gdn_full_chunk_forward_kernel(
     __syncthreads();
 
     for (int t = 0; t < kChunkSize; ++t) {
-        const float beta_t = bf16_to_f32(beta_base[t]);
-        const float p_t = bf16_to_f32(f32_to_bf16(s_p[t]));
+        if (active_dv) {
+            const float beta_t = bf16_to_f32(beta_base[t]);
+            const float p_t = bf16_to_f32(f32_to_bf16(s_p[t]));
 
-        const __nv_bfloat16 *a_row = s_a + (size_t)t * kChunkSize;
-        const __nv_bfloat16 *b_row = s_b + (size_t)t * kChunkSize;
-        __nv_bfloat16 *w_row = s_w + (size_t)t * dv;
+            const __nv_bfloat16 *a_row = s_a + (size_t)t * kChunkSize;
+            const __nv_bfloat16 *b_row = s_b + (size_t)t * kChunkSize;
+            __nv_bfloat16 *w_row = s_w + (size_t)t * dv;
 
-        float acc_a = 0.0f;
-        #pragma unroll
-        for (int i = 0; i < kChunkSize; ++i) {
-            if (i < t) {
-                acc_a += bf16_to_f32(a_row[i]) * bf16_to_f32(s_w[(size_t)i * dv + tid]);
+            float acc_a = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < kChunkSize; ++i) {
+                if (i < t) {
+                    acc_a += bf16_to_f32(a_row[i]) * bf16_to_f32(s_w[(size_t)i * dv + tid]);
+                }
             }
-        }
 
-        const size_t td = (size_t)t * dv + tid;
-        const float vp = bf16_to_f32(f32_to_bf16(
-            bf16_to_f32(v_base[td]) - bf16_to_f32(ks_base[td]) * p_t
-        ));
-        const float w_val = beta_t * (vp - acc_a);
-        w_row[tid] = f32_to_bf16(w_val);
+            const size_t td = (size_t)t * dv + tid;
+            const float vp = bf16_to_f32(f32_to_bf16(
+                bf16_to_f32(v_base[td]) - bf16_to_f32(ks_base[td]) * p_t
+            ));
+            const float w_val = beta_t * (vp - acc_a);
+            w_row[tid] = f32_to_bf16(w_val);
+        }
         __syncthreads();
 
-        float acc_b = 0.0f;
-        #pragma unroll
-        for (int i = 0; i < kChunkSize; ++i) {
-            if (i <= t) {
-                acc_b += bf16_to_f32(b_row[i]) * bf16_to_f32(s_w[(size_t)i * dv + tid]);
+        if (active_dv) {
+            const float p_t = bf16_to_f32(f32_to_bf16(s_p[t]));
+            const __nv_bfloat16 *b_row = s_b + (size_t)t * kChunkSize;
+            float acc_b = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < kChunkSize; ++i) {
+                if (i <= t) {
+                    acc_b += bf16_to_f32(b_row[i]) * bf16_to_f32(s_w[(size_t)i * dv + tid]);
+                }
             }
-        }
 
-        const float qss = bf16_to_f32(f32_to_bf16(bf16_to_f32(qs_base[td]) * p_t));
-        const float out_val = qss + acc_b;
-        out_base[td] = f32_to_bf16(out_val);
+            const size_t td = (size_t)t * dv + tid;
+            const float qss = bf16_to_f32(f32_to_bf16(bf16_to_f32(qs_base[td]) * p_t));
+            const float out_val = qss + acc_b;
+            out_base[td] = f32_to_bf16(out_val);
+        }
         __syncthreads();
     }
 
     const float p_last = bf16_to_f32(f32_to_bf16(s_p_last));
-    for (int k_idx = 0; k_idx < dk; ++k_idx) {
-        float delta = 0.0f;
+    if (active_dv) {
         #pragma unroll
         for (int t = 0; t < kChunkSize; ++t) {
-            const float kt = bf16_to_f32(kt_base[(size_t)k_idx * kChunkSize + t]);
-            const float w = bf16_to_f32(s_w[(size_t)t * dv + tid]);
             const float decay_last = bf16_to_f32(f32_to_bf16(s_decay_last[t]));
+            const float w = bf16_to_f32(s_w[(size_t)t * dv + tid]);
             const float w_weighted = bf16_to_f32(f32_to_bf16(w * decay_last));
-            delta += kt * w_weighted;
+            s_w[(size_t)t * dv + tid] = f32_to_bf16(w_weighted);
         }
-        const size_t state_idx = (size_t)k_idx * dv + tid;
-        const float prev = bf16_to_f32(state_base[state_idx]);
-        state_base[state_idx] = f32_to_bf16(prev * p_last + delta);
+    }
+    __syncthreads();
+
+    __nv_bfloat16 *s_k_tile = s_a; // [kStateKTile, C]
+    const int state_v_lane = tid % kStateVTile;
+    const int state_k_lane = tid / kStateVTile;
+
+    for (int k0 = 0; k0 < dk; k0 += kStateKTile) {
+        for (int idx = tid; idx < kStateKTile * kChunkSize; idx += blockDim.x) {
+            const int k_local = idx / kChunkSize;
+            const int t = idx % kChunkSize;
+            const int k_idx = k0 + k_local;
+            s_k_tile[idx] = (k_idx < dk)
+                ? kt_base[(size_t)k_idx * kChunkSize + t]
+                : f32_to_bf16(0.0f);
+        }
+        __syncthreads();
+
+        for (int dv0 = 0; dv0 < dv; dv0 += kStateVTile) {
+            const int k_idx = k0 + state_k_lane;
+            const int dv_idx = dv0 + state_v_lane;
+            if (k_idx < dk && dv_idx < dv) {
+                float delta = 0.0f;
+                #pragma unroll
+                for (int t = 0; t < kChunkSize; ++t) {
+                    const float kt = bf16_to_f32(s_k_tile[(size_t)state_k_lane * kChunkSize + t]);
+                    const float w_weighted = bf16_to_f32(s_w[(size_t)t * dv + dv_idx]);
+                    delta += kt * w_weighted;
+                }
+                const size_t state_idx = (size_t)k_idx * dv + dv_idx;
+                const float prev = bf16_to_f32(state_base[state_idx]);
+                state_base[state_idx] = f32_to_bf16(prev * p_last + delta);
+            }
+        }
+        __syncthreads();
     }
 }
 
