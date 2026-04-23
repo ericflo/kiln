@@ -63,7 +63,6 @@ __global__ void gdn_full_chunk_forward_kernel(
     __shared__ float s_p[kChunkSize];
     __shared__ float s_decay_last[kChunkSize];
     __shared__ float s_p_last;
-    __shared__ __nv_bfloat16 s_kt_row[kChunkSize];
 
     const __nv_bfloat16 *g_base = g + (size_t)bh * kChunkSize;
     const __nv_bfloat16 *v_base = v + (size_t)bh * kChunkSize * dv;
@@ -149,15 +148,10 @@ __global__ void gdn_full_chunk_forward_kernel(
 
     const float p_last = bf16_to_f32(f32_to_bf16(s_p_last));
     for (int k_idx = 0; k_idx < dk; ++k_idx) {
-        if (tid < kChunkSize) {
-            s_kt_row[tid] = kt_base[(size_t)k_idx * kChunkSize + tid];
-        }
-        __syncthreads();
-
         float delta = 0.0f;
         #pragma unroll
         for (int t = 0; t < kChunkSize; ++t) {
-            const float kt = bf16_to_f32(s_kt_row[t]);
+            const float kt = bf16_to_f32(kt_base[(size_t)k_idx * kChunkSize + t]);
             const float w = bf16_to_f32(s_w[(size_t)t * dv + tid]);
             const float decay_last = bf16_to_f32(f32_to_bf16(s_decay_last[t]));
             const float w_weighted = bf16_to_f32(f32_to_bf16(w * decay_last));
@@ -166,7 +160,6 @@ __global__ void gdn_full_chunk_forward_kernel(
         const size_t state_idx = (size_t)k_idx * dv + tid;
         const float prev = bf16_to_f32(state_base[state_idx]);
         state_base[state_idx] = f32_to_bf16(prev * p_last + delta);
-        __syncthreads();
     }
 }
 
