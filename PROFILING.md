@@ -243,6 +243,102 @@ change. The current source of truth therefore remains the post-`#392` profile
 above, and the next Phase 6 retry on this frontier needs a different upstream
 idea than this scalar round-trip cleanup.
 
+### Post-#399 bounded W-decay hoist — 2026-04-23
+
+Fresh-`main` preflight passed again before editing:
+
+- PR `#399` is merged and remains doc-only (`PROFILING.md` only).
+- No newer open or merged PR already changes
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this post-`#399`
+  full-chunk optimization target.
+- The validated post-`#392` refined prefill capture above still shows
+  `gdn_full_chunk_forward_kernel` at **34.6%** of prompt-heavy prefill kernel
+  time, so the frontier still exists.
+
+This retry ported one different, bounded vLLM-inspired win inside the vendored
+full-chunk kernel: fold the per-token `decay_last` weighting into the shared
+`W` rows once after chunk output is produced, then reuse the weighted rows in
+the recurrent-state update instead of recomputing the same `w * decay_last`
+bf16 product inside every `dk` iteration.
+
+**Attempted code path**
+
+- `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`
+
+**Parity**
+
+RunPod on-demand RTX A6000, `ghcr.io/ericflo/kiln-runpod:latest`.
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+export CARGO_PROFILE_DEV_DEBUG=0
+cargo test -p kiln-model --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+cargo test -p kiln-gdn-kernel gdn_gates_parity_vs_candle_reference \
+  -- --exact --nocapture
+```
+
+Result: **pass**.
+
+- `out_chunk` max abs diff: **1.5625e-2**
+- `state` max abs diff: **3.125e-2**
+- `gdn_gates_parity_vs_candle_reference`: passed
+
+**8192/1 prompt-heavy prefill**
+
+Baseline already recorded in the validated post-`#392` section above:
+
+- before: **3277.7 ms**, **2495.6 tok/s**
+
+Current branch uncaptured reruns on the same `--paged --prompt-tokens 8192
+--max-output-tokens 1 --skip-training --latency-only` arm:
+
+- warm rerun 1: **3566.0 ms**, **2293.9 tok/s**
+- profile-arm rerun: **3686.3 ms**, **2219.0 tok/s**
+
+So this kernel change is **parity-safe but slower** on prompt-heavy prefill on
+the measured A6000 run, and the kernel diff was reverted before opening the
+PR. This section documents the failed retry; it does **not** land a kernel
+change.
+
+**Refined kernel-share capture**
+
+I attempted the requested refined prompt-heavy capture on the same pod with:
+
+```bash
+nsys profile -t cuda,nvtx --sample=none --cpuctxsw=none \
+  --delay=26 --duration=4 \
+  -o /workspace/phase6-profile/post399-prefill \
+  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 8192 --max-output-tokens 1 --skip-training \
+  --latency-only
+```
+
+and two bounded fallbacks:
+
+- `--cuda-graph-trace=graph:host-only`
+- `KILN_CUDA_GRAPHS=false`
+
+All three runs produced `.qdstrm` traces but the pod's baked `nsys 2023.4.4`
+failed to import them into `.nsys-rep` with the same `Wrong event order has
+been detected` error, so there is **no new post-change kernel-share CSV** from
+this pod. The failure details are recorded in
+`profiling-artifacts/post399_20260423_prefill_kern.csv`.
+
+**Frontier status**
+
+Yes: absent a new validated post-change kernel-share export, the last valid
+refined capture still leaves `gdn_full_chunk_forward_kernel` as the prompt-
+heavy prefill frontier. This specific W-decay hoist does not clear the
+end-to-end bar, so the next retry on this path should target a different
+kernel-internal bottleneck than both `#399`'s scalar round-trip cleanup and
+this shared-`W` weighting hoist.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)

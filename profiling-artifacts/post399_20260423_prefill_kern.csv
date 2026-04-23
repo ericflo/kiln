@@ -1,0 +1,4 @@
+attempt,graphs_setting,nsys_args,bench_prefill_ms,bench_prefill_tok_s,artifact,error_status,error_excerpt
+post399-prefill,true,"-t cuda,nvtx --sample=none --cpuctxsw=none --delay=26 --duration=4",3678.347114,2223.824926,/workspace/phase6-profile/post399-prefill.qdstrm,import_failed,"Wrong event order has been detected when adding events to the collection"
+post399-prefill-graph,true,"--cuda-graph-trace=graph:host-only -t cuda,nvtx --sample=none --cpuctxsw=none --delay=26 --duration=4",3692.861298,2215.084548,/workspace/phase6-profile/post399-prefill-graph.qdstrm,import_failed,"Wrong event order has been detected when adding events to the collection"
+post399-prefill-nographs,false,"-t cuda,nvtx --sample=none --cpuctxsw=none --delay=26 --duration=4",3683.016346,2221.005619,/workspace/phase6-profile/post399-prefill-nographs.qdstrm,import_failed,"Wrong event order has been detected when adding events to the collection"
