@@ -49,6 +49,36 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     Ok((x * sig)?)
 }
 
+#[cfg(feature = "metal")]
+fn try_metal_mlp_gate_up_hidden(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora_layer: Option<&LoraLayerWeights>,
+) -> Result<Option<Tensor>> {
+    if lora_layer.is_some()
+        || crate::mtp_debug::is_mtp_fp32_head_armed()
+        || crate::backend::metal::metal_mlp_gate_up_fusion_disabled()
+    {
+        return Ok(None);
+    }
+    if mlp.gate_proj_marlin.is_some()
+        || mlp.up_proj_marlin.is_some()
+        || mlp.down_proj_marlin.is_some()
+    {
+        return Ok(None);
+    }
+    if !crate::backend::metal::metal_mlp_gate_up_supports(x, &mlp.gate_proj_t, &mlp.up_proj_t) {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/mlp/gate_up_fused");
+    Ok(Some(crate::backend::metal::metal_mlp_gate_up_bf16(
+        x,
+        &mlp.gate_proj_t,
+        &mlp.up_proj_t,
+    )?))
+}
+
 /// CUDA-compatible softmax on last dimension.
 ///
 /// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
@@ -2034,6 +2064,21 @@ pub fn swiglu_ffn(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
+    #[cfg(feature = "metal")]
+    if let Some(hidden) = try_metal_mlp_gate_up_hidden(x, mlp, lora_layer)? {
+        let out = {
+            kiln_nvtx::range!(c"kiln/mlp/down");
+            mlp_proj_forward(
+                &hidden,
+                &mlp.down_proj_t,
+                mlp.down_proj_marlin.as_ref(),
+                None,
+                lora_scale,
+            )?
+        };
+        return Ok(out);
+    }
+
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");

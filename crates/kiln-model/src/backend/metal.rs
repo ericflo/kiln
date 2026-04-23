@@ -23,6 +23,7 @@ const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
 const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
 const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
+const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
 
 #[derive(Debug)]
 pub struct MetalBackend {
@@ -93,6 +94,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_conv1d_prefill_pipeline(metal_device)?;
     metal_conv1d_update_pipeline(metal_device)?;
     metal_lm_head_pipeline(metal_device)?;
+    if !metal_mlp_gate_up_fusion_disabled() {
+        metal_mlp_gate_up_pipeline(metal_device)?;
+    }
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
     metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
     Ok(())
@@ -561,6 +565,10 @@ fn metal_gdn_qk_norm_disabled() -> bool {
 
 fn metal_rms_norm_disabled() -> bool {
     env_present(DISABLE_RMSNORM_KERNEL) || env_truthy(DISABLE_METAL_RMSNORM)
+}
+
+pub(crate) fn metal_mlp_gate_up_fusion_disabled() -> bool {
+    env_truthy(DISABLE_METAL_MLP_GATE_UP_FUSION)
 }
 
 fn env_present(var: &str) -> bool {
@@ -1430,6 +1438,42 @@ kernel void kiln_lm_head_bf16(
 }
 "#;
 
+const METAL_MLP_GATE_UP_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_mlp_gate_up_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* gate_t [[buffer(1)]],
+    device const bfloat* up_t [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& rows [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant uint& intermediate [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = rows * intermediate;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint row = gid / intermediate;
+    const uint col = gid - row * intermediate;
+    const uint x_base = row * hidden;
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+    for (uint i = 0; i < hidden; ++i) {
+        const float xv = static_cast<float>(x[x_base + i]);
+        const uint w_idx = i * intermediate + col;
+        gate_acc += xv * static_cast<float>(gate_t[w_idx]);
+        up_acc += xv * static_cast<float>(up_t[w_idx]);
+    }
+
+    const float gate_sigmoid = 1.0f / (1.0f + exp(-gate_acc));
+    out[gid] = static_cast<bfloat>((gate_acc * gate_sigmoid) * up_acc);
+}
+"#;
+
 const METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -1532,6 +1576,7 @@ fn metal_shared_library(
         METAL_CONV1D_PREFILL_KERNEL,
         METAL_CONV1D_UPDATE_KERNEL,
         METAL_LM_HEAD_KERNEL,
+        METAL_MLP_GATE_UP_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
     ]
@@ -1689,6 +1734,35 @@ fn metal_lm_head_pipeline(
     Ok(pipeline)
 }
 
+fn metal_mlp_gate_up_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal mlp gate/up pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_mlp_gate_up_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal mlp gate/up function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal mlp gate/up pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_paged_kv_head_major_read_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -1826,6 +1900,123 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: vocab,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> bool {
+    if x.dtype() != DType::BF16 || gate_t.dtype() != DType::BF16 || up_t.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_))
+        || !matches!(gate_t.device(), Device::Metal(_))
+        || !matches!(up_t.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !x.is_contiguous() || !gate_t.is_contiguous() || !up_t.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return false;
+    };
+    let Ok((gate_hidden, intermediate)) = gate_t.dims2() else {
+        return false;
+    };
+    let Ok((up_hidden, up_intermediate)) = up_t.dims2() else {
+        return false;
+    };
+    let Some(rows) = batch.checked_mul(seq_len) else {
+        return false;
+    };
+    let Some(total) = rows.checked_mul(intermediate) else {
+        return false;
+    };
+
+    rows == 1
+        && hidden == gate_hidden
+        && hidden == up_hidden
+        && intermediate == up_intermediate
+        && hidden <= u32::MAX as usize
+        && intermediate <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
+pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_mlp_gate_up_supports(x, gate_t, up_t),
+        "metal mlp gate/up supports only BF16 [1,1,H] x [H,I] on Metal"
+    );
+    let (batch, seq_len, hidden) = x.dims3()?;
+    let (_, intermediate) = gate_t.dims2()?;
+    let rows = batch * seq_len;
+    let total = rows * intermediate;
+
+    let out = Tensor::zeros((batch, seq_len, intermediate), DType::BF16, x.device())?;
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal mlp gate/up requires Metal tensors");
+    };
+    let pipeline = metal_mlp_gate_up_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_mlp_gate_up_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (gate_storage, gate_layout) = gate_t.storage_and_layout();
+        let (up_storage, up_layout) = up_t.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp gate/up x must be on Metal"),
+        };
+        let gate_metal = match &*gate_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp gate/up gate_t must be on Metal"),
+        };
+        let up_metal = match &*up_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp gate/up up_t must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp gate/up out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let gate_buf =
+            candle_core::metal_backend::buffer_o(gate_metal.buffer(), &gate_layout, gate_t.dtype());
+        let up_buf =
+            candle_core::metal_backend::buffer_o(up_metal.buffer(), &up_layout, up_t.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(up_buf.buffer), up_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let rows_u32 = rows as u32;
+        let hidden_u32 = hidden as u32;
+        let intermediate_u32 = intermediate as u32;
+        encoder.set_bytes(4, &rows_u32);
+        encoder.set_bytes(5, &hidden_u32);
+        encoder.set_bytes(6, &intermediate_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
             height: 1,
             depth: 1,
         };
@@ -4959,6 +5150,57 @@ mod tests {
         assert!(
             mean < 2e-3,
             "Metal LM-head mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mlp_gate_up_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let hidden = 64usize;
+        let intermediate = 97usize;
+        let x_data: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
+            .collect();
+        let gate_data: Vec<f32> = (0..(hidden * intermediate))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0078125)
+            .collect();
+        let up_data: Vec<f32> = (0..(hidden * intermediate))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.0078125)
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let gate_t = Tensor::from_slice(&gate_data, (hidden, intermediate), &device)?
+            .to_dtype(DType::BF16)?;
+        let up_t =
+            Tensor::from_slice(&up_data, (hidden, intermediate), &device)?.to_dtype(DType::BF16)?;
+
+        assert!(metal_mlp_gate_up_supports(&x, &gate_t, &up_t));
+        let fused = metal_mlp_gate_up_bf16(&x, &gate_t, &up_t)?;
+
+        let gate = x.broadcast_matmul(&gate_t)?;
+        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let gate = (gate * gate_sig)?;
+        let up = x.broadcast_matmul(&up_t)?;
+        let reference = (gate * up)?;
+
+        assert_eq!(fused.dims(), &[1usize, 1usize, intermediate]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal MLP gate/up max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal MLP gate/up mean_abs_diff={mean:e} exceeds tolerance"
         );
 
         Ok(())
