@@ -189,6 +189,69 @@ as the front-door verdict, then bisect why standard-workload seeds 1 and 2
 stay trapped in the identity-biased reject regime while seed 0 escapes it on
 the same current `main`.
 
+## Phase C37 post-#420 seed0-vs-seed1 `h_main` drift audit (2026-04-23)
+
+**Scope:** reuse the existing splice dump path plus
+`scripts/c15_h_main_drift_audit.py` to test whether the post-#420 seed split
+is already visible in the base-model hidden-state path on the standard native
+MTP workload.
+
+**Preflight outcome:** proceed. Fresh `origin/main` was still `59ea3b5`
+(PR #419 merged, PR #420 already present), with no newer open or merged PR
+landing a post-#420 seed0-vs-seed1 `h_main` drift artifact. A fresh rerun of
+the standard workload also reproduced the split before the audit:
+
+| Seed | prompt tokens | mean ITL ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 24.9 | 40.1 | 0.740 |
+| 1 | 508 | 43.7 | 22.9 | 0.309 |
+
+**Hardware note:** RunPod A6000 capacity was unavailable on 2026-04-23
+(both pool resume and direct launch returned supply-constraint failures), so
+this run used the project-policy fallback `A40` on the same kiln image.
+
+**Commands run:** build `kiln-bench`, rerun the standard workload with
+`KILN_MTP_DUMP_SPLICE=1`, `KILN_MTP_DUMP_HIDDEN_STATES=1`, and a dump path
+template rooted at
+`profiling-artifacts/post420_20260423_seed${seed}_captures/mtp_pos-{pos}/step-{step}.safetensors`,
+then run `scripts/c15_h_main_drift_audit.py` twice per seed (default BF16 and
+`--fp32`). The committed source-of-truth artifacts are the FP32 outputs:
+
+- `profiling-artifacts/post420_20260423_hmain_seed0.json`
+- `profiling-artifacts/post420_20260423_hmain_seed1.json`
+
+### Verdict at `mtp_pos=0`
+
+Yes, the split is already visible in `h_main`.
+
+- **Seed 0 (escaping case):** FP32 audit is `clean` at `mtp_pos=0`. Minimum
+  cosine is **0.999067**, last-step cosine **0.999675**, and drift shrinks
+  across the captured window (ratio **0.348x**).
+- **Seed 1 (trapped case):** FP32 audit is `drift` at `mtp_pos=0`. Minimum
+  cosine falls to **0.990691** at step 6, last-step cosine is **0.998943**,
+  and drift grows **3.425x** from step 0 to step 7.
+
+So the low-α seed is not merely failing farther downstream on identical
+hidden-state quality. By the late `mtp_pos=0` steps, it is already feeding the
+MTP head a materially worse `h_main` than the escaping seed.
+
+### Caveat
+
+The existing C15 script's `pos=2` output is not usable on these per-seed
+roots: it builds a 4-token chained sequence from the isolated `pos=2` files
+and then indexes with `base_pos` values around 502/520, producing the
+committed `index out of range` errors. No new instrumentation was added in
+this task, so the source-of-truth verdict is intentionally limited to
+`mtp_pos=0`.
+
+### Recommendation
+
+Do **not** queue another decode-kernel retry off this result. The next narrow
+task should bisect the first seed1-only divergence upstream of the `h_main`
+tap on the standard workload, using the existing hidden-state dump path and a
+layer/sub-op comparator. Seed 1's failure is already visible before the
+accept/reject seam.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled
