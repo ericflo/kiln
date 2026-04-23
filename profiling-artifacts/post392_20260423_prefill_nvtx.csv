@@ -1,0 +1,30 @@
+Generating SQLite file post392-prefill-refined.sqlite from post392-prefill-refined.nsys-rep
+Processing [post392-prefill-refined.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
+53.9,176872825,6,29478804.2,82944.0,75919,176453279,72002494.1,PushPop,:kiln/gdn/in_proj
+22.6,74129302,1,74129302.0,74129302.0,74129302,74129302,0.0,PushPop,:kiln/attn/full/prefill_initial
+9.3,30654430,6,5109071.7,99229.0,91049,30152224,12268593.0,PushPop,:kiln/mlp/gate
+7.2,23663155,6,3943859.2,462332.5,290639,21645836,8672480.7,PushPop,:kiln/gdn/conv
+2.9,9545089,6,1590848.2,417617.0,177399,7904641,3095160.2,PushPop,:kiln/gdn/qk_norm
+0.7,2412516,5,482503.2,241059.0,235278,1446651,539000.4,PushPop,:kiln/gdn/gated_norm
+0.7,2340736,6,390122.7,432937.5,240878,485327,111978.4,PushPop,:kiln/gdn/gates
+0.4,1350811,7,192973.0,27570.0,21970,1195902,442259.1,PushPop,:kiln/norm/pre_attn
+0.4,1272673,12,106056.1,24710.0,20020,286439,121576.9,PushPop,:kiln/residual
+0.3,1042262,6,173710.3,196203.5,94419,233319,62837.6,PushPop,:kiln/mlp/up
+0.3,973004,6,162167.3,164739.0,52439,266958,114470.5,PushPop,:kiln/gdn/qkv_split
+0.3,951604,1,951604.0,951604.0,951604,951604,0.0,PushPop,:kiln/attn/rope
+0.2,576486,6,96081.0,94909.5,91029,102619,4447.1,PushPop,:kiln/mlp/down
+0.1,479347,5,95869.4,92799.0,83490,122559,15446.8,PushPop,:kiln/attn/gdn/chunk_prep
+0.1,412828,5,82565.6,33950.0,29710,280338,110597.8,PushPop,:kiln/attn/gdn/chunk
+0.1,259878,1,259878.0,259878.0,259878,259878,0.0,PushPop,:kiln/attn/qkv_transpose
+0.1,221729,6,36954.8,34990.0,33090,43060,4597.3,PushPop,:kiln/gdn/head_expand
+0.1,218949,1,218949.0,218949.0,218949,218949,0.0,PushPop,:kiln/proj/qkv_split
+0.1,201288,5,40257.6,33140.0,30180,67979,15941.3,PushPop,:kiln/gdn/out_proj
+0.1,183839,1,183839.0,183839.0,183839,183839,0.0,PushPop,:kiln/proj/qkv
+0.1,175529,6,29254.8,26114.5,23730,43110,7254.2,PushPop,:kiln/norm/pre_mlp
+0.0,129799,1,129799.0,129799.0,129799,129799,0.0,PushPop,:kiln/kv/copy
+0.0,88310,1,88310.0,88310.0,88310,88310,0.0,PushPop,:kiln/proj/o
+0.0,66430,6,11071.7,10145.0,9660,14710,1980.6,PushPop,:kiln/gdn/recur_prep
+0.0,39980,1,39980.0,39980.0,39980,39980,0.0,PushPop,:kiln/attn/qk_norm
+0.0,5520,5,1104.0,1130.0,890,1300,147.2,PushPop,:kiln/gdn/post_transpose
+
