@@ -6380,3 +6380,74 @@ specifically the normalization / pre-weight scaling path before the final
 - `profiling-artifacts/post428_c42_20260423_seed1.bench.stderr`
 - `profiling-artifacts/post428_c42_20260423_compare_bf16.txt`
 - `profiling-artifacts/post428_c42_20260423_compare_fp32.txt`
+
+## Phase C43 post-#429 layer-1 pre-weight multiply audit (2026-04-23)
+
+Goal: split the existing C42 `layer_1_input_norm_pre_weight` boundary into the
+current `broadcast_mul` path and an independently computed equivalent that
+changes the row-selection / scaling path without changing the math.
+
+Code change:
+
+- add opt-in C43 taps behind `KILN_MTP_DUMP_C43_LAYER1_PREWEIGHT_TAPS=1`
+- capture both:
+  - `layer_1_input_norm_pre_weight_broadcast_mul`
+  - `layer_1_input_norm_pre_weight_scalar_affine`
+- mirror the C43 tap order in `mtp_h_main_reference_dump.py`
+- add `scripts/mtp_compare.py --c43`
+
+Final source-of-truth run:
+
+- RunPod kiln image on on-demand `NVIDIA RTX A6000`
+- validation passed:
+  - `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+  - `cargo test -p kiln-model mtp_debug --lib -- --test-threads=1`
+- standard workload:
+  - `KILN_W4A16=1`
+  - `KILN_CUDA_GRAPHS=true`
+  - `KILN_SPEC_METHOD=mtp`
+  - `KILN_BENCH_FORCE_MTP=1`
+  - `--paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
+
+Representative compare dumps:
+
+- seed 0: `profiling-artifacts/post429_c43_20260423_seed0_captures/mtp_pos-0/step-1.safetensors`
+- seed 1: `profiling-artifacts/post429_c43_20260423_seed1_captures/mtp_pos-2/step-1.safetensors`
+
+Fresh workload check:
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 10057.8 | 38.9 | 0.693 |
+| 1 | 508 | 414.0 | 21.3 | 0.293 |
+
+Verdict:
+
+- `layer_1_residual_input` stays shared-good
+- `layer_1_input_norm_rms_inv` stays shared-good
+- `layer_1_input_norm_pre_weight_broadcast_mul` is the earliest shared bad tap
+- `layer_1_input_norm_pre_weight_scalar_affine` is also bad in both seeds and
+  in both bf16 and fp32 compares
+
+Therefore C43 rejects the "layout / row selection around `broadcast_mul`"
+hypothesis. The shared divergence survives the independent equivalent, so the
+remaining culprit space stays on the layer-1 pre-weight values themselves, not
+on the specific broadcast path.
+
+Recommendation:
+
+- Do not widen into deeper layer-1 block internals yet.
+- The next slice should stay inside layer-1 input-layernorm numerics and audit
+  why kiln's normalized pre-weight tensor is wrong even when the same
+  `rms_inv` scalar is reused through an independent scaling path.
+- Treat the discarded H200 NVL run as non-evidence; with `KILN_W4A16=1` it hit
+  `CUDA_ERROR_ILLEGAL_INSTRUCTION` before the audit completed.
+
+Evidence:
+
+- `profiling-artifacts/post429_c43_20260423_seed0.bench.json`
+- `profiling-artifacts/post429_c43_20260423_seed0.bench.stderr`
+- `profiling-artifacts/post429_c43_20260423_seed1.bench.json`
+- `profiling-artifacts/post429_c43_20260423_seed1.bench.stderr`
+- `profiling-artifacts/post429_c43_20260423_compare_bf16.txt`
+- `profiling-artifacts/post429_c43_20260423_compare_fp32.txt`
