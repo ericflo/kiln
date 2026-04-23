@@ -339,6 +339,80 @@ end-to-end bar, so the next retry on this path should target a different
 kernel-internal bottleneck than both `#399`'s scalar round-trip cleanup and
 this shared-`W` weighting hoist.
 
+### Post-#401 bounded shared-`k_t` row staging — 2026-04-23
+
+Fresh-`main` preflight passed again before editing:
+
+- PR `#401` is merged and remains doc-only (`PROFILING.md` plus a capture-note
+  CSV only).
+- No newer open or merged PR already changes
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this post-`#401`
+  follow-up scope.
+- The validated post-`#392` refined prefill capture above still shows
+  `gdn_full_chunk_forward_kernel` at **34.6%** of prompt-heavy prefill kernel
+  time, so the frontier still exists on the current source of truth.
+
+This retry ported one different bounded vLLM-style idea into the fused
+full-chunk kernel's recurrent-state update: stage each `k_t[k_idx, :]` row
+into shared memory once per `dk` iteration, then let all `dv` lanes reuse that
+staged row instead of reloading the same 64 bf16 `k_t` scalars from global
+memory in every thread. The motivating upstream pattern is the current vLLM
+`fused_recurrent_gated_delta_rule_fwd_kernel`, which loads `b_k` once per
+program tile and reuses it across all value lanes.
+
+**Attempted code path**
+
+- `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`
+
+**Parity**
+
+RunPod on-demand RTX A6000, `ghcr.io/ericflo/kiln-runpod:latest`.
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+export CARGO_PROFILE_DEV_DEBUG=0
+cargo test -p kiln-model --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+```
+
+Result: **pass**.
+
+- `out_chunk` max abs diff: **1.5625e-2**
+- `state` max abs diff: **3.125e-2**
+
+**8192/1 prompt-heavy prefill**
+
+To avoid cross-pod noise, I measured both arms on the same A6000 pod after the
+branch benchmark looked much slower than the historical post-`#392` number.
+
+Same-pod control on fresh `main`:
+
+- before: **3272.4 ms**, **2499.7 tok/s**
+
+Branch with shared-`k_t` row staging:
+
+- after: **4704.0 ms**, **1739.0 tok/s**
+
+That is a clear regression on the required prompt-heavy arm, so the kernel
+change was reverted before opening the PR. This section documents the failed
+attempt; it does **not** land a source change in
+`gdn_full_chunk_forward.cu`.
+
+**Kernel-share capture note**
+
+Unlike the post-`#399` retry, I did **not** keep a new Nsight kernel-share
+capture for this attempt. Once the same-pod control showed the branch at
+**4704.0 ms** versus `main` at **3272.4 ms**, the code no longer met the keep
+bar, so I reverted it immediately instead of burning more pod time on a
+post-change profile for a change that was already disqualified. The capture
+note for this decision is recorded in
+`profiling-artifacts/post401_20260423_prefill_kern.csv`.
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
