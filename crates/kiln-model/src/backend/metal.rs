@@ -87,6 +87,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_gdn_recurrent_pipeline(metal_device)?;
     metal_gdn_forward_substitution_pipeline(metal_device)?;
     metal_gdn_chunk_prep_pipeline(metal_device)?;
+    metal_gdn_full_chunk_forward_pipeline(metal_device)?;
     metal_conv1d_prefill_pipeline(metal_device)?;
     metal_conv1d_update_pipeline(metal_device)?;
     metal_lm_head_pipeline(metal_device)?;
@@ -131,6 +132,10 @@ impl BackendRuntime for MetalBackend {
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
+        !self.disable.gdn_forward_substitution
+    }
+
+    fn supports_gdn_full_chunk_forward(&self) -> bool {
         !self.disable.gdn_forward_substitution
     }
 
@@ -355,6 +360,32 @@ impl BackendRuntime for MetalBackend {
         }
         let out = metal_gdn_chunk_prep_bf16(g, v, kkt, qkt, ks_entry, q_s)
             .context("metal gdn_chunk_prep kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn gdn_full_chunk_forward(
+        &self,
+        g: &Tensor,
+        v: &Tensor,
+        kkt: &Tensor,
+        qkt: &Tensor,
+        ks_entry: &Tensor,
+        q_s: &Tensor,
+        beta: &Tensor,
+        k_t: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        if self.disable.gdn_forward_substitution
+            || !metal_gdn_full_chunk_forward_supports(
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+            )
+        {
+            return Ok(None);
+        }
+        let out = metal_gdn_full_chunk_forward_bf16(
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+        )
+        .context("metal gdn_full_chunk_forward kernel failed")?;
         Ok(Some(out))
     }
 
@@ -627,6 +658,53 @@ fn metal_gdn_chunk_prep_supports(
         return false;
     };
     (b_qs, h_qs, c_qs, dv_qs) == (batch, heads, chunk, dv)
+}
+
+fn metal_gdn_full_chunk_forward_supports(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    state: &Tensor,
+) -> bool {
+    if !metal_gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s)
+        || !matches!(beta.device(), Device::Metal(_))
+        || !matches!(k_t.device(), Device::Metal(_))
+        || !matches!(state.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if beta.dtype() != DType::BF16 || k_t.dtype() != DType::BF16 || state.dtype() != DType::BF16 {
+        return false;
+    }
+    let Ok((batch, heads, chunk)) = g.dims3() else {
+        return false;
+    };
+    let Ok((_, _, _, dv)) = v.dims4() else {
+        return false;
+    };
+    let Ok((b_beta, h_beta, c_beta)) = beta.dims3() else {
+        return false;
+    };
+    let Ok((b_kt, h_kt, dk, c_kt)) = k_t.dims4() else {
+        return false;
+    };
+    let Ok((b_state, h_state, dk_state, dv_state)) = state.dims4() else {
+        return false;
+    };
+    (b_beta, h_beta, c_beta) == (batch, heads, chunk)
+        && (b_kt, h_kt, c_kt) == (batch, heads, chunk)
+        && (b_state, h_state, dk_state, dv_state) == (batch, heads, dk, dv)
+        && chunk == 64
+        && dk > 0
+        && dk <= 128
+        && dv > 0
+        && dv <= 128
+        && state.is_contiguous()
 }
 
 fn metal_gdn_recurrent_supports(
@@ -969,6 +1047,7 @@ fn metal_shared_library(
         METAL_GDN_GATES_KERNEL,
         METAL_GATED_RMSNORM_KERNEL,
         METAL_GDN_RECURRENT_KERNEL,
+        METAL_GDN_FULL_CHUNK_FORWARD_KERNEL,
         METAL_CONV1D_PREFILL_KERNEL,
         METAL_CONV1D_UPDATE_KERNEL,
         METAL_LM_HEAD_KERNEL,
@@ -2010,6 +2089,134 @@ kernel void kiln_gdn_chunk_prep_bf16(
 }
 "#;
 
+const METAL_GDN_FULL_CHUNK_FORWARD_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_full_chunk_forward_bf16(
+    device const bfloat* g [[buffer(0)]],
+    device const bfloat* v [[buffer(1)]],
+    device const bfloat* kkt [[buffer(2)]],
+    device const bfloat* qkt [[buffer(3)]],
+    device const bfloat* ks_entry [[buffer(4)]],
+    device const bfloat* q_s [[buffer(5)]],
+    device const bfloat* beta [[buffer(6)]],
+    device const bfloat* k_t [[buffer(7)]],
+    device bfloat* state [[buffer(8)]],
+    device bfloat* out_chunk [[buffer(9)]],
+    constant uint& batch_heads [[buffer(10)]],
+    constant uint& dk [[buffer(11)]],
+    constant uint& dv [[buffer(12)]],
+    uint bh [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    constexpr uint C = 64;
+    constexpr uint MAX_DV = 128;
+    if (bh >= batch_heads) {
+        return;
+    }
+
+    threadgroup bfloat sArow[64];
+    threadgroup bfloat sBrow[64];
+    threadgroup bfloat sW[8192];
+    threadgroup float sBigG[64];
+    threadgroup float sP[64];
+    threadgroup float sDecayLast[64];
+    threadgroup float sPLast;
+
+    const uint g_base = bh * C;
+    const uint cdv_base = bh * C * dv;
+    const uint cc_base = bh * C * C;
+    const uint kt_base = bh * dk * C;
+    const uint state_base = bh * dk * dv;
+
+    for (uint i = tid; i < C; i += 128) {
+        sBigG[i] = static_cast<float>(g[g_base + i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        float acc = 0.0f;
+        for (uint i = 0; i < C; ++i) {
+            acc += sBigG[i];
+            sBigG[i] = acc;
+        }
+        sPLast = exp(sBigG[C - 1]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint i = tid; i < C; i += 128) {
+        sP[i] = exp(sBigG[i]);
+        sDecayLast[i] = exp(sBigG[C - 1] - sBigG[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint t = 0; t < C; ++t) {
+        for (uint i = tid; i < C; i += 128) {
+            const uint ti = t * C + i;
+            const float decay = exp(sBigG[t] - sBigG[i]);
+            const float a_val = (i < t) ? static_cast<float>(kkt[cc_base + ti]) * decay : 0.0f;
+            const float b_val = (i <= t) ? static_cast<float>(qkt[cc_base + ti]) * decay : 0.0f;
+            sArow[i] = static_cast<bfloat>(a_val);
+            sBrow[i] = static_cast<bfloat>(b_val);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const float beta_t = static_cast<float>(beta[g_base + t]);
+        const float p_t = static_cast<float>(static_cast<bfloat>(sP[t]));
+
+        if (tid < dv) {
+            float acc_a = 0.0f;
+            for (uint i = 0; i < t; ++i) {
+                acc_a += static_cast<float>(sArow[i]) *
+                         static_cast<float>(sW[i * MAX_DV + tid]);
+            }
+
+            const uint td = t * dv + tid;
+            const float vp = static_cast<float>(static_cast<bfloat>(
+                static_cast<float>(v[cdv_base + td]) -
+                static_cast<float>(ks_entry[cdv_base + td]) * p_t
+            ));
+            const float w_val = beta_t * (vp - acc_a);
+            sW[t * MAX_DV + tid] = static_cast<bfloat>(w_val);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid < dv) {
+            float acc_b = 0.0f;
+            for (uint i = 0; i <= t; ++i) {
+                acc_b += static_cast<float>(sBrow[i]) *
+                         static_cast<float>(sW[i * MAX_DV + tid]);
+            }
+
+            const uint td = t * dv + tid;
+            const float qss = static_cast<float>(static_cast<bfloat>(
+                static_cast<float>(q_s[cdv_base + td]) * p_t
+            ));
+            out_chunk[cdv_base + td] = static_cast<bfloat>(qss + acc_b);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid < dv) {
+        const float p_last = static_cast<float>(static_cast<bfloat>(sPLast));
+        for (uint k_idx = 0; k_idx < dk; ++k_idx) {
+            float delta = 0.0f;
+            for (uint t = 0; t < C; ++t) {
+                const float kt = static_cast<float>(k_t[kt_base + k_idx * C + t]);
+                const float w = static_cast<float>(sW[t * MAX_DV + tid]);
+                const float decay_last = static_cast<float>(static_cast<bfloat>(sDecayLast[t]));
+                const float w_weighted = static_cast<float>(static_cast<bfloat>(w * decay_last));
+                delta += kt * w_weighted;
+            }
+            const uint state_idx = state_base + k_idx * dv + tid;
+            const float prev = static_cast<float>(state[state_idx]);
+            state[state_idx] = static_cast<bfloat>(prev * p_last + delta);
+        }
+    }
+}
+"#;
+
 fn metal_gdn_recurrent_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -2093,6 +2300,35 @@ fn metal_gdn_chunk_prep_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn chunk-prep pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_full_chunk_forward_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn full-chunk pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_full_chunk_forward_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn full-chunk function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn full-chunk pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -2370,6 +2606,157 @@ fn metal_gdn_chunk_prep_bf16(
         decay_last_col,
         p_last,
     ))
+}
+
+fn metal_gdn_full_chunk_forward_bf16(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+    beta: &Tensor,
+    k_t: &Tensor,
+    state: &mut Tensor,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_gdn_full_chunk_forward_supports(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state),
+        "metal gdn full-chunk unsupported shape"
+    );
+    let (batch, heads, chunk_size) = g.dims3()?;
+    let (_, _, dk, _) = k_t.dims4()?;
+    let dv = v.dim(3)?;
+    let batch_heads = batch * heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize && dk <= u32::MAX as usize && dv <= u32::MAX as usize,
+        "metal gdn full-chunk shape too large"
+    );
+
+    let g = g.contiguous()?;
+    let v = v.contiguous()?;
+    let kkt = kkt.contiguous()?;
+    let qkt = qkt.contiguous()?;
+    let ks_entry = ks_entry.contiguous()?;
+    let q_s = q_s.contiguous()?;
+    let beta = beta.contiguous()?;
+    let k_t = k_t.contiguous()?;
+    let out = Tensor::zeros((batch, heads, chunk_size, dv), DType::BF16, g.device())?;
+
+    let Device::Metal(device) = g.device() else {
+        anyhow::bail!("metal gdn full-chunk requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_full_chunk_forward_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_full_chunk_forward_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (g_storage, g_layout) = g.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (kkt_storage, kkt_layout) = kkt.storage_and_layout();
+        let (qkt_storage, qkt_layout) = qkt.storage_and_layout();
+        let (ks_storage, ks_layout) = ks_entry.storage_and_layout();
+        let (qs_storage, qs_layout) = q_s.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (kt_storage, kt_layout) = k_t.storage_and_layout();
+        let (state_storage, state_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let g_metal = match &*g_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk g must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk v must be on Metal"),
+        };
+        let kkt_metal = match &*kkt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk kkt must be on Metal"),
+        };
+        let qkt_metal = match &*qkt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk qkt must be on Metal"),
+        };
+        let ks_metal = match &*ks_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk ks_entry must be on Metal"),
+        };
+        let qs_metal = match &*qs_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk q_s must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk beta must be on Metal"),
+        };
+        let kt_metal = match &*kt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk k_t must be on Metal"),
+        };
+        let state_metal = match &*state_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk state must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn full-chunk out must be on Metal"),
+        };
+
+        let g_buf = candle_core::metal_backend::buffer_o(g_metal.buffer(), &g_layout, g.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let kkt_buf =
+            candle_core::metal_backend::buffer_o(kkt_metal.buffer(), &kkt_layout, kkt.dtype());
+        let qkt_buf =
+            candle_core::metal_backend::buffer_o(qkt_metal.buffer(), &qkt_layout, qkt.dtype());
+        let ks_buf =
+            candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, ks_entry.dtype());
+        let qs_buf =
+            candle_core::metal_backend::buffer_o(qs_metal.buffer(), &qs_layout, q_s.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let kt_buf =
+            candle_core::metal_backend::buffer_o(kt_metal.buffer(), &kt_layout, k_t.dtype());
+        let state_buf = candle_core::metal_backend::buffer_o(
+            state_metal.buffer(),
+            &state_layout,
+            state.dtype(),
+        );
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(g_buf.buffer), g_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(kkt_buf.buffer), kkt_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(qkt_buf.buffer), qkt_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(qs_buf.buffer), qs_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(7, Some(kt_buf.buffer), kt_buf.offset_in_bytes);
+        encoder.set_buffer(8, Some(state_buf.buffer), state_buf.offset_in_bytes);
+        encoder.set_buffer(9, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let dk_u32 = dk as u32;
+        let dv_u32 = dv as u32;
+        encoder.set_bytes(10, &batch_heads_u32);
+        encoder.set_bytes(11, &dk_u32);
+        encoder.set_bytes(12, &dv_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch_heads,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 fn metal_gdn_recurrent_bf16(
@@ -3175,6 +3562,129 @@ mod tests {
                 "GDN chunk-prep {name} mean_abs_diff={mean:e} exceeds tolerance"
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_full_chunk_forward_matches_fallback_prefill_shape() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let heads = 2usize;
+        let chunk = 64usize;
+        let dk = 64usize;
+        let dv = 64usize;
+        let c_elems = batch * heads * chunk;
+        let cc_elems = batch * heads * chunk * chunk;
+        let cdv_elems = batch * heads * chunk * dv;
+        let ktd_elems = batch * heads * dk * chunk;
+        let state_elems = batch * heads * dk * dv;
+
+        let g_data: Vec<f32> = (0..c_elems)
+            .map(|idx| -0.08 + ((idx % 17) as f32) * 0.002)
+            .collect();
+        let v_data: Vec<f32> = (0..cdv_elems)
+            .map(|idx| ((idx % 43) as f32 - 21.0) * 0.0125)
+            .collect();
+        let kkt_data: Vec<f32> = (0..cc_elems)
+            .map(|idx| ((idx % 31) as f32 - 15.0) * 0.004)
+            .collect();
+        let qkt_data: Vec<f32> = (0..cc_elems)
+            .map(|idx| ((idx % 37) as f32 - 18.0) * 0.004)
+            .collect();
+        let ks_data: Vec<f32> = (0..cdv_elems)
+            .map(|idx| ((idx % 47) as f32 - 23.0) * 0.006)
+            .collect();
+        let qs_data: Vec<f32> = (0..cdv_elems)
+            .map(|idx| ((idx % 53) as f32 - 26.0) * 0.006)
+            .collect();
+        let beta_data: Vec<f32> = (0..c_elems)
+            .map(|idx| 0.15 + ((idx % 11) as f32) * 0.01)
+            .collect();
+        let kt_data: Vec<f32> = (0..ktd_elems)
+            .map(|idx| ((idx % 29) as f32 - 14.0) * 0.006)
+            .collect();
+        let state_data: Vec<f32> = (0..state_elems)
+            .map(|idx| ((idx % 41) as f32 - 20.0) * 0.004)
+            .collect();
+
+        let g =
+            Tensor::from_slice(&g_data, (batch, heads, chunk), &device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (batch, heads, chunk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let ks_entry = Tensor::from_slice(&ks_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (batch, heads, chunk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let beta =
+            Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?.to_dtype(DType::BF16)?;
+        let k_t = Tensor::from_slice(&kt_data, (batch, heads, dk, chunk), &device)?
+            .to_dtype(DType::BF16)?;
+        let state_entry = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut state_fused = Tensor::from_slice(&state_data, (batch, heads, dk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+
+        assert!(metal_gdn_full_chunk_forward_supports(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &state_fused
+        ));
+
+        let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
+            gdn_chunk_prep_reference(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
+        let w = metal_gdn_forward_substitution_bf16(&a_strict, &v_prime, &beta)?;
+        let out_ref = (q_s_scaled + b_mask.matmul(&w)?)?;
+        let decay_last_col_u = decay_last_col.unsqueeze(3)?;
+        let w_weighted = w.broadcast_mul(&decay_last_col_u)?.contiguous()?;
+        let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?;
+        let state_ref = (state_entry.broadcast_mul(&p_last_u)? + k_t.matmul(&w_weighted)?)?;
+
+        let out_fused = metal_gdn_full_chunk_forward_bf16(
+            &g,
+            &v,
+            &kkt,
+            &qkt,
+            &ks_entry,
+            &q_s,
+            &beta,
+            &k_t,
+            &mut state_fused,
+        )?;
+
+        let out_max = max_abs_diff(&out_ref, &out_fused)?;
+        let out_mean = mean_abs_diff(&out_ref, &out_fused)?;
+        let state_max = max_abs_diff(&state_ref, &state_fused)?;
+        let state_mean = mean_abs_diff(&state_ref, &state_fused)?;
+        assert!(
+            out_max < 2e-2,
+            "GDN full-chunk out max_abs_diff={out_max:e} exceeds tolerance"
+        );
+        assert!(
+            out_mean < 2e-3,
+            "GDN full-chunk out mean_abs_diff={out_mean:e} exceeds tolerance"
+        );
+        assert!(
+            state_max < 2e-2,
+            "GDN full-chunk state max_abs_diff={state_max:e} exceeds tolerance"
+        );
+        assert!(
+            state_mean < 2e-3,
+            "GDN full-chunk state mean_abs_diff={state_mean:e} exceeds tolerance"
+        );
 
         Ok(())
     }
