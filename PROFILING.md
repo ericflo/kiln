@@ -6451,3 +6451,72 @@ Evidence:
 - `profiling-artifacts/post429_c43_20260423_seed1.bench.stderr`
 - `profiling-artifacts/post429_c43_20260423_compare_bf16.txt`
 - `profiling-artifacts/post429_c43_20260423_compare_fp32.txt`
+
+## Phase C44 post-#430 layer-1 F32 row vs normalized-row audit (2026-04-23)
+
+Goal: answer the next smallest slice after C43 by checking whether the last
+replay row is already bad immediately after `x.to_dtype(F32)` or whether the
+row stays shared-good and only diverges when the shared-good `rms_inv` scalar
+is applied.
+
+Code change:
+
+- add opt-in C44 taps behind `KILN_MTP_DUMP_C44_LAYER1_F32_ROW_TAPS=1`
+- capture only:
+  - `layer_1_residual_input_f32_row`
+  - `layer_1_input_norm_rms_inv_scalar`
+  - `layer_1_input_norm_pre_weight_row_scalar_affine`
+- mirror the C44 tap order in `mtp_h_main_reference_dump.py`
+- add `scripts/mtp_compare.py --c44`
+
+Final source-of-truth run:
+
+- RunPod kiln image on on-demand `NVIDIA RTX A6000`
+- validation passed:
+  - `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+  - `cargo test -p kiln-model mtp_debug --lib -- --test-threads=1`
+- standard workload:
+  - `KILN_W4A16=1`
+  - `KILN_CUDA_GRAPHS=true`
+  - `KILN_SPEC_METHOD=mtp`
+  - `KILN_BENCH_FORCE_MTP=1`
+  - `--paged --prompt-tokens 512 --max-output-tokens 128 --skip-training`
+
+Representative compare dumps:
+
+- seed 0: `profiling-artifacts/post430_c44_20260423_seed0_captures/mtp_pos-0/step-1.safetensors`
+- seed 1: `profiling-artifacts/post430_c44_20260423_seed1_captures/mtp_pos-2/step-1.safetensors`
+
+Fresh workload check:
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 10046.8 | 38.3 | 0.716 |
+| 1 | 508 | 397.5 | 23.0 | 0.270 |
+
+Verdict:
+
+- `layer_1_residual_input_f32_row` stays shared-good
+- `layer_1_input_norm_rms_inv_scalar` stays shared-good
+- `layer_1_input_norm_pre_weight_row_scalar_affine` is the earliest shared bad tap
+- this holds in both bf16 and fp32 HF compares
+
+Therefore C44 answers the remaining question from C43 directly: the bad values
+are **not** already present in the F32-cast last replay row. The row stays
+shared-good, and the first shared divergence appears only when normalization is
+applied to produce the row's pre-weight values.
+
+Recommendation:
+
+- Do not widen beyond layer-1 input-layernorm numerics yet.
+- The next slice should stay inside the row-local normalization application
+  itself, not the F32 cast and not the RMS reduction.
+
+Evidence:
+
+- `profiling-artifacts/post430_c44_20260423_seed0.bench.json`
+- `profiling-artifacts/post430_c44_20260423_seed0.bench.stderr`
+- `profiling-artifacts/post430_c44_20260423_seed1.bench.json`
+- `profiling-artifacts/post430_c44_20260423_seed1.bench.stderr`
+- `profiling-artifacts/post430_c44_20260423_compare_bf16.txt`
+- `profiling-artifacts/post430_c44_20260423_compare_fp32.txt`
