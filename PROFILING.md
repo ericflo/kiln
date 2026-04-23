@@ -252,6 +252,82 @@ tap on the standard workload, using the existing hidden-state dump path and a
 layer/sub-op comparator. Seed 1's failure is already visible before the
 accept/reject seam.
 
+## Phase C38 post-#422 seed1 upstream base-stack bisect (2026-04-23)
+
+**Scope:** use the existing B10/B11/B12 hidden-state dump + HF reference +
+comparator path on fresh `main` after PR #422 to localize the first
+seed1-only divergence upstream of `h_main`.
+
+**Preflight outcome:** proceed. Fresh `origin/main` was `c66cf41`
+(PR #422 on `main`), with no newer open or merged PR already landing a
+post-#422 upstream base-stack bisect artifact. A fresh standard-workload rerun
+still reproduced the split:
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 5602.8 | 49.98 | 0.7162 |
+| 1 | 508 | 377.2 | 30.82 | 0.2828 |
+
+**Hardware note:** the pod-pool A6000 could not resume (`not enough free GPUs
+on the host machine`). Direct A6000 launch hit `SUPPLY_CONSTRAINT`, and direct
+A40 launch failed with a RunPod internal error, so the fresh rerun used the
+documented fallback `A100 PCIe` on the kiln image.
+
+**Commands run:** rebuilt `kiln-bench`, reran the standard workload for seeds
+0/1 with `KILN_MTP_DUMP_HIDDEN_STATES=1`, `KILN_MTP_DUMP_B11_TAPS=1`, and
+`KILN_MTP_DUMP_B12_GQA_TAPS=1`, generated matched HF reference dumps with
+`scripts/mtp_h_main_reference_dump.py` in both bf16 and fp32, then ran
+`scripts/mtp_compare.py --b10`, `--b11`, and `--b12` for both seeds. The
+committed source-of-truth artifacts are:
+
+- `profiling-artifacts/post422_20260423_seed0_compare_bf16.txt`
+- `profiling-artifacts/post422_20260423_seed1_compare_bf16.txt`
+- `profiling-artifacts/post422_20260423_seed0_compare_fp32.txt`
+- `profiling-artifacts/post422_20260423_seed1_compare_fp32.txt`
+
+### Verdict
+
+**Blocked by the existing reference contract.** The current B10/B11/B12 path
+cannot honestly localize a **seed1-only** first divergence beyond the initial
+`mtp_pos=0` dump.
+
+Why:
+
+- `mtp_h_main_reference_dump.py` forwards the `prompt_tokens` tensor embedded
+  in each splice dump.
+- Only the first `mtp_pos=0` dump (`0_s0`) contains the full prompt
+  (`494` tokens for seed 0, `508` for seed 1).
+- Every later `mtp_pos=0` dump carries `prompt_tokens` length `1`, and the
+  `mtp_pos=2` path carries lengths `2` then `1`.
+- So every later comparator row is an under-conditioned HF replay on the wrong
+  sequence length. Both seeds then look "divergent" for the same reason.
+
+On the **only** fully-contexted row (`0_s0`), seed 0 and seed 1 do not
+separate in a way that makes the next fix target obvious:
+
+- `h_layer_0`: seed 0 `1.00`, seed 1 `1.00`
+- `h_layer_24`: seed 0 `0.985`, seed 1 `0.976`
+- `h_layer_31`: seed 0 `0.958`, seed 1 `0.957`
+- B11 `gdn_conv`: seed 0 `1.00`, seed 1 `1.00`
+
+The mechanically-generated full reports do produce the same nominal
+localization for **both** seeds:
+
+- B10: `DIVERGENCE AT LAYER 0`
+- B11: first below-bar sub-op = `gdn_conv`
+- B12: first below-bar late-stack layer = `h_layer_24`
+
+But those are **not** seed1-only findings; they are artifacts of the
+incomplete-history replay on every row after `0_s0`.
+
+### Recommendation
+
+Do **not** queue a fix from this task. The next narrow task should keep the
+same B10/B11/B12 comparator stack but fix the replay contract first, either
+by serializing the full chained prompt history into every splice dump or by
+teaching the HF reference side to reconstruct the chained history C15-style
+before re-running the existing comparators.
+
 ## Phase 6 post-#412 preflight — tiled recurrent-state retry is obsolete (2026-04-23)
 
 **Scope:** re-check the queued "prototype vLLM-style block-tiled
