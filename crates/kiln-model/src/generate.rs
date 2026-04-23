@@ -1738,6 +1738,16 @@ impl ModelRunner {
                 }
             }
 
+            if generated_tokens.len() >= params.max_tokens {
+                return Ok(MtpGenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::MaxTokens,
+                    draft_accepted_count,
+                    total_draft_attempts,
+                });
+            }
+
             total_draft_attempts += 1;
             let mut replay_prefix =
                 Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
