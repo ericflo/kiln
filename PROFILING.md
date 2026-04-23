@@ -552,6 +552,92 @@ there was no remaining one-diff candidate to validate. Re-running another
 micro-port on RunPod would have been a duplicate spend against the same
 already-failed frontier.
 
+### Post-#406 tiled full-chunk recurrent-state update — 2026-04-23
+
+Fresh-`main` preflight passed before editing:
+
+- PR `#406` is merged and remains doc-only: it updated `PROFILING.md` plus
+  `profiling-artifacts/post405_20260423_vllm_recurrent_audit.csv`, with **no**
+  source change under `crates/kiln-gdn-kernel/`.
+- No newer open or merged PR already changes
+  `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu` for this exact
+  recurrent/full-chunk follow-up. Current `main` includes PR `#408`, but that
+  only touches `crates/kiln-model/src/{forward,generate,loader,weights}.rs`.
+- The validated post-`#392` refined prefill capture above still shows
+  `gdn_full_chunk_forward_kernel` at **34.6%** of prompt-heavy prefill kernel
+  time, so this frontier still existed on fresh `main`.
+
+This retry implemented the first real structural step implied by PR `#406`'s
+audit: tile the scalar `(k_idx, dv)` recurrent-state epilogue over a small
+`k_idx` block so each value lane reuses `w[t, dv] * decay_last[t]` across
+multiple state rows before writing BF16 state back. Concretely, the attempted
+kernel diff:
+
+- staged an `8 x 64` `k_t` tile in shared memory;
+- accumulated `delta_tile[8]` per value lane in registers;
+- left the full-chunk body, launch envelope, and Rust call surface unchanged.
+
+**Attempted code path**
+
+- `crates/kiln-gdn-kernel/csrc/gdn_full_chunk_forward.cu`
+
+**Validation**
+
+RunPod on-demand RTX A6000, `ghcr.io/ericflo/kiln-runpod:latest`.
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+export CARGO_PROFILE_DEV_DEBUG=0
+
+cargo build --release --features cuda --bin kiln-bench
+cargo test -p kiln-model --release --features cuda \
+  forward::tests::test_gdn_full_chunk_forward_matches_fallback \
+  -- --exact --nocapture
+
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 8192 --max-output-tokens 1 --skip-training --latency-only
+```
+
+Parity passed:
+
+- `out_chunk` max abs diff: **1.5625e-2**
+- `state` max abs diff: **3.125e-2**
+
+The first before/after pair looked promising:
+
+- fresh `main`: **4735.5 ms**, **1727 tok/s**
+- patched branch: **3145.3 ms**, **2601 tok/s**
+
+But the same-pod warm control disproved that apparent win:
+
+- warm `main` rerun: **3112.7 ms**, **2628 tok/s**
+- warm patched rerun: **3167.5 ms**, **2582 tok/s**
+
+So the tiled epilogue is actually **1.8% slower** than warmed `main`
+(`3167.5 / 3112.7 - 1`), which fails the task's **>=3%** keep bar and fits the
+same warm-order artifact pattern that invalidated the earlier post-`#403`
+result.
+
+I still captured one refined changed-build kernel CSV after the parity pass:
+`profiling-artifacts/post406_20260423_tiled_prefill_kern.csv`. The changed
+build's top kernel remains `gdn_full_chunk_forward_kernel` at **29.7%**, but
+that capture does **not** override the failed end-to-end wall-clock gate.
+
+**Keep / revert decision**
+
+Doc-only negative result. I reverted the kernel diff and did **not** ship a
+source change in `gdn_full_chunk_forward.cu` because the same-pod warmed
+control shows the tiled recurrent-state update misses the acceptance threshold.
+
+**Measurement artifact**
+
+- `profiling-artifacts/post406_20260423_tiled_recurrent_verdict.csv`
+- `profiling-artifacts/post406_20260423_tiled_prefill_kern.csv`
+
 ## Phase 6 post-#384 current-main re-profile — 2026-04-22
 
 ### Post-change note — 2026-04-23 (`ce/phase6-fused-gdn-full-chunk`)
