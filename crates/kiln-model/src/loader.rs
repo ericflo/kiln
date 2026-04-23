@@ -47,9 +47,9 @@ type TensorMap<'a> = HashMap<&'a str, TensorMapEntry<'a>>;
 pub struct LoadModelOptions {
     /// Load the checkpoint's native MTP head when present.
     ///
-    /// Desktop macOS defaults keep speculative decoding off, so skipping this
-    /// avoids extra CPU allocations and GPU upload/transposes for weights that
-    /// the default serve path will never touch.
+    /// Startup-sensitive callers may set this to `false` and rely on the
+    /// deferred MTP path instead, which keeps routing support visible while
+    /// postponing the CPU load until the first actual native-MTP request.
     pub load_mtp: bool,
 }
 
@@ -168,8 +168,22 @@ fn load_model_dense(
     } else {
         None
     };
+    let deferred_mtp = if options.load_mtp {
+        None
+    } else {
+        detect_mtp_prefix(&tensor_map, &prefix).map(|mtp_prefix| DeferredMtpSource {
+            model_dir: model_dir.to_path_buf(),
+            mtp_prefix,
+            config: config.clone(),
+        })
+    };
     if mtp.is_some() {
         tracing::info!("Native MTP head detected and loaded (k=1 draft depth)");
+    } else if let Some(source) = &deferred_mtp {
+        tracing::info!(
+            mtp_prefix = %source.mtp_prefix,
+            "Native MTP head detected; deferring CPU load until first use"
+        );
     } else if !options.load_mtp {
         tracing::info!("Skipping native MTP head load");
     }
@@ -179,6 +193,7 @@ fn load_model_dense(
         layers,
         final_norm,
         mtp,
+        deferred_mtp,
     };
 
     let total_mb = weights.total_bytes() as f64 / (1024.0 * 1024.0);
@@ -279,6 +294,7 @@ fn load_model_gptq(
         layers,
         final_norm,
         mtp: None,
+        deferred_mtp: None,
     };
 
     let total_mb = weights.total_bytes() as f64 / (1024.0 * 1024.0);
@@ -673,7 +689,14 @@ fn load_mtp_if_present(
         Some(p) => p,
         None => return Ok(None),
     };
+    load_mtp_with_prefix(tensor_map, &mtp_prefix, config).map(Some)
+}
 
+fn load_mtp_with_prefix(
+    tensor_map: &TensorMap<'_>,
+    mtp_prefix: &str,
+    config: &ModelConfig,
+) -> Result<MtpWeights> {
     let ctx = |name: &str| format!("{mtp_prefix}{name}");
 
     let fc = extract_tensor(tensor_map, &format!("{mtp_prefix}fc.weight"))?;
@@ -747,13 +770,51 @@ fn load_mtp_if_present(
         }
     }
 
-    Ok(Some(MtpWeights {
+    Ok(MtpWeights {
         fc,
         pre_fc_norm_embedding,
         pre_fc_norm_hidden,
         layer,
         final_layernorm,
-    }))
+    })
+}
+
+/// Load only the checkpoint's native-MTP tensors from a previously recorded
+/// deferred source.
+pub fn load_deferred_mtp(source: &DeferredMtpSource) -> Result<MtpWeights> {
+    let shards = discover_shards(&source.model_dir)?;
+    let loaded_shards = mmap_shards(&shards)?;
+    let parsed: Vec<SafeTensors<'_>> = loaded_shards
+        .iter()
+        .map(|shard| {
+            SafeTensors::deserialize(&shard.mmap[..]).context("Failed to parse safetensors file")
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
+    for (shard_idx, st) in parsed.iter().enumerate() {
+        for (name, view) in st.tensors() {
+            all_tensors.push((name, shard_idx, view));
+        }
+    }
+    let mut tensor_map: TensorMap<'_> = HashMap::new();
+    for (name, shard_idx, view) in &all_tensors {
+        tensor_map.insert(
+            name.as_str(),
+            TensorMapEntry {
+                shard: Arc::clone(&loaded_shards[*shard_idx].meta),
+                mmap: Arc::clone(&loaded_shards[*shard_idx].mmap),
+                view,
+            },
+        );
+    }
+
+    load_mtp_with_prefix(&tensor_map, &source.mtp_prefix, &source.config).with_context(|| {
+        format!(
+            "deferred native MTP load from {}",
+            source.model_dir.display()
+        )
+    })
 }
 
 /// Extract a tensor by name from the unified tensor map.
@@ -1751,6 +1812,47 @@ mod tests {
     }
 
     #[test]
+    fn test_load_mtp_can_be_deferred_to_first_use() {
+        let mut tensors = tiny_model_tensors("model.language_model.");
+        tensors.extend(tiny_mtp_tensors("mtp.", "norm"));
+
+        let tensor_refs: Vec<(&str, Vec<usize>, StDtype)> = tensors
+            .iter()
+            .map(|(n, s, d)| (n.as_str(), s.clone(), *d))
+            .collect();
+        let bytes = create_test_safetensors(&tensor_refs);
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("model.safetensors"), &bytes).unwrap();
+
+        let config = tiny_model_config();
+        let weights =
+            load_model_with_options(dir.path(), &config, LoadModelOptions { load_mtp: false })
+                .unwrap();
+        assert!(weights.mtp.is_none(), "MTP should stay off the eager path");
+        assert!(
+            weights.deferred_mtp.is_some(),
+            "MTP presence should still be visible via deferred source"
+        );
+
+        let device = candle_core::Device::Cpu;
+        let gpu_weights =
+            crate::forward::GpuWeights::from_model_weights(&weights, &config, &device).unwrap();
+        let slot = gpu_weights
+            .mtp
+            .as_ref()
+            .expect("deferred source should still expose native MTP support");
+        assert!(!slot.is_uploaded(), "deferred MTP must remain lazy");
+
+        let mtp = gpu_weights.mtp_weights().unwrap();
+        assert_eq!(mtp.final_layernorm.dims1().unwrap(), 64);
+        assert!(
+            gpu_weights.mtp.as_ref().unwrap().is_uploaded(),
+            "first native-MTP access should load deferred CPU+GPU tensors"
+        );
+    }
+
+    #[test]
     fn test_load_without_mtp_leaves_none() {
         // Base checkpoint without MTP should leave mtp = None and load fine.
         let tensors = tiny_model_tensors("model.language_model.");
@@ -1768,6 +1870,10 @@ mod tests {
         assert!(
             weights.mtp.is_none(),
             "MTP should be None when tensors are absent"
+        );
+        assert!(
+            weights.deferred_mtp.is_none(),
+            "deferred MTP should also be absent when tensors are absent"
         );
     }
 

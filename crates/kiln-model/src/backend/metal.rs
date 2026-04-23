@@ -94,6 +94,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_conv1d_update_pipeline(metal_device)?;
     metal_lm_head_pipeline(metal_device)?;
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
+    metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
     Ok(())
 }
 
@@ -119,6 +120,10 @@ impl BackendRuntime for MetalBackend {
     }
 
     fn supports_paged_kv_head_major_read(&self) -> bool {
+        true
+    }
+
+    fn supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
         true
     }
 
@@ -309,6 +314,27 @@ impl BackendRuntime for MetalBackend {
         metal_paged_kv_head_major_read_bf16(k_pool, v_pool, start_slot, seq_len)
             .map(Some)
             .context("metal paged_kv_head_major_read failed")
+    }
+
+    fn paged_kv_head_major_read_append_token_major(
+        &self,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        start_slot: usize,
+        prefix_len: usize,
+        k_tail: &Tensor,
+        v_tail: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        if !metal_paged_kv_head_major_read_append_token_major_supports(
+            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        ) {
+            return Ok(None);
+        }
+        metal_paged_kv_head_major_read_append_token_major_bf16(
+            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        )
+        .map(Some)
+        .context("metal paged_kv_head_major_read_append_token_major failed")
     }
 
     fn causal_conv1d_prefill(
@@ -1435,6 +1461,48 @@ kernel void kiln_paged_kv_head_major_read_bf16(
 }
 "#;
 
+const METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_paged_kv_head_major_read_append_token_major_bf16(
+    device const bfloat* k_pool [[buffer(0)]],
+    device const bfloat* v_pool [[buffer(1)]],
+    device const bfloat* k_tail [[buffer(2)]],
+    device const bfloat* v_tail [[buffer(3)]],
+    device bfloat* k_out [[buffer(4)]],
+    device bfloat* v_out [[buffer(5)]],
+    constant uint& start_slot [[buffer(6)]],
+    constant uint& prefix_len [[buffer(7)]],
+    constant uint& tail_len [[buffer(8)]],
+    constant uint& heads [[buffer(9)]],
+    constant uint& head_dim [[buffer(10)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total_len = prefix_len + tail_len;
+    const uint total = total_len * heads * head_dim;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint d = gid % head_dim;
+    const uint h = (gid / head_dim) % heads;
+    const uint t = gid / (head_dim * heads);
+    const uint out_idx = (h * total_len + t) * head_dim + d;
+
+    if (t < prefix_len) {
+        const uint pool_idx = ((start_slot + t) * heads + h) * head_dim + d;
+        k_out[out_idx] = k_pool[pool_idx];
+        v_out[out_idx] = v_pool[pool_idx];
+    } else {
+        const uint tail_t = t - prefix_len;
+        const uint tail_idx = (tail_t * heads + h) * head_dim + d;
+        k_out[out_idx] = k_tail[tail_idx];
+        v_out[out_idx] = v_tail[tail_idx];
+    }
+}
+"#;
+
 fn metal_shared_library(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::Library> {
@@ -1465,6 +1533,7 @@ fn metal_shared_library(
         METAL_CONV1D_UPDATE_KERNEL,
         METAL_LM_HEAD_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
+        METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
     ]
     .join("");
     let library = device
@@ -1645,6 +1714,38 @@ fn metal_paged_kv_head_major_read_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv read pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_paged_kv_head_major_read_append_token_major_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal paged kv read+append pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function(
+            "kiln_paged_kv_head_major_read_append_token_major_bf16",
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("load metal paged kv read+append function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal paged kv read+append pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -1965,6 +2066,170 @@ fn metal_paged_kv_head_major_read_bf16(
         encoder.set_bytes(7, &head_dim_u32);
 
         let total = seq_len * heads * head_dim;
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((k_out, v_out))
+}
+
+fn metal_paged_kv_head_major_read_append_token_major_supports(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    start_slot: usize,
+    prefix_len: usize,
+    k_tail: &Tensor,
+    v_tail: &Tensor,
+) -> bool {
+    if prefix_len == 0 {
+        return false;
+    }
+    if !metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, prefix_len) {
+        return false;
+    }
+    if k_tail.dtype() != DType::BF16 || v_tail.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(k_tail.device(), Device::Metal(_)) || !matches!(v_tail.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !k_tail.is_contiguous() || !v_tail.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, tail_len, heads, head_dim)) = k_tail.dims4() else {
+        return false;
+    };
+    let Ok(v_dims) = v_tail.dims4() else {
+        return false;
+    };
+    let Ok((_, pool_heads, pool_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Some(total_len) = prefix_len.checked_add(tail_len) else {
+        return false;
+    };
+    let Some(total) = total_len
+        .checked_mul(heads)
+        .and_then(|n| n.checked_mul(head_dim))
+    else {
+        return false;
+    };
+    batch == 1
+        && v_dims == (batch, tail_len, heads, head_dim)
+        && heads == pool_heads
+        && head_dim == pool_head_dim
+        && total_len <= u32::MAX as usize
+        && tail_len <= u32::MAX as usize
+        && heads <= u32::MAX as usize
+        && head_dim <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
+fn metal_paged_kv_head_major_read_append_token_major_bf16(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    start_slot: usize,
+    prefix_len: usize,
+    k_tail: &Tensor,
+    v_tail: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_paged_kv_head_major_read_append_token_major_supports(
+            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        ),
+        "metal paged kv head-major read+append unsupported shape"
+    );
+    let (_, tail_len, heads, head_dim) = k_tail.dims4()?;
+    let total_len = prefix_len + tail_len;
+    let out_shape = (1usize, heads, total_len, head_dim);
+    // SAFETY: the kernel dispatch covers exactly every element in `out_shape`.
+    let k_out = unsafe { Tensor::empty(out_shape, DType::BF16, k_pool.device())? };
+    // SAFETY: the kernel dispatch covers exactly every element in `out_shape`.
+    let v_out = unsafe { Tensor::empty(out_shape, DType::BF16, v_pool.device())? };
+
+    let Device::Metal(device) = k_pool.device() else {
+        anyhow::bail!("metal paged kv read+append requires Metal tensors");
+    };
+    let pipeline = metal_paged_kv_head_major_read_append_token_major_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_kv_head_major_read_append_token_major_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (k_storage, k_layout) = k_pool.storage_and_layout();
+        let (v_storage, v_layout) = v_pool.storage_and_layout();
+        let (kt_storage, kt_layout) = k_tail.storage_and_layout();
+        let (vt_storage, vt_layout) = v_tail.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+        let (vo_storage, vo_layout) = v_out.storage_and_layout();
+
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv read+append k_pool must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv read+append v_pool must be on Metal"),
+        };
+        let kt_metal = match &*kt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv read+append k_tail must be on Metal"),
+        };
+        let vt_metal = match &*vt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv read+append v_tail must be on Metal"),
+        };
+        let ko_metal = match &*ko_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv read+append k_out must be on Metal"),
+        };
+        let vo_metal = match &*vo_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv read+append v_out must be on Metal"),
+        };
+
+        let k_buf =
+            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+        let v_buf =
+            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+        let kt_buf =
+            candle_core::metal_backend::buffer_o(kt_metal.buffer(), &kt_layout, k_tail.dtype());
+        let vt_buf =
+            candle_core::metal_backend::buffer_o(vt_metal.buffer(), &vt_layout, v_tail.dtype());
+        let ko_buf =
+            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+        let vo_buf =
+            candle_core::metal_backend::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+
+        encoder.set_buffer(0, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(kt_buf.buffer), kt_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(vt_buf.buffer), vt_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(ko_buf.buffer), ko_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(vo_buf.buffer), vo_buf.offset_in_bytes);
+
+        let start_slot_u32 = start_slot as u32;
+        let prefix_len_u32 = prefix_len as u32;
+        let tail_len_u32 = tail_len as u32;
+        let heads_u32 = heads as u32;
+        let head_dim_u32 = head_dim as u32;
+        encoder.set_bytes(6, &start_slot_u32);
+        encoder.set_bytes(7, &prefix_len_u32);
+        encoder.set_bytes(8, &tail_len_u32);
+        encoder.set_bytes(9, &heads_u32);
+        encoder.set_bytes(10, &head_dim_u32);
+
+        let total = total_len * heads * head_dim;
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
             height: 1,
@@ -4747,6 +5012,86 @@ mod tests {
         assert!(
             max_abs_diff(&v_fast, &v_ref)? < 1e-6,
             "V fast read diverged from reference"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_kv_head_major_read_append_token_major_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let total_slots = 24usize;
+        let heads = 2usize;
+        let head_dim = 16usize;
+        let start_slot = 3usize;
+        let prefix_len = 9usize;
+        let tail_len = 5usize;
+        let elems = total_slots * heads * head_dim;
+        let k_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 101) as f32 - 50.0) * 0.015625)
+            .collect();
+        let v_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 83) as f32 - 41.0) * 0.03125)
+            .collect();
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+
+        let tail_elems = tail_len * heads * head_dim;
+        let k_tail_data: Vec<f32> = (0..tail_elems)
+            .map(|i| ((i % 67) as f32 - 33.0) * 0.0078125)
+            .collect();
+        let v_tail_data: Vec<f32> = (0..tail_elems)
+            .map(|i| ((i % 59) as f32 - 29.0) * 0.015625)
+            .collect();
+        let k_tail =
+            Tensor::from_slice(&k_tail_data, (1usize, tail_len, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?;
+        let v_tail =
+            Tensor::from_slice(&v_tail_data, (1usize, tail_len, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?;
+
+        assert!(metal_paged_kv_head_major_read_append_token_major_supports(
+            &k_pool, &v_pool, start_slot, prefix_len, &k_tail, &v_tail
+        ));
+        let (k_fast, v_fast) = metal_paged_kv_head_major_read_append_token_major_bf16(
+            &k_pool, &v_pool, start_slot, prefix_len, &k_tail, &v_tail,
+        )?;
+
+        let prefix_k = k_pool
+            .narrow(0, start_slot, prefix_len)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .unsqueeze(0)?;
+        let prefix_v = v_pool
+            .narrow(0, start_slot, prefix_len)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .unsqueeze(0)?;
+        let current_k = k_tail.transpose(1, 2)?.contiguous()?;
+        let current_v = v_tail.transpose(1, 2)?.contiguous()?;
+        let k_ref = Tensor::cat(&[&prefix_k, &current_k], 2)?;
+        let v_ref = Tensor::cat(&[&prefix_v, &current_v], 2)?;
+
+        assert_eq!(
+            k_fast.dims(),
+            &[1usize, heads, prefix_len + tail_len, head_dim]
+        );
+        assert_eq!(
+            v_fast.dims(),
+            &[1usize, heads, prefix_len + tail_len, head_dim]
+        );
+        assert!(
+            max_abs_diff(&k_fast, &k_ref)? < 1e-6,
+            "K fast read+append diverged from reference"
+        );
+        assert!(
+            max_abs_diff(&v_fast, &v_ref)? < 1e-6,
+            "V fast read+append diverged from reference"
         );
 
         Ok(())

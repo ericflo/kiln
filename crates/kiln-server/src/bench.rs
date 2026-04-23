@@ -15,21 +15,21 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_core::vram::detect_vram;
+use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    model_forward, model_forward_paged, model_forward_paged_last_token,
-    model_forward_paged_last_token_with_last_hidden, model_forward_paged_streaming,
-    model_forward_paged_streaming_last_token_with_last_hidden, streaming_prefill_enabled_for,
-    GpuWeights, LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
+    model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
-    speculative_decode_step, speculative_decode_step_paged_greedy, speculative_mtp_decode_step,
-    SpeculativeConfig,
+    SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
+    speculative_mtp_decode_step,
 };
-use kiln_model::ModelRunner;
 use kiln_server::config::SpecMethod;
 
 /// Block size used for the paged-path benchmark. Matches the kiln-core default.
@@ -393,7 +393,6 @@ const PROMPT_POOL: [&str; 30] = [
     "Melanie is a door-to-door saleswoman. She sold a third of her vacuum cleaners at a neighborhood on the east side of town during her morning route. She then sold two more to her cousin, who runs a small rental business. She is left with five vacuum cleaners in the boot of her car. We want the number she started with at the beginning of the day. ",
     // 9: mountain round trips
     "Stephen made ten round trips up and down a forty thousand foot tall mountain over the course of the last week. He reached three quarters of the mountain's height on each of his round trips before turning around. We want the total distance in feet he covered across every round trip combined. Compute the effective height per trip, double it for the round trip, then multiply by the number of trips. ",
-
     // === 10-19: HumanEval-style Python function signatures with docstrings ===
     // 10: has_close_elements
     "from typing import List\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\"Check whether any two numbers in the input list are closer together than the given threshold. Return True if such a pair exists, otherwise return False. Both arguments are guaranteed to be valid, and the threshold is always positive. \"\"\"\n",
@@ -415,7 +414,6 @@ const PROMPT_POOL: [&str; 30] = [
     "from typing import List, Tuple\n\ndef sum_product(numbers: List[int]) -> Tuple[int, int]:\n    \"\"\"Return a tuple consisting of the sum and the product of all integers in the input list. An empty list must yield a sum of zero and a product of one, matching the standard neutral elements. \"\"\"\n",
     // 19: rolling_max
     "from typing import List\n\ndef rolling_max(numbers: List[int]) -> List[int]:\n    \"\"\"Return a list of rolling maxima ending at each prefix of the input sequence. The i-th element of the output is the maximum of all input numbers from index zero through index i inclusive. \"\"\"\n",
-
     // === 20-29: C4-style natural English text fragments ===
     // 20: weather forecast
     "The forecast for next Tuesday calls for widespread thunderstorms across the central plains, with scattered severe cells developing through the late afternoon. Meteorologists have already raised the flood watch for several counties along the river corridor. Local emergency coordinators are urging residents near low-lying creeks to prepare sandbags and monitor updated guidance from the national weather service. ",
@@ -930,6 +928,7 @@ fn read_spec_method_from_env() -> SpecMethod {
 }
 
 const BENCH_MTP_MAX_PROMPT_TOKENS: usize = 128;
+const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS: usize = 1024;
 const BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS: usize = 32;
 
 fn bench_force_raw_mtp() -> bool {
@@ -940,8 +939,10 @@ fn bench_force_raw_mtp() -> bool {
 }
 
 /// Resolve the benchmark arm the same way the server resolves desktop
-/// requests. Native MTP is only the short greedy no-LoRA path; long greedy
-/// desktop-default requests fall back to skip-layer instead of timing raw MTP.
+/// requests. Native MTP is only the short greedy no-LoRA path; medium prompts
+/// stay off because skip-layer regresses there on Apple Silicon, and only
+/// genuinely long greedy requests fall back to skip-layer instead of timing
+/// raw MTP.
 fn resolve_bench_spec_method(
     configured: SpecMethod,
     requested_prompt_tokens: usize,
@@ -978,7 +979,7 @@ fn resolve_bench_spec_method_with_force(
             if mtp_supported && greedy && requested_prompt_tokens <= BENCH_MTP_MAX_PROMPT_TOKENS {
                 SpecMethod::Mtp
             } else if greedy
-                && requested_prompt_tokens > BENCH_MTP_MAX_PROMPT_TOKENS
+                && requested_prompt_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS
                 && max_output_tokens >= BENCH_LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS
             {
                 SpecMethod::SkipLayer
@@ -1004,7 +1005,14 @@ mod tests {
     #[test]
     fn bench_mtp_long_greedy_prompt_falls_back_to_skip_layer() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.0, true, false),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
+                64,
+                0.0,
+                true,
+                false
+            ),
             SpecMethod::SkipLayer
         );
     }
@@ -1012,11 +1020,33 @@ mod tests {
     #[test]
     fn bench_mtp_long_short_output_or_sampled_prompt_turns_off() {
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 31, 0.0, true, false),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
+                31,
+                0.0,
+                true,
+                false
+            ),
             SpecMethod::Off
         );
         assert_eq!(
-            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 8192, 64, 0.7, true, false),
+            resolve_bench_spec_method_with_force(
+                SpecMethod::Mtp,
+                BENCH_LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS,
+                64,
+                0.7,
+                true,
+                false
+            ),
+            SpecMethod::Off
+        );
+    }
+
+    #[test]
+    fn bench_mtp_medium_prompt_stays_off_until_skip_layer_crossover() {
+        assert_eq!(
+            resolve_bench_spec_method_with_force(SpecMethod::Mtp, 512, 64, 0.0, true, false),
             SpecMethod::Off
         );
     }
@@ -1977,9 +2007,7 @@ fn main() -> Result<()> {
     let model_weights = kiln_model::load_model_with_options(
         model_path,
         &model_config,
-        kiln_model::LoadModelOptions {
-            load_mtp: matches!(spec_method, SpecMethod::Mtp),
-        },
+        kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("failed to load model weights")?;
 

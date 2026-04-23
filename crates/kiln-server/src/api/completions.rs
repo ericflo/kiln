@@ -149,6 +149,7 @@ enum ResolvedSpeculativeMode {
 }
 
 const MTP_MAX_PROMPT_TOKENS_DEFAULT: usize = 128;
+const LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT: usize = 1024;
 const LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT: usize = 32;
 
 fn resolve_skip_layer_config(
@@ -186,7 +187,7 @@ fn resolve_speculative_mode_from_config(
             {
                 ResolvedSpeculativeMode::Mtp
             } else if greedy_without_lora
-                && prompt_tokens > MTP_MAX_PROMPT_TOKENS_DEFAULT
+                && prompt_tokens >= LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT
                 && sampling.max_tokens >= LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT
             {
                 skip_layer
@@ -1052,11 +1053,21 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &make_sampling(0.0),
-            MTP_MAX_PROMPT_TOKENS_DEFAULT + 1,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
             true,
             false,
         );
         assert!(matches!(long_prompt, ResolvedSpeculativeMode::SkipLayer(_)));
+
+        let medium_prompt = resolve_speculative_mode_from_config(
+            &ModelConfig::qwen3_5_4b(),
+            &cfg,
+            &make_sampling(0.0),
+            512,
+            true,
+            false,
+        );
+        assert!(matches!(medium_prompt, ResolvedSpeculativeMode::Off));
 
         let mut short_output_sampling = make_sampling(0.0);
         short_output_sampling.max_tokens = LONG_PROMPT_SKIP_LAYER_MIN_OUTPUT_TOKENS_DEFAULT - 1;
@@ -1064,7 +1075,7 @@ mod tests {
             &ModelConfig::qwen3_5_4b(),
             &cfg,
             &short_output_sampling,
-            MTP_MAX_PROMPT_TOKENS_DEFAULT + 1,
+            LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_DEFAULT,
             true,
             false,
         );

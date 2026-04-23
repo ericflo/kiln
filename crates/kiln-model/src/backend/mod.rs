@@ -54,6 +54,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_paged_kv_head_major_read_append_token_major(&self) -> bool {
+        false
+    }
+
     fn supports_gdn_forward_substitution(&self) -> bool {
         false
     }
@@ -155,6 +159,25 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _v_pool: &Tensor,
         _start_slot: usize,
         _seq_len: usize,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        Ok(None)
+    }
+
+    /// Materialize a contiguous head-major K/V view from a contiguous paged
+    /// cache slot run, then append a contiguous token-major tail directly into
+    /// the same output buffer.
+    ///
+    /// `k_pool`/`v_pool`: `[total_slots, num_kv_heads, head_dim]`.
+    /// `k_tail`/`v_tail`: `[1, tail_len, num_kv_heads, head_dim]`.
+    /// Returns `[1, num_kv_heads, prefix_len + tail_len, head_dim]` tensors.
+    fn paged_kv_head_major_read_append_token_major(
+        &self,
+        _k_pool: &Tensor,
+        _v_pool: &Tensor,
+        _start_slot: usize,
+        _prefix_len: usize,
+        _k_tail: &Tensor,
+        _v_tail: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
         Ok(None)
     }
