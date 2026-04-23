@@ -2478,27 +2478,7 @@ pub fn gated_deltanet_forward(
         (q, k, v, z)
     };
 
-    // --- Step 4: GQA head repeat (nk → nv) ---
-    let (q, k) = {
-        kiln_nvtx::range!(c"kiln/gdn/head_expand");
-        if gqa_ratio > 1 {
-            let q = q
-                .unsqueeze(3)?
-                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                .contiguous()?
-                .reshape((batch, seq_len, nv, dk))?;
-            let k = k
-                .unsqueeze(3)?
-                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                .contiguous()?
-                .reshape((batch, seq_len, nv, dk))?;
-            (q, k)
-        } else {
-            (q.contiguous()?, k.contiguous()?)
-        }
-    };
-
-    // --- Step 5: L2 normalize Q, K; scale Q by 1/sqrt(dk) ---
+    // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
     //
     // Fast paths: Metal defaults to a fused F32->BF16 kernel for the desktop
     // hot path, and CUDA keeps its opt-in `kiln_rmsnorm_kernel::fused_l2_qk_norm`.
@@ -2523,10 +2503,69 @@ pub fn gated_deltanet_forward(
     // path skips the F32 round-trip through HBM. The candle path is the
     // parity oracle exercised by `kiln-rmsnorm-kernel`'s
     // `parity_l2_qk_norm_*` tests.
+    let scale = 1.0 / (dk as f64).sqrt();
     let (q, k) = {
-        kiln_nvtx::range!(c"kiln/gdn/qk_norm");
-        let scale = 1.0 / (dk as f64).sqrt();
-        gdn_qk_norm(&q, &k, input_dtype, scale)?
+        #[cfg(feature = "metal")]
+        {
+            if input_dtype == DType::BF16
+                && gqa_ratio > 1
+                && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
+            {
+                kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
+                crate::backend::metal::metal_gdn_qk_norm_gqa_f32_bf16(
+                    &q,
+                    &k,
+                    nv,
+                    scale as f32,
+                    1e-6,
+                )
+                .context("metal gdn qk_norm gqa kernel failed")?
+            } else {
+                let (q, k) = {
+                    kiln_nvtx::range!(c"kiln/gdn/head_expand");
+                    if gqa_ratio > 1 {
+                        let q = q
+                            .unsqueeze(3)?
+                            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                            .contiguous()?
+                            .reshape((batch, seq_len, nv, dk))?;
+                        let k = k
+                            .unsqueeze(3)?
+                            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                            .contiguous()?
+                            .reshape((batch, seq_len, nv, dk))?;
+                        (q, k)
+                    } else {
+                        (q.contiguous()?, k.contiguous()?)
+                    }
+                };
+                kiln_nvtx::range!(c"kiln/gdn/qk_norm");
+                gdn_qk_norm(&q, &k, input_dtype, scale)?
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            let (q, k) = {
+                kiln_nvtx::range!(c"kiln/gdn/head_expand");
+                if gqa_ratio > 1 {
+                    let q = q
+                        .unsqueeze(3)?
+                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                        .contiguous()?
+                        .reshape((batch, seq_len, nv, dk))?;
+                    let k = k
+                        .unsqueeze(3)?
+                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                        .contiguous()?
+                        .reshape((batch, seq_len, nv, dk))?;
+                    (q, k)
+                } else {
+                    (q.contiguous()?, k.contiguous()?)
+                }
+            };
+            kiln_nvtx::range!(c"kiln/gdn/qk_norm");
+            gdn_qk_norm(&q, &k, input_dtype, scale)?
+        }
     };
 
     // Phase B11b taps: `gdn_qk_norm_q` / `gdn_qk_norm_k`. Both are post-L2
