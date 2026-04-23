@@ -6575,3 +6575,154 @@ Evidence:
 
 - `profiling-artifacts/post431_c45_20260423_local_validation.txt`
 - `profiling-artifacts/post431_c45_20260423_runpod_blocker.txt`
+
+## Phase C45 post-#432 healthy-RunPod rerun (2026-04-23)
+
+Goal: rerun the already-merged C45 tap contract on the first healthy
+on-demand RunPod pod and capture the earliest shared bad C45 tap on current
+`origin/main`.
+
+Remaining-work preflight:
+
+- PR #432 was present on `origin/main` (`5574aed`, merged 2026-04-23 14:34 UTC)
+- no newer open or merged kiln PR had already recorded a successful post-#432
+  C45 rerun or an earlier shared-bad C45 boundary
+- no separate pending/running kiln task overlapped this exact post-#432 rerun
+
+RunPod outcome:
+
+- `NVIDIA RTX A6000` launch failed immediately with `SUPPLY_CONSTRAINT`
+- the next allowed GPU, on-demand `NVIDIA A40`, reached SSH and completed the
+  rerun on `ghcr.io/ericflo/kiln-runpod:latest`
+- hardware used for the final verdict: `NVIDIA A40` (46068 MB VRAM reported by
+  `nvidia-smi`)
+
+Validation completed on pod:
+
+- `cargo build --release --features cuda --bin kiln-bench`
+- `cargo test --locked -p kiln-model c45 -- --nocapture`
+- `python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py`
+
+All three passed on the A40 pod.
+
+Actual rerun commands:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+
+hf download Qwen/Qwen3.5-4B --local-dir /workspace/qwen3.5-4b
+python3 -m pip install transformers sentencepiece
+
+KILN_W4A16=1 \
+KILN_CUDA_GRAPHS=true \
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_SPLICE=1 \
+KILN_MTP_DUMP_SPLICE_POS=0,2 \
+KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+KILN_MTP_DUMP_PATH=profiling-artifacts/post432_c45_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+  --seed 0 \
+  > profiling-artifacts/post432_c45_seed0.bench.json \
+  2> profiling-artifacts/post432_c45_seed0.bench.stderr
+
+KILN_W4A16=1 \
+KILN_CUDA_GRAPHS=true \
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_SPLICE=1 \
+KILN_MTP_DUMP_SPLICE_POS=0,2 \
+KILN_MTP_DUMP_SPLICE_MAX_STEPS=8 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_EARLY_HMAIN_SWEEP=1 \
+KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+KILN_MTP_DUMP_PATH=profiling-artifacts/post432_c45_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training \
+  --seed 1 \
+  > profiling-artifacts/post432_c45_seed1.bench.json \
+  2> profiling-artifacts/post432_c45_seed1.bench.stderr
+```
+
+Representative compare inputs:
+
+- seed 0 kiln dump: `profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors`
+- seed 1 kiln dump: `profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors`
+
+Reference + compare:
+
+```bash
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors \
+  --out profiling-artifacts/post432_c45_seed0_ref.safetensors \
+  --device cuda \
+  --c45-taps
+
+python3 scripts/mtp_compare.py --c45 \
+  --kiln profiling-artifacts/post432_c45_seed0_captures/mtp_pos-0/step-1.safetensors \
+  --ref profiling-artifacts/post432_c45_seed0_ref.safetensors \
+  > profiling-artifacts/post432_c45_seed0_compare.txt
+
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors \
+  --out profiling-artifacts/post432_c45_seed1_ref.safetensors \
+  --device cuda \
+  --c45-taps
+
+python3 scripts/mtp_compare.py --c45 \
+  --kiln profiling-artifacts/post432_c45_seed1_captures/mtp_pos-2/step-1.safetensors \
+  --ref profiling-artifacts/post432_c45_seed1_ref.safetensors \
+  > profiling-artifacts/post432_c45_seed1_compare.txt
+```
+
+Fresh workload check:
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 384.8 | 36.8 | 0.740 |
+| 1 | 508 | 393.4 | 24.2 | 0.296 |
+
+Verdict:
+
+- seed 0 compare: earliest shared bad tap =
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- seed 1 compare: earliest shared bad tap =
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- the last shared-good C45 tap on both seeds is
+  `layer_1_input_norm_rms_inv_scalar`
+
+So the post-#432 rerun localizes the first shared layer-1 row-normalization
+drift one step earlier than C44:
+
+- `layer_1_residual_input_f32_row_values` remains shared-good
+- `layer_1_input_norm_rms_inv_scalar` remains shared-good
+- `layer_1_input_norm_pre_weight_row_scalar_values` is the earliest shared-bad
+  C45 tap
+- `layer_1_input_norm_pre_weight_row_reconstructed` also diverges, but only
+  after the scalar-value tap is already bad
+
+Recommendation:
+
+- do not widen to C46 or expand the tap contract
+- focus the next audit inside the row-local scalar multiply that produces
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- treat row selection and the row-local `rms_inv` scalar as provisionally
+  cleared on current main
+
+Evidence:
+
+- `profiling-artifacts/post432_c45_seed0.bench.json`
+- `profiling-artifacts/post432_c45_seed0.bench.stderr`
+- `profiling-artifacts/post432_c45_seed1.bench.json`
+- `profiling-artifacts/post432_c45_seed1.bench.stderr`
+- `profiling-artifacts/post432_c45_seed0_compare.txt`
+- `profiling-artifacts/post432_c45_seed1_compare.txt`
