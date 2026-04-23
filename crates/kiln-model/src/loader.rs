@@ -1726,6 +1726,31 @@ mod tests {
     }
 
     #[test]
+    fn test_gpu_weights_defer_mtp_upload_until_first_use() {
+        let config = tiny_model_config();
+        let weights = load_tiny_with_mtp("model.language_model.", "mtp.", "norm");
+        let device = candle_core::Device::Cpu;
+        let gpu_weights =
+            crate::forward::GpuWeights::from_model_weights(&weights, &config, &device).unwrap();
+
+        let slot = gpu_weights
+            .mtp
+            .as_ref()
+            .expect("GPU weights should expose MTP support");
+        assert!(
+            !slot.is_uploaded(),
+            "MTP tensors should not upload during base model load"
+        );
+
+        let mtp = gpu_weights.mtp_weights().unwrap();
+        assert_eq!(mtp.final_layernorm.dims1().unwrap(), 64);
+        assert!(
+            gpu_weights.mtp.as_ref().unwrap().is_uploaded(),
+            "first native-MTP access should materialize the GPU tensors"
+        );
+    }
+
+    #[test]
     fn test_load_without_mtp_leaves_none() {
         // Base checkpoint without MTP should leave mtp = None and load fine.
         let tensors = tiny_model_tensors("model.language_model.");

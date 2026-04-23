@@ -34,6 +34,7 @@ impl fmt::Display for TensorDType {
 }
 
 /// Backing storage for loaded tensor bytes.
+#[derive(Clone)]
 pub enum WeightData {
     /// Owned bytes, used by generated/dequantized tensors and tests.
     Owned(Vec<u8>),
@@ -107,6 +108,7 @@ pub struct WeightSource {
 ///
 /// This is a CPU-side representation. The forward pass will convert these
 /// to GPU tensors (candle Tensor or raw CUDA buffers).
+#[derive(Clone)]
 pub struct WeightTensor {
     pub data: WeightData,
     pub shape: Vec<usize>,
@@ -145,7 +147,7 @@ impl fmt::Debug for WeightTensor {
 }
 
 /// Token embedding weights.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EmbeddingWeights {
     /// [vocab_size, hidden_size]
     pub embed_tokens: WeightTensor,
@@ -155,7 +157,7 @@ pub struct EmbeddingWeights {
 ///
 /// These layers use FlashAttention with KV cache and RoPE.
 /// Every 4th layer in Qwen3.5-4B (indices 3, 7, 11, ..., 31).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FullAttentionWeights {
     /// [num_heads * head_dim, hidden_size]
     pub q_proj: WeightTensor,
@@ -176,7 +178,7 @@ pub struct FullAttentionWeights {
 ///
 /// These layers use O(1) recurrent state instead of KV cache.
 /// 24 out of 32 layers in Qwen3.5-4B use this mechanism.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LinearAttentionWeights {
     /// Fused QKV projection. [3 * num_heads * head_dim, hidden_size]
     pub in_proj_qkv: WeightTensor,
@@ -199,14 +201,14 @@ pub struct LinearAttentionWeights {
 }
 
 /// Attention weights — either full GQA or linear (Gated DeltaNet).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AttentionWeights {
     Full(FullAttentionWeights),
     Linear(LinearAttentionWeights),
 }
 
 /// SwiGLU feed-forward network weights (shared across all layer types).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FfnWeights {
     /// [intermediate_size, hidden_size]
     pub gate_proj: WeightTensor,
@@ -217,7 +219,7 @@ pub struct FfnWeights {
 }
 
 /// One transformer layer's complete weights.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LayerWeights {
     /// RMSNorm before attention. [hidden_size]
     pub input_layernorm: WeightTensor,
@@ -243,7 +245,7 @@ pub struct LayerWeights {
 /// `lm_head` is tied to the base model's `embed_tokens`, so we do NOT
 /// store a separate `lm_head` tensor — the spec-decode forward path
 /// reuses `GpuWeights::embed_tokens_t`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MtpWeights {
     /// Concat-then-project: `[hidden_size, 2 * hidden_size]`.
     /// Ingests `concat(norm_embed, norm_hidden)` and produces `[seq, hidden_size]`.
