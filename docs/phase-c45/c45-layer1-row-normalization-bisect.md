@@ -97,3 +97,21 @@ Recovered seed metrics from the final artifact-producing pod:
 - `profiling-artifacts/post435_c45_row_scalar_seed1.bench.stderr`
 - `profiling-artifacts/post435_c45_row_scalar_seed0_compare.txt`
 - `profiling-artifacts/post435_c45_row_scalar_seed1_compare.txt`
+
+## 2026-04-23 broadcast-mul parity rerun
+
+After aligning the C45 replay helper with the production last-row
+`broadcast_mul` shape path in `forward.rs`, a fresh A6000 rerun on current
+`main` still confirms the same boundary on the representative two-seed check:
+
+- seed 0 (`profiling-artifacts/c45_broadcast_parity_seed0_compare.txt`):
+  earliest shared bad tap remains
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+- seed 1 (`profiling-artifacts/c45_broadcast_parity_seed1_compare.txt`):
+  earliest shared bad tap remains
+  `layer_1_input_norm_pre_weight_row_scalar_values`
+
+So production-op parity for the replay path does **not** move the first-bad
+boundary past the row-local scalar multiply on current `main`; C45 remains
+localized to the multiply itself, and this task stops here without widening the
+tap contract.
