@@ -1,0 +1,3 @@
+attempt,graphs_setting,nsys_args,bench_prefill_ms,bench_prefill_tok_s,artifact,error_status,error_excerpt
+post401-main-control,true,"",3272.444408,2499.660492,not-run,control_only,"Fresh-main same-pod control on the A6000 before deciding whether to keep the kernel change"
+post401-shared-kt-row,true,"",4703.982696,1738.951975,not-run,capture_skipped_after_regression,"Skipped Nsight capture after same-pod control showed the branch regressed badly enough to require immediate revert"
