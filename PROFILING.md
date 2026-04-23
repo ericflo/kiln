@@ -428,6 +428,64 @@ full-attention decode backend.
 **Validation:** no pod launched; no CUDA files changed; no build or benchmark
 commands run because this is a docs-only redirect on current-main evidence.
 
+## Phase C39 post-#423 replay-context fix + fresh seed bisect (2026-04-23)
+
+**Scope:** extend the B10/B11/B12 dump contract so every splice row carries
+the fully conditioned replay sequence, rerun the standard native-MTP seed-0 /
+seed-1 workload on fresh `main` after PR #423, and re-run the matched HF
+reference / comparator path on the updated artifacts.
+
+**Preflight outcome:** proceed. Fresh `origin/main` was `61badb6`
+(PR #423), and current `main` did **not** already serialize enough token
+context for later splice rows. An initial rerun on the unchanged bench path
+still logged `replay_tokens_len=1` / `2` after step 0, proving the missing
+context was still present outside the kiln-model generation loop.
+
+**Code path fixed:** the replay-prefix plumbing now covers both the
+kiln-model native-MTP generation loops and the `kiln-bench` native-MTP bench
+loop. Fresh rerun logs on a supported A40 show the intended full-sequence
+contract:
+
+- seed 0: `step-1 replay_tokens_len=495`, `step-2=496`, `mtp_pos=2 step-0=502`
+- seed 1: `step-1 replay_tokens_len=509`, `step-7=515`, `mtp_pos=2 step-0=520`
+
+Those rows previously carried only the current 1-token / 2-token slice.
+
+**Fresh workload check (standard native-MTP path):**
+
+| Seed | prompt tokens | prefill ms | decode tok/s | α |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 494 | 8734.0 | 36.13 | 0.7162 |
+| 1 | 508 | 452.6 | 22.92 | 0.2828 |
+
+So the seed split still reproduces on fresh `main`; C39 only changes the
+replay contract, not the underlying acceptance behavior.
+
+**Source-of-truth artifacts:** the refreshed comparator outputs are:
+
+- `profiling-artifacts/post423_20260423_seed0_compare_bf16.txt`
+- `profiling-artifacts/post423_20260423_seed0_compare_fp32.txt`
+- `profiling-artifacts/post423_20260423_seed1_compare_bf16.txt`
+- `profiling-artifacts/post423_20260423_seed1_compare_fp32.txt`
+
+Across both bf16 and fp32 HF references, the seed-0 and seed-1 verdicts are
+the same:
+
+- B10: first diverging tap is `h_layer_8` (`h_layer_0` still matches), verdict
+  `DIVERGENCE IN EARLY GDN STACK`
+- B11: `ALL layer-0 GDN sub-ops match within cos_sim >= 0.95`
+- B12: first below-bar late-stack layer is `h_layer_24`, verdict
+  `DRIFT FIRST APPEARS AT 'h_layer_24' (not layer 31)`
+
+**Verdict:** the replay-contract blocker from C38 is fixed, but the refreshed
+post-#423 artifact still does **not** expose a seed1-only first boundary or
+sub-op. With fully conditioned HF replays, both the control and failing seeds
+land the same first boundary verdict (`h_layer_8`) and the same later-stack
+drift verdict (`h_layer_24`). The honest next recommendation is **not** a
+seed1-only fix from this artifact; it is a narrower bisect inside the early
+GDN span between `h_layer_0` and `h_layer_8`, because that is now the first
+shared bad boundary on both seeds.
+
 ## Phase 6 post-#392 current-main re-profile — 2026-04-23
 
 **Scope:** refresh the Phase 6 performance source of truth on fresh `main`
