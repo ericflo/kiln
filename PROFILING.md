@@ -1,5 +1,162 @@
 # Kiln Profiling Report
 
+## Phase 7 post-#521 current-main profile refresh (2026-04-24)
+
+**Scope:** refresh the Phase 7 source of truth after PR
+[#521](https://github.com/ericflo/kiln/pull/521) routed the radix prefix
+cache through the CUDA-graph chat-completion path. PR #521 closes the
+18-PR window of radix-cache, streaming-prefill, Metal-fusion, and codex
+tuning work (PRs #503–#521) since the post-#502 refresh. Artifact-only
+profile PR; no optimization code changed.
+
+**Preflight outcome:** proceed. Fresh `origin/main` is
+`0fda0e667636bd782bb0a29feb06f2ff3d31d917`
+(`Use prefix cache with CUDA graphs (#521)`). `gh pr list -R ericflo/kiln
+--state all --limit 30 | grep -i profil` returned no post-#502
+profile-refresh PR (PR #502 is the most recent profile refresh and predates
+PRs #503–#521).
+
+**Hardware / image:** RunPod on-demand `NVIDIA RTX A6000`, pod
+`mfk88l8i8tab02`, lease `pod-66eb55349e1403350e6c342d`,
+`ghcr.io/ericflo/kiln-runpod:latest`, driver `550.127.08`, CUDA toolkit
+`12.4`, and `KILN_CUDA_ARCHS=86`. The baked `nsys 2023.4.4` was not used
+for stats; `nsight-systems-2024.6.2` was installed from NVIDIA's apt repo
+and `/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys` was used
+for both capture and CSV export (per agent notes
+`kiln-nsys-baked-importer-broken` and `kiln-nsight-profiling-gotchas`).
+
+**Build / profile commands:** see `docs/phase-c64/post-521-profile.md`.
+
+### Decode bench median-of-3 (no profiler)
+
+`KILN_W4A16=1 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench --paged
+--prompt-tokens 512 --max-output-tokens 128 --skip-training
+--prompt-subset humaneval --chat-template --latency-only --temperature
+0.0 --seed 1`. Three back-to-back invocations of the same command with a
+fresh process per run (cold model load each, excluded from latency
+stats).
+
+| Run | Decode tok/s | Mean ITL ms | P50 ITL ms | P99 ITL ms | Prefill ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 45.85 | 21.81 | 21.68 | 25.43 | 9304.9 (cold-start TTFT artifact) |
+| 2 | 46.18 | 21.65 | 21.69 | 26.99 | 353.7 |
+| 3 | 45.71 | 21.88 | 21.87 | 26.36 | 351.7 |
+| **median** | **45.85** | **21.81** | **21.69** | **26.36** | **352.7** (warm, runs 2–3 mean) |
+
+Run 1's prefill is the documented cold-start TTFT artifact (agent notes
+`kiln-bench-prefill-warmup-required`,
+`rope-inv-freq-cold-start-ttft`) — one-time HtoD allocations like
+`RoPE inv_freq` plus CUDA graph capture. Decode tok/s and ITL are stable
+across all three runs.
+
+### Decode regression vs Phase 6 post-#166 closing baseline
+
+The closing Phase 6 baseline (PROFILING.md, post-#166 around line 3225)
+is **49.76 tok/s decode, 20.10 ms mean ITL, 25.46 ms p99 ITL** for the
+same 512×128 paged decode shape with `KILN_W4A16=1` and CUDA graphs ON.
+The post-#521 median is **45.85 tok/s, 21.81 ms mean ITL, 26.36 ms p99
+ITL** — a **−7.9 %** decode tok/s regression and **+8.5 %** mean ITL
+regression versus the documented Phase 7 starting baseline.
+
+The post-#166 baseline section did not record its prompt subset, so the
+gap could include prompt-content delta (this run pinned humaneval to
+match recent post-#481 / post-#500 / post-#502 profiles). But the gap is
+large enough that prompt content alone is unlikely to fully explain it.
+The post-#166 section explicitly states *"any Phase 7 work that
+unintentionally regresses decode tok/s below this median should be
+flagged"* — flagging here.
+
+### Decode top NVTX ranges
+
+Source: `docs/phase-c64/post521_decode_nvtx_pushpop_sum.csv`. Capture
+shape: 1 paged prefill (494 prompt tokens) + 128 paged decode steps; the
+prefill `:kiln/attn/full/prefill_initial` range is only **0.8 %** of
+total wall-clock, so this ranking is decode-dominated.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/gates` | **14.5%** |
+| 2 | `:kiln/gdn/gated_norm` | **13.9%** |
+| 3 | `:kiln/gdn/qk_norm` | **11.9%** |
+| 4 | `:kiln/gdn/in_proj` | **9.5%** |
+| 5 | `:kiln/attn/rope` | **8.3%** |
+| 6 | `:kiln/mlp/gate` | **5.0%** |
+| 7 | `:kiln/mlp/up` | **5.0%** |
+| 8 | `:kiln/mlp/down` | **4.7%** |
+| 9 | `:kiln/attn/full/decode_fused` | **3.8%** |
+| 10 | `:kiln/gdn/head_expand` | **2.9%** |
+
+### Decode top CUDA kernels
+
+Source: `docs/phase-c64/post521_decode_cuda_gpu_kern_sum.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `ucopy_bf16` | **15.9%** |
+| 2 | `Marlin<(256,1,8,8,4,8)>` (W4A16 decode) | **13.3%** |
+| 3 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8` (single big prefill GEMM) | **10.9%** |
+| 4 | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn` | **9.0%** |
+| 5 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8` | **8.4%** |
+| 6 | `ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn` | **4.9%** |
+| 7 | `bmul_f32` | **2.9%** |
+| 8 | `cast_bf16_f32` | **2.8%** |
+| 9 | `gdn_full_chunk_forward_kernel` (vendored GDN, PR #80) | **2.8%** |
+| 10 | `fused_rmsnorm_kernel` | **2.6%** |
+
+### Region shifts vs post-#481 plain decode trace
+
+The closest like-for-like prior trace is the post-#481 "plain decode"
+nsys profile (also 512 prompt × 128 decode under nsys, same paged config)
+documented above in PROFILING.md.
+
+| NVTX range | post-#481 | post-#521 | Δ pp |
+| --- | ---: | ---: | ---: |
+| `:kiln/gdn/qk_norm` | 24.4% | 11.9% | −12.5 |
+| `:kiln/gdn/gates` | 12.0% | 14.5% | +2.5 |
+| `:kiln/gdn/gated_norm` | 11.2% | 13.9% | +2.7 |
+
+The `qk_norm` collapse is the documented effect of PR #486
+default-on fused QK norm. The relative growth of `gates` / `gated_norm`
+is a redistribution effect from `qk_norm` shrinking; their absolute
+ms/region budgets are essentially unchanged. `ucopy_bf16` GPU-kernel
+share is also essentially unchanged (15.4 % → 15.9 %).
+
+### Implications for the next optimization
+
+- **Investigate the −7.9 % decode tok/s regression versus the post-#166
+  baseline before queueing any new kernel-fusion work.** The most
+  parsimonious culprit is the radix-prefix-cache lookup/registration
+  hooks now active on every CUDA-graph chat-completion request (PRs
+  #515 / #520 / #521). The next planning cycle should A/B
+  `KILN_PREFIX_CACHE_ENABLED=0` vs `=1` on the same paged decode-only
+  shape used here to isolate prefix-cache overhead from any other
+  regression source. If the A/B reproduces the gap, the fast path is to
+  short-circuit the lookup when no prior session is cached.
+- **Do not re-queue another GDN gates / gated_norm fusion attempt on
+  this evidence alone.** Their rebound to top-of-table is a relative
+  effect from the `qk_norm` win, not new HBM traffic. PR #173 closed
+  null on `gates` fusion; PR #176 closed null on the
+  `gates + gated_norm + recurrent` big-fusion ($14.99 burn). Any new
+  fusion task here needs sub-range NVTX evidence that the work it would
+  fuse is real HBM traffic and not launch-dispatch cost that CUDA graph
+  replay already amortizes (`kiln-cuda-graph-dispatch-amortization`).
+- **`ucopy_bf16` remains the dominant GPU-kernel hotspot at 15.9 %** but
+  per agent note `kiln-ucopy-bf16-exhausted` (post-#219, 2026-04-20) the
+  remaining un-attempted sites combined yield ≤ 0.080 speedup at 1.5×
+  local and the work is not green-lit. Phase 7's productive next axis is
+  the prefix-cache regression A/B above, KV cache FP8
+  (`KILN_KV_CACHE_FP8=1`) for context capability, and / or self-spec
+  end-to-end benching — not another `ucopy_bf16` audit.
+
+Committed artifacts: `docs/phase-c64/post-521-profile.md`,
+`docs/phase-c64/post521_decode_nvtx_pushpop_sum.csv`,
+`docs/phase-c64/post521_decode_cuda_gpu_kern_sum.csv`,
+`docs/phase-c64/post521_decode_nvtx_kern_sum.csv`. The full
+`post521_decode.nsys-rep` (110 MB) is not committed because it exceeds
+the in-repo artifact-size convention; it remains at
+`/tmp/kiln-post521/post521_decode.nsys-rep` for the lifetime of pod
+`mfk88l8i8tab02` (lease `pod-66eb55349e1403350e6c342d`).
+
 ## Phase 7 real prefix-cache reuse A/B (2026-04-24)
 
 **Scope:** verify that the real-backend append-prefix cache from PR #515 skips shared prompt prefill and improves repeat/shared-prefix latency on GPU.
