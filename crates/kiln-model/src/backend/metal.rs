@@ -27,9 +27,38 @@ const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_F
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV: &str = "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV";
-const METAL_TRANSPOSED_COOP_GEMV_TILE_COLS: usize = 4;
+const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
+    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
+const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
+const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
 const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 4;
 const METAL_TRANSPOSED_COOP_GEMV_THREADS: usize = 32 * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MetalTransposedCoopGemvTile {
+    Tile4,
+    Tile8,
+}
+
+impl MetalTransposedCoopGemvTile {
+    fn function_name(self) -> &'static str {
+        match self {
+            Self::Tile4 => "kiln_transposed_coop_gemv4_bf16",
+            Self::Tile8 => "kiln_transposed_coop_gemv8_bf16",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        self.function_name()
+    }
+
+    fn tile_cols(self) -> usize {
+        match self {
+            Self::Tile4 => METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS,
+            Self::Tile8 => METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct MetalBackend {
@@ -110,7 +139,11 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
         metal_mlp_gate_up_pipeline(metal_device)?;
     }
     if !metal_transposed_coop_gemv_disabled() {
-        metal_transposed_coop_gemv_pipeline(metal_device)?;
+        let default_tile = metal_transposed_coop_gemv_default_tile();
+        metal_transposed_coop_gemv_pipeline(metal_device, default_tile)?;
+        if default_tile != MetalTransposedCoopGemvTile::Tile4 {
+            metal_transposed_coop_gemv_pipeline(metal_device, MetalTransposedCoopGemvTile::Tile4)?;
+        }
     }
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
     metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
@@ -617,6 +650,18 @@ pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
 
 pub(crate) fn metal_transposed_coop_gemv_disabled() -> bool {
     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV)
+}
+
+fn metal_transposed_coop_gemv_tile8_disabled() -> bool {
+    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8)
+}
+
+fn metal_transposed_coop_gemv_default_tile() -> MetalTransposedCoopGemvTile {
+    if metal_transposed_coop_gemv_tile8_disabled() {
+        MetalTransposedCoopGemvTile::Tile4
+    } else {
+        MetalTransposedCoopGemvTile::Tile8
+    }
 }
 
 fn env_present(var: &str) -> bool {
@@ -1653,11 +1698,12 @@ kernel void kiln_transposed_coop_gemv4_bf16(
     float acc2 = 0.0f;
     float acc3 = 0.0f;
     const bool full_tile = col_base + 3 < output_dim;
+    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
 
     for (uint row = lane; row < input_dim; row += 32) {
         const float xv = static_cast<float>(x[row]);
         const uint weight_base = row * output_dim + col_base;
-        if (full_tile) {
+        if (vector_load_safe) {
             device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
             const bfloat4 w = *w4_ptr;
             acc0 += xv * static_cast<float>(w[0]);
@@ -1671,6 +1717,9 @@ kernel void kiln_transposed_coop_gemv4_bf16(
             }
             if (col_base + 2 < output_dim) {
                 acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+            }
+            if (col_base + 3 < output_dim) {
+                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
             }
         }
     }
@@ -1690,6 +1739,108 @@ kernel void kiln_transposed_coop_gemv4_bf16(
         }
         if (col_base + 3 < output_dim) {
             out[col_base + 3] = static_cast<bfloat>(acc3);
+        }
+    }
+}
+
+kernel void kiln_transposed_coop_gemv8_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& input_dim [[buffer(3)]],
+    constant uint& output_dim [[buffer(4)]],
+    uint tgroup [[threadgroup_position_in_grid]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint col_base = (tgroup * 4 + simd_group) * 8;
+    if (col_base >= output_dim) {
+        return;
+    }
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    const bool full_tile = col_base + 7 < output_dim;
+    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
+
+    for (uint row = lane; row < input_dim; row += 32) {
+        const float xv = static_cast<float>(x[row]);
+        const uint weight_base = row * output_dim + col_base;
+        if (vector_load_safe) {
+            device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+            const bfloat4 w0 = w4_ptr[0];
+            const bfloat4 w1 = w4_ptr[1];
+            acc0 += xv * static_cast<float>(w0[0]);
+            acc1 += xv * static_cast<float>(w0[1]);
+            acc2 += xv * static_cast<float>(w0[2]);
+            acc3 += xv * static_cast<float>(w0[3]);
+            acc4 += xv * static_cast<float>(w1[0]);
+            acc5 += xv * static_cast<float>(w1[1]);
+            acc6 += xv * static_cast<float>(w1[2]);
+            acc7 += xv * static_cast<float>(w1[3]);
+        } else {
+            acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
+            if (col_base + 1 < output_dim) {
+                acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
+            }
+            if (col_base + 2 < output_dim) {
+                acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+            }
+            if (col_base + 3 < output_dim) {
+                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
+            }
+            if (col_base + 4 < output_dim) {
+                acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
+            }
+            if (col_base + 5 < output_dim) {
+                acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
+            }
+            if (col_base + 6 < output_dim) {
+                acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
+            }
+            if (col_base + 7 < output_dim) {
+                acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
+            }
+        }
+    }
+
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    acc4 = simd_sum(acc4);
+    acc5 = simd_sum(acc5);
+    acc6 = simd_sum(acc6);
+    acc7 = simd_sum(acc7);
+
+    if (lane == 0) {
+        out[col_base + 0] = static_cast<bfloat>(acc0);
+        if (col_base + 1 < output_dim) {
+            out[col_base + 1] = static_cast<bfloat>(acc1);
+        }
+        if (col_base + 2 < output_dim) {
+            out[col_base + 2] = static_cast<bfloat>(acc2);
+        }
+        if (col_base + 3 < output_dim) {
+            out[col_base + 3] = static_cast<bfloat>(acc3);
+        }
+        if (col_base + 4 < output_dim) {
+            out[col_base + 4] = static_cast<bfloat>(acc4);
+        }
+        if (col_base + 5 < output_dim) {
+            out[col_base + 5] = static_cast<bfloat>(acc5);
+        }
+        if (col_base + 6 < output_dim) {
+            out[col_base + 6] = static_cast<bfloat>(acc6);
+        }
+        if (col_base + 7 < output_dim) {
+            out[col_base + 7] = static_cast<bfloat>(acc7);
         }
     }
 }
@@ -2071,30 +2222,34 @@ fn metal_mlp_gate_up_pipeline(
 
 fn metal_transposed_coop_gemv_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
+    tile: MetalTransposedCoopGemvTile,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
     use candle_core::metal_backend::DeviceId;
     use candle_metal_kernels::metal::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<
+        Mutex<HashMap<(DeviceId, MetalTransposedCoopGemvTile), ComputePipeline>>,
+    > = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal transposed coop GEMV pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    let key = (device.id(), tile);
+    if let Some(pipeline) = cache.get(&key) {
         return Ok(pipeline.clone());
     }
 
     let library = metal_shared_library(device)?;
     let function = library
-        .get_function("kiln_transposed_coop_gemv4_bf16", None)
+        .get_function(tile.function_name(), None)
         .map_err(|e| anyhow::anyhow!("load metal transposed coop GEMV function: {e:?}"))?;
     let pipeline = device
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal transposed coop GEMV pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(key, pipeline.clone());
     Ok(pipeline)
 }
 
@@ -2547,6 +2702,18 @@ pub(crate) fn metal_transposed_coop_gemv_supports(x: &Tensor, weight_t: &Tensor)
 }
 
 pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+    metal_transposed_coop_gemv_bf16_with_tile(
+        x,
+        weight_t,
+        metal_transposed_coop_gemv_default_tile(),
+    )
+}
+
+fn metal_transposed_coop_gemv_bf16_with_tile(
+    x: &Tensor,
+    weight_t: &Tensor,
+    tile: MetalTransposedCoopGemvTile,
+) -> Result<Tensor> {
     anyhow::ensure!(
         metal_transposed_coop_gemv_supports(x, weight_t),
         "metal transposed coop GEMV supports only BF16 [1,1,K] x [K,N] on Metal"
@@ -2560,9 +2727,9 @@ pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal transposed coop GEMV requires Metal tensors");
     };
-    let pipeline = metal_transposed_coop_gemv_pipeline(device)?;
+    let pipeline = metal_transposed_coop_gemv_pipeline(device, tile)?;
     let encoder = device.command_encoder()?;
-    encoder.set_label("kiln_transposed_coop_gemv4_bf16");
+    encoder.set_label(tile.label());
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
@@ -2598,8 +2765,7 @@ pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> 
         encoder.set_bytes(3, &input_dim_u32);
         encoder.set_bytes(4, &output_dim_u32);
 
-        let cols_per_threadgroup =
-            METAL_TRANSPOSED_COOP_GEMV_TILE_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+        let cols_per_threadgroup = tile.tile_cols() * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: output_dim.div_ceil(cols_per_threadgroup),
             height: 1,
@@ -5986,41 +6152,77 @@ mod tests {
 
         assert!(metal_transposed_coop_gemv_supports(&x, &weight_t));
         let reference = x.broadcast_matmul(&weight_t)?;
-        let candidate = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+        let tile4 = metal_transposed_coop_gemv_bf16_with_tile(
+            &x,
+            &weight_t,
+            MetalTransposedCoopGemvTile::Tile4,
+        )?;
+        let tile8 = metal_transposed_coop_gemv_bf16_with_tile(
+            &x,
+            &weight_t,
+            MetalTransposedCoopGemvTile::Tile8,
+        )?;
         device.synchronize()?;
 
         assert_eq!(reference.dims(), &[1usize, 1usize, output_dim]);
-        assert_eq!(candidate.dims(), &[1usize, 1usize, output_dim]);
-        assert_eq!(candidate.dtype(), DType::BF16);
+        assert_eq!(tile4.dims(), &[1usize, 1usize, output_dim]);
+        assert_eq!(tile8.dims(), &[1usize, 1usize, output_dim]);
+        assert_eq!(tile4.dtype(), DType::BF16);
+        assert_eq!(tile8.dtype(), DType::BF16);
 
-        let max = max_abs_diff(&reference, &candidate)?;
-        let mean = mean_abs_diff(&reference, &candidate)?;
+        let tile4_max = max_abs_diff(&reference, &tile4)?;
+        let tile4_mean = mean_abs_diff(&reference, &tile4)?;
+        let tile8_max = max_abs_diff(&reference, &tile8)?;
+        let tile8_mean = mean_abs_diff(&reference, &tile8)?;
         assert!(
-            max < 1.5e-1,
-            "{name} transposed coop GEMV max_abs_diff={max:e} exceeds tolerance"
+            tile4_max < 1.5e-1,
+            "{name} transposed coop GEMV tile4 max_abs_diff={tile4_max:e} exceeds tolerance"
         );
         assert!(
-            mean < 2.5e-2,
-            "{name} transposed coop GEMV mean_abs_diff={mean:e} exceeds tolerance"
+            tile4_mean < 2.5e-2,
+            "{name} transposed coop GEMV tile4 mean_abs_diff={tile4_mean:e} exceeds tolerance"
+        );
+        assert!(
+            tile8_max < 1.5e-1,
+            "{name} transposed coop GEMV tile8 max_abs_diff={tile8_max:e} exceeds tolerance"
+        );
+        assert!(
+            tile8_mean < 2.5e-2,
+            "{name} transposed coop GEMV tile8 mean_abs_diff={tile8_mean:e} exceeds tolerance"
         );
 
         let broadcast_us = bench_metal_tensor_op(device, warmup, iters, || {
             x.broadcast_matmul(&weight_t)
                 .context("bench broadcast_matmul transposed projection")
         })?;
-        let coop_us = bench_metal_tensor_op(device, warmup, iters, || {
-            metal_transposed_coop_gemv_bf16(&x, &weight_t)
-                .context("bench transposed coop GEMV projection")
+        let tile4_us = bench_metal_tensor_op(device, warmup, iters, || {
+            metal_transposed_coop_gemv_bf16_with_tile(
+                &x,
+                &weight_t,
+                MetalTransposedCoopGemvTile::Tile4,
+            )
+            .context("bench transposed coop GEMV tile4 projection")
+        })?;
+        let tile8_us = bench_metal_tensor_op(device, warmup, iters, || {
+            metal_transposed_coop_gemv_bf16_with_tile(
+                &x,
+                &weight_t,
+                MetalTransposedCoopGemvTile::Tile8,
+            )
+            .context("bench transposed coop GEMV tile8 projection")
         })?;
 
         eprintln!(
             "synthetic Metal Qwen3.5 {name} BF16 transposed GEMV: x=[1,1,{input_dim}] \
-             weight_t=[{input_dim},{output_dim}] tile_cols={} simdgroups={} warmup={warmup} \
-             iters={iters} broadcast_matmul={broadcast_us:.3} us transposed_coop_gemv={coop_us:.3} us \
-             speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
-            METAL_TRANSPOSED_COOP_GEMV_TILE_COLS,
+             weight_t=[{input_dim},{output_dim}] simdgroups={} warmup={warmup} iters={iters} \
+             broadcast_matmul={broadcast_us:.3} us tile4={tile4_us:.3} us tile8={tile8_us:.3} us \
+             tile8_vs_tile4={:.3}x tile4_speedup={:.3}x tile8_speedup={:.3}x \
+             tile4_max_abs_diff={tile4_max:.6e} tile4_mean_abs_diff={tile4_mean:.6e} \
+             tile8_max_abs_diff={tile8_max:.6e} tile8_mean_abs_diff={tile8_mean:.6e}",
             METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS,
-            broadcast_us / coop_us
+            tile4_us / tile8_us,
+            broadcast_us / tile4_us,
+            broadcast_us / tile8_us,
         );
 
         Ok(())
@@ -6051,11 +6253,7 @@ mod tests {
                 .map(|idx| {
                     let t = idx / chunk;
                     let i = idx % chunk;
-                    if i < t {
-                        1.0f32
-                    } else {
-                        0.0f32
-                    }
+                    if i < t { 1.0f32 } else { 0.0f32 }
                 })
                 .collect::<Vec<_>>(),
             (chunk, chunk),
@@ -6067,11 +6265,7 @@ mod tests {
                 .map(|idx| {
                     let t = idx / chunk;
                     let i = idx % chunk;
-                    if i <= t {
-                        1.0f32
-                    } else {
-                        0.0f32
-                    }
+                    if i <= t { 1.0f32 } else { 0.0f32 }
                 })
                 .collect::<Vec<_>>(),
             (chunk, chunk),
@@ -6248,23 +6442,66 @@ mod tests {
 
         assert!(metal_transposed_coop_gemv_supports(&x, &weight_t));
         let reference = x.broadcast_matmul(&weight_t)?;
-        let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+        let tile4 = metal_transposed_coop_gemv_bf16_with_tile(
+            &x,
+            &weight_t,
+            MetalTransposedCoopGemvTile::Tile4,
+        )?;
+        let tile8 = metal_transposed_coop_gemv_bf16_with_tile(
+            &x,
+            &weight_t,
+            MetalTransposedCoopGemvTile::Tile8,
+        )?;
 
-        assert_eq!(fused.dims(), &[1usize, 1usize, output_dim]);
-        assert_eq!(fused.dtype(), DType::BF16);
+        assert_eq!(tile4.dims(), &[1usize, 1usize, output_dim]);
+        assert_eq!(tile8.dims(), &[1usize, 1usize, output_dim]);
+        assert_eq!(tile4.dtype(), DType::BF16);
+        assert_eq!(tile8.dtype(), DType::BF16);
 
-        let max = max_abs_diff(&reference, &fused)?;
-        let mean = mean_abs_diff(&reference, &fused)?;
+        let tile4_max = max_abs_diff(&reference, &tile4)?;
+        let tile4_mean = mean_abs_diff(&reference, &tile4)?;
+        let tile8_max = max_abs_diff(&reference, &tile8)?;
+        let tile8_mean = mean_abs_diff(&reference, &tile8)?;
         assert!(
-            max < 2e-2,
-            "Metal transposed coop GEMV max_abs_diff={max:e} exceeds tolerance"
+            tile4_max < 2e-2,
+            "Metal transposed coop GEMV tile4 max_abs_diff={tile4_max:e} exceeds tolerance"
         );
         assert!(
-            mean < 3e-3,
-            "Metal transposed coop GEMV mean_abs_diff={mean:e} exceeds tolerance"
+            tile4_mean < 3e-3,
+            "Metal transposed coop GEMV tile4 mean_abs_diff={tile4_mean:e} exceeds tolerance"
+        );
+        assert!(
+            tile8_max < 2e-2,
+            "Metal transposed coop GEMV tile8 max_abs_diff={tile8_max:e} exceeds tolerance"
+        );
+        assert!(
+            tile8_mean < 3e-3,
+            "Metal transposed coop GEMV tile8 mean_abs_diff={tile8_mean:e} exceeds tolerance"
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_transposed_coop_gemv_tile8_env_falls_back_to_tile4() {
+        unsafe {
+            std::env::remove_var(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8);
+        }
+        assert_eq!(
+            metal_transposed_coop_gemv_default_tile(),
+            MetalTransposedCoopGemvTile::Tile8
+        );
+
+        unsafe {
+            std::env::set_var(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8, "1");
+        }
+        assert_eq!(
+            metal_transposed_coop_gemv_default_tile(),
+            MetalTransposedCoopGemvTile::Tile4
+        );
+        unsafe {
+            std::env::remove_var(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8);
+        }
     }
 
     #[test]
