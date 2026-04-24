@@ -9,12 +9,13 @@ use axum::{
 };
 
 use crate::metrics::SnapshotGauges;
+use kiln_scheduler::PrefixCacheStats;
 use crate::state::{AppState, ModelBackend};
 use kiln_train::TrainingState;
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     // Snapshot scheduler gauges.
-    let (scheduler_waiting, scheduler_running, blocks_used, blocks_total) =
+    let (scheduler_waiting, scheduler_running, blocks_used, blocks_total, prefix_cache) =
         match state.backend.as_ref() {
             ModelBackend::Mock { scheduler, .. } => {
                 let sched = scheduler.lock().await;
@@ -24,11 +25,12 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                     sched.num_running(),
                     bm.num_used(),
                     bm.num_blocks(),
+                    sched.prefix_cache_stats(),
                 )
             }
             ModelBackend::Real { block_manager, .. } => {
                 let bm = block_manager.lock().unwrap();
-                (0, 0, bm.num_used(), bm.num_blocks())
+                (0, 0, bm.num_used(), bm.num_blocks(), PrefixCacheStats::default())
             }
         };
 
@@ -53,6 +55,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         vram_model: state.memory_budget.model_memory_bytes,
         vram_kv_cache: state.memory_budget.kv_cache_bytes,
         vram_training_budget: state.memory_budget.training_budget_bytes,
+        prefix_cache,
         training_active,
         active_adapter,
     };
