@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -19,6 +20,10 @@ use crate::weights::WeightTensor;
 const CACHE_VERSION: u32 = 2;
 const CACHE_MAGIC: &[u8; 8] = b"KILNTRP1";
 const CACHE_PAYLOAD_ALIGN: usize = 8;
+const CACHE_WRITE_INITIAL_DELAY_MS: u64 = 120_000;
+const CACHE_WRITE_SPACING_MS: u64 = 50;
+const CACHE_WRITE_INITIAL_DELAY_ENV: &str = "KILN_TRANSPOSED_CACHE_WRITE_DELAY_MS";
+const CACHE_WRITE_SPACING_ENV: &str = "KILN_TRANSPOSED_CACHE_WRITE_SPACING_MS";
 
 static CACHE_WRITE_ENQUEUED: AtomicU64 = AtomicU64::new(0);
 static CACHE_WRITE_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
@@ -205,6 +210,16 @@ fn cache_write_sender() -> Option<&'static Sender<CacheWrite>> {
 }
 
 fn cache_writer_loop(receiver: Receiver<CacheWrite>) {
+    let initial_delay = cache_write_initial_delay();
+    if !initial_delay.is_zero() {
+        tracing::debug!(
+            delay_ms = initial_delay.as_millis() as u64,
+            "deferring transposed weight cache background writes"
+        );
+        thread::sleep(initial_delay);
+    }
+
+    let spacing = cache_write_spacing();
     for CacheWrite { cache_key, weight } in receiver {
         if cache_key.file_path.exists() {
             continue;
@@ -221,7 +236,28 @@ fn cache_writer_loop(receiver: Receiver<CacheWrite>) {
                 tracing::debug!(error = %err, "failed to write transposed weight cache entry");
             }
         }
+        if !spacing.is_zero() {
+            thread::sleep(spacing);
+        }
     }
+}
+
+fn cache_write_initial_delay() -> Duration {
+    Duration::from_millis(env_u64(
+        CACHE_WRITE_INITIAL_DELAY_ENV,
+        CACHE_WRITE_INITIAL_DELAY_MS,
+    ))
+}
+
+fn cache_write_spacing() -> Duration {
+    Duration::from_millis(env_u64(CACHE_WRITE_SPACING_ENV, CACHE_WRITE_SPACING_MS))
+}
+
+fn env_u64(var: &str, default: u64) -> u64 {
+    env::var(var)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -592,6 +628,12 @@ mod tests {
 
     #[test]
     fn queue_cache_write_persists_payload_on_background_writer() -> Result<()> {
+        // Each nextest test process is isolated. Keep this unit test fast while
+        // production defers cache writes away from startup/first-request load.
+        unsafe {
+            std::env::set_var(CACHE_WRITE_INITIAL_DELAY_ENV, "0");
+            std::env::set_var(CACHE_WRITE_SPACING_ENV, "0");
+        }
         let dir = tempfile::tempdir()?;
         let mut cache_key = test_cache_key(4);
         cache_key.file_path = dir.path().join("entry.bin");
@@ -614,6 +656,10 @@ mod tests {
         let mut file = std::fs::File::open(&cache_key.file_path)?;
         let got = read_cached_payload(&cache_key, &mut file)?;
         assert_eq!(got, payload.as_slice());
+        unsafe {
+            std::env::remove_var(CACHE_WRITE_INITIAL_DELAY_ENV);
+            std::env::remove_var(CACHE_WRITE_SPACING_ENV);
+        }
         Ok(())
     }
 
