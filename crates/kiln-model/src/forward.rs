@@ -5941,6 +5941,40 @@ pub fn model_forward_paged_last_token(
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
 }
 
+/// Paged-KV forward pass for greedy generation prefill.
+///
+/// This runs the same prefill work as [`model_forward_paged_last_token`] but
+/// fuses the final-row LM-head projection with argmax when the backend supports
+/// it, avoiding a `[1, 1, vocab_size]` logits tensor that greedy sampling would
+/// immediately reduce.
+pub fn model_forward_paged_last_token_greedy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+) -> Result<u32> {
+    let (_logits, _hidden, token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+        LmHeadMode::LastRowArgmaxOnly,
+    )?;
+    token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
+}
+
 /// Paged-KV single-token decode for greedy sampling.
 ///
 /// This keeps the existing logits APIs intact but, on the Metal BF16 decode
@@ -5958,7 +5992,7 @@ pub fn model_forward_paged_next_token_greedy(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<u32> {
-    let (_logits, _hidden, token) = model_forward_paged_inner(
+    model_forward_paged_last_token_greedy(
         backend,
         &[token_id],
         weights,
@@ -5969,9 +6003,7 @@ pub fn model_forward_paged_next_token_greedy(
         linear_state,
         lora,
         positions_gpu,
-        LmHeadMode::LastRowArgmaxOnly,
-    )?;
-    token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
+    )
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
@@ -11094,6 +11126,26 @@ mod tests {
         assert!(
             max_abs <= 1e-5,
             "last-token prefill max_abs_diff={max_abs:e} exceeds 1e-5"
+        );
+
+        let expected_token = crate::sampling::greedy_sample(&last_logits)?;
+        let (mut greedy_cache, greedy_bt) = make_paged_setup(&config, total, 64, &device)?;
+        let mut greedy_state = LinearAttentionState::new(&config, &device)?;
+        let greedy_token = model_forward_paged_last_token_greedy(
+            &backend,
+            &tokens,
+            &weights,
+            &config,
+            &mut greedy_cache,
+            &greedy_bt,
+            0,
+            Some(&mut greedy_state),
+            None,
+            None,
+        )?;
+        assert_eq!(
+            greedy_token, expected_token,
+            "last-token greedy prefill should match greedy_sample(last-token logits)"
         );
 
         Ok(())

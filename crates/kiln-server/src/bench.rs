@@ -20,9 +20,10 @@ use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
-    model_forward_paged_streaming_last_token_with_last_hidden, streaming_prefill_enabled_for,
+    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
+    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
+    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -758,8 +759,9 @@ fn bench_latency_paged(
     // prompts use tiled streaming prefill by default; env overrides can force
     // either path.
     let prefill_start = Instant::now();
-    let logits = if streaming_prefill_enabled_for(device, actual_prompt_tokens) {
-        model_forward_paged_streaming(
+    let streaming_prefill = streaming_prefill_enabled_for(device, actual_prompt_tokens);
+    let mut next_token = if streaming_prefill {
+        let logits = model_forward_paged_streaming(
             &*backend,
             &prompt_token_ids,
             weights,
@@ -770,9 +772,24 @@ fn bench_latency_paged(
             Some(&mut linear_state),
             None,
         )
-        .context("paged prefill forward pass (streaming) failed")?
+        .context("paged prefill forward pass (streaming) failed")?;
+        greedy_sample(&logits)?
+    } else if matches!(device, candle_core::Device::Metal(_)) {
+        model_forward_paged_last_token_greedy(
+            &*backend,
+            &prompt_token_ids,
+            weights,
+            config,
+            &mut paged_cache,
+            &block_table,
+            0,
+            Some(&mut linear_state),
+            None,
+            None,
+        )
+        .context("paged greedy prefill forward pass failed")?
     } else {
-        model_forward_paged_last_token(
+        let logits = model_forward_paged_last_token(
             &*backend,
             &prompt_token_ids,
             weights,
@@ -784,11 +801,9 @@ fn bench_latency_paged(
             None,
             None,
         )
-        .context("paged prefill forward pass failed")?
+        .context("paged prefill forward pass failed")?;
+        greedy_sample(&logits)?
     };
-
-    // Sample first token
-    let mut next_token = greedy_sample(&logits)?;
     let prefill_time = prefill_start.elapsed();
 
     eprintln!(

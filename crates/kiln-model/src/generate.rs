@@ -4,7 +4,7 @@
 //! a `ModelRunner` that accepts text prompts and produces text output.
 
 use anyhow::{Context, Result};
-use candle_core::DType;
+use candle_core::{DType, Tensor};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -17,9 +17,10 @@ use crate::backend::{self, BackendRuntime};
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
-    model_forward_paged_streaming_last_token_with_last_hidden, streaming_prefill_enabled_for,
+    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
+    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
+    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -77,6 +78,11 @@ pub struct PrefixCachedGenerationOutput {
     pub output: GenerationOutput,
     pub registration: Option<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
+}
+
+enum PrefillSampleSource {
+    Logits(Tensor),
+    GreedyToken(TokenId),
 }
 
 /// Output from a native MTP speculative generation call.
@@ -961,21 +967,44 @@ impl ModelRunner {
             "prefix cache hit must leave at least one suffix token"
         );
 
-        let logits = {
+        let use_greedy_prefill_token = params.temperature == 0.0
+            && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
+        let prefill_source = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            model_forward_paged_last_token(
-                &*self.backend,
-                prefill_tokens,
-                &self.weights,
-                &self.config,
-                &mut pc_guard,
-                block_table,
-                cached_tokens,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-                None,
-            )
-            .context("prefill forward pass (paged prefix cache) failed")?
+            if use_greedy_prefill_token {
+                PrefillSampleSource::GreedyToken(
+                    model_forward_paged_last_token_greedy(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("greedy prefill forward pass (paged prefix cache) failed")?,
+                )
+            } else {
+                PrefillSampleSource::Logits(
+                    model_forward_paged_last_token(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("prefill forward pass (paged prefix cache) failed")?,
+                )
+            }
         };
 
         let registration = self.completed_prompt_registration(
@@ -985,14 +1014,25 @@ impl ModelRunner {
             block_size,
         )?;
 
-        let output = self.decode_from_prefill_logits(
-            logits,
-            prompt_tokens.len(),
-            params,
-            paged_cache,
-            block_table,
-            &mut linear_state,
-        )?;
+        let output = match prefill_source {
+            PrefillSampleSource::Logits(logits) => self.decode_from_prefill_logits(
+                logits,
+                prompt_tokens.len(),
+                params,
+                paged_cache,
+                block_table,
+                &mut linear_state,
+            )?,
+            PrefillSampleSource::GreedyToken(token) => self.decode_from_prefill_token(
+                token,
+                prompt_tokens.len(),
+                params,
+                paged_cache,
+                block_table,
+                &mut linear_state,
+                params.seed,
+            )?,
+        };
 
         Ok(PrefixCachedGenerationOutput {
             output,
@@ -1025,16 +1065,15 @@ impl ModelRunner {
     fn decode_from_prefill_logits(
         &self,
         logits: candle_core::Tensor,
-        mut seq_len: usize,
+        seq_len: usize,
         params: &SamplingParams,
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
     ) -> Result<GenerationOutput> {
-        let mut generated_tokens: Vec<TokenId> = Vec::new();
-        let mut step_seed = params.seed;
+        let step_seed = params.seed;
 
-        let mut next_token = if params.temperature == 0.0 {
+        let next_token = if params.temperature == 0.0 {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -1045,7 +1084,28 @@ impl ModelRunner {
                 step_seed,
             )?
         };
+        self.decode_from_prefill_token(
+            next_token,
+            seq_len,
+            params,
+            paged_cache,
+            block_table,
+            linear_state,
+            step_seed,
+        )
+    }
 
+    fn decode_from_prefill_token(
+        &self,
+        mut next_token: TokenId,
+        mut seq_len: usize,
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        linear_state: &mut LinearAttentionState,
+        mut step_seed: Option<u64>,
+    ) -> Result<GenerationOutput> {
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
         for _step in 0..params.max_tokens {
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
@@ -1534,33 +1594,57 @@ impl ModelRunner {
         // Prefill: forward pass on all prompt tokens (never uses CUDA graphs).
         // Long Metal prompts use tiled streaming prefill by default; env
         // overrides can force either path.
-        let logits = if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
-            model_forward_paged_streaming(
-                &*self.backend,
-                prompt_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
+        let streaming_prefill =
+            streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len());
+        let prefill_source = if streaming_prefill {
+            PrefillSampleSource::Logits(
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+                .context("prefill forward pass (paged, streaming) failed")?,
             )
-            .context("prefill forward pass (paged, streaming) failed")?
+        } else if params.temperature == 0.0
+            && matches!(self.backend.device(), candle_core::Device::Metal(_))
+        {
+            PrefillSampleSource::GreedyToken(
+                model_forward_paged_last_token_greedy(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("greedy prefill forward pass (paged) failed")?,
+            )
         } else {
-            model_forward_paged_last_token(
-                &*self.backend,
-                prompt_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-                None,
+            PrefillSampleSource::Logits(
+                model_forward_paged_last_token(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged) failed")?,
             )
-            .context("prefill forward pass (paged) failed")?
         };
 
         let mut seq_len = prompt_tokens.len();
@@ -1573,17 +1657,21 @@ impl ModelRunner {
             .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
 
-        // Sample first token
-        let mut next_token = if params.temperature == 0.0 {
-            greedy_sample(&logits)?
-        } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
+        let mut next_token = match prefill_source {
+            PrefillSampleSource::GreedyToken(token) => token,
+            PrefillSampleSource::Logits(logits) => {
+                if params.temperature == 0.0 {
+                    greedy_sample(&logits)?
+                } else {
+                    sample_with_params(
+                        &logits,
+                        params.temperature,
+                        params.top_p,
+                        params.top_k,
+                        step_seed,
+                    )?
+                }
+            }
         };
 
         for _step in 0..params.max_tokens {
