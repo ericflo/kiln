@@ -10,7 +10,7 @@ Image: `ghcr.io/ericflo/kiln-runpod:latest`
 PR #515 is merged on `main`; the benchmark ran at `8bd7dd0e` whose tip commit is `Wire real append prefix cache (#515)`. I inspected:
 
 - `crates/kiln-server/src/state.rs`: `RealPrefixCache` stores prompt token IDs, retained paged-KV block IDs, and `LinearAttentionState`, so the real backend preserves GDN recurrent state as well as full-attention KV blocks.
-- `crates/kiln-server/src/api/completions.rs`: non-streaming real generation calls `cache.lookup(...)`, passes `PagedPrefixReuse` into `generate_paged_shared_tokens_with_prefix_cache(...)`, then registers completed block-aligned prompts after successful generation.
+- `crates/kiln-server/src/api/completions.rs`: real generation calls `cache.lookup(...)`, passes `PagedPrefixReuse` into the non-streaming or streaming paged-prefix generation helper, then registers completed block-aligned prompts after successful generation.
 - `crates/kiln-server/src/metrics.rs`: metrics are `kiln_prefix_cache_lookups_total{result="hit|miss"}`, `kiln_prefix_cache_hit_tokens_total`, `kiln_prefix_cache_hit_blocks_total`, `kiln_prefix_cache_cached_blocks`, and `kiln_prefix_cache_max_blocks`.
 
 No existing post-#515 artifact for this benchmark was present in `PROFILING.md` or `docs/phase7-prefix-cache-reuse-ab.md` before this run.
@@ -61,7 +61,7 @@ KILN_SPEC_ENABLED=0
 KILN_PREFIX_CACHE_ENABLED=1   # ON arm; 0 for OFF arm
 ```
 
-CUDA graphs were disabled intentionally. With graphs enabled, `generate_real` currently bypasses `generate_paged_shared_tokens_with_prefix_cache(...)` and calls `generate_paged_shared_tokens(...)`. As a follow-up, the server now emits a one-time structured warning when `RealPrefixCache` is enabled but CUDA graphs force that non-prefix path, so operators do not silently expect cache reuse from real chat completions. Full CUDA-graph prefix-cache integration remains separate work.
+CUDA graphs were disabled intentionally. With graphs enabled, real chat completions still bypass the prefix-cache helpers and call the non-prefix paged generation path. The server emits a one-time structured warning when `RealPrefixCache` is enabled but CUDA graphs force that non-prefix path, so operators do not silently expect cache reuse from real chat completions. Full CUDA-graph prefix-cache integration remains separate work.
 
 ## Prompt Design
 
@@ -95,7 +95,7 @@ Each measured request used `temperature = 0.0`, `seed = 1`, and `max_tokens = 16
 
 Median total-latency speedup: **3.49x**.
 
-TTFT is not reported because the streaming path is not the prefix-cache path; these are non-streaming total request latencies from the Python client around `POST /v1/chat/completions`.
+TTFT is not reported because this A/B used non-streaming total request latencies from the Python client around `POST /v1/chat/completions`. Streaming chat completions now use the same real prefix-cache lookup/register path when CUDA graphs are disabled, and streaming hits increment the same `/metrics` counters.
 
 ## Metrics
 
@@ -254,6 +254,6 @@ Results: all commands passed on the A6000 pod. Existing compiler warnings were u
 
 ## Verdict
 
-The real append-prefix cache is effective for block-aligned append-only shared prefixes on the non-streaming real backend. The measured 2,048-token shared-prefix workload improved median total latency from 26.923s to 7.711s and metrics exactly matched the expected skipped tokens/blocks.
+The real append-prefix cache is effective for block-aligned append-only shared prefixes on the real backend. The measured 2,048-token shared-prefix workload improved median total latency from 26.923s to 7.711s and metrics exactly matched the expected skipped tokens/blocks.
 
-Recommended next task: make prefix-cache behavior explicit around CUDA graphs and chat prompt shape. Either integrate prefix reuse into the CUDA-graph path or emit a startup/config warning when both are enabled, and add a partial-prefix registration strategy so normal chat `shared + suffix` prompts can reuse shared user text without delimiter-shaped content.
+Remaining work: integrate prefix reuse into the CUDA-graph path, and add a partial-prefix registration strategy so normal chat `shared + suffix` prompts can reuse shared user text without delimiter-shaped content.
