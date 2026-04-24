@@ -116,6 +116,63 @@ fn linear_with_lora_t_decode_if(
     }
 }
 
+fn full_attn_qkv_proj_decode_if(
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    lora_layer: Option<&LoraLayerWeights>,
+    lora_scale: f32,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    #[cfg(feature = "metal")]
+    {
+        if use_metal_decode_gemv
+            && lora_layer.is_none()
+            && attn_weights.q_proj_marlin.is_none()
+            && !crate::mtp_debug::is_mtp_fp32_head_armed()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && !crate::mtp_debug::current_b12_layer_is_31()
+            && crate::backend::metal::metal_fused_qkv_transposed_coop_gemv_supports(
+                x,
+                &attn_weights.q_proj_t,
+                &attn_weights.k_proj_t,
+                &attn_weights.v_proj_t,
+            )
+        {
+            kiln_nvtx::range!(c"kiln/proj/qkv_fused");
+            return crate::backend::metal::metal_fused_qkv_transposed_coop_gemv_bf16(
+                x,
+                &attn_weights.q_proj_t,
+                &attn_weights.k_proj_t,
+                &attn_weights.v_proj_t,
+            )
+            .context("metal fused QKV projection failed");
+        }
+    }
+
+    let q_raw = q_proj_forward_decode_if(
+        use_metal_decode_gemv,
+        x,
+        attn_weights,
+        lora_layer.and_then(|l| l.q_proj.as_ref()),
+        lora_scale,
+    )?;
+    let k = linear_with_lora_t_decode_if(
+        use_metal_decode_gemv,
+        x,
+        &attn_weights.k_proj_t,
+        lora_layer.and_then(|l| l.k_proj.as_ref()),
+        lora_scale,
+    )?;
+    let v = linear_with_lora_t_decode_if(
+        use_metal_decode_gemv,
+        x,
+        &attn_weights.v_proj_t,
+        lora_layer.and_then(|l| l.v_proj.as_ref()),
+        lora_scale,
+    )?;
+    Ok((q_raw, k, v))
+}
+
 /// CUDA-compatible softmax on last dimension.
 ///
 /// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
@@ -3710,28 +3767,13 @@ pub fn gqa_attention(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = q_proj_forward_decode_if(
+        full_attn_qkv_proj_decode_if(
             use_metal_decode_gemv,
             x,
             attn_weights,
-            lora_layer.and_then(|l| l.q_proj.as_ref()),
+            lora_layer,
             lora_scale,
-        )?;
-        let k = linear_with_lora_t_decode_if(
-            use_metal_decode_gemv,
-            x,
-            &attn_weights.k_proj_t,
-            lora_layer.and_then(|l| l.k_proj.as_ref()),
-            lora_scale,
-        )?;
-        let v = linear_with_lora_t_decode_if(
-            use_metal_decode_gemv,
-            x,
-            &attn_weights.v_proj_t,
-            lora_layer.and_then(|l| l.v_proj.as_ref()),
-            lora_scale,
-        )?;
-        (q_raw, k, v)
+        )?
     };
 
     // Split Q and gate if output gate is enabled
@@ -4210,28 +4252,13 @@ fn gqa_attention_paged_with_rope_tables(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = q_proj_forward_decode_if(
+        full_attn_qkv_proj_decode_if(
             use_metal_decode_gemv,
             x,
             attn_weights,
-            lora_layer.and_then(|l| l.q_proj.as_ref()),
+            lora_layer,
             lora_scale,
-        )?;
-        let k = linear_with_lora_t_decode_if(
-            use_metal_decode_gemv,
-            x,
-            &attn_weights.k_proj_t,
-            lora_layer.and_then(|l| l.k_proj.as_ref()),
-            lora_scale,
-        )?;
-        let v = linear_with_lora_t_decode_if(
-            use_metal_decode_gemv,
-            x,
-            &attn_weights.v_proj_t,
-            lora_layer.and_then(|l| l.v_proj.as_ref()),
-            lora_scale,
-        )?;
-        (q_raw, k, v)
+        )?
     };
     // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
     // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.

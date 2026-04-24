@@ -24,6 +24,7 @@ const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
 const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
+const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
@@ -148,6 +149,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
         metal_transposed_coop_gemv_pipeline(metal_device, default_tile)?;
         if default_tile != MetalTransposedCoopGemvTile::Tile4 {
             metal_transposed_coop_gemv_pipeline(metal_device, MetalTransposedCoopGemvTile::Tile4)?;
+        }
+        if !metal_fused_qkv_proj_disabled() {
+            metal_fused_qkv_transposed_coop_gemv_pipeline(metal_device)?;
         }
     }
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
@@ -647,6 +651,10 @@ fn metal_rms_norm_disabled() -> bool {
 
 pub(crate) fn metal_mlp_gate_up_fusion_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_FUSION)
+}
+
+fn metal_fused_qkv_proj_disabled() -> bool {
+    env_truthy(DISABLE_METAL_FUSED_QKV_PROJ) || metal_transposed_coop_gemv_tile8_disabled()
 }
 
 pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
@@ -1893,6 +1901,134 @@ kernel void kiln_transposed_coop_gemv8_bf16(
 }
 "#;
 
+const METAL_FUSED_QKV_TRANSPOSED_COOP_GEMV_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_fused_qkv_transposed_coop_gemv8_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* q_t [[buffer(1)]],
+    device const bfloat* k_t [[buffer(2)]],
+    device const bfloat* v_t [[buffer(3)]],
+    device bfloat* q_out [[buffer(4)]],
+    device bfloat* k_out [[buffer(5)]],
+    device bfloat* v_out [[buffer(6)]],
+    constant uint& input_dim [[buffer(7)]],
+    constant uint& q_output_dim [[buffer(8)]],
+    constant uint& k_output_dim [[buffer(9)]],
+    constant uint& v_output_dim [[buffer(10)]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint proj = tgroup.y;
+    const uint col_base = (tgroup.x * 4 + simd_group) * 8;
+
+    device const bfloat* weight_t = q_t;
+    device bfloat* out = q_out;
+    uint output_dim = q_output_dim;
+    if (proj == 1) {
+        weight_t = k_t;
+        out = k_out;
+        output_dim = k_output_dim;
+    } else if (proj == 2) {
+        weight_t = v_t;
+        out = v_out;
+        output_dim = v_output_dim;
+    }
+
+    if (proj > 2 || col_base >= output_dim) {
+        return;
+    }
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    const bool full_tile = col_base + 7 < output_dim;
+    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
+
+    for (uint row = lane; row < input_dim; row += 32) {
+        const float xv = static_cast<float>(x[row]);
+        const uint weight_base = row * output_dim + col_base;
+        if (vector_load_safe) {
+            device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+            const bfloat4 w0 = w4_ptr[0];
+            const bfloat4 w1 = w4_ptr[1];
+            acc0 += xv * static_cast<float>(w0[0]);
+            acc1 += xv * static_cast<float>(w0[1]);
+            acc2 += xv * static_cast<float>(w0[2]);
+            acc3 += xv * static_cast<float>(w0[3]);
+            acc4 += xv * static_cast<float>(w1[0]);
+            acc5 += xv * static_cast<float>(w1[1]);
+            acc6 += xv * static_cast<float>(w1[2]);
+            acc7 += xv * static_cast<float>(w1[3]);
+        } else {
+            acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
+            if (col_base + 1 < output_dim) {
+                acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
+            }
+            if (col_base + 2 < output_dim) {
+                acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+            }
+            if (col_base + 3 < output_dim) {
+                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
+            }
+            if (col_base + 4 < output_dim) {
+                acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
+            }
+            if (col_base + 5 < output_dim) {
+                acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
+            }
+            if (col_base + 6 < output_dim) {
+                acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
+            }
+            if (col_base + 7 < output_dim) {
+                acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
+            }
+        }
+    }
+
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    acc4 = simd_sum(acc4);
+    acc5 = simd_sum(acc5);
+    acc6 = simd_sum(acc6);
+    acc7 = simd_sum(acc7);
+
+    if (lane == 0) {
+        out[col_base + 0] = static_cast<bfloat>(acc0);
+        if (col_base + 1 < output_dim) {
+            out[col_base + 1] = static_cast<bfloat>(acc1);
+        }
+        if (col_base + 2 < output_dim) {
+            out[col_base + 2] = static_cast<bfloat>(acc2);
+        }
+        if (col_base + 3 < output_dim) {
+            out[col_base + 3] = static_cast<bfloat>(acc3);
+        }
+        if (col_base + 4 < output_dim) {
+            out[col_base + 4] = static_cast<bfloat>(acc4);
+        }
+        if (col_base + 5 < output_dim) {
+            out[col_base + 5] = static_cast<bfloat>(acc5);
+        }
+        if (col_base + 6 < output_dim) {
+            out[col_base + 6] = static_cast<bfloat>(acc6);
+        }
+        if (col_base + 7 < output_dim) {
+            out[col_base + 7] = static_cast<bfloat>(acc7);
+        }
+    }
+}
+"#;
+
 const METAL_GDN_IN_PROJ_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -2051,6 +2187,7 @@ fn metal_shared_library(
         METAL_LM_HEAD_KERNEL,
         METAL_MLP_GATE_UP_KERNEL,
         METAL_TRANSPOSED_COOP_GEMV_KERNEL,
+        METAL_FUSED_QKV_TRANSPOSED_COOP_GEMV_KERNEL,
         METAL_GDN_IN_PROJ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
@@ -2326,6 +2463,35 @@ fn metal_transposed_coop_gemv_pipeline(
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal transposed coop GEMV pipeline: {e:?}"))?;
     cache.insert(key, pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_fused_qkv_transposed_coop_gemv_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal fused QKV projection pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_fused_qkv_transposed_coop_gemv8_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal fused QKV projection function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal fused QKV projection pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
 
@@ -2908,6 +3074,160 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
     }
 
     Ok(out)
+}
+
+pub(crate) fn metal_fused_qkv_transposed_coop_gemv_supports(
+    x: &Tensor,
+    q_t: &Tensor,
+    k_t: &Tensor,
+    v_t: &Tensor,
+) -> bool {
+    if metal_fused_qkv_proj_disabled() {
+        return false;
+    }
+    if !metal_transposed_coop_gemv_supports(x, q_t)
+        || !metal_transposed_coop_gemv_supports(x, k_t)
+        || !metal_transposed_coop_gemv_supports(x, v_t)
+    {
+        return false;
+    }
+
+    let Ok((_, _, input_dim)) = x.dims3() else {
+        return false;
+    };
+    let Ok((q_input_dim, _)) = q_t.dims2() else {
+        return false;
+    };
+    let Ok((k_input_dim, _)) = k_t.dims2() else {
+        return false;
+    };
+    let Ok((v_input_dim, _)) = v_t.dims2() else {
+        return false;
+    };
+    input_dim == q_input_dim && input_dim == k_input_dim && input_dim == v_input_dim
+}
+
+pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
+    x: &Tensor,
+    q_t: &Tensor,
+    k_t: &Tensor,
+    v_t: &Tensor,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_fused_qkv_transposed_coop_gemv_supports(x, q_t, k_t, v_t),
+        "metal fused QKV projection supports only BF16 [1,1,K] x [K,Nq/Nk/Nv] on Metal"
+    );
+    let (_, _, input_dim) = x.dims3()?;
+    let (_, q_output_dim) = q_t.dims2()?;
+    let (_, k_output_dim) = k_t.dims2()?;
+    let (_, v_output_dim) = v_t.dims2()?;
+
+    // The kernel writes each projection output independently with the existing
+    // tile8 cooperative GEMV mapping.
+    let q_out = unsafe { Tensor::empty((1usize, 1usize, q_output_dim), DType::BF16, x.device())? };
+    let k_out = unsafe { Tensor::empty((1usize, 1usize, k_output_dim), DType::BF16, x.device())? };
+    let v_out = unsafe { Tensor::empty((1usize, 1usize, v_output_dim), DType::BF16, x.device())? };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal fused QKV projection requires Metal tensors");
+    };
+    let pipeline = metal_fused_qkv_transposed_coop_gemv_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_fused_qkv_transposed_coop_gemv8_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (q_storage, q_layout) = q_t.storage_and_layout();
+        let (k_storage, k_layout) = k_t.storage_and_layout();
+        let (v_storage, v_layout) = v_t.storage_and_layout();
+        let (q_out_storage, q_out_layout) = q_out.storage_and_layout();
+        let (k_out_storage, k_out_layout) = k_out.storage_and_layout();
+        let (v_out_storage, v_out_layout) = v_out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection x must be on Metal"),
+        };
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection q_t must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection k_t must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection v_t must be on Metal"),
+        };
+        let q_out_metal = match &*q_out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection q_out must be on Metal"),
+        };
+        let k_out_metal = match &*k_out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection k_out must be on Metal"),
+        };
+        let v_out_metal = match &*v_out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal fused QKV projection v_out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q_t.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_t.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_t.dtype());
+        let q_out_buf = candle_core::metal_backend::buffer_o(
+            q_out_metal.buffer(),
+            &q_out_layout,
+            q_out.dtype(),
+        );
+        let k_out_buf = candle_core::metal_backend::buffer_o(
+            k_out_metal.buffer(),
+            &k_out_layout,
+            k_out.dtype(),
+        );
+        let v_out_buf = candle_core::metal_backend::buffer_o(
+            v_out_metal.buffer(),
+            &v_out_layout,
+            v_out.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(q_out_buf.buffer), q_out_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(k_out_buf.buffer), k_out_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(v_out_buf.buffer), v_out_buf.offset_in_bytes);
+
+        let input_dim_u32 = input_dim as u32;
+        let q_output_dim_u32 = q_output_dim as u32;
+        let k_output_dim_u32 = k_output_dim as u32;
+        let v_output_dim_u32 = v_output_dim as u32;
+        encoder.set_bytes(7, &input_dim_u32);
+        encoder.set_bytes(8, &q_output_dim_u32);
+        encoder.set_bytes(9, &k_output_dim_u32);
+        encoder.set_bytes(10, &v_output_dim_u32);
+
+        let cols_per_threadgroup =
+            METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+        let max_output_dim = q_output_dim.max(k_output_dim).max(v_output_dim);
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: max_output_dim.div_ceil(cols_per_threadgroup),
+            height: 3,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: METAL_TRANSPOSED_COOP_GEMV_THREADS,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((q_out, k_out, v_out))
 }
 
 fn metal_gdn_in_proj_decode_supports(
@@ -6605,6 +6925,83 @@ mod tests {
         assert!(
             tile8_mean < 3e-3,
             "Metal transposed coop GEMV tile8 mean_abs_diff={tile8_mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fused_qkv_transposed_coop_gemv_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let input_dim = 128usize;
+        let q_output_dim = 65usize;
+        let k_output_dim = 37usize;
+        let v_output_dim = 41usize;
+        let x_data: Vec<f32> = (0..input_dim)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.03125)
+            .collect();
+        let make_weight = |output_dim: usize, modulus: usize, scale: f32| -> Vec<f32> {
+            (0..(input_dim * output_dim))
+                .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
+                .collect()
+        };
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, input_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let q_t = Tensor::from_slice(
+            &make_weight(q_output_dim, 29, 0.0078125),
+            (input_dim, q_output_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .contiguous()?;
+        let k_t = Tensor::from_slice(
+            &make_weight(k_output_dim, 31, 0.0068359375),
+            (input_dim, k_output_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .contiguous()?;
+        let v_t = Tensor::from_slice(
+            &make_weight(v_output_dim, 37, 0.005859375),
+            (input_dim, v_output_dim),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .contiguous()?;
+
+        assert!(metal_fused_qkv_transposed_coop_gemv_supports(
+            &x, &q_t, &k_t, &v_t
+        ));
+        let q_reference = x.broadcast_matmul(&q_t)?;
+        let k_reference = x.broadcast_matmul(&k_t)?;
+        let v_reference = x.broadcast_matmul(&v_t)?;
+        let (q, k, v) = metal_fused_qkv_transposed_coop_gemv_bf16(&x, &q_t, &k_t, &v_t)?;
+
+        assert_eq!(q.dims(), &[1usize, 1usize, q_output_dim]);
+        assert_eq!(k.dims(), &[1usize, 1usize, k_output_dim]);
+        assert_eq!(v.dims(), &[1usize, 1usize, v_output_dim]);
+        assert_eq!(q.dtype(), DType::BF16);
+        assert_eq!(k.dtype(), DType::BF16);
+        assert_eq!(v.dtype(), DType::BF16);
+
+        let q_max = max_abs_diff(&q_reference, &q)?;
+        let k_max = max_abs_diff(&k_reference, &k)?;
+        let v_max = max_abs_diff(&v_reference, &v)?;
+        let q_mean = mean_abs_diff(&q_reference, &q)?;
+        let k_mean = mean_abs_diff(&k_reference, &k)?;
+        let v_mean = mean_abs_diff(&v_reference, &v)?;
+        assert!(
+            q_max < 2e-2 && k_max < 2e-2 && v_max < 2e-2,
+            "Metal fused QKV max_abs_diff q={q_max:e} k={k_max:e} v={v_max:e} exceeds tolerance"
+        );
+        assert!(
+            q_mean < 3e-3 && k_mean < 3e-3 && v_mean < 3e-3,
+            "Metal fused QKV mean_abs_diff q={q_mean:e} k={k_mean:e} v={v_mean:e} exceeds tolerance"
         );
 
         Ok(())
