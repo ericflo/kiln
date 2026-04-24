@@ -1,0 +1,11 @@
+rank,range,wall_clock_share_pct,total_time_ms,instances
+1,:kiln/gdn/conv,15.4,562.361,2328
+2,:kiln/gdn/gates,14.2,518.513,2328
+3,:kiln/gdn/gated_norm,13.4,487.295,2328
+4,:kiln/gdn/qk_norm,10.9,396.837,2328
+5,:kiln/attn/rope,8.5,308.079,851
+6,:kiln/gdn/in_proj,4.5,164.971,2328
+7,:kiln/attn/full/prefill,3.4,124.87,600
+8,:kiln/attn/gdn/chunk_prep,3.0,109.453,1800
+9,:kiln/residual,2.8,100.982,6358
+10,:kiln/gdn/qkv_split,2.5,92.293,2328

@@ -1,0 +1,7 @@
+
+NOTICE: Existing SQLite export found: /tmp/kiln-post468-mtp.sqlite
+        It is assumed file was previously exported from: /tmp/kiln-post468-mtp.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [/tmp/kiln-post468-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_pushpop_trace.py] to [docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv]... PROCESSED
+

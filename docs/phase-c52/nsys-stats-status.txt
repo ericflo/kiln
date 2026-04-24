@@ -1,0 +1,6 @@
+nvtxsum rc=0
+gpukernsum rc=0
+cudaapisum rc=0
+nvtxsum csv rc=0
+gpukernsum csv rc=0
+cudaapisum csv rc=0
