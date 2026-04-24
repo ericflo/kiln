@@ -191,12 +191,14 @@ pub struct SpeculativeDecodingConfig {
 ///
 /// Dispatch is driven by reading these environment variables directly from
 /// `kiln-model` helpers; this struct is the documentation / TOML-config
-/// mirror. The generic config default keeps streaming OFF, while the runtime
-/// Metal policy enables streaming by default for long desktop prompts.
+/// mirror. The generic config default keeps streaming OFF unless explicitly set,
+/// while runtime device policy enables streaming by default for long CUDA and
+/// Metal prompts after device-specific thresholds.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StreamingPrefillConfig {
-    /// Enable tiled/streaming prefill (default: false).
+    /// Force tiled/streaming prefill on through config/env. Runtime device
+    /// policy may still enable it for long CUDA/Metal prompts when unset.
     pub enabled: bool,
     /// Tile size in tokens (generic default: 8192). Must be a positive
     /// multiple of 64.
