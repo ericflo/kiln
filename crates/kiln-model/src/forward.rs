@@ -3302,7 +3302,57 @@ fn gated_deltanet_forward_decode_if(
         }
     };
 
+    let fused_prefill_qkv_conv_split = {
+        #[cfg(feature = "metal")]
+        {
+            if fused_decode_qkv_conv_norm.is_none()
+                && recurrent_unexpanded_qk
+                && seq_len > 1
+                && !capture_b11_taps
+                && !capture_c41_taps
+                && crate::backend::metal::metal_gdn_prefill_qkv_conv_split_supports(
+                    &mixed_qkv,
+                    &weights.conv1d,
+                    conv_state,
+                    kernel_size,
+                    nk,
+                    dk,
+                    nv,
+                    dv,
+                )
+            {
+                kiln_nvtx::range!(c"kiln/gdn/qkv_conv_split");
+                let (q, k, v) =
+                    crate::backend::metal::metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
+                        &mixed_qkv,
+                        &weights.conv1d,
+                        conv_state,
+                        kernel_size,
+                        nk,
+                        dk,
+                        nv,
+                        dv,
+                    )
+                    .context("metal gdn prefill qkv conv-split kernel failed")?;
+                let (q, k) = {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
+                    gdn_qk_norm(&q, &k, input_dtype, scale)?
+                };
+                let z = z.reshape((batch, seq_len, nv, dv))?;
+                Some((q, k, v, z, false))
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            None
+        }
+    };
+
     let (q, k, v, z, qk_expanded) = if let Some(fused) = fused_decode_qkv_conv_norm {
+        fused
+    } else if let Some(fused) = fused_prefill_qkv_conv_split {
         fused
     } else {
         // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
