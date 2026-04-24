@@ -7151,3 +7151,21 @@ C49 compares the C48-style forced-MTP command against C40f-style harness flags o
 Result: C40f-style flags restore the median acceptance rate from `0.391` to `0.707` and median decode from `28.73 tok/s` to `42.45 tok/s`. The restored arm clears both gates: α ≥ `0.65`, and decode is `1.11x` the C40f historical median of `38.25 tok/s` rather than outside the allowed 10% band.
 
 Recommendation: treat C48 as a harness/workload comparability artifact and resume Phase 6 MTP performance/profiling work from the C40f-style harness anchor. Do not reopen model-math investigation based on C48 alone.
+
+## Phase 6 C50 C40f-style native MTP decode profile (2026-04-24)
+
+C50 re-ran the restored C40f-style native-MTP harness from C49 on current
+`origin/main` at `7c638e7e2d69cb16772619a2a32d6114767bf7e2` on an on-demand
+A6000. The three-seed median remained healthy: α `0.707`, decode `44.00 tok/s`,
+and mean ITL `22.73 ms`, so do not reopen the C48 model-math investigation.
+
+Artifact: `docs/phase-c50/mtp-c40f-decode-profile.md`; machine summary:
+`docs/phase-c50/summary.json`.
+
+The baked Nsight Systems 2023.4.4 importer failed C50 `.qdstrm` import with a
+QuadD wrong-event-order error before stats export, so C50 carries forward the
+latest successful current-main decode NVTX attribution from post-#442 for the
+hotspot table: `:kiln/gdn/gates` `17.9%`, `:kiln/gdn/gated_norm` `17.3%`, and
+`:kiln/gdn/qk_norm` `15.0%`. Next implementation target: fuse or vendor the GDN
+gate/gated-norm decode path; it is higher leverage than FlashInfer/full-attn
+decode and C50 does not justify retrying C48 model-math work.

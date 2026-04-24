@@ -1,0 +1,104 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-24T02:42:42.480409Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-24T02:42:42.482529Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-24T02:42:42.482859Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-24T02:42:42.482890Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-24T02:42:42.483037Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+Model loaded in 2.86s (backend: cuda, VRAM: 16367 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=49] (515 prompt tokens)...
+    Prefill (MTP): 421.8ms (1221 tok/s)
+[2m2026-04-24T02:42:46.280903Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m deferred native MTP CPU load complete [3mload_elapsed_ms[0m[2m=[0m3
+[2m2026-04-24T02:42:46.329178Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m lazy native MTP GPU upload complete [3mupload_elapsed_ms[0m[2m=[0m48
+    Decode (MTP): 128 tokens, mean ITL 39.9ms (25.1 tok/s), α = 0.707 (53/75)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 2.86s (VRAM: 16367 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         515
+Prefill time:          421.8 ms (1221 tok/s)
+Time to first token:   421.8 ms
+Mean inter-token:      39.9 ms (25.1 tok/s)
+P50 inter-token:       28.8 ms
+P99 inter-token:       100.1 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.707
+
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 2.858273815,
+    "model_vram_mb": 16367
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 515,
+    "prefill_time_ms": 421.794046,
+    "prefill_tokens_per_sec": 1220.9750348159255,
+    "time_to_first_token_ms": 421.794046,
+    "mean_inter_token_ms": 39.89365402362206,
+    "p50_inter_token_ms": 28.777122,
+    "p99_inter_token_ms": 100.142286,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 25.06664341671671,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.7066666666666667,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}
+Generating '/tmp/nsys-report-10c3.qdstrm'
+[1/1] [0%                          ] c50-mtp-window.nsys-rep[1/1] [0%                          ] c50-mtp-window.nsys-rep[1/1] [===22%                      ] c50-mtp-window.nsys-rep[1/1] [=17%                        ] c50-mtp-window.nsys-rep[1/1] [14%                         ] c50-mtp-window.nsys-rep[1/1] [=====29%                    ] c50-mtp-window.nsys-rep[1/1] [====25%                     ] c50-mtp-window.nsys-rep[1/1] [===22%                      ] c50-mtp-window.nsys-rep[1/1] [==19%                       ] c50-mtp-window.nsys-rep[1/1] [=17%                        ] c50-mtp-window.nsys-rep[1/1] [=16%                        ] c50-mtp-window.nsys-rep[1/1] [14%                         ] c50-mtp-window.nsys-rep[1/1] [13%                         ] c50-mtp-window.nsys-rep[1/1] [12%                         ] c50-mtp-window.nsys-rep[1/1] [11%                         ] c50-mtp-window.nsys-rep[1/1] [10%                         ] c50-mtp-window.nsys-rep[1/1] [9%                          ] c50-mtp-window.nsys-rep[1/1] [8%                          ] c50-mtp-window.nsys-rep[1/1] [7%                          ] c50-mtp-window.nsys-rep[1/1] [6%                          ] c50-mtp-window.nsys-rep[1/1] [5%                          ] c50-mtp-window.nsys-rep[1/1] [0%                          ] c50-mtp-window.nsys-rep[1/1] [5%                          ] c50-mtp-window.nsys-rep[1/1] [6%                          ] c50-mtp-window.nsys-rep[1/1] [7%                          ] c50-mtp-window.nsys-rep[1/1] [8%                          ] c50-mtp-window.nsys-rep[1/1] [9%                          ] c50-mtp-window.nsys-rep[1/1] [10%                         ] c50-mtp-window.nsys-rep[1/1] [11%                         ] c50-mtp-window.nsys-rep[1/1] [12%                         ] c50-mtp-window.nsys-rep[1/1] [13%                         ] c50-mtp-window.nsys-rep[1/1] [14%                         ] c50-mtp-window.nsys-rep[1/1] [=15%                        ] c50-mtp-window.nsys-rep[1/1] [=16%                        ] c50-mtp-window.nsys-rep[1/1] [=17%                        ] c50-mtp-window.nsys-rep[1/1] [==18%                       ] c50-mtp-window.nsys-rep[1/1] [==19%                       ] c50-mtp-window.nsys-rep[1/1] [==20%                       ] c50-mtp-window.nsys-rep[1/1] [==21%                       ] c50-mtp-window.nsys-rep[1/1] [===22%                      ] c50-mtp-window.nsys-rep[1/1] [===23%                      ] c50-mtp-window.nsys-rep[1/1] [===24%                      ] c50-mtp-window.nsys-rep[1/1] [====25%                     ] c50-mtp-window.nsys-rep[1/1] [====26%                     ] c50-mtp-window.nsys-rep[1/1] [====27%                     ] c50-mtp-window.nsys-rep[1/1] [====28%                     ] c50-mtp-window.nsys-rep[1/1] [=====29%                    ] c50-mtp-window.nsys-rep[1/1] [=====30%                    ] c50-mtp-window.nsys-rep[1/1] [=====31%                    ] c50-mtp-window.nsys-rep[1/1] [=====32%                    ] c50-mtp-window.nsys-rep[1/1] [======33%                   ] c50-mtp-window.nsys-rep[1/1] [======34%                   ] c50-mtp-window.nsys-rep[1/1] [======35%                   ] c50-mtp-window.nsys-rep[1/1] [=======36%                  ] c50-mtp-window.nsys-rep[1/1] [=======37%                  ] c50-mtp-window.nsys-rep[1/1] [=======38%                  ] c50-mtp-window.nsys-rep[1/1] [=======39%                  ] c50-mtp-window.nsys-rep[1/1] [========40%                 ] c50-mtp-window.nsys-rep[1/1] [========41%                 ] c50-mtp-window.nsys-rep[1/1] [========42%                 ] c50-mtp-window.nsys-rep[1/1] [=========43%                ] c50-mtp-window.nsys-rep[1/1] [=========44%                ] c50-mtp-window.nsys-rep[1/1] [=========45%                ] c50-mtp-window.nsys-rep[1/1] [=========46%                ] c50-mtp-window.nsys-rep[1/1] [==========47%               ] c50-mtp-window.nsys-rep[1/1] [==========48%               ] c50-mtp-window.nsys-rep[1/1] [==========49%               ] c50-mtp-window.nsys-rep[1/1] [===========50%              ] c50-mtp-window.nsys-rep[1/1] [===========51%              ] c50-mtp-window.nsys-rep[1/1] [===========52%              ] c50-mtp-window.nsys-rep[1/1] [===========53%              ] c50-mtp-window.nsys-rep[1/1] [============54%             ] c50-mtp-window.nsys-rep[1/1] [============55%             ] c50-mtp-window.nsys-rep[1/1] [============56%             ] c50-mtp-window.nsys-rep[1/1] [============57%             ] c50-mtp-window.nsys-rep[1/1] [=============58%            ] c50-mtp-window.nsys-rep[1/1] [=============59%            ] c50-mtp-window.nsys-rep[1/1] [=============60%            ] c50-mtp-window.nsys-rep[1/1] [==============61%           ] c50-mtp-window.nsys-rep
+Importer error status: Importation failed.
+Import Failed with unexpected exception: /dvs/p4/build/sw/devtools/Agora/Rel/CUDA12.4/QuadD/Host/QdstrmImporter/main.cpp(34): Throw in function {anonymous}::Importer::Importer(const boost::filesystem::path&, const boost::filesystem::path&)
+Dynamic exception type: boost::wrapexcept<QuadDCommon::RuntimeException>
+std::exception::what: RuntimeException
+[QuadDCommon::tag_message*] = Status: AnalysisFailed
+Error {
+  Type: RuntimeError
+  SubError {
+    Type: InvalidArgument
+    Props {
+      Items {
+        Type: OriginalExceptionClass
+        Value: "N5boost10wrapexceptIN11QuadDCommon24InvalidArgumentExceptionEEE"
+      }
+      Items {
+        Type: OriginalFile
+        Value: "/dvs/p4/build/sw/devtools/Agora/Rel/CUDA12.4/QuadD/Host/Analysis/Modules/EventCollection.cpp"
+      }
+      Items {
+        Type: OriginalLine
+        Value: "1048"
+      }
+      Items {
+        Type: OriginalFunction
+        Value: "void QuadDAnalysis::EventCollection::CheckOrder(QuadDAnalysis::EventCollectionHelper::EventContainer&, const QuadDAnalysis::ConstEvent&) const"
+      }
+      Items {
+        Type: ErrorText
+        Value: "Wrong event order has been detected when adding events to the collection:\nnew event ={ StartNs=3293547706 StopNs=3293547906 GlobalId=282319910913210 Event={ TraceProcessEvent=[{ Correlation=5143063 EventClass=1 TextId=48 ReturnValue=0 },] } Type=48 }\nlast event ={ StartNs=3346952524 StopNs=3346952674 GlobalId=282319910913210 Event={ TraceProcessEvent=[{ Correlation=5222087 EventClass=1 TextId=48 ReturnValue=0 },] } Type=48 }"
+      }
+    }
+  }
+}
+Generated:
+    /tmp/c50-mtp-window.qdstrm
