@@ -1,5 +1,41 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.1 — 2026-04-24
+
+Server re-cut to include CI fixes that were missing from kiln-v0.2.0. No
+user-facing behavior changes from v0.2.0 in the core server; this cut also
+picks up phase-6 Metal and CUDA kernel work landed on main between v0.2.0 and
+v0.2.1.
+
+### CI fixes shipped for the full platform matrix
+- Bump Jimver/cuda-toolkit from v0.2.19 to v0.2.35 to handle NVIDIA's renamed
+  installer URLs (#469)
+- Install MSVC dev env on Windows before CUDA build; fixes M_LOG2E undefined
+  in flash_api_c.cu under MSVC (#472)
+- Force static MSVC CRT on Windows CUDA build; fixes CRT mismatch between
+  esaxx-rs and kiln-marlin-gemm (#477)
+
+### Phase 6 CUDA decode work
+- Fuse CUDA GDN gated RMSNorm (#466)
+- Add CUDA conv1d prefill fast path and fix conv1d prefill launch bounds
+  (#481)
+- Document post-466 and post-468 MTP decode profiles and post-476 MTP profile
+  failure (#468, #480)
+- Audit GDN conv decode hotspot and refresh post-#481 current-main profile
+  (#473, #483)
+
+### Phase 6 Metal decode work
+- Fuse Metal LM-head argmax for greedy decode and reduce Metal LM-head argmax
+  on GPU (#471)
+- Speed up Metal decode GEMV and route GDN out-proj through Metal decode GEMV
+- Fuse Metal full-attention QKV projections and fuse Metal GDN decode QKV
+  conv norm
+- Persist transposed weight cache asynchronously
+
+### Infrastructure
+- Cap cargo and nvcc parallelism and add OOM postmortem helper for RunPod
+  builds (#474)
+
 ## kiln-v0.2.0 — 2026-04-24
 
 Coordinated release aligned with desktop-v0.2.0. Headline work is the Metal
