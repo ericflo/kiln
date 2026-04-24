@@ -8,6 +8,9 @@
 //! 2. [`fused_l2_qk_norm`] — fused L2-norm(Q) + scale(Q) + L2-norm(K) used by
 //!    GDN linear attention. Replaces the ~11 candle ops behind the
 //!    `kiln/gdn/qk_norm` block in `forward.rs`.
+//! 3. [`fused_l2_qk_norm_gqa`] — CUDA GDN GQA fast path that normalizes
+//!    unexpanded `[B, T, nk, dk]` Q/K and emits expanded `[B, T, nv, dk]`
+//!    outputs in one launch.
 //!
 //! # Why
 //!
@@ -37,21 +40,22 @@
 //! - [`fused_l2_qk_norm`] — candle-compatible wrapper around the GDN QK
 //!   fused-norm kernel. Returns `(q_out, k_out)`.
 //! - [`supports_l2_qk_norm`] — capability check for the QK kernel.
+//! - [`fused_l2_qk_norm_gqa`] / [`supports_l2_qk_norm_gqa`] — GDN GQA
+//!   head-expand + QK norm CUDA path.
 //!
 //! # Envelope
 //!
 //! - bf16 activations, bf16 weights, bf16 outputs.
 //! - Contiguous CUDA tensors only.
-//! - Last dim (`hidden`) must be <= 8192.
+//! - Last dim (`hidden`) must be <= 8192 for expanded QK norm; exactly 128
+//!   for the GQA head-expand fast path.
 //! - `eps` is F32 — kiln uses 1e-6 for both kernels.
 //!
 //! Out of scope: backward pass, fused GEMM prologue, non-bf16 dtypes,
 //! non-contiguous input.
 
 use candle_core::{
-    backend::BackendStorage,
-    cuda_backend::cudarc::driver::DevicePtr,
-    DType, Device, Result, Tensor,
+    DType, Device, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
 
@@ -72,6 +76,20 @@ unsafe extern "C" {
         q_out: *mut core::ffi::c_void,
         k_out: *mut core::ffi::c_void,
         rows: i32,
+        hidden: i32,
+        q_scale: f32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_fused_l2_qk_norm_gqa(
+        q_in: *const core::ffi::c_void,
+        k_in: *const core::ffi::c_void,
+        q_out: *mut core::ffi::c_void,
+        k_out: *mut core::ffi::c_void,
+        rows: i32,
+        nk: i32,
+        ratio: i32,
         hidden: i32,
         q_scale: f32,
         eps: f32,
@@ -347,6 +365,163 @@ pub fn fused_l2_qk_norm(
     Ok((q_out, k_out))
 }
 
+/// Whether the fused GQA head-expand + L2 QK-norm kernel is available.
+///
+/// Inputs must be CUDA + bf16 with shape `[batch, seq, nk, dk]`; the wrapper
+/// materializes contiguous inputs before launch when needed.
+/// `nv` must be a positive multiple of `nk`; `dk` is intentionally limited to
+/// Qwen3.5 GDN's `128` so this remains a narrow forward-only CUDA path.
+pub fn supports_l2_qk_norm_gqa(q: &Tensor, k: &Tensor, nv: usize) -> bool {
+    if !matches!(q.device(), Device::Cuda(_))
+        || !matches!(k.device(), Device::Cuda(_))
+        || q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || q.dims() != k.dims()
+        || q.rank() != 4
+    {
+        return false;
+    }
+
+    let dims = q.dims();
+    let nk = dims[2];
+    let dk = dims[3];
+    nk > 0 && dk == 128 && nv >= nk && nv % nk == 0
+}
+
+/// Run fused GQA head-expand + L2 QK-norm.
+///
+/// Inputs are unexpanded GDN Q/K tensors `[batch, seq, nk, dk]`; outputs are
+/// freshly allocated bf16 tensors `[batch, seq, nv, dk]`, with each normalized
+/// input head repeated `nv / nk` times. Semantics match explicit Candle
+/// `expand(...).contiguous().reshape(...)` followed by [`fused_l2_qk_norm`].
+pub fn fused_l2_qk_norm_gqa(
+    q: &Tensor,
+    k: &Tensor,
+    nv: usize,
+    q_scale: f32,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
+    if q.dtype() != DType::BF16 || k.dtype() != DType::BF16 {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: l2_qk_norm_gqa requires bf16 inputs (got {:?}, {:?})",
+            q.dtype(),
+            k.dtype()
+        );
+    }
+    if q.dims() != k.dims() {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: l2_qk_norm_gqa requires q.dims == k.dims (got {:?}, {:?})",
+            q.dims(),
+            k.dims()
+        );
+    }
+    if q.rank() != 4 {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: l2_qk_norm_gqa requires rank-4 [B,T,nk,dk] input (got {:?})",
+            q.dims()
+        );
+    }
+
+    let dims = q.dims();
+    let batch = dims[0];
+    let seq = dims[1];
+    let nk = dims[2];
+    let dk = dims[3];
+
+    if nk == 0 || nv < nk || nv % nk != 0 {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: l2_qk_norm_gqa requires nv to be a positive multiple of nk (nk={nk}, nv={nv})"
+        );
+    }
+    if dk != 128 {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: l2_qk_norm_gqa dk {dk} outside envelope (expected 128)"
+        );
+    }
+
+    let ratio = nv / nk;
+    let rows = batch * seq * nk;
+    let device = q.device();
+    let out_dims = [batch, seq, nv, dk];
+
+    let q_out = Tensor::zeros(&out_dims, DType::BF16, device)?;
+    let k_out = Tensor::zeros(&out_dims, DType::BF16, device)?;
+
+    if rows == 0 {
+        return Ok((q_out, k_out));
+    }
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (qo_storage, qo_layout) = q_out.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+
+        let q_cuda = match &*q_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: q must be on CUDA"),
+        };
+        let k_cuda = match &*k_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: k must be on CUDA"),
+        };
+        let qo_cuda = match &*qo_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: q_out must be on CUDA"),
+        };
+        let ko_cuda = match &*ko_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: k_out must be on CUDA"),
+        };
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let q_slice = q_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(q_layout.start_offset()..);
+        let k_slice = k_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(k_layout.start_offset()..);
+        let qo_slice = qo_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qo_layout.start_offset()..);
+        let ko_slice = ko_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ko_layout.start_offset()..);
+
+        unsafe {
+            let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+            let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+            let (qo_ptr, _g3) = qo_slice.device_ptr(&stream);
+            let (ko_ptr, _g4) = ko_slice.device_ptr(&stream);
+
+            let status = kiln_fused_l2_qk_norm_gqa(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                qo_ptr as *mut _,
+                ko_ptr as *mut _,
+                rows as i32,
+                nk as i32,
+                ratio as i32,
+                dk as i32,
+                q_scale,
+                eps,
+                raw_stream,
+            );
+
+            if status != 0 {
+                candle_core::bail!("kiln_fused_l2_qk_norm_gqa failed with status {status}");
+            }
+        }
+    }
+
+    Ok((q_out, k_out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,8 +779,7 @@ mod tests {
         let k = k_f32.to_dtype(DType::BF16).unwrap();
 
         let (q_ref, k_ref) = reference_l2_qk_norm(&q, &k, q_scale, eps).unwrap();
-        let (q_fused, k_fused) =
-            fused_l2_qk_norm(&q, &k, q_scale as f32, eps as f32).unwrap();
+        let (q_fused, k_fused) = fused_l2_qk_norm(&q, &k, q_scale as f32, eps as f32).unwrap();
 
         assert_eq!(q_fused.dims(), &[batch, seq, nv, dk]);
         assert_eq!(k_fused.dims(), &[batch, seq, nv, dk]);
@@ -654,8 +828,7 @@ mod tests {
         let k = k_f32.to_dtype(DType::BF16).unwrap();
 
         let (q_ref, k_ref) = reference_l2_qk_norm(&q, &k, q_scale, eps).unwrap();
-        let (q_fused, k_fused) =
-            fused_l2_qk_norm(&q, &k, q_scale as f32, eps as f32).unwrap();
+        let (q_fused, k_fused) = fused_l2_qk_norm(&q, &k, q_scale as f32, eps as f32).unwrap();
 
         assert_eq!(q_fused.dims(), &[batch, seq, nv, dk]);
         assert_eq!(k_fused.dims(), &[batch, seq, nv, dk]);
@@ -670,6 +843,145 @@ mod tests {
         assert!(
             k_diff < 1e-2,
             "K parity failed: max_abs_diff={k_diff} exceeds 1e-2 tolerance"
+        );
+    }
+
+    #[test]
+    fn parity_l2_qk_norm_gqa_decode_shape() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        let batch = 1usize;
+        let seq = 1usize;
+        let nk = 8usize;
+        let nv = 16usize;
+        let dk = 128usize;
+        let total = batch * seq * nk * dk;
+        let q_scale = 1.0 / (dk as f64).sqrt();
+        let eps = 1e-6;
+
+        let mut q_raw = Vec::with_capacity(total);
+        let mut k_raw = Vec::with_capacity(total);
+        fill_pseudo_random(&mut q_raw, total, 0x3141_5926, 0.5);
+        fill_pseudo_random(&mut k_raw, total, 0x2718_2818, 0.5);
+
+        let q = Tensor::from_vec(q_raw, (batch, seq, nk, dk), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::from_vec(k_raw, (batch, seq, nk, dk), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        assert!(supports_l2_qk_norm_gqa(&q, &k, nv));
+
+        let ratio = nv / nk;
+        let q_expanded = q
+            .unsqueeze(3)
+            .unwrap()
+            .expand(&[batch, seq, nk, ratio, dk])
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .reshape((batch, seq, nv, dk))
+            .unwrap();
+        let k_expanded = k
+            .unsqueeze(3)
+            .unwrap()
+            .expand(&[batch, seq, nk, ratio, dk])
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .reshape((batch, seq, nv, dk))
+            .unwrap();
+
+        let (q_ref, k_ref) = reference_l2_qk_norm(&q_expanded, &k_expanded, q_scale, eps).unwrap();
+        let (q_fused, k_fused) =
+            fused_l2_qk_norm_gqa(&q, &k, nv, q_scale as f32, eps as f32).unwrap();
+
+        assert_eq!(q_fused.dims(), &[batch, seq, nv, dk]);
+        assert_eq!(k_fused.dims(), &[batch, seq, nv, dk]);
+
+        let q_diff = max_abs_diff(&q_ref, &q_fused);
+        let k_diff = max_abs_diff(&k_ref, &k_fused);
+
+        assert!(
+            q_diff < 1e-2,
+            "GQA Q parity failed: max_abs_diff={q_diff} exceeds 1e-2 tolerance"
+        );
+        assert!(
+            k_diff < 1e-2,
+            "GQA K parity failed: max_abs_diff={k_diff} exceeds 1e-2 tolerance"
+        );
+    }
+
+    #[test]
+    fn parity_l2_qk_norm_gqa_prefill_shape() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        let batch = 2usize;
+        let seq = 17usize;
+        let nk = 8usize;
+        let nv = 16usize;
+        let dk = 128usize;
+        let total = batch * seq * nk * dk;
+        let q_scale = 1.0 / (dk as f64).sqrt();
+        let eps = 1e-6;
+
+        let mut q_raw = Vec::with_capacity(total);
+        let mut k_raw = Vec::with_capacity(total);
+        fill_pseudo_random(&mut q_raw, total, 0x0bad_f00d, 0.7);
+        fill_pseudo_random(&mut k_raw, total, 0x00c0_ffee, 0.7);
+
+        let q = Tensor::from_vec(q_raw, (batch, seq, nk, dk), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::from_vec(k_raw, (batch, seq, nk, dk), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        let ratio = nv / nk;
+        let q_expanded = q
+            .unsqueeze(3)
+            .unwrap()
+            .expand(&[batch, seq, nk, ratio, dk])
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .reshape((batch, seq, nv, dk))
+            .unwrap();
+        let k_expanded = k
+            .unsqueeze(3)
+            .unwrap()
+            .expand(&[batch, seq, nk, ratio, dk])
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .reshape((batch, seq, nv, dk))
+            .unwrap();
+
+        let (q_ref, k_ref) = reference_l2_qk_norm(&q_expanded, &k_expanded, q_scale, eps).unwrap();
+        let (q_fused, k_fused) =
+            fused_l2_qk_norm_gqa(&q, &k, nv, q_scale as f32, eps as f32).unwrap();
+
+        let q_diff = max_abs_diff(&q_ref, &q_fused);
+        let k_diff = max_abs_diff(&k_ref, &k_fused);
+
+        assert!(
+            q_diff < 1e-2,
+            "GQA prefill Q parity failed: max_abs_diff={q_diff} exceeds 1e-2 tolerance"
+        );
+        assert!(
+            k_diff < 1e-2,
+            "GQA prefill K parity failed: max_abs_diff={k_diff} exceeds 1e-2 tolerance"
         );
     }
 
@@ -700,8 +1012,7 @@ mod tests {
         let k = k_f32.to_dtype(DType::BF16).unwrap();
 
         let (q_ref, k_ref) = reference_l2_qk_norm(&q, &k, q_scale, eps).unwrap();
-        let (q_fused, k_fused) =
-            fused_l2_qk_norm(&q, &k, q_scale as f32, eps as f32).unwrap();
+        let (q_fused, k_fused) = fused_l2_qk_norm(&q, &k, q_scale as f32, eps as f32).unwrap();
 
         let q_diff = max_abs_diff(&q_ref, &q_fused);
         let k_diff = max_abs_diff(&k_ref, &k_fused);

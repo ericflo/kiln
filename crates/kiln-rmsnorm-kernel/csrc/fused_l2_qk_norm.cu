@@ -129,6 +129,63 @@ __global__ void fused_l2_qk_norm_kernel(
     }
 }
 
+__global__ void fused_l2_qk_norm_gqa_kernel(
+    const __nv_bfloat16 *__restrict__ q_in,
+    const __nv_bfloat16 *__restrict__ k_in,
+    __nv_bfloat16 *__restrict__ q_out,
+    __nv_bfloat16 *__restrict__ k_out,
+    int nk,
+    int ratio,
+    int hidden,
+    float q_scale,
+    float eps
+) {
+    int row = blockIdx.x;
+    int head = row % nk;
+    int token = row / nk;
+
+    const __nv_bfloat16 *q_row = q_in + static_cast<size_t>(row) * hidden;
+    const __nv_bfloat16 *k_row = k_in + static_cast<size_t>(row) * hidden;
+
+    float q_ss = 0.0f;
+    float k_ss = 0.0f;
+    for (int j = threadIdx.x; j < hidden; j += blockDim.x) {
+        float qj = __bfloat162float(q_row[j]);
+        float kj = __bfloat162float(k_row[j]);
+        q_ss += qj * qj;
+        k_ss += kj * kj;
+    }
+
+    __shared__ float smem[kMaxWarps];
+    __shared__ float s_inv_q;
+    __shared__ float s_inv_k;
+
+    float q_sum = block_reduce_sum(q_ss, smem);
+    float k_sum = block_reduce_sum(k_ss, smem);
+
+    if (threadIdx.x == 0) {
+        s_inv_q = q_scale * rsqrtf(q_sum + eps);
+        s_inv_k = rsqrtf(k_sum + eps);
+    }
+    __syncthreads();
+
+    float inv_q = s_inv_q;
+    float inv_k = s_inv_k;
+    int nv = nk * ratio;
+    size_t out_base = (static_cast<size_t>(token) * nv + static_cast<size_t>(head) * ratio) * hidden;
+
+    for (int r = 0; r < ratio; ++r) {
+        __nv_bfloat16 *q_out_row = q_out + out_base + static_cast<size_t>(r) * hidden;
+        __nv_bfloat16 *k_out_row = k_out + out_base + static_cast<size_t>(r) * hidden;
+        for (int j = threadIdx.x; j < hidden; j += blockDim.x) {
+            float qj = __bfloat162float(q_row[j]) * inv_q;
+            float kj = __bfloat162float(k_row[j]) * inv_k;
+            q_out_row[j] = __float2bfloat16(qj);
+            k_out_row[j] = __float2bfloat16(kj);
+        }
+    }
+}
+
 }  // namespace
 
 extern "C" kiln_l2_qk_norm_status_t kiln_fused_l2_qk_norm(
@@ -161,6 +218,51 @@ extern "C" kiln_l2_qk_norm_status_t kiln_fused_l2_qk_norm(
         reinterpret_cast<const __nv_bfloat16 *>(k_in),
         reinterpret_cast<__nv_bfloat16 *>(q_out),
         reinterpret_cast<__nv_bfloat16 *>(k_out),
+        hidden,
+        q_scale,
+        eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        return 1;
+    }
+    return 0;
+}
+
+
+extern "C" kiln_l2_qk_norm_status_t kiln_fused_l2_qk_norm_gqa(
+    const void *q_in,
+    const void *k_in,
+    void *q_out,
+    void *k_out,
+    int rows,
+    int nk,
+    int ratio,
+    int hidden,
+    float q_scale,
+    float eps,
+    void *stream
+) {
+    if (rows <= 0 || nk <= 0 || ratio <= 0 || hidden <= 0) {
+        return 0;
+    }
+    if (hidden != 128 || rows % nk != 0) {
+        return 2;
+    }
+
+    dim3 grid(rows);
+    dim3 block(kThreadsPerBlock);
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+
+    fused_l2_qk_norm_gqa_kernel<<<grid, block, 0, s>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(q_in),
+        reinterpret_cast<const __nv_bfloat16 *>(k_in),
+        reinterpret_cast<__nv_bfloat16 *>(q_out),
+        reinterpret_cast<__nv_bfloat16 *>(k_out),
+        nk,
+        ratio,
         hidden,
         q_scale,
         eps
