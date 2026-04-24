@@ -26,6 +26,8 @@ const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
+const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
+    "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV: &str = "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
@@ -134,6 +136,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_lm_head_pipeline(metal_device)?;
     if !metal_lm_head_argmax_disabled() {
         metal_lm_head_argmax_pipeline(metal_device)?;
+        if !metal_lm_head_argmax_gpu_reduce_disabled() {
+            metal_lm_head_argmax_reduce_pipeline(metal_device)?;
+        }
     }
     if !metal_mlp_gate_up_fusion_disabled() {
         metal_mlp_gate_up_pipeline(metal_device)?;
@@ -646,6 +651,10 @@ pub(crate) fn metal_mlp_gate_up_fusion_disabled() -> bool {
 
 pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX)
+}
+
+fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
+    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE)
 }
 
 pub(crate) fn metal_transposed_coop_gemv_disabled() -> bool {
@@ -1636,6 +1645,44 @@ kernel void kiln_lm_head_argmax_chunks_bf16(
         partial_indices[group] = indices[0];
     }
 }
+
+kernel void kiln_lm_head_argmax_reduce_f32(
+    device const float* partial_scores [[buffer(0)]],
+    device const float* partial_indices [[buffer(1)]],
+    device float* final_index [[buffer(2)]],
+    constant uint& num_groups [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    threadgroup float scores[1024];
+    threadgroup float indices[1024];
+
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (tid < num_groups) {
+        score = partial_scores[tid];
+        index = partial_indices[tid];
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 512; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other_score = scores[tid + stride];
+            const float other_index = indices[tid + stride];
+            if (other_score > scores[tid] ||
+                (other_score == scores[tid] && other_index < indices[tid])) {
+                scores[tid] = other_score;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        final_index[0] = indices[0];
+    }
+}
 "#;
 
 const METAL_MLP_GATE_UP_KERNEL: &str = r#"
@@ -2191,6 +2238,35 @@ fn metal_lm_head_argmax_pipeline(
     Ok(pipeline)
 }
 
+fn metal_lm_head_argmax_reduce_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head argmax reduce pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_argmax_reduce_f32", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head argmax reduce function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head argmax reduce pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_mlp_gate_up_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -2462,11 +2538,21 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
     let num_groups = vocab.div_ceil(chunk_width);
     let partial_scores = unsafe { Tensor::empty((num_groups,), DType::F32, x.device())? };
     let partial_indices = unsafe { Tensor::empty((num_groups,), DType::F32, x.device())? };
+    let final_index = if metal_lm_head_argmax_gpu_reduce_disabled() {
+        None
+    } else {
+        Some(unsafe { Tensor::empty((1usize,), DType::F32, x.device())? })
+    };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal lm head argmax requires Metal tensors");
     };
     let pipeline = metal_lm_head_argmax_pipeline(device)?;
+    let reduce_pipeline = if final_index.is_some() {
+        Some(metal_lm_head_argmax_reduce_pipeline(device)?)
+    } else {
+        None
+    };
     let encoder = device.command_encoder()?;
     encoder.set_label("kiln_lm_head_argmax_chunks_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
@@ -2476,6 +2562,7 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
         let (w_storage, w_layout) = weight_t.storage_and_layout();
         let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
         let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
+        let final_storage_and_layout = final_index.as_ref().map(Tensor::storage_and_layout);
 
         let x_metal = match &*x_storage {
             candle_core::Storage::Metal(s) => s,
@@ -2493,6 +2580,11 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
             candle_core::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head argmax partial indices must be on Metal"),
         };
+        let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
+            Some((candle_core::Storage::Metal(s), layout)) => Some((s, layout)),
+            Some(_) => anyhow::bail!("metal lm head argmax final index must be on Metal"),
+            None => None,
+        };
 
         let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
         let w_buf =
@@ -2507,6 +2599,9 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
             &pi_layout,
             partial_indices.dtype(),
         );
+        let final_buf = final_metal.map(|(storage, layout)| {
+            candle_core::metal_backend::buffer_o(storage.buffer(), layout, DType::F32)
+        });
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -2529,11 +2624,44 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
             depth: 1,
         };
         encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+
+        if let (Some(reduce_pipeline), Some(final_buf)) = (&reduce_pipeline, final_buf) {
+            encoder.set_label("kiln_lm_head_argmax_reduce_f32");
+            encoder.set_compute_pipeline_state(reduce_pipeline);
+            encoder.set_buffer(0, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+            encoder.set_buffer(1, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+            encoder.set_buffer(2, Some(final_buf.buffer), final_buf.offset_in_bytes);
+
+            let num_groups_u32 = num_groups as u32;
+            encoder.set_bytes(3, &num_groups_u32);
+
+            let reduce_threadgroups = objc2_metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            };
+            let reduce_threads = objc2_metal::MTLSize {
+                width: 1024,
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatch_thread_groups(reduce_threadgroups, reduce_threads);
+        }
     }
 
-    // Commit the argmax dispatch before synchronously reading the tiny list of
-    // per-chunk winners back to the CPU for the final reduction.
+    // Commit the argmax dispatch before the tiny synchronous readback. The
+    // default path reduces chunk winners on-GPU and reads only one scalar.
     drop(encoder);
+
+    if let Some(final_index) = final_index {
+        let token = final_index
+            .to_vec1::<f32>()
+            .context("read metal lm head argmax final index")?
+            .into_iter()
+            .next()
+            .context("metal lm head argmax final index missing")?;
+        return Ok(token as u32);
+    }
 
     let scores = partial_scores
         .to_vec1::<f32>()
