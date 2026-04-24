@@ -43,6 +43,7 @@ fn main() {
     build.file(csrc_dir.join("gdn_fwd_sub.cu"));
     build.file(csrc_dir.join("recurrent_gdn_fwd.cu"));
     build.file(csrc_dir.join("gdn_gates.cu"));
+    build.file(csrc_dir.join("gdn_gated_rms_norm.cu"));
     build.file(csrc_dir.join("gdn_chunk_prep.cu"));
     build.file(csrc_dir.join("gdn_chunk_scan.cu"));
     build.file(csrc_dir.join("gdn_full_chunk_forward.cu"));

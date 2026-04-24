@@ -6753,6 +6753,68 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_gdn_gated_rms_norm_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping test_cuda_gdn_gated_rms_norm_matches_fallback: {err}");
+                return Ok(());
+            }
+        };
+        let backend = crate::backend::for_device(&device);
+        if !backend.supports_gdn_gated_rms_norm() {
+            eprintln!("CUDA gated RMSNorm disabled, skipping parity test");
+            return Ok(());
+        }
+
+        let batch = 1usize;
+        let seq_len = 3usize;
+        let heads = 32usize;
+        let hidden = 128usize;
+        let elems = batch * seq_len * heads * hidden;
+
+        let mut rng = StdRng::seed_from_u64(0xC0DA_6A7E);
+        let x_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let z_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-2.0f32..2.0f32)).collect();
+        let w_data: Vec<f32> = (0..hidden).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+
+        let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
+        let fused = backend
+            .gdn_gated_rms_norm(&x, &z, &weight, 1e-6)?
+            .context("CUDA backend declined gated RMSNorm test shape")?;
+
+        assert_eq!(fused.dims(), fallback.dims());
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let diff = (fused.to_dtype(DType::F32)?
+            - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("gated_rms_norm cuda vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 5e-3,
+            "CUDA gated_rms_norm max_abs_diff={max:e} exceeds 5e-3"
+        );
+        assert!(
+            mean < 5e-4,
+            "CUDA gated_rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        Ok(())
+    }
+
     #[cfg(feature = "metal")]
     #[test]
     fn test_metal_gated_rms_norm_matches_fallback() -> Result<()> {

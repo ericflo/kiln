@@ -17,6 +17,9 @@ pub struct CudaBackend {
     /// Same pattern: cache the env-var read. The fused gates kernel is
     /// gated behind its own kill switch so it can be disabled independently.
     gdn_gates_enabled: bool,
+    /// Kill switch for the fused GDN gated RMSNorm kernel (decode/prefill
+    /// kiln/gdn/gated_norm region).
+    gdn_gated_rms_norm_enabled: bool,
     /// Kill switch for the fused causal_conv1d_update kernel (decode
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
@@ -29,11 +32,14 @@ impl CudaBackend {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
+        let gdn_gated_rms_norm_enabled = gdn_enabled
+            && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
         Self {
             device,
             gdn_enabled,
             gdn_gates_enabled,
+            gdn_gated_rms_norm_enabled,
             fused_conv1d_enabled,
         }
     }
@@ -243,6 +249,28 @@ impl BackendRuntime for CudaBackend {
         let (beta, g) = kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias)
             .context("gdn_gates kernel failed")?;
         Ok(Some((beta, g)))
+    }
+
+    fn supports_gdn_gated_rms_norm(&self) -> bool {
+        self.gdn_gated_rms_norm_enabled
+    }
+
+    fn gdn_gated_rms_norm(
+        &self,
+        x: &Tensor,
+        z: &Tensor,
+        weight: &Tensor,
+        eps: f64,
+    ) -> Result<Option<Tensor>> {
+        if !self.gdn_gated_rms_norm_enabled {
+            return Ok(None);
+        }
+        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports(x, z, weight) {
+            return Ok(None);
+        }
+        let out = kiln_gdn_kernel::gdn_gated_rms_norm(x, z, weight, eps as f32)
+            .context("gdn_gated_rms_norm kernel failed")?;
+        Ok(Some(out))
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
