@@ -32,6 +32,8 @@ const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_F
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
     "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
+const DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR: &str =
+    "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV: &str = "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
@@ -161,6 +163,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     }
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
     metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
+    if !metal_paged_kv_write_token_major_disabled() {
+        metal_paged_kv_write_token_major_pipeline(metal_device)?;
+    }
     Ok(())
 }
 
@@ -688,6 +693,10 @@ pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
 
 fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE)
+}
+
+fn metal_paged_kv_write_token_major_disabled() -> bool {
+    env_truthy(DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR)
 }
 
 pub(crate) fn metal_transposed_coop_gemv_disabled() -> bool {
@@ -2407,6 +2416,31 @@ kernel void kiln_paged_kv_head_major_read_append_token_major_bf16(
 }
 "#;
 
+const METAL_PAGED_KV_WRITE_TOKEN_MAJOR_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_paged_kv_write_token_major_bf16(
+    device const bfloat* k_src [[buffer(0)]],
+    device const bfloat* v_src [[buffer(1)]],
+    device bfloat* k_pool [[buffer(2)]],
+    device bfloat* v_pool [[buffer(3)]],
+    constant uint& slot [[buffer(4)]],
+    constant uint& heads [[buffer(5)]],
+    constant uint& head_dim [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = heads * head_dim;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint pool_idx = slot * total + gid;
+    k_pool[pool_idx] = k_src[gid];
+    v_pool[pool_idx] = v_src[gid];
+}
+"#;
+
 fn metal_shared_library(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::Library> {
@@ -2444,6 +2478,7 @@ fn metal_shared_library(
         METAL_GDN_IN_PROJ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
+        METAL_PAGED_KV_WRITE_TOKEN_MAJOR_KERNEL,
     ]
     .join("");
     let library = device
@@ -2863,6 +2898,35 @@ fn metal_paged_kv_head_major_read_append_token_major_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv read+append pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_paged_kv_write_token_major_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal paged kv write pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_paged_kv_write_token_major_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal paged kv write function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal paged kv write pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -4116,6 +4180,142 @@ fn metal_paged_kv_head_major_read_append_token_major_bf16(
     }
 
     Ok((k_out, v_out))
+}
+
+pub(crate) fn metal_paged_kv_write_token_major_supports(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    slot: usize,
+    k: &Tensor,
+    v: &Tensor,
+) -> bool {
+    if metal_paged_kv_write_token_major_disabled() {
+        return false;
+    }
+    if k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+    {
+        return false;
+    }
+    if !matches!(k_pool.device(), Device::Metal(_))
+        || !matches!(v_pool.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !k_pool.is_contiguous() || !v_pool.is_contiguous() || !k.is_contiguous() || !v.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((total_slots, pool_heads, pool_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Ok(v_pool_dims) = v_pool.dims3() else {
+        return false;
+    };
+    let Ok((batch, seq_len, heads, head_dim)) = k.dims4() else {
+        return false;
+    };
+    let Ok(v_dims) = v.dims4() else {
+        return false;
+    };
+    let Some(total) = heads.checked_mul(head_dim) else {
+        return false;
+    };
+
+    batch == 1
+        && seq_len == 1
+        && v_pool_dims == (total_slots, pool_heads, pool_head_dim)
+        && v_dims == (batch, seq_len, heads, head_dim)
+        && heads == pool_heads
+        && head_dim == pool_head_dim
+        && slot < total_slots
+        && slot <= u32::MAX as usize
+        && heads <= u32::MAX as usize
+        && head_dim <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
+pub(crate) fn metal_paged_kv_write_token_major_bf16(
+    k_pool: &mut Tensor,
+    v_pool: &mut Tensor,
+    slot: usize,
+    k: &Tensor,
+    v: &Tensor,
+) -> Result<()> {
+    anyhow::ensure!(
+        metal_paged_kv_write_token_major_supports(k_pool, v_pool, slot, k, v),
+        "metal paged kv token-major write unsupported shape"
+    );
+    let (_, heads, head_dim) = k_pool.dims3()?;
+    let Device::Metal(device) = k_pool.device() else {
+        anyhow::bail!("metal paged kv write requires Metal tensors");
+    };
+    let pipeline = metal_paged_kv_write_token_major_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_kv_write_token_major_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (ks_storage, ks_layout) = k.storage_and_layout();
+        let (vs_storage, vs_layout) = v.storage_and_layout();
+        let (kp_storage, kp_layout) = k_pool.storage_and_layout();
+        let (vp_storage, vp_layout) = v_pool.storage_and_layout();
+
+        let ks_metal = match &*ks_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv write k source must be on Metal"),
+        };
+        let vs_metal = match &*vs_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv write v source must be on Metal"),
+        };
+        let kp_metal = match &*kp_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv write k pool must be on Metal"),
+        };
+        let vp_metal = match &*vp_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv write v pool must be on Metal"),
+        };
+
+        let ks_buf = candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
+        let vs_buf = candle_core::metal_backend::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
+        let kp_buf =
+            candle_core::metal_backend::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
+        let vp_buf =
+            candle_core::metal_backend::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
+
+        encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(kp_buf.buffer), kp_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(vp_buf.buffer), vp_buf.offset_in_bytes);
+
+        let slot_u32 = slot as u32;
+        let heads_u32 = heads as u32;
+        let head_dim_u32 = head_dim as u32;
+        encoder.set_bytes(4, &slot_u32);
+        encoder.set_bytes(5, &heads_u32);
+        encoder.set_bytes(6, &head_dim_u32);
+
+        let total = heads * head_dim;
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(())
 }
 
 pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
@@ -8064,6 +8264,52 @@ mod tests {
         assert!(
             max_abs_diff(&v_fast, &v_ref)? < 1e-6,
             "V fast read+append diverged from reference"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_kv_write_token_major_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let total_slots = 8usize;
+        let heads = 2usize;
+        let head_dim = 16usize;
+        let slot = 5usize;
+        let elems = heads * head_dim;
+        let k_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 37) as f32 - 18.0) * 0.015625)
+            .collect();
+        let v_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+            .collect();
+        let k = Tensor::from_slice(&k_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (1usize, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let mut v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+
+        assert!(metal_paged_kv_write_token_major_supports(
+            &k_pool, &v_pool, slot, &k, &v
+        ));
+        metal_paged_kv_write_token_major_bf16(&mut k_pool, &mut v_pool, slot, &k, &v)?;
+
+        let k_written = k_pool.narrow(0, slot, 1)?;
+        let v_written = v_pool.narrow(0, slot, 1)?;
+        let k_ref = k.squeeze(0)?.contiguous()?;
+        let v_ref = v.squeeze(0)?.contiguous()?;
+
+        assert!(
+            max_abs_diff(&k_written, &k_ref)? < 1e-6,
+            "K fast write diverged from source"
+        );
+        assert!(
+            max_abs_diff(&v_written, &v_ref)? < 1e-6,
+            "V fast write diverged from source"
         );
 
         Ok(())

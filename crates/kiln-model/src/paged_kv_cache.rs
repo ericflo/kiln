@@ -227,6 +227,17 @@ impl PagedKvCache {
                 .ok_or_else(|| {
                     anyhow::anyhow!("no slot for position {start_pos} in block table")
                 })?;
+            #[cfg(feature = "metal")]
+            {
+                if crate::backend::metal::metal_paged_kv_write_token_major_supports(
+                    k_pool, v_pool, slot, k, v,
+                ) {
+                    crate::backend::metal::metal_paged_kv_write_token_major_bf16(
+                        k_pool, v_pool, slot, k, v,
+                    )?;
+                    return Ok(true);
+                }
+            }
             k_pool.slice_set(&k.squeeze(1)?, 0, slot)?;
             v_pool.slice_set(&v.squeeze(1)?, 0, slot)?;
             return Ok(true);
