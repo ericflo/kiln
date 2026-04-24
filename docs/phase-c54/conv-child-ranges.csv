@@ -1,0 +1,7 @@
+range,total_time_ms,instances,decode_window_share_pct,conv_parent_share_pct
+:kiln/gdn/conv,603.799,2352,12.45,100.00
+:kiln/gdn/conv/fallback_prefill,538.451,1800,11.11,89.18
+:kiln/gdn/conv/layout,43.672,2352,0.90,7.23
+:kiln/gdn/conv/update,11.114,552,0.23,1.84
+:kiln/gdn/conv/prefill_update,0.000,0,0.00,0.00
+:kiln/gdn/conv/fallback_decode,0.000,0,0.00,0.00
