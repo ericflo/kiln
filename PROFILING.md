@@ -6,7 +6,7 @@
 
 **Build / hardware:** `main` `8bd7dd0e` (`8bd7dd0ec047db35b2b48324b0493c1298efe6c7`), RunPod on-demand `NVIDIA RTX A6000, 49140 MiB, driver 550.127.08`, `ghcr.io/ericflo/kiln-runpod:latest`. The requested A6000 was available. The task's literal build command `cargo build --release --features cuda --bin kiln-server` is incompatible with current Cargo targets (`kiln` is the server binary), so the benchmark built `cargo build --release --features cuda --bin kiln`.
 
-**Server config:** real `kiln` server, `model.path = "/workspace/qwen3.5-4b"`, `memory.num_blocks = 4096`, `memory.kv_cache_fp8 = true`, `memory.cuda_graphs = false`, `[prefix_cache] max_blocks = 2048`. CUDA graphs were disabled because `crates/kiln-server/src/api/completions.rs` currently routes to `generate_paged_shared_tokens` when `runner_guard.cuda_graph_enabled()?` is true, bypassing the real prefix-cache path.
+**Server config:** real `kiln` server, `model.path = "/workspace/qwen3.5-4b"`, `memory.num_blocks = 4096`, `memory.kv_cache_fp8 = true`, `memory.cuda_graphs = false`, `[prefix_cache] max_blocks = 2048`. The original A/B disabled CUDA graphs to isolate prefix-cache reuse; current CUDA-graph real chat completions now use the same prefix-cache lookup/register path.
 
 **Prompt shape:** ChatML content used a 2,048-token block-aligned shared prefix. Suffix variants embedded the ChatML assistant delimiter after the shared text so the warm shared prompt's complete token sequence was an exact prefix of both later variant prompts. Variant A was 2,068 prompt tokens; variant B was 2,069 prompt tokens.
 
@@ -15,7 +15,7 @@
 | ON | `KILN_PREFIX_CACHE_ENABLED=1` | 7.711s | 7.718s | 7.678s | 7.777s | 16 each | 10 hits, 20,480 hit tokens, 1,280 hit blocks |
 | OFF | `KILN_PREFIX_CACHE_ENABLED=0` | 26.923s | 26.501s | 24.455s | 27.227s | 16 each | counters stayed zero |
 
-**Result:** prefix cache ON was **3.49x faster** on median total latency for the 5 paired A/B suffix requests after warming the shared prefix. TTFT was not reported in this A/B because it used non-streaming requests; streaming chat completions now use the same real prefix-cache lookup/register path when CUDA graphs are disabled, so streaming hits increment the same `/metrics` prefix-cache counters.
+**Result:** prefix cache ON was **3.49x faster** on median total latency for the 5 paired A/B suffix requests after warming the shared prefix. TTFT was not reported in this A/B because it used non-streaming requests; streaming and non-streaming real chat completions now use the same real prefix-cache lookup/register path with or without CUDA graphs, so hits increment the same `/metrics` prefix-cache counters.
 
 **Metrics after ON arm:**
 
@@ -30,7 +30,7 @@ kiln_prefix_cache_max_blocks 2048
 
 **Exact-repeat caveat:** repeating the warmed 2,048-token prompt increments a miss rather than a hit because cache lookup requires `prompt_tokens.len() > entry.prompt_tokens.len()` and next-token logits are not cached. The exact-repeat request completed in 0.823s with 1 output token, but it did not count as a prefix-cache hit.
 
-**Verdict / next task:** the real append-prefix cache is functionally effective for append-only shared prefixes on both non-streaming and streaming chat completions when CUDA graphs are disabled. CUDA graphs still bypass the cache and emit the one-time warning added for that configuration; CUDA-graph prefix-cache integration and partial-prompt registration remain separate work.
+**Verdict / current behavior:** the real append-prefix cache is functionally effective for append-only shared prefixes on both non-streaming and streaming chat completions. CUDA graphs no longer bypass prefix-cache lookup/registration for non-speculative real chat completions; `scripts/phase7_cuda_graph_prefix_cache_verify.sh` verifies a CUDA-graph cache hit and absence of the old bypass warning.
 
 Detailed artifact: `docs/phase7-prefix-cache-reuse-ab.md`.
 

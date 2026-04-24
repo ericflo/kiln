@@ -409,8 +409,6 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// True once startup inference prewarm has finished or was not needed.
     pub inference_prewarm_complete: Arc<AtomicBool>,
-    /// True after logging that CUDA graphs bypass the real prefix cache.
-    pub prefix_cache_cuda_graphs_bypass_warned: Arc<AtomicBool>,
     /// Server-level default for adapter checkpoint interval during training.
     /// Per-job config overrides this. None = only save at the end.
     pub checkpoint_interval: Option<usize>,
@@ -469,7 +467,6 @@ impl AppState {
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
             inference_prewarm_complete: Arc::new(AtomicBool::new(true)),
-            prefix_cache_cuda_graphs_bypass_warned: Arc::new(AtomicBool::new(false)),
             checkpoint_interval: None,
             served_model_id,
         }
@@ -681,7 +678,6 @@ impl AppState {
                 device,
                 candle_core::Device::Metal(_)
             ))),
-            prefix_cache_cuda_graphs_bypass_warned: Arc::new(AtomicBool::new(false)),
             checkpoint_interval: None,
             served_model_id,
         }
