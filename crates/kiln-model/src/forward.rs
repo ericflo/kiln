@@ -3719,30 +3719,20 @@ fn try_flash_attn_paged_decode(
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
-            let fast_head_major = if backend.supports_flash_attn_prefill_head_major()
-                && backend.supports_paged_kv_head_major_read()
-            {
-                kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, total_seq_len)?
-            } else {
-                None
-            };
             let attn_output = if backend.supports_flash_attn_prefill_head_major() {
                 // Q is already head-major at the call site. Keep K/V grouped
                 // instead of routing through `flash_attention_forward`, which
                 // expands GQA K/V before Metal SDPA and defeats Candle's
                 // native vector-attention GQA path.
-                let (k_head, v_head) = match fast_head_major {
-                    Some(kv) => kv,
-                    None => {
-                        let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                        let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                        (
-                            k_live.transpose(1, 2)?.contiguous()?,
-                            v_live.transpose(1, 2)?.contiguous()?,
-                        )
-                    }
-                };
+                //
+                // Do not force these transposed views contiguous here. Candle
+                // Metal SDPA accepts the strided `[1, kv_heads, seq, dim]`
+                // view, which avoids a K/V materialization on every
+                // full-attention decode layer.
+                let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+                let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+                let k_head = k_live.transpose(1, 2)?;
+                let v_head = v_live.transpose(1, 2)?;
                 flash_attention_forward_head_major(
                     backend, q, &k_head, &v_head, num_heads, head_dim,
                 )?
