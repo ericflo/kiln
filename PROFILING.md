@@ -7129,3 +7129,17 @@ Evidence:
 - `profiling-artifacts/post435_c45_row_scalar_seed1.bench.stderr`
 - `profiling-artifacts/post435_c45_row_scalar_seed0_compare.txt`
 - `profiling-artifacts/post435_c45_row_scalar_seed1_compare.txt`
+
+## 2026-04-24 C48 post-C47 forced-MTP A6000 benchmark
+
+C48 refreshed the forced-MTP A6000 artifact on current `origin/main` after PR #459
+(`e9c071e`) using the mandatory RunPod image on pod `sl53yvx5seviyx`. Full
+report and per-seed artifacts live in
+`docs/phase-c48/post-c47-mtp-a6000-benchmark.md`.
+
+Summary: median alpha = `0.3231`; median decode = `26.91 tok/s`; median mean
+ITL = `37.16 ms`; median prefill = `351.7 ms` across 20 zero-exit seeds.
+Compared with `docs/phase-c40f/summary.json`, C48 is still below the MTP
+acceptance floor and decode is `0.703x` of the C40f median, so C47 does not
+change the MTP go/no-go. Next boundary is benchmark harness/prompt-distribution
+parity, not production RMSNorm/broadcast math.
