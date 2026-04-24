@@ -7169,3 +7169,24 @@ hotspot table: `:kiln/gdn/gates` `17.9%`, `:kiln/gdn/gated_norm` `17.3%`, and
 `:kiln/gdn/qk_norm` `15.0%`. Next implementation target: fuse or vendor the GDN
 gate/gated-norm decode path; it is higher leverage than FlashInfer/full-attn
 decode and C50 does not justify retrying C48 model-math work.
+
+## 2026-04-24 — GDN gated RMSNorm CUDA fusion result (PR TBD)
+
+Implemented a minimal CUDA bf16 fused `rms_norm(x, weight, eps) * silu(z)` kernel for the Qwen3.5 GDN `hidden=128` envelope and wired it through `BackendRuntime::gdn_gated_rms_norm` behind `KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM=1`.
+
+Validation on RunPod A6000 (`KILN_CUDA_ARCHS=86`) passed:
+
+- `cargo test -p kiln-gdn-kernel --release -- --nocapture`
+- `cargo test -p kiln-model --release --features cuda test_cuda_gdn_gated_rms_norm_matches_fallback -- --nocapture`
+- `cargo build --release --features cuda,nvtx --bin kiln-bench`
+
+Parity was exact at the model backend test shape (`max_abs_diff=0`, `mean_abs_diff=0`) versus the Candle fallback rounded to bf16.
+
+C40f-style MTP decode A/B (`--prompt-subset humaneval --prompt-tokens 512 --max-output-tokens 128 --temperature 0.0`) did not clear the speedup floor:
+
+| Path | Seeds | Median decode tok/s | Median mean ITL |
+| --- | --- | ---: | ---: |
+| Candle fallback (`KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM=1`) | 1,2,3 | 37.54 tok/s | 26.64 ms |
+| Fused CUDA default | 1,2,3 | 38.58 tok/s | 25.92 ms |
+
+Overall decode median improved ~2.8%, which is safely below the requested `kiln/gdn/gated_norm` 25% local floor and consistent with prior CUDA-graphs fusion-null notes. The fused kernel remains safe to ship because parity passed and the kill switch preserves fallback behavior, but the next optimization task should target a different hotspot or a memory-traffic-reducing extension of an existing on-chip GDN kernel rather than retrying standalone gated-norm fusion.

@@ -483,6 +483,19 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+unsafe extern "C" {
+    fn kiln_gdn_gated_rms_norm_bf16(
+        x: *const core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        rows: i32,
+        hidden: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
 /// Cheap shape / dtype check so callers can skip allocating the outputs
 /// (and materialising contiguous copies) when they know they'd fall back.
 ///
@@ -634,6 +647,110 @@ pub fn gdn_gates(
     }
 
     Ok((beta, g))
+}
+
+// ---------------------------------------------------------------------------
+// Fused GDN gated RMSNorm kernel.
+//
+// Collapses the `kiln/gdn/gated_norm` body for Qwen3.5 GDN from the
+// candle F32 `rms_norm(x, weight, eps) * silu(z)` op chain into one CUDA
+// launch. The envelope is intentionally narrow: CUDA bf16 tensors,
+// matching contiguous-last-dim shapes, and hidden=128.
+// ---------------------------------------------------------------------------
+
+pub fn gdn_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> bool {
+    if !matches!(x.device(), candle_core::Device::Cuda(_)) {
+        return false;
+    }
+    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::BF16 {
+        return false;
+    }
+    if x.shape() != z.shape() {
+        return false;
+    }
+    let Some(hidden) = x.dims().last().copied() else {
+        return false;
+    };
+    hidden == 128 && weight.dims() == &[hidden]
+}
+
+pub fn gdn_gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    if !gdn_gated_rms_norm_supports(x, z, weight) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: gdn_gated_rms_norm: envelope violation \
+             (x={:?}, z={:?}, weight={:?}, x.dtype={:?})",
+            x.shape(), z.shape(), weight.shape(), x.dtype()
+        );
+    }
+
+    let device = x.device();
+    let shape = x.dims().to_vec();
+    let hidden = *shape.last().unwrap();
+    let rows: usize = shape.iter().take(shape.len() - 1).product();
+    if rows > i32::MAX as usize {
+        candle_core::bail!("kiln-gdn-kernel: gdn_gated_rms_norm rows exceed i32");
+    }
+
+    let x = x.contiguous()?;
+    let z = z.contiguous()?;
+    let weight = weight.contiguous()?;
+    let out = Tensor::zeros(shape, DType::BF16, device)?;
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (z_storage, z_layout) = z.storage_and_layout();
+        let (w_storage, w_layout) = weight.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let x_cuda = match &*x_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: x must be on CUDA"),
+        };
+        let z_cuda = match &*z_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: z must be on CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: weight must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: out must be on CUDA"),
+        };
+
+        let stream = x_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let x_slice = x_cuda.as_cuda_slice::<bf16>()?.slice(x_layout.start_offset()..);
+        let z_slice = z_cuda.as_cuda_slice::<bf16>()?.slice(z_layout.start_offset()..);
+        let w_slice = w_cuda.as_cuda_slice::<bf16>()?.slice(w_layout.start_offset()..);
+        let out_slice = out_cuda.as_cuda_slice::<bf16>()?.slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (x_ptr, _g1) = x_slice.device_ptr(&stream);
+            let (z_ptr, _g2) = z_slice.device_ptr(&stream);
+            let (w_ptr, _g3) = w_slice.device_ptr(&stream);
+            let (out_ptr, _g4) = out_slice.device_ptr(&stream);
+
+            let status = kiln_gdn_gated_rms_norm_bf16(
+                x_ptr as *const _,
+                z_ptr as *const _,
+                w_ptr as *const _,
+                out_ptr as *mut _,
+                rows as i32,
+                hidden as i32,
+                eps,
+                raw_stream,
+            );
+
+            if status != 0 {
+                candle_core::bail!("kiln_gdn_gated_rms_norm_bf16 failed with status {status}");
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
