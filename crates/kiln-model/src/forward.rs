@@ -3120,6 +3120,31 @@ pub fn gated_deltanet_forward(
     capture_b11_taps: bool,
     capture_c41_taps: bool,
 ) -> Result<Tensor> {
+    gated_deltanet_forward_decode_if(
+        backend,
+        x,
+        weights,
+        config,
+        recurrent_state,
+        conv_state,
+        capture_b11_taps,
+        capture_c41_taps,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gated_deltanet_forward_decode_if(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    config: &kiln_core::config::ModelConfig,
+    recurrent_state: &mut Tensor,
+    conv_state: &mut Tensor,
+    capture_b11_taps: bool,
+    capture_c41_taps: bool,
+    use_metal_decode_gemv: bool,
+) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let input_dtype = x.dtype();
     let nk = config.linear_num_key_heads;
@@ -3575,7 +3600,13 @@ pub fn gated_deltanet_forward(
     // Pre-transposed cache (see Step 1 note).
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
-        attn_out.broadcast_matmul(&weights.out_proj_t)?
+        linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
+            &attn_out,
+            &weights.out_proj_t,
+            None,
+            0.0,
+        )?
     };
 
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
@@ -5231,7 +5262,7 @@ pub fn model_forward(
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
                 // Gated DeltaNet linear attention
-                let attn_out = gated_deltanet_forward(
+                let attn_out = gated_deltanet_forward_decode_if(
                     backend,
                     &normed,
                     lin_weights,
@@ -5240,6 +5271,7 @@ pub fn model_forward(
                     &mut state.conv_states[linear_attn_idx],
                     /* capture_b11_taps = */ false,
                     /* capture_c41_taps = */ false,
+                    use_metal_decode_ffn,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
@@ -6414,7 +6446,7 @@ fn model_forward_paged_inner(
                 if capture_c41_taps {
                     crate::mtp_debug::capture_c41_layer1_tap("layer_1_post_input_norm", &normed)?;
                 }
-                let attn_out = gated_deltanet_forward(
+                let attn_out = gated_deltanet_forward_decode_if(
                     backend,
                     &normed,
                     lin_weights,
@@ -6423,6 +6455,7 @@ fn model_forward_paged_inner(
                     &mut state.conv_states[linear_attn_idx],
                     capture_b11_taps,
                     capture_c41_taps,
+                    use_metal_decode_ffn,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
