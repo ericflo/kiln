@@ -59,9 +59,7 @@
 //! chunkwise recurrence and are *not* covered by this crate.
 
 use candle_core::{
-    backend::BackendStorage,
-    cuda_backend::cudarc::driver::DevicePtr,
-    DType, Result, Tensor,
+    DType, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
 
@@ -88,6 +86,27 @@ unsafe extern "C" {
         batch_heads: i32,
         dk: i32,
         dv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_decode_gates_recurrent_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        a_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        value_heads: i32,
+        dk: i32,
+        dv: i32,
+        eps: f32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -193,14 +212,10 @@ pub fn gdn_forward_substitution(
     }
 
     if c > 128 {
-        candle_core::bail!(
-            "kiln-gdn-kernel: chunk_size must be <= 128 (got {c})"
-        );
+        candle_core::bail!("kiln-gdn-kernel: chunk_size must be <= 128 (got {c})");
     }
     if dv > 1024 {
-        candle_core::bail!(
-            "kiln-gdn-kernel: dv must be <= 1024 (got {dv})"
-        );
+        candle_core::bail!("kiln-gdn-kernel: dv must be <= 1024 (got {dv})");
     }
 
     let a_strict = a_strict.contiguous()?;
@@ -263,9 +278,7 @@ pub fn gdn_forward_substitution(
             );
 
             if status != 0 {
-                candle_core::bail!(
-                    "kiln_gdn_forward_substitution failed with status {status}"
-                );
+                candle_core::bail!("kiln_gdn_forward_substitution failed with status {status}");
             }
         }
     }
@@ -323,9 +336,7 @@ pub fn gdn_recurrent_forward(
 
     let (b_g, h_g) = g.dims2()?;
     if (b_g, h_g) != (b, h) {
-        candle_core::bail!(
-            "kiln-gdn-kernel: g shape [{b_g}, {h_g}] mismatch with q [{b}, {h}, *]"
-        );
+        candle_core::bail!("kiln-gdn-kernel: g shape [{b_g}, {h_g}] mismatch with q [{b}, {h}, *]");
     }
 
     let (b_s, h_s, dk_s, dv_s) = state.dims4()?;
@@ -344,7 +355,12 @@ pub fn gdn_recurrent_forward(
     {
         candle_core::bail!(
             "kiln-gdn-kernel: all inputs must be bf16 (got q={:?}, k={:?}, v={:?}, beta={:?}, g={:?}, state={:?})",
-            q.dtype(), k.dtype(), v.dtype(), beta.dtype(), g.dtype(), state.dtype()
+            q.dtype(),
+            k.dtype(),
+            v.dtype(),
+            beta.dtype(),
+            g.dtype(),
+            state.dtype()
         );
     }
 
@@ -410,13 +426,27 @@ pub fn gdn_recurrent_forward(
         let stream = q_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let q_slice = q_cuda.as_cuda_slice::<bf16>()?.slice(q_layout.start_offset()..);
-        let k_slice = k_cuda.as_cuda_slice::<bf16>()?.slice(k_layout.start_offset()..);
-        let v_slice = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
-        let beta_slice = beta_cuda.as_cuda_slice::<bf16>()?.slice(beta_layout.start_offset()..);
-        let g_slice = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
-        let s_slice = s_cuda.as_cuda_slice::<bf16>()?.slice(s_layout.start_offset()..);
-        let out_slice = out_cuda.as_cuda_slice::<bf16>()?.slice(out_layout.start_offset()..);
+        let q_slice = q_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(q_layout.start_offset()..);
+        let k_slice = k_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(k_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let beta_slice = beta_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(beta_layout.start_offset()..);
+        let g_slice = g_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(g_layout.start_offset()..);
+        let s_slice = s_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(s_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
 
         unsafe {
             let (q_ptr, _g1) = q_slice.device_ptr(&stream);
@@ -442,8 +472,245 @@ pub fn gdn_recurrent_forward(
             );
 
             if status != 0 {
+                candle_core::bail!("kiln_gdn_recurrent_forward failed with status {status}");
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn gdn_decode_gates_recurrent_supports(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+) -> bool {
+    if !matches!(q.device(), candle_core::Device::Cuda(_)) {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || a.dtype() != DType::BF16
+        || b.dtype() != DType::BF16
+        || a_log.dtype() != DType::BF16
+        || dt_bias.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+        || z.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+    {
+        return false;
+    }
+
+    let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
+        return false;
+    };
+    let Ok((b_k, t_k, h_k, dk_k)) = k.dims4() else {
+        return false;
+    };
+    let Ok((b_v, t_v, value_heads, dv)) = v.dims4() else {
+        return false;
+    };
+    let Ok((b_a, t_a, h_a)) = a.dims3() else {
+        return false;
+    };
+    let Ok((b_b, t_b, h_b)) = b.dims3() else {
+        return false;
+    };
+    let Ok((b_s, h_s, dk_s, dv_s)) = state.dims4() else {
+        return false;
+    };
+
+    batch >= 1
+        && seq_len == 1
+        && (b_k, t_k, h_k, dk_k) == (batch, seq_len, q_heads, dk)
+        && (b_v, t_v) == (batch, seq_len)
+        && (b_a, t_a, h_a) == (batch, seq_len, value_heads)
+        && (b_b, t_b, h_b) == (batch, seq_len, value_heads)
+        && z.dims() == [batch, seq_len, value_heads, dv]
+        && a_log.dims() == [value_heads]
+        && dt_bias.dims() == [value_heads]
+        && weight.dims() == [dv]
+        && (b_s, h_s, dk_s, dv_s) == (batch, value_heads, dk, dv)
+        && q_heads > 0
+        && value_heads >= q_heads
+        && value_heads % q_heads == 0
+        && dk == 128
+        && dv == 128
+        && state.is_contiguous()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_decode_gates_recurrent(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &mut Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    if !gdn_decode_gates_recurrent_supports(q, k, v, a, b, a_log, dt_bias, state, z, weight) {
+        candle_core::bail!("kiln-gdn-kernel: gdn_decode_gates_recurrent envelope violation");
+    }
+
+    let device = q.device();
+    let (batch, _, q_heads, dk) = q.dims4()?;
+    let (_, _, value_heads, dv) = v.dims4()?;
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
+    let a_log = a_log.contiguous()?;
+    let dt_bias = dt_bias.contiguous()?;
+    let z = z.contiguous()?;
+    let weight = weight.contiguous()?;
+    let out = Tensor::zeros((batch, 1, value_heads, dv), DType::BF16, device)?;
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (a_storage, a_layout) = a.storage_and_layout();
+        let (b_storage, b_layout) = b.storage_and_layout();
+        let (al_storage, al_layout) = a_log.storage_and_layout();
+        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
+        let (s_storage, s_layout) = state.storage_and_layout();
+        let (z_storage, z_layout) = z.storage_and_layout();
+        let (w_storage, w_layout) = weight.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_cuda = match &*q_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: q must be on CUDA"),
+        };
+        let k_cuda = match &*k_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: k must be on CUDA"),
+        };
+        let v_cuda = match &*v_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: v must be on CUDA"),
+        };
+        let a_cuda = match &*a_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: a must be on CUDA"),
+        };
+        let b_cuda = match &*b_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: b must be on CUDA"),
+        };
+        let al_cuda = match &*al_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: a_log must be on CUDA"),
+        };
+        let dt_cuda = match &*dt_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: dt_bias must be on CUDA"),
+        };
+        let s_cuda = match &*s_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: state must be on CUDA"),
+        };
+        let z_cuda = match &*z_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: z must be on CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: weight must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: out must be on CUDA"),
+        };
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let q_slice = q_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(q_layout.start_offset()..);
+        let k_slice = k_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(k_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let a_slice = a_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(a_layout.start_offset()..);
+        let b_slice = b_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(b_layout.start_offset()..);
+        let al_slice = al_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(al_layout.start_offset()..);
+        let dt_slice = dt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dt_layout.start_offset()..);
+        let s_slice = s_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(s_layout.start_offset()..);
+        let z_slice = z_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(z_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(w_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+            let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+            let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+            let (a_ptr, _g4) = a_slice.device_ptr(&stream);
+            let (b_ptr, _g5) = b_slice.device_ptr(&stream);
+            let (al_ptr, _g6) = al_slice.device_ptr(&stream);
+            let (dt_ptr, _g7) = dt_slice.device_ptr(&stream);
+            let (s_ptr, _g8) = s_slice.device_ptr(&stream);
+            let (z_ptr, _g9) = z_slice.device_ptr(&stream);
+            let (w_ptr, _g10) = w_slice.device_ptr(&stream);
+            let (out_ptr, _g11) = out_slice.device_ptr(&stream);
+
+            let status = kiln_gdn_decode_gates_recurrent_bf16(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                a_ptr as *const _,
+                b_ptr as *const _,
+                al_ptr as *const _,
+                dt_ptr as *const _,
+                s_ptr as *mut _,
+                z_ptr as *const _,
+                w_ptr as *const _,
+                out_ptr as *mut _,
+                batch as i32,
+                q_heads as i32,
+                value_heads as i32,
+                dk as i32,
+                dv as i32,
+                eps,
+                raw_stream,
+            );
+            if status != 0 {
                 candle_core::bail!(
-                    "kiln_gdn_recurrent_forward failed with status {status}"
+                    "kiln_gdn_decode_gates_recurrent_bf16 failed with status {status}"
                 );
             }
         }
@@ -503,12 +770,7 @@ unsafe extern "C" {
 ///   - `a`, `b` of shape `[.., nv]`, bf16, CUDA
 ///   - `A_log`, `dt_bias` of shape `[nv]`, bf16, CUDA
 ///   - `nv <= 256`
-pub fn gdn_gates_supports(
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-) -> bool {
+pub fn gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Tensor) -> bool {
     if !matches!(a.device(), candle_core::Device::Cuda(_)) {
         return false;
     }
@@ -560,7 +822,11 @@ pub fn gdn_gates(
         candle_core::bail!(
             "kiln-gdn-kernel: gdn_gates: envelope violation \
              (a={:?}, b={:?}, a_log={:?}, dt_bias={:?}, a.dtype={:?})",
-            a.shape(), b.shape(), a_log.shape(), dt_bias.shape(), a.dtype()
+            a.shape(),
+            b.shape(),
+            a_log.shape(),
+            dt_bias.shape(),
+            a.dtype()
         );
     }
 
@@ -613,12 +879,24 @@ pub fn gdn_gates(
         let stream = a_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let a_slice = a_cuda.as_cuda_slice::<bf16>()?.slice(a_layout.start_offset()..);
-        let b_slice = b_cuda.as_cuda_slice::<bf16>()?.slice(b_layout.start_offset()..);
-        let al_slice = al_cuda.as_cuda_slice::<bf16>()?.slice(al_layout.start_offset()..);
-        let dt_slice = dt_cuda.as_cuda_slice::<bf16>()?.slice(dt_layout.start_offset()..);
-        let beta_slice = beta_cuda.as_cuda_slice::<bf16>()?.slice(beta_layout.start_offset()..);
-        let g_slice = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
+        let a_slice = a_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(a_layout.start_offset()..);
+        let b_slice = b_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(b_layout.start_offset()..);
+        let al_slice = al_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(al_layout.start_offset()..);
+        let dt_slice = dt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dt_layout.start_offset()..);
+        let beta_slice = beta_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(beta_layout.start_offset()..);
+        let g_slice = g_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(g_layout.start_offset()..);
 
         unsafe {
             let (a_ptr, _g1) = a_slice.device_ptr(&stream);
@@ -679,7 +957,10 @@ pub fn gdn_gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> 
         candle_core::bail!(
             "kiln-gdn-kernel: gdn_gated_rms_norm: envelope violation \
              (x={:?}, z={:?}, weight={:?}, x.dtype={:?})",
-            x.shape(), z.shape(), weight.shape(), x.dtype()
+            x.shape(),
+            z.shape(),
+            weight.shape(),
+            x.dtype()
         );
     }
 
@@ -722,10 +1003,18 @@ pub fn gdn_gated_rms_norm(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> 
         let stream = x_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let x_slice = x_cuda.as_cuda_slice::<bf16>()?.slice(x_layout.start_offset()..);
-        let z_slice = z_cuda.as_cuda_slice::<bf16>()?.slice(z_layout.start_offset()..);
-        let w_slice = w_cuda.as_cuda_slice::<bf16>()?.slice(w_layout.start_offset()..);
-        let out_slice = out_cuda.as_cuda_slice::<bf16>()?.slice(out_layout.start_offset()..);
+        let x_slice = x_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(x_layout.start_offset()..);
+        let z_slice = z_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(z_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(w_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
 
         unsafe {
             let (x_ptr, _g1) = x_slice.device_ptr(&stream);
@@ -823,9 +1112,7 @@ pub fn gdn_chunk_prep_supports(
     {
         return false;
     }
-    if ks_entry.dims().last().copied() != Some(dv)
-        || q_s.dims().last().copied() != Some(dv)
-    {
+    if ks_entry.dims().last().copied() != Some(dv) || q_s.dims().last().copied() != Some(dv) {
         return false;
     }
     true
@@ -861,8 +1148,12 @@ pub fn gdn_chunk_prep(
         candle_core::bail!(
             "kiln-gdn-kernel: gdn_chunk_prep: envelope violation \
              (g={:?}, v={:?}, kkt={:?}, qkt={:?}, ks_entry={:?}, q_s={:?})",
-            g.shape(), v.shape(), kkt.shape(), qkt.shape(),
-            ks_entry.shape(), q_s.shape()
+            g.shape(),
+            v.shape(),
+            kkt.shape(),
+            qkt.shape(),
+            ks_entry.shape(),
+            q_s.shape()
         );
     }
 
@@ -950,18 +1241,42 @@ pub fn gdn_chunk_prep(
         let stream = g_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let g_slice = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
-        let v_slice = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
-        let kkt_slice = kkt_cuda.as_cuda_slice::<bf16>()?.slice(kkt_layout.start_offset()..);
-        let qkt_slice = qkt_cuda.as_cuda_slice::<bf16>()?.slice(qkt_layout.start_offset()..);
-        let ks_slice = ks_cuda.as_cuda_slice::<bf16>()?.slice(ks_layout.start_offset()..);
-        let qs_slice = qs_cuda.as_cuda_slice::<bf16>()?.slice(qs_layout.start_offset()..);
-        let a_slice = a_cuda.as_cuda_slice::<bf16>()?.slice(a_layout.start_offset()..);
-        let b_slice = b_cuda.as_cuda_slice::<bf16>()?.slice(b_layout.start_offset()..);
-        let vp_slice = vp_cuda.as_cuda_slice::<bf16>()?.slice(vp_layout.start_offset()..);
-        let qss_slice = qss_cuda.as_cuda_slice::<bf16>()?.slice(qss_layout.start_offset()..);
-        let dl_slice = dl_cuda.as_cuda_slice::<bf16>()?.slice(dl_layout.start_offset()..);
-        let pl_slice = pl_cuda.as_cuda_slice::<bf16>()?.slice(pl_layout.start_offset()..);
+        let g_slice = g_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(g_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let kkt_slice = kkt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kkt_layout.start_offset()..);
+        let qkt_slice = qkt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qkt_layout.start_offset()..);
+        let ks_slice = ks_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ks_layout.start_offset()..);
+        let qs_slice = qs_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qs_layout.start_offset()..);
+        let a_slice = a_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(a_layout.start_offset()..);
+        let b_slice = b_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(b_layout.start_offset()..);
+        let vp_slice = vp_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(vp_layout.start_offset()..);
+        let qss_slice = qss_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qss_layout.start_offset()..);
+        let dl_slice = dl_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dl_layout.start_offset()..);
+        let pl_slice = pl_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(pl_layout.start_offset()..);
 
         unsafe {
             let (g_ptr, _g1) = g_slice.device_ptr(&stream);
@@ -1002,7 +1317,14 @@ pub fn gdn_chunk_prep(
         }
     }
 
-    Ok((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last))
+    Ok((
+        a_strict,
+        b_mask,
+        v_prime,
+        q_s_scaled,
+        decay_last_col,
+        p_last,
+    ))
 }
 
 pub fn gdn_chunk_scan_supports(
@@ -1069,14 +1391,7 @@ pub fn gdn_chunk_scan(
     beta: &Tensor,
     decay_last_col: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
-    if !gdn_chunk_scan_supports(
-        a_strict,
-        b_mask,
-        v_prime,
-        q_s_scaled,
-        beta,
-        decay_last_col,
-    ) {
+    if !gdn_chunk_scan_supports(a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col) {
         candle_core::bail!(
             "kiln-gdn-kernel: gdn_chunk_scan: envelope violation \
              (a={:?}, b={:?}, v_prime={:?}, q_s_scaled={:?}, beta={:?}, decay_last_col={:?})",
@@ -1149,10 +1464,18 @@ pub fn gdn_chunk_scan(
         let stream = a_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let a_slice = a_cuda.as_cuda_slice::<bf16>()?.slice(a_layout.start_offset()..);
-        let b_slice = b_cuda.as_cuda_slice::<bf16>()?.slice(b_layout.start_offset()..);
-        let vp_slice = vp_cuda.as_cuda_slice::<bf16>()?.slice(vp_layout.start_offset()..);
-        let qss_slice = qss_cuda.as_cuda_slice::<bf16>()?.slice(qss_layout.start_offset()..);
+        let a_slice = a_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(a_layout.start_offset()..);
+        let b_slice = b_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(b_layout.start_offset()..);
+        let vp_slice = vp_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(vp_layout.start_offset()..);
+        let qss_slice = qss_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qss_layout.start_offset()..);
         let beta_slice = beta_cuda
             .as_cuda_slice::<bf16>()?
             .slice(beta_layout.start_offset()..);
@@ -1380,16 +1703,30 @@ pub fn gdn_full_chunk_forward(
         let stream = g_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let g_slice = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
-        let v_slice = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
-        let kkt_slice = kkt_cuda.as_cuda_slice::<bf16>()?.slice(kkt_layout.start_offset()..);
-        let qkt_slice = qkt_cuda.as_cuda_slice::<bf16>()?.slice(qkt_layout.start_offset()..);
-        let ks_slice = ks_cuda.as_cuda_slice::<bf16>()?.slice(ks_layout.start_offset()..);
-        let qs_slice = qs_cuda.as_cuda_slice::<bf16>()?.slice(qs_layout.start_offset()..);
+        let g_slice = g_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(g_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let kkt_slice = kkt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kkt_layout.start_offset()..);
+        let qkt_slice = qkt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qkt_layout.start_offset()..);
+        let ks_slice = ks_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ks_layout.start_offset()..);
+        let qs_slice = qs_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qs_layout.start_offset()..);
         let beta_slice = beta_cuda
             .as_cuda_slice::<bf16>()?
             .slice(beta_layout.start_offset()..);
-        let kt_slice = kt_cuda.as_cuda_slice::<bf16>()?.slice(kt_layout.start_offset()..);
+        let kt_slice = kt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kt_layout.start_offset()..);
         let state_slice = state_cuda
             .as_cuda_slice::<bf16>()?
             .slice(state_layout.start_offset()..);

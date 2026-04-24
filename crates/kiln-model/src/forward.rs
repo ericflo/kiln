@@ -3585,44 +3585,65 @@ fn gated_deltanet_forward_decode_if(
     };
 
     let fused_decode_gates_recurrent = {
-        #[cfg(feature = "metal")]
+        if fused_decode_gates_recurrent_rmsnorm.is_none()
+            && seq_len == 1
+            && !capture_b11_taps
+            && !capture_c41_taps
         {
-            if fused_decode_gates_recurrent_rmsnorm.is_none()
-                && recurrent_unexpanded_qk
-                && seq_len == 1
-                && !capture_b11_taps
-                && !capture_c41_taps
-                && crate::backend::metal::metal_gdn_decode_gates_recurrent_supports(
-                    &q,
-                    &k,
-                    &v,
-                    &a,
-                    &b,
-                    &weights.a_log,
-                    &weights.dt_bias,
-                    recurrent_state,
-                )
-            {
+            if let Some(out) = backend.gdn_decode_gates_recurrent(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &weights.a_log,
+                &weights.dt_bias,
+                recurrent_state,
+                &z,
+                &weights.norm,
+                config.rms_norm_eps,
+            )? {
                 kiln_nvtx::range!(c"kiln/gdn/gates_recur");
-                Some(
-                    crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
-                        &q,
-                        &k,
-                        &v,
-                        &a,
-                        &b,
-                        &weights.a_log,
-                        &weights.dt_bias,
-                        recurrent_state,
-                    )
-                    .context("metal gdn decode gates+recurrent kernel failed")?,
-                )
+                Some(out)
             } else {
-                None
+                #[cfg(feature = "metal")]
+                {
+                    if recurrent_unexpanded_qk
+                        && crate::backend::metal::metal_gdn_decode_gates_recurrent_supports(
+                            &q,
+                            &k,
+                            &v,
+                            &a,
+                            &b,
+                            &weights.a_log,
+                            &weights.dt_bias,
+                            recurrent_state,
+                        )
+                    {
+                        kiln_nvtx::range!(c"kiln/gdn/gates_recur");
+                        Some(
+                            crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
+                                &q,
+                                &k,
+                                &v,
+                                &a,
+                                &b,
+                                &weights.a_log,
+                                &weights.dt_bias,
+                                recurrent_state,
+                            )
+                            .context("metal gdn decode gates+recurrent kernel failed")?,
+                        )
+                    } else {
+                        None
+                    }
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    None
+                }
             }
-        }
-        #[cfg(not(feature = "metal"))]
-        {
+        } else {
             None
         }
     };

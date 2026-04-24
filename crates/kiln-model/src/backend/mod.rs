@@ -321,6 +321,30 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Fused native-MTP GDN decode gates + recurrent update.
+    ///
+    /// Narrow CUDA/Metal decode path for `seq_len == 1` bf16 tensors. Returns
+    /// `[B, 1, value_heads, dv]` before gated RMSNorm, mutating `state` in
+    /// place. `Ok(None)` means the backend declines and the caller should use
+    /// the split gates/recurrent/gated_norm path.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_gates_recurrent(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _a: &Tensor,
+        _b: &Tensor,
+        _a_log: &Tensor,
+        _dt_bias: &Tensor,
+        _state: &mut Tensor,
+        _z: &Tensor,
+        _weight: &Tensor,
+        _eps: f64,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     /// Fused GDN decode input projections.
     ///
     /// Collapses the four single-token `broadcast_matmul` calls in Step 1

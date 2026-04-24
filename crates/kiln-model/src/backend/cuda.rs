@@ -20,6 +20,9 @@ pub struct CudaBackend {
     /// Kill switch for the fused GDN gated RMSNorm kernel (decode/prefill
     /// kiln/gdn/gated_norm region).
     gdn_gated_rms_norm_enabled: bool,
+    /// Experimental fused native-MTP decode GDN gates + recurrent update.
+    /// Opt-in only until output parity is proven.
+    gdn_decode_fused_enabled: bool,
     /// Kill switch for the fused causal_conv1d_update kernel (decode
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
@@ -32,14 +35,19 @@ impl CudaBackend {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
-        let gdn_gated_rms_norm_enabled = gdn_enabled
-            && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
+        let gdn_gated_rms_norm_enabled =
+            gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
+        let gdn_decode_fused_enabled = gdn_gates_enabled
+            && gdn_gated_rms_norm_enabled
+            && std::env::var("KILN_ENABLE_FUSED_GDN_DECODE").is_ok()
+            && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
         Self {
             device,
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
+            gdn_decode_fused_enabled,
             fused_conv1d_enabled,
         }
     }
@@ -230,6 +238,36 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_gates_recurrent(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+        state: &mut Tensor,
+        z: &Tensor,
+        weight: &Tensor,
+        eps: f64,
+    ) -> Result<Option<Tensor>> {
+        if !self.gdn_decode_fused_enabled {
+            return Ok(None);
+        }
+        if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports(
+            q, k, v, a, b, a_log, dt_bias, state, z, weight,
+        ) {
+            return Ok(None);
+        }
+        let out = kiln_gdn_kernel::gdn_decode_gates_recurrent(
+            q, k, v, a, b, a_log, dt_bias, state, z, weight, eps as f32,
+        )
+        .context("gdn_decode_gates_recurrent kernel failed")?;
+        Ok(Some(out))
+    }
+
     fn supports_gdn_gates(&self) -> bool {
         self.gdn_gates_enabled
     }
@@ -246,8 +284,8 @@ impl BackendRuntime for CudaBackend {
         if !kiln_gdn_kernel::gdn_gates_supports(a, b, a_log, dt_bias) {
             return Ok(None);
         }
-        let (beta, g) = kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias)
-            .context("gdn_gates kernel failed")?;
+        let (beta, g) =
+            kiln_gdn_kernel::gdn_gates(a, b, a_log, dt_bias).context("gdn_gates kernel failed")?;
         Ok(Some((beta, g)))
     }
 
