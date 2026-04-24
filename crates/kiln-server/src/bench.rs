@@ -21,8 +21,8 @@ use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
     model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    streaming_prefill_enabled_for,
+    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden, streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
 use kiln_model::paged_kv_cache::PagedKvCache;
@@ -814,21 +814,37 @@ fn bench_latency_paged(
         }
 
         let step_start = Instant::now();
-        let logits = model_forward_paged(
-            &*backend,
-            &[next_token],
-            weights,
-            config,
-            &mut paged_cache,
-            &block_table,
-            current_pos,
-            Some(&mut linear_state),
-            None,
-            None,
-        )
-        .context("paged decode forward pass failed")?;
+        next_token = if matches!(device, candle_core::Device::Metal(_)) {
+            model_forward_paged_next_token_greedy(
+                &*backend,
+                next_token,
+                weights,
+                config,
+                &mut paged_cache,
+                &block_table,
+                current_pos,
+                Some(&mut linear_state),
+                None,
+                None,
+            )
+            .context("paged greedy decode forward pass failed")?
+        } else {
+            let logits = model_forward_paged(
+                &*backend,
+                &[next_token],
+                weights,
+                config,
+                &mut paged_cache,
+                &block_table,
+                current_pos,
+                Some(&mut linear_state),
+                None,
+                None,
+            )
+            .context("paged decode forward pass failed")?;
+            greedy_sample(&logits)?
+        };
         current_pos += 1;
-        next_token = greedy_sample(&logits)?;
         let step_time = step_start.elapsed();
 
         inter_token_ms.push(step_time.as_secs_f64() * 1000.0);

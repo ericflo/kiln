@@ -18,8 +18,8 @@ use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
     model_forward_paged_last_token, model_forward_paged_last_token_with_last_hidden,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    streaming_prefill_enabled_for,
+    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -1272,23 +1272,37 @@ impl ModelRunner {
                 break;
             }
 
-            // Decode step: use CUDA graph runner (captures/replays when enabled)
-            let logits = graph_runner.decode_step_paged(
-                &*self.backend,
-                next_token,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                block_table,
-                seq_len,
-                &mut linear_state,
-                self.active_lora.as_ref(),
-            )?;
-            seq_len += 1;
-
-            next_token = if params.temperature == 0.0 {
-                greedy_sample(&logits)?
+            next_token = if params.temperature == 0.0
+                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            {
+                let token = model_forward_paged_next_token_greedy(
+                    &*self.backend,
+                    next_token,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )?;
+                seq_len += 1;
+                token
             } else {
+                // Decode step: use CUDA graph runner (captures/replays when enabled)
+                let logits = graph_runner.decode_step_paged(
+                    &*self.backend,
+                    next_token,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    &mut linear_state,
+                    self.active_lora.as_ref(),
+                )?;
+                seq_len += 1;
                 sample_with_params(
                     &logits,
                     params.temperature,
@@ -2859,29 +2873,49 @@ impl ModelRunner {
                 break;
             }
 
-            // Decode step: use CUDA graph runner
-            let logits = match graph_runner.decode_step_paged(
-                &*self.backend,
-                next_token,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                &block_table,
-                seq_len,
-                &mut linear_state,
-                self.active_lora.as_ref(),
-            ) {
-                Ok(l) => l,
-                Err(e) => {
-                    block_manager.free_all(&allocated_blocks);
-                    return Err(e.context("decode forward pass (paged) failed"));
-                }
-            };
-            seq_len += 1;
-
-            next_token = if params.temperature == 0.0 {
-                greedy_sample(&logits)?
+            next_token = if params.temperature == 0.0
+                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            {
+                let token = match model_forward_paged_next_token_greedy(
+                    &*self.backend,
+                    next_token,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    &block_table,
+                    seq_len,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                ) {
+                    Ok(token) => token,
+                    Err(e) => {
+                        block_manager.free_all(&allocated_blocks);
+                        return Err(e.context("decode forward pass (paged greedy) failed"));
+                    }
+                };
+                seq_len += 1;
+                token
             } else {
+                // Decode step: use CUDA graph runner
+                let logits = match graph_runner.decode_step_paged(
+                    &*self.backend,
+                    next_token,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    &block_table,
+                    seq_len,
+                    &mut linear_state,
+                    self.active_lora.as_ref(),
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        block_manager.free_all(&allocated_blocks);
+                        return Err(e.context("decode forward pass (paged) failed"));
+                    }
+                };
+                seq_len += 1;
                 sample_with_params(
                     &logits,
                     params.temperature,
