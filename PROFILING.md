@@ -1,5 +1,39 @@
 # Kiln Profiling Report
 
+## Phase 7 kill-switch bisection follow-up (2026-04-24)
+
+**Scope:** follow-up to the post-#522 A/B above. Ran 6 arms × 3 runs with one
+fused-kernel kill switch per arm (`KILN_DISABLE_FUSED_GDN_GATES`,
+`KILN_DISABLE_GDN_KERNEL`, `KILN_DISABLE_RMSNORM_KERNEL`,
+`KILN_DISABLE_FUSED_CONV1D`, `KILN_DISABLE_FUSED_PAGED_DECODE`) to isolate the
+post-#166 decode regression. Full per-arm tables, variance analysis, and
+recommended next steps in
+[`docs/phase-c64/post523-killswitch-bisection.md`](docs/phase-c64/post523-killswitch-bisection.md).
+
+**Outcome: null. No single fused-kernel default path accounts for the gap.**
+
+- No arm recovers decode tok/s to ≥ 49.0 (post-#166 baseline 49.76). Two arms
+  (`DISABLE_FUSED_GDN_GATES`, `DISABLE_FUSED_PAGED_DECODE`) cross +3% vs this
+  sweep's own baseline A (44.43 tok/s) but neither reaches the 49.0 bar.
+- Intra-arm spread ran 8.2% for baseline A and 20.0% for arm E — larger than
+  the inter-arm signal. The pre-sweep sanity run on the same binary hit 50.48
+  tok/s; the ensuing sweep's baseline collapsed to 44.43. Parsimonious
+  explanation is GPU clock / thermal drift and CUDA-graph-capture warmth, not
+  a single kernel.
+- Kill switches are verified wired: arms C and D fall back to candle paths
+  and lose 8–11% decode as expected, and arm C's prefill balloons 7× to
+  2357 ms (known candle GDN-linear-attn fallback cost).
+- Two observations worth a higher-N follow-up (not regression fixes):
+  arm B's median p99 ITL (25.46 ms) exactly matches post-#166, and arm F
+  shows bimodal p99 — both possible weak signals buried in the noise.
+
+**Recommended next step:** stop chasing the post-#166 single-kernel culprit.
+Move to KV cache FP8, Marlin packing latency cleanup, or Marlin BF16 VRAM
+cleanup from the existing Phase 6 frontier list. If the post-#166 gap still
+matters, the next attempt needs pinned GPU clocks + cooldowns between runs
+and median-of-5+ per arm before it can distinguish a 3–5% effect from 8–20%
+noise.
+
 ## Phase 7 prefix-cache regression A/B (2026-04-24)
 
 **Scope:** isolation A/B for the −7.9% decode tok/s regression flagged in the
