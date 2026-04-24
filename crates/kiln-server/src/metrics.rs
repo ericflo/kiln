@@ -3,6 +3,7 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
+use kiln_scheduler::PrefixCacheStats;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Atomically tracked metrics for the kiln server.
@@ -173,6 +174,64 @@ impl Metrics {
         out.push_str("# TYPE kiln_vram_training_budget_bytes gauge\n");
         push_line(&mut out, &format!("kiln_vram_training_budget_bytes {}", gauges.vram_training_budget));
 
+        // --- Prefix cache ---
+        out.push_str("# HELP kiln_prefix_cache_lookups_total Total prefix cache lookups.\n");
+        out.push_str("# TYPE kiln_prefix_cache_lookups_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_prefix_cache_lookups_total",
+            "result",
+            "hit",
+            gauges.prefix_cache.lookup_hits,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_prefix_cache_lookups_total",
+            "result",
+            "miss",
+            gauges.prefix_cache.lookup_misses,
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_hit_tokens_total Total prompt tokens skipped by prefix cache hits.\n");
+        out.push_str("# TYPE kiln_prefix_cache_hit_tokens_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_hit_tokens_total {}",
+                gauges.prefix_cache.hit_tokens
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_hit_blocks_total Total KV blocks reused by prefix cache hits.\n");
+        out.push_str("# TYPE kiln_prefix_cache_hit_blocks_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_hit_blocks_total {}",
+                gauges.prefix_cache.hit_blocks
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_cached_blocks KV blocks currently retained by the prefix cache.\n");
+        out.push_str("# TYPE kiln_prefix_cache_cached_blocks gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_cached_blocks {}",
+                gauges.prefix_cache.cached_blocks
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_max_blocks Maximum KV blocks retainable by the prefix cache.\n");
+        out.push_str("# TYPE kiln_prefix_cache_max_blocks gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_max_blocks {}",
+                gauges.prefix_cache.max_blocks
+            ),
+        );
+
         // --- Training ---
         out.push_str("# HELP kiln_training_jobs_total Total training jobs.\n");
         out.push_str("# TYPE kiln_training_jobs_total counter\n");
@@ -210,6 +269,7 @@ pub struct SnapshotGauges {
     pub vram_model: u64,
     pub vram_kv_cache: u64,
     pub vram_training_budget: u64,
+    pub prefix_cache: PrefixCacheStats,
     pub training_active: u8,
     pub active_adapter: Option<String>,
 }
@@ -270,6 +330,14 @@ mod tests {
             vram_model: 8_000_000_000,
             vram_kv_cache: 2_000_000_000,
             vram_training_budget: 14_000_000_000,
+            prefix_cache: PrefixCacheStats {
+                lookup_hits: 7,
+                lookup_misses: 3,
+                hit_tokens: 112,
+                hit_blocks: 7,
+                cached_blocks: 64,
+                max_blocks: 128,
+            },
             training_active: 0,
             active_adapter: Some("my-adapter".to_string()),
         };
@@ -283,6 +351,12 @@ mod tests {
         assert!(output.contains("kiln_scheduler_waiting 3"));
         assert!(output.contains("kiln_blocks_total 256"));
         assert!(output.contains("kiln_vram_total_bytes 24000000000"));
+        assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
+        assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
+        assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
+        assert!(output.contains("kiln_prefix_cache_hit_blocks_total 7"));
+        assert!(output.contains("kiln_prefix_cache_cached_blocks 64"));
+        assert!(output.contains("kiln_prefix_cache_max_blocks 128"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
         assert!(output.contains("kiln_request_duration_seconds_count 1"));
         assert!(output.contains("kiln_request_duration_seconds_sum 0.5"));
@@ -300,6 +374,7 @@ mod tests {
             vram_model: 0,
             vram_kv_cache: 0,
             vram_training_budget: 0,
+            prefix_cache: PrefixCacheStats::default(),
             training_active: 0,
             active_adapter: None,
         };

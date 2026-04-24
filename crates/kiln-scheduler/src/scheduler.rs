@@ -59,6 +59,17 @@ pub struct SchedulerOutput {
     pub completed_ids: Vec<RequestId>,
 }
 
+/// Prefix-cache effectiveness counters and gauges exposed by the scheduler.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrefixCacheStats {
+    pub lookup_hits: u64,
+    pub lookup_misses: u64,
+    pub hit_tokens: u64,
+    pub hit_blocks: u64,
+    pub cached_blocks: usize,
+    pub max_blocks: usize,
+}
+
 /// Iteration-level continuous batching scheduler.
 ///
 /// Implements the Sarathi-style chunked prefill algorithm:
@@ -77,6 +88,7 @@ pub struct Scheduler {
     running: Vec<Request>,
     block_manager: BlockManager,
     prefix_cache: Option<PrefixCache>,
+    prefix_cache_stats: PrefixCacheStats,
     /// Tracks which blocks per request came from prefix cache (should not be freed).
     cached_block_counts: std::collections::HashMap<RequestId, usize>,
 }
@@ -84,11 +96,13 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(config: SchedulerConfig, num_blocks: usize) -> Self {
         let block_manager = BlockManager::new(num_blocks, config.block_size);
+        let prefix_cache_max_blocks = if config.prefix_cache_enabled {
+            config.prefix_cache_max_blocks.unwrap_or(num_blocks / 4)
+        } else {
+            0
+        };
         let prefix_cache = if config.prefix_cache_enabled {
-            let max_blocks = config
-                .prefix_cache_max_blocks
-                .unwrap_or(num_blocks / 4);
-            Some(PrefixCache::new(config.block_size, max_blocks))
+            Some(PrefixCache::new(config.block_size, prefix_cache_max_blocks))
         } else {
             None
         };
@@ -98,6 +112,10 @@ impl Scheduler {
             running: Vec::new(),
             block_manager,
             prefix_cache,
+            prefix_cache_stats: PrefixCacheStats {
+                max_blocks: prefix_cache_max_blocks,
+                ..Default::default()
+            },
             cached_block_counts: std::collections::HashMap::new(),
         }
     }
@@ -222,12 +240,17 @@ impl Scheduler {
                     cached_blocks = cached_block_ids.len();
                     tokens_already_cached = cached_tokens;
                     req.block_ids = cached_block_ids;
+                    self.prefix_cache_stats.lookup_hits += 1;
+                    self.prefix_cache_stats.hit_tokens += cached_tokens as u64;
+                    self.prefix_cache_stats.hit_blocks += cached_blocks as u64;
                     tracing::debug!(
                         id = %req.id,
                         cached_tokens,
                         cached_blocks,
                         "prefix cache hit"
                     );
+                } else {
+                    self.prefix_cache_stats.lookup_misses += 1;
                 }
             }
 
@@ -390,6 +413,14 @@ impl Scheduler {
 
     pub fn prefix_cache(&self) -> Option<&PrefixCache> {
         self.prefix_cache.as_ref()
+    }
+
+    pub fn prefix_cache_stats(&self) -> PrefixCacheStats {
+        let mut stats = self.prefix_cache_stats;
+        if let Some(prefix_cache) = self.prefix_cache.as_ref() {
+            stats.cached_blocks = prefix_cache.total_cached_blocks();
+        }
+        stats
     }
 }
 
@@ -640,6 +671,47 @@ mod tests {
         assert_eq!(output.scheduled.len(), 1);
         assert!(output.scheduled[0].is_prefill);
         assert_eq!(output.scheduled[0].num_tokens, 8); // full prefill
+
+        let stats = sched.prefix_cache_stats();
+        assert_eq!(stats.lookup_hits, 0);
+        assert_eq!(stats.lookup_misses, 2);
+        assert_eq!(stats.hit_tokens, 0);
+        assert_eq!(stats.hit_blocks, 0);
+        assert_eq!(stats.cached_blocks, 2);
+        assert_eq!(stats.max_blocks, 100);
+    }
+
+    #[test]
+    fn prefix_cache_stats_track_hits() {
+        let config = SchedulerConfig {
+            max_batch_tokens: 200,
+            max_batch_size: 8,
+            block_size: 4,
+            prefix_cache_enabled: true,
+            prefix_cache_max_blocks: Some(100),
+        };
+        let mut sched = Scheduler::new(config, 200);
+
+        let tokens: Vec<TokenId> = (0..8).collect();
+        let req1 = make_request_with_tokens(tokens.clone());
+        let id1 = req1.id;
+        sched.add_request(req1);
+        sched.step();
+        sched.update_request(&id1, None, false, Some(8));
+        sched.update_request(&id1, Some(42), true, None);
+        sched.step();
+
+        let req2 = make_request_with_tokens(tokens);
+        sched.add_request(req2);
+        sched.step();
+
+        let stats = sched.prefix_cache_stats();
+        assert_eq!(stats.lookup_hits, 1);
+        assert_eq!(stats.lookup_misses, 1);
+        assert_eq!(stats.hit_tokens, 8);
+        assert_eq!(stats.hit_blocks, 2);
+        assert_eq!(stats.cached_blocks, 2);
+        assert_eq!(stats.max_blocks, 100);
     }
 
     #[test]
