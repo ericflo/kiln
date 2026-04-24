@@ -36,6 +36,8 @@ const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_F
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
     "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
+const DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS: &str =
+    "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS";
 const DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR: &str =
     "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV: &str = "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV";
@@ -169,6 +171,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     }
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
     metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
+    if !metal_paged_attn_decode_contiguous_disabled() {
+        metal_paged_attn_decode_contiguous_pipeline(metal_device)?;
+    }
     if !metal_paged_kv_write_token_major_disabled() {
         metal_paged_kv_write_token_major_pipeline(metal_device)?;
     }
@@ -194,6 +199,36 @@ impl BackendRuntime for MetalBackend {
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
         true
+    }
+
+    fn flash_attn_paged_decode_contiguous(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        start_slot: usize,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
+    ) -> Result<Option<Tensor>> {
+        if !metal_paged_attn_decode_contiguous_supports(
+            q,
+            k_pool,
+            v_pool,
+            start_slot,
+            total_seqlen_k,
+        ) {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            start_slot,
+            total_seqlen_k,
+            softmax_scale,
+        )
+        .context("metal contiguous paged decode attention failed")?;
+        Ok(Some(out))
     }
 
     fn supports_paged_kv_head_major_read(&self) -> bool {
@@ -712,6 +747,10 @@ pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
 
 fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE)
+}
+
+fn metal_paged_attn_decode_contiguous_disabled() -> bool {
+    env_truthy(DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS)
 }
 
 fn metal_paged_kv_write_token_major_disabled() -> bool {
@@ -2457,6 +2496,114 @@ kernel void kiln_paged_kv_head_major_read_append_token_major_bf16(
 }
 "#;
 
+const METAL_PAGED_ATTN_DECODE_CONTIGUOUS_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_paged_attn_decode_contiguous_bf16_d256(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k_pool [[buffer(1)]],
+    device const bfloat* v_pool [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& start_slot [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    constant uint& q_heads [[buffer(6)]],
+    constant uint& kv_heads [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]]
+) {
+    constexpr uint D = 256;
+    constexpr uint BN = 32;
+    constexpr uint BD = 32;
+    constexpr uint EPT = D / BD;
+    constexpr uint QWEN_HEADS_PER_KV = 4;
+
+    const uint head_idx = tid.y;
+    if (head_idx >= q_heads) {
+        return;
+    }
+
+    const uint kv_head_idx = head_idx / QWEN_HEADS_PER_KV;
+    if (kv_head_idx >= kv_heads) {
+        return;
+    }
+
+    thread float q_frag[EPT];
+    thread float k_frag[EPT];
+    thread float o_frag[EPT];
+    threadgroup float outputs[BN * BD];
+    threadgroup float max_scores[BN];
+    threadgroup float sum_exp_scores[BN];
+
+    device const bfloat* q_ptr = q + head_idx * D + simd_lid * EPT;
+    device const bfloat* k_ptr =
+        k_pool + ((start_slot + simd_gid) * kv_heads + kv_head_idx) * D + simd_lid * EPT;
+    device const bfloat* v_ptr =
+        v_pool + ((start_slot + simd_gid) * kv_heads + kv_head_idx) * D + simd_lid * EPT;
+    device bfloat* out_ptr = out + head_idx * D + simd_gid * EPT;
+
+    for (uint i = 0; i < EPT; ++i) {
+        q_frag[i] = scale * static_cast<float>(q_ptr[i]);
+        o_frag[i] = 0.0f;
+    }
+
+    float max_score = -INFINITY;
+    float sum_exp_score = 0.0f;
+
+    for (uint t = simd_gid; t < seq_len; t += BN) {
+        for (uint i = 0; i < EPT; ++i) {
+            k_frag[i] = static_cast<float>(k_ptr[i]);
+        }
+
+        float score = 0.0f;
+        for (uint i = 0; i < EPT; ++i) {
+            score += q_frag[i] * k_frag[i];
+        }
+        score = simd_sum(score);
+
+        const float new_max = max(max_score, score);
+        const float factor = fast::exp(max_score - new_max);
+        const float exp_score = fast::exp(score - new_max);
+
+        max_score = new_max;
+        sum_exp_score = sum_exp_score * factor + exp_score;
+
+        for (uint i = 0; i < EPT; ++i) {
+            o_frag[i] = o_frag[i] * factor + exp_score * static_cast<float>(v_ptr[i]);
+        }
+
+        k_ptr += BN * kv_heads * D;
+        v_ptr += BN * kv_heads * D;
+    }
+
+    if (simd_lid == 0) {
+        max_scores[simd_gid] = max_score;
+        sum_exp_scores[simd_gid] = sum_exp_score;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float partial_max = max_scores[simd_lid];
+    const float global_max = simd_max(partial_max);
+    const float partial_factor = fast::exp(partial_max - global_max);
+    const float denom = simd_sum(sum_exp_scores[simd_lid] * partial_factor);
+
+    for (uint i = 0; i < EPT; ++i) {
+        outputs[simd_lid * BD + simd_gid] = o_frag[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        o_frag[i] = simd_sum(outputs[simd_gid * BD + simd_lid] * partial_factor) / denom;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (simd_lid == 0) {
+        for (uint i = 0; i < EPT; ++i) {
+            out_ptr[i] = static_cast<bfloat>(o_frag[i]);
+        }
+    }
+}
+"#;
+
 const METAL_PAGED_KV_WRITE_TOKEN_MAJOR_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -2520,6 +2667,7 @@ fn metal_shared_library(
         METAL_GDN_IN_PROJ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
+        METAL_PAGED_ATTN_DECODE_CONTIGUOUS_KERNEL,
         METAL_PAGED_KV_WRITE_TOKEN_MAJOR_KERNEL,
     ]
     .join("");
@@ -2940,6 +3088,35 @@ fn metal_paged_kv_head_major_read_append_token_major_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv read+append pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_paged_attn_decode_contiguous_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal contiguous paged decode attention cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_paged_attn_decode_contiguous_bf16_d256", None)
+        .map_err(|e| anyhow::anyhow!("load metal contiguous paged decode attention: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal contiguous paged decode attention: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -4058,6 +4235,147 @@ fn metal_paged_kv_head_major_read_bf16(
     }
 
     Ok((k_out, v_out))
+}
+
+fn metal_paged_attn_decode_contiguous_supports(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    start_slot: usize,
+    seq_len: usize,
+) -> bool {
+    if metal_paged_attn_decode_contiguous_disabled() {
+        return false;
+    }
+    if q.dtype() != DType::BF16 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k_pool.device(), Device::Metal(_))
+        || !matches!(v_pool.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !q.is_contiguous() || !k_pool.is_contiguous() || !v_pool.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, q_heads, q_len, head_dim)) = q.dims4() else {
+        return false;
+    };
+    let Ok((total_slots, kv_heads, k_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Ok(v_dims) = v_pool.dims3() else {
+        return false;
+    };
+    let Some(end_slot) = start_slot.checked_add(seq_len) else {
+        return false;
+    };
+    batch == 1
+        && q_heads == 16
+        && kv_heads == 4
+        && q_len == 1
+        && head_dim == 256
+        && k_head_dim == head_dim
+        && v_dims == (total_slots, kv_heads, head_dim)
+        && seq_len > 0
+        && end_slot <= total_slots
+        && start_slot <= u32::MAX as usize
+        && seq_len <= u32::MAX as usize
+        && q_heads <= u32::MAX as usize
+        && kv_heads <= u32::MAX as usize
+}
+
+fn metal_paged_attn_decode_contiguous_bf16_d256(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    start_slot: usize,
+    seq_len: usize,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_paged_attn_decode_contiguous_supports(q, k_pool, v_pool, start_slot, seq_len),
+        "metal contiguous paged decode attention unsupported shape"
+    );
+    let (_, q_heads, _, head_dim) = q.dims4()?;
+    // SAFETY: the kernel writes one contiguous [1, 1, q_heads * head_dim] output.
+    let out = unsafe {
+        Tensor::empty(
+            (1usize, 1usize, q_heads * head_dim),
+            DType::BF16,
+            q.device(),
+        )?
+    };
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal contiguous paged decode attention requires Metal tensors");
+    };
+    let pipeline = metal_paged_attn_decode_contiguous_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_attn_decode_contiguous_bf16_d256");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k_pool.storage_and_layout();
+        let (v_storage, v_layout) = v_pool.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged attention q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged attention k_pool must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged attention v_pool must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged attention out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf =
+            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+        let v_buf =
+            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let start_slot_u32 = start_slot as u32;
+        let seq_len_u32 = seq_len as u32;
+        let q_heads_u32 = q_heads as u32;
+        let kv_heads_u32 = 4u32;
+        encoder.set_bytes(4, &start_slot_u32);
+        encoder.set_bytes(5, &seq_len_u32);
+        encoder.set_bytes(6, &q_heads_u32);
+        encoder.set_bytes(7, &kv_heads_u32);
+        encoder.set_bytes(8, &softmax_scale);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: 1,
+            height: q_heads,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 fn metal_paged_kv_head_major_read_append_token_major_supports(
@@ -8916,6 +9234,75 @@ mod tests {
         assert!(
             max_abs_diff(&v_fast, &v_ref)? < 1e-6,
             "V fast read diverged from reference"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_attn_decode_contiguous_matches_candle_sdpa() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let total_slots = 768usize;
+        let start_slot = 11usize;
+        let seq_len = 512usize;
+        let q_heads = 16usize;
+        let kv_heads = 4usize;
+        let head_dim = 256usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let q_data: Vec<f32> = (0..q_heads * head_dim)
+            .map(|i| ((i % 97) as f32 - 48.0) * 0.0005)
+            .collect();
+        let kv_elems = total_slots * kv_heads * head_dim;
+        let k_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 131) as f32 - 65.0) * 0.0004)
+            .collect();
+        let v_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
+            .collect();
+
+        let q = Tensor::from_slice(&q_data, (1usize, q_heads, 1usize, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?;
+
+        assert!(metal_paged_attn_decode_contiguous_supports(
+            &q, &k_pool, &v_pool, start_slot, seq_len
+        ));
+        let fast = metal_paged_attn_decode_contiguous_bf16_d256(
+            &q, &k_pool, &v_pool, start_slot, seq_len, scale,
+        )?;
+
+        let k_ref = k_pool
+            .narrow(0, start_slot, seq_len)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .unsqueeze(0)?;
+        let v_ref = v_pool
+            .narrow(0, start_slot, seq_len)?
+            .transpose(0, 1)?
+            .contiguous()?
+            .unsqueeze(0)?;
+        let reference = candle_nn::ops::sdpa(&q, &k_ref, &v_ref, None, true, scale, 1.0)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((1usize, 1usize, q_heads * head_dim))?;
+
+        assert_eq!(fast.dims(), reference.dims());
+        let max = max_abs_diff(&fast, &reference)?;
+        let mean = mean_abs_diff(&fast, &reference)?;
+        assert!(
+            max < 2e-2,
+            "contiguous paged decode attention max_abs_diff={max:e}"
+        );
+        assert!(
+            mean < 3e-3,
+            "contiguous paged decode attention mean_abs_diff={mean:e}"
         );
 
         Ok(())

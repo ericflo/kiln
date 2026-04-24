@@ -50,6 +50,24 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// FlashAttention-style decode for the common single-sequence case where
+    /// the live KV slots are already one contiguous run in the paged cache.
+    ///
+    /// `q`: `[1, num_heads, 1, head_dim]`; `k_pool`/`v_pool`:
+    /// `[total_slots, num_kv_heads, head_dim]`. Returns `[1, 1,
+    /// num_heads * head_dim]`.
+    fn flash_attn_paged_decode_contiguous(
+        &self,
+        _q: &Tensor,
+        _k_pool: &Tensor,
+        _v_pool: &Tensor,
+        _start_slot: usize,
+        _total_seqlen_k: usize,
+        _softmax_scale: f32,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     fn supports_paged_kv_head_major_read(&self) -> bool {
         false
     }
