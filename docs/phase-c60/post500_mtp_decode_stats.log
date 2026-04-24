@@ -1,0 +1,14 @@
+Generating SQLite file /tmp/kiln-c60/post500_mtp_decode.sqlite from /tmp/kiln-c60/post500_mtp_decode.nsys-rep
+Processing [/tmp/kiln-c60/post500_mtp_decode.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py] to [/tmp/kiln-c60/post500_mtp_decode_cuda_gpu_kern_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c60/post500_mtp_decode.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/nvtx_kern_sum.py] to [/tmp/kiln-c60/post500_mtp_decode_nvtx_kern_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c60/post500_mtp_decode.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/nvtx_pushpop_sum.py] to [/tmp/kiln-c60/post500_mtp_decode_nvtx_pushpop_sum.csv]... PROCESSED
+
+-rw-r--r-- 1 root root  11K Apr 24 14:36 /tmp/kiln-c60/post500_mtp_decode.log
+-rw-rw-r-- 1 root root 100M Apr 24 14:36 /tmp/kiln-c60/post500_mtp_decode.nsys-rep
+-rw-r--r-- 1 root root 221M Apr 24 14:37 /tmp/kiln-c60/post500_mtp_decode.sqlite
+-rw-r--r-- 1 root root 8.4K Apr 24 14:37 /tmp/kiln-c60/post500_mtp_decode_cuda_gpu_kern_sum.csv
+-rw-r--r-- 1 root root  29K Apr 24 14:37 /tmp/kiln-c60/post500_mtp_decode_nvtx_kern_sum.csv
+-rw-r--r-- 1 root root 3.3K Apr 24 14:37 /tmp/kiln-c60/post500_mtp_decode_nvtx_pushpop_sum.csv
+-rw-r--r-- 1 root root  742 Apr 24 14:37 /tmp/kiln-c60/post500_mtp_decode_stats.log

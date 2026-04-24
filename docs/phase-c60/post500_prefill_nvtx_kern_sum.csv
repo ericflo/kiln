@@ -1,0 +1,121 @@
+NVTX Range,Style,PID,TID,NVTX Inst,Kern Inst,Total Time (ns),Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Kernel Name
+,,17663,17663,0,1512,526055433,347920.3,349777.5,325857,419554,14628.0,"<unnamed>::gdn_full_chunk_forward_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, int)"
+,,17663,17663,0,9465,260394459,27511.3,9472.0,2592,97415231,1003718.1,ucopy_bf16
+,,17663,17663,0,6096,28818150,4727.4,4960.0,3744,5888,691.8,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_nn_align8>(T1::Params)
+,,17663,17663,0,1112,27975408,25157.7,1472.0,1344,418977,94463.0,bmul_bf16
+,,17663,17663,0,512,27137439,53002.8,3968.0,3840,250209,96987.7,cast_bf16_f32
+,,17663,17663,0,544,12622092,23202.4,1408.0,1376,389538,87210.6,urecip_bf16
+,,17663,17663,0,544,12401866,22797.5,1408.0,1376,381985,85614.3,uexp_bf16
+,,17663,17663,0,544,12091948,22227.8,1376.0,1344,372097,83450.4,uneg_bf16
+,,17663,17663,0,544,11985063,22031.4,1408.0,1376,368353,82614.1,affine_bf16
+,,17663,17663,0,1536,6470708,4212.7,4192.0,3616,4640,115.1,copy2d_bf16
+,,17663,17663,0,408,2419142,5929.3,5856.0,5696,7936,328.7,cast_f32_bf16
+,,17663,17663,0,17,2266729,133337.0,132608.0,131520,143041,2624.4,fast_argmax_bf16
+,,17663,17663,0,17,222464,13086.1,2720.0,2688,178432,42608.8,is_u32_bf16
+,,17663,17663,0,48,220256,4588.7,4560.0,4288,4864,154.9,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align2>(T1::Params)
+,,17663,17663,0,24,148898,6204.1,6176.0,6016,6560,150.8,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_nn_align2>(T1::Params)
+,,17663,17663,0,24,121377,5057.4,5056.0,4864,5376,116.5,badd_bf16
+,,17663,17663,0,17,49888,2934.6,2784.0,2720,5344,623.9,bmul_f32
+,,17663,17663,0,17,25728,1513.4,1440.0,1408,2688,304.0,ucos_f32
+,,17663,17663,0,17,25728,1513.4,1440.0,1440,2432,238.9,usin_f32
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,256,113679561,444060.8,443745.5,441793,456801,2142.1,ucopy_bf16
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,22718070,177484.9,178049.0,175649,181601,1224.4,"void kiln_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<(int)256, (int)64, (int)64, (int)4, (bool)0, (bool)0, cutlass::bfloat16_t, Flash_kernel_traits<(int)256, (int)64, (int)64, (int)4, cutlass::bfloat16_t>>, (bool)0, (bool)1, (bool)0, (bool)0, (bool)0, (bool)1, (bool)0, (bool)0>(kiln_flash::Flash_fwd_params)"
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,4424683,34567.8,34560.0,34368,34848,100.8,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params)
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,259457,2027.0,2016.0,1952,2144,42.6,uneg_bf16
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,215200,1681.3,1664.0,1632,1760,21.6,uexp_bf16
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,199810,1561.0,1568.0,1504,1632,31.3,bmul_bf16
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,183872,1436.5,1440.0,1408,1504,16.7,urecip_bf16
+:kiln/attn/full/decode_fused,PushPop,17663,17663,128,128,173984,1359.3,1344.0,1344,1408,17.5,affine_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,40,12213868,305346.7,418321.0,105440,460738,164922.1,ucopy_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,11198918,1399864.8,1401220.5,1394885,1403205,3603.4,"void kiln_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<(int)256, (int)64, (int)64, (int)4, (bool)0, (bool)0, cutlass::bfloat16_t, Flash_kernel_traits<(int)256, (int)64, (int)64, (int)4, cutlass::bfloat16_t>>, (bool)0, (bool)1, (bool)0, (bool)0, (bool)0, (bool)1, (bool)0, (bool)0>(kiln_flash::Flash_fwd_params)"
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,5277202,659650.3,660834.5,654083,664866,4058.0,ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,1452998,181624.8,181824.5,178209,183713,1723.3,bmul_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,1320708,165088.5,164896.5,163072,169152,1903.3,urecip_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,1307044,163380.5,163248.0,162144,165760,1210.6,uexp_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,1277317,159664.6,159552.5,158113,162945,1487.6,uneg_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,8,1258532,157316.5,156801.0,155041,160449,1653.5,affine_bf16
+:kiln/attn/full/prefill_initial,PushPop,17663,17663,8,16,723523,45220.2,45136.5,44512,46240,483.8,copy2d_bf16
+:kiln/attn/gdn/chunk,PushPop,17663,17663,24,24,3310379,137932.5,137904.5,132800,146305,3338.3,"void <unnamed>::gdn_chunk_scan_kernel<(int)64>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, int)"
+:kiln/attn/gdn/chunk_prep,PushPop,17663,17663,24,24,637186,26549.4,26656.0,21888,29760,1585.0,"void <unnamed>::gdn_chunk_prep_kernel<(int)64>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, int)"
+:kiln/attn/gdn/recurrent,PushPop,17663,17663,384,384,5803578,15113.5,15104.0,14976,15649,90.5,"void <unnamed>::recurrent_gdn_fwd_kernel<(int)128>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, int)"
+:kiln/attn/qk_norm,PushPop,17663,17663,136,272,1943844,7146.5,1728.0,1632,151105,25533.6,"<unnamed>::fused_rmsnorm_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, float)"
+:kiln/attn/qkv_transpose,PushPop,17663,17663,8,8,3317674,414709.3,415201.0,411426,417377,2426.9,ucopy_bf16
+:kiln/attn/rope,PushPop,17663,17663,136,816,16461755,20173.7,2592.0,2240,1483045,143912.7,ucopy_f32
+:kiln/attn/rope,PushPop,17663,17663,136,1088,5451692,5010.7,2848.0,2688,61664,10088.4,bmul_f32
+:kiln/attn/rope,PushPop,17663,17663,136,272,5274355,19391.0,2752.0,2528,466561,79628.7,cast_f32_bf16
+:kiln/attn/rope,PushPop,17663,17663,136,272,2055180,7555.8,1280.0,1216,174113,29664.6,cast_bf16_f32
+:kiln/attn/rope,PushPop,17663,17663,136,272,741761,2727.1,1536.0,1312,38144,6243.8,badd_f32
+:kiln/attn/rope,PushPop,17663,17663,136,272,734724,2701.2,1568.0,1248,38080,6243.4,bsub_f32
+:kiln/gdn/conv,PushPop,17663,17663,24,24,22616108,942337.8,935300.0,906403,1004675,28827.6,ucopy_bf16
+:kiln/gdn/conv,PushPop,17663,17663,24,24,7317754,304906.4,304833.0,303937,306145,645.3,"void <unnamed>::kiln_conv1d_prefill_k4_kernel<(bool)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, float *, float *, int, int, int)"
+:kiln/gdn/conv,PushPop,17663,17663,384,384,656739,1710.3,1696.0,1600,1856,61.6,"void <unnamed>::kiln_conv1d_update_k4_kernel<(bool)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, float *, float *, int, int)"
+:kiln/gdn/conv/layout,PushPop,17663,17663,24,24,22616108,942337.8,935300.0,906403,1004675,28827.6,ucopy_bf16
+:kiln/gdn/conv/prefill_update,PushPop,17663,17663,24,24,7317754,304906.4,304833.0,303937,306145,645.3,"void <unnamed>::kiln_conv1d_prefill_k4_kernel<(bool)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, float *, float *, int, int, int)"
+:kiln/gdn/conv/update,PushPop,17663,17663,384,384,656739,1710.3,1696.0,1600,1856,61.6,"void <unnamed>::kiln_conv1d_update_k4_kernel<(bool)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, float *, float *, int, int)"
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,1632,42554705,26075.2,3232.0,1344,571778,98993.6,bmul_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,816,15439383,18920.8,1216.0,1184,453314,77501.9,cast_bf16_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,408,8556892,20972.8,2368.0,2368,336289,74471.1,fast_sum_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,1224,6572947,5370.1,1280.0,1184,208321,28489.8,affine_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,816,6108312,7485.7,1376.0,1280,211744,35057.7,urecip_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,408,5517043,13522.2,1376.0,1344,210144,48645.0,usqr_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,408,5511735,13509.2,1408.0,1408,208737,48407.2,uexp_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,408,5510514,13506.2,1376.0,1344,209889,48548.9,uneg_f32
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,408,4567411,11194.6,1312.0,1280,173953,39572.2,cast_f32_bf16
+:kiln/gdn/gated_norm,PushPop,17663,17663,408,408,558242,1368.2,1312.0,1280,2336,198.5,usqrt_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,1224,1800810,1471.3,1280.0,1216,6176,655.7,badd_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,1224,1570438,1283.0,1248.0,1184,2240,162.7,uneg_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,816,1181540,1448.0,1536.0,1216,2656,284.7,bmaximum_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,816,1135524,1391.6,1376.0,1280,2272,142.9,uexp_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,816,1083489,1327.8,1280.0,1216,2688,204.4,cast_bf16_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,408,724385,1775.5,1536.0,1472,6112,1009.7,bmul_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,408,573984,1406.8,1376.0,1344,2272,180.7,urecip_bf16
+:kiln/gdn/gates,PushPop,17663,17663,408,408,570755,1398.9,1312.0,1280,3136,384.4,uneg_bf16
+:kiln/gdn/gates,PushPop,17663,17663,408,408,568737,1394.0,1344.0,1312,2432,225.6,ulog_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,408,562531,1378.8,1344.0,1280,2208,173.7,uexp_bf16
+:kiln/gdn/gates,PushPop,17663,17663,408,408,545792,1337.7,1280.0,1248,2144,173.4,affine_bf16
+:kiln/gdn/gates,PushPop,17663,17663,408,408,526177,1289.6,1248.0,1216,2240,194.1,affine_f32
+:kiln/gdn/gates,PushPop,17663,17663,408,408,513472,1258.5,1216.0,1184,2112,183.9,cast_f32_bf16
+:kiln/gdn/head_expand,PushPop,17663,17663,408,816,25343833,31058.6,3296.0,3104,506146,111211.8,ucopy_f32
+:kiln/gdn/in_proj,PushPop,17663,17663,24,48,47220065,983751.4,987459.5,673186,1321732,300651.5,ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nn
+:kiln/gdn/in_proj,PushPop,17663,17663,384,384,24153532,62899.8,62848.5,62688,63616,157.5,ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn
+:kiln/gdn/in_proj,PushPop,17663,17663,408,432,14769592,34188.9,34016.0,33472,37152,675.5,ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn
+:kiln/gdn/in_proj,PushPop,17663,17663,384,768,2393319,3116.3,3136.0,2624,3744,418.9,void cutlass::Kernel2<cutlass_80_wmma_tensorop_s161616gemm_bf16_16x16_128x1_nn_align8>(T1::Params)
+:kiln/gdn/in_proj,PushPop,17663,17663,384,768,1370950,1785.1,1840.0,1568,2112,195.8,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T5 *, T5 *, const T6 *, const T6 *, const T7 *, const T4 *, T7 *, void *, long, T6 *, int *)"
+:kiln/gdn/out_proj,PushPop,17663,17663,24,24,15915414,663142.3,664034.0,653027,674594,6407.8,ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn
+:kiln/gdn/out_proj,PushPop,17663,17663,384,384,15028506,39136.7,39136.0,38753,39425,134.7,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params)
+:kiln/gdn/qk_norm,PushPop,17663,17663,408,816,26892894,32957.0,3488.0,3136,536097,118398.0,bdiv_f32
+:kiln/gdn/qk_norm,PushPop,17663,17663,408,816,17155158,21023.5,2400.0,2336,338817,74619.0,fast_sum_f32
+:kiln/gdn/qk_norm,PushPop,17663,17663,408,816,10958470,13429.5,1344.0,1280,209152,48373.4,usqr_f32
+:kiln/gdn/qk_norm,PushPop,17663,17663,408,816,9106629,11160.1,1312.0,1216,174625,39562.2,cast_f32_bf16
+:kiln/gdn/qk_norm,PushPop,17663,17663,408,1224,6642072,5426.5,1312.0,1184,209793,28615.5,affine_f32
+:kiln/gdn/qk_norm,PushPop,17663,17663,408,816,1116513,1368.3,1312.0,1248,2656,275.8,usqrt_f32
+:kiln/gdn/qkv_split,PushPop,17663,17663,24,72,27569214,382905.8,294369.0,281281,583650,132076.8,ucopy_f32
+:kiln/gdn/recur_prep,PushPop,17663,17663,408,408,4537749,11121.9,1248.0,1216,174144,39586.8,cast_f32_bf16
+:kiln/kv/copy,PushPop,17663,17663,136,272,1066979,3922.7,1344.0,1312,46240,10344.0,copy2d_bf16
+:kiln/lm_head,PushPop,17663,17663,17,17,30692618,1805448.1,1804903.0,1803302,1811974,1940.2,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8>(T1::Params)
+:kiln/lm_head,PushPop,17663,17663,17,17,104800,6164.7,6144.0,6080,6496,101.8,"<unnamed>::fused_rmsnorm_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, float)"
+:kiln/mlp/down,PushPop,17663,17663,32,160,69897013,436856.3,534385.5,41280,554402,197881.0,"void Marlin<(int)256, (int)4, (int)16, (int)4, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/mlp/down,PushPop,17663,17663,544,544,11789962,21672.7,1312.0,1312,358721,81475.1,cast_bf16_f16
+:kiln/mlp/down,PushPop,17663,17663,512,512,11729607,22909.4,22912.0,22496,23424,170.5,"void Marlin<(int)256, (int)1, (int)8, (int)8, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/mlp/down,PushPop,17663,17663,544,544,3789548,6966.1,1248.0,1216,103105,22863.4,cast_f16_bf16
+:kiln/mlp/gate,PushPop,17663,17663,32,160,51212559,320078.5,391281.5,34944,404129,142797.9,"void Marlin<(int)256, (int)4, (int)16, (int)4, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/mlp/gate,PushPop,17663,17663,544,544,11756649,21611.5,1344.0,1312,359874,81144.2,cast_f16_bf16
+:kiln/mlp/gate,PushPop,17663,17663,512,512,10818791,21130.5,21120.0,20864,21697,115.6,"void Marlin<(int)256, (int)1, (int)8, (int)8, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/mlp/gate,PushPop,17663,17663,544,544,3817549,7017.6,1312.0,1280,101888,22857.7,cast_bf16_f16
+:kiln/mlp/up,PushPop,17663,17663,32,160,51244689,320279.3,391633.5,34816,408162,142836.4,"void Marlin<(int)256, (int)4, (int)16, (int)4, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/mlp/up,PushPop,17663,17663,544,544,11730631,21563.7,1248.0,1216,359009,81306.8,cast_f16_bf16
+:kiln/mlp/up,PushPop,17663,17663,512,512,10629182,20760.1,20768.0,20544,21088,96.2,"void Marlin<(int)256, (int)1, (int)8, (int)8, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/mlp/up,PushPop,17663,17663,544,544,3778058,6945.0,1248.0,1216,102337,22819.1,cast_bf16_f16
+:kiln/norm/pre_attn,PushPop,17663,17663,544,544,5481622,10076.5,6177.0,5920,73505,15585.0,"<unnamed>::fused_rmsnorm_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, float)"
+:kiln/norm/pre_mlp,PushPop,17663,17663,544,544,5467439,10050.4,6176.0,5888,73440,15546.6,"<unnamed>::fused_rmsnorm_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, float)"
+:kiln/proj/o,PushPop,17663,17663,8,8,5277202,659650.3,660834.5,654083,664866,4058.0,ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn
+:kiln/proj/o,PushPop,17663,17663,128,128,4424683,34567.8,34560.0,34368,34848,100.8,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params)
+:kiln/proj/qkv,PushPop,17663,17663,8,40,11357479,283937.0,345233.5,31360,359233,127720.1,"void Marlin<(int)256, (int)4, (int)16, (int)4, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/proj/qkv,PushPop,17663,17663,8,16,3277740,204858.8,205393.0,201537,207072,1867.2,ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn
+:kiln/proj/qkv,PushPop,17663,17663,128,256,2719242,10622.0,10624.0,10368,11072,102.7,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params)
+:kiln/proj/qkv,PushPop,17663,17663,136,136,2611912,19205.2,1248.0,1248,309409,72043.9,cast_f16_bf16
+:kiln/proj/qkv,PushPop,17663,17663,128,128,2447495,19121.1,19104.5,18816,19584,131.4,"void Marlin<(int)256, (int)1, (int)8, (int)8, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)"
+:kiln/proj/qkv,PushPop,17663,17663,136,136,947364,6965.9,1248.0,1216,100161,22970.2,cast_bf16_f16
+:kiln/proj/qkv,PushPop,17663,17663,128,256,370080,1445.6,1456.0,1344,1568,69.2,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, (bool)1, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T5 *, T5 *, const T6 *, const T6 *, const T7 *, const T4 *, T7 *, void *, long, T6 *, int *)"
+:kiln/proj/qkv_split,PushPop,17663,17663,136,272,7476344,27486.6,3072.0,2976,426978,97839.9,ucopy_bf16
+:kiln/residual,PushPop,17663,17663,1088,1088,9142400,8402.9,1888.0,1312,121984,26994.7,badd_bf16

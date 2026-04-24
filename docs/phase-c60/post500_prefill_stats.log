@@ -1,0 +1,14 @@
+Generating SQLite file /tmp/kiln-c60/post500_prefill.sqlite from /tmp/kiln-c60/post500_prefill.nsys-rep
+Processing [/tmp/kiln-c60/post500_prefill.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py] to [/tmp/kiln-c60/post500_prefill_cuda_gpu_kern_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c60/post500_prefill.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/nvtx_kern_sum.py] to [/tmp/kiln-c60/post500_prefill_nvtx_kern_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c60/post500_prefill.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/nvtx_pushpop_sum.py] to [/tmp/kiln-c60/post500_prefill_nvtx_pushpop_sum.csv]... PROCESSED
+
+-rw-r--r-- 1 root root 8.3K Apr 24 14:37 /tmp/kiln-c60/post500_prefill.log
+-rw-rw-r-- 1 root root  22M Apr 24 14:37 /tmp/kiln-c60/post500_prefill.nsys-rep
+-rw-r--r-- 1 root root  49M Apr 24 14:37 /tmp/kiln-c60/post500_prefill.sqlite
+-rw-r--r-- 1 root root 6.4K Apr 24 14:37 /tmp/kiln-c60/post500_prefill_cuda_gpu_kern_sum.csv
+-rw-r--r-- 1 root root  17K Apr 24 14:37 /tmp/kiln-c60/post500_prefill_nvtx_kern_sum.csv
+-rw-r--r-- 1 root root 2.6K Apr 24 14:37 /tmp/kiln-c60/post500_prefill_nvtx_pushpop_sum.csv
+-rw-r--r-- 1 root root  718 Apr 24 14:37 /tmp/kiln-c60/post500_prefill_stats.log
