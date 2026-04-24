@@ -144,7 +144,6 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 # crates × 24 default cargo jobs × multi-arch was OOM-killing sshd.
 export CARGO_BUILD_JOBS=4
 export NVCC_THREADS=1
-export KILN_CUDA_ARCHS=86
 ENVEOF
     echo "Wrote ${ENV_FILE}"
 fi
@@ -165,7 +164,6 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 # crates × 24 default cargo jobs × multi-arch was OOM-killing sshd.
 export CARGO_BUILD_JOBS=4
 export NVCC_THREADS=1
-export KILN_CUDA_ARCHS=86
 ENVEOF
 
 # Postmortem helper — run after any build wedge / failure to capture state
