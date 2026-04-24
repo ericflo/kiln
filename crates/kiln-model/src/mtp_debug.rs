@@ -199,6 +199,20 @@ thread_local! {
     static C45_LAYER1_ROW_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
         const { RefCell::new(None) };
 
+    /// Phase C46: thread-local sink for the C45 row-side operand provenance
+    /// bisect. Kept distinct from C45 because this phase looks upstream of
+    /// `layer_1_input_norm_last_row_flat_values`: row selection before
+    /// RMSNorm, dtype promotion, contiguous materialization, flattening, and
+    /// the exact C45 operand reconstruction.
+    ///
+    /// Driven by [`arm_c46_layer1_row_provenance_capture`] /
+    /// [`drain_c46_layer1_row_provenance_capture`] /
+    /// [`capture_c46_layer1_row_provenance_tap`], and gated on
+    /// `KILN_MTP_DUMP_C46_ROW_PROVENANCE=1` so production decode stays on the
+    /// current fast path when unset.
+    static C46_LAYER1_ROW_PROVENANCE_CAPTURE: RefCell<Option<Vec<(String, Vec<usize>, Vec<f32>)>>> =
+        const { RefCell::new(None) };
+
     /// Phase B12: thread-local "current absolute layer index" slot. Set by
     /// the main transformer layer loop around each layer's forward call so
     /// that deep inside `gqa_attention_paged` / `transformer_block_paged`
@@ -947,6 +961,16 @@ pub fn is_dump_c45_layer1_row_taps_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// True when `KILN_MTP_DUMP_C46_ROW_PROVENANCE=1` (or `true`) is set.
+/// Opt-in for the Phase C46 row-side provenance bisect feeding C45's
+/// `layer_1_input_norm_last_row_flat_values`; captured tensors are appended
+/// to the MTP dump safetensors under names `c46__<name>`.
+pub fn is_dump_c46_row_provenance_enabled() -> bool {
+    std::env::var("KILN_MTP_DUMP_C46_ROW_PROVENANCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Canonical ordered list of Phase C42 layer-1 pre-norm / input-layernorm tap
 /// names. The comparator (`scripts/mtp_compare.py --c42`) and the HF
 /// reference (`scripts/mtp_h_main_reference_dump.py --c42-taps`) both mirror
@@ -991,6 +1015,18 @@ pub const C45_LAYER1_ROW_TAP_NAMES: &[&str] = &[
     "layer_1_input_norm_pre_weight_row_broadcast_output",
     "layer_1_input_norm_pre_weight_row_scalar_values",
     "layer_1_input_norm_pre_weight_row_reconstructed",
+];
+
+/// Canonical ordered list of Phase C46 layer-1 row-side provenance tap names.
+/// The comparator (`scripts/mtp_compare.py --c46-row-provenance`) and the HF
+/// reference (`scripts/mtp_h_main_reference_dump.py --c46-row-provenance-taps`)
+/// both mirror this exact order.
+pub const C46_ROW_PROVENANCE_TAP_NAMES: &[&str] = &[
+    "layer_1_input_norm_selected_row_before_rmsnorm",
+    "layer_1_input_norm_selected_row_after_f32_cast",
+    "layer_1_input_norm_selected_row_after_contiguous",
+    "layer_1_input_norm_selected_row_after_flatten",
+    "layer_1_input_norm_last_row_flat_values",
 ];
 
 /// True if the Phase C41 layer-1 capture window is currently armed on this
@@ -1201,6 +1237,49 @@ pub fn capture_c45_layer1_row_tap(name: &str, t: &Tensor) -> Result<()> {
     let (shape, flat) = tensor_to_f32_host(t)
         .with_context(|| format!("capture_c45_layer1_row_tap `{name}`: tensor→f32 host copy"))?;
     C45_LAYER1_ROW_CAPTURE.with(|c| {
+        if let Some(buf) = c.borrow_mut().as_mut() {
+            buf.push((name.to_string(), shape, flat));
+        }
+    });
+    Ok(())
+}
+
+/// True if the Phase C46 layer-1 row-side provenance capture window is
+/// currently armed on this thread.
+pub fn is_c46_layer1_row_provenance_capture_armed() -> bool {
+    C46_LAYER1_ROW_PROVENANCE_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// True if a C46 layer-1 row-side provenance capture should happen for
+/// `layer_idx`.
+pub fn should_capture_c46_layer1_row_provenance_tap_for_layer(layer_idx: usize) -> bool {
+    layer_idx == 1 && is_c46_layer1_row_provenance_capture_armed()
+}
+
+/// Begin a C46 layer-1 row-side provenance capture window.
+pub fn arm_c46_layer1_row_provenance_capture() {
+    if !is_dump_c46_row_provenance_enabled() {
+        return;
+    }
+    C46_LAYER1_ROW_PROVENANCE_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+}
+
+/// Drain the captured C46 layer-1 row-side provenance taps and disarm.
+pub fn drain_c46_layer1_row_provenance_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
+    C46_LAYER1_ROW_PROVENANCE_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record one named C46 layer-1 row-side provenance tap if a capture window
+/// is currently open on this thread.
+pub fn capture_c46_layer1_row_provenance_tap(name: &str, t: &Tensor) -> Result<()> {
+    let armed = C46_LAYER1_ROW_PROVENANCE_CAPTURE.with(|c| c.borrow().is_some());
+    if !armed {
+        return Ok(());
+    }
+    let (shape, flat) = tensor_to_f32_host(t).with_context(|| {
+        format!("capture_c46_layer1_row_provenance_tap `{name}`: tensor→f32 host copy")
+    })?;
+    C46_LAYER1_ROW_PROVENANCE_CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push((name.to_string(), shape, flat));
         }
@@ -1841,12 +1920,13 @@ fn tensor_to_f32_host(t: &Tensor) -> Result<(Vec<usize>, Vec<f32>)> {
 /// passing `&[]` for both `b11_taps` and `b12_taps` produce the historical
 /// safetensors layout.
 ///
-/// Phase C41 / C42 / C43 / C44 / C45: `c41_taps`, `c42_taps`, `c43_taps`,
-/// `c44_taps`, and `c45_taps` carry the layer-1 bisect taps captured via
-/// their phase-specific arm/capture/drain helpers. Each slice is serialized
-/// as F32 under `c41__<name>` / `c42__<name>` / `c43__<name>` / `c44__<name>`
-/// / `c45__<name>`, with an accompanying ordered tap-id metadata tensor so
-/// the Python side can mirror the exact tap order from the kiln dump.
+/// Phase C41 / C42 / C43 / C44 / C45 / C46: `c41_taps`, `c42_taps`,
+/// `c43_taps`, `c44_taps`, `c45_taps`, and `c46_taps` carry the layer-1
+/// bisect taps captured via their phase-specific arm/capture/drain helpers.
+/// Each slice is serialized as F32 under `c41__<name>` / `c42__<name>` /
+/// `c43__<name>` / `c44__<name>` / `c45__<name>` / `c46__<name>`, with an
+/// accompanying ordered tap-id metadata tensor so the Python side can mirror
+/// the exact tap order from the kiln dump.
 ///
 /// Phase C6: `c6_taps` carries the pre-RoPE MTP-input taps captured via
 /// [`arm_pre_rope_capture`] / [`capture_pre_rope_tap`] /
@@ -1887,6 +1967,7 @@ pub fn write_mtp_dump(
     c43_taps: &[(String, Vec<usize>, Vec<f32>)],
     c44_taps: &[(String, Vec<usize>, Vec<f32>)],
     c45_taps: &[(String, Vec<usize>, Vec<f32>)],
+    c46_taps: &[(String, Vec<usize>, Vec<f32>)],
     c6_taps: &[(String, Vec<usize>, Vec<f32>)],
     c7_taps: &[(String, Vec<usize>, Vec<f32>)],
     c14_taps: &[(String, Vec<usize>, Vec<f32>)],
@@ -1897,8 +1978,8 @@ pub fn write_mtp_dump(
     // TensorViews we build below can borrow from a stable backing store.
     // Capacity: static taps + subops + 4 meta + optional boundary-layer meta
     // + optional prompt/replay token tensors + b11 taps + b12 taps + optional
-    // C41/C42/C43/C44 tap-id meta + c41/c42/c43/c44 taps + c6 taps + c7 taps
-    // + c14 taps.
+    // C41/C42/C43/C44/C45/C46 tap-id meta + c41/c42/c43/c44/c45/c46 taps +
+    // c6 taps + c7 taps + c14 taps.
     let boundary_reserve = if boundary_layers.is_empty() { 0 } else { 1 };
     let prompt_reserve = if prompt_tokens.is_empty() { 0 } else { 2 };
     let replay_reserve = if replay_tokens.is_empty() { 0 } else { 2 };
@@ -1907,6 +1988,7 @@ pub fn write_mtp_dump(
     let c43_meta_reserve = if c43_taps.is_empty() { 0 } else { 1 };
     let c44_meta_reserve = if c44_taps.is_empty() { 0 } else { 1 };
     let c45_meta_reserve = if c45_taps.is_empty() { 0 } else { 1 };
+    let c46_meta_reserve = if c46_taps.is_empty() { 0 } else { 1 };
     let mut backings: Vec<(String, Vec<usize>, Dtype, Vec<u8>)> = Vec::with_capacity(
         taps.len()
             + extra_subops.len()
@@ -1926,6 +2008,8 @@ pub fn write_mtp_dump(
             + c44_taps.len()
             + c45_meta_reserve
             + c45_taps.len()
+            + c46_meta_reserve
+            + c46_taps.len()
             + c6_taps.len()
             + c7_taps.len()
             + c14_taps.len(),
@@ -2192,6 +2276,32 @@ pub fn write_mtp_dump(
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         backings.push((format!("c45__{name}"), shape.clone(), Dtype::F32, bytes));
+    }
+
+    if !c46_taps.is_empty() {
+        let mut bytes = Vec::with_capacity(c46_taps.len() * 4);
+        for (name, _shape, _flat) in c46_taps {
+            let idx = C46_ROW_PROVENANCE_TAP_NAMES
+                .iter()
+                .position(|&tap| tap == name.as_str())
+                .with_context(|| format!("unknown C46 tap `{name}`"))?;
+            let idx_i32 = idx as i32;
+            bytes.extend_from_slice(&idx_i32.to_le_bytes());
+        }
+        backings.push((
+            "meta__c46_tap_ids".into(),
+            vec![c46_taps.len()],
+            Dtype::I32,
+            bytes,
+        ));
+    }
+
+    for (name, shape, flat) in c46_taps {
+        let mut bytes = Vec::with_capacity(flat.len() * 4);
+        for v in flat {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        backings.push((format!("c46__{name}"), shape.clone(), Dtype::F32, bytes));
     }
 
     // Phase C6: serialize the pre-RoPE MTP-input taps under `c6__<name>` so
@@ -2669,6 +2779,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2803,6 +2914,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -2951,6 +3063,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3056,6 +3169,27 @@ mod tests {
         assert_eq!(
             C45_LAYER1_ROW_TAP_NAMES[5],
             "layer_1_input_norm_pre_weight_row_reconstructed"
+        );
+    }
+
+    #[test]
+    fn c46_row_provenance_tap_names_enumerate_expected_boundaries() {
+        assert_eq!(C46_ROW_PROVENANCE_TAP_NAMES.len(), 5);
+        assert_eq!(
+            C46_ROW_PROVENANCE_TAP_NAMES[0],
+            "layer_1_input_norm_selected_row_before_rmsnorm"
+        );
+        assert_eq!(
+            C46_ROW_PROVENANCE_TAP_NAMES[1],
+            "layer_1_input_norm_selected_row_after_f32_cast"
+        );
+        assert_eq!(
+            C46_ROW_PROVENANCE_TAP_NAMES[3],
+            "layer_1_input_norm_selected_row_after_flatten"
+        );
+        assert_eq!(
+            C46_ROW_PROVENANCE_TAP_NAMES[4],
+            "layer_1_input_norm_last_row_flat_values"
         );
     }
 
@@ -3321,6 +3455,77 @@ mod tests {
     }
 
     #[test]
+    fn c46_row_provenance_capture_records_then_drains() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::set_var("KILN_MTP_DUMP_C46_ROW_PROVENANCE", "1");
+        }
+        let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
+
+        capture_c46_layer1_row_provenance_tap(
+            "layer_1_input_norm_selected_row_before_rmsnorm",
+            &a,
+        )
+        .unwrap();
+        assert!(drain_c46_layer1_row_provenance_capture().is_empty());
+        assert!(!is_c46_layer1_row_provenance_capture_armed());
+        assert!(!should_capture_c46_layer1_row_provenance_tap_for_layer(1));
+
+        arm_c46_layer1_row_provenance_capture();
+        assert!(is_c46_layer1_row_provenance_capture_armed());
+        assert!(should_capture_c46_layer1_row_provenance_tap_for_layer(1));
+        assert!(!should_capture_c46_layer1_row_provenance_tap_for_layer(0));
+        capture_c46_layer1_row_provenance_tap(
+            "layer_1_input_norm_selected_row_before_rmsnorm",
+            &b,
+        )
+        .unwrap();
+        capture_c46_layer1_row_provenance_tap(
+            "layer_1_input_norm_last_row_flat_values",
+            &a,
+        )
+        .unwrap();
+        let drained = drain_c46_layer1_row_provenance_capture();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "layer_1_input_norm_selected_row_before_rmsnorm");
+        assert_eq!(drained[0].1, vec![1]);
+        assert_eq!(drained[0].2, vec![10.0]);
+        assert_eq!(drained[1].0, "layer_1_input_norm_last_row_flat_values");
+        assert_eq!(drained[1].1, vec![3]);
+        assert_eq!(drained[1].2, vec![1.0, 2.0, 3.0]);
+
+        assert!(!is_c46_layer1_row_provenance_capture_armed());
+        capture_c46_layer1_row_provenance_tap(
+            "layer_1_input_norm_selected_row_after_flatten",
+            &a,
+        )
+        .unwrap();
+        assert!(drain_c46_layer1_row_provenance_capture().is_empty());
+
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C46_ROW_PROVENANCE");
+        }
+    }
+
+    #[test]
+    fn c46_row_provenance_arm_is_noop_when_env_unset() {
+        let _guard = test_env_lock();
+        unsafe {
+            std::env::remove_var("KILN_MTP_DUMP_C46_ROW_PROVENANCE");
+        }
+        arm_c46_layer1_row_provenance_capture();
+        assert!(!is_c46_layer1_row_provenance_capture_armed());
+        let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        capture_c46_layer1_row_provenance_tap(
+            "layer_1_input_norm_selected_row_before_rmsnorm",
+            &a,
+        )
+        .unwrap();
+        assert!(drain_c46_layer1_row_provenance_capture().is_empty());
+    }
+
+    #[test]
     fn b12_gqa_capture_records_then_drains() {
         let _guard = test_env_lock();
         // SAFETY: single-threaded test; scoped env mutation.
@@ -3413,6 +3618,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3481,6 +3687,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3546,6 +3753,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3611,6 +3819,7 @@ mod tests {
             &c43,
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3678,6 +3887,7 @@ mod tests {
             /* c43_taps = */ &[],
             &c44,
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3745,6 +3955,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             &c45,
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -3771,6 +3982,74 @@ mod tests {
             .unwrap();
         assert_eq!(out.dtype(), safetensors::Dtype::F32);
         assert_eq!(out.shape(), &[1, 1, 3]);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn write_mtp_dump_emits_c46_taps_and_metadata_when_provided() {
+        use safetensors::SafeTensors;
+
+        let h = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
+        let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c46.safetensors");
+        let tmp_s = tmp.to_string_lossy().into_owned();
+        let c46 = vec![
+            (
+                "layer_1_input_norm_selected_row_before_rmsnorm".to_string(),
+                vec![1, 1, 3],
+                vec![0.11_f32, 0.12, 0.13],
+            ),
+            (
+                "layer_1_input_norm_last_row_flat_values".to_string(),
+                vec![1, 3],
+                vec![0.21_f32, 0.22, 0.23],
+            ),
+        ];
+        write_mtp_dump(
+            &tmp_s,
+            /* draft_token_id = */ 70,
+            /* mtp_pos = */ 0,
+            /* base_pos = */ 0,
+            /* swap_fc_norms = */ false,
+            /* boundary_layers = */ &[],
+            &[("h_main", &h)],
+            &[],
+            /* prompt_tokens = */ &[],
+            /* replay_tokens = */ &[],
+            /* b11_taps = */ &[],
+            /* b12_taps = */ &[],
+            /* c41_taps = */ &[],
+            /* c42_taps = */ &[],
+            /* c43_taps = */ &[],
+            /* c44_taps = */ &[],
+            /* c45_taps = */ &[],
+            &c46,
+            /* c6_taps = */ &[],
+            /* c7_taps = */ &[],
+            /* c14_taps = */ &[],
+        )
+        .unwrap();
+
+        let raw = std::fs::read(&tmp).unwrap();
+        let st = SafeTensors::deserialize(&raw).unwrap();
+        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"c46__layer_1_input_norm_selected_row_before_rmsnorm"));
+        assert!(names.contains(&"c46__layer_1_input_norm_last_row_flat_values"));
+        assert!(names.contains(&"meta__c46_tap_ids"));
+
+        let ids = st.tensor("meta__c46_tap_ids").unwrap();
+        assert_eq!(ids.dtype(), safetensors::Dtype::I32);
+        assert_eq!(ids.shape(), &[2]);
+        let id0 = i32::from_le_bytes(ids.data()[0..4].try_into().unwrap());
+        let id1 = i32::from_le_bytes(ids.data()[4..8].try_into().unwrap());
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 4);
+
+        let out = st
+            .tensor("c46__layer_1_input_norm_last_row_flat_values")
+            .unwrap();
+        assert_eq!(out.dtype(), safetensors::Dtype::F32);
+        assert_eq!(out.shape(), &[1, 3]);
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -3970,6 +4249,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             &c6,
             /* c7_taps = */ &[],
             /* c14_taps = */ &[],
@@ -4107,6 +4387,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             &c7,
             /* c14_taps = */ &[],
@@ -4270,6 +4551,7 @@ mod tests {
             /* c43_taps = */ &[],
             /* c44_taps = */ &[],
             /* c45_taps = */ &[],
+            /* c46_taps = */ &[],
             /* c6_taps = */ &[],
             /* c7_taps = */ &[],
             &c14,

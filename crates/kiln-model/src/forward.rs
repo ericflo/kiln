@@ -1887,6 +1887,71 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     Ok(())
 }
 
+fn c46_layer1_row_provenance_tensors(x: &Tensor) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    let (_batch, seq_len, hidden) = x
+        .dims3()
+        .context("C46 row provenance expects layer-1 hidden to be [batch, seq, hidden]")?;
+    anyhow::ensure!(seq_len > 0, "C46 row provenance requires non-empty sequence");
+
+    let selected_row = x.narrow(1, seq_len - 1, 1)?;
+    let selected_row_f32 = selected_row.to_dtype(DType::F32)?;
+    let selected_row_contiguous = selected_row_f32.contiguous()?;
+    let selected_row_flat = selected_row_contiguous.reshape(((), hidden))?.contiguous()?;
+
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let (_batch, seq_len, hidden) = x_f32
+        .dims3()
+        .context("C46 row provenance expects f32 layer-1 hidden to be [batch, seq, hidden]")?;
+    let c45_last_row = x_f32
+        .narrow(1, seq_len - 1, 1)?
+        .contiguous()?
+        .reshape(((), hidden))?
+        .contiguous()?;
+
+    Ok((
+        selected_row,
+        selected_row_f32,
+        selected_row_contiguous,
+        selected_row_flat,
+        c45_last_row,
+    ))
+}
+
+/// Phase C46: bisect the row-side operand provenance feeding C45's
+/// `layer_1_input_norm_last_row_flat_values` by splitting row selection,
+/// dtype promotion, contiguous materialization, flattening, and the exact C45
+/// operand reconstruction into separate taps.
+fn capture_c46_layer1_row_provenance_taps(x: &Tensor) -> Result<()> {
+    let (
+        selected_row,
+        selected_row_f32,
+        selected_row_contiguous,
+        selected_row_flat,
+        c45_last_row,
+    ) = c46_layer1_row_provenance_tensors(x)?;
+    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
+        "layer_1_input_norm_selected_row_before_rmsnorm",
+        &selected_row,
+    )?;
+    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
+        "layer_1_input_norm_selected_row_after_f32_cast",
+        &selected_row_f32,
+    )?;
+    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
+        "layer_1_input_norm_selected_row_after_contiguous",
+        &selected_row_contiguous,
+    )?;
+    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
+        "layer_1_input_norm_selected_row_after_flatten",
+        &selected_row_flat,
+    )?;
+    crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
+        "layer_1_input_norm_last_row_flat_values",
+        &c45_last_row,
+    )?;
+    Ok(())
+}
+
 /// Apply Rotary Position Embeddings (RoPE) to query and key tensors.
 ///
 /// `q`: [batch, seq_len, num_heads, head_dim]
@@ -5374,6 +5439,7 @@ pub fn model_forward_paged_with_last_hidden(
     crate::mtp_debug::arm_c43_layer1_preweight_capture();
     crate::mtp_debug::arm_c44_layer1_f32_row_capture();
     crate::mtp_debug::arm_c45_layer1_row_capture();
+    crate::mtp_debug::arm_c46_layer1_row_provenance_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5418,6 +5484,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     crate::mtp_debug::arm_c43_layer1_preweight_capture();
     crate::mtp_debug::arm_c44_layer1_f32_row_capture();
     crate::mtp_debug::arm_c45_layer1_row_capture();
+    crate::mtp_debug::arm_c46_layer1_row_provenance_capture();
     let (logits, hidden) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -5828,6 +5895,10 @@ pub fn mtp_forward_step(
             // stashed during the base-model forward. Empty when
             // `KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS` is unset.
             let c45_taps = crate::mtp_debug::drain_c45_layer1_row_capture();
+            // Phase C46: drain the C45 row-side operand provenance taps
+            // stashed during the base-model forward. Empty when
+            // `KILN_MTP_DUMP_C46_ROW_PROVENANCE` is unset.
+            let c46_taps = crate::mtp_debug::drain_c46_layer1_row_provenance_capture();
             // Phase C6: drain the 5 pre-RoPE MTP input taps (token_emb,
             // norm_emb, norm_h, concat, fused) captured above. Empty when
             // `KILN_MTP_DUMP_PRE_ROPE` is unset, which keeps the dump format
@@ -5863,6 +5934,7 @@ pub fn mtp_forward_step(
                 &c43_taps,
                 &c44_taps,
                 &c45_taps,
+                &c46_taps,
                 &c6_taps,
                 &c7_taps,
                 &c14_taps,
@@ -5883,6 +5955,7 @@ pub fn mtp_forward_step(
                     c43_taps = c43_taps.len(),
                     c44_taps = c44_taps.len(),
                     c45_taps = c45_taps.len(),
+                    c46_taps = c46_taps.len(),
                     c6_taps = c6_taps.len(),
                     c7_taps = c7_taps.len(),
                     c14_taps = c14_taps.len(),
@@ -6099,6 +6172,8 @@ fn model_forward_paged_inner(
                     crate::mtp_debug::should_capture_c44_layer1_f32_row_tap_for_layer(i);
                 let capture_c45_taps =
                     crate::mtp_debug::should_capture_c45_layer1_row_tap_for_layer(i);
+                let capture_c46_taps =
+                    crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(i);
                 if capture_c42_taps {
                     capture_c42_layer1_input_norm_taps(
                         &hidden,
@@ -6118,6 +6193,9 @@ fn model_forward_paged_inner(
                 }
                 if capture_c45_taps {
                     capture_c45_layer1_row_taps(&hidden, config.rms_norm_eps)?;
+                }
+                if capture_c46_taps {
+                    capture_c46_layer1_row_provenance_taps(&hidden)?;
                 }
                 let normed = {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");

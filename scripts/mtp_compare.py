@@ -391,6 +391,24 @@ C45_HYPOTHESIS: Dict[str, str] = {
 C45_TIGHT_ATOL = 1e-3
 C45_TIGHT_RTOL = 1e-2
 
+# Phase C46 — row-side provenance taps feeding C45's
+# `layer_1_input_norm_last_row_flat_values`, in forward-graph order.
+C46_ROW_PROVENANCE_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_input_norm_selected_row_before_rmsnorm",
+    "layer_1_input_norm_selected_row_after_f32_cast",
+    "layer_1_input_norm_selected_row_after_contiguous",
+    "layer_1_input_norm_selected_row_after_flatten",
+    "layer_1_input_norm_last_row_flat_values",
+)
+
+C46_HYPOTHESIS: Dict[str, str] = {
+    "layer_1_input_norm_selected_row_before_rmsnorm": "upstream residual-row drift is already present before RMSNorm row selection/cast replay",
+    "layer_1_input_norm_selected_row_after_f32_cast": "row selection is within tolerance, but dtype promotion exposes the first row-side drift",
+    "layer_1_input_norm_selected_row_after_contiguous": "dtype-promoted row is within tolerance, but contiguous materialization changes the row values",
+    "layer_1_input_norm_selected_row_after_flatten": "row-shaped contiguous values are within tolerance, but flattening changes the row-side operand",
+    "layer_1_input_norm_last_row_flat_values": "the exact C45 operand reconstruction is the first boundary that exceeds tolerance",
+}
+
 # Phase B12 — the cos_sim bar is tighter than B10/B11 because the expected
 # residual drift is small (0.97-0.98) and the goal is to localize it. A
 # per-layer median below this threshold marks the first layer of interest; if
@@ -938,7 +956,7 @@ def _compare_pair(
         emit("  pair verdict: all taps match within tolerance.")
     else:
         base_first_div = first_div
-        for prefix in ("b11__", "b12__", "c41__", "c45__", "c6__", "c7__"):
+        for prefix in ("b11__", "b12__", "c41__", "c45__", "c46__", "c6__", "c7__"):
             if base_first_div.startswith(prefix):
                 base_first_div = base_first_div[len(prefix) :]
                 break
@@ -949,6 +967,7 @@ def _compare_pair(
             or B12_HYPOTHESIS.get(base_first_div)
             or C41_HYPOTHESIS.get(base_first_div)
             or C45_HYPOTHESIS.get(base_first_div)
+            or C46_HYPOTHESIS.get(base_first_div)
             or C6_HYPOTHESIS.get(base_first_div)
             or C7_HYPOTHESIS.get(base_first_div)
             or "<unknown tap>"
@@ -2312,6 +2331,143 @@ def _emit_c44_summary(
         )
 
 
+def _emit_c46_summary(
+    pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
+    atol: float,
+    rtol: float,
+    emit,
+) -> None:
+    """Phase C46 — row-side provenance bisect for C45 selected-row operand."""
+    emit("")
+    emit("=" * 78)
+    emit("Phase C46 layer-1 row-side provenance audit — current and tight tolerance")
+    emit("=" * 78)
+    emit(f"  current tolerance: atol={atol:g}, rtol={rtol:g}")
+    emit(f"  tight tolerance  : atol={C45_TIGHT_ATOL:g}, rtol={C45_TIGHT_RTOL:g}")
+
+    labels = [pr[0] for pr in pair_results]
+    current_cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]] = {
+        n: {} for n in C46_ROW_PROVENANCE_TAP_NAMES
+    }
+    tight_cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]] = {
+        n: {} for n in C46_ROW_PROVENANCE_TAP_NAMES
+    }
+    for label, _ok, _fd, rows, kiln_tensors, ref_tensors in pair_results:
+        for r in rows:
+            n = r["name"]
+            if not isinstance(n, str) or not n.startswith("c46__"):
+                continue
+            short = n[len("c46__") :]
+            if short not in current_cell:
+                continue
+            current_cell[short][label] = (
+                float(r["cos_sim"]),
+                float(r["max_abs_diff"]),
+                float(r["mean_abs_diff"]),
+                float(r.get("rel_l2", float("nan"))),
+                bool(r["allclose"]),
+            )
+            key = f"c46__{short}"
+            if key in kiln_tensors and key in ref_tensors:
+                tr = _compare_tap(
+                    key,
+                    kiln_tensors[key],
+                    ref_tensors[key],
+                    C45_TIGHT_ATOL,
+                    C45_TIGHT_RTOL,
+                )
+                tight_cell[short][label] = (
+                    float(tr["cos_sim"]),
+                    float(tr["max_abs_diff"]),
+                    float(tr["mean_abs_diff"]),
+                    float(tr.get("rel_l2", float("nan"))),
+                    bool(tr["allclose"]),
+                )
+
+    for tap, by_label in current_cell.items():
+        for lab, cur in by_label.items():
+            if lab not in tight_cell[tap]:
+                cs, mxd, mnd, rl2, _ok = cur
+                tight_cell[tap][lab] = (cs, mxd, mnd, rl2, mxd <= C45_TIGHT_ATOL)
+
+    header = "  " + "tap".ljust(54) + " ".join(f"{lab:<58}" for lab in labels)
+    emit(header)
+    emit("  " + "-" * (len(header) - 2))
+    captured_any = False
+    for tap in C46_ROW_PROVENANCE_TAP_NAMES:
+        cells = []
+        for lab in labels:
+            cur = current_cell[tap].get(lab)
+            tight = tight_cell[tap].get(lab)
+            if cur is None:
+                cells.append(f"{'<missing>':<58}")
+                continue
+            cs, mxd, mnd, rl2, ok = cur
+            captured_any = True
+            tight_ok = tight[4] if tight is not None else False
+            cells.append(
+                f"cur={'ok' if ok else 'DIV':<3} tight={'ok' if tight_ok else 'DIV':<3} "
+                f"max|Δ|={_fmt_sci(mxd):<10} mean|Δ|={_fmt_sci(mnd):<10} "
+                f"rel_l2={_fmt_sci(rl2):<10} cos={_fmt_sci(cs):<10}"
+            )
+        emit(f"  {tap:<54}{' '.join(cells)}")
+
+    if not captured_any:
+        emit("Phase C46 verdict: no C46 row-provenance taps present in dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C46_ROW_PROVENANCE=1 and")
+        emit("     re-run mtp_h_main_reference_dump.py with --c46-row-provenance-taps.")
+        return
+
+    def first_shared_bad(cell: Dict[str, Dict[str, Tuple[float, float, float, float, bool]]]) -> Tuple[Optional[str], Optional[str], Dict[str, str]]:
+        first_bad: Optional[str] = None
+        last_ok: Optional[str] = None
+        per_seed: Dict[str, str] = {}
+        for tap in C46_ROW_PROVENANCE_TAP_NAMES:
+            all_present = True
+            all_ok = True
+            all_bad = True
+            for lab in labels:
+                entry = cell[tap].get(lab)
+                if entry is None:
+                    all_present = False
+                    all_ok = False
+                    all_bad = False
+                    continue
+                ok = entry[4]
+                all_ok &= ok
+                all_bad &= not ok
+                if not ok and lab not in per_seed:
+                    per_seed[lab] = tap
+            if all_present and all_ok and first_bad is None:
+                last_ok = tap
+            if all_present and all_bad and first_bad is None:
+                first_bad = tap
+        return first_bad, last_ok, per_seed
+
+    current_bad, current_last_ok, current_per_seed = first_shared_bad(current_cell)
+    tight_bad, tight_last_ok, tight_per_seed = first_shared_bad(tight_cell)
+
+    if current_bad is None:
+        emit("Phase C46 current-tolerance verdict: no shared earliest-bad row-provenance tap.")
+        for lab in labels:
+            emit(f"  current earliest divergent tap for {lab}: {current_per_seed.get(lab, '<none>')}")
+    else:
+        emit(f"Phase C46 current-tolerance verdict: earliest shared bad tap = '{current_bad}'.")
+        if current_last_ok is not None:
+            emit(f"  current last shared-good tap: '{current_last_ok}'")
+        emit(f"  Most-likely cause: {C46_HYPOTHESIS.get(current_bad, '<unknown tap>')}")
+
+    if tight_bad is None:
+        emit("Phase C46 tight-tolerance verdict: no shared earliest-bad row-provenance tap.")
+        for lab in labels:
+            emit(f"  tight earliest divergent tap for {lab}: {tight_per_seed.get(lab, '<none>')}")
+    else:
+        emit(f"Phase C46 tight-tolerance verdict: earliest shared bad tap = '{tight_bad}'.")
+        if tight_last_ok is not None:
+            emit(f"  tight last shared-good tap: '{tight_last_ok}'")
+        emit(f"  Most-likely cause: {C46_HYPOTHESIS.get(tight_bad, '<unknown tap>')}")
+
+
 def _emit_c45_summary(
     pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
@@ -2704,6 +2860,16 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c46-row-provenance",
+        action="store_true",
+        help=(
+            "Phase C46 mode: emit the row-side provenance audit over the "
+            "explicit c46__<name> tap set feeding C45's "
+            "layer_1_input_norm_last_row_flat_values. Defaults atol=1e-2, "
+            "rtol=1e-1 and also reports tight atol=1e-3, rtol=1e-2 verdicts."
+        ),
+    )
+    ap.add_argument(
         "--c6",
         action="store_true",
         help=(
@@ -2755,6 +2921,7 @@ def main() -> int:
         or args.c45
         or args.c45_row_scalar
         or args.c45_operand_budget
+        or args.c46_row_provenance
     )
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
@@ -2772,7 +2939,7 @@ def main() -> int:
         if not (args.kiln and args.ref):
             print("ERROR: must specify --kiln and --ref, or one or more --pair args", file=sys.stderr)
             return 2
-        pairs.append(("", args.kiln, args.ref))
+        pairs.append(("pair", args.kiln, args.ref))
 
     lines: List[str] = []
 
@@ -2783,6 +2950,8 @@ def main() -> int:
     multi = len(pairs) > 1
     if args.c7:
         mode = "SDPA-internal bisect (C7)"
+    elif args.c46_row_provenance:
+        mode = "layer-1 row-side provenance audit (C46)"
     elif args.c45 or args.c45_row_scalar or args.c45_operand_budget:
         mode = "layer-1 row-local operand drift budget (C45)"
     elif args.c44:
@@ -2812,7 +2981,9 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c45 or args.c45_row_scalar or args.c45_operand_budget:
+    if args.c46_row_provenance:
+        focus_keys = [f"c46__{name}" for name in C46_ROW_PROVENANCE_TAP_NAMES]
+    elif args.c45 or args.c45_row_scalar or args.c45_operand_budget:
         focus_keys = [f"c45__{name}" for name in C45_LAYER1_ROW_TAP_NAMES]
     elif args.c44:
         focus_keys = [f"c44__{name}" for name in C44_LAYER1_F32_ROW_TAP_NAMES]
@@ -2832,6 +3003,8 @@ def main() -> int:
 
     if args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
+    elif args.c46_row_provenance:
+        _emit_c46_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c45 or args.c45_row_scalar or args.c45_operand_budget:
         _emit_c45_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c44:
