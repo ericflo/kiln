@@ -50,6 +50,27 @@ kiln_gdn_recurrent_status_t kiln_gdn_recurrent_forward(
     void *stream
 );
 
+kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    const void *z,
+    const void *weight,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float eps,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif
