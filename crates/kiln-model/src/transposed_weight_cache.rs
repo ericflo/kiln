@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
+#[cfg(test)]
+use std::io::Read;
 use std::io::Write;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::OnceLock;
-#[cfg(test)]
-use std::io::Read;
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, OnceLock};
+use std::thread;
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
@@ -15,7 +17,9 @@ use crate::weights::WeightTensor;
 
 const CACHE_VERSION: u32 = 1;
 const CACHE_MAGIC: &[u8; 8] = b"KILNTRP1";
+const CACHE_WRITE_QUEUE_BOUND: usize = 2;
 
+#[derive(Clone)]
 struct CacheKey {
     file_path: PathBuf,
     key_bytes: Vec<u8>,
@@ -29,14 +33,14 @@ pub(crate) struct CachedTransposedWeightBytes {
 }
 
 enum CachedTransposedWeightStorage {
-    Owned(Vec<u8>),
+    Owned(Arc<[u8]>),
     Mapped { mmap: Mmap, payload: Range<usize> },
 }
 
 impl CachedTransposedWeightBytes {
     pub(crate) fn as_bytes(&self) -> &[u8] {
         match &self.storage {
-            CachedTransposedWeightStorage::Owned(bytes) => bytes.as_slice(),
+            CachedTransposedWeightStorage::Owned(bytes) => &bytes[..],
             CachedTransposedWeightStorage::Mapped { mmap, payload } => &mmap[payload.clone()],
         }
     }
@@ -52,7 +56,7 @@ pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
     let Some(cache_key) = cache_key(weight) else {
         let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
         return Ok(CachedTransposedWeightBytes {
-            storage: CachedTransposedWeightStorage::Owned(bytes),
+            storage: CachedTransposedWeightStorage::Owned(Arc::from(bytes)),
             shape,
         });
     };
@@ -75,9 +79,8 @@ pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
     }
 
     let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
-    if let Err(err) = try_write_cached(&cache_key, &bytes) {
-        tracing::debug!(error = %err, "failed to write transposed weight cache entry");
-    }
+    let bytes = Arc::<[u8]>::from(bytes);
+    let _ = queue_cache_write(cache_key, Arc::clone(&bytes));
     Ok(CachedTransposedWeightBytes {
         storage: CachedTransposedWeightStorage::Owned(bytes),
         shape,
@@ -146,6 +149,59 @@ fn try_mmap_cached(cache_key: &CacheKey) -> Result<Option<CachedTransposedWeight
             );
             let _ = fs::remove_file(&cache_key.file_path);
             Ok(None)
+        }
+    }
+}
+
+struct CacheWrite {
+    cache_key: CacheKey,
+    data: Arc<[u8]>,
+}
+
+fn queue_cache_write(cache_key: CacheKey, data: Arc<[u8]>) -> bool {
+    let Some(sender) = cache_write_sender() else {
+        return false;
+    };
+
+    match sender.try_send(CacheWrite { cache_key, data }) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            tracing::debug!("transposed weight cache writer queue full; skipping cache write");
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            tracing::debug!("transposed weight cache writer disconnected; skipping cache write");
+            false
+        }
+    }
+}
+
+fn cache_write_sender() -> Option<&'static SyncSender<CacheWrite>> {
+    static CACHE_WRITE_SENDER: OnceLock<Option<SyncSender<CacheWrite>>> = OnceLock::new();
+    CACHE_WRITE_SENDER
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(CACHE_WRITE_QUEUE_BOUND);
+            match thread::Builder::new()
+                .name("kiln-transposed-weight-cache-writer".to_string())
+                .spawn(move || cache_writer_loop(receiver))
+            {
+                Ok(_) => Some(sender),
+                Err(err) => {
+                    tracing::debug!(
+                        error = %err,
+                        "failed to spawn transposed weight cache writer; cache writes disabled"
+                    );
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn cache_writer_loop(receiver: Receiver<CacheWrite>) {
+    for CacheWrite { cache_key, data } in receiver {
+        if let Err(err) = try_write_cached(&cache_key, &data) {
+            tracing::debug!(error = %err, "failed to write transposed weight cache entry");
         }
     }
 }
@@ -417,6 +473,7 @@ fn unique_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -464,6 +521,33 @@ mod tests {
 
         assert_eq!(got.as_bytes(), payload);
         assert_eq!(got.shape(), [2, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn queue_cache_write_persists_payload_on_background_writer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = dir.path().join("entry.bin");
+        let payload = Arc::<[u8]>::from([1u8, 2, 3, 4]);
+
+        anyhow::ensure!(
+            queue_cache_write(cache_key.clone(), Arc::clone(&payload)),
+            "expected background cache write to enqueue"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cache_key.file_path.exists() {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "timed out waiting for background cache write"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut file = std::fs::File::open(&cache_key.file_path)?;
+        let got = read_cached_payload(&cache_key, &mut file)?;
+        assert_eq!(got, payload.as_ref());
         Ok(())
     }
 
