@@ -307,6 +307,15 @@ jobs:
           cuda: '12.4.1'
           method: 'local'
 
+      - name: Set up MSVC dev environment
+        # candle-kernels compiles .cu files with nvcc, which shells out
+        # to MSVC's cl.exe for host-side code. Server 2022 has MSVC
+        # installed but not on PATH by default; this action runs
+        # vcvarsall.bat and exports the env vars to subsequent steps.
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
