@@ -255,14 +255,18 @@ fn spawn_backend_prewarm(state: AppState) {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            // Pipeline compilation does not allocate KV/model working buffers, so
+            // keep it outside the opportunistic GPU lock. If the first live
+            // request wins the lock, it should still benefit from compiled
+            // custom kernels rather than paying lazy compile latency itself.
+            precompile_metal_custom_kernels(&device);
+
             // Prewarm is opportunistic. If a live request or training job has
             // the GPU first, skip prewarm rather than sitting in front of it.
             let Ok(_gpu_guard) = gpu_lock.try_write() else {
                 tracing::info!("skipping inference prewarm because GPU is already busy");
                 return Ok(());
             };
-
-            precompile_metal_custom_kernels(&device);
 
             let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
