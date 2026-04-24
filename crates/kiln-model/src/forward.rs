@@ -3113,16 +3113,24 @@ pub fn gated_deltanet_forward(
     let mixed_qkv = {
         kiln_nvtx::range!(c"kiln/gdn/conv");
         // Transpose to [B, channels, T] for conv
-        let mixed_qkv_ct = mixed_qkv.transpose(1, 2)?.contiguous()?;
+        let mixed_qkv_ct = {
+            kiln_nvtx::range!(c"kiln/gdn/conv/layout");
+            mixed_qkv.transpose(1, 2)?.contiguous()?
+        };
         let post_silu = if seq_len == 1 && backend.supports_causal_conv1d_update() {
-            match backend.causal_conv1d_update(
-                &mixed_qkv_ct,
-                &weights.conv1d,
-                conv_state,
-                kernel_size,
-            )? {
+            let conv_update = {
+                kiln_nvtx::range!(c"kiln/gdn/conv/update");
+                backend.causal_conv1d_update(
+                    &mixed_qkv_ct,
+                    &weights.conv1d,
+                    conv_state,
+                    kernel_size,
+                )?
+            };
+            match conv_update {
                 Some(out) => out, // F32, SiLU fused into the kernel epilogue
                 None => {
+                    kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
                     let y = causal_conv1d_decode(
                         &mixed_qkv_ct,
                         &weights.conv1d,
@@ -3134,14 +3142,19 @@ pub fn gated_deltanet_forward(
             }
         } else if seq_len > 1 {
             if backend.supports_causal_conv1d_prefill() {
-                match backend.causal_conv1d_prefill(
-                    &mixed_qkv_ct,
-                    &weights.conv1d,
-                    conv_state,
-                    kernel_size,
-                )? {
+                let conv_prefill = {
+                    kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");
+                    backend.causal_conv1d_prefill(
+                        &mixed_qkv_ct,
+                        &weights.conv1d,
+                        conv_state,
+                        kernel_size,
+                    )?
+                };
+                match conv_prefill {
                     Some(out) => out, // F32, SiLU fused into the kernel epilogue
                     None => {
+                        kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
                         let y = causal_conv1d_prefill(
                             &mixed_qkv_ct,
                             &weights.conv1d,
@@ -3152,11 +3165,13 @@ pub fn gated_deltanet_forward(
                     }
                 }
             } else {
+                kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
                 let y =
                     causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
                 cuda_silu(&y)?
             }
         } else {
+            kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
             let y = causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
             cuda_silu(&y.to_dtype(DType::F32)?)?
         };
