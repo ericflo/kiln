@@ -1,5 +1,39 @@
 # Kiln Profiling Report
 
+## Phase 6 default-on fused GDN qk_norm validation (2026-04-24)
+
+PR scope: make the existing CUDA fused L2 Q/K norm path the default for bf16
+CUDA tensors supported by `kiln_rmsnorm_kernel::fused_l2_qk_norm`, with
+`KILN_DISABLE_FUSED_L2_QK_NORM=1` as the candle fallback opt-out.
+
+Validation ran on an on-demand RTX A6000 RunPod pod
+`ztru3dal6px398` using `ghcr.io/ericflo/kiln-runpod:latest`,
+`KILN_CUDA_ARCHS=86`, `KILN_W4A16=1`, and `KILN_CUDA_GRAPHS=true`.
+
+- `cargo test -p kiln-rmsnorm-kernel --release -- --nocapture`: passed, 6
+  tests including all `parity_l2_qk_norm_*` coverage.
+- `cargo test -p kiln-model --release --features cuda gdn -- --nocapture`:
+  7/8 matching tests passed; `test_gdn_chunk_body_matches_fallback` failed
+  with `max_abs_diff 2.109375e0`, and the same focused test still failed
+  with `KILN_DISABLE_FUSED_L2_QK_NORM=1`, so this is not attributable to
+  the default-on qk_norm dispatch.
+- `cargo build --release --features cuda,nvtx --bin kiln-bench`: passed.
+- Default-on latency arm (`--paged --prompt-tokens 512 --max-output-tokens 64`):
+  494 prompt tokens, 65 generated tokens, prefill 1736.8 ms, mean ITL 24.3 ms,
+  decode 41.1 tok/s. This was the first post-load arm and includes cold-start
+  noise.
+- Opt-out latency arm (`KILN_DISABLE_FUSED_L2_QK_NORM=1`, same command): 494
+  prompt tokens, 65 generated tokens, prefill 352.8 ms, mean ITL 19.9 ms,
+  decode 50.2 tok/s. Treat the paired wall-clock comparison as noisy because
+  it ran second after model/kernel warmup.
+
+A short default-on NVTX profile on the same A6000 run reported
+`:kiln/gdn/qk_norm` at **11.4%** of total NVTX push/pop time
+(`277.014 ms`, 1560 instances). That is below the post-#481 plain-decode
+source-of-truth share of **24.4%**, but the run was a short validation profile
+under Nsight Systems 2023.4.4 and is not a strict replacement for the
+post-#481 decode-window methodology.
+
 ## Phase 6 post-#481 current-main profile refresh (2026-04-24)
 
 **Scope:** refresh the Phase 6 source of truth after PR
