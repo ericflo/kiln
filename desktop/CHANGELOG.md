@@ -1,5 +1,11 @@
 # Kiln Desktop Changelog
 
+## desktop-v0.2.0 — 2026-04-24
+- Coordinated release aligned with kiln-v0.2.0 server
+- Picks up macOS startup and KV prefill overhead reductions
+- Gate desktop readiness on inference prewarm so the tray "server ready" state reflects actual readiness
+- Speed up macOS default MTP decode
+
 ## desktop-v0.1.11 — 2026-04-21
 - Notify when the Dashboard Copy URL button fails (#315)
 - Notify when the About window Copy Diagnostics fails (#312)
