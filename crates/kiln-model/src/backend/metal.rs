@@ -34,6 +34,7 @@ const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_F
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
+const ENABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_ENABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
     "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
@@ -750,7 +751,10 @@ fn metal_fused_qkv_proj_disabled() -> bool {
 }
 
 pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
-    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX)
+    // On the Qwen3.5-4B macOS desktop path, Candle's materialized last-row
+    // projection plus argmax is faster than this custom chunk/reduce kernel.
+    // Keep the kernel available for tuning, but require explicit opt-in.
+    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || !env_truthy(ENABLE_METAL_LM_HEAD_ARGMAX)
 }
 
 fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
@@ -8775,27 +8779,49 @@ mod tests {
             return Ok(());
         };
 
-        let hidden = 128usize;
-        let vocab = 257usize;
-        let x_data: Vec<f32> = (0..hidden)
-            .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
-            .collect();
-        let weight_data: Vec<f32> = (0..(hidden * vocab))
-            .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
-            .collect();
+        let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
+        let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        unsafe {
+            std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+        }
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
-        let weight_t =
-            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+        let result = (|| -> Result<()> {
+            let hidden = 128usize;
+            let vocab = 257usize;
+            let x_data: Vec<f32> = (0..hidden)
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+                .collect();
+            let weight_data: Vec<f32> = (0..(hidden * vocab))
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
+                .collect();
 
-        assert!(metal_lm_head_argmax_supports(&x, &weight_t));
-        let logits = metal_lm_head_bf16(&x, &weight_t)?;
-        let reference = crate::sampling::greedy_sample(&logits)?;
-        let fused = metal_lm_head_argmax_bf16(&x, &weight_t)?;
+            let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?;
+            let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+                .to_dtype(DType::BF16)?;
 
-        assert_eq!(fused, reference);
-        Ok(())
+            assert!(metal_lm_head_argmax_supports(&x, &weight_t));
+            let logits = metal_lm_head_bf16(&x, &weight_t)?;
+            let reference = crate::sampling::greedy_sample(&logits)?;
+            let fused = metal_lm_head_argmax_bf16(&x, &weight_t)?;
+
+            assert_eq!(fused, reference);
+            Ok(())
+        })();
+
+        unsafe {
+            match enable_prev {
+                Some(value) => std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(ENABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX),
+            }
+        }
+
+        result
     }
 
     #[test]
