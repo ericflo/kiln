@@ -7289,3 +7289,37 @@ Start with a static audit of `:kiln/gdn/conv` so we do not retry an already
 exhausted causal-conv/chunk-vendoring path; if that audit shows low leverage,
 move to the adjacent `:kiln/gdn/gates` + `:kiln/gdn/gated_norm` cluster. Do not
 choose a next kernel from stale C50/C51 carry-forward percentages.
+
+## Phase 6 C53 GDN conv decode hotspot audit (2026-04-24)
+
+C53 audited the C52 rank-1 decode hotspot, `:kiln/gdn/conv`, before attempting
+another causal-conv optimization. Artifact:
+`docs/phase-c53/gdn-conv-decode-audit.md`; machine summary:
+`docs/phase-c53/summary.json`.
+
+Conclusion: **audit-only, no implementation**. The current CUDA path already
+routes supported native-MTP single-token decode calls through
+`backend.causal_conv1d_update` and the vendored `kiln-conv1d-kernel` update
+kernel for the Qwen3.5 envelope (BF16 activations/weights, F32 state,
+`seq_len == 1`, `kernel_size == 4`). The portable
+`causal_conv1d_decode` fallback is not expected for the C52 workload unless the
+`KILN_DISABLE_FUSED_CONV1D` kill switch is set or the support envelope changes.
+
+C53 adds measurement-only child NVTX ranges under `:kiln/gdn/conv`:
+`:kiln/gdn/conv/layout`, `:kiln/gdn/conv/update`,
+`:kiln/gdn/conv/prefill_update`, `:kiln/gdn/conv/fallback_decode`, and
+`:kiln/gdn/conv/fallback_prefill`. These ranges split the remaining hotspot
+into layout/contiguity, fused update wrapper/kernel launch, and explicit
+fallback time without changing tensor behavior.
+
+Required RunPod validation/profiling was attempted on RTX A6000 pods
+`nszu2wno80dvef` and `efeldsa2tpx69s`, but both runs hit SSH failures during
+validation (`wait-file` timeout followed by SSH reset/no-output state checks).
+Both pods were terminated. No C53 before/after speedup is claimed.
+
+Recommendation: re-run the C52 native-MTP decode workload with the C53 child
+NVTX ranges when RunPod SSH is healthy. If `:kiln/gdn/conv/update` dominates,
+treat causal-conv as already kernel/runtime-bound and move to the adjacent
+`:kiln/gdn/gates` + `:kiln/gdn/gated_norm` cluster. If
+`:kiln/gdn/conv/layout` dominates, open a separate minimal layout/contiguity
+fix task.
