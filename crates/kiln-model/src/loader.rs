@@ -37,10 +37,10 @@ struct LoadedShard {
 struct TensorMapEntry<'a> {
     shard: Arc<ShardMetadata>,
     mmap: Arc<Mmap>,
-    view: &'a safetensors::tensor::TensorView<'a>,
+    view: safetensors::tensor::TensorView<'a>,
 }
 
-type TensorMap<'a> = HashMap<&'a str, TensorMapEntry<'a>>;
+type TensorMap<'a> = HashMap<String, TensorMapEntry<'a>>;
 
 /// Optional loader toggles for startup-sensitive callers.
 #[derive(Debug, Clone, Copy)]
@@ -114,25 +114,7 @@ fn load_model_dense(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Build a unified name -> (shard_idx, tensor_view) lookup.
-    // We collect (String, TensorView) pairs and then reference them by &str.
-    let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
-    for (shard_idx, st) in parsed.iter().enumerate() {
-        for (name, view) in st.tensors() {
-            all_tensors.push((name, shard_idx, view));
-        }
-    }
-    let mut tensor_map: TensorMap<'_> = HashMap::new();
-    for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(
-            name.as_str(),
-            TensorMapEntry {
-                shard: Arc::clone(&loaded_shards[*shard_idx].meta),
-                mmap: Arc::clone(&loaded_shards[*shard_idx].mmap),
-                view,
-            },
-        );
-    }
+    let tensor_map = build_tensor_map(&parsed, &loaded_shards);
 
     // Auto-detect prefix: try "model.language_model." first, fall back to "model.".
     let prefix = detect_prefix(&tensor_map);
@@ -238,23 +220,7 @@ fn load_model_gptq(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
-    for (shard_idx, st) in parsed.iter().enumerate() {
-        for (name, view) in st.tensors() {
-            all_tensors.push((name, shard_idx, view));
-        }
-    }
-    let mut tensor_map: TensorMap<'_> = HashMap::new();
-    for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(
-            name.as_str(),
-            TensorMapEntry {
-                shard: Arc::clone(&loaded_shards[*shard_idx].meta),
-                mmap: Arc::clone(&loaded_shards[*shard_idx].mmap),
-                view,
-            },
-        );
-    }
+    let tensor_map = build_tensor_map(&parsed, &loaded_shards);
 
     let prefix = detect_prefix(&tensor_map);
     tracing::info!("Using weight name prefix: \"{prefix}\"");
@@ -282,7 +248,7 @@ fn load_model_gptq(
     // GPTQ MTP is not yet supported — the MTP layer projections would need
     // a separate GPTQ dequant path. For now we simply log and skip.
     if tensor_map.contains_key("mtp.fc.weight")
-        || tensor_map.contains_key(&format!("{prefix}mtp.fc.weight") as &str)
+        || tensor_map.contains_key(format!("{prefix}mtp.fc.weight").as_str())
     {
         tracing::warn!(
             "MTP tensors present in GPTQ checkpoint but GPTQ MTP loading is not yet implemented — skipping"
@@ -408,7 +374,7 @@ fn mmap_shards(paths: &[std::path::PathBuf]) -> Result<Vec<LoadedShard>> {
 /// Detect the weight name prefix by checking which keys exist.
 fn detect_prefix(tensor_map: &TensorMap<'_>) -> String {
     // Try the VL model prefix first (Qwen3.5-4B ships as VL).
-    if tensor_map.contains_key(&format!("{LM_PREFIX}embed_tokens.weight") as &str) {
+    if tensor_map.contains_key(format!("{LM_PREFIX}embed_tokens.weight").as_str()) {
         return LM_PREFIX.to_string();
     }
     // Fall back to bare prefix for text-only checkpoints.
@@ -791,23 +757,7 @@ pub fn load_deferred_mtp(source: &DeferredMtpSource) -> Result<MtpWeights> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut all_tensors: Vec<(String, usize, safetensors::tensor::TensorView<'_>)> = Vec::new();
-    for (shard_idx, st) in parsed.iter().enumerate() {
-        for (name, view) in st.tensors() {
-            all_tensors.push((name, shard_idx, view));
-        }
-    }
-    let mut tensor_map: TensorMap<'_> = HashMap::new();
-    for (name, shard_idx, view) in &all_tensors {
-        tensor_map.insert(
-            name.as_str(),
-            TensorMapEntry {
-                shard: Arc::clone(&loaded_shards[*shard_idx].meta),
-                mmap: Arc::clone(&loaded_shards[*shard_idx].mmap),
-                view,
-            },
-        );
-    }
+    let tensor_map = build_tensor_map(&parsed, &loaded_shards);
 
     load_mtp_with_prefix(&tensor_map, &source.mtp_prefix, &source.config).with_context(|| {
         format!(
@@ -815,6 +765,26 @@ pub fn load_deferred_mtp(source: &DeferredMtpSource) -> Result<MtpWeights> {
             source.model_dir.display()
         )
     })
+}
+
+fn build_tensor_map<'data>(
+    parsed: &[SafeTensors<'data>],
+    loaded_shards: &[LoadedShard],
+) -> TensorMap<'data> {
+    let mut tensor_map: TensorMap<'data> = HashMap::new();
+    for (shard_idx, st) in parsed.iter().enumerate() {
+        for (name, view) in st.tensors() {
+            tensor_map.insert(
+                name,
+                TensorMapEntry {
+                    shard: Arc::clone(&loaded_shards[shard_idx].meta),
+                    mmap: Arc::clone(&loaded_shards[shard_idx].mmap),
+                    view,
+                },
+            );
+        }
+    }
+    tensor_map
 }
 
 /// Extract a tensor by name from the unified tensor map.
