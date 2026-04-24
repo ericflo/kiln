@@ -279,6 +279,14 @@ jobs:
       # build time to pick an SM and the CI runner has no GPU. SM80 PTX
       # JIT-compiles to every arch we target.
       CUDA_COMPUTE_CAP: '80'
+      # Force the static MSVC runtime (`/MT`) across the whole build.
+      # The Rust default is `/MD` (dynamic), but `esaxx-rs` (pulled in
+      # via `tokenizers`) compiles its C++ with `/MT`, and CUDA 12.4's
+      # `cudart_static.lib` is also `/MT`. Mixing produces
+      # `LNK2038: mismatch detected for 'RuntimeLibrary'`. Picking `/MT`
+      # everywhere also means the shipped `kiln.exe` doesn't require
+      # `msvcr*.dll` on end-user machines — a nice distribution win.
+      RUSTFLAGS: '-C target-feature=+crt-static'
     steps:
       - uses: actions/checkout@v4
 
