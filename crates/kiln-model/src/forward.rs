@@ -16,7 +16,9 @@ use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, linear_with_lora_t,
 };
 use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
-use crate::transposed_weight_cache::transposed_weight_bytes_2d_cached;
+use crate::transposed_weight_cache::{
+    CachedTransposedWeightBytes, transposed_weight_bytes_2d_cached_bytes,
+};
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
 use kiln_core::block::BlockTable;
@@ -912,8 +914,8 @@ pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [
 }
 
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let (data, shape) = transposed_weight_bytes_2d_cached(w)?;
-    Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, device)
+    let data = transposed_weight_bytes_2d_cached_bytes(w)?;
+    Tensor::from_raw_buffer(data.as_bytes(), weight_dtype(w), &data.shape(), device)
         .context("failed to create transposed tensor from raw buffer")
 }
 
@@ -1015,10 +1017,10 @@ fn projection_tensors_for_load_batch(
 
     use rayon::prelude::*;
 
-    let transposed: Result<Vec<(Vec<u8>, [usize; 2])>> = weights
+    let transposed: Result<Vec<CachedTransposedWeightBytes>> = weights
         .par_iter()
         .map(|(name, w)| {
-            transposed_weight_bytes_2d_cached(w)
+            transposed_weight_bytes_2d_cached_bytes(w)
                 .with_context(|| format!("{name} transposed projection bytes"))
         })
         .collect();
@@ -1028,9 +1030,10 @@ fn projection_tensors_for_load_batch(
     transposed?
         .into_par_iter()
         .zip(weights.par_iter())
-        .map(|((data, shape), (name, w))| {
-            let transposed = Tensor::from_raw_buffer(&data, weight_dtype(w), &shape, &device)
-                .with_context(|| format!("{name} transposed projection upload"))?;
+        .map(|(data, (name, w))| {
+            let transposed =
+                Tensor::from_raw_buffer(data.as_bytes(), weight_dtype(w), &data.shape(), &device)
+                    .with_context(|| format!("{name} transposed projection upload"))?;
             let original_stub = match cache.metal_stub_for(weight_dtype(w)) {
                 Some(stub) => stub,
                 None => dropped_weight_stub(w, &device)
