@@ -1772,3 +1772,151 @@ pub fn gdn_full_chunk_forward(
     *state = state_c;
     Ok(out_chunk)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    fn patterned_data(len: usize, scale: f32, phase: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| {
+                let x = i as f32;
+                ((x * 0.013 + phase).sin() * 0.7 + (x * 0.007 + phase * 0.5).cos() * 0.3)
+                    * scale
+            })
+            .collect()
+    }
+
+    fn max_mean_abs_diff(lhs: &Tensor, rhs: &Tensor) -> Result<(f32, f32)> {
+        let diff = (lhs.to_dtype(DType::F32)? - rhs.to_dtype(DType::F32)?)?.abs()?;
+        let flat = diff.flatten_all()?;
+        Ok((
+            flat.max(0)?.to_scalar::<f32>()?,
+            flat.mean(0)?.to_scalar::<f32>()?,
+        ))
+    }
+
+    #[test]
+    fn test_cuda_decode_gates_recurrent_matches_split_path() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping decode gates+recurrent parity test: {err}");
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let q = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dk, 0.35, 0.1),
+            (batch, seq_len, heads, dk),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dk, 0.25, 0.7),
+            (batch, seq_len, heads, dk),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dv, 0.5, 1.3),
+            (batch, seq_len, heads, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let a = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads, 0.4, 2.1),
+            (batch, seq_len, heads),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let b = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads, 0.6, 2.9),
+            (batch, seq_len, heads),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&patterned_data(heads, 0.15, 3.7), (heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(&patterned_data(heads, 0.2, 4.3), (heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dv, 0.45, 4.9),
+            (batch, seq_len, heads, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?
+            .to_dtype(DType::BF16)?;
+        let state = Tensor::from_slice(
+            &patterned_data(batch * heads * dk * dv, 0.08, 6.1),
+            (batch, heads, dk, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        let (beta, g) = gdn_gates(&a, &b, &a_log, &dt_bias)?;
+        let q_split = q.squeeze(1)?.contiguous()?;
+        let k_split = k.squeeze(1)?.contiguous()?;
+        let v_split = v.squeeze(1)?.contiguous()?;
+        let beta_split = beta.squeeze(1)?.contiguous()?;
+        let g_split = g.squeeze(1)?.contiguous()?;
+        let mut state_split = state.copy()?;
+        let out_split = gdn_recurrent_forward(
+            &q_split,
+            &k_split,
+            &v_split,
+            &beta_split,
+            &g_split,
+            &mut state_split,
+        )?
+        .unsqueeze(1)?;
+
+        let mut state_fused = state.copy()?;
+        let out_fused = gdn_decode_gates_recurrent(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_fused,
+            &z,
+            &weight,
+            1e-6,
+        )?;
+
+        let (out_max, out_mean) = max_mean_abs_diff(&out_fused, &out_split)?;
+        let (state_max, state_mean) = max_mean_abs_diff(&state_fused, &state_split)?;
+        eprintln!(
+            "cuda decode gates+recurrent vs split: out max={out_max:e} mean={out_mean:e}, state max={state_max:e} mean={state_mean:e}"
+        );
+
+        assert!(
+            out_max == 0.0,
+            "fused decode recurrent output max_abs_diff={out_max:e}"
+        );
+        assert!(
+            out_mean == 0.0,
+            "fused decode recurrent output mean_abs_diff={out_mean:e}"
+        );
+        assert!(
+            state_max == 0.0,
+            "fused decode recurrent state max_abs_diff={state_max:e}"
+        );
+        assert!(
+            state_mean == 0.0,
+            "fused decode recurrent state mean_abs_diff={state_mean:e}"
+        );
+
+        Ok(())
+    }
+}

@@ -1,38 +1,49 @@
-# Phase C58 CUDA GDN Decode Fusion Attempt
+# Phase C58 CUDA GDN Decode Fusion
 
 Date: 2026-04-24
-Pod: `yzf1plx0m6z092` (`NVIDIA A40`, `ghcr.io/ericflo/kiln-runpod:latest`)
+Pod: `mfk88l8i8tab02` (`NVIDIA RTX A6000`, `ghcr.io/ericflo/kiln-runpod:latest`)
 
 ## Scope
 
-Added a narrow CUDA C-ABI entry point for native-MTP `seq_len == 1` GDN decode that computes gates and advances the recurrent GDN state in one launch for bf16 `dk == dv == 128` tensors. The hook is wired through `BackendRuntime::gdn_decode_gates_recurrent` and the CUDA backend.
+PR #498 adds a narrow opt-in CUDA C-ABI entry point for native-MTP `seq_len == 1` GDN decode that computes gates and advances the recurrent state in one launch for bf16 `dk == dv == 128` tensors. The hook is wired through `BackendRuntime::gdn_decode_gates_recurrent` and the CUDA backend.
 
-## Current Status
+The production path remains disabled by default and is only selected when `KILN_ENABLE_FUSED_GDN_DECODE=1` is set.
 
-The CUDA hook is guarded behind `KILN_ENABLE_FUSED_GDN_DECODE=1` and remains disabled by default. During validation, the state update matched the split CUDA path exactly, but the recurrent output did not:
+## Parity Resolution
+
+The reported output mismatch was caused by the parity probe using `Tensor::clone()` for mutable recurrent state. Candle tensor clones share storage, so the split path advanced the same state storage before the fused path ran. The fused kernel was then compared from an already-mutated input state, which produced a recurrent output mismatch while making the final state appear identical.
+
+The restored GPU parity test now deep-copies state with `Tensor::copy()` before each arm and proves exact parity against the existing split CUDA path:
 
 ```text
-cuda decode gates+recurrent vs split: max_abs_diff=4.1328125e0 mean_abs_diff=5.352731e-1 state_max=0e0
+cuda decode gates+recurrent vs split: out max=0e0 mean=0e0, state max=0e0 mean=0e0
 ```
 
-Because output parity is not proven, the production path continues to use the existing split `gdn/gates` + `gdn/recurrent` + `gdn/gated_norm` kernels unless explicitly opted in for debugging.
+The fused hook only covers gates + recurrent state/output. Gated RMSNorm remains on the existing standalone kernel, per the earlier combined-RMSNorm fusion risk.
 
-## Validation Notes
+## Validation
 
-Passing:
+RunPod A6000 validation passed:
 
 ```bash
 cargo test -p kiln-gdn-kernel --release -- --nocapture
+KILN_ENABLE_FUSED_GDN_DECODE=1 cargo test -p kiln-model --release --features cuda gdn_decode -- --nocapture
+cargo build --release --features cuda,nvtx --bin kiln-bench
 ```
 
-Known failing during this attempt:
+## Benchmark Result
+
+Focused A6000 decode benchmark command:
 
 ```bash
-cargo test -p kiln-model --release --features cuda gdn -- --nocapture
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --prompt-subset humaneval --chat-template --latency-only --temperature 0.0 --seed 1
 ```
 
-The command included an existing `test_gdn_chunk_body_matches_fallback` failure on this A40 run, and the experimental fused-output parity test failed before it was removed from the default suite.
+Results:
 
-## Next Step
+| Path | Mean ITL | Decode tok/s |
+| --- | ---: | ---: |
+| Default | 22.493 ms | 44.458 |
+| `KILN_ENABLE_FUSED_GDN_DECODE=1` | 22.501 ms | 44.442 |
 
-Do not retry standalone gates/recurrent/gated-norm fusion blindly. First isolate the recurrent output discrepancy with a tiny debug kernel or compare the existing `kiln_gdn_recurrent_forward` output against a C-ABI variant fed the exact `[B, 1, H, D]` layout. If this remains below a 5% decode throughput gain, pivot to `:kiln/gdn/qk_norm` or `:kiln/attn/rope` per the C57 profile guidance.
+The measured decode delta is effectively parity and below the 5% enable-by-default floor. Leave `KILN_ENABLE_FUSED_GDN_DECODE` opt-in and pivot to `:kiln/gdn/qk_norm` or `:kiln/attn/rope` rather than retrying this fusion shape.
