@@ -277,6 +277,10 @@ impl BackendRuntime for CudaBackend {
         self.fused_conv1d_enabled
     }
 
+    fn supports_causal_conv1d_prefill(&self) -> bool {
+        self.fused_conv1d_enabled
+    }
+
     fn causal_conv1d_update(
         &self,
         x: &Tensor,
@@ -292,6 +296,24 @@ impl BackendRuntime for CudaBackend {
         }
         let out = kiln_conv1d_kernel::causal_conv1d_update(x, weight, conv_state, kernel_size)
             .context("causal_conv1d_update kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn causal_conv1d_prefill(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        conv_state: &mut Tensor,
+        kernel_size: usize,
+    ) -> Result<Option<Tensor>> {
+        if !self.fused_conv1d_enabled {
+            return Ok(None);
+        }
+        if !kiln_conv1d_kernel::supports_prefill(x, weight, conv_state, kernel_size) {
+            return Ok(None);
+        }
+        let out = kiln_conv1d_kernel::causal_conv1d_prefill(x, weight, conv_state, kernel_size)
+            .context("causal_conv1d_prefill kernel failed")?;
         Ok(Some(out))
     }
 }

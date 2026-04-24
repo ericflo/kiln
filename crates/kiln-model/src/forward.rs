@@ -9987,6 +9987,90 @@ mod tests {
         Ok(())
     }
 
+    /// Parity check for the fused CUDA causal_conv1d prefill kernel against
+    /// the portable `causal_conv1d_prefill` + `cuda_silu` chain, at the native
+    /// MTP draft shape that exercises `seq_len > 1`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_causal_conv1d_prefill_matches_fallback() -> Result<()> {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!(
+                    "CUDA not available, skipping test_causal_conv1d_prefill_matches_fallback"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
+        let seq_len = 16usize;
+        let kernel_size = 4usize;
+
+        let mut rng = StdRng::seed_from_u64(0xC0_1DC0DE);
+        let n_x = batch * channels * seq_len;
+        let n_w = channels * kernel_size;
+        let n_s = batch * channels * (kernel_size - 1);
+
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+            .to_dtype(DType::BF16)?;
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+            .to_dtype(DType::BF16)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+
+        let mut s_fb = s_init.clone();
+        let out_fb = causal_conv1d_prefill_with_dtype(&x, &w, &mut s_fb, kernel_size, DType::F32)?;
+        let out_fb = cuda_silu(&out_fb)?;
+
+        let backend = crate::backend::for_device(&device);
+        if !backend.supports_causal_conv1d_prefill() {
+            eprintln!(
+                "backend declines causal_conv1d_prefill (KILN_DISABLE_FUSED_CONV1D?); skipping"
+            );
+            return Ok(());
+        }
+        let mut s_k = s_init.clone();
+        let out_k = match backend.causal_conv1d_prefill(&x, &w, &mut s_k, kernel_size)? {
+            Some(t) => t,
+            None => {
+                eprintln!("backend declined causal_conv1d_prefill at Qwen3.5 envelope; skipping");
+                return Ok(());
+            }
+        };
+
+        let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        eprintln!("conv1d_prefill vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        assert!(
+            max < 2e-3,
+            "fused conv1d_prefill output max_abs_diff={max:e} exceeds 2e-3"
+        );
+        assert!(
+            mean < 5e-4,
+            "fused conv1d_prefill output mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        eprintln!("conv1d_prefill state parity: max_abs_diff={smax:e}");
+        assert!(
+            smax < 1e-5,
+            "fused conv1d_prefill state max_abs_diff={smax:e} exceeds 1e-5"
+        );
+
+        Ok(())
+    }
+
     /// Metal parity check for `backend.causal_conv1d_update` against the same
     /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
     #[cfg(feature = "metal")]
