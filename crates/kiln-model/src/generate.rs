@@ -789,6 +789,65 @@ impl ModelRunner {
         result
     }
 
+    fn decode_next_token_paged_interleaved(
+        &self,
+        params: &SamplingParams,
+        input_token: TokenId,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        step_seed: Option<u64>,
+    ) -> Result<TokenId> {
+        if params.temperature == 0.0
+            && matches!(self.backend.device(), candle_core::Device::Metal(_))
+        {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            return model_forward_paged_next_token_greedy(
+                &*self.backend,
+                input_token,
+                &self.weights,
+                &self.config,
+                &mut pc_guard,
+                block_table,
+                seq_len,
+                Some(linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("greedy decode forward pass (paged) failed");
+        }
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            model_forward_paged(
+                &*self.backend,
+                &[input_token],
+                &self.weights,
+                &self.config,
+                &mut pc_guard,
+                block_table,
+                seq_len,
+                Some(linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("decode forward pass (paged) failed")?
+        };
+
+        if params.temperature == 0.0 {
+            greedy_sample(&logits)
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )
+        }
+    }
+
     pub fn generate_paged_speculative_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
@@ -948,35 +1007,16 @@ impl ModelRunner {
                 break;
             }
 
-            let logits = {
-                let mut pc_guard = lock_paged_cache(paged_cache)?;
-                model_forward_paged(
-                    &*self.backend,
-                    &[next_token],
-                    &self.weights,
-                    &self.config,
-                    &mut pc_guard,
-                    block_table,
-                    seq_len,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("decode forward pass (paged) failed")?
-            };
+            next_token = self.decode_next_token_paged_interleaved(
+                params,
+                next_token,
+                paged_cache,
+                block_table,
+                seq_len,
+                &mut linear_state,
+                step_seed,
+            )?;
             seq_len += 1;
-
-            next_token = if params.temperature == 0.0 {
-                greedy_sample(&logits)?
-            } else {
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
-            };
         }
 
         Ok(GenerationOutput {
@@ -2516,35 +2556,16 @@ impl ModelRunner {
                 break;
             }
 
-            let logits = {
-                let mut pc_guard = lock_paged_cache(paged_cache)?;
-                model_forward_paged(
-                    &*self.backend,
-                    &[next_token],
-                    &self.weights,
-                    &self.config,
-                    &mut pc_guard,
-                    block_table,
-                    seq_len,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("decode forward pass (paged) failed")?
-            };
+            next_token = self.decode_next_token_paged_interleaved(
+                params,
+                next_token,
+                paged_cache,
+                block_table,
+                seq_len,
+                &mut linear_state,
+                step_seed,
+            )?;
             seq_len += 1;
-
-            next_token = if params.temperature == 0.0 {
-                greedy_sample(&logits)?
-            } else {
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
-            };
         }
 
         let _ = tx.send(StreamEvent::Done(StreamDone {
