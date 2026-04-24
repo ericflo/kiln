@@ -1,5 +1,78 @@
 # Kiln Profiling Report
 
+## Phase 6 C57 native-MTP conv1d prefill recovery profile (2026-04-24)
+
+**Scope:** verify that the C56 CUDA `causal_conv1d_prefill` status-3 blocker is
+cleared on current `main`, keep regression coverage on the real C56 prefill
+envelope, and refresh the native-MTP decode-window source of truth.
+
+**Precondition outcome:** proceed. `PROFILING.md` had a newer post-#486 plain
+decode/prefill profile, but no newer artifact than C56 that both exercised the
+CUDA conv1d prefill fast path and reached native-MTP decode (`:kiln/mtp/step`).
+
+**Root-cause status:** current `main` already includes PR #481 (`7227b4c`),
+which fixed the C56 root cause by matching the prefill kernel
+`__launch_bounds__` to the largest 256-thread launch path. C57 adds model-level
+regression coverage by running the CUDA prefill parity test at `seq_len=512`,
+the C56 native-MTP prompt prefill envelope.
+
+**Hardware / image:** RunPod on-demand `NVIDIA RTX A6000`, pod
+`6lv4pu241ofanf`, `ghcr.io/ericflo/kiln-runpod:latest`, driver `550.127.08`,
+CUDA toolkit `12.4`, `KILN_CUDA_ARCHS=86`. The pod was terminated after
+artifacts were copied.
+
+**Validation:**
+
+- `cargo test -p kiln-conv1d-kernel --release -- --nocapture`: 4 passed.
+- `cargo test -p kiln-model --release --features cuda causal_conv1d_prefill -- --nocapture`: 1 passed at the 512-token C56 prefill envelope.
+- `cargo test -p kiln-model --release --features cuda test_causal_conv1d_update_matches_fallback -- --nocapture`: 1 passed.
+- `cargo build --release --features cuda,nvtx --bin kiln-bench`: succeeded.
+
+**Profile command:**
+
+```bash
+nsys profile --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none --cuda-memory-usage=false --output /tmp/kiln-c57/c57-mtp-conv-prefill-v2 \
+  env KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_MTP_ARGMAX_FP32=1 KILN_W4A16=1 KILN_CUDA_GRAPHS=true \
+  ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --prompt-subset humaneval --chat-template --latency-only --temperature 0.0 --seed 1
+```
+
+**Result:** the profile reached `:kiln/mtp/step`; the C56 prefill status-3
+failure did not reproduce on current `main`. Latency metrics were 515 prompt
+tokens, 417.7 ms prefill (1233 tok/s), 128 generated tokens, **26.5 decode
+tok/s**, **37.8 ms mean ITL**, and **MTP α = 0.764**.
+
+### C57 top native-MTP decode hotspots
+
+Source: `docs/phase-c57/top_decode_nvtx.csv`. Decode window is first
+`:kiln/mtp/step` start through final decode NVTX end, excluding the
+`:kiln/mtp/step` parent wrapper.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/gates` | **14.45%** |
+| 2 | `:kiln/gdn/gated_norm` | **13.55%** |
+| 3 | `:kiln/gdn/qk_norm` | **11.02%** |
+
+### C57 top native-MTP prefill hotspots
+
+Source: `docs/phase-c57/top_prefill_nvtx.csv`.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/in_proj` | **59.49%** |
+| 2 | `:kiln/attn/full/prefill_initial` | **12.67%** |
+| 3 | `:kiln/gdn/qk_norm` | **4.47%** |
+
+**Verdict:** C56's profiling blocker is cleared on current `main`, and Phase 6
+should use C57, not failed C56, when selecting the next native-MTP decode target.
+The top native-MTP decode buckets are now GDN gates, gated_norm, and qk_norm.
+
+Committed artifacts: `docs/phase-c57/conv-prefill-mtp-profile.md`,
+`docs/phase-c57/summary.json`, `docs/phase-c57/top_decode_nvtx.csv`,
+`docs/phase-c57/top_prefill_nvtx.csv`,
+`docs/phase-c57/c57-mtp-conv-prefill-v2_cuda_gpu_kern_sum.csv`,
+`docs/phase-c57/nsys-profile-v2.log`, and `docs/phase-c57/nsys-stats-v2.log`.
+
 ## Phase 6 post-#486 current-main profile refresh (2026-04-24)
 
 **Scope:** refresh the Phase 6 CUDA source of truth after PR

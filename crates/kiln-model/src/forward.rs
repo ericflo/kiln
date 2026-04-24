@@ -10175,7 +10175,7 @@ mod tests {
 
         let batch = 1usize;
         let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
-        let seq_len = 16usize;
+        let seq_len = 512usize;
         let kernel_size = 4usize;
 
         let mut rng = StdRng::seed_from_u64(0xC0_1DC0DE);
