@@ -23,8 +23,8 @@ pub use backend::{BackendRuntime, for_device as backend_for_device};
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{
-    FinishReason, GenerationOutput, ModelRunner, MtpGenerationOutput, StreamDone, StreamEvent,
-    StreamToken,
+    FinishReason, GenerationOutput, ModelRunner, MtpGenerationOutput, PagedPrefixRegistration,
+    PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken,
 };
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};

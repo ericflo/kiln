@@ -167,6 +167,7 @@ async fn main() -> Result<()> {
             &config.memory,
             config.server.request_timeout_secs,
             served_model_id,
+            &config.prefix_cache,
         )
     } else {
         // Mock mode: use scheduler + mock engine.

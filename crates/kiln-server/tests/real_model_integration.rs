@@ -6,15 +6,15 @@ use std::collections::HashMap;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use candle_core::{DType, Device, Tensor};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt; // for `oneshot`
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
+use kiln_model::ModelRunner;
 use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
 };
-use kiln_model::ModelRunner;
 use kiln_server::api;
 use kiln_server::state::AppState;
 
@@ -193,7 +193,17 @@ async fn test_real_model_chat_completion() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300, "qwen3.5-4b-kiln".to_string());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device.clone(),
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        300,
+        "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+    );
 
     let app = api::router(state);
 
@@ -267,6 +277,7 @@ async fn test_real_model_streaming_chat_completion() {
         &kiln_server::config::MemoryConfig::default(),
         300,
         "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
     );
 
     let app = api::router(state);
@@ -312,7 +323,11 @@ async fn test_real_model_streaming_chat_completion() {
     let data_lines: Vec<&str> = body_str
         .lines()
         .filter(|line| line.starts_with("data: ") || line.starts_with("data:"))
-        .map(|line| line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")).unwrap_or(line))
+        .map(|line| {
+            line.strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+                .unwrap_or(line)
+        })
         .collect();
 
     assert!(
@@ -381,6 +396,7 @@ async fn test_request_timeout_configurable() {
         &kiln_server::config::MemoryConfig::default(),
         42,
         "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
     );
 
     assert_eq!(state.request_timeout.as_secs(), 42);
@@ -406,6 +422,7 @@ async fn test_default_request_timeout() {
         &kiln_server::config::MemoryConfig::default(),
         300,
         "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
     );
 
     assert_eq!(state.request_timeout.as_secs(), 300);
@@ -421,7 +438,17 @@ async fn test_health_with_real_backend() {
     let state_tokenizer = test_tokenizer();
 
     let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
-    let state = AppState::new_real(config, runner, state_tokenizer, device.clone(), std::path::PathBuf::from("/tmp/kiln-test-adapters"), &kiln_server::config::MemoryConfig::default(), 300, "qwen3.5-4b-kiln".to_string());
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device.clone(),
+        std::path::PathBuf::from("/tmp/kiln-test-adapters"),
+        &kiln_server::config::MemoryConfig::default(),
+        300,
+        "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+    );
 
     let app = api::router(state);
 
@@ -446,9 +473,11 @@ async fn test_health_with_real_backend() {
     assert_eq!(scheduler["running"], 0);
     assert!(scheduler["blocks_total"].as_u64().unwrap() > 0);
     let checks = resp["checks"].as_array().unwrap();
-    assert!(checks
-        .iter()
-        .any(|check| check["name"] == "inference_prewarm_complete" && check["pass"] == true));
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["name"] == "inference_prewarm_complete" && check["pass"] == true)
+    );
 }
 
 /// End-to-end: HTTP → axum → ModelRunner → Metal → generate. Runs the tiny
@@ -482,6 +511,7 @@ async fn test_real_model_chat_completion_metal() {
         &kiln_server::config::MemoryConfig::default(),
         300,
         "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
     );
 
     let app = api::router(state);

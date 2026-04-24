@@ -58,6 +58,27 @@ pub struct GenerationOutput {
     pub finish_reason: FinishReason,
 }
 
+/// A block-aligned paged prefix that can be reused by a later prompt.
+pub struct PagedPrefixReuse {
+    pub cached_tokens: usize,
+    pub block_ids: Vec<u32>,
+    pub linear_state: LinearAttentionState,
+}
+
+/// A completed block-aligned prompt prefix produced by generation.
+pub struct PagedPrefixRegistration {
+    pub prompt_tokens: Vec<TokenId>,
+    pub block_ids: Vec<u32>,
+    pub linear_state: LinearAttentionState,
+}
+
+/// Result of paged generation plus an optional prefix-cache registration.
+pub struct PrefixCachedGenerationOutput {
+    pub output: GenerationOutput,
+    pub registration: Option<PagedPrefixRegistration>,
+    pub allocated_blocks: Vec<u32>,
+}
+
 /// Output from a native MTP speculative generation call.
 ///
 /// Carries everything [`GenerationOutput`] does plus the per-call MTP draft
@@ -141,6 +162,17 @@ fn lock_paged_cache(
     paged_cache
         .lock()
         .map_err(|e| anyhow::anyhow!("failed to lock paged KV cache: {e}"))
+}
+
+pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]) -> BlockTable {
+    let mut block_table = BlockTable::new();
+    for &block_id in cached_blocks {
+        block_table.push(block_id);
+    }
+    for &block_id in allocated_blocks {
+        block_table.push(block_id);
+    }
+    block_table
 }
 
 fn emit_stream_token(
@@ -325,6 +357,14 @@ impl ModelRunner {
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
         let device = self.weights.embed_tokens.device();
         LinearAttentionState::new(&self.config, device)
+    }
+
+    pub fn cuda_graph_enabled(&self) -> Result<bool> {
+        Ok(self
+            .cuda_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
+            .is_enabled())
     }
 
     /// Generate text token-by-token, sending each token to a channel as it is produced.
@@ -703,6 +743,42 @@ impl ModelRunner {
         })
     }
 
+    /// Same as [`generate_paged_shared`], but optionally reuses a
+    /// block-aligned cached prefix and returns a completed prompt snapshot that
+    /// the caller may register after successful generation.
+    pub fn generate_paged_shared_tokens_with_prefix_cache(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        cached_prefix: Option<PagedPrefixReuse>,
+    ) -> Result<PrefixCachedGenerationOutput> {
+        let output = self.generate_from_tokens_paged_interleaved_with_prefix_cache(
+            prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+            cached_prefix,
+        )?;
+
+        let text = self
+            .tokenizer
+            .decode(&output.output.token_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(PrefixCachedGenerationOutput {
+            output: GenerationOutput {
+                text,
+                token_ids: output.output.token_ids,
+                finish_reason: output.output.finish_reason,
+            },
+            registration: output.registration,
+            allocated_blocks: output.allocated_blocks,
+        })
+    }
+
     /// Same as [`generate_paged_shared`], but accepts an already-tokenized
     /// prompt so API callers do not render/tokenize the same prompt twice.
     pub fn generate_paged_shared_tokens(
@@ -787,6 +863,244 @@ impl ModelRunner {
 
         drop(reservation);
         result
+    }
+
+    fn generate_from_tokens_paged_interleaved_with_prefix_cache(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        cached_prefix: Option<PagedPrefixReuse>,
+    ) -> Result<PrefixCachedGenerationOutput> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let cuda_graph_enabled = self
+            .cuda_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
+            .is_enabled();
+        anyhow::ensure!(
+            !cuda_graph_enabled,
+            "prefix cache path does not support CUDA graph replay"
+        );
+
+        let block_size = {
+            let bm_guard = lock_block_manager(block_manager)?;
+            bm_guard.block_size()
+        };
+
+        let cached_prefix = cached_prefix.filter(|prefix| {
+            prefix.cached_tokens > 0
+                && prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0
+                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+        });
+
+        let cached_blocks = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.block_ids.as_slice())
+            .unwrap_or(&[]);
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let total_blocks = Self::blocks_needed(max_total, block_size);
+        let additional_blocks_needed = total_blocks.saturating_sub(cached_blocks.len());
+        let allocated_blocks = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            bm_guard
+                .allocate(additional_blocks_needed)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+        let block_table = append_prefix_block_table(cached_blocks, &allocated_blocks);
+
+        let result = self.generate_from_tokens_paged_interleaved_with_prefix_blocks(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+            cached_prefix,
+            block_size,
+        );
+
+        match result {
+            Ok(mut output) => {
+                output.allocated_blocks = allocated_blocks;
+                Ok(output)
+            }
+            Err(err) => {
+                if !allocated_blocks.is_empty() {
+                    let mut bm_guard = lock_block_manager(block_manager)?;
+                    bm_guard.free_all(&allocated_blocks);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn generate_from_tokens_paged_interleaved_with_prefix_blocks(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        cached_prefix: Option<PagedPrefixReuse>,
+        block_size: usize,
+    ) -> Result<PrefixCachedGenerationOutput> {
+        let cached_tokens = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.cached_tokens)
+            .unwrap_or(0);
+        let mut linear_state = match cached_prefix {
+            Some(prefix) => prefix.linear_state,
+            None => self.new_linear_state()?,
+        };
+
+        let prefill_tokens = &prompt_tokens[cached_tokens..];
+        anyhow::ensure!(
+            !prefill_tokens.is_empty(),
+            "prefix cache hit must leave at least one suffix token"
+        );
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            model_forward_paged_last_token(
+                &*self.backend,
+                prefill_tokens,
+                &self.weights,
+                &self.config,
+                &mut pc_guard,
+                block_table,
+                cached_tokens,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("prefill forward pass (paged prefix cache) failed")?
+        };
+
+        let registration = self.completed_prompt_registration(
+            prompt_tokens,
+            block_table,
+            &linear_state,
+            block_size,
+        )?;
+
+        let output = self.decode_from_prefill_logits(
+            logits,
+            prompt_tokens.len(),
+            params,
+            paged_cache,
+            block_table,
+            &mut linear_state,
+        )?;
+
+        Ok(PrefixCachedGenerationOutput {
+            output,
+            registration,
+            allocated_blocks: Vec::new(),
+        })
+    }
+
+    fn completed_prompt_registration(
+        &self,
+        prompt_tokens: &[TokenId],
+        block_table: &BlockTable,
+        linear_state: &LinearAttentionState,
+        block_size: usize,
+    ) -> Result<Option<PagedPrefixRegistration>> {
+        if prompt_tokens.is_empty() || prompt_tokens.len() % block_size != 0 {
+            return Ok(None);
+        }
+        let num_prompt_blocks = prompt_tokens.len() / block_size;
+        if num_prompt_blocks == 0 || block_table.blocks.len() < num_prompt_blocks {
+            return Ok(None);
+        }
+        Ok(Some(PagedPrefixRegistration {
+            prompt_tokens: prompt_tokens.to_vec(),
+            block_ids: block_table.blocks[..num_prompt_blocks].to_vec(),
+            linear_state: linear_state.snapshot()?,
+        }))
+    }
+
+    fn decode_from_prefill_logits(
+        &self,
+        logits: candle_core::Tensor,
+        mut seq_len: usize,
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<GenerationOutput> {
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
+
+        let mut next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                step_seed,
+            )?
+        };
+
+        for _step in 0..params.max_tokens {
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            if self.eos_token_ids.contains(&next_token) {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                });
+            }
+
+            generated_tokens.push(next_token);
+
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            return Ok(GenerationOutput {
+                                text: String::new(),
+                                token_ids: generated_tokens,
+                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            next_token = self.decode_next_token_paged_interleaved(
+                params,
+                next_token,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                step_seed,
+            )?;
+            seq_len += 1;
+        }
+
+        Ok(GenerationOutput {
+            text: String::new(),
+            token_ids: generated_tokens,
+            finish_reason: FinishReason::MaxTokens,
+        })
     }
 
     fn decode_next_token_paged_interleaved(
@@ -2786,32 +3100,33 @@ impl ModelRunner {
 
         // Prefill. Long Metal prompts use tiled streaming prefill by default;
         // env overrides can force either path.
-        let prefill_result = if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
-            model_forward_paged_streaming(
-                &*self.backend,
-                &prompt_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                &block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-            )
-        } else {
-            model_forward_paged_last_token(
-                &*self.backend,
-                &prompt_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                &block_table,
-                0,
-                Some(&mut linear_state),
-                self.active_lora.as_ref(),
-                None,
-            )
-        };
+        let prefill_result =
+            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    &prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    &block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+            } else {
+                model_forward_paged_last_token(
+                    &*self.backend,
+                    &prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    &block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+            };
         let logits = match prefill_result {
             Ok(l) => l,
             Err(e) => {
@@ -3515,6 +3830,15 @@ mod tests {
         assert_eq!(block_manager.lock().unwrap().num_free(), num_blocks);
 
         Ok(())
+    }
+
+    #[test]
+    fn prefix_block_table_appends_allocated_suffix_after_cached_blocks() {
+        let table = append_prefix_block_table(&[7, 8], &[20, 21, 22]);
+        assert_eq!(table.blocks, vec![7, 8, 20, 21, 22]);
+        assert_eq!(table.lookup(0, 16), Some((7, 0)));
+        assert_eq!(table.lookup(31, 16), Some((8, 15)));
+        assert_eq!(table.lookup(32, 16), Some((20, 0)));
     }
 
     #[test]

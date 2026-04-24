@@ -16,12 +16,12 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::ChatMessage;
 use kiln_model::lora_loader::LoraWeights;
-use kiln_model::{GenerationOutput, ModelRunner, SpeculativeConfig, StreamEvent};
+use kiln_model::{GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent};
 
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::metrics::RequestStatus;
-use crate::state::{AppState, ModelBackend};
+use crate::state::{AppState, ModelBackend, RealPrefixCache};
 
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
@@ -325,6 +325,7 @@ async fn chat_completions_inner(
                 runner,
                 block_manager,
                 paged_cache,
+                ..
             } => {
                 generate_real_streaming(
                     state,
@@ -346,12 +347,14 @@ async fn chat_completions_inner(
                 runner,
                 block_manager,
                 paged_cache,
+                prefix_cache,
             } => {
                 let resp = generate_real(
                     state,
                     runner,
                     block_manager,
                     paged_cache,
+                    prefix_cache,
                     &prompt_text,
                     &prompt_tokens,
                     &sampling,
@@ -427,6 +430,7 @@ async fn ensure_adapter(
             .await
             .map_err(|e| ApiError::internal(format!("join error: {e}")))?
             .map_err(ApiError::adapter_load_failed)?;
+            state.clear_real_prefix_cache();
         }
         None => {
             // Revert to base model.
@@ -440,6 +444,7 @@ async fn ensure_adapter(
             })
             .await
             .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
+            state.clear_real_prefix_cache();
         }
     }
 
@@ -452,6 +457,7 @@ async fn generate_real(
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
+    prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
@@ -476,9 +482,11 @@ async fn generate_real(
     let runner = runner.clone();
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
+    let prefix_cache = prefix_cache.clone();
     let prompt = prompt_text.to_owned();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
+    let adapter = req.adapter.clone();
 
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
@@ -488,12 +496,77 @@ async fn generate_real(
         let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
         match speculative_mode {
-            ResolvedSpeculativeMode::Off => runner_guard.generate_paged_shared_tokens(
-                &prompt_tokens,
-                &params,
-                bm.as_ref(),
-                pc.as_ref(),
-            ),
+            ResolvedSpeculativeMode::Off => {
+                let prefix_enabled = {
+                    let cache = prefix_cache.lock().unwrap();
+                    cache.is_enabled()
+                };
+                if !prefix_enabled || runner_guard.cuda_graph_enabled()? {
+                    runner_guard.generate_paged_shared_tokens(
+                        &prompt_tokens,
+                        &params,
+                        bm.as_ref(),
+                        pc.as_ref(),
+                    )
+                } else {
+                    let hit = {
+                        let mut cache = prefix_cache.lock().unwrap();
+                        cache.lookup(&adapter, &prompt_tokens)?
+                    };
+                    let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
+                    let cached_prefix = hit.map(|hit| PagedPrefixReuse {
+                        cached_tokens: hit.cached_tokens,
+                        block_ids: hit.block_ids,
+                        linear_state: hit.linear_state,
+                    });
+
+                    let result = runner_guard.generate_paged_shared_tokens_with_prefix_cache(
+                        &prompt_tokens,
+                        &params,
+                        bm.as_ref(),
+                        pc.as_ref(),
+                        cached_prefix,
+                    );
+
+                    let mut output = match result {
+                        Ok(output) => output,
+                        Err(err) => {
+                            if let Some(entry_id) = hit_entry_id {
+                                let mut cache = prefix_cache.lock().unwrap();
+                                cache.release_hit(entry_id);
+                            }
+                            return Err(err);
+                        }
+                    };
+                    let registration = output.registration.take();
+                    let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+                    let mut retained_blocks = Vec::new();
+                    let mut evicted_blocks = Vec::new();
+                    {
+                        let mut cache = prefix_cache.lock().unwrap();
+                        if let Some(entry_id) = hit_entry_id {
+                            cache.release_hit(entry_id);
+                        }
+                        if let Some(registration) = registration {
+                            let outcome = cache.register(adapter.clone(), registration);
+                            retained_blocks = outcome.retained_blocks;
+                            evicted_blocks = outcome.evicted_blocks;
+                        }
+                    }
+
+                    let mut blocks_to_free: Vec<u32> = allocated_blocks
+                        .into_iter()
+                        .filter(|block_id| !retained_blocks.contains(block_id))
+                        .collect();
+                    blocks_to_free.extend(evicted_blocks);
+                    if !blocks_to_free.is_empty() {
+                        let mut bm_guard = bm.lock().unwrap();
+                        bm_guard.free_all(&blocks_to_free);
+                    }
+
+                    Ok(output.output)
+                }
+            }
             ResolvedSpeculativeMode::SkipLayer(spec_config) => {
                 if params.temperature == 0.0 {
                     runner_guard.generate_paged_speculative_shared_tokens(

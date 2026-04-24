@@ -1,15 +1,14 @@
 //! GET /metrics — Prometheus text exposition format.
 
 use axum::{
+    Router,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::get,
-    Router,
 };
 
 use crate::metrics::SnapshotGauges;
-use kiln_scheduler::PrefixCacheStats;
 use crate::state::{AppState, ModelBackend};
 use kiln_train::TrainingState;
 
@@ -28,9 +27,14 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                     sched.prefix_cache_stats(),
                 )
             }
-            ModelBackend::Real { block_manager, .. } => {
+            ModelBackend::Real {
+                block_manager,
+                prefix_cache,
+                ..
+            } => {
                 let bm = block_manager.lock().unwrap();
-                (0, 0, bm.num_used(), bm.num_blocks(), PrefixCacheStats::default())
+                let prefix_cache = prefix_cache.lock().unwrap().stats();
+                (0, 0, bm.num_used(), bm.num_blocks(), prefix_cache)
             }
         };
 
