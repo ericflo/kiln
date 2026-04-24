@@ -215,8 +215,7 @@ mod tests {
         };
         let scheduler = Scheduler::new(sched_config, 256);
         let engine = MockEngine::new(config.clone());
-        let tokenizer =
-            kiln_core::tokenizer::KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B").unwrap();
+        let tokenizer = crate::api::test_tokenizer();
         AppState::new_mock(
             config,
             scheduler,

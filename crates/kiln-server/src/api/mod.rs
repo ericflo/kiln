@@ -14,6 +14,19 @@ mod training;
 mod config;
 mod ui;
 
+#[cfg(test)]
+pub(crate) fn test_tokenizer() -> kiln_core::tokenizer::KilnTokenizer {
+    let json = br#"{
+        "version": "1.0",
+        "model": {
+            "type": "BPE",
+            "vocab": {"a": 0, "b": 1},
+            "merges": []
+        }
+    }"#;
+    kiln_core::tokenizer::KilnTokenizer::from_bytes(json).unwrap()
+}
+
 pub fn router(state: AppState) -> Router {
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|request: &axum::http::Request<_>| {
