@@ -1,0 +1,4 @@
+bench_seed_1_status=0
+bench_seed_2_status=0
+bench_seed_3_status=0
+nsys_profile_status=0

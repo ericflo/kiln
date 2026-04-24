@@ -1,0 +1,1 @@
+-rw-rw-r-- 1 root root 94M Apr 24 03:20 /tmp/kiln-post466-mtp.qdstrm

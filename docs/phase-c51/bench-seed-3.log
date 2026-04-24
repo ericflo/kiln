@@ -1,0 +1,67 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+2026-04-24T03:19:51.075323Z  INFO kiln_model::loader: Loading model from /workspace/qwen3.5-4b (2 shards)
+2026-04-24T03:19:51.077553Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-04-24T03:19:51.077865Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-04-24T03:19:51.077881Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-04-24T03:19:51.078063Z  INFO kiln_server::device: CUDA available — using GPU device 0
+Model loaded in 2.33s (backend: cuda, VRAM: 16342 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=47] (494 prompt tokens)...
+    Prefill (MTP): 375.7ms (1315 tok/s)
+2026-04-24T03:19:54.356179Z  INFO kiln_model::forward: deferred native MTP CPU load complete load_elapsed_ms=2
+2026-04-24T03:19:54.409952Z  INFO kiln_model::forward: lazy native MTP GPU upload complete upload_elapsed_ms=53
+    Decode (MTP): 128 tokens, mean ITL 31.2ms (32.1 tok/s), α = 0.568 (46/81)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 2.33s (VRAM: 16342 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         494
+Prefill time:          375.7 ms (1315 tok/s)
+Time to first token:   375.7 ms
+Mean inter-token:      31.2 ms (32.1 tok/s)
+P50 inter-token:       20.0 ms
+P99 inter-token:       67.7 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.568
+
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 2.334617255,
+    "model_vram_mb": 16342
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 494,
+    "prefill_time_ms": 375.734893,
+    "prefill_tokens_per_sec": 1314.75678517832,
+    "time_to_first_token_ms": 375.734893,
+    "mean_inter_token_ms": 31.195535897637818,
+    "p50_inter_token_ms": 20.0031335,
+    "p99_inter_token_ms": 67.651762,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 32.0558686114997,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.5679012345679012,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}
