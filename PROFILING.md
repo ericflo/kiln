@@ -1,5 +1,42 @@
 # Kiln Profiling Report
 
+## Phase 7 prefix-cache regression A/B (2026-04-24)
+
+**Scope:** isolation A/B for the −7.9% decode tok/s regression flagged in the
+post-#521 profile refresh below. Toggles `KILN_PREFIX_CACHE_ENABLED` on and off
+on current main (`821ccd3`, PR #522 docs-only) and compares decode tok/s,
+ITL, and prefill on `kiln-bench --paged`. Full methodology, per-run tables,
+and structural analysis in
+[`docs/phase-c64/post522-prefix-cache-ab.md`](docs/phase-c64/post522-prefix-cache-ab.md).
+
+**Outcome: prefix-cache hooks are not the source of the bench-visible regression.**
+Both structurally and empirically:
+
+- `crates/kiln-model/src/forward.rs` and `crates/kiln-server/src/bench.rs`
+  contain **zero** references to `prefix_cache`. The cache only fires through
+  `generate_*_with_prefix_cache()` in `crates/kiln-model/src/generate.rs`,
+  which is only called from the HTTP handlers in
+  `crates/kiln-server/src/api/completions.rs`. `kiln-bench --paged` bypasses
+  those generate entry points and calls `model_forward_paged*` directly, so
+  `KILN_PREFIX_CACHE_ENABLED` has no surface to affect.
+- Empirically, median-of-last-2 (runs 2–3 of 3, discarding cold run 1):
+  Arm A (`=0`) = 48.84 tok/s, Arm B (`=1`) = 47.65 tok/s. Inter-arm delta
+  (+1.19 tok/s, 2.5%) is smaller than intra-arm spread (3.47 tok/s in Arm A,
+  7.21 tok/s in Arm B).
+- Neither arm fully recovers to the post-#166 49.76 tok/s baseline, so the
+  regression is real but partly noise overlaid on a smaller ~2–4%
+  steady-state drift.
+
+**Next-candidate bisection targets** (CUDA-decode landings between post-#166
+`c2579a1` and current main `821ccd3` that modify `forward.rs` or the CUDA GDN
+kernels): #461 (mmap transposed weight cache hits), #506 + #508 (transposed
+cache reliability / deferred writer), #486 (fused GDN qk norm on by default),
+#466 (fused CUDA GDN gated RMSNorm), #500 (CUDA GDN qk norm GQA fast path),
+#498 (opt-in CUDA GDN decode fuse hook). Recommended approach: try the
+existing `KILN_DISABLE_*` kill-switches one at a time to look for a single
+toggle that recovers ≥49 tok/s. If none do, `git bisect` across the 70+
+post-#166 commits touching `forward.rs`.
+
 ## Phase 7 post-#521 current-main profile refresh (2026-04-24)
 
 **Scope:** refresh the Phase 7 source of truth after PR
