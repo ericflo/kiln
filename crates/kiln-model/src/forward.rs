@@ -3510,42 +3510,6 @@ fn gated_deltanet_forward_decode_if(
         crate::mtp_debug::capture_c41_layer1_tap("gdn_qk_norm_k", &k)?;
     }
 
-    // --- Step 6: Compute gates ---
-    //
-    // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
-    // the sigmoid + softplus + exp + mul chain into one launch, and the
-    // candle-op reference path for everything outside the kernel's
-    // envelope (unsupported backend, non-bf16, nv > 256, or kill switches
-    // like `KILN_DISABLE_FUSED_GDN_GATES=1` /
-    // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
-    // identical — the reference path is the original Phase-6 implementation
-    // and remains the parity oracle.
-    let (beta, g) = {
-        kiln_nvtx::range!(c"kiln/gdn/gates");
-        if backend.supports_gdn_gates() {
-            if let Some((beta, g)) = backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)? {
-                (beta, g)
-            } else {
-                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
-            }
-        } else {
-            gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
-        }
-    };
-
-    // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
-    // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
-    // recurrence). Shapes [B, T, nv]. HF mirror: `beta = b.sigmoid()` and
-    // `g = -A_log.exp() * F.softplus(a + dt_bias)`.
-    if capture_b11_taps {
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_beta", &beta)?;
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_g", &g)?;
-    }
-    if capture_c41_taps {
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_beta", &beta)?;
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
-    }
-
     // --- Step 7: Chunkwise analytical recurrence (Phase 6, approach (b)) ---
     // The recurrent state is stored in F32 externally (across layers/steps)
     // for accumulator stability, but we run the recurrence in bf16 to reclaim
@@ -3571,71 +3535,155 @@ fn gated_deltanet_forward_decode_if(
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
-    let native_recurrent_prefill = if recurrent_unexpanded_qk {
-        let v_recur = v.to_dtype(input_dtype)?;
-        gdn_recurrent_prefill_native_head_last(
-            backend,
-            &q,
-            &k,
-            &v_recur,
-            &beta,
-            &g,
-            recurrent_state,
-        )?
-    } else {
-        None
-    };
-
-    // Cast v back to input_dtype so the recurrence stays in bf16. The
-    // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
-    // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
-    // hits a dtype mismatch on bf16 GPU runs, because the state-derived
-    // tensor inherits the (now bf16) state dtype.
-    let (attn_out, attn_out_head_last) = if let Some(attn_out) = native_recurrent_prefill {
-        (attn_out, true) // [B, T, nv, dv], contiguous
-    } else {
-        let (q, k, v, beta, g) = {
-            kiln_nvtx::range!(c"kiln/gdn/recur_prep");
-            let v = v.to_dtype(input_dtype)?;
-
-            // Transpose to [B, nv, T, dim] for per-head processing.
-            let q = q.transpose(1, 2)?; // [B, nv, T, dk]
-            let k = k.transpose(1, 2)?; // [B, nv, T, dk]
-            let v = v.transpose(1, 2)?; // [B, nv, T, dv]
-            let beta = beta.transpose(1, 2)?; // [B, nv, T]
-            let g = g.transpose(1, 2)?; // [B, nv, T]
-            (q, k, v, beta, g)
-        };
-
-        if let Some(attn_out) =
-            gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)?
+    let fused_decode_gates_recurrent = {
+        #[cfg(feature = "metal")]
         {
-            (attn_out, true) // [B, T, nv, dv], contiguous
-        } else {
-            match gdn_chunkwise_recurrence_head_last_full_chunks(
-                backend,
-                &q,
-                &k,
-                &v,
-                &beta,
-                &g,
-                recurrent_state,
-                GDN_CHUNK_SIZE,
-            )? {
-                Some(attn_out) => (attn_out, true), // [B, T, nv, dv], contiguous
-                None => (
-                    gdn_chunkwise_recurrence(
-                        backend,
+            if recurrent_unexpanded_qk
+                && seq_len == 1
+                && !capture_b11_taps
+                && !capture_c41_taps
+                && crate::backend::metal::metal_gdn_decode_gates_recurrent_supports(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &weights.a_log,
+                    &weights.dt_bias,
+                    recurrent_state,
+                )
+            {
+                kiln_nvtx::range!(c"kiln/gdn/gates_recur");
+                Some(
+                    crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
                         &q,
                         &k,
                         &v,
-                        &beta,
-                        &g,
+                        &a,
+                        &b,
+                        &weights.a_log,
+                        &weights.dt_bias,
                         recurrent_state,
-                        GDN_CHUNK_SIZE,
-                    )?,
-                    false,
-                ), // [B, nv, T, dv]
+                    )
+                    .context("metal gdn decode gates+recurrent kernel failed")?,
+                )
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            None
+        }
+    };
+
+    let (attn_out, attn_out_head_last) = if let Some(attn_out) = fused_decode_gates_recurrent {
+        (attn_out, true) // [B, T, nv, dv], contiguous
+    } else {
+        // --- Step 6: Compute gates ---
+        //
+        // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
+        // the sigmoid + softplus + exp + mul chain into one launch, and the
+        // candle-op reference path for everything outside the kernel's
+        // envelope (unsupported backend, non-bf16, nv > 256, or kill switches
+        // like `KILN_DISABLE_FUSED_GDN_GATES=1` /
+        // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
+        // identical — the reference path is the original Phase-6 implementation
+        // and remains the parity oracle.
+        let (beta, g) = {
+            kiln_nvtx::range!(c"kiln/gdn/gates");
+            if backend.supports_gdn_gates() {
+                if let Some((beta, g)) =
+                    backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
+                {
+                    (beta, g)
+                } else {
+                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                }
+            } else {
+                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+            }
+        };
+
+        // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
+        // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
+        // recurrence). Shapes [B, T, nv]. HF mirror: `beta = b.sigmoid()` and
+        // `g = -A_log.exp() * F.softplus(a + dt_bias)`.
+        if capture_b11_taps {
+            crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_beta", &beta)?;
+            crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_g", &g)?;
+        }
+        if capture_c41_taps {
+            crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_beta", &beta)?;
+            crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
+        }
+
+        let native_recurrent_prefill = if recurrent_unexpanded_qk {
+            let v_recur = v.to_dtype(input_dtype)?;
+            gdn_recurrent_prefill_native_head_last(
+                backend,
+                &q,
+                &k,
+                &v_recur,
+                &beta,
+                &g,
+                recurrent_state,
+            )?
+        } else {
+            None
+        };
+
+        if let Some(attn_out) = native_recurrent_prefill {
+            (attn_out, true) // [B, T, nv, dv], contiguous
+        } else {
+            // Cast v back to input_dtype so the recurrence stays in bf16. The
+            // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
+            // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
+            // hits a dtype mismatch on bf16 GPU runs, because the state-derived
+            // tensor inherits the (now bf16) state dtype.
+            let (q, k, v, beta, g) = {
+                kiln_nvtx::range!(c"kiln/gdn/recur_prep");
+                let v = v.to_dtype(input_dtype)?;
+
+                // Transpose to [B, nv, T, dim] for per-head processing.
+                let q = q.transpose(1, 2)?; // [B, nv, T, dk]
+                let k = k.transpose(1, 2)?; // [B, nv, T, dk]
+                let v = v.transpose(1, 2)?; // [B, nv, T, dv]
+                let beta = beta.transpose(1, 2)?; // [B, nv, T]
+                let g = g.transpose(1, 2)?; // [B, nv, T]
+                (q, k, v, beta, g)
+            };
+
+            if let Some(attn_out) =
+                gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)?
+            {
+                (attn_out, true) // [B, T, nv, dv], contiguous
+            } else {
+                match gdn_chunkwise_recurrence_head_last_full_chunks(
+                    backend,
+                    &q,
+                    &k,
+                    &v,
+                    &beta,
+                    &g,
+                    recurrent_state,
+                    GDN_CHUNK_SIZE,
+                )? {
+                    Some(attn_out) => (attn_out, true), // [B, T, nv, dv], contiguous
+                    None => (
+                        gdn_chunkwise_recurrence(
+                            backend,
+                            &q,
+                            &k,
+                            &v,
+                            &beta,
+                            &g,
+                            recurrent_state,
+                            GDN_CHUNK_SIZE,
+                        )?,
+                        false,
+                    ), // [B, nv, T, dv]
+                }
             }
         }
     };

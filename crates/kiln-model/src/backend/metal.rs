@@ -19,6 +19,8 @@ const DISABLE_FUSED_GDN_GATES: &str = "KILN_DISABLE_FUSED_GDN_GATES";
 const DISABLE_METAL_GDN_GATES: &str = "KILN_DISABLE_METAL_GDN_GATES";
 const DISABLE_METAL_GDN_FORWARD_SUBSTITUTION: &str = "KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION";
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
+const DISABLE_METAL_GDN_DECODE_GATES_RECURRENT: &str =
+    "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT";
 const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
 const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
 const DISABLE_METAL_GDN_QKV_CONV_NORM: &str = "KILN_DISABLE_METAL_GDN_QKV_CONV_NORM";
@@ -127,6 +129,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_gdn_qk_norm_gqa_pipeline(metal_device)?;
     metal_gdn_decode_qkv_conv_norm_pipeline(metal_device)?;
     metal_gdn_gates_pipeline(metal_device)?;
+    metal_gdn_decode_gates_recurrent_pipeline(metal_device)?;
     metal_gated_rms_norm_pipeline(metal_device)?;
     metal_gdn_in_proj_pipeline(metal_device)?;
     metal_gdn_recurrent_pipeline(metal_device)?;
@@ -651,6 +654,20 @@ fn metal_gdn_qkv_conv_norm_disabled() -> bool {
     env_present(DISABLE_FUSED_CONV1D)
         || env_truthy(DISABLE_METAL_FUSED_CONV1D)
         || env_truthy(DISABLE_METAL_GDN_QKV_CONV_NORM)
+}
+
+fn metal_gdn_gates_disabled() -> bool {
+    env_present(DISABLE_FUSED_GDN_GATES) || env_truthy(DISABLE_METAL_GDN_GATES)
+}
+
+fn metal_gdn_recurrent_disabled() -> bool {
+    env_truthy(DISABLE_GDN_KERNEL) || env_truthy(DISABLE_METAL_GDN_RECURRENT)
+}
+
+fn metal_gdn_decode_gates_recurrent_disabled() -> bool {
+    metal_gdn_gates_disabled()
+        || metal_gdn_recurrent_disabled()
+        || env_truthy(DISABLE_METAL_GDN_DECODE_GATES_RECURRENT)
 }
 
 fn metal_rms_norm_disabled() -> bool {
@@ -1225,6 +1242,75 @@ fn metal_gdn_recurrent_prefill_native_head_last_supports(
         && dk == 128
         && dv > 0
         && dv <= 128
+        && state.is_contiguous()
+}
+
+pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+) -> bool {
+    if metal_gdn_decode_gates_recurrent_disabled() || !matches!(q.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+        || !matches!(a.device(), Device::Metal(_))
+        || !matches!(b.device(), Device::Metal(_))
+        || !matches!(a_log.device(), Device::Metal(_))
+        || !matches!(dt_bias.device(), Device::Metal(_))
+        || !matches!(state.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || a.dtype() != DType::BF16
+        || b.dtype() != DType::BF16
+        || a_log.dtype() != DType::BF16
+        || dt_bias.dtype() != DType::BF16
+        || state.dtype() != DType::BF16
+    {
+        return false;
+    }
+    let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
+        return false;
+    };
+    let Ok((b_k, t_k, h_k, dk_k)) = k.dims4() else {
+        return false;
+    };
+    let Ok((b_v, t_v, value_heads, dv)) = v.dims4() else {
+        return false;
+    };
+    let Ok((b_a, t_a, h_a)) = a.dims3() else {
+        return false;
+    };
+    let Ok((b_b, t_b, h_b)) = b.dims3() else {
+        return false;
+    };
+    let Ok((b_state, h_state, dk_state, dv_state)) = state.dims4() else {
+        return false;
+    };
+    batch == 1
+        && seq_len == 1
+        && (b_k, t_k, h_k, dk_k) == (batch, seq_len, q_heads, dk)
+        && (b_v, t_v) == (batch, seq_len)
+        && (b_a, t_a, h_a) == (batch, seq_len, value_heads)
+        && (b_b, t_b, h_b) == (batch, seq_len, value_heads)
+        && a_log.dims() == [value_heads]
+        && dt_bias.dims() == [value_heads]
+        && (b_state, h_state, dk_state, dv_state) == (batch, value_heads, dk, dv)
+        && q_heads > 0
+        && value_heads > q_heads
+        && value_heads % q_heads == 0
+        && dk == 128
+        && dv == 128
         && state.is_contiguous()
 }
 
@@ -2344,6 +2430,7 @@ fn metal_shared_library(
         METAL_GDN_QK_NORM_KERNEL,
         METAL_GDN_DECODE_QKV_CONV_NORM_KERNEL,
         METAL_GDN_GATES_KERNEL,
+        METAL_GDN_DECODE_GATES_RECURRENT_KERNEL,
         METAL_GATED_RMSNORM_KERNEL,
         METAL_GDN_RECURRENT_KERNEL,
         METAL_GDN_RECURRENT_PREFILL_HEAD_LAST_KERNEL,
@@ -4503,6 +4590,91 @@ kernel void kiln_gdn_gates_bf16(
 }
 "#;
 
+const METAL_GDN_DECODE_GATES_RECURRENT_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_decode_gates_recurrent_bf16(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k [[buffer(1)]],
+    device const bfloat* v [[buffer(2)]],
+    device const bfloat* a [[buffer(3)]],
+    device const bfloat* b [[buffer(4)]],
+    device const bfloat* a_log [[buffer(5)]],
+    device const bfloat* dt_bias [[buffer(6)]],
+    device bfloat* state [[buffer(7)]],
+    device bfloat* out [[buffer(8)]],
+    constant uint& batch_heads [[buffer(9)]],
+    constant uint& dk [[buffer(10)]],
+    constant uint& dv [[buffer(11)]],
+    constant uint& value_heads [[buffer(12)]],
+    constant uint& q_heads [[buffer(13)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    constexpr uint NSG = 4;
+    constexpr uint LANES = 32;
+    if (gid >= batch_heads * dv || tid >= LANES || dk != 128 || dv != 128) {
+        return;
+    }
+
+    const uint bh = gid / dv;
+    const uint d = gid - bh * dv;
+    const uint batch_idx = bh / value_heads;
+    const uint head_idx = bh - batch_idx * value_heads;
+    const uint q_group = value_heads / q_heads;
+    const uint q_head_idx = head_idx / q_group;
+    const uint qk_base = (batch_idx * q_heads + q_head_idx) * dk;
+    const uint v_base = (batch_idx * value_heads + head_idx) * dv;
+    const uint gate_idx = batch_idx * value_heads + head_idx;
+    const uint state_base = bh * dk * dv;
+
+    const float beta = static_cast<float>(static_cast<bfloat>(
+        kiln_stable_sigmoid(static_cast<float>(b[gate_idx]))
+    ));
+    const float g = static_cast<float>(static_cast<bfloat>(
+        kiln_stable_softplus(static_cast<float>(a[gate_idx]) + static_cast<float>(dt_bias[head_idx])) *
+        -exp(static_cast<float>(a_log[head_idx]))
+    ));
+    const float decay = static_cast<float>(static_cast<bfloat>(exp(g)));
+
+    float ls[NSG];
+    for (uint j = 0; j < NSG; ++j) {
+        const uint is = tid * NSG + j;
+        ls[j] = static_cast<float>(state[state_base + is * dv + d]);
+    }
+
+    float s_k = 0.0f;
+    for (uint j = 0; j < NSG; ++j) {
+        const uint is = tid * NSG + j;
+        const float decayed = static_cast<float>(static_cast<bfloat>(ls[j] * decay));
+        ls[j] = decayed;
+        s_k += decayed * static_cast<float>(k[qk_base + is]);
+    }
+    s_k = simd_sum(s_k);
+
+    const float delta = static_cast<float>(static_cast<bfloat>(
+        (static_cast<float>(v[v_base + d]) - s_k) * beta
+    ));
+
+    float y = 0.0f;
+    for (uint j = 0; j < NSG; ++j) {
+        const uint is = tid * NSG + j;
+        const float new_s = static_cast<float>(static_cast<bfloat>(
+            ls[j] + static_cast<float>(k[qk_base + is]) * delta
+        ));
+        ls[j] = new_s;
+        y += new_s * static_cast<float>(q[qk_base + is]);
+        state[state_base + is * dv + d] = static_cast<bfloat>(new_s);
+    }
+    y = simd_sum(y);
+
+    if (tid == 0) {
+        out[v_base + d] = static_cast<bfloat>(y);
+    }
+}
+"#;
+
 fn metal_gdn_gates_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -4528,6 +4700,35 @@ fn metal_gdn_gates_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn_gates pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_decode_gates_recurrent_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn decode gates+recurrent pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_decode_gates_recurrent_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn decode gates+recurrent function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn decode gates+recurrent pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -4634,6 +4835,152 @@ fn metal_gdn_gates_bf16(
     }
 
     Ok((beta, g))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &mut Tensor,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_gdn_decode_gates_recurrent_supports(q, k, v, a, b, a_log, dt_bias, state),
+        "metal gdn decode gates+recurrent unsupported shape"
+    );
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
+    let (_, _, value_heads, dv) = v.dims4()?;
+    let batch_heads = batch * value_heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize
+            && dk <= u32::MAX as usize
+            && dv <= u32::MAX as usize
+            && value_heads <= u32::MAX as usize
+            && q_heads <= u32::MAX as usize,
+        "metal gdn decode gates+recurrent shape too large"
+    );
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
+    let a_log = a_log.contiguous()?;
+    let dt_bias = dt_bias.contiguous()?;
+    let out = unsafe { Tensor::empty((batch, seq_len, value_heads, dv), DType::BF16, q.device())? };
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal gdn decode gates+recurrent requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_decode_gates_recurrent_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_decode_gates_recurrent_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (a_storage, a_layout) = a.storage_and_layout();
+        let (b_storage, b_layout) = b.storage_and_layout();
+        let (al_storage, al_layout) = a_log.storage_and_layout();
+        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
+        let (state_storage, state_layout) = state.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent k must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent v must be on Metal"),
+        };
+        let a_metal = match &*a_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent a must be on Metal"),
+        };
+        let b_metal = match &*b_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent b must be on Metal"),
+        };
+        let al_metal = match &*al_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent a_log must be on Metal"),
+        };
+        let dt_metal = match &*dt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent dt_bias must be on Metal"),
+        };
+        let state_metal = match &*state_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent state must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode gates+recurrent out must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf = candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k.dtype());
+        let v_buf = candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v.dtype());
+        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let al_buf =
+            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+        let dt_buf =
+            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+        let state_buf = candle_core::metal_backend::buffer_o(
+            state_metal.buffer(),
+            &state_layout,
+            state.dtype(),
+        );
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(a_buf.buffer), a_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(b_buf.buffer), b_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(al_buf.buffer), al_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(dt_buf.buffer), dt_buf.offset_in_bytes);
+        encoder.set_buffer(7, Some(state_buf.buffer), state_buf.offset_in_bytes);
+        encoder.set_buffer(8, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let dk_u32 = dk as u32;
+        let dv_u32 = dv as u32;
+        let value_heads_u32 = value_heads as u32;
+        let q_heads_u32 = q_heads as u32;
+        encoder.set_bytes(9, &batch_heads_u32);
+        encoder.set_bytes(10, &dk_u32);
+        encoder.set_bytes(11, &dv_u32);
+        encoder.set_bytes(12, &value_heads_u32);
+        encoder.set_bytes(13, &q_heads_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch_heads * dv,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
 }
 
 const METAL_GATED_RMSNORM_KERNEL: &str = r#"
@@ -8362,6 +8709,134 @@ mod tests {
             native_one_state_max < 3e-2,
             "GDN recurrent native decode state max_abs_diff={native_one_state_max:e} exceeds tolerance"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_decode_gates_recurrent_matches_split_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let q_heads = 1usize;
+        let value_heads = 2usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let qk_elems = batch * seq_len * q_heads * dk;
+        let v_elems = batch * seq_len * value_heads * dv;
+        let gate_elems = batch * seq_len * value_heads;
+        let state_elems = batch * value_heads * dk * dv;
+
+        let q_data: Vec<f32> = (0..qk_elems)
+            .map(|idx| ((idx % 31) as f32 - 15.0) * 0.004)
+            .collect();
+        let k_data: Vec<f32> = (0..qk_elems)
+            .map(|idx| ((idx % 29) as f32 - 14.0) * 0.004)
+            .collect();
+        let v_data: Vec<f32> = (0..v_elems)
+            .map(|idx| ((idx % 37) as f32 - 18.0) * 0.006)
+            .collect();
+        let a_data: Vec<f32> = (0..gate_elems)
+            .map(|idx| ((idx % 17) as f32 - 8.0) * 0.08)
+            .collect();
+        let b_data: Vec<f32> = (0..gate_elems)
+            .map(|idx| ((idx % 19) as f32 - 9.0) * 0.07)
+            .collect();
+        let a_log_data: Vec<f32> = (0..value_heads)
+            .map(|idx| ((idx % 11) as f32 - 5.0) * 0.04)
+            .collect();
+        let dt_bias_data: Vec<f32> = (0..value_heads)
+            .map(|idx| ((idx % 13) as f32 - 6.0) * 0.05)
+            .collect();
+        let state_data: Vec<f32> = (0..state_elems)
+            .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
+            .collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
+            .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let a = Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
+            .to_dtype(DType::BF16)?;
+        let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
+            .to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?.to_dtype(DType::BF16)?;
+        let dt_bias =
+            Tensor::from_slice(&dt_bias_data, value_heads, &device)?.to_dtype(DType::BF16)?;
+        let mut state_ref = Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut state_fused =
+            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+
+        let (beta, g) = gdn_gates_reference(&a, &b, &a_log, &dt_bias)?;
+        let out_ref = metal_gdn_recurrent_prefill_native_head_last_bf16(
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            &mut state_ref,
+        )?;
+
+        assert!(metal_gdn_decode_gates_recurrent_supports(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &state_fused
+        ));
+        let out_fused = metal_gdn_decode_gates_recurrent_bf16(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_fused,
+        )?;
+
+        let out_max = max_abs_diff(&out_ref, &out_fused)?;
+        let out_mean = mean_abs_diff(&out_ref, &out_fused)?;
+        let state_max = max_abs_diff(&state_ref, &state_fused)?;
+        let state_mean = mean_abs_diff(&state_ref, &state_fused)?;
+        assert!(
+            out_max < 3e-2,
+            "GDN decode gates+recurrent out max_abs_diff={out_max:e} exceeds tolerance"
+        );
+        assert!(
+            out_mean < 3e-3,
+            "GDN decode gates+recurrent out mean_abs_diff={out_mean:e} exceeds tolerance"
+        );
+        assert!(
+            state_max < 3e-2,
+            "GDN decode gates+recurrent state max_abs_diff={state_max:e} exceeds tolerance"
+        );
+        assert!(
+            state_mean < 3e-3,
+            "GDN decode gates+recurrent state mean_abs_diff={state_mean:e} exceeds tolerance"
+        );
+
+        let q_prefill = Tensor::zeros((batch, 2usize, q_heads, dk), DType::BF16, &device)?;
+        assert!(!metal_gdn_decode_gates_recurrent_supports(
+            &q_prefill,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &state_fused
+        ));
 
         Ok(())
     }
