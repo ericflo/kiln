@@ -1222,7 +1222,7 @@ fn marlin_bf16_drop_disabled() -> bool {
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
 pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 65533;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
-pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 4096;
+pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1263,7 +1263,7 @@ pub fn streaming_prefill_enabled() -> bool {
 fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usize) -> bool {
     match kind {
         StreamingPrefillDeviceKind::Cuda => seq_len >= STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD,
-        StreamingPrefillDeviceKind::Metal => seq_len >= STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD,
+        StreamingPrefillDeviceKind::Metal => seq_len >= streaming_prefill_threshold_tokens(),
         StreamingPrefillDeviceKind::Cpu => false,
     }
 }
@@ -1272,12 +1272,28 @@ fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usiz
 ///
 /// Env overrides win. Without an override, long CUDA prompts use tiled prefill
 /// by default because it cuts peak GDN activation memory enough to make 128k
-/// prefill fit on 48 GiB GPUs; long Metal prompts keep the desktop default.
+/// prefill fit on 48 GiB GPUs; long Metal prompts use the macOS desktop
+/// threshold because it improves TTFT at common chat context sizes.
 pub fn streaming_prefill_enabled_for(device: &Device, seq_len: usize) -> bool {
     if let Some(enabled) = streaming_prefill_env_override() {
         return enabled;
     }
     streaming_prefill_default_for(streaming_prefill_device_kind(device), seq_len)
+}
+
+fn streaming_prefill_threshold_tokens_env_override() -> Option<usize> {
+    std::env::var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Read `KILN_STREAMING_PREFILL_THRESHOLD_TOKENS` for Metal's automatic
+/// streaming dispatch threshold. Malformed or zero values fall back to the
+/// production default.
+pub fn streaming_prefill_threshold_tokens() -> usize {
+    streaming_prefill_threshold_tokens_env_override()
+        .unwrap_or(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD)
 }
 
 fn streaming_tile_tokens_env_override() -> Option<usize> {
@@ -11339,6 +11355,7 @@ mod tests {
         // `model_forward_paged_streaming` reads from the environment.
         unsafe {
             std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
@@ -11363,6 +11380,10 @@ mod tests {
             StreamingPrefillDeviceKind::Metal,
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
         ));
+        assert_eq!(
+            streaming_prefill_threshold_tokens(),
+            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+        );
         assert!(!streaming_prefill_enabled_for(
             &Device::Cpu,
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
@@ -11388,6 +11409,20 @@ mod tests {
                 streaming_tile_tokens_for(&device),
                 STREAMING_PREFILL_METAL_DEFAULT_TILE
             );
+            unsafe {
+                std::env::set_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "1024");
+            }
+            assert_eq!(streaming_prefill_threshold_tokens(), 1024);
+            assert!(!streaming_prefill_default_for(
+                StreamingPrefillDeviceKind::Metal,
+                1023
+            ));
+            assert!(streaming_prefill_default_for(
+                StreamingPrefillDeviceKind::Metal,
+                1024
+            ));
+            assert!(!streaming_prefill_enabled_for(&device, 1023));
+            assert!(streaming_prefill_enabled_for(&device, 1024));
         }
 
         unsafe {
@@ -11404,6 +11439,14 @@ mod tests {
             &Device::Cpu,
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
         ));
+
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS", "0");
+        }
+        assert_eq!(
+            streaming_prefill_threshold_tokens(),
+            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+        );
 
         unsafe {
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
