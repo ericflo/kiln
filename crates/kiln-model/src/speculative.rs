@@ -11,8 +11,8 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
-use rand::Rng;
 use rand::rngs::StdRng;
+use rand::Rng;
 
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
@@ -22,9 +22,9 @@ use kiln_core::token::TokenId;
 use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_head,
-    model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
-    mtp_forward_step,
+    model_forward, model_forward_embed, model_forward_head, model_forward_paged,
+    model_forward_paged_with_last_hidden, model_forward_segment, mtp_forward_step, GpuWeights,
+    LinearAttentionState,
 };
 use crate::kv_cache::KvCache;
 use crate::paged_kv_cache::PagedKvCache;
@@ -32,7 +32,7 @@ use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
 /// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
 /// via `OnceLock`. When enabled, logits are promoted to FP32 before each
-/// greedy argmax inside `speculative_mtp_decode_step` (draft / verify / bonus).
+/// greedy argmax inside `speculative_mtp_decode_step` (draft / batched verify).
 /// This matches vLLM's `rejection_sampler.py` which casts
 /// `raw_target_logits.to(torch.float32)` prior to argmax — BF16 argmax can
 /// flip top-1 under ties when two candidates share the same BF16 bucket.
@@ -41,12 +41,7 @@ use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 pub fn mtp_argmax_fp32_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        std::env::var("KILN_MTP_ARGMAX_FP32")
-            .ok()
-            .as_deref()
-            == Some("1")
-    })
+    *CACHE.get_or_init(|| std::env::var("KILN_MTP_ARGMAX_FP32").ok().as_deref() == Some("1"))
 }
 
 /// Helper for `mtp_argmax_fp32_enabled` — cast a logit tensor to FP32 when
@@ -794,8 +789,7 @@ pub fn speculative_mtp_decode_step(
     // MTP debug top-k extraction, so `argmax_input` returns a cloned / cast
     // view rather than consuming it.
     let mtp_logits_for_argmax = argmax_input(&mtp_logits).context("mtp draft argmax cast")?;
-    let draft_token =
-        greedy_sample(&mtp_logits_for_argmax).context("mtp draft sampling failed")?;
+    let draft_token = greedy_sample(&mtp_logits_for_argmax).context("mtp draft sampling failed")?;
 
     // 2. Verify the draft with one two-token base-model pass. This is the only
     // k=1 MTP shape that can amortize base-model overhead: on accept the pass
@@ -821,12 +815,18 @@ pub fn speculative_mtp_decode_step(
     .context("mtp two-token verify forward failed")?;
 
     // Position 0 predicts what follows `last_token`; position 1 predicts what
-    // follows the accepted draft token (the speculative bonus).
-    let verify_pos0 = verify_logits.narrow(1, 0, 1)?.squeeze(1)?;
-    let verify_pos0_for_argmax =
-        argmax_input(&verify_pos0).context("mtp verify pos-0 argmax cast")?;
-    let target_at_0 =
-        greedy_sample(&verify_pos0_for_argmax).context("verify pos-0 sampling failed")?;
+    // follows the accepted draft token (the speculative bonus). Sample both
+    // verifier rows in one argmax to avoid a second device sync on accept.
+    let verify_logits_for_argmax =
+        argmax_input(&verify_logits).context("mtp verify argmax cast")?;
+    let verify_targets = greedy_sample_rows(&verify_logits_for_argmax)
+        .context("mtp batched verify sampling failed")?;
+    anyhow::ensure!(
+        verify_targets.len() == 2,
+        "mtp verifier returned {} target tokens for window 2",
+        verify_targets.len()
+    );
+    let target_at_0 = verify_targets[0];
 
     // 3. Accept / reject decision. Greedy compare.
     let mut accepted_tokens: Vec<TokenId> = Vec::new();
@@ -840,11 +840,24 @@ pub fn speculative_mtp_decode_step(
     // bug (tokens disagree) or a verification/sampling bug (tokens agree
     // but accept flips false). Off by default; enabled with
     // `KILN_C1_ATTR_PATH=<path>`.
-    if c1_attr::is_enabled() {
+    let c1_attr_enabled = c1_attr::is_enabled();
+    let mtp_debug_enabled = crate::mtp_debug::is_enabled();
+    let verify_pos0 = if c1_attr_enabled || mtp_debug_enabled {
+        Some(verify_logits.narrow(1, 0, 1)?.squeeze(1)?)
+    } else {
+        None
+    };
+
+    if c1_attr_enabled {
         // top_k=1 extraction is ~O(V) on host but only runs when the env
         // var is set, so production decode pays nothing.
         let draft_top1 = crate::mtp_debug::top_k_logits(&mtp_logits, 1);
-        let main_top1 = crate::mtp_debug::top_k_logits(&verify_pos0, 1);
+        let main_top1 = crate::mtp_debug::top_k_logits(
+            verify_pos0
+                .as_ref()
+                .expect("verify pos-0 tensor materialized for C1 attribution"),
+            1,
+        );
         let (mtp_top1_logit, main_top1_logit) = match (draft_top1, main_top1) {
             (Ok(d), Ok(m)) => (
                 d.first().map(|p| p.1).unwrap_or(f32::NAN),
@@ -872,11 +885,14 @@ pub fn speculative_mtp_decode_step(
     // a 16-step trace can be diffed against an HF reference run on the same
     // prompt. The `mtp_draft` line emitted from `mtp_forward_step` and this
     // `mtp_verify` line share `mtp_pos` so they can be paired by grep.
-    if crate::mtp_debug::is_enabled() {
-        let v_top = crate::mtp_debug::top_k_logits(&verify_pos0, 5)
+    if mtp_debug_enabled {
+        let verify_pos0 = verify_pos0
+            .as_ref()
+            .expect("verify pos-0 tensor materialized for MTP debug");
+        let v_top = crate::mtp_debug::top_k_logits(verify_pos0, 5)
             .map(|t| crate::mtp_debug::format_top_k(&t))
             .unwrap_or_else(|e| format!("<top_k err: {e}>"));
-        let v_norm = crate::mtp_debug::tensor_l2_norm(&verify_pos0).unwrap_or(f32::NAN);
+        let v_norm = crate::mtp_debug::tensor_l2_norm(verify_pos0).unwrap_or(f32::NAN);
         tracing::info!(
             target: "kiln::mtp_debug",
             mtp_pos = mtp_pos,
@@ -901,11 +917,7 @@ pub fn speculative_mtp_decode_step(
             (1, 1)
         } else {
             accepted_tokens.push(draft_token);
-            let verify_pos1 = verify_logits.narrow(1, 1, 1)?.squeeze(1)?;
-            let verify_pos1_for_argmax =
-                argmax_input(&verify_pos1).context("mtp verify pos-1 argmax cast")?;
-            let bonus =
-                greedy_sample(&verify_pos1_for_argmax).context("bonus sampling failed")?;
+            let bonus = verify_targets[1];
             if eos_token_ids.contains(&bonus) {
                 hit_eos = true;
             } else {
