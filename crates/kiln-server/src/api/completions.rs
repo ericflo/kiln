@@ -10,8 +10,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
-
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
@@ -492,8 +490,6 @@ async fn generate_real(
 
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
-    let prefix_cache_cuda_graphs_bypass_warned =
-        state.prefix_cache_cuda_graphs_bypass_warned.clone();
     let generation = tokio::task::spawn_blocking(move || {
         // Acquire GPU coordination read lock — allows concurrent inference,
         // but blocks while training holds the write lock.
@@ -505,19 +501,7 @@ async fn generate_real(
                     let cache = prefix_cache.lock().unwrap();
                     cache.is_enabled()
                 };
-                let cuda_graphs_enabled = runner_guard.cuda_graph_enabled()?;
-                if prefix_enabled && cuda_graphs_enabled {
-                    let already_warned =
-                        prefix_cache_cuda_graphs_bypass_warned.swap(true, Ordering::Relaxed);
-                    if !already_warned {
-                        tracing::warn!(
-                            prefix_cache_enabled = true,
-                            cuda_graphs_enabled = true,
-                            "real prefix cache is enabled but CUDA graphs are active; real chat completions bypass prefix-cache lookup and registration until CUDA-graph prefix-cache integration is implemented"
-                        );
-                    }
-                }
-                if !prefix_enabled || cuda_graphs_enabled {
+                if !prefix_enabled {
                     runner_guard.generate_paged_shared_tokens(
                         &prompt_tokens,
                         &params,
@@ -700,8 +684,6 @@ async fn generate_real_streaming(
     let created = now_epoch();
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
-    let prefix_cache_cuda_graphs_bypass_warned =
-        state.prefix_cache_cuda_graphs_bypass_warned.clone();
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -744,19 +726,7 @@ async fn generate_real_streaming(
                             let cache = prefix_cache.lock().unwrap();
                             cache.is_enabled()
                         };
-                        let cuda_graphs_enabled = runner_guard.cuda_graph_enabled()?;
-                        if prefix_enabled && cuda_graphs_enabled {
-                            let already_warned = prefix_cache_cuda_graphs_bypass_warned
-                                .swap(true, Ordering::Relaxed);
-                            if !already_warned {
-                                tracing::warn!(
-                                    prefix_cache_enabled = true,
-                                    cuda_graphs_enabled = true,
-                                    "real prefix cache is enabled but CUDA graphs are active; real streaming chat completions bypass prefix-cache lookup and registration until CUDA-graph prefix-cache integration is implemented"
-                                );
-                            }
-                        }
-                        if !prefix_enabled || cuda_graphs_enabled {
+                        if !prefix_enabled {
                             runner_guard.generate_streaming_paged_shared_tokens(
                                 &prompt_tokens,
                                 &params,

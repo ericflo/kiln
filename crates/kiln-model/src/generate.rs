@@ -888,16 +888,6 @@ impl ModelRunner {
     ) -> Result<PrefixCachedGenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
-        let cuda_graph_enabled = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
-            .is_enabled();
-        anyhow::ensure!(
-            !cuda_graph_enabled,
-            "prefix cache path does not support CUDA graph replay"
-        );
-
         let block_size = {
             let bm_guard = lock_block_manager(block_manager)?;
             bm_guard.block_size()
@@ -2906,16 +2896,6 @@ impl ModelRunner {
         cached_prefix: Option<PagedPrefixReuse>,
     ) -> Result<PrefixCachedStreamingOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
-
-        let cuda_graph_enabled = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
-            .is_enabled();
-        anyhow::ensure!(
-            !cuda_graph_enabled,
-            "streaming prefix cache path does not support CUDA graph replay"
-        );
 
         let block_size = {
             let bm_guard = lock_block_manager(block_manager)?;

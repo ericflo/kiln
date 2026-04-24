@@ -56,12 +56,12 @@ Runtime env:
 
 ```bash
 KILN_W4A16=1
-KILN_CUDA_GRAPHS=false
+KILN_CUDA_GRAPHS=false   # original A/B; CUDA-graph path now uses the same cache helpers
 KILN_SPEC_ENABLED=0
 KILN_PREFIX_CACHE_ENABLED=1   # ON arm; 0 for OFF arm
 ```
 
-CUDA graphs were disabled intentionally. With graphs enabled, real chat completions still bypass the prefix-cache helpers and call the non-prefix paged generation path. The server emits a one-time structured warning when `RealPrefixCache` is enabled but CUDA graphs force that non-prefix path, so operators do not silently expect cache reuse from real chat completions. Full CUDA-graph prefix-cache integration remains separate work.
+CUDA graphs now use the same real prefix-cache lookup/register helpers for non-speculative real chat completions. Cache misses preserve the normal CUDA-graph decode behavior and register block-aligned completed prompts; cache hits reuse retained paged-KV blocks plus GDN recurrent state for the suffix prefill before CUDA-graph decode continues.
 
 ## Prompt Design
 
@@ -95,7 +95,7 @@ Each measured request used `temperature = 0.0`, `seed = 1`, and `max_tokens = 16
 
 Median total-latency speedup: **3.49x**.
 
-TTFT is not reported because this A/B used non-streaming total request latencies from the Python client around `POST /v1/chat/completions`. Streaming chat completions now use the same real prefix-cache lookup/register path when CUDA graphs are disabled, and streaming hits increment the same `/metrics` counters.
+TTFT is not reported because this A/B used non-streaming total request latencies from the Python client around `POST /v1/chat/completions`. Streaming and non-streaming real chat completions now use the same real prefix-cache lookup/register path with or without CUDA graphs, and hits increment the same `/metrics` counters.
 
 ## Metrics
 
@@ -254,6 +254,6 @@ Results: all commands passed on the A6000 pod. Existing compiler warnings were u
 
 ## Verdict
 
-The real append-prefix cache is effective for block-aligned append-only shared prefixes on the real backend. The measured 2,048-token shared-prefix workload improved median total latency from 26.923s to 7.711s and metrics exactly matched the expected skipped tokens/blocks.
+The real append-prefix cache is effective for block-aligned append-only shared prefixes on the real backend. The measured 2,048-token shared-prefix workload improved median total latency from 26.923s to 7.711s and metrics exactly matched the expected skipped tokens/blocks. CUDA-graph real chat completions now use the same cache path; `scripts/phase7_cuda_graph_prefix_cache_verify.sh` starts `target/release/kiln` with `KILN_CUDA_GRAPHS=true` and verifies a `/metrics` hit without any bypass warning.
 
-Remaining work: integrate prefix reuse into the CUDA-graph path, and add a partial-prefix registration strategy so normal chat `shared + suffix` prompts can reuse shared user text without delimiter-shaped content.
+Remaining work: add a partial-prefix registration strategy so normal chat `shared + suffix` prompts can reuse shared user text without delimiter-shaped content.
