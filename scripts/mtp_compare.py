@@ -654,6 +654,26 @@ def _component_stats(component: np.ndarray, ref: np.ndarray) -> Dict[str, float]
         "rel_l2": _rel_l2(abs_component, ref),
     }
 
+
+def _allclose_stats(
+    kiln: np.ndarray,
+    ref: np.ndarray,
+    atol: float,
+    rtol: float,
+) -> Tuple[float, float, float, bool, float]:
+    diff = np.abs(kiln - ref)
+    return (
+        float(diff.max()) if diff.size else 0.0,
+        float(diff.mean()) if diff.size else 0.0,
+        _rel_l2(diff, ref),
+        bool(np.allclose(kiln, ref, atol=atol, rtol=rtol)),
+        _max_tolerance_ratio(diff, ref, atol, rtol),
+    )
+
+
+def _fmt_verdict(ok: bool) -> str:
+    return "PASS" if ok else "FAIL"
+
 def _c45_operand_product_bound_diagnostic(
     kiln_tensors: Dict[str, np.ndarray],
     ref_tensors: Dict[str, np.ndarray],
@@ -766,6 +786,153 @@ def _c45_operand_product_bound_diagnostic(
         "product_tight_tol_ratio": _max_tolerance_ratio(
             product_diff, predicted_ref, C45_TIGHT_ATOL, C45_TIGHT_RTOL
         ),
+    }
+
+
+def _c47_c45_tolerance_artifact_diagnostic(
+    kiln_tensors: Dict[str, np.ndarray],
+    ref_tensors: Dict[str, np.ndarray],
+    top_n: int = 8,
+) -> Optional[Dict[str, object]]:
+    kiln_row = kiln_tensors.get("c45__layer_1_input_norm_last_row_flat_values")
+    kiln_scalar = kiln_tensors.get("c45__layer_1_input_norm_rms_inv_scalar_extracted_values")
+    kiln_output = kiln_tensors.get("c45__layer_1_input_norm_pre_weight_row_broadcast_output")
+    ref_row = ref_tensors.get("c45__layer_1_input_norm_last_row_flat_values")
+    ref_scalar = ref_tensors.get("c45__layer_1_input_norm_rms_inv_scalar_extracted_values")
+    ref_output = ref_tensors.get("c45__layer_1_input_norm_pre_weight_row_broadcast_output")
+    if (
+        kiln_row is None
+        or kiln_scalar is None
+        or kiln_output is None
+        or ref_row is None
+        or ref_scalar is None
+        or ref_output is None
+    ):
+        return None
+    if kiln_row.shape != ref_row.shape or kiln_scalar.shape != ref_scalar.shape:
+        return None
+    if kiln_row.ndim != 2 or kiln_scalar.ndim != 1:
+        return None
+    expected_output_shape = (kiln_row.shape[0], 1, kiln_row.shape[1])
+    if kiln_output.shape != expected_output_shape or ref_output.shape != expected_output_shape:
+        return None
+
+    kr = kiln_row.astype(np.float64)
+    rr = ref_row.astype(np.float64)
+    ks = kiln_scalar.astype(np.float64).reshape(-1, 1)
+    rs = ref_scalar.astype(np.float64).reshape(-1, 1)
+    ko = kiln_output.reshape(kr.shape).astype(np.float64)
+    ro = ref_output.reshape(rr.shape).astype(np.float64)
+
+    predicted_kiln = kr * ks
+    predicted_ref = rr * rs
+    output_delta = ko - ro
+    predicted_delta = predicted_kiln - predicted_ref
+    predicted_vs_observed = output_delta - predicted_delta
+    same_side_kiln = predicted_kiln - ko
+    same_side_ref = predicted_ref - ro
+    row_delta = kr - rr
+    scalar_delta = ks - rs
+    row_component = row_delta * rs
+    scalar_component = rr * scalar_delta
+    interaction_component = row_delta * scalar_delta
+    output_abs = np.abs(output_delta)
+    predicted_abs = np.abs(predicted_delta)
+    residual_abs = np.abs(predicted_vs_observed)
+    allowed = C45_TIGHT_ATOL + C45_TIGHT_RTOL * np.abs(predicted_ref)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratios = np.divide(
+            predicted_abs,
+            allowed,
+            out=np.full_like(predicted_abs, np.inf),
+            where=allowed != 0.0,
+        )
+
+    row_current = _allclose_stats(kr, rr, 1e-2, 1e-1)
+    row_tight = _allclose_stats(kr, rr, C45_TIGHT_ATOL, C45_TIGHT_RTOL)
+    scalar_current = _allclose_stats(ks, rs, 1e-2, 1e-1)
+    scalar_tight = _allclose_stats(ks, rs, C45_TIGHT_ATOL, C45_TIGHT_RTOL)
+    product_current = _allclose_stats(predicted_kiln, predicted_ref, 1e-2, 1e-1)
+    product_tight = _allclose_stats(predicted_kiln, predicted_ref, C45_TIGHT_ATOL, C45_TIGHT_RTOL)
+    output_current = _allclose_stats(ko, ro, 1e-2, 1e-1)
+    output_tight = _allclose_stats(ko, ro, C45_TIGHT_ATOL, C45_TIGHT_RTOL)
+    residual_current = _allclose_stats(output_delta, predicted_delta, 1e-6, 1e-5)
+
+    side_residual_max = max(
+        float(np.abs(same_side_kiln).max()) if same_side_kiln.size else 0.0,
+        float(np.abs(same_side_ref).max()) if same_side_ref.size else 0.0,
+    )
+    predicted_vs_observed_max = residual_current[0]
+    explained = (
+        predicted_vs_observed_max <= max(1e-5, output_current[0] * 1e-4)
+        and side_residual_max <= max(1e-5, output_current[0] * 1e-4)
+        and product_current[3] == output_current[3]
+        and product_tight[3] == output_tight[3]
+    )
+
+    flat_order = np.argsort(ratios.reshape(-1))[::-1]
+    offenders = []
+    rows, hidden = kr.shape
+    for flat_idx in flat_order[:top_n]:
+        batch_idx = int(flat_idx // hidden)
+        hidden_idx = int(flat_idx % hidden)
+        offenders.append(
+            {
+                "index": (batch_idx, hidden_idx),
+                "tight_ratio": float(ratios[batch_idx, hidden_idx]),
+                "row_kiln": float(kr[batch_idx, hidden_idx]),
+                "row_ref": float(rr[batch_idx, hidden_idx]),
+                "row_delta": float(row_delta[batch_idx, hidden_idx]),
+                "scalar_kiln": float(ks[batch_idx, 0]),
+                "scalar_ref": float(rs[batch_idx, 0]),
+                "scalar_delta": float(scalar_delta[batch_idx, 0]),
+                "pred_kiln": float(predicted_kiln[batch_idx, hidden_idx]),
+                "pred_ref": float(predicted_ref[batch_idx, hidden_idx]),
+                "pred_delta": float(predicted_delta[batch_idx, hidden_idx]),
+                "out_kiln": float(ko[batch_idx, hidden_idx]),
+                "out_ref": float(ro[batch_idx, hidden_idx]),
+                "out_delta": float(output_delta[batch_idx, hidden_idx]),
+                "pred_vs_obs_residual": float(predicted_vs_observed[batch_idx, hidden_idx]),
+                "row_component": float(row_component[batch_idx, hidden_idx]),
+                "scalar_component": float(scalar_component[batch_idx, hidden_idx]),
+                "interaction_component": float(interaction_component[batch_idx, hidden_idx]),
+            }
+        )
+
+    row_stats = _component_stats(row_component, predicted_ref)
+    scalar_stats = _component_stats(scalar_component, predicted_ref)
+    interaction_stats = _component_stats(interaction_component, predicted_ref)
+    if scalar_stats["l2"] > row_stats["l2"] * 2.0:
+        dominant = "scalar-side"
+    elif row_stats["l2"] > scalar_stats["l2"] * 2.0:
+        dominant = "row-side"
+    else:
+        dominant = "both"
+
+    return {
+        "row_current": row_current,
+        "row_tight": row_tight,
+        "scalar_current": scalar_current,
+        "scalar_tight": scalar_tight,
+        "product_current": product_current,
+        "product_tight": product_tight,
+        "output_current": output_current,
+        "output_tight": output_tight,
+        "predicted_vs_observed": residual_current,
+        "side_residual_max": side_residual_max,
+        "same_side_kiln_max": float(np.abs(same_side_kiln).max()) if same_side_kiln.size else 0.0,
+        "same_side_kiln_mean": float(np.abs(same_side_kiln).mean()) if same_side_kiln.size else 0.0,
+        "same_side_ref_max": float(np.abs(same_side_ref).max()) if same_side_ref.size else 0.0,
+        "same_side_ref_mean": float(np.abs(same_side_ref).mean()) if same_side_ref.size else 0.0,
+        "output_max_abs_diff": float(output_abs.max()) if output_abs.size else 0.0,
+        "predicted_max_abs_diff": float(predicted_abs.max()) if predicted_abs.size else 0.0,
+        "residual_max_abs_diff": float(residual_abs.max()) if residual_abs.size else 0.0,
+        "row_component": row_stats,
+        "scalar_component": scalar_stats,
+        "interaction_component": interaction_stats,
+        "dominant_operand_side": dominant,
+        "fully_predicted": explained,
+        "top_offenders": offenders,
     }
 
 def _load(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
@@ -2468,6 +2635,119 @@ def _emit_c46_summary(
         emit(f"  Most-likely cause: {C46_HYPOTHESIS.get(tight_bad, '<unknown tap>')}")
 
 
+def _emit_c47_summary_from_paths(
+    pairs: List[Tuple[str, str, str]],
+    emit,
+) -> None:
+    emit("")
+    emit("=" * 78)
+    emit("Phase C47 C45 tolerance/reproducer artifact classifier")
+    emit("=" * 78)
+    emit(f"  current tolerance: atol={1e-2:g}, rtol={1e-1:g}")
+    emit(f"  tight tolerance  : atol={C45_TIGHT_ATOL:g}, rtol={C45_TIGHT_RTOL:g}")
+
+    captured_any = False
+    all_fully_predicted = True
+    any_product_current_fail = False
+
+    def emit_stats(name: str, stats: Tuple[float, float, float, bool, float]) -> None:
+        max_abs, mean_abs, rel_l2, ok, ratio = stats
+        emit(
+            f"    {name:<20} max|Δ|={_fmt_sci(max_abs)} "
+            f"mean|Δ|={_fmt_sci(mean_abs)} rel_l2={_fmt_sci(rel_l2)} "
+            f"allclose={_fmt_verdict(ok)} tol_ratio={_fmt_sci(ratio)}"
+        )
+
+    for label, kpath, rpath in pairs:
+        kiln_arr, _kiln_meta = _load(kpath)
+        ref_arr, _ref_meta = _load(rpath)
+        diag = _c47_c45_tolerance_artifact_diagnostic(kiln_arr, ref_arr)
+        emit("")
+        emit(f"  [{label}] C47 artifact boundary details")
+        if diag is None:
+            emit("    missing required C45 taps; capture both dumps with C45 taps enabled")
+            all_fully_predicted = False
+            continue
+        captured_any = True
+        all_fully_predicted &= bool(diag["fully_predicted"])
+        any_product_current_fail |= not bool(diag["product_current"][3])
+
+        emit("    current-mask operand/output stats:")
+        emit_stats("row operand", diag["row_current"])
+        emit_stats("scalar operand", diag["scalar_current"])
+        emit_stats("predicted product", diag["product_current"])
+        emit_stats("observed output", diag["output_current"])
+        emit("    tight-mask operand/output stats:")
+        emit_stats("row operand", diag["row_tight"])
+        emit_stats("scalar operand", diag["scalar_tight"])
+        emit_stats("predicted product", diag["product_tight"])
+        emit_stats("observed output", diag["output_tight"])
+        emit("    prediction residual:")
+        emit_stats("predicted-vs-observed", diag["predicted_vs_observed"])
+        emit(
+            "    same-side product residual: "
+            f"kiln max={_fmt_sci(diag['same_side_kiln_max'])} "
+            f"mean={_fmt_sci(diag['same_side_kiln_mean'])}; "
+            f"ref max={_fmt_sci(diag['same_side_ref_max'])} "
+            f"mean={_fmt_sci(diag['same_side_ref_mean'])}"
+        )
+        emit(
+            "    output/prediction max diff: "
+            f"observed={_fmt_sci(diag['output_max_abs_diff'])} "
+            f"predicted={_fmt_sci(diag['predicted_max_abs_diff'])} "
+            f"residual={_fmt_sci(diag['residual_max_abs_diff'])}"
+        )
+        emit(
+            "    contribution budget: "
+            f"row max={_fmt_sci(diag['row_component']['max'])} "
+            f"mean={_fmt_sci(diag['row_component']['mean'])} "
+            f"rel_l2={_fmt_sci(diag['row_component']['rel_l2'])}; "
+            f"scalar max={_fmt_sci(diag['scalar_component']['max'])} "
+            f"mean={_fmt_sci(diag['scalar_component']['mean'])} "
+            f"rel_l2={_fmt_sci(diag['scalar_component']['rel_l2'])}; "
+            f"interaction max={_fmt_sci(diag['interaction_component']['max'])} "
+            f"mean={_fmt_sci(diag['interaction_component']['mean'])} "
+            f"rel_l2={_fmt_sci(diag['interaction_component']['rel_l2'])}; "
+            f"dominant={diag['dominant_operand_side']}"
+        )
+        emit("    top offending indices by predicted-product tight tolerance ratio:")
+        for offender in diag["top_offenders"]:
+            batch_idx, hidden_idx = offender["index"]
+            emit(
+                f"      idx=({batch_idx},{hidden_idx}) "
+                f"tight_ratio={_fmt_sci(offender['tight_ratio'])} "
+                f"row_k={_fmt_sci(offender['row_kiln'])} row_r={_fmt_sci(offender['row_ref'])} "
+                f"row_Δ={_fmt_sci(offender['row_delta'])} "
+                f"scalar_k={_fmt_sci(offender['scalar_kiln'])} scalar_r={_fmt_sci(offender['scalar_ref'])} "
+                f"scalar_Δ={_fmt_sci(offender['scalar_delta'])} "
+                f"pred_Δ={_fmt_sci(offender['pred_delta'])} "
+                f"out_Δ={_fmt_sci(offender['out_delta'])} "
+                f"resid={_fmt_sci(offender['pred_vs_obs_residual'])} "
+                f"terms(row={_fmt_sci(offender['row_component'])}, "
+                f"scalar={_fmt_sci(offender['scalar_component'])}, "
+                f"inter={_fmt_sci(offender['interaction_component'])})"
+            )
+        if diag["fully_predicted"]:
+            emit("    seed verdict: FULLY_PREDICTED operand-drift/tolerance amplification artifact")
+        else:
+            emit("    seed verdict: NOT_FULLY_PREDICTED; inspect same-side product/reproducer alignment")
+
+    emit("")
+    if not captured_any:
+        emit("Phase C47 verdict: no C45 C47-compatible taps present in supplied dumps.")
+        emit("  -> Re-run kiln-bench with KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 and")
+        emit("     mtp_h_main_reference_dump.py with --c45-taps.")
+    elif all_fully_predicted and any_product_current_fail:
+        emit("Phase C47 verdict: C45 broadcast-output failure is fully predicted by operand drift/tolerance amplification.")
+        emit("  -> Stop condition: no production math change is justified at the C45 broadcast boundary.")
+    elif all_fully_predicted:
+        emit("Phase C47 verdict: output is fully predicted, but supplied pairs do not reproduce the current-mask C45 failure.")
+        emit("  -> Treat this as a reproducer alignment issue before changing production math.")
+    else:
+        emit("Phase C47 verdict: output is not fully predicted by captured operands.")
+        emit("  -> Next boundary: same-side product residual or dump/reproducer alignment around C45 broadcast output.")
+
+
 def _emit_c45_summary(
     pair_results: List[Tuple[str, bool, str, List[Dict[str, object]], Dict[str, object], Dict[str, object]]],
     atol: float,
@@ -2869,6 +3149,18 @@ def main() -> int:
             "rtol=1e-1 and also reports tight atol=1e-3, rtol=1e-2 verdicts."
         ),
     )
+
+    ap.add_argument(
+        "--c47-c45-tolerance-artifact",
+        action="store_true",
+        help=(
+            "Phase C47 mode: classify the remaining C45 "
+            "layer_1_input_norm_pre_weight_row_broadcast_output failure as "
+            "operand-drift/tolerance amplification, dump/reproducer mismatch, "
+            "or a concrete same-side product residual. Consumes the existing "
+            "C45 tap set from kiln and HF reference dumps."
+        ),
+    )
     ap.add_argument(
         "--c6",
         action="store_true",
@@ -2922,6 +3214,7 @@ def main() -> int:
         or args.c45_row_scalar
         or args.c45_operand_budget
         or args.c46_row_provenance
+        or args.c47_c45_tolerance_artifact
     )
     if args.atol is None:
         args.atol = 1e-2 if bf16_mode else 1e-3
@@ -2948,7 +3241,9 @@ def main() -> int:
         lines.append(s)
 
     multi = len(pairs) > 1
-    if args.c7:
+    if args.c47_c45_tolerance_artifact:
+        mode = "C45 tolerance/reproducer artifact classifier (C47)"
+    elif args.c7:
         mode = "SDPA-internal bisect (C7)"
     elif args.c46_row_provenance:
         mode = "layer-1 row-side provenance audit (C46)"
@@ -2981,7 +3276,9 @@ def main() -> int:
     ] = []
     overall_ok = True
     focus_keys = None
-    if args.c46_row_provenance:
+    if args.c47_c45_tolerance_artifact:
+        focus_keys = [f"c45__{name}" for name in C45_LAYER1_ROW_TAP_NAMES]
+    elif args.c46_row_provenance:
         focus_keys = [f"c46__{name}" for name in C46_ROW_PROVENANCE_TAP_NAMES]
     elif args.c45 or args.c45_row_scalar or args.c45_operand_budget:
         focus_keys = [f"c45__{name}" for name in C45_LAYER1_ROW_TAP_NAMES]
@@ -3001,7 +3298,9 @@ def main() -> int:
         if not ok:
             overall_ok = False
 
-    if args.c7:
+    if args.c47_c45_tolerance_artifact:
+        _emit_c47_summary_from_paths(pairs, emit)
+    elif args.c7:
         _emit_c7_summary(pair_results, args.atol, args.rtol, emit)
     elif args.c46_row_provenance:
         _emit_c46_summary(pair_results, args.atol, args.rtol, emit)
@@ -3031,7 +3330,7 @@ def main() -> int:
     # captured" note when the dump didn't include the B9 sub-ops (e.g.
     # legacy dumps from before this PR). Skipped in explicit --b10/--b11/--b12/--c6
     # mode so the per-phase report isn't cluttered by unrelated sub-op tables.
-    if not args.b10 and not args.b11 and not args.b12 and not args.c41 and not args.c42 and not args.c6 and not args.c7:
+    if not args.b10 and not args.b11 and not args.b12 and not args.c41 and not args.c42 and not args.c6 and not args.c7 and not args.c47_c45_tolerance_artifact:
         have_b9_taps = any(
             any(r["name"] in B9_H2_ZONE or r["name"] in B9_H3_ZONE for r in pr[3])
             for pr in pair_results

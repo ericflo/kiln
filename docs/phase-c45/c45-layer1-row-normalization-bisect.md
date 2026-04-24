@@ -339,3 +339,103 @@ representative seeds. Because the fresh C46 replay cannot reproduce a local
 row-provenance failure, no production math fix is justified here; the next
 boundary classification is the existing C45 tolerance artifact rather than row
 selection, dtype cast, flatten/contiguous, or exact operand construction.
+
+## 2026-04-24 C47 C45 tolerance/reproducer artifact classification
+
+C46 proved that row selection, F32 promotion, contiguous materialization,
+flattening, and exact reconstruction of the C45 row operand are shared-good
+under both the current C45 tolerance (`atol=1e-2`, `rtol=1e-1`) and the tighter
+mask (`atol=1e-3`, `rtol=1e-2`). C47 therefore adds a comparator-only classifier
+for the remaining `layer_1_input_norm_pre_weight_row_broadcast_output` boundary:
+it recomputes the expected product from the captured C45 row operand and scalar
+operand on each side, compares predicted-vs-observed residuals, reports current
+and tight mask verdicts, and prints the top offending hidden indices by tight
+product tolerance ratio. No production inference math changed.
+
+GPU validation used the mandatory RunPod image through the pool lease
+`pod-c11fe496c432600caf0baa6a` on pod `sl53yvx5seviyx` (`NVIDIA RTX A6000`,
+CUDA image `ghcr.io/ericflo/kiln-runpod:latest`) after direct on-demand capacity
+failed for A6000/A100/L40S and produced pre-SSH runtime wedges for A40 and RTX
+6000 Ada. The validation branch was based on `origin/main` at PR #457
+(`c9f5332`).
+
+Commands run on the pod:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench
+cargo test --locked -p kiln-model c45 -- --nocapture
+cargo test --locked -p kiln-model c46 -- --nocapture
+python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py
+
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_PATH='profiling-artifacts/c47_c45_tolerance_artifact_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors' \
+KILN_MTP_DUMP_POS=0 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+KILN_MTP_DUMP_C46_ROW_PROVENANCE=1 \
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 8 --skip-training --seed 0
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump 'profiling-artifacts/c47_c45_tolerance_artifact_seed0_captures/mtp_pos-0/step-{step}.safetensors' \
+  --out profiling-artifacts/c47_c45_tolerance_artifact_seed0_ref_bf16.safetensors \
+  --c45-taps --seed 0
+python3 scripts/mtp_compare.py --c47-c45-tolerance-artifact \
+  --kiln 'profiling-artifacts/c47_c45_tolerance_artifact_seed0_captures/mtp_pos-0/step-{step}.safetensors' \
+  --ref profiling-artifacts/c47_c45_tolerance_artifact_seed0_ref_bf16.safetensors \
+  > profiling-artifacts/c47_c45_tolerance_artifact_seed0_compare.txt
+
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_PATH='profiling-artifacts/c47_c45_tolerance_artifact_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors' \
+KILN_MTP_DUMP_POS=2 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_C45_LAYER1_ROW_TAPS=1 \
+KILN_MTP_DUMP_C46_ROW_PROVENANCE=1 \
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 1
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump 'profiling-artifacts/c47_c45_tolerance_artifact_seed1_captures/mtp_pos-2/step-{step}.safetensors' \
+  --out profiling-artifacts/c47_c45_tolerance_artifact_seed1_ref_bf16.safetensors \
+  --c45-taps --seed 1
+python3 scripts/mtp_compare.py --c47-c45-tolerance-artifact \
+  --kiln 'profiling-artifacts/c47_c45_tolerance_artifact_seed1_captures/mtp_pos-2/step-{step}.safetensors' \
+  --ref profiling-artifacts/c47_c45_tolerance_artifact_seed1_ref_bf16.safetensors \
+  > profiling-artifacts/c47_c45_tolerance_artifact_seed1_compare.txt
+```
+
+Seed-specific evidence:
+
+- seed 0 (`mtp_pos=0`, `profiling-artifacts/c47_c45_tolerance_artifact_seed0_compare.txt`):
+  row and scalar operands pass the current and tight masks; predicted and
+  observed product both pass the current mask but fail the tight mask
+  (`max|Δ|=2.83e-02`, `mean|Δ|=1.93e-03`, `rel_l2=2.65e-03`, tight
+  `tol_ratio=8.43`). The output is fully predicted by operands
+  (`observed=2.83e-02`, `predicted=2.83e-02`, residual=`2.32e-06`), same-side
+  product residuals are tiny (`kiln max=1.40e-06`, `ref max=9.24e-07`), and the
+  contribution budget is row-side dominant. Prompt=494, prefill=`7704.9 ms`,
+  `alpha=0.333`.
+- seed 1 (`mtp_pos=2`, `profiling-artifacts/c47_c45_tolerance_artifact_seed1_compare.txt`):
+  row and scalar operands pass the current and tight masks; predicted and
+  observed product both pass the current mask but fail the tight mask
+  (`max|Δ|=1.86e-02`, `mean|Δ|=2.60e-03`, `rel_l2=3.44e-03`, tight
+  `tol_ratio=7.78`). The output is fully predicted by operands
+  (`observed=1.86e-02`, `predicted=1.86e-02`, residual=`2.26e-06`), same-side
+  product residuals are tiny (`kiln max=1.91e-06`, `ref max=3.58e-07`), and the
+  contribution budget is row-side dominant. Prompt=508, prefill=`351.0 ms`,
+  `alpha=0.309`.
+
+Final C47 verdict: the fresh C45/C46-compatible reproducer no longer fails the
+current C45 mask at `layer_1_input_norm_pre_weight_row_broadcast_output`, so the
+remaining checked-in C45 current-mask failure should be classified as a
+reproducer/tolerance-boundary artifact rather than a production RMSNorm
+`broadcast_mul` bug. Under the tighter mask, both seeds still expose the same
+boundary, and C47 fully predicts that tighter failure from captured row/scalar
+operand drift with only ~1e-6 same-side residuals. Stop condition: do not change
+production inference math at the C45 broadcast boundary; any future work should
+only revisit this area if a fresh current-main reproducer again fails the current
+mask and C47 reports a non-negligible predicted-vs-observed residual.
