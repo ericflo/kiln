@@ -1,5 +1,47 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#502 GDN full-chunk audit (2026-04-24)
+
+**Scope:** audit whether the freshly merged PR #502 post-PR-#500 profile leaves
+one bounded CUDA improvement to port into Kiln's vendored GDN full-chunk
+prefill kernel.
+
+**Preflight outcome:** stop with a documentation-only PR. `gh pr list -R
+ericflo/kiln --limit 10` returned no open PRs, and the post-PR-#500 section
+below is present on `origin/main` at commit `76ea952`, with prompt-heavy
+prefill led by `gdn_full_chunk_forward_kernel` (**27.9%** GPU-kernel share)
+and `ucopy_bf16` (**22.3%**). The CUDA file still exists, but the upstream
+audit found no remaining bounded micro-port inside the task envelope.
+
+**Upstream reviewed:** `fla-org/flash-linear-attention` commit
+`101240f396a6b53e452defb371e3d6e98211535a` and `vllm-project/vllm` commit
+`9f771b3ab92d26a7d91a8255572c5d8d2b3ad601`, specifically the chunk gated-delta
+and fused recurrent kernels documented in
+`docs/phase-c60/post-502-gdn-full-chunk-audit.md`.
+
+**Audit result:** no CUDA source change. Current upstream still gets its
+remaining full-chunk advantage from a structural state-ownership model: WY-style
+chunk preparation plus tiled FP32 recurrent-state ownership in the update
+kernel. Kiln's current `gdn_full_chunk_forward_kernel` consumes the existing
+cuBLAS-produced `kkt`, `qkt`, `ks_entry`, and `q_s` tensors and then performs
+value-lane forward substitution/output accumulation plus a scalar BF16 state
+epilogue behind the existing C ABI. Porting the remaining upstream shape would
+therefore require a larger re-vendor/rewrite of the chunk/state boundary, not a
+bounded patch to `gdn_full_chunk_forward.cu`.
+
+**Consumed sub-ideas:** the bounded slices implied by upstream have already
+been attempted or disqualified in the history below: recurrent-state BF16
+round-trip removal failed parity; decay hoisting, `k_t` staging, and triangular
+front-half packing did not produce durable prompt-heavy wins; the tiled
+recurrent-state epilogue was **1.8% slower** than warmed `main`; and the
+post-#442 vLLM audit already concluded the remaining delta is structural only.
+
+**Validation:** no RunPod was launched and no CUDA build was run because the
+remaining-work precondition failed before source edits. Local validation:
+`git diff --check`.
+
+Detailed artifact: `docs/phase-c60/post-502-gdn-full-chunk-audit.md`.
+
 ## Phase 6 post-#500 current-main profile refresh (2026-04-24)
 
 **Scope:** refresh the Phase 6 CUDA source of truth after PR
