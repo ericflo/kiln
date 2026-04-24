@@ -1,0 +1,6 @@
+Start (ns),End (ns),Duration (ns),DurChild (ns),DurNonChild (ns),Name,PID,TID,Lvl,NumChild,RangeId,ParentId,RangeStack,NameTree
+26637189664,26638286730,1097066,0,1097066,:kiln/norm/pre_attn,19006,19006,0,0,1,,:1,:kiln/norm/pre_attn
+26638288060,26782865043,144576983,0,144576983,:kiln/gdn/in_proj,19006,19006,0,0,2,,:2,:kiln/gdn/in_proj
+26782869203,26783119563,250360,243260,7100,:kiln/gdn/conv,19006,19006,0,2,3,,:3,:kiln/gdn/conv
+26782870423,26782924043,53620,0,53620,:kiln/gdn/conv/layout,19006,19006,1,0,4,3,:3:4,--:kiln/gdn/conv/layout
+26782925253,26783114893,189640,0,189640,:kiln/gdn/conv/prefill_update,19006,19006,1,0,5,3,:3:5,--:kiln/gdn/conv/prefill_update

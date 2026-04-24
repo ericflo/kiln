@@ -1,0 +1,122 @@
+{
+  "phase": "c56-post-476-mtp-decode-profile",
+  "date": "2026-04-24",
+  "commit": "f1530071bb489b4d72bbf8e6ad0062281b52c0bf",
+  "commit_short": "f153007",
+  "gpu": "NVIDIA RTX A6000",
+  "compute_capability": "8.6",
+  "driver_version": "550.127.08",
+  "vram_mb": 49140,
+  "pod_id": "2cetn7tf9zckij",
+  "nsight_systems": "2024.5.1.113-245134619542v0",
+  "workload": {
+    "command": "KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_MTP_ARGMAX_FP32=1 KILN_W4A16=1 KILN_CUDA_GRAPHS=true ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --prompt-subset humaneval --chat-template --latency-only --temperature 0.0 --seed 1",
+    "prompt_tokens_requested": 512,
+    "prompt_tokens_measured": 515,
+    "max_output_tokens": 128,
+    "prompt_subset": "humaneval",
+    "paged": true,
+    "native_mtp": true,
+    "w4a16": true,
+    "cuda_graphs": true
+  },
+  "profile_status": "blocked_before_decode",
+  "failure": {
+    "stage": "MTP prefill (paged with last-hidden), GDN layer 0",
+    "error": "causal_conv1d_prefill kernel failed: kiln_causal_conv1d_prefill_bf16_f32 failed with status 3",
+    "also_reproduced_without_cuda_graphs": true
+  },
+  "decode_tok_s": null,
+  "mean_itl_ms": null,
+  "alpha": null,
+  "decode_window_available": false,
+  "decode_window_method": "C52/C54 first :kiln/mtp/step start through final decode NVTX end, excluding :kiln/mtp/step parent wrapper; not computed because the run failed during native-MTP prefill before any :kiln/mtp/step range.",
+  "fallback_prefill": {
+    "appears_in_failed_prefill_trace": false,
+    "appears_in_decode_window": null,
+    "instance_count": null,
+    "wall_clock_share_pct": null,
+    "note": "No :kiln/gdn/conv/fallback_prefill NVTX range appeared before failure, but the decode-window question remains unconfirmed because decode did not start."
+  },
+  "top_nvtx_ranges": [
+    {
+      "rank": 1,
+      "range": ":kiln/gdn/in_proj",
+      "wall_ms": 144.576983,
+      "share_pct": 98.9,
+      "instances": 1,
+      "window": "failed_prefill_before_decode"
+    },
+    {
+      "rank": 2,
+      "range": ":kiln/norm/pre_attn",
+      "wall_ms": 1.097066,
+      "share_pct": 0.8,
+      "instances": 1,
+      "window": "failed_prefill_before_decode"
+    },
+    {
+      "rank": 3,
+      "range": ":kiln/gdn/conv",
+      "wall_ms": 0.250360,
+      "share_pct": 0.2,
+      "instances": 1,
+      "window": "failed_prefill_before_decode"
+    }
+  ],
+  "conv_child_attribution": [
+    {
+      "range": ":kiln/gdn/conv/layout",
+      "wall_ms": 0.053620,
+      "instances": 1
+    },
+    {
+      "range": ":kiln/gdn/conv/prefill_update",
+      "wall_ms": 0.189640,
+      "instances": 1
+    }
+  ],
+  "top_cuda_kernels": [
+    {
+      "rank": 1,
+      "kernel": "ucopy_bf16",
+      "total_ms": 192.268138,
+      "share_pct": 88.2,
+      "instances": 250,
+      "window": "failed_prefill_before_decode"
+    },
+    {
+      "rank": 2,
+      "kernel": "cast_bf16_f32",
+      "total_ms": 25.365062,
+      "share_pct": 11.6,
+      "instances": 104,
+      "window": "failed_prefill_before_decode"
+    },
+    {
+      "rank": 3,
+      "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(T1::Params)",
+      "total_ms": 0.200449,
+      "share_pct": 0.1,
+      "instances": 1,
+      "window": "failed_prefill_before_decode"
+    },
+    {
+      "rank": 4,
+      "kernel": "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nn",
+      "total_ms": 0.099648,
+      "share_pct": 0.0,
+      "instances": 1,
+      "window": "failed_prefill_before_decode"
+    },
+    {
+      "rank": 5,
+      "kernel": "is_u32_bf16",
+      "total_ms": 0.026048,
+      "share_pct": 0.0,
+      "instances": 1,
+      "window": "failed_prefill_before_decode"
+    }
+  ],
+  "recommendation": "Do not pick a new Phase 6 decode hotspot from this run. First fix or guard the CUDA causal_conv1d_prefill fast path for the real native-MTP prefill workload on A6000; rerun C56 after MTP prefill reaches decode."
+}

@@ -1,0 +1,22 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-24T08:17:10.480584Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-24T08:17:10.481830Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-24T08:17:10.482002Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-24T08:17:10.482015Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-24T08:17:10.482100Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+[2m2026-04-24T08:17:35.275662Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m marlin batch pack complete [3mn_inputs[0m[2m=[0m104 [3mn_packed[0m[2m=[0m104 [3mpack_elapsed_ms[0m[2m=[0m22065 [3mparallel[0m[2m=[0mtrue
+[kiln] marlin batch pack: 104/104 projections in 22065 ms (parallel)
+Model loaded in 25.89s (backend: cuda, VRAM: 17526 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=49] (515 prompt tokens)...
+Error: MTP latency benchmark failed
+
+Caused by:
+    0: MTP prefill (paged with last-hidden) failed
+    1: gated deltanet layer 0 (linear attention, paged)
+    2: causal_conv1d_prefill kernel failed
+    3: kiln_causal_conv1d_prefill_bf16_f32 failed with status 3

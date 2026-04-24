@@ -7393,3 +7393,52 @@ native-MTP draft GDN conv shape before moving to `:kiln/gdn/gates` +
 Do not retry the existing `seq_len == 1` update kernel; if the minimal CUDA
 prefill support envelope cannot cover the MTP draft shape, retarget to the
 gates/gated-norm cluster instead.
+
+## Phase 6 C56 post-#476 native-MTP decode profile (2026-04-24)
+
+C56 attempted to replace C54 with a fresh post-#476 native-MTP decode-window profile on current `origin/main` at `f1530071bb489b4d72bbf8e6ad0062281b52c0bf` (`phase6: add CUDA conv1d prefill fast path`). The run used the required `ghcr.io/ericflo/kiln-runpod:latest` image on on-demand pod `2cetn7tf9zckij` with an RTX A6000 (`sm_86`, 49140 MiB, driver 550.127.08). Nsight Systems `2024.5.1` was installed from the existing NVIDIA CUDA apt repo because the baked PATH still pointed at `2023.4.4`.
+
+The focused validation/build commands passed before profiling:
+
+- `cargo test -p kiln-conv1d-kernel --release -- --nocapture`: 4 passed
+- `cargo test -p kiln-model --release --features cuda test_causal_conv1d_update_matches_fallback -- --nocapture`: 1 passed
+- `cargo test -p kiln-model --release --features cuda causal_conv1d_prefill -- --nocapture`: 1 passed; max abs diff `1.4901161e-8`, state parity max abs diff `0`
+- `cargo build --release --features cuda,nvtx --bin kiln-bench`: passed
+
+The required C52/C54 workload did **not** reach decode. It failed during native-MTP prefill in GDN layer 0:
+
+```text
+Error: MTP latency benchmark failed
+
+Caused by:
+    0: MTP prefill (paged with last-hidden) failed
+    1: gated deltanet layer 0 (linear attention, paged)
+    2: causal_conv1d_prefill kernel failed
+    3: kiln_causal_conv1d_prefill_bf16_f32 failed with status 3
+```
+
+The same failure reproduced with `KILN_CUDA_GRAPHS=false`, so it is not isolated to CUDA graph capture. Because no `:kiln/mtp/step` range was emitted, the C52/C54 decode-window method (first `:kiln/mtp/step` start through final decode NVTX end, excluding the `:kiln/mtp/step` parent wrapper) could not be applied. Decode tok/s, mean ITL, MTP α, top decode NVTX ranges, and top decode-window CUDA kernels are therefore unavailable from C56.
+
+`:kiln/gdn/conv/fallback_prefill` does not appear in the failed prefill trace, but this does not confirm its decode-window removal because decode never starts. The fast path is reached as `:kiln/gdn/conv/prefill_update` and then the CUDA wrapper returns status `3`.
+
+Failed-prefill NVTX ranges, included only as diagnostic context:
+
+| Rank | NVTX range | Wall time | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `:kiln/gdn/in_proj` | 144.576983 ms | 98.9% | 1 |
+| 2 | `:kiln/norm/pre_attn` | 1.097066 ms | 0.8% | 1 |
+| 3 | `:kiln/gdn/conv` | 0.250360 ms | 0.2% | 1 |
+
+Failed-prefill CUDA kernels, included only as diagnostic context:
+
+| Rank | CUDA kernel | Total time | Share | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ucopy_bf16` | 192.268138 ms | 88.2% | 250 |
+| 2 | `cast_bf16_f32` | 25.365062 ms | 11.6% | 104 |
+| 3 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8` | 0.200449 ms | 0.1% | 1 |
+| 4 | `ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nn` | 0.099648 ms | 0.0% | 1 |
+| 5 | `is_u32_bf16` | 0.026048 ms | 0.0% | 1 |
+
+Recommendation: do not pick the next Phase 6 decode optimization target from C56. First fix or guard the CUDA causal-conv1d prefill fast path for the real native-MTP prefill workload on A6000, then rerun C56. Until that rerun reaches `:kiln/mtp/step`, C54 remains the last valid native-MTP decode-window source of truth.
+
+Full reduced artifact: `docs/phase-c56/post-476-mtp-decode-profile.md`. Machine-readable summary: `docs/phase-c56/summary.json`.
