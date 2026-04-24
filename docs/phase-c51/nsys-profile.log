@@ -1,0 +1,130 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+2026-04-24T03:19:59.988522Z  INFO kiln_model::loader: Loading model from /workspace/qwen3.5-4b (2 shards)
+2026-04-24T03:19:59.989837Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-04-24T03:19:59.990040Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-04-24T03:19:59.990054Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-04-24T03:19:59.990216Z  INFO kiln_server::device: CUDA available — using GPU device 0
+Model loaded in 2.50s (backend: cuda, VRAM: 16367 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=49] (515 prompt tokens)...
+    Prefill (MTP): 440.1ms (1170 tok/s)
+2026-04-24T03:20:04.141247Z  INFO kiln_model::forward: deferred native MTP CPU load complete load_elapsed_ms=2
+2026-04-24T03:20:04.190898Z  INFO kiln_model::forward: lazy native MTP GPU upload complete upload_elapsed_ms=49
+    Decode (MTP): 128 tokens, mean ITL 45.7ms (21.9 tok/s), α = 0.707 (53/75)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 2.50s (VRAM: 16367 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         515
+Prefill time:          440.1 ms (1170 tok/s)
+Time to first token:   440.1 ms
+Mean inter-token:      45.7 ms (21.9 tok/s)
+P50 inter-token:       32.3 ms
+P99 inter-token:       118.0 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.707
+
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 2.5025469129999998,
+    "model_vram_mb": 16367
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 515,
+    "prefill_time_ms": 440.089777,
+    "prefill_tokens_per_sec": 1170.2157762233137,
+    "time_to_first_token_ms": 440.089777,
+    "mean_inter_token_ms": 45.745464389763775,
+    "p50_inter_token_ms": 32.282146,
+    "p99_inter_token_ms": 117.974034,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 21.86009068526944,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.7066666666666667,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}
+Generating '/tmp/nsys-report-b42f.qdstrm'
+
+[1/1] [0%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [0%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [5%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [6%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [7%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [8%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [9%                          ] kiln-post466-mtp.nsys-rep
+[1/1] [10%                         ] kiln-post466-mtp.nsys-rep
+[1/1] [11%                         ] kiln-post466-mtp.nsys-rep
+[1/1] [12%                         ] kiln-post466-mtp.nsys-rep
+[1/1] [13%                         ] kiln-post466-mtp.nsys-rep
+[1/1] [14%                         ] kiln-post466-mtp.nsys-rep
+[1/1] [=15%                        ] kiln-post466-mtp.nsys-rep
+[1/1] [=16%                        ] kiln-post466-mtp.nsys-rep
+[1/1] [=17%                        ] kiln-post466-mtp.nsys-rep
+[1/1] [==18%                       ] kiln-post466-mtp.nsys-rep
+[1/1] [==19%                       ] kiln-post466-mtp.nsys-rep
+[1/1] [==20%                       ] kiln-post466-mtp.nsys-rep
+[1/1] [==21%                       ] kiln-post466-mtp.nsys-rep
+[1/1] [===22%                      ] kiln-post466-mtp.nsys-rep
+[1/1] [===23%                      ] kiln-post466-mtp.nsys-rep
+[1/1] [===24%                      ] kiln-post466-mtp.nsys-rep
+[1/1] [====25%                     ] kiln-post466-mtp.nsys-rep
+[1/1] [====26%                     ] kiln-post466-mtp.nsys-rep
+[1/1] [====27%                     ] kiln-post466-mtp.nsys-rep
+[1/1] [====28%                     ] kiln-post466-mtp.nsys-rep
+Importer error status: Importation failed.
+Import Failed with unexpected exception: /dvs/p4/build/sw/devtools/Agora/Rel/CUDA12.4/QuadD/Host/QdstrmImporter/main.cpp(34): Throw in function {anonymous}::Importer::Importer(const boost::filesystem::path&, const boost::filesystem::path&)
+Dynamic exception type: boost::wrapexcept<QuadDCommon::RuntimeException>
+std::exception::what: RuntimeException
+[QuadDCommon::tag_message*] = Status: AnalysisFailed
+Error {
+  Type: RuntimeError
+  SubError {
+    Type: InvalidArgument
+    Props {
+      Items {
+        Type: OriginalExceptionClass
+        Value: "N5boost10wrapexceptIN11QuadDCommon24InvalidArgumentExceptionEEE"
+      }
+      Items {
+        Type: OriginalFile
+        Value: "/dvs/p4/build/sw/devtools/Agora/Rel/CUDA12.4/QuadD/Host/Analysis/Modules/EventCollection.cpp"
+      }
+      Items {
+        Type: OriginalLine
+        Value: "1048"
+      }
+      Items {
+        Type: OriginalFunction
+        Value: "void QuadDAnalysis::EventCollection::CheckOrder(QuadDAnalysis::EventCollectionHelper::EventContainer&, const QuadDAnalysis::ConstEvent&) const"
+      }
+      Items {
+        Type: ErrorText
+        Value: "Wrong event order has been detected when adding events to the collection:\nnew event ={ StartNs=6310866305 StopNs=6310869305 GlobalId=281722457438623 Event={ TraceProcessEvent=[{ Correlation=2608736 EventClass=1 TextId=595 ReturnValue=0 },] } Type=48 }\nlast event ={ StartNs=6358907422 StopNs=6358907742 GlobalId=281722457438623 Event={ TraceProcessEvent=[{ Correlation=2679247 EventClass=1 TextId=596 ReturnValue=0 },] } Type=48 }"
+      }
+    }
+  }
+}
+Generated:
+    /tmp/kiln-post466-mtp.qdstrm

@@ -7190,3 +7190,40 @@ C40f-style MTP decode A/B (`--prompt-subset humaneval --prompt-tokens 512 --max-
 | Fused CUDA default | 1,2,3 | 38.58 tok/s | 25.92 ms |
 
 Overall decode median improved ~2.8%, which is safely below the requested `kiln/gdn/gated_norm` 25% local floor and consistent with prior CUDA-graphs fusion-null notes. The fused kernel remains safe to ship because parity passed and the kill switch preserves fallback behavior, but the next optimization task should target a different hotspot or a memory-traffic-reducing extension of an existing on-chip GDN kernel rather than retrying standalone gated-norm fusion.
+
+## Phase 6 — post-#466 C40f-style native MTP decode profile
+
+C51 re-ran the C40f-style native-MTP decode workload on current `origin/main`
+after PR #466 landed the fused CUDA GDN gated RMSNorm kernel. RunPod used the
+mandatory `ghcr.io/ericflo/kiln-runpod:latest` image on an on-demand NVIDIA RTX
+A6000 at commit `831d879d2ddb2500fd49f76c9b5df89aedd923b1`.
+
+Artifact: `docs/phase-c51/post-466-mtp-decode-profile.md`; machine summary:
+`docs/phase-c51/summary.json`.
+
+Benchmark command shape: `KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1
+KILN_MTP_ARGMAX_FP32=1`, paged, 512 prompt tokens, 128 output tokens,
+`--prompt-subset humaneval`, chat template, temperature `0.0`, seeds `1,2,3`.
+Median decode was `37.07 tok/s`, median mean ITL was `26.97 ms`, and median α
+was `0.588`. The per-seed decode tok/s values were `41.41`, `37.07`, and
+`32.06`.
+
+Profiler status: `nsys profile` exited `0` and generated a `94M` `.qdstrm`, but
+the baked Nsight Systems `2023.4.4` importer failed with the known QuadD
+wrong-event-order error before producing `/tmp/kiln-post466-mtp.nsys-rep`. The
+committed `docs/phase-c51/nsys-profile.log`, `nsys-nvtxsum.txt`,
+`nsys-gpu-kernsum.txt`, and `nsys-cuda-api.txt` preserve the failed capture and
+missing-stats evidence; the multi-MB raw `.qdstrm` is intentionally not
+committed.
+
+Top decode hotspots: unavailable for post-#466. Do not invent wall-clock
+percentages or treat the C50 post-#442 carry-forward table as fresh after PR
+#466. For context only, the freshest successful attribution before #466 had
+`:kiln/gdn/gates` `17.9%`, `:kiln/gdn/gated_norm` `17.3%`, and
+`:kiln/gdn/qk_norm` `15.0%`; those numbers are now stale.
+
+Recommended next implementation target: conditional GDN gate/gated-norm cluster
+work only if a successful post-#466 profiler capture confirms it remains the top
+decode cluster. Otherwise, first repair or bypass the Nsight importer failure
+with a compatible newer `nsys`, smaller decode-window capture, or alternate
+profiler path that yields current NVTX/kernel attribution.
