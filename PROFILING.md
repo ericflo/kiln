@@ -7143,3 +7143,11 @@ Compared with `docs/phase-c40f/summary.json`, C48 is still below the MTP
 acceptance floor and decode is `0.703x` of the C40f median, so C47 does not
 change the MTP go/no-go. Next boundary is benchmark harness/prompt-distribution
 parity, not production RMSNorm/broadcast math.
+
+## 2026-04-24 C49 MTP harness-parity A/B
+
+C49 compares the C48-style forced-MTP command against C40f-style harness flags on the same current-main commit and A6000. See `docs/phase-c49/mtp-harness-parity-ab.md` and `docs/phase-c49/summary.json`.
+
+Result: C40f-style flags restore the median acceptance rate from `0.391` to `0.707` and median decode from `28.73 tok/s` to `42.45 tok/s`. The restored arm clears both gates: α ≥ `0.65`, and decode is `1.11x` the C40f historical median of `38.25 tok/s` rather than outside the allowed 10% band.
+
+Recommendation: treat C48 as a harness/workload comparability artifact and resume Phase 6 MTP performance/profiling work from the C40f-style harness anchor. Do not reopen model-math investigation based on C48 alone.
