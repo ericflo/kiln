@@ -107,6 +107,13 @@ sccache --start-server
 echo "sccache server started"
 sccache --show-stats | head -8
 
+echo ""
+echo "=== pod resources ==="
+free -h || true
+echo "cpus: $(nproc)"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>/dev/null || echo "no nvidia-smi"
+echo ""
+
 # Restore flash-attn artifacts if a kiln checkout is present
 if [ -d "${KILN_REPO_DIR}" ]; then
     b2 account authorize "${B2_APPLICATION_KEY_ID}" "${B2_APPLICATION_KEY}" >/dev/null 2>&1
@@ -133,6 +140,11 @@ export AWS_SECRET_ACCESS_KEY="${B2_APPLICATION_KEY}"
 export RUSTC_WRAPPER=sccache
 export PATH="/usr/local/cuda/bin:\${PATH}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+# Cap build parallelism: nvcc -O3 can use 4-8GB per TU, and 5 CUDA kernel
+# crates × 24 default cargo jobs × multi-arch was OOM-killing sshd.
+export CARGO_BUILD_JOBS=4
+export NVCC_THREADS=1
+export KILN_CUDA_ARCHS=86
 ENVEOF
     echo "Wrote ${ENV_FILE}"
 fi
@@ -149,9 +161,27 @@ export AWS_SECRET_ACCESS_KEY="${B2_APPLICATION_KEY}"
 export RUSTC_WRAPPER=sccache
 export PATH="/usr/local/cuda/bin:\${PATH}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+# Cap build parallelism: nvcc -O3 can use 4-8GB per TU, and 5 CUDA kernel
+# crates × 24 default cargo jobs × multi-arch was OOM-killing sshd.
+export CARGO_BUILD_JOBS=4
+export NVCC_THREADS=1
+export KILN_CUDA_ARCHS=86
 ENVEOF
+
+# Postmortem helper — run after any build wedge / failure to capture state
+cat > /root/kiln-postmortem.sh <<'POSTEOF'
+#!/usr/bin/env bash
+echo "=== free -h ==="; free -h
+echo "=== dmesg tail (OOM?) ==="; dmesg 2>/dev/null | tail -200
+echo "=== top procs ==="; ps auxf --sort=-%mem | head -30
+echo "=== disk ==="; df -h /workspace /tmp 2>/dev/null
+POSTEOF
+chmod +x /root/kiln-postmortem.sh
 
 echo ""
 echo "Build cache ready. Source the env file and build:"
 echo "  source /root/.kiln-build-env"
 echo "  cargo build --release --features cuda"
+echo ""
+echo "If a build wedges or sshd dies mid-build, run:"
+echo "  /root/kiln-postmortem.sh"
