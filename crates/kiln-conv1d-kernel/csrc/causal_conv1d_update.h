@@ -64,6 +64,34 @@ kiln_conv1d_status_t kiln_causal_conv1d_update_bf16_f32(
     void *stream
 );
 
+// Multi-token causal depthwise conv1d prefill with fused SiLU.
+//
+// All pointers are CUDA device memory, contiguous.
+//   x          : bf16, [B, C, T], T > 1
+//   weight     : bf16, [C, K]  (flat; caller's [C, 1, K] view is already contiguous)
+//   conv_state : f32,  [B, C, K-1] — read as the entry state, then written
+//   out        : f32,  [B, C, T]
+// Shape:
+//   B    = batch
+//   C    = channels
+//   T    = sequence length (must be > 1)
+//   K    = kernel width (must be 4 for the current specialisation)
+//   silu = 1 to fuse SiLU, 0 to leave the raw accumulator (parity-test mode)
+//
+// Returns 0 on success, non-zero on launch/config failure.
+kiln_conv1d_status_t kiln_causal_conv1d_prefill_bf16_f32(
+    const void *x,
+    const void *weight,
+    void *conv_state,
+    void *out,
+    int batch,
+    int channels,
+    int seq_len,
+    int kernel_width,
+    int silu,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif
