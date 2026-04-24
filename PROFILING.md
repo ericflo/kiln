@@ -7979,3 +7979,64 @@ Failed-prefill CUDA kernels, included only as diagnostic context:
 Recommendation: do not pick the next Phase 6 decode optimization target from C56. First fix or guard the CUDA causal-conv1d prefill fast path for the real native-MTP prefill workload on A6000, then rerun C56. Until that rerun reaches `:kiln/mtp/step`, C54 remains the last valid native-MTP decode-window source of truth.
 
 Full reduced artifact: `docs/phase-c56/post-476-mtp-decode-profile.md`. Machine-readable summary: `docs/phase-c56/summary.json`.
+
+## Phase 7 GDN prefill memory preflight (2026-04-24)
+
+**Outcome: current `origin/main` (`4abc2ca`) no longer OOMs at 64k with W4A16 + FP8 KV on an RTX A6000, but the monolithic CUDA prefill path is still activation-bound and effectively hits the A6000 ceiling at 128k.** The required 32k and 64k probes completed with `KILN_STREAMING_PREFILL=0`, `KILN_W4A16=1`, `KILN_KV_CACHE_FP8=1`, and `KILN_CUDA_GRAPHS=true`; peak memory was 25.3 GiB and 33.3 GiB respectively. An exploratory 128k monolithic run completed the latency prefill/decode portion at 48.6 GiB peak, within ~0.6 GiB of the 49.1 GiB device total, then was SIGTERM'd during the post-latency throughput sweep to stay inside the task budget. The already-shipped opt-in streaming prefill path (`KILN_STREAMING_PREFILL=1`, default 8192-token tile) ran the same 128k latency probe at 25.4 GiB peak with equivalent prefill throughput.
+
+### Hardware and cleanup
+
+- **Pod:** direct RunPod fallback `jc3jwpaps4e8ro`, `kiln-gdn-prefill-memory-c62`; pool acquire failed with A6000 supply exhaustion.
+- **Image:** `ghcr.io/ericflo/kiln-runpod:latest`.
+- **GPU:** NVIDIA RTX A6000, 49140 MiB, driver 550.127.08, CUDA 12.4 runtime.
+- **Repository:** `/workspace/kiln`, `origin/main` at `4abc2ca`.
+- **Cleanup:** fallback pod explicitly terminated after measurements.
+
+### Commands
+
+Current `kiln-bench` requires `--model-path`, so the required commands were run with that added argument and with an `nvidia-smi --query-gpu=timestamp,memory.used --format=csv -lms 250` sampler around the process:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench
+
+KILN_CUDA_ARCHS=86 \
+KILN_W4A16=1 \
+KILN_KV_CACHE_FP8=1 \
+KILN_CUDA_GRAPHS=true \
+KILN_STREAMING_PREFILL=0 \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 32768 --max-output-tokens 1 --skip-training
+
+KILN_CUDA_ARCHS=86 \
+KILN_W4A16=1 \
+KILN_KV_CACHE_FP8=1 \
+KILN_CUDA_GRAPHS=true \
+KILN_STREAMING_PREFILL=0 \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 65536 --max-output-tokens 1 --skip-training
+```
+
+Exploratory ceiling/streaming commands added `--latency-only` only for 128k where the post-latency throughput sweep was not needed for this memory preflight.
+
+### Measurements
+
+| Prompt request | Actual prompt | Path | Peak GPU memory | Model-load memory | Delta over load | Prefill time | Prefill tok/s | Status |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 32768 | 32768 | monolithic (`KILN_STREAMING_PREFILL=0`) | 25320 MiB | 17526 MiB | 7794 MiB | 20340.1 ms | 1611 | pass |
+| 65536 | 65533 | monolithic (`KILN_STREAMING_PREFILL=0`) | 33327 MiB | 17526 MiB | 15801 MiB | 25868.8 ms | 2533 | pass |
+| 131072 | 131065 | monolithic (`KILN_STREAMING_PREFILL=0`) | 48562 MiB | 17526 MiB | 31036 MiB | 58397.6 ms | 2244 | latency pass; SIGTERM during throughput sweep |
+| 131072 | 131065 | streaming (`KILN_STREAMING_PREFILL=1`, tile 8192) | 25384 MiB | 17526 MiB | 7858 MiB | 58013.7 ms | 2259 | pass (`--latency-only`) |
+
+The required 32k/64k validation commands exited `0`. The harness printed `generation failed` in the later throughput section, but the process still exited successfully and the latency prefill/decode data were emitted. The optional 128k monolithic run also completed prefill and decode, but was manually terminated after it entered the unnecessary throughput sweep.
+
+### Conclusion
+
+FP8 KV is not the limiting factor for these long prompts. With `KILN_KV_CACHE_FP8=1`, memory still scales almost linearly with monolithic GDN/full-forward activations: +7.8 GiB at 32k, +15.8 GiB at 64k, and +31.0 GiB at 128k over the loaded model. The 64k path now fits on A6000, but 128k monolithic prefill runs with only ~578 MiB headroom, so the practical monolithic ceiling is around 128k on this 48 GiB card.
+
+The streaming path is already present and opt-in on CUDA. At 128k it reduces peak memory from 48.6 GiB to 25.4 GiB while preserving roughly the same prefill throughput in this single-run probe (2259 tok/s vs 2244 tok/s). That makes the next Phase 7 slice a defaulting/guarding task, not a new CUDA-kernel task: run a small interleaved regression at 32k/64k/128k with `KILN_STREAMING_PREFILL=0/1`, then enable streaming by default for CUDA prompts above a conservative threshold (recommended first threshold: 65536 tokens) if decode and TTFT stay within noise.
+
+Detailed artifact: `docs/phase-c62/gdn-prefill-memory-preflight.md`.
