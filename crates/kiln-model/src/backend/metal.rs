@@ -25,6 +25,7 @@ const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
+const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 
 #[derive(Debug)]
 pub struct MetalBackend {
@@ -98,6 +99,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_conv1d_prefill_pipeline(metal_device)?;
     metal_conv1d_update_pipeline(metal_device)?;
     metal_lm_head_pipeline(metal_device)?;
+    if !metal_lm_head_argmax_disabled() {
+        metal_lm_head_argmax_pipeline(metal_device)?;
+    }
     if !metal_mlp_gate_up_fusion_disabled() {
         metal_mlp_gate_up_pipeline(metal_device)?;
     }
@@ -598,6 +602,10 @@ fn metal_rms_norm_disabled() -> bool {
 
 pub(crate) fn metal_mlp_gate_up_fusion_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_FUSION)
+}
+
+pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
+    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX)
 }
 
 fn env_present(var: &str) -> bool {
@@ -1525,6 +1533,53 @@ kernel void kiln_lm_head_bf16(
     }
     out[gid] = static_cast<bfloat>(acc);
 }
+
+kernel void kiln_lm_head_argmax_chunks_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device float* partial_scores [[buffer(2)]],
+    device float* partial_indices [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant uint& vocab [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]]
+) {
+    threadgroup float scores[256];
+    threadgroup float indices[256];
+
+    const uint col = group * 256 + tid;
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (col < vocab) {
+        float acc = 0.0f;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(x[i]) * static_cast<float>(weight_t[i * vocab + col]);
+        }
+        score = static_cast<float>(static_cast<bfloat>(acc));
+        index = static_cast<float>(col);
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other_score = scores[tid + stride];
+            const float other_index = indices[tid + stride];
+            if (other_score > scores[tid] ||
+                (other_score == scores[tid] && other_index < indices[tid])) {
+                scores[tid] = other_score;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        partial_scores[group] = scores[0];
+        partial_indices[group] = indices[0];
+    }
+}
 "#;
 
 const METAL_MLP_GATE_UP_KERNEL: &str = r#"
@@ -1878,6 +1933,35 @@ fn metal_lm_head_pipeline(
     Ok(pipeline)
 }
 
+fn metal_lm_head_argmax_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head argmax pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_argmax_chunks_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head argmax function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head argmax pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_mlp_gate_up_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -2020,6 +2104,22 @@ pub(crate) fn metal_lm_head_supports(x: &Tensor, weight_t: &Tensor) -> bool {
         && vocab <= u32::MAX as usize
 }
 
+pub(crate) fn metal_lm_head_argmax_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+    if metal_lm_head_argmax_disabled() {
+        return false;
+    }
+    if !metal_lm_head_supports(x, weight_t) {
+        return false;
+    }
+    let Ok((_, vocab)) = weight_t.dims2() else {
+        return false;
+    };
+    let num_groups = vocab.div_ceil(256);
+    // The final reduction is intentionally bounded to one threadgroup for the
+    // Qwen3.5-4B vocab path; larger vocabs fall back to materialized logits.
+    num_groups > 0 && num_groups <= 1024
+}
+
 pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
     anyhow::ensure!(
         metal_lm_head_supports(x, weight_t),
@@ -2086,6 +2186,110 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
     }
 
     Ok(out)
+}
+
+pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result<u32> {
+    anyhow::ensure!(
+        metal_lm_head_argmax_supports(x, weight_t),
+        "metal lm head argmax supports only BF16 [1,1,H] x [H,V] on Metal with <= 262144 vocab"
+    );
+    let (_, _, hidden) = x.dims3()?;
+    let (_, vocab) = weight_t.dims2()?;
+
+    let chunk_width = 256usize;
+    let num_groups = vocab.div_ceil(chunk_width);
+    let partial_scores = unsafe { Tensor::empty((num_groups,), DType::F32, x.device())? };
+    let partial_indices = unsafe { Tensor::empty((num_groups,), DType::F32, x.device())? };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal lm head argmax requires Metal tensors");
+    };
+    let pipeline = metal_lm_head_argmax_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_lm_head_argmax_chunks_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight_t.storage_and_layout();
+        let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
+        let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head argmax x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head argmax weight must be on Metal"),
+        };
+        let ps_metal = match &*ps_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head argmax partial scores must be on Metal"),
+        };
+        let pi_metal = match &*pi_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head argmax partial indices must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let ps_buf = candle_core::metal_backend::buffer_o(
+            ps_metal.buffer(),
+            &ps_layout,
+            partial_scores.dtype(),
+        );
+        let pi_buf = candle_core::metal_backend::buffer_o(
+            pi_metal.buffer(),
+            &pi_layout,
+            partial_indices.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+
+        let hidden_u32 = hidden as u32;
+        let vocab_u32 = vocab as u32;
+        encoder.set_bytes(4, &hidden_u32);
+        encoder.set_bytes(5, &vocab_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: num_groups,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: chunk_width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    // Commit the argmax dispatch before synchronously reading the tiny list of
+    // per-chunk winners back to the CPU for the final reduction.
+    drop(encoder);
+
+    let scores = partial_scores
+        .to_vec1::<f32>()
+        .context("read metal lm head argmax partial scores")?;
+    let indices = partial_indices
+        .to_vec1::<f32>()
+        .context("read metal lm head argmax partial indices")?;
+
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_idx = 0u32;
+    for (&score, &idx_f) in scores.iter().zip(indices.iter()) {
+        let idx = idx_f as u32;
+        if score > best_score || (score == best_score && idx < best_idx) {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+    Ok(best_idx)
 }
 
 pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> bool {
@@ -5605,6 +5809,35 @@ mod tests {
             "Metal LM-head mean_abs_diff={mean:e} exceeds tolerance"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_head_argmax_matches_materialized_logits() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let hidden = 128usize;
+        let vocab = 257usize;
+        let x_data: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+            .collect();
+        let weight_data: Vec<f32> = (0..(hidden * vocab))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight_t =
+            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+
+        assert!(metal_lm_head_argmax_supports(&x, &weight_t));
+        let logits = metal_lm_head_bf16(&x, &weight_t)?;
+        let reference = crate::sampling::greedy_sample(&logits)?;
+        let fused = metal_lm_head_argmax_bf16(&x, &weight_t)?;
+
+        assert_eq!(fused, reference);
         Ok(())
     }
 

@@ -2279,6 +2279,18 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
     Ok(x.broadcast_matmul(embed_tokens_t)?)
 }
 
+fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_lm_head_argmax_supports(x, embed_tokens_t) {
+            return crate::backend::metal::metal_lm_head_argmax_bf16(x, embed_tokens_t)
+                .context("metal lm_head argmax kernel failed");
+        }
+    }
+    let logits = lm_head_forward(x, embed_tokens_t)?;
+    Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
+}
+
 // ---------------------------------------------------------------------------
 // Gated DeltaNet (GDN) linear attention primitives
 // ---------------------------------------------------------------------------
@@ -5342,7 +5354,7 @@ pub fn model_forward_paged(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
-    let (logits, _hidden) = model_forward_paged_inner(
+    let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
         weights,
@@ -5377,7 +5389,7 @@ pub fn model_forward_paged_last_token(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
-    let (logits, _hidden) = model_forward_paged_inner(
+    let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
         weights,
@@ -5391,6 +5403,39 @@ pub fn model_forward_paged_last_token(
         LmHeadMode::LastRowOnly,
     )?;
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
+}
+
+/// Paged-KV single-token decode for greedy sampling.
+///
+/// This keeps the existing logits APIs intact but, on the Metal BF16 decode
+/// path, fuses the LM-head projection with argmax so generation does not
+/// materialize `[1, 1, vocab_size]` logits only to immediately reduce them.
+pub fn model_forward_paged_next_token_greedy(
+    backend: &dyn BackendRuntime,
+    token_id: u32,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+) -> Result<u32> {
+    let (_logits, _hidden, token) = model_forward_paged_inner(
+        backend,
+        &[token_id],
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+        LmHeadMode::LastRowArgmaxOnly,
+    )?;
+    token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
@@ -5453,7 +5498,7 @@ pub fn model_forward_paged_with_last_hidden(
     crate::mtp_debug::arm_c44_layer1_f32_row_capture();
     crate::mtp_debug::arm_c45_layer1_row_capture();
     crate::mtp_debug::arm_c46_layer1_row_provenance_capture();
-    let (logits, hidden) = model_forward_paged_inner(
+    let (logits, hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
         weights,
@@ -5498,7 +5543,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
     crate::mtp_debug::arm_c44_layer1_f32_row_capture();
     crate::mtp_debug::arm_c45_layer1_row_capture();
     crate::mtp_debug::arm_c46_layer1_row_provenance_capture();
-    let (logits, hidden) = model_forward_paged_inner(
+    let (logits, hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
         weights,
@@ -6055,6 +6100,10 @@ enum LmHeadMode {
     /// of `Full` because RMSNorm is per-position and the matmul reduces
     /// along `hidden_size` only.
     LastRowOnly,
+    /// Compute the final token's greedy argmax without materializing logits
+    /// when a backend-specific fused head supports it. Used only by greedy
+    /// single-token decode.
+    LastRowArgmaxOnly,
     /// Compute the LM head over every position AND return the last-row
     /// pre-final-norm hidden state. Used by
     /// [`model_forward_paged_with_last_hidden`] to surface per-position logits
@@ -6091,7 +6140,7 @@ fn model_forward_paged_inner(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
     lm_head_mode: LmHeadMode,
-) -> Result<(Option<Tensor>, Option<Tensor>)> {
+) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
 
@@ -6294,7 +6343,7 @@ fn model_forward_paged_inner(
                 hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
                 lm_head_forward(&hidden, &weights.embed_tokens_t)?
             };
-            Ok((Some(logits), None))
+            Ok((Some(logits), None, None))
         }
         LmHeadMode::LastRowOnly => {
             let logits = {
@@ -6303,7 +6352,16 @@ fn model_forward_paged_inner(
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
                 lm_head_forward(&normed, &weights.embed_tokens_t)?
             };
-            Ok((Some(logits), None))
+            Ok((Some(logits), None, None))
+        }
+        LmHeadMode::LastRowArgmaxOnly => {
+            let token = {
+                kiln_nvtx::range!(c"kiln/lm_head_argmax");
+                let last = hidden.narrow(1, seq_len - 1, 1)?;
+                let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
+                lm_head_argmax(&normed, &weights.embed_tokens_t)?
+            };
+            Ok((None, None, Some(token)))
         }
         LmHeadMode::FullWithLastHidden => {
             // Phase C18: `h_prev` must be returned POST-final-norm.
@@ -6326,7 +6384,7 @@ fn model_forward_paged_inner(
                 kiln_nvtx::range!(c"kiln/lm_head");
                 lm_head_forward(&normed, &weights.embed_tokens_t)?
             };
-            Ok((Some(logits), Some(last_hidden)))
+            Ok((Some(logits), Some(last_hidden), None))
         }
         LmHeadMode::LastRowWithLastHidden => {
             // Phase C18: same frame fix as `FullWithLastHidden`. For the
@@ -6345,9 +6403,9 @@ fn model_forward_paged_inner(
                 kiln_nvtx::range!(c"kiln/lm_head");
                 lm_head_forward(&last_hidden, &weights.embed_tokens_t)?
             };
-            Ok((Some(logits), Some(last_hidden)))
+            Ok((Some(logits), Some(last_hidden), None))
         }
-        LmHeadMode::Skip => Ok((None, None)),
+        LmHeadMode::Skip => Ok((None, None, None)),
     }
 }
 
@@ -6469,7 +6527,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
         };
 
         let state_for_tile: Option<&mut LinearAttentionState> = linear_state.as_deref_mut();
-        let (tile_logits, tile_hidden) = model_forward_paged_inner(
+        let (tile_logits, tile_hidden, _token) = model_forward_paged_inner(
             backend,
             &token_ids[cursor..end],
             weights,
@@ -6551,7 +6609,7 @@ pub fn model_forward_paged_streaming_with(
         // `Option<&mut T>::as_deref_mut()` produces `Option<&mut T>` again.
         let state_for_tile: Option<&mut LinearAttentionState> = linear_state.as_deref_mut();
 
-        let (tile_logits, _tile_hidden) = model_forward_paged_inner(
+        let (tile_logits, _tile_hidden, _token) = model_forward_paged_inner(
             backend,
             &token_ids[cursor..end],
             weights,
