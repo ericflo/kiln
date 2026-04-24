@@ -1102,7 +1102,7 @@ fn metal_gdn_recurrent_prefill_native_head_last_supports(
         && (b_state, h_state, dk_state, dv_state) == (batch, value_heads, dk, dv)
         && value_heads >= q_heads
         && value_heads % q_heads == 0
-        && seq_len > 1
+        && seq_len >= 1
         && seq_len <= METAL_GDN_RECURRENT_PREFILL_MAX_SEQ_LEN
         && dk == 128
         && dv > 0
@@ -5983,6 +5983,7 @@ mod tests {
             .reshape((batch, value_heads, seq_len, dk))?;
 
         let mut out_chunks = Vec::with_capacity(seq_len);
+        let mut state_ref_first = None;
         for t in 0..seq_len {
             let q_t = q_ref.narrow(2, t, 1)?.contiguous()?;
             let k_t = k_ref.narrow(2, t, 1)?.contiguous()?;
@@ -6001,6 +6002,9 @@ mod tests {
             let state_scaled = state_ref.broadcast_mul(&p_u)?;
             let delta_state = k_t_mat.matmul(&w)?;
             state_ref = (state_scaled + delta_state)?;
+            if t == 0 {
+                state_ref_first = Some(state_ref.clone());
+            }
             out_chunks.push(out_t);
         }
         let out_ref = Tensor::cat(&out_chunks, 2)?.transpose(1, 2)?.contiguous()?;
@@ -6077,6 +6081,43 @@ mod tests {
         assert!(
             native_state_mean < 3e-3,
             "GDN recurrent native prefill state mean_abs_diff={native_state_mean:e} exceeds tolerance"
+        );
+
+        let q_native_one = q_native.narrow(1, 0, 1)?.contiguous()?;
+        let k_native_one = k_native.narrow(1, 0, 1)?.contiguous()?;
+        let v_native_one = v_native.narrow(1, 0, 1)?.contiguous()?;
+        let beta_native_one = beta_native.narrow(1, 0, 1)?.contiguous()?;
+        let g_native_one = g_native.narrow(1, 0, 1)?.contiguous()?;
+        let mut state_native_one =
+            Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                .to_dtype(DType::BF16)?;
+        assert!(metal_gdn_recurrent_prefill_native_head_last_supports(
+            &q_native_one,
+            &k_native_one,
+            &v_native_one,
+            &beta_native_one,
+            &g_native_one,
+            &state_native_one
+        ));
+        let out_native_one = metal_gdn_recurrent_prefill_native_head_last_bf16(
+            &q_native_one,
+            &k_native_one,
+            &v_native_one,
+            &beta_native_one,
+            &g_native_one,
+            &mut state_native_one,
+        )?;
+        let out_ref_one = out_ref.narrow(1, 0, 1)?;
+        let state_ref_first = state_ref_first.expect("first recurrent state reference");
+        let native_one_out_max = max_abs_diff(&out_ref_one, &out_native_one)?;
+        let native_one_state_max = max_abs_diff(&state_ref_first, &state_native_one)?;
+        assert!(
+            native_one_out_max < 3e-2,
+            "GDN recurrent native decode out max_abs_diff={native_one_out_max:e} exceeds tolerance"
+        );
+        assert!(
+            native_one_state_max < 3e-2,
+            "GDN recurrent native decode state max_abs_diff={native_one_state_max:e} exceeds tolerance"
         );
 
         Ok(())
