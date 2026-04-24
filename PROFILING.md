@@ -1,5 +1,26 @@
 # Kiln Profiling Report
 
+## Phase 7 MTP acceptance-rate state-of-play audit (2026-04-24)
+
+**Scope:** doc-only consolidation of the 34 MTP-named phase-B / phase-C PRs
+(#311 through #382, plus C40+ refresh attempts and post-#481/#500/#502 GDN
+work) into a single H-hypothesis inventory + α gap quantification + remaining
+unknowns scoring. No pod spend, no SSH, no new Rust code.
+
+**Outcome:** every named hypothesis on the inference-side pipeline (H1–H14)
+is ruled out. Current canonical N=20 anchor (C40f) is α median **0.689**,
+95% CI [0.652, 0.723], 6/20 seeds ≥ paper-floor 0.72. Median decode 38.25
+tok/s — still below the +10% MTP-on vs plain-decode floor on this hardware.
+The remaining frontier is C36's seed-conditioned identity-bias regime split
+(80.85% of reject rows show `draft_top1 == last_token`; 0% of accept rows
+do; one of 3 seeds clears the floor under default flags). Recommended next
+H: stratified C29 v2 — re-run the existing top-K Jaccard / cos_sim probe on
+the existing dump pipeline but split by accept/reject, since C29's clean
+verdict was measured only on accepted-token positions. Falsification cost
+~30 min A6000 / ~$0.25. Full inventory table, scoring, anti-duplication
+evidence, and bench plan in
+[`docs/phase7-mtp-acceptance-state-of-play.md`](docs/phase7-mtp-acceptance-state-of-play.md).
+
 ## Phase 7 SGLang RadixAttention design audit (2026-04-24)
 
 **Scope:** doc-only audit of kiln's radix prefix cache (PR #512) and real-path
