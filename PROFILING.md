@@ -1,5 +1,17 @@
 # Kiln Profiling Report
 
+## Phase 7 SGLang RadixAttention design audit (2026-04-24)
+
+**Scope:** doc-only audit of kiln's radix prefix cache (PR #512) and real-path
+flat `RealPrefixCache` (PRs #515/#520/#521) against SGLang's RadixAttention
+(`python/sglang/srt/mem_cache/radix_cache.py` + `mamba_radix_cache.py`). No
+pod spend, no new Rust code.
+
+**Outcome:** design parity sufficient for kiln's target workloads; port-to-radix
+on the real path is speculative without branching-workload evidence. Detailed
+findings, 16-feature classification table, and reopen precondition in
+[`docs/phase7-sglang-radix-audit.md`](docs/phase7-sglang-radix-audit.md).
+
 ## Phase 7 kill-switch bisection follow-up (2026-04-24)
 
 **Scope:** follow-up to the post-#522 A/B above. Ran 6 arms × 3 runs with one
