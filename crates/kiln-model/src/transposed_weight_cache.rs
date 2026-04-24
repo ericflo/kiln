@@ -5,7 +5,8 @@ use std::io::Read;
 use std::io::Write;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
@@ -15,9 +16,14 @@ use memmap2::Mmap;
 use crate::forward::transposed_weight_bytes_2d;
 use crate::weights::WeightTensor;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const CACHE_MAGIC: &[u8; 8] = b"KILNTRP1";
-const CACHE_WRITE_QUEUE_BOUND: usize = 2;
+const CACHE_PAYLOAD_ALIGN: usize = 8;
+
+static CACHE_WRITE_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+static CACHE_WRITE_DISCONNECTED: AtomicU64 = AtomicU64::new(0);
+static CACHE_WRITE_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static CACHE_WRITE_FAILED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct CacheKey {
@@ -80,7 +86,7 @@ pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
 
     let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
     let bytes = Arc::<[u8]>::from(bytes);
-    let _ = queue_cache_write(cache_key, Arc::clone(&bytes));
+    let _ = queue_cache_write(cache_key, weight.clone());
     Ok(CachedTransposedWeightBytes {
         storage: CachedTransposedWeightStorage::Owned(bytes),
         shape,
@@ -155,32 +161,32 @@ fn try_mmap_cached(cache_key: &CacheKey) -> Result<Option<CachedTransposedWeight
 
 struct CacheWrite {
     cache_key: CacheKey,
-    data: Arc<[u8]>,
+    weight: WeightTensor,
 }
 
-fn queue_cache_write(cache_key: CacheKey, data: Arc<[u8]>) -> bool {
+fn queue_cache_write(cache_key: CacheKey, weight: WeightTensor) -> bool {
     let Some(sender) = cache_write_sender() else {
         return false;
     };
 
-    match sender.try_send(CacheWrite { cache_key, data }) {
-        Ok(()) => true,
-        Err(TrySendError::Full(_)) => {
-            tracing::debug!("transposed weight cache writer queue full; skipping cache write");
-            false
+    match sender.send(CacheWrite { cache_key, weight }) {
+        Ok(()) => {
+            CACHE_WRITE_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+            true
         }
-        Err(TrySendError::Disconnected(_)) => {
+        Err(_) => {
+            CACHE_WRITE_DISCONNECTED.fetch_add(1, Ordering::Relaxed);
             tracing::debug!("transposed weight cache writer disconnected; skipping cache write");
             false
         }
     }
 }
 
-fn cache_write_sender() -> Option<&'static SyncSender<CacheWrite>> {
-    static CACHE_WRITE_SENDER: OnceLock<Option<SyncSender<CacheWrite>>> = OnceLock::new();
+fn cache_write_sender() -> Option<&'static Sender<CacheWrite>> {
+    static CACHE_WRITE_SENDER: OnceLock<Option<Sender<CacheWrite>>> = OnceLock::new();
     CACHE_WRITE_SENDER
         .get_or_init(|| {
-            let (sender, receiver) = mpsc::sync_channel(CACHE_WRITE_QUEUE_BOUND);
+            let (sender, receiver) = mpsc::channel();
             match thread::Builder::new()
                 .name("kiln-transposed-weight-cache-writer".to_string())
                 .spawn(move || cache_writer_loop(receiver))
@@ -199,9 +205,21 @@ fn cache_write_sender() -> Option<&'static SyncSender<CacheWrite>> {
 }
 
 fn cache_writer_loop(receiver: Receiver<CacheWrite>) {
-    for CacheWrite { cache_key, data } in receiver {
-        if let Err(err) = try_write_cached(&cache_key, &data) {
-            tracing::debug!(error = %err, "failed to write transposed weight cache entry");
+    for CacheWrite { cache_key, weight } in receiver {
+        if cache_key.file_path.exists() {
+            continue;
+        }
+
+        let result = transposed_weight_bytes_2d(&weight)
+            .and_then(|(data, _shape)| try_write_cached(&cache_key, &data));
+        match result {
+            Ok(()) => {
+                CACHE_WRITE_COMPLETED.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(err) => {
+                CACHE_WRITE_FAILED.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(error = %err, "failed to write transposed weight cache entry");
+            }
         }
     }
 }
@@ -240,6 +258,17 @@ fn read_cached_payload<R: Read>(cache_key: &CacheKey, reader: &mut R) -> Result<
         "cache payload length mismatch: expected {}, got {}",
         cache_key.expected_len,
         data_len
+    );
+
+    let payload_offset = CACHE_MAGIC.len() + 4 + 4 + key_len + 8;
+    let padding_len = padding_for_alignment(payload_offset, CACHE_PAYLOAD_ALIGN);
+    let mut padding = vec![0u8; padding_len];
+    reader
+        .read_exact(&mut padding)
+        .context("cache entry truncated in payload alignment padding")?;
+    anyhow::ensure!(
+        padding.iter().all(|&byte| byte == 0),
+        "cache entry payload alignment padding is non-zero"
     );
 
     let mut payload = vec![0u8; data_len];
@@ -301,6 +330,18 @@ fn cached_payload_range(cache_key: &CacheKey, bytes: &[u8]) -> Result<Range<usiz
         data_len
     );
 
+    let padding_len = padding_for_alignment(offset, CACHE_PAYLOAD_ALIGN);
+    let padding = take_bytes(
+        bytes,
+        &mut offset,
+        padding_len,
+        "cache entry truncated in payload alignment padding",
+    )?;
+    anyhow::ensure!(
+        padding.iter().all(|&byte| byte == 0),
+        "cache entry payload alignment padding is non-zero"
+    );
+
     let payload_start = offset;
     let payload_end = payload_start
         .checked_add(data_len)
@@ -339,6 +380,11 @@ fn read_u32_le_slice(bytes: &[u8], offset: &mut usize, truncated: &'static str) 
 fn read_u64_le_slice(bytes: &[u8], offset: &mut usize, truncated: &'static str) -> Result<u64> {
     let raw = take_bytes(bytes, offset, 8, truncated)?;
     Ok(u64::from_le_bytes(raw.try_into().expect("u64 byte width")))
+}
+
+fn padding_for_alignment(offset: usize, alignment: usize) -> usize {
+    debug_assert!(alignment.is_power_of_two());
+    (alignment - (offset & (alignment - 1))) & (alignment - 1)
 }
 
 #[cfg(test)]
@@ -405,6 +451,12 @@ fn try_write_cached(cache_key: &CacheKey, data: &[u8]) -> Result<()> {
         .context("writing transposed weight cache key")?;
     file.write_all(&(data.len() as u64).to_le_bytes())
         .context("writing transposed weight cache payload length")?;
+    let payload_offset = CACHE_MAGIC.len() + 4 + 4 + cache_key.key_bytes.len() + 8;
+    let padding_len = padding_for_alignment(payload_offset, CACHE_PAYLOAD_ALIGN);
+    if padding_len > 0 {
+        file.write_all(&[0u8; CACHE_PAYLOAD_ALIGN][..padding_len])
+            .context("writing transposed weight cache payload alignment padding")?;
+    }
     file.write_all(data)
         .context("writing transposed weight cache payload")?;
     match fs::rename(&temp_path, &cache_key.file_path) {
@@ -476,6 +528,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::weights::{TensorDType, WeightData};
 
     fn test_cache_key(expected_len: usize) -> CacheKey {
         CacheKey {
@@ -493,8 +546,19 @@ mod tests {
         bytes.extend_from_slice(&(cache_key.key_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&cache_key.key_bytes);
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let padding_len = padding_for_alignment(bytes.len(), CACHE_PAYLOAD_ALIGN);
+        bytes.resize(bytes.len() + padding_len, 0);
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    fn passthrough_test_weight(payload: Vec<u8>) -> WeightTensor {
+        WeightTensor {
+            data: WeightData::owned(payload),
+            shape: vec![2, 1],
+            dtype: TensorDType::F16,
+            source: None,
+        }
     }
 
     #[test]
@@ -513,6 +577,7 @@ mod tests {
     fn try_mmap_cached_returns_payload_without_allocating_vec() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let mut cache_key = test_cache_key(4);
+        cache_key.key_bytes = b"odd-key".to_vec();
         cache_key.file_path = dir.path().join("entry.bin");
         let payload = [1u8, 2, 3, 4];
         std::fs::write(&cache_key.file_path, cache_entry(&cache_key, &payload))?;
@@ -520,6 +585,7 @@ mod tests {
         let got = try_mmap_cached(&cache_key)?.context("expected cache hit")?;
 
         assert_eq!(got.as_bytes(), payload);
+        assert_eq!(got.as_bytes().as_ptr() as usize % CACHE_PAYLOAD_ALIGN, 0);
         assert_eq!(got.shape(), [2, 2]);
         Ok(())
     }
@@ -529,10 +595,10 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let mut cache_key = test_cache_key(4);
         cache_key.file_path = dir.path().join("entry.bin");
-        let payload = Arc::<[u8]>::from([1u8, 2, 3, 4]);
+        let payload = vec![1u8, 2, 3, 4];
 
         anyhow::ensure!(
-            queue_cache_write(cache_key.clone(), Arc::clone(&payload)),
+            queue_cache_write(cache_key.clone(), passthrough_test_weight(payload.clone())),
             "expected background cache write to enqueue"
         );
 
@@ -547,7 +613,7 @@ mod tests {
 
         let mut file = std::fs::File::open(&cache_key.file_path)?;
         let got = read_cached_payload(&cache_key, &mut file)?;
-        assert_eq!(got, payload.as_ref());
+        assert_eq!(got, payload.as_slice());
         Ok(())
     }
 
