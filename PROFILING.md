@@ -7323,3 +7323,73 @@ treat causal-conv as already kernel/runtime-bound and move to the adjacent
 `:kiln/gdn/gates` + `:kiln/gdn/gated_norm` cluster. If
 `:kiln/gdn/conv/layout` dominates, open a separate minimal layout/contiguity
 fix task.
+
+## Phase 6 C54 GDN conv child NVTX profile (2026-04-24)
+
+C54 reran the C52 C40f-style native-MTP decode profile on current `origin/main`
+at `13a2a3d437680d299a1f4a17029cbca8b700701f`, after C53 added child NVTX
+ranges under `:kiln/gdn/conv`. Artifact:
+`docs/phase-c54/conv-child-nvtx-profile.md`; machine summary:
+`docs/phase-c54/summary.json`.
+
+Validation passed on an on-demand RTX A6000 RunPod pool lease
+`pod-c11fe496c432600caf0baa6a` / `sl53yvx5seviyx`: `cargo test -p
+kiln-conv1d-kernel --release -- --nocapture`, `cargo test -p kiln-model
+--release --features cuda test_causal_conv1d_update_matches_fallback --
+--nocapture`, and `cargo build --release --features cuda,nvtx --bin
+kiln-bench`. The pod was released after artifacts were copied; the subsequent
+RunPod status check showed no active pods.
+
+Profiler setup matched the C52 Nsight repair: the baked image had Nsight Systems
+`2023.4.4`, so C54 installed only `nsight-systems-2024.5.1` from the existing
+NVIDIA CUDA apt repo and used
+`/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys`. The retained
+workload used `KILN_SPEC_METHOD=mtp`, `KILN_BENCH_FORCE_MTP=1`,
+`KILN_MTP_ARGMAX_FP32=1`, `KILN_W4A16=1`, `KILN_CUDA_GRAPHS=true`,
+`--model-path /workspace/qwen3.5-4b`, paged 512-token Humaneval prompt, 128
+generated tokens, `--skip-training`, `--chat-template`, `--latency-only`,
+temperature `0.0`, and seed `1`.
+
+The profiled run produced α `0.693`, decode `22.16 tok/s`, mean ITL `45.13 ms`,
+P50 ITL `31.74 ms`, and P99 ITL `105.52 ms`. Treat those as profiled
+attribution context only.
+
+Decode window attribution uses the same C52 method: first `:kiln/mtp/step` start
+through final decode NVTX end (`5880.202 ms`, 75 MTP steps), excluding the
+`:kiln/mtp/step` parent wrapper from the NVTX-duration denominator
+(`4848.439 ms`).
+
+| Rank | Decode range | Wall-clock share | Total time | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `:kiln/gdn/conv` | 12.45% | 603.799 ms | 2352 |
+| 2 | `:kiln/gdn/gates` | 11.47% | 555.891 ms | 2352 |
+| 3 | `:kiln/gdn/conv/fallback_prefill` | 11.11% | 538.451 ms | 1800 |
+| 4 | `:kiln/gdn/gated_norm` | 10.79% | 523.019 ms | 2352 |
+| 5 | `:kiln/gdn/qk_norm` | 8.76% | 424.748 ms | 2352 |
+
+Child attribution under `:kiln/gdn/conv`:
+
+| Child range | Decode-window share | Total time | Instances | Share of conv parent |
+| --- | ---: | ---: | ---: | ---: |
+| `:kiln/gdn/conv/fallback_prefill` | 11.11% | 538.451 ms | 1800 | 89.18% |
+| `:kiln/gdn/conv/layout` | 0.90% | 43.672 ms | 2352 | 7.23% |
+| `:kiln/gdn/conv/update` | 0.23% | 11.114 ms | 552 | 1.84% |
+| `:kiln/gdn/conv/prefill_update` | 0.00% | 0.000 ms | 0 | 0.00% |
+| `:kiln/gdn/conv/fallback_decode` | 0.00% | 0.000 ms | 0 | 0.00% |
+
+Conclusion: C53's single-token decode audit was correct — `fallback_decode` is
+absent and the existing `causal_conv1d_update` wrapper is not the bottleneck.
+The material fallback is the native-MTP draft path: CUDA does not yet implement
+`supports_causal_conv1d_prefill` / `causal_conv1d_prefill`, so each `seq_len >
+1` GDN draft forward falls back to the portable prefill path. The 1800 fallback
+instances equal 24 GDN layers × 75 MTP steps.
+
+Recommendation: target a minimal CUDA `causal_conv1d_prefill` path for the
+native-MTP draft GDN conv shape before moving to `:kiln/gdn/gates` +
+`:kiln/gdn/gated_norm`. Suggested files are `crates/kiln-conv1d-kernel/src/lib.rs`,
+`crates/kiln-conv1d-kernel/csrc/causal_conv1d_update.cu`,
+`crates/kiln-conv1d-kernel/csrc/causal_conv1d_update.h`,
+`crates/kiln-model/src/backend/cuda.rs`, and `crates/kiln-model/src/forward.rs`.
+Do not retry the existing `seq_len == 1` update kernel; if the minimal CUDA
+prefill support envelope cannot cover the MTP draft shape, retarget to the
+gates/gated-norm cluster instead.
