@@ -1,0 +1,140 @@
+{
+  "arms": {
+    "c48_style": {
+      "rows": [
+        {
+          "seed": 0,
+          "acceptance_rate": 0.7397260273972602,
+          "decode_tokens_per_sec": 43.11997835703033,
+          "mean_inter_token_ms": 23.191106259842517,
+          "prefill_time_ms": 356.144689,
+          "prompt_tokens": 494,
+          "prompt_subset": "all"
+        },
+        {
+          "seed": 1,
+          "acceptance_rate": 0.30927835051546393,
+          "decode_tokens_per_sec": 26.46220655137668,
+          "mean_inter_token_ms": 37.78974357480312,
+          "prefill_time_ms": 352.722319,
+          "prompt_tokens": 508,
+          "prompt_subset": "all"
+        },
+        {
+          "seed": 2,
+          "acceptance_rate": 0.3956043956043956,
+          "decode_tokens_per_sec": 29.7580389923559,
+          "mean_inter_token_ms": 33.60436486614172,
+          "prefill_time_ms": 368.37636899999995,
+          "prompt_tokens": 501,
+          "prompt_subset": "all"
+        },
+        {
+          "seed": 3,
+          "acceptance_rate": 0.27,
+          "decode_tokens_per_sec": 25.383079446329678,
+          "mean_inter_token_ms": 39.39632313385826,
+          "prefill_time_ms": 350.258687,
+          "prompt_tokens": 496,
+          "prompt_subset": "all"
+        },
+        {
+          "seed": 4,
+          "acceptance_rate": 0.391304347826087,
+          "decode_tokens_per_sec": 28.725303176880967,
+          "mean_inter_token_ms": 34.81251333858268,
+          "prefill_time_ms": 376.325492,
+          "prompt_tokens": 512,
+          "prompt_subset": "all"
+        }
+      ],
+      "summary": {
+        "n": 5,
+        "median_acceptance_rate": 0.391304347826087,
+        "mean_acceptance_rate": 0.42118262426864134,
+        "min_acceptance_rate": 0.27,
+        "max_acceptance_rate": 0.7397260273972602,
+        "median_decode_tokens_per_sec": 28.725303176880967,
+        "mean_decode_tokens_per_sec": 30.68972130479471,
+        "min_decode_tokens_per_sec": 25.383079446329678,
+        "max_decode_tokens_per_sec": 43.11997835703033,
+        "median_mean_inter_token_ms": 34.81251333858268,
+        "mean_mean_inter_token_ms": 33.75881023464566,
+        "min_mean_inter_token_ms": 23.191106259842517,
+        "max_mean_inter_token_ms": 39.39632313385826,
+        "median_prefill_time_ms": 356.144689,
+        "mean_prefill_time_ms": 360.7655112,
+        "min_prefill_time_ms": 350.258687,
+        "max_prefill_time_ms": 376.325492
+      }
+    },
+    "c40f_style": {
+      "rows": [
+        {
+          "seed": 0,
+          "acceptance_rate": 0.7887323943661971,
+          "decode_tokens_per_sec": 46.42090691910316,
+          "mean_inter_token_ms": 21.542017732283455,
+          "prefill_time_ms": 349.544059,
+          "prompt_tokens": 496,
+          "prompt_subset": "humaneval"
+        },
+        {
+          "seed": 1,
+          "acceptance_rate": 0.7066666666666667,
+          "decode_tokens_per_sec": 42.44505663840869,
+          "mean_inter_token_ms": 23.55986961023622,
+          "prefill_time_ms": 382.584483,
+          "prompt_tokens": 515,
+          "prompt_subset": "humaneval"
+        },
+        {
+          "seed": 2,
+          "acceptance_rate": 0.5875,
+          "decode_tokens_per_sec": 37.35633880140753,
+          "mean_inter_token_ms": 26.769218614173223,
+          "prefill_time_ms": 350.42982700000005,
+          "prompt_tokens": 510,
+          "prompt_subset": "humaneval"
+        },
+        {
+          "seed": 3,
+          "acceptance_rate": 0.5679012345679012,
+          "decode_tokens_per_sec": 36.244328254209755,
+          "mean_inter_token_ms": 27.590523763779522,
+          "prefill_time_ms": 347.65232499999996,
+          "prompt_tokens": 494,
+          "prompt_subset": "humaneval"
+        },
+        {
+          "seed": 4,
+          "acceptance_rate": 0.7397260273972602,
+          "decode_tokens_per_sec": 44.46303828799195,
+          "mean_inter_token_ms": 22.490590803149594,
+          "prefill_time_ms": 347.389847,
+          "prompt_tokens": 502,
+          "prompt_subset": "humaneval"
+        }
+      ],
+      "summary": {
+        "n": 5,
+        "median_acceptance_rate": 0.7066666666666667,
+        "mean_acceptance_rate": 0.6781052645996051,
+        "min_acceptance_rate": 0.5679012345679012,
+        "max_acceptance_rate": 0.7887323943661971,
+        "median_decode_tokens_per_sec": 42.44505663840869,
+        "mean_decode_tokens_per_sec": 41.385933780224214,
+        "min_decode_tokens_per_sec": 36.244328254209755,
+        "max_decode_tokens_per_sec": 46.42090691910316,
+        "median_mean_inter_token_ms": 23.55986961023622,
+        "mean_mean_inter_token_ms": 24.390444104724402,
+        "min_mean_inter_token_ms": 21.542017732283455,
+        "max_mean_inter_token_ms": 27.590523763779522,
+        "median_prefill_time_ms": 349.544059,
+        "mean_prefill_time_ms": 355.5201082,
+        "min_prefill_time_ms": 347.389847,
+        "max_prefill_time_ms": 382.584483
+      }
+    }
+  }
+}
