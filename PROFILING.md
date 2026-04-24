@@ -1,5 +1,31 @@
 # Kiln Profiling Report
 
+## Phase 7 H15a Marlin pack determinism correlation (2026-04-24)
+
+**Scope:** $0 doc-only correlation analysis on the existing C40f N=20 anchor
+(`docs/phase-c40f/summary.json`, PR #379). Executes the "free pre-step (do
+BEFORE GPU spend)" called out in PR #527's bench plan: Spearman + Pearson
+between `model_load_secs` and `acceptance_rate` to test whether load-time
+variance in Marlin packed weights drives MTP α variance. No pod, no SSH, no
+Rust changes.
+
+**Outcome: RULED OUT.** Marlin pack determinism is NOT the alpha-gap
+mechanism on this anchor. Pearson r = +0.349 (95% CI [−0.111, +0.686], t =
++1.580 df=18 — NOT significant at p<0.05; critical |r| = 0.4438). Spearman
+ρ = +0.111 (NOT significant; critical |ρ| = 0.4500). The weak Pearson signal
+is single-seed leverage from seed 0's 3.55 s load-time outlier; rank-robust
+Spearman drops to +0.111. Bonus structural finding: `acceptance_rate` has
+only 10 unique values across 20 seeds (paired seeds {0,10} … {9,19} produce
+bit-identical α despite 8–116% load-time differences) — itself near-conclusive
+evidence that α at this anchor is workload-deterministic, not pack-determined.
+**Recommendation:** queue H15b (stratified C29 v2 reject-row probe, ~30 min
+A6000 / ~$0.25) per PR #527 §"Recommended next H." Decision belongs to the
+next planning cycle. Full methodology, decision rule, period-10 collision
+table, anti-duplication evidence, and reopen triggers in
+[`docs/phase7-h15a-marlin-determinism.md`](docs/phase7-h15a-marlin-determinism.md).
+Raw script + verbatim output: `docs/phase-c40f/h15a_correlation.py` and
+`docs/phase-c40f/h15a_correlation_output.txt`.
+
 ## Phase 7 MTP acceptance-rate state-of-play audit (2026-04-24)
 
 **Scope:** doc-only consolidation of the 34 MTP-named phase-B / phase-C PRs
