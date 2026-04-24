@@ -43,6 +43,7 @@ fn main() {
     build.flag("--expt-extended-lambda");
     build.flag("-Xcompiler").flag("-fPIC");
     build.flag("-DFLASH_NAMESPACE=kiln_flash");
+    build.flag("-D_USE_MATH_DEFINES");
 
     // Suppress noisy warnings from CUTLASS templates
     build.flag("-diag-suppress=177");  // variable declared but never referenced
