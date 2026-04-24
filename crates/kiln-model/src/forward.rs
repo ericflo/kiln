@@ -81,6 +81,41 @@ fn try_metal_mlp_gate_up_hidden(
     )?))
 }
 
+fn linear_with_lora_t_decode(
+    x: &Tensor,
+    weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    #[cfg(feature = "metal")]
+    {
+        if lora.is_none()
+            && !crate::mtp_debug::is_mtp_fp32_head_armed()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
+        {
+            return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
+                .context("metal transposed coop GEMV failed");
+        }
+    }
+
+    linear_with_lora_t(x, weight_t, lora, lora_scale)
+}
+
+fn linear_with_lora_t_decode_if(
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    if use_metal_decode_gemv {
+        linear_with_lora_t_decode(x, weight_t, lora, lora_scale)
+    } else {
+        linear_with_lora_t(x, weight_t, lora, lora_scale)
+    }
+}
+
 /// CUDA-compatible softmax on last dimension.
 ///
 /// `candle_nn::ops::softmax_last_dim` lacks a CUDA kernel, so we implement it
@@ -2122,6 +2157,23 @@ pub fn swiglu_ffn(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
+    swiglu_ffn_impl(x, mlp, lora, false)
+}
+
+fn swiglu_ffn_metal_decode(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    swiglu_ffn_impl(x, mlp, lora, true)
+}
+
+fn swiglu_ffn_impl(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    use_metal_decode_gemv: bool,
+) -> Result<Tensor> {
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
@@ -2130,7 +2182,8 @@ pub fn swiglu_ffn(
     if let Some(hidden) = try_metal_mlp_gate_up_hidden(x, mlp, lora_layer)? {
         let out = {
             kiln_nvtx::range!(c"kiln/mlp/down");
-            mlp_proj_forward(
+            mlp_proj_forward_decode_if(
+                use_metal_decode_gemv,
                 &hidden,
                 &mlp.down_proj_t,
                 mlp.down_proj_marlin.as_ref(),
@@ -2170,7 +2223,8 @@ pub fn swiglu_ffn(
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
-        mlp_proj_forward(
+        mlp_proj_forward_decode_if(
+            use_metal_decode_gemv,
             &hidden,
             &mlp.down_proj_t,
             mlp.down_proj_marlin.as_ref(),
@@ -2251,6 +2305,17 @@ fn mlp_proj_forward(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
+    mlp_proj_forward_decode_if(false, x, weight_t, marlin, lora, lora_scale)
+}
+
+fn mlp_proj_forward_decode_if(
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    weight_t: &Tensor,
+    marlin: Option<&crate::marlin_proj::MarlinPackedProj>,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(packed) = marlin {
         let base = crate::marlin_proj::matmul_bf16(x, packed)
@@ -2265,7 +2330,7 @@ fn mlp_proj_forward(
     // Non-CUDA builds never carry Marlin weights; reference the parameter so
     // the signature stays unified without a dead_code warning.
     let _ = marlin;
-    linear_with_lora_t(x, weight_t, lora, lora_scale)
+    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
 }
 
 fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
@@ -3552,6 +3617,16 @@ pub fn q_proj_forward(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
+    q_proj_forward_decode_if(false, x, attn_weights, lora, lora_scale)
+}
+
+fn q_proj_forward_decode_if(
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(ref packed) = attn_weights.q_proj_marlin {
         let base =
@@ -3563,7 +3638,13 @@ pub fn q_proj_forward(
         }
         return Ok(base);
     }
-    linear_with_lora_t(x, &attn_weights.q_proj_t, lora, lora_scale)
+    linear_with_lora_t_decode_if(
+        use_metal_decode_gemv,
+        x,
+        &attn_weights.q_proj_t,
+        lora,
+        lora_scale,
+    )
 }
 
 /// Returns: [batch, seq_len, hidden_size]
@@ -3584,6 +3665,9 @@ pub fn gqa_attention(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_gemv = seq_len == 1
+        && kv_cache.is_some()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Project to Q, K, V (with optional LoRA delta)
     // When attn_output_gate is true, q_proj outputs [Q, gate] fused:
@@ -3595,19 +3679,22 @@ pub fn gqa_attention(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = q_proj_forward(
+        let q_raw = q_proj_forward_decode_if(
+            use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer.and_then(|l| l.q_proj.as_ref()),
             lora_scale,
         )?;
-        let k = linear_with_lora_t(
+        let k = linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
             x,
             &attn_weights.k_proj_t,
             lora_layer.and_then(|l| l.k_proj.as_ref()),
             lora_scale,
         )?;
-        let v = linear_with_lora_t(
+        let v = linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
             x,
             &attn_weights.v_proj_t,
             lora_layer.and_then(|l| l.v_proj.as_ref()),
@@ -3748,7 +3835,8 @@ pub fn gqa_attention(
     // Output projection
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t(
+        linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -3891,7 +3979,7 @@ fn try_flash_attn_paged_decode(
 
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
-                    linear_with_lora_t(
+                    linear_with_lora_t_decode(
                         &attn_output,
                         &attn_weights.o_proj_t,
                         lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -4002,7 +4090,7 @@ fn try_flash_attn_paged_decode(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t(
+        linear_with_lora_t_decode(
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -4081,6 +4169,8 @@ fn gqa_attention_paged_with_rope_tables(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_gemv =
+        seq_len == 1 && start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Project to Q, K, V (with optional LoRA delta and output gate split)
     let (lora_layer, lora_scale) = match lora {
@@ -4089,19 +4179,22 @@ fn gqa_attention_paged_with_rope_tables(
     };
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let q_raw = q_proj_forward(
+        let q_raw = q_proj_forward_decode_if(
+            use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer.and_then(|l| l.q_proj.as_ref()),
             lora_scale,
         )?;
-        let k = linear_with_lora_t(
+        let k = linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
             x,
             &attn_weights.k_proj_t,
             lora_layer.and_then(|l| l.k_proj.as_ref()),
             lora_scale,
         )?;
-        let v = linear_with_lora_t(
+        let v = linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
             x,
             &attn_weights.v_proj_t,
             lora_layer.and_then(|l| l.v_proj.as_ref()),
@@ -4684,7 +4777,8 @@ fn gqa_attention_paged_with_rope_tables(
         }
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t(
+            linear_with_lora_t_decode_if(
+                use_metal_decode_gemv,
                 &attn_output,
                 &attn_weights.o_proj_t,
                 lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -4748,7 +4842,8 @@ fn gqa_attention_paged_with_rope_tables(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t(
+        linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -4845,6 +4940,9 @@ pub fn transformer_block(
             anyhow::bail!("transformer_block only supports full attention layers (not linear/GDN)")
         }
     };
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_ffn =
+        seq_len == 1 && kv_cache.is_some() && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Pre-attention norm
     let normed = {
@@ -4883,7 +4981,11 @@ pub fn transformer_block(
     };
 
     // Feed-forward network
-    let ffn_out = swiglu_ffn(&normed, &layer.mlp, lora)?;
+    let ffn_out = if use_metal_decode_ffn {
+        swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
+    } else {
+        swiglu_ffn(&normed, &layer.mlp, lora)?
+    };
 
     // Residual connection
     let out = {
@@ -4964,6 +5066,11 @@ fn transformer_block_paged_with_rope_tables(
             )
         }
     };
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_ffn = seq_len == 1
+        && start_pos > 0
+        && !crate::mtp_debug::current_b12_layer_is_31()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Pre-attention norm
     let normed = {
@@ -5024,6 +5131,8 @@ fn transformer_block_paged_with_rope_tables(
     // standard `swiglu_ffn` fuses those and is fine for everyone else.
     let ffn_out = if crate::mtp_debug::current_b12_layer_is_31() {
         swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
+    } else if use_metal_decode_ffn {
+        swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
     } else {
         swiglu_ffn(&normed, &layer.mlp, lora)?
     };
@@ -5076,6 +5185,9 @@ pub fn model_forward(
     // Position indices for RoPE — absolute positions accounting for cached tokens
     let offset = kv_cache.as_ref().map_or(0, |c| c.seq_len());
     let positions: Vec<u32> = (offset..offset + seq_len).map(|p| p as u32).collect();
+    let use_metal_decode_ffn = seq_len == 1
+        && offset > 0
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // 2. Loop through all transformer layers
     // Track full-attention layer index (0-based counter of only full-attn layers)
@@ -5143,7 +5255,11 @@ pub fn model_forward(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                let ffn_out = if use_metal_decode_ffn {
+                    swiglu_ffn_metal_decode(&normed_post, &layer.mlp, layer_lora)?
+                } else {
+                    swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?
+                };
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -6251,6 +6367,16 @@ fn model_forward_paged_inner(
                     crate::mtp_debug::should_capture_c45_layer1_row_tap_for_layer(i);
                 let capture_c46_taps =
                     crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(i);
+                let use_metal_decode_ffn = seq_len == 1
+                    && start_pos > 0
+                    && !capture_b11_taps
+                    && !capture_c41_taps
+                    && !capture_c42_taps
+                    && !capture_c43_taps
+                    && !capture_c44_taps
+                    && !capture_c45_taps
+                    && !capture_c46_taps
+                    && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
                 if capture_c42_taps {
                     capture_c42_layer1_input_norm_taps(
                         &hidden,
@@ -6317,7 +6443,11 @@ fn model_forward_paged_inner(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                let ffn_out = if use_metal_decode_ffn {
+                    swiglu_ffn_metal_decode(&normed_post, &layer.mlp, layer_lora)?
+                } else {
+                    swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?
+                };
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
