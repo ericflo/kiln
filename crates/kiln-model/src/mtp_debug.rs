@@ -31,6 +31,8 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 
 static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SUBOP_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
+static B12_GQA_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 static C7_SDPA_CAPTURE_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 static MTP_FP32_HEAD_ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 // Phase B7a: track which mtp_pos values have already been dumped so a single
@@ -445,7 +447,9 @@ pub fn is_mtp_fp32_head_enabled() -> bool {
 /// per-tap `allclose` sweep (see `scripts/mtp_compare.py`) localizes
 /// the first divergence and narrows the remaining runtime hypotheses.
 pub fn dump_path() -> Option<String> {
-    std::env::var("KILN_MTP_DUMP_PATH").ok().filter(|s| !s.is_empty())
+    std::env::var("KILN_MTP_DUMP_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Path with `{pos}` substituted. Falls through to `dump_path()` when
@@ -511,13 +515,38 @@ pub fn is_dump_subops_enabled() -> bool {
 /// from the same thread record into a fresh buffer until
 /// [`drain_subop_capture`] is called.
 pub fn arm_subop_capture() {
-    SUBOP_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    let was_armed = SUBOP_CAPTURE.with(|c| {
+        let mut capture = c.borrow_mut();
+        let was_armed = capture.is_some();
+        *capture = Some(Vec::new());
+        was_armed
+    });
+    if !was_armed {
+        SUBOP_CAPTURE_ARMED_THREADS.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Drain the captured sub-op tensors and disarm. Returns whatever was
 /// recorded since the matching [`arm_subop_capture`] call, in order.
 pub fn drain_subop_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
-    SUBOP_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+    let (was_armed, drained) = SUBOP_CAPTURE.with(|c| {
+        let mut capture = c.borrow_mut();
+        let was_armed = capture.is_some();
+        (was_armed, capture.take().unwrap_or_default())
+    });
+    if was_armed {
+        SUBOP_CAPTURE_ARMED_THREADS.fetch_sub(1, Ordering::Release);
+    }
+    drained
+}
+
+/// True if the Phase B7b sub-op capture window is currently armed on this
+/// thread. The atomic fast path keeps normal inference from touching TLS.
+pub fn is_subop_capture_armed() -> bool {
+    if SUBOP_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    SUBOP_CAPTURE.with(|c| c.borrow().is_some())
 }
 
 /// Record one named tap if a capture window is currently open on this
@@ -529,6 +558,9 @@ pub fn drain_subop_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// are swallowed (returned via `Result` so callers using `?` get the
 /// usual propagation, but production callers wrap in `let _ = ...`).
 pub fn capture_subop(name: &str, t: &Tensor) -> Result<()> {
+    if SUBOP_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
+        return Ok(());
+    }
     let armed = SUBOP_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1108,9 +1140,8 @@ pub fn capture_c42_layer1_norm_tap(name: &str, t: &Tensor) -> Result<()> {
     if !armed {
         return Ok(());
     }
-    let (shape, flat) = tensor_to_f32_host(t).with_context(|| {
-        format!("capture_c42_layer1_norm_tap `{name}`: tensor→f32 host copy")
-    })?;
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_c42_layer1_norm_tap `{name}`: tensor→f32 host copy"))?;
     C42_LAYER1_NORM_CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push((name.to_string(), shape, flat));
@@ -1192,8 +1223,9 @@ pub fn capture_c44_layer1_f32_row_tap(name: &str, t: &Tensor) -> Result<()> {
     if !armed {
         return Ok(());
     }
-    let (shape, flat) = tensor_to_f32_host(t)
-        .with_context(|| format!("capture_c44_layer1_f32_row_tap `{name}`: tensor→f32 host copy"))?;
+    let (shape, flat) = tensor_to_f32_host(t).with_context(|| {
+        format!("capture_c44_layer1_f32_row_tap `{name}`: tensor→f32 host copy")
+    })?;
     C44_LAYER1_F32_ROW_CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push((name.to_string(), shape, flat));
@@ -1291,6 +1323,9 @@ pub fn capture_c46_layer1_row_provenance_tap(name: &str, t: &Tensor) -> Result<(
 /// this thread. Call sites use this to gate the (relatively cheap) host
 /// copy so disarmed runs pay zero cost.
 pub fn is_b12_gqa_capture_armed() -> bool {
+    if B12_GQA_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
+        return false;
+    }
     B12_GQA_CAPTURE.with(|c| c.borrow().is_some())
 }
 
@@ -1347,13 +1382,29 @@ pub fn arm_b12_gqa_capture() {
     if !is_dump_b12_gqa_taps_enabled() {
         return;
     }
-    B12_GQA_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    let was_armed = B12_GQA_CAPTURE.with(|c| {
+        let mut capture = c.borrow_mut();
+        let was_armed = capture.is_some();
+        *capture = Some(Vec::new());
+        was_armed
+    });
+    if !was_armed {
+        B12_GQA_CAPTURE_ARMED_THREADS.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Drain the captured B12 layer-31 GQA taps and disarm. Returns whatever
 /// was recorded since the matching [`arm_b12_gqa_capture`] call, in order.
 pub fn drain_b12_gqa_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
-    B12_GQA_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+    let (was_armed, drained) = B12_GQA_CAPTURE.with(|c| {
+        let mut capture = c.borrow_mut();
+        let was_armed = capture.is_some();
+        (was_armed, capture.take().unwrap_or_default())
+    });
+    if was_armed {
+        B12_GQA_CAPTURE_ARMED_THREADS.fetch_sub(1, Ordering::Release);
+    }
+    drained
 }
 
 /// Record one named B12 layer-31 GQA tap if a capture window is currently
@@ -1363,6 +1414,9 @@ pub fn drain_b12_gqa_capture() -> Vec<(String, Vec<usize>, Vec<f32>)> {
 /// reused — same pattern as [`capture_h_main_tap`] /
 /// [`capture_b11_layer0_tap`].
 pub fn capture_b12_gqa_tap(name: &str, t: &Tensor) -> Result<()> {
+    if B12_GQA_CAPTURE_ARMED_THREADS.load(Ordering::Acquire) == 0 {
+        return Ok(());
+    }
     let armed = B12_GQA_CAPTURE.with(|c| c.borrow().is_some());
     if !armed {
         return Ok(());
@@ -1393,13 +1447,7 @@ pub fn capture_b12_gqa_tap(name: &str, t: &Tensor) -> Result<()> {
 /// 3. `norm_h` — `rms_norm(h_prev, pre_fc_norm_hidden)` (pre-fc norm on hidden half)
 /// 4. `concat` — `Tensor::cat([norm_emb, norm_h], dim=2)` post-contiguous
 /// 5. `fused` — `concat @ mtp.fc_t` (output of the fused-input linear)
-pub const C6_TAP_NAMES: &[&str] = &[
-    "token_emb",
-    "norm_emb",
-    "norm_h",
-    "concat",
-    "fused",
-];
+pub const C6_TAP_NAMES: &[&str] = &["token_emb", "norm_emb", "norm_h", "concat", "fused"];
 
 /// True when `KILN_MTP_DUMP_PRE_ROPE=1` (or `true`) is set. Opt-in for the
 /// Phase C6 pre-RoPE MTP-input bisect: when enabled alongside
@@ -1839,9 +1887,8 @@ pub fn capture_c14_post_block_tap(name: &str, t: &Tensor) -> Result<()> {
     if !armed {
         return Ok(());
     }
-    let (shape, flat) = tensor_to_f32_host(t).with_context(|| {
-        format!("capture_c14_post_block_tap `{name}`: tensor→f32 host copy")
-    })?;
+    let (shape, flat) = tensor_to_f32_host(t)
+        .with_context(|| format!("capture_c14_post_block_tap `{name}`: tensor→f32 host copy"))?;
     C14_POST_BLOCK_CAPTURE.with(|c| {
         if let Some(buf) = c.borrow_mut().as_mut() {
             buf.push((name.to_string(), shape, flat));
@@ -2879,7 +2926,9 @@ mod tests {
         }
         assert_eq!(
             current_h_main_boundary_layers(),
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 23, 24, 25, 26, 27, 28, 29, 30, 31
+            ]
         );
 
         unsafe {
@@ -3034,11 +3083,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_b11.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let b11 = vec![
-            (
-                "tok_embed".to_string(),
-                vec![2],
-                vec![0.11_f32, 0.22],
-            ),
+            ("tok_embed".to_string(), vec![2], vec![0.11_f32, 0.22]),
             (
                 "gdn_out_proj".to_string(),
                 vec![3],
@@ -3130,10 +3175,7 @@ mod tests {
     #[test]
     fn c43_layer1_preweight_tap_names_enumerate_expected_boundaries() {
         assert_eq!(C43_LAYER1_PREWEIGHT_TAP_NAMES.len(), 5);
-        assert_eq!(
-            C43_LAYER1_PREWEIGHT_TAP_NAMES[0],
-            "layer_1_residual_input"
-        );
+        assert_eq!(C43_LAYER1_PREWEIGHT_TAP_NAMES[0], "layer_1_residual_input");
         assert_eq!(
             C43_LAYER1_PREWEIGHT_TAP_NAMES[3],
             "layer_1_input_norm_pre_weight_scalar_affine"
@@ -3157,7 +3199,10 @@ mod tests {
     #[test]
     fn c45_layer1_row_tap_names_enumerate_expected_boundaries() {
         assert_eq!(C45_LAYER1_ROW_TAP_NAMES.len(), 6);
-        assert_eq!(C45_LAYER1_ROW_TAP_NAMES[0], "layer_1_input_norm_rms_inv_scalar");
+        assert_eq!(
+            C45_LAYER1_ROW_TAP_NAMES[0],
+            "layer_1_input_norm_rms_inv_scalar"
+        );
         assert_eq!(
             C45_LAYER1_ROW_TAP_NAMES[1],
             "layer_1_input_norm_rms_inv_scalar_extracted_values"
@@ -3432,8 +3477,7 @@ mod tests {
         assert_eq!(drained[1].2, vec![1.0, 2.0, 3.0]);
 
         assert!(!is_c45_layer1_row_capture_armed());
-        capture_c45_layer1_row_tap("layer_1_input_norm_pre_weight_row_scalar_values", &a)
-            .unwrap();
+        capture_c45_layer1_row_tap("layer_1_input_norm_pre_weight_row_scalar_values", &a).unwrap();
         assert!(drain_c45_layer1_row_capture().is_empty());
 
         unsafe {
@@ -3463,11 +3507,8 @@ mod tests {
         let a = Tensor::new(&[1.0_f32, 2.0, 3.0][..], &Device::Cpu).unwrap();
         let b = Tensor::new(&[10.0_f32][..], &Device::Cpu).unwrap();
 
-        capture_c46_layer1_row_provenance_tap(
-            "layer_1_input_norm_selected_row_before_rmsnorm",
-            &a,
-        )
-        .unwrap();
+        capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_before_rmsnorm", &a)
+            .unwrap();
         assert!(drain_c46_layer1_row_provenance_capture().is_empty());
         assert!(!is_c46_layer1_row_provenance_capture_armed());
         assert!(!should_capture_c46_layer1_row_provenance_tap_for_layer(1));
@@ -3476,19 +3517,16 @@ mod tests {
         assert!(is_c46_layer1_row_provenance_capture_armed());
         assert!(should_capture_c46_layer1_row_provenance_tap_for_layer(1));
         assert!(!should_capture_c46_layer1_row_provenance_tap_for_layer(0));
-        capture_c46_layer1_row_provenance_tap(
-            "layer_1_input_norm_selected_row_before_rmsnorm",
-            &b,
-        )
-        .unwrap();
-        capture_c46_layer1_row_provenance_tap(
-            "layer_1_input_norm_last_row_flat_values",
-            &a,
-        )
-        .unwrap();
+        capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_before_rmsnorm", &b)
+            .unwrap();
+        capture_c46_layer1_row_provenance_tap("layer_1_input_norm_last_row_flat_values", &a)
+            .unwrap();
         let drained = drain_c46_layer1_row_provenance_capture();
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].0, "layer_1_input_norm_selected_row_before_rmsnorm");
+        assert_eq!(
+            drained[0].0,
+            "layer_1_input_norm_selected_row_before_rmsnorm"
+        );
         assert_eq!(drained[0].1, vec![1]);
         assert_eq!(drained[0].2, vec![10.0]);
         assert_eq!(drained[1].0, "layer_1_input_norm_last_row_flat_values");
@@ -3496,11 +3534,8 @@ mod tests {
         assert_eq!(drained[1].2, vec![1.0, 2.0, 3.0]);
 
         assert!(!is_c46_layer1_row_provenance_capture_armed());
-        capture_c46_layer1_row_provenance_tap(
-            "layer_1_input_norm_selected_row_after_flatten",
-            &a,
-        )
-        .unwrap();
+        capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_after_flatten", &a)
+            .unwrap();
         assert!(drain_c46_layer1_row_provenance_capture().is_empty());
 
         unsafe {
@@ -3517,11 +3552,8 @@ mod tests {
         arm_c46_layer1_row_provenance_capture();
         assert!(!is_c46_layer1_row_provenance_capture_armed());
         let a = Tensor::new(&[1.0_f32, 2.0][..], &Device::Cpu).unwrap();
-        capture_c46_layer1_row_provenance_tap(
-            "layer_1_input_norm_selected_row_before_rmsnorm",
-            &a,
-        )
-        .unwrap();
+        capture_c46_layer1_row_provenance_tap("layer_1_input_norm_selected_row_before_rmsnorm", &a)
+            .unwrap();
         assert!(drain_c46_layer1_row_provenance_capture().is_empty());
     }
 
@@ -3589,16 +3621,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_b12.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let b12 = vec![
-            (
-                "post_input_norm".to_string(),
-                vec![2],
-                vec![0.41_f32, 0.42],
-            ),
-            (
-                "mlp_down".to_string(),
-                vec![3],
-                vec![0.51_f32, 0.52, 0.53],
-            ),
+            ("post_input_norm".to_string(), vec![2], vec![0.41_f32, 0.42]),
+            ("mlp_down".to_string(), vec![3], vec![0.51_f32, 0.52, 0.53]),
         ];
         write_mtp_dump(
             &tmp_s,
@@ -4220,16 +4244,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c6.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c6 = vec![
-            (
-                "token_emb".to_string(),
-                vec![2],
-                vec![0.61_f32, 0.62],
-            ),
-            (
-                "fused".to_string(),
-                vec![3],
-                vec![0.71_f32, 0.72, 0.73],
-            ),
+            ("token_emb".to_string(), vec![2], vec![0.61_f32, 0.62]),
+            ("fused".to_string(), vec![3], vec![0.71_f32, 0.72, 0.73]),
         ];
         write_mtp_dump(
             &tmp_s,
@@ -4358,16 +4374,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c7.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c7 = vec![
-            (
-                "pre_sdpa_q".to_string(),
-                vec![2],
-                vec![0.71_f32, 0.72],
-            ),
-            (
-                "attn_out".to_string(),
-                vec![3],
-                vec![0.81_f32, 0.82, 0.83],
-            ),
+            ("pre_sdpa_q".to_string(), vec![2], vec![0.71_f32, 0.72]),
+            ("attn_out".to_string(), vec![3], vec![0.81_f32, 0.82, 0.83]),
         ];
         write_mtp_dump(
             &tmp_s,
@@ -4522,16 +4530,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("kiln_mtp_dump_with_c14.safetensors");
         let tmp_s = tmp.to_string_lossy().into_owned();
         let c14 = vec![
-            (
-                "post_block".to_string(),
-                vec![2],
-                vec![0.91_f32, 0.92],
-            ),
-            (
-                "logits".to_string(),
-                vec![3],
-                vec![1.01_f32, 1.02, 1.03],
-            ),
+            ("post_block".to_string(), vec![2], vec![0.91_f32, 0.92]),
+            ("logits".to_string(), vec![3], vec![1.01_f32, 1.02, 1.03]),
         ];
         write_mtp_dump(
             &tmp_s,

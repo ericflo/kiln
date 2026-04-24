@@ -1953,8 +1953,7 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
         broadcast_output,
         scalar_values,
         reconstructed,
-    ) =
-        c45_layer1_row_replay_tensors(x, eps)?;
+    ) = c45_layer1_row_replay_tensors(x, eps)?;
     crate::mtp_debug::capture_c45_layer1_row_tap(
         "layer_1_input_norm_rms_inv_scalar",
         &rms_inv_row,
@@ -1982,16 +1981,23 @@ fn capture_c45_layer1_row_taps(x: &Tensor, eps: f64) -> Result<()> {
     Ok(())
 }
 
-fn c46_layer1_row_provenance_tensors(x: &Tensor) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+fn c46_layer1_row_provenance_tensors(
+    x: &Tensor,
+) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
     let (_batch, seq_len, hidden) = x
         .dims3()
         .context("C46 row provenance expects layer-1 hidden to be [batch, seq, hidden]")?;
-    anyhow::ensure!(seq_len > 0, "C46 row provenance requires non-empty sequence");
+    anyhow::ensure!(
+        seq_len > 0,
+        "C46 row provenance requires non-empty sequence"
+    );
 
     let selected_row = x.narrow(1, seq_len - 1, 1)?;
     let selected_row_f32 = selected_row.to_dtype(DType::F32)?;
     let selected_row_contiguous = selected_row_f32.contiguous()?;
-    let selected_row_flat = selected_row_contiguous.reshape(((), hidden))?.contiguous()?;
+    let selected_row_flat = selected_row_contiguous
+        .reshape(((), hidden))?
+        .contiguous()?;
 
     let x_f32 = x.to_dtype(DType::F32)?;
     let (_batch, seq_len, hidden) = x_f32
@@ -2017,13 +2023,8 @@ fn c46_layer1_row_provenance_tensors(x: &Tensor) -> Result<(Tensor, Tensor, Tens
 /// dtype promotion, contiguous materialization, flattening, and the exact C45
 /// operand reconstruction into separate taps.
 fn capture_c46_layer1_row_provenance_taps(x: &Tensor) -> Result<()> {
-    let (
-        selected_row,
-        selected_row_f32,
-        selected_row_contiguous,
-        selected_row_flat,
-        c45_last_row,
-    ) = c46_layer1_row_provenance_tensors(x)?;
+    let (selected_row, selected_row_f32, selected_row_contiguous, selected_row_flat, c45_last_row) =
+        c46_layer1_row_provenance_tensors(x)?;
     crate::mtp_debug::capture_c46_layer1_row_provenance_tap(
         "layer_1_input_norm_selected_row_before_rmsnorm",
         &selected_row,
@@ -2439,7 +2440,8 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     #[cfg(feature = "cuda")]
     {
         let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
-        if !disabled && input_dtype == DType::BF16 && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k) {
+        if !disabled && input_dtype == DType::BF16 && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k)
+        {
             return kiln_rmsnorm_kernel::fused_l2_qk_norm(q, k, scale as f32, 1e-6)
                 .context("fused_l2_qk_norm kernel failed");
         }
@@ -4330,6 +4332,8 @@ fn gqa_attention_paged_with_rope_tables(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let subop_armed = crate::mtp_debug::is_subop_capture_armed();
+    let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
     let use_metal_decode_gemv =
         seq_len == 1 && start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
@@ -4350,17 +4354,21 @@ fn gqa_attention_paged_with_rope_tables(
     };
     // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
     // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
-    let _ = crate::mtp_debug::capture_subop("post_q_proj_raw", &q_raw);
-    let _ = crate::mtp_debug::capture_subop("post_k_proj", &k);
-    let _ = crate::mtp_debug::capture_subop("post_v_proj", &v);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_q_proj_raw", &q_raw);
+        let _ = crate::mtp_debug::capture_subop("post_k_proj", &k);
+        let _ = crate::mtp_debug::capture_subop("post_v_proj", &v);
+    }
     // Phase B9 H3 alias: pre_gated_attn_split is the q_raw tensor before the
     // (q, gate) narrow split. Captured as alias of post_q_proj_raw so the
     // comparator can locate H3 zone divergence by name.
-    let _ = crate::mtp_debug::capture_subop("pre_gated_attn_split", &q_raw);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("pre_gated_attn_split", &q_raw);
+    }
     // Phase B12 layer-31 GQA taps: q_proj / k_proj / v_proj. These are
     // the post-projection tensors before the gate split. No-op unless
     // layer 31 is executing with B12 capture armed.
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("q_proj", &q_raw)?;
         crate::mtp_debug::capture_b12_gqa_tap("k_proj", &k)?;
         crate::mtp_debug::capture_b12_gqa_tap("v_proj", &v)?;
@@ -4382,13 +4390,17 @@ fn gqa_attention_paged_with_rope_tables(
         }
     };
     // After the gate split, q is the rotation target.
-    let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
+    }
     // Phase B9 H3 alias: post_gated_attn_split_value mirrors post_q_split.
-    let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_value", &q);
-    if let Some(ref g) = gate {
-        let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
-        // Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
-        let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_gate", g);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_value", &q);
+        if let Some(ref g) = gate {
+            let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
+            // Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
+            let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_gate", g);
+        }
     }
 
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
@@ -4397,8 +4409,10 @@ fn gqa_attention_paged_with_rope_tables(
     // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
     // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
     // post_q_split; pre_qk_norm_k is genuinely new (post_k_proj is pre-reshape).
-    let _ = crate::mtp_debug::capture_subop("pre_qk_norm_q", &q);
-    let _ = crate::mtp_debug::capture_subop("pre_qk_norm_k", &k);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("pre_qk_norm_q", &q);
+        let _ = crate::mtp_debug::capture_subop("pre_qk_norm_k", &k);
+    }
 
     // QK-norm
     let (q, k) = {
@@ -4407,15 +4421,19 @@ fn gqa_attention_paged_with_rope_tables(
         let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
         (q, k)
     };
-    let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
-    let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
+        let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
+    }
     // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
-    let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
-    let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
+        let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
+    }
     // Phase B12 layer-31 GQA taps: qk_norm_q / qk_norm_k. Post per-head
     // RMSNorm, pre-RoPE. Shape [B, T, num_heads, head_dim] /
     // [B, T, num_kv_heads, head_dim].
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("qk_norm_q", &q)?;
         crate::mtp_debug::capture_b12_gqa_tap("qk_norm_k", &k)?;
     }
@@ -4431,14 +4449,16 @@ fn gqa_attention_paged_with_rope_tables(
             rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
         }
     };
-    let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
-    let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
+        let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
+    }
     // Phase B12 layer-31 GQA taps: rope_q / rope_k. Post-RoPE, pre-transpose.
     // These are intermediates that HF can only expose via a forward hook on
     // the attention module's q_proj/k_proj output + manual re-run of the
     // rotary function in the comparator — the Python dump script emits a
     // NOTE rather than failing when these HF taps are absent.
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("rope_q", &q)?;
         crate::mtp_debug::capture_b12_gqa_tap("rope_k", &k)?;
     }
@@ -4529,7 +4549,7 @@ fn gqa_attention_paged_with_rope_tables(
             } else {
                 attn_output
             };
-            if crate::mtp_debug::current_b12_layer_is_31() {
+            if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
             let out = {
@@ -4542,7 +4562,7 @@ fn gqa_attention_paged_with_rope_tables(
                 )?
             };
             // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
-            if crate::mtp_debug::current_b12_layer_is_31() {
+            if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
             }
             return Ok(out);
@@ -4755,7 +4775,7 @@ fn gqa_attention_paged_with_rope_tables(
             } else {
                 attn_output
             };
-            if crate::mtp_debug::current_b12_layer_is_31() {
+            if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
             let out = {
@@ -4767,7 +4787,7 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
-            if crate::mtp_debug::current_b12_layer_is_31() {
+            if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
             }
             return Ok(out);
@@ -4795,7 +4815,7 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_output
             };
             // Phase B12 layer-31 GQA tap (secondary prefill path).
-            if crate::mtp_debug::current_b12_layer_is_31() {
+            if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
             let out = {
@@ -4807,7 +4827,7 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
-            if crate::mtp_debug::current_b12_layer_is_31() {
+            if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
             }
             return Ok(out);
@@ -4902,7 +4922,9 @@ fn gqa_attention_paged_with_rope_tables(
             .transpose(1, 2)?
             .contiguous()?
             .reshape((batch, 1, num_heads * head_dim))?;
-        let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
+        }
 
         // Phase C7: final SDPA output tap at the same point as post_attn_raw,
         // shape [batch, q_len=1, num_heads*head_dim] = [1, 1, 4096].
@@ -4916,9 +4938,11 @@ fn gqa_attention_paged_with_rope_tables(
         } else {
             attn_output
         };
-        let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
+        }
         // Phase B12 layer-31 GQA tap (grouped decode path).
-        if crate::mtp_debug::current_b12_layer_is_31() {
+        if b12_layer_31 {
             crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
         }
         let out = {
@@ -4931,8 +4955,10 @@ fn gqa_attention_paged_with_rope_tables(
                 lora_scale,
             )?
         };
-        let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
-        if crate::mtp_debug::current_b12_layer_is_31() {
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
+        }
+        if b12_layer_31 {
             crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
         }
         return Ok(out);
@@ -4972,7 +4998,9 @@ fn gqa_attention_paged_with_rope_tables(
             .transpose(1, 2)?
             .contiguous()?
             .reshape(((), seq_len, num_heads * head_dim))?;
-    let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
+    }
 
     let attn_output = if let Some(ref gate) = gate {
         let sigmoid_gate = cuda_sigmoid(gate)?;
@@ -4980,9 +5008,11 @@ fn gqa_attention_paged_with_rope_tables(
     } else {
         attn_output
     };
-    let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
+    }
     // Phase B12 layer-31 GQA tap (standard fallback path).
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
     }
 
@@ -4996,8 +5026,10 @@ fn gqa_attention_paged_with_rope_tables(
             lora_scale,
         )?
     };
-    let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
+    }
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
     }
     Ok(out)
@@ -5087,8 +5119,9 @@ pub fn transformer_block(
         }
     };
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    let use_metal_decode_ffn =
-        seq_len == 1 && kv_cache.is_some() && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let use_metal_decode_ffn = seq_len == 1
+        && kv_cache.is_some()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Pre-attention norm
     let normed = {
@@ -5213,9 +5246,11 @@ fn transformer_block_paged_with_rope_tables(
         }
     };
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let subop_armed = crate::mtp_debug::is_subop_capture_armed();
+    let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
     let use_metal_decode_ffn = seq_len == 1
         && start_pos > 0
-        && !crate::mtp_debug::current_b12_layer_is_31()
+        && !b12_layer_31
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Pre-attention norm
@@ -5223,11 +5258,13 @@ fn transformer_block_paged_with_rope_tables(
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
-    let _ = crate::mtp_debug::capture_subop("post_pre_attn_norm", &normed);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_pre_attn_norm", &normed);
+    }
     // Phase B12: layer-31 GQA sub-op tap #1. Named `post_input_norm` to
     // match the HF reference-dump naming. No-op unless we are on base-model
     // layer 31 with the B12 capture window armed.
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("post_input_norm", &normed)?;
     }
 
@@ -5251,38 +5288,46 @@ fn transformer_block_paged_with_rope_tables(
         config.attn_output_gate,
         lora,
     )?;
-    let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
+    }
 
     // Residual connection
     let x = {
         kiln_nvtx::range!(c"kiln/residual");
         (x + attn_out)?
     };
-    let _ = crate::mtp_debug::capture_subop("post_attn_residual", &x);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_attn_residual", &x);
+    }
 
     // Post-attention norm
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_mlp");
         rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
     };
-    let _ = crate::mtp_debug::capture_subop("post_pre_mlp_norm", &normed);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_pre_mlp_norm", &normed);
+    }
     // Phase B12: layer-31 GQA sub-op tap — post_attn_norm. Named to match
     // the HF reference. No-op unless layer 31 + armed.
-    if crate::mtp_debug::current_b12_layer_is_31() {
+    if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("post_attn_norm", &normed)?;
     }
 
     // Feed-forward network. For layer 31 with B12 armed, route through a
     // sub-op-tapping path that exposes mlp_gate / mlp_up / mlp_down; the
     // standard `swiglu_ffn` fuses those and is fine for everyone else.
-    let ffn_out = if crate::mtp_debug::current_b12_layer_is_31() {
+    let ffn_out = if b12_layer_31 {
         swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
     } else if use_metal_decode_ffn {
         swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
     } else {
         swiglu_ffn(&normed, &layer.mlp, lora)?
     };
-    let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
+    if subop_armed {
+        let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
+    }
 
     // Residual connection
     let out = {
@@ -5331,9 +5376,8 @@ pub fn model_forward(
     // Position indices for RoPE — absolute positions accounting for cached tokens
     let offset = kv_cache.as_ref().map_or(0, |c| c.seq_len());
     let positions: Vec<u32> = (offset..offset + seq_len).map(|p| p as u32).collect();
-    let use_metal_decode_ffn = seq_len == 1
-        && offset > 0
-        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let use_metal_decode_ffn =
+        seq_len == 1 && offset > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // 2. Loop through all transformer layers
     // Track full-attention layer index (0-based counter of only full-attn layers)
@@ -7042,8 +7086,8 @@ mod tests {
         let eps = 1e-6;
         let x = Tensor::from_slice(
             &[
-                1.0_f32, 2.0, 3.0, 4.0, 0.5, 1.5, 2.5, 3.5, 4.0, 3.0, 2.0, 1.0, -1.0, -2.0,
-                -3.0, -4.0, 1.0, -1.5, 2.0, -2.5, 0.25, -0.5, 0.75, -1.0,
+                1.0_f32, 2.0, 3.0, 4.0, 0.5, 1.5, 2.5, 3.5, 4.0, 3.0, 2.0, 1.0, -1.0, -2.0, -3.0,
+                -4.0, 1.0, -1.5, 2.0, -2.5, 0.25, -0.5, 0.75, -1.0,
             ],
             (batch, seq_len, hidden),
             &device,
@@ -7068,10 +7112,14 @@ mod tests {
             .contiguous()?
             .reshape((batch, hidden))?
             .contiguous()?;
-        let production_scalar_values = production_last_row.reshape((batch, hidden))?.contiguous()?;
+        let production_scalar_values =
+            production_last_row.reshape((batch, hidden))?.contiguous()?;
         let production_rms_inv_row = rms_inv.narrow(1, seq_len - 1, 1)?.contiguous()?;
 
-        assert_eq!(rms_inv_row.to_vec3::<f32>()?, production_rms_inv_row.to_vec3::<f32>()?);
+        assert_eq!(
+            rms_inv_row.to_vec3::<f32>()?,
+            production_rms_inv_row.to_vec3::<f32>()?
+        );
         assert_eq!(
             extracted_scalars.to_vec1::<f32>()?,
             production_rms_inv_row.reshape((batch,))?.to_vec1::<f32>()?
@@ -7097,7 +7145,9 @@ mod tests {
             scalar_values.to_vec2::<f32>()?
         );
         assert_eq!(
-            broadcast_output.reshape((batch, hidden))?.to_vec2::<f32>()?,
+            broadcast_output
+                .reshape((batch, hidden))?
+                .to_vec2::<f32>()?,
             scalar_values.to_vec2::<f32>()?
         );
 
@@ -7113,7 +7163,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping test_cuda_gdn_gated_rms_norm_matches_fallback: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping test_cuda_gdn_gated_rms_norm_matches_fallback: {err}"
+                );
                 return Ok(());
             }
         };
