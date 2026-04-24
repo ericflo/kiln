@@ -1,0 +1,287 @@
+{
+  "phase": "c52",
+  "date_utc": "2026-04-24T03:33:43Z",
+  "commit": "55a5d9f26e6ca4be3d5f448935786d6a97e16a24",
+  "gpu": "NVIDIA RTX A6000",
+  "tool_versions": {
+    "cuda": "Build cuda_12.4.r12.4/compiler.34097967_0",
+    "baked_nsys": "NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0 ",
+    "selected_nsys": "NVIDIA Nsight Systems version 2024.5.1.113-245134619542v0 "
+  },
+  "benchmark_shape": {
+    "env": {
+      "KILN_SPEC_METHOD": "mtp",
+      "KILN_BENCH_FORCE_MTP": "1",
+      "KILN_MTP_ARGMAX_FP32": "1"
+    },
+    "command": "./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 1 --chat-template --latency-only --prompt-subset humaneval --temperature 0.0",
+    "seed": 1,
+    "prompt_subset": "humaneval",
+    "prompt_tokens": 515,
+    "max_output_tokens": 128,
+    "temperature": 0.0
+  },
+  "benchmark_result": {
+    "prefill_time_ms": 7921.204989999999,
+    "decode_tokens_per_sec": 25.312506533946454,
+    "mean_inter_token_ms": 39.506162641732296,
+    "acceptance_rate": 0.7066666666666667,
+    "tokens_generated": 128
+  },
+  "profiler_status": {
+    "primary": "success",
+    "fix": "Installed nsight-systems-2024.5.1 from the existing NVIDIA CUDA apt repository and used /opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys for capture and stats.",
+    "baked_2023_4_4_failure_bypassed": true,
+    "stats_reports": [
+      "nvtx_sum",
+      "nvtx_gpu_proj_sum",
+      "nvtx_kern_sum",
+      "cuda_gpu_kern_sum",
+      "cuda_api_sum",
+      "cuda_gpu_trace",
+      "cuda_kern_exec_sum",
+      "nvtx_pushpop_trace"
+    ],
+    "decode_window_start_ns": 12058641289,
+    "decode_window_end_ns": 17128527253,
+    "decode_window_ms": 5069.886,
+    "mtp_steps": 75
+  },
+  "top_decode_ranges": [
+    {
+      "rank": 1,
+      "range": ":kiln/gdn/conv",
+      "wall_clock_share_pct": 15.4,
+      "total_time_ms": 562.361,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 2,
+      "range": ":kiln/gdn/gates",
+      "wall_clock_share_pct": 14.2,
+      "total_time_ms": 518.513,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 3,
+      "range": ":kiln/gdn/gated_norm",
+      "wall_clock_share_pct": 13.4,
+      "total_time_ms": 487.295,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    }
+  ],
+  "top_decode_kernels": [
+    {
+      "rank": 1,
+      "kernel": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn",
+      "gpu_time_share_pct": 23.6,
+      "total_time_ms": 563.199,
+      "instances": 7977,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 2,
+      "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8>(T1::Params)",
+      "gpu_time_share_pct": 12.3,
+      "total_time_ms": 293.366,
+      "instances": 1655,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 3,
+      "kernel": "ucopy_bf16",
+      "gpu_time_share_pct": 7.6,
+      "total_time_ms": 181.148,
+      "instances": 19612,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    }
+  ],
+  "top_decode_ranges_top10": [
+    {
+      "rank": 1,
+      "range": ":kiln/gdn/conv",
+      "wall_clock_share_pct": 15.4,
+      "total_time_ms": 562.361,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 2,
+      "range": ":kiln/gdn/gates",
+      "wall_clock_share_pct": 14.2,
+      "total_time_ms": 518.513,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 3,
+      "range": ":kiln/gdn/gated_norm",
+      "wall_clock_share_pct": 13.4,
+      "total_time_ms": 487.295,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 4,
+      "range": ":kiln/gdn/qk_norm",
+      "wall_clock_share_pct": 10.9,
+      "total_time_ms": 396.837,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 5,
+      "range": ":kiln/attn/rope",
+      "wall_clock_share_pct": 8.5,
+      "total_time_ms": 308.079,
+      "instances": 851,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 6,
+      "range": ":kiln/gdn/in_proj",
+      "wall_clock_share_pct": 4.5,
+      "total_time_ms": 164.971,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 7,
+      "range": ":kiln/attn/full/prefill",
+      "wall_clock_share_pct": 3.4,
+      "total_time_ms": 124.87,
+      "instances": 600,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 8,
+      "range": ":kiln/attn/gdn/chunk_prep",
+      "wall_clock_share_pct": 3.0,
+      "total_time_ms": 109.453,
+      "instances": 1800,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 9,
+      "range": ":kiln/residual",
+      "wall_clock_share_pct": 2.8,
+      "total_time_ms": 100.982,
+      "instances": 6358,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    },
+    {
+      "rank": 10,
+      "range": ":kiln/gdn/qkv_split",
+      "wall_clock_share_pct": 2.5,
+      "total_time_ms": 92.293,
+      "instances": 2328,
+      "source": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv; decode window = first :kiln/mtp/step start through final decode NVTX end; :kiln/mtp/step parent excluded from denominator"
+    }
+  ],
+  "top_decode_kernels_top10": [
+    {
+      "rank": 1,
+      "kernel": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn",
+      "gpu_time_share_pct": 23.6,
+      "total_time_ms": 563.199,
+      "instances": 7977,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 2,
+      "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8>(T1::Params)",
+      "gpu_time_share_pct": 12.3,
+      "total_time_ms": 293.366,
+      "instances": 1655,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 3,
+      "kernel": "ucopy_bf16",
+      "gpu_time_share_pct": 7.6,
+      "total_time_ms": 181.148,
+      "instances": 19612,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 4,
+      "kernel": "ampere_bf16_s16816gemm_bf16_128x64_sliced1x2_ldg8_f2f_stages_64x3_nn",
+      "gpu_time_share_pct": 6.5,
+      "total_time_ms": 154.203,
+      "instances": 2400,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 5,
+      "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_32x6_nn_align8>(T1::Params)",
+      "gpu_time_share_pct": 5.6,
+      "total_time_ms": 133.066,
+      "instances": 74,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 6,
+      "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params)",
+      "gpu_time_share_pct": 4.5,
+      "total_time_ms": 107.316,
+      "instances": 3335,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 7,
+      "kernel": "ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn",
+      "gpu_time_share_pct": 4.5,
+      "total_time_ms": 106.534,
+      "instances": 2928,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 8,
+      "kernel": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(T1::Params)",
+      "gpu_time_share_pct": 3.2,
+      "total_time_ms": 75.305,
+      "instances": 3600,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 9,
+      "kernel": "bmul_f32",
+      "gpu_time_share_pct": 3.1,
+      "total_time_ms": 73.891,
+      "instances": 27620,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    },
+    {
+      "rank": 10,
+      "kernel": "[CUDA memcpy Host-to-Device]",
+      "gpu_time_share_pct": 2.7,
+      "total_time_ms": 65.108,
+      "instances": 80434,
+      "source": "docs/phase-c52/decode-window-kernels.csv derived from cuda_gpu_trace_cuda_gpu_trace.csv before dropping the multi-MB raw trace from git artifacts"
+    }
+  ],
+  "next_target": {
+    "recommendation": "Target the current post-#468 GDN decode cluster, starting with :kiln/gdn/conv only if static audit shows it is not already fully covered by the existing chunk/causal-conv vendoring path; otherwise move to the adjacent :kiln/gdn/gates + :kiln/gdn/gated_norm cluster.",
+    "rationale": "The successful post-#468 decode window attribution has :kiln/gdn/conv at 15.4%, :kiln/gdn/gates at 14.2%, and :kiln/gdn/gated_norm at 13.4%; full-attention/MTP parent ranges are smaller."
+  },
+  "artifacts": {
+    "report": "docs/phase-c52/post-468-mtp-profiler-attribution.md",
+    "environment": "docs/phase-c52/environment.txt",
+    "profile_log": "docs/phase-c52/nsys-profile.log",
+    "v2024_stats_status": "docs/phase-c52/nsys-stats-v2024-status.txt",
+    "decode_nvtx_csv": "docs/phase-c52/decode-window-nvtx-ranges.csv",
+    "decode_kernel_csv": "docs/phase-c52/decode-window-kernels.csv",
+    "raw_nvtx_trace_csv": "docs/phase-c52/nvtx_pushpop_trace_nvtx_pushpop_trace.csv",
+    "raw_summary_csvs": [
+      "docs/phase-c52/nvtx_sum_nvtx_sum.csv",
+      "docs/phase-c52/nvtx_gpu_proj_sum_nvtx_gpu_proj_sum.csv",
+      "docs/phase-c52/nvtx_kern_sum_nvtx_kern_sum.csv",
+      "docs/phase-c52/cuda_gpu_kern_sum_cuda_gpu_kern_sum.csv",
+      "docs/phase-c52/cuda_api_sum_cuda_api_sum.csv",
+      "docs/phase-c52/cuda_kern_exec_sum_cuda_kern_exec_sum.csv"
+    ]
+  }
+}

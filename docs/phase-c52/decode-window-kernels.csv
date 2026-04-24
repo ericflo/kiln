@@ -1,0 +1,11 @@
+rank,kernel,gpu_time_share_pct,total_time_ms,instances
+1,ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn,23.6,563.199,7977
+2,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8>(T1::Params),12.3,293.366,1655
+3,ucopy_bf16,7.6,181.148,19612
+4,ampere_bf16_s16816gemm_bf16_128x64_sliced1x2_ldg8_f2f_stages_64x3_nn,6.5,154.203,2400
+5,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x64_32x6_nn_align8>(T1::Params),5.6,133.066,74
+6,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(T1::Params),4.5,107.316,3335
+7,ampere_bf16_s16816gemm_bf16_64x64_sliced1x2_ldg8_f2f_stages_64x5_nn,4.5,106.534,2928
+8,void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(T1::Params),3.2,75.305,3600
+9,bmul_f32,3.1,73.891,27620
+10,[CUDA memcpy Host-to-Device],2.7,65.108,80434

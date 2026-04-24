@@ -7227,3 +7227,65 @@ work only if a successful post-#466 profiler capture confirms it remains the top
 decode cluster. Otherwise, first repair or bypass the Nsight importer failure
 with a compatible newer `nsys`, smaller decode-window capture, or alternate
 profiler path that yields current NVTX/kernel attribution.
+
+## Phase 6 C52 post-#468 MTP profiler attribution (2026-04-24)
+
+C52 repairs the C51 attribution gap on current `origin/main` at
+`55a5d9f26e6ca4be3d5f448935786d6a97e16a24` after PR #468 documented the
+post-#466 Nsight importer failure. The workload is the same C40f-style
+native-MTP decode shape used by C51: `KILN_SPEC_METHOD=mtp`,
+`KILN_BENCH_FORCE_MTP=1`, `KILN_MTP_ARGMAX_FP32=1`, paged 512-token prompt,
+128 generated tokens, seed `1`, `--chat-template`, `--latency-only`,
+`--prompt-subset humaneval`, and temperature `0.0`.
+
+Artifact: `docs/phase-c52/post-468-mtp-profiler-attribution.md`; machine
+summary: `docs/phase-c52/summary.json`.
+
+Profiler repair: the baked image still reports Nsight Systems `2023.4.4`, which
+is the version that failed C51 import with the QuadD wrong-event-order error.
+C52 installed only `nsight-systems-2024.5.1` from the already-configured NVIDIA
+CUDA apt repository and used
+`/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nsys` for both capture and
+stats. The required capture produced a `104M` `.nsys-rep`, and the 2024 report
+exports succeeded with the current report names (`nvtx_sum`,
+`nvtx_pushpop_trace`, `cuda_gpu_kern_sum`, `cuda_api_sum`,
+`cuda_kern_exec_sum`). The old aliases (`nvtxsum`, `gpukernsum`, `cudaapisum`)
+are not valid report names under 2024.5.1; the failed alias outputs are
+committed as fallback-ladder evidence.
+
+The profiled seed-1 run produced α `0.707`, decode `25.31 tok/s`, and mean ITL
+`39.51 ms` under Nsight tracing. Treat those timings as profiled attribution
+context only; C51 remains the unprofiled post-#466 benchmark median anchor.
+
+### Top decode NVTX ranges
+
+Decode window attribution is derived from `nvtx_pushpop_trace`: first
+`:kiln/mtp/step` start through the final decode NVTX end (`5069.9 ms`, 75 MTP
+steps). Percentages exclude the `:kiln/mtp/step` parent wrapper from the
+NVTX-duration denominator to avoid double-counting that high-level parent.
+
+| Rank | Decode range | Wall-clock share | Total time | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `:kiln/gdn/conv` | 15.4% | 562.361 ms | 2328 |
+| 2 | `:kiln/gdn/gates` | 14.2% | 518.513 ms | 2328 |
+| 3 | `:kiln/gdn/gated_norm` | 13.4% | 487.295 ms | 2328 |
+| 4 | `:kiln/gdn/qk_norm` | 10.9% | 396.837 ms | 2328 |
+| 5 | `:kiln/attn/rope` | 8.5% | 308.079 ms | 851 |
+
+### Top decode kernels
+
+Kernel shares use CUDA GPU trace rows inside the same decode window, reduced to
+`docs/phase-c52/decode-window-kernels.csv` rather than committing the full
+multi-MB raw CUDA trace.
+
+| Rank | Kernel | GPU-time share | Total time | Instances |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | `ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_64x3_nn` | 23.6% | 563.199 ms | 7977 |
+| 2 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8` | 12.3% | 293.366 ms | 1655 |
+| 3 | `ucopy_bf16` | 7.6% | 181.148 ms | 19612 |
+
+Recommendation from current post-#468 data only: target the GDN decode cluster.
+Start with a static audit of `:kiln/gdn/conv` so we do not retry an already
+exhausted causal-conv/chunk-vendoring path; if that audit shows low leverage,
+move to the adjacent `:kiln/gdn/gates` + `:kiln/gdn/gated_norm` cluster. Do not
+choose a next kernel from stale C50/C51 carry-forward percentages.

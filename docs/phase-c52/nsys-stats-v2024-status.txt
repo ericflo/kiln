@@ -1,0 +1,14 @@
+nvtx_sum rc=0
+nvtx_sum csv rc=0
+nvtx_gpu_proj_sum rc=0
+nvtx_gpu_proj_sum csv rc=0
+nvtx_kern_sum rc=0
+nvtx_kern_sum csv rc=0
+cuda_gpu_kern_sum rc=0
+cuda_gpu_kern_sum csv rc=0
+cuda_api_sum rc=0
+cuda_api_sum csv rc=0
+cuda_gpu_trace rc=0
+cuda_gpu_trace csv rc=0
+cuda_kern_exec_sum rc=0
+cuda_kern_exec_sum csv rc=0

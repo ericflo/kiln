@@ -1,0 +1,4 @@
+Generating SQLite file /tmp/kiln-post468-mtp.sqlite from /tmp/kiln-post468-mtp.nsys-rep
+Processing [/tmp/kiln-post468-mtp.sqlite] with [nvtxsum]... 
+ERROR: Report 'nvtxsum' could not be found.
+
