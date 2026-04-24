@@ -2438,8 +2438,8 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
 
     #[cfg(feature = "cuda")]
     {
-        let enabled = std::env::var("KILN_ENABLE_FUSED_L2_QK_NORM").is_ok();
-        if enabled && input_dtype == DType::BF16 && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k) {
+        let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
+        if !disabled && input_dtype == DType::BF16 && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k) {
             return kiln_rmsnorm_kernel::fused_l2_qk_norm(q, k, scale as f32, 1e-6)
                 .context("fused_l2_qk_norm kernel failed");
         }
@@ -3414,24 +3414,11 @@ fn gated_deltanet_forward_decode_if(
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
-        // Fast paths: Metal defaults to a fused F32->BF16 kernel for the desktop
-        // hot path, and CUDA keeps its opt-in `kiln_rmsnorm_kernel::fused_l2_qk_norm`.
-        // Both collapse the l2-normalize(Q) + scale(Q) + l2-normalize(K) +
-        // dtype-cast chain (~11 candle launches on tiny per-row tensors at decode
-        // shape) into a single launch.
-        //
-        // The CUDA fused kernel remains **opt-in via
-        // `KILN_ENABLE_FUSED_L2_QK_NORM=1`**. Phase 6 wallclock validation on Arm B
-        // (RTX A6000, KILN_W4A16=1
-        // KILN_CUDA_GRAPHS=true, paged 512/128, 3 paired runs) measured a
-        // median speedup of 1.0093x — well below the task's 1.05x abort floor.
-        // Mean ITL improved by 0.18ms (0.92%); only p99 ITL showed a
-        // meaningful win (24.78ms -> 20.25ms, -18% tail latency) and the
-        // run-to-run variance tightened. The kernel is correct (parity tests
-        // and the full nextest suite pass) but the wallclock impact at the
-        // Qwen3.5-4B GDN decode shape does not meet
-        // the bar to engage by default. See PROFILING.md "Phase 6 fused
-        // qk_norm null result" for the full numbers and analysis.
+        // Fast paths: Metal and CUDA default to fused F32->BF16 kernels for
+        // supported bf16 tensors. Both collapse the l2-normalize(Q) + scale(Q) +
+        // l2-normalize(K) + dtype-cast chain (~11 candle launches on tiny per-row
+        // tensors at decode shape) into a single launch. CUDA can be forced back
+        // to the candle parity path with `KILN_DISABLE_FUSED_L2_QK_NORM=1`.
         //
         // Both paths produce bf16 outputs in `input_dtype`; only the kernel
         // path skips the F32 round-trip through HBM. The candle path is the
