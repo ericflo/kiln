@@ -1,0 +1,13 @@
+rank,range,total_ms,share_pct,instances
+1,:kiln/gdn/gates,489.003,14.45,2088
+2,:kiln/gdn/gated_norm,458.578,13.55,2088
+3,:kiln/gdn/qk_norm,372.938,11.02,2088
+4,:kiln/attn/rope,289.762,8.56,768
+5,:kiln/mlp/gate,159.151,4.7,2856
+6,:kiln/gdn/in_proj,158.758,4.69,2088
+7,:kiln/mlp/up,156.102,4.61,2856
+8,:kiln/mlp/down,147.346,4.35,2856
+9,:kiln/attn/full/prefill,122.761,3.63,568
+10,:kiln/attn/gdn/chunk_prep,109.84,3.25,1704
+11,:kiln/gdn/qkv_split,94.232,2.78,2088
+12,:kiln/gdn/conv,92.213,2.73,2088

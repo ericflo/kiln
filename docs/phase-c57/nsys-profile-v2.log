@@ -1,0 +1,73 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-24T11:22:10.867585Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-24T11:22:10.869242Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-24T11:22:10.869439Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-24T11:22:10.869461Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-24T11:22:10.869588Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+[2m2026-04-24T11:22:37.591333Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m marlin batch pack complete [3mn_inputs[0m[2m=[0m104 [3mn_packed[0m[2m=[0m104 [3mpack_elapsed_ms[0m[2m=[0m22494 [3mparallel[0m[2m=[0mtrue
+[kiln] marlin batch pack: 104/104 projections in 22494 ms (parallel)
+Model loaded in 27.87s (backend: cuda, VRAM: 17551 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=49] (515 prompt tokens)...
+    Prefill (MTP): 417.7ms (1233 tok/s)
+[2m2026-04-24T11:22:39.721062Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m deferred native MTP CPU load complete [3mload_elapsed_ms[0m[2m=[0m1
+[2m2026-04-24T11:22:39.782679Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m lazy native MTP GPU upload complete [3mupload_elapsed_ms[0m[2m=[0m61
+    Decode (MTP): 128 tokens, mean ITL 37.8ms (26.5 tok/s), α = 0.764 (55/72)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 27.87s (VRAM: 17551 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         515
+Prefill time:          417.7 ms (1233 tok/s)
+Time to first token:   417.7 ms
+Mean inter-token:      37.8 ms (26.5 tok/s)
+P50 inter-token:       27.9 ms
+P99 inter-token:       100.7 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.764
+
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 27.865969299,
+    "model_vram_mb": 17551
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 515,
+    "prefill_time_ms": 417.745026,
+    "prefill_tokens_per_sec": 1232.809412313625,
+    "time_to_first_token_ms": 417.745026,
+    "mean_inter_token_ms": 37.789477629921265,
+    "p50_inter_token_ms": 27.863319,
+    "p99_inter_token_ms": 100.692662,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 26.462392780158773,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.7638888888888888,
+    "prompt_subset": "humaneval"
+  },
+  "training": null
+}
+Generating '/tmp/nsys-report-e9c1.qdstrm'
+[1/1] [0%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [0%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [0%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====29%                    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===22%                      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=17%                        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [======35%                   ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====29%                    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====25%                     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===22%                      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==19%                       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=17%                        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=16%                        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [14%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [13%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [12%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [11%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [10%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [9%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [8%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [7%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [6%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [5%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [0%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [5%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [6%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [7%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [8%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [9%                          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [10%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [11%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [12%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [13%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [14%                         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=15%                        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=16%                        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=17%                        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==18%                       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==19%                       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==20%                       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==21%                       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===22%                      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===23%                      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===24%                      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====25%                     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====26%                     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====27%                     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====28%                     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====29%                    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====30%                    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====31%                    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====32%                    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [======33%                   ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [======34%                   ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [======35%                   ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=======36%                  ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=======37%                  ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=======38%                  ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=======39%                  ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [========40%                 ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [========41%                 ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [========42%                 ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=========43%                ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=========44%                ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=========45%                ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=========46%                ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==========47%               ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==========48%               ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==========49%               ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===========50%              ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===========51%              ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===========52%              ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===========53%              ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [============54%             ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [============55%             ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [============56%             ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [============57%             ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=============58%            ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=============59%            ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=============60%            ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==============61%           ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==============62%           ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==============63%           ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==============64%           ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===============65%          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===============66%          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===============67%          ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [================68%         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [================69%         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [================70%         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [================71%         ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=================72%        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=================73%        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=================74%        ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==================75%       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==================76%       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==================77%       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [==================78%       ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===================79%      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===================80%      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===================81%      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [===================82%      ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====================83%     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====================84%     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [====================85%     ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====================86%    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====================87%    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====================88%    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [=====================89%    ] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [========================100%] c57-mtp-conv-prefill-v2.nsys-rep[1/1] [========================100%] c57-mtp-conv-prefill-v2.nsys-rep
+Generated:
+    /tmp/kiln-c57/c57-mtp-conv-prefill-v2.nsys-rep
