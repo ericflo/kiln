@@ -3248,135 +3248,6 @@ fn gated_deltanet_forward_decode_if(
         crate::mtp_debug::capture_c41_layer1_tap("gdn_in_proj", &gdn_in_proj)?;
     }
 
-    // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
-    //
-    // Decode fast path: backend-side `causal_conv1d_update` collapses the
-    // to_f32 / cat / sum / narrow / silu chain into one fused update per
-    // (batch, channel). It returns F32 with SiLU already fused, so the
-    // subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Unsupported
-    // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
-    // kill switch all route through the portable candle path below — which is the
-    // parity oracle.
-    let mixed_qkv = {
-        kiln_nvtx::range!(c"kiln/gdn/conv");
-        // Transpose to [B, channels, T] for conv
-        let mixed_qkv_ct = {
-            kiln_nvtx::range!(c"kiln/gdn/conv/layout");
-            mixed_qkv.transpose(1, 2)?.contiguous()?
-        };
-        let post_silu = if seq_len == 1 && backend.supports_causal_conv1d_update() {
-            let conv_update = {
-                kiln_nvtx::range!(c"kiln/gdn/conv/update");
-                backend.causal_conv1d_update(
-                    &mixed_qkv_ct,
-                    &weights.conv1d,
-                    conv_state,
-                    kernel_size,
-                )?
-            };
-            match conv_update {
-                Some(out) => out, // F32, SiLU fused into the kernel epilogue
-                None => {
-                    kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
-                    let y = causal_conv1d_decode(
-                        &mixed_qkv_ct,
-                        &weights.conv1d,
-                        conv_state,
-                        kernel_size,
-                    )?;
-                    cuda_silu(&y.to_dtype(DType::F32)?)?
-                }
-            }
-        } else if seq_len > 1 {
-            if backend.supports_causal_conv1d_prefill() {
-                let conv_prefill = {
-                    kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");
-                    backend.causal_conv1d_prefill(
-                        &mixed_qkv_ct,
-                        &weights.conv1d,
-                        conv_state,
-                        kernel_size,
-                    )?
-                };
-                match conv_prefill {
-                    Some(out) => out, // F32, SiLU fused into the kernel epilogue
-                    None => {
-                        kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
-                        let y = causal_conv1d_prefill(
-                            &mixed_qkv_ct,
-                            &weights.conv1d,
-                            conv_state,
-                            kernel_size,
-                        )?;
-                        cuda_silu(&y)?
-                    }
-                }
-            } else {
-                kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
-                let y =
-                    causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
-                cuda_silu(&y)?
-            }
-        } else {
-            kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
-            let y = causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
-            cuda_silu(&y.to_dtype(DType::F32)?)?
-        };
-        // Transpose back to [B, T, qkv_dim]
-        post_silu.transpose(1, 2)?
-    };
-
-    // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
-    // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
-    // `F.silu(...)` (shape [B, T, qkv_dim]).
-    if capture_b11_taps {
-        crate::mtp_debug::capture_b11_layer0_tap("gdn_conv", &mixed_qkv)?;
-    }
-    if capture_c41_taps {
-        crate::mtp_debug::capture_c41_layer1_tap("gdn_conv", &mixed_qkv)?;
-    }
-
-    // --- Step 3: Split into Q, K, V and reshape to heads ---
-    let (q, k, v, z) = {
-        kiln_nvtx::range!(c"kiln/gdn/qkv_split");
-        let q = mixed_qkv
-            .narrow(2, 0, qk_dim)?
-            .reshape((batch, seq_len, nk, dk))?;
-        let k = mixed_qkv
-            .narrow(2, qk_dim, qk_dim)?
-            .reshape((batch, seq_len, nk, dk))?;
-        let v = mixed_qkv
-            .narrow(2, 2 * qk_dim, v_dim)?
-            .reshape((batch, seq_len, nv, dv))?;
-        let z = z.reshape((batch, seq_len, nv, dv))?;
-        (q, k, v, z)
-    };
-
-    // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
-    //
-    // Fast paths: Metal defaults to a fused F32->BF16 kernel for the desktop
-    // hot path, and CUDA keeps its opt-in `kiln_rmsnorm_kernel::fused_l2_qk_norm`.
-    // Both collapse the l2-normalize(Q) + scale(Q) + l2-normalize(K) +
-    // dtype-cast chain (~11 candle launches on tiny per-row tensors at decode
-    // shape) into a single launch.
-    //
-    // The CUDA fused kernel remains **opt-in via
-    // `KILN_ENABLE_FUSED_L2_QK_NORM=1`**. Phase 6 wallclock validation on Arm B
-    // (RTX A6000, KILN_W4A16=1
-    // KILN_CUDA_GRAPHS=true, paged 512/128, 3 paired runs) measured a
-    // median speedup of 1.0093x — well below the task's 1.05x abort floor.
-    // Mean ITL improved by 0.18ms (0.92%); only p99 ITL showed a
-    // meaningful win (24.78ms -> 20.25ms, -18% tail latency) and the
-    // run-to-run variance tightened. The kernel is correct (parity tests
-    // and the full nextest suite pass) but the wallclock impact at the
-    // Qwen3.5-4B GDN decode shape does not meet
-    // the bar to engage by default. See PROFILING.md "Phase 6 fused
-    // qk_norm null result" for the full numbers and analysis.
-    //
-    // Both paths produce bf16 outputs in `input_dtype`; only the kernel
-    // path skips the F32 round-trip through HBM. The candle path is the
-    // parity oracle exercised by `kiln-rmsnorm-kernel`'s
-    // `parity_l2_qk_norm_*` tests.
     let scale = 1.0 / (dk as f64).sqrt();
     let recurrent_unexpanded_qk = input_dtype == DType::BF16
         && seq_len >= 1
@@ -3386,28 +3257,233 @@ fn gated_deltanet_forward_decode_if(
         && !capture_b11_taps
         && !capture_c41_taps
         && backend.supports_gdn_recurrent_prefill_native_head_last();
-    let (q, k, qk_expanded) = {
+    let fused_decode_qkv_conv_norm = {
         #[cfg(feature = "metal")]
         {
-            if recurrent_unexpanded_qk {
-                kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
-                let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                (q, k, false)
-            } else if input_dtype == DType::BF16
-                && gqa_ratio > 1
-                && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
-            {
-                kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
-                crate::backend::metal::metal_gdn_qk_norm_gqa_f32_bf16(
-                    &q,
-                    &k,
+            if recurrent_unexpanded_qk
+                && !capture_b11_taps
+                && !capture_c41_taps
+                && crate::backend::metal::metal_gdn_decode_qkv_conv_norm_supports(
+                    &mixed_qkv,
+                    &weights.conv1d,
+                    conv_state,
+                    kernel_size,
+                    nk,
+                    dk,
                     nv,
+                    dv,
+                )
+            {
+                kiln_nvtx::range!(c"kiln/gdn/qkv_conv_norm");
+                let (q, k, v) = crate::backend::metal::metal_gdn_decode_qkv_conv_norm_bf16(
+                    &mixed_qkv,
+                    &weights.conv1d,
+                    conv_state,
+                    kernel_size,
+                    nk,
+                    dk,
+                    nv,
+                    dv,
                     scale as f32,
                     1e-6,
                 )
-                .context("metal gdn qk_norm gqa kernel failed")
-                .map(|(q, k)| (q, k, true))?
+                .context("metal gdn decode qkv conv/norm kernel failed")?;
+                let z = z.reshape((batch, seq_len, nv, dv))?;
+                Some((q, k, v, z, false))
             } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            None
+        }
+    };
+
+    let (q, k, v, z, qk_expanded) = if let Some(fused) = fused_decode_qkv_conv_norm {
+        fused
+    } else {
+        // --- Step 2: Causal depthwise conv1d + SiLU on fused QKV ---
+        //
+        // Decode fast path: backend-side `causal_conv1d_update` collapses the
+        // to_f32 / cat / sum / narrow / silu chain into one fused update per
+        // (batch, channel). It returns F32 with SiLU already fused, so the
+        // subsequent `cuda_silu(.to_dtype(F32))` step is skipped. Unsupported
+        // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
+        // kill switch all route through the portable candle path below — which is the
+        // parity oracle.
+        let mixed_qkv = {
+            kiln_nvtx::range!(c"kiln/gdn/conv");
+            // Transpose to [B, channels, T] for conv
+            let mixed_qkv_ct = {
+                kiln_nvtx::range!(c"kiln/gdn/conv/layout");
+                mixed_qkv.transpose(1, 2)?.contiguous()?
+            };
+            let post_silu = if seq_len == 1 && backend.supports_causal_conv1d_update() {
+                let conv_update = {
+                    kiln_nvtx::range!(c"kiln/gdn/conv/update");
+                    backend.causal_conv1d_update(
+                        &mixed_qkv_ct,
+                        &weights.conv1d,
+                        conv_state,
+                        kernel_size,
+                    )?
+                };
+                match conv_update {
+                    Some(out) => out, // F32, SiLU fused into the kernel epilogue
+                    None => {
+                        kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
+                        let y = causal_conv1d_decode(
+                            &mixed_qkv_ct,
+                            &weights.conv1d,
+                            conv_state,
+                            kernel_size,
+                        )?;
+                        cuda_silu(&y.to_dtype(DType::F32)?)?
+                    }
+                }
+            } else if seq_len > 1 {
+                if backend.supports_causal_conv1d_prefill() {
+                    let conv_prefill = {
+                        kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");
+                        backend.causal_conv1d_prefill(
+                            &mixed_qkv_ct,
+                            &weights.conv1d,
+                            conv_state,
+                            kernel_size,
+                        )?
+                    };
+                    match conv_prefill {
+                        Some(out) => out, // F32, SiLU fused into the kernel epilogue
+                        None => {
+                            kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
+                            let y = causal_conv1d_prefill(
+                                &mixed_qkv_ct,
+                                &weights.conv1d,
+                                conv_state,
+                                kernel_size,
+                            )?;
+                            cuda_silu(&y)?
+                        }
+                    }
+                } else {
+                    kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
+                    let y = causal_conv1d_prefill(
+                        &mixed_qkv_ct,
+                        &weights.conv1d,
+                        conv_state,
+                        kernel_size,
+                    )?;
+                    cuda_silu(&y)?
+                }
+            } else {
+                kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
+                let y =
+                    causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
+                cuda_silu(&y.to_dtype(DType::F32)?)?
+            };
+            // Transpose back to [B, T, qkv_dim]
+            post_silu.transpose(1, 2)?
+        };
+
+        // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
+        // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
+        // `F.silu(...)` (shape [B, T, qkv_dim]).
+        if capture_b11_taps {
+            crate::mtp_debug::capture_b11_layer0_tap("gdn_conv", &mixed_qkv)?;
+        }
+        if capture_c41_taps {
+            crate::mtp_debug::capture_c41_layer1_tap("gdn_conv", &mixed_qkv)?;
+        }
+
+        // --- Step 3: Split into Q, K, V and reshape to heads ---
+        let (q, k, v, z) = {
+            kiln_nvtx::range!(c"kiln/gdn/qkv_split");
+            let q = mixed_qkv
+                .narrow(2, 0, qk_dim)?
+                .reshape((batch, seq_len, nk, dk))?;
+            let k = mixed_qkv
+                .narrow(2, qk_dim, qk_dim)?
+                .reshape((batch, seq_len, nk, dk))?;
+            let v = mixed_qkv
+                .narrow(2, 2 * qk_dim, v_dim)?
+                .reshape((batch, seq_len, nv, dv))?;
+            let z = z.reshape((batch, seq_len, nv, dv))?;
+            (q, k, v, z)
+        };
+
+        // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
+        //
+        // Fast paths: Metal defaults to a fused F32->BF16 kernel for the desktop
+        // hot path, and CUDA keeps its opt-in `kiln_rmsnorm_kernel::fused_l2_qk_norm`.
+        // Both collapse the l2-normalize(Q) + scale(Q) + l2-normalize(K) +
+        // dtype-cast chain (~11 candle launches on tiny per-row tensors at decode
+        // shape) into a single launch.
+        //
+        // The CUDA fused kernel remains **opt-in via
+        // `KILN_ENABLE_FUSED_L2_QK_NORM=1`**. Phase 6 wallclock validation on Arm B
+        // (RTX A6000, KILN_W4A16=1
+        // KILN_CUDA_GRAPHS=true, paged 512/128, 3 paired runs) measured a
+        // median speedup of 1.0093x — well below the task's 1.05x abort floor.
+        // Mean ITL improved by 0.18ms (0.92%); only p99 ITL showed a
+        // meaningful win (24.78ms -> 20.25ms, -18% tail latency) and the
+        // run-to-run variance tightened. The kernel is correct (parity tests
+        // and the full nextest suite pass) but the wallclock impact at the
+        // Qwen3.5-4B GDN decode shape does not meet
+        // the bar to engage by default. See PROFILING.md "Phase 6 fused
+        // qk_norm null result" for the full numbers and analysis.
+        //
+        // Both paths produce bf16 outputs in `input_dtype`; only the kernel
+        // path skips the F32 round-trip through HBM. The candle path is the
+        // parity oracle exercised by `kiln-rmsnorm-kernel`'s
+        // `parity_l2_qk_norm_*` tests.
+        let (q, k, qk_expanded) = {
+            #[cfg(feature = "metal")]
+            {
+                if recurrent_unexpanded_qk {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
+                    let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                    (q, k, false)
+                } else if input_dtype == DType::BF16
+                    && gqa_ratio > 1
+                    && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
+                {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
+                    crate::backend::metal::metal_gdn_qk_norm_gqa_f32_bf16(
+                        &q,
+                        &k,
+                        nv,
+                        scale as f32,
+                        1e-6,
+                    )
+                    .context("metal gdn qk_norm gqa kernel failed")
+                    .map(|(q, k)| (q, k, true))?
+                } else {
+                    let (q, k) = {
+                        kiln_nvtx::range!(c"kiln/gdn/head_expand");
+                        if gqa_ratio > 1 {
+                            let q = q
+                                .unsqueeze(3)?
+                                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                                .contiguous()?
+                                .reshape((batch, seq_len, nv, dk))?;
+                            let k = k
+                                .unsqueeze(3)?
+                                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                                .contiguous()?
+                                .reshape((batch, seq_len, nv, dk))?;
+                            (q, k)
+                        } else {
+                            (q.contiguous()?, k.contiguous()?)
+                        }
+                    };
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm");
+                    let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                    (q, k, true)
+                }
+            }
+            #[cfg(not(feature = "metal"))]
+            {
                 let (q, k) = {
                     kiln_nvtx::range!(c"kiln/gdn/head_expand");
                     if gqa_ratio > 1 {
@@ -3430,31 +3506,8 @@ fn gated_deltanet_forward_decode_if(
                 let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
                 (q, k, true)
             }
-        }
-        #[cfg(not(feature = "metal"))]
-        {
-            let (q, k) = {
-                kiln_nvtx::range!(c"kiln/gdn/head_expand");
-                if gqa_ratio > 1 {
-                    let q = q
-                        .unsqueeze(3)?
-                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                        .contiguous()?
-                        .reshape((batch, seq_len, nv, dk))?;
-                    let k = k
-                        .unsqueeze(3)?
-                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                        .contiguous()?
-                        .reshape((batch, seq_len, nv, dk))?;
-                    (q, k)
-                } else {
-                    (q.contiguous()?, k.contiguous()?)
-                }
-            };
-            kiln_nvtx::range!(c"kiln/gdn/qk_norm");
-            let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-            (q, k, true)
-        }
+        };
+        (q, k, v, z, qk_expanded)
     };
 
     // Phase B11b taps: `gdn_qk_norm_q` / `gdn_qk_norm_k`. Both are post-L2

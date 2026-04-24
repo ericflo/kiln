@@ -21,6 +21,7 @@ const DISABLE_METAL_GDN_FORWARD_SUBSTITUTION: &str = "KILN_DISABLE_METAL_GDN_FOR
 const DISABLE_METAL_GDN_RECURRENT: &str = "KILN_DISABLE_METAL_GDN_RECURRENT";
 const DISABLE_METAL_GATED_RMSNORM: &str = "KILN_DISABLE_METAL_GATED_RMSNORM";
 const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
+const DISABLE_METAL_GDN_QKV_CONV_NORM: &str = "KILN_DISABLE_METAL_GDN_QKV_CONV_NORM";
 const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
@@ -124,6 +125,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_rotary_qk_pipeline(metal_device)?;
     metal_gdn_qk_norm_pipeline(metal_device)?;
     metal_gdn_qk_norm_gqa_pipeline(metal_device)?;
+    metal_gdn_decode_qkv_conv_norm_pipeline(metal_device)?;
     metal_gdn_gates_pipeline(metal_device)?;
     metal_gated_rms_norm_pipeline(metal_device)?;
     metal_gdn_in_proj_pipeline(metal_device)?;
@@ -643,6 +645,12 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
 
 fn metal_gdn_qk_norm_disabled() -> bool {
     env_truthy(DISABLE_METAL_GDN_QK_NORM)
+}
+
+fn metal_gdn_qkv_conv_norm_disabled() -> bool {
+    env_present(DISABLE_FUSED_CONV1D)
+        || env_truthy(DISABLE_METAL_FUSED_CONV1D)
+        || env_truthy(DISABLE_METAL_GDN_QKV_CONV_NORM)
 }
 
 fn metal_rms_norm_disabled() -> bool {
@@ -1295,6 +1303,67 @@ pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &Tensor, k: &Tensor, nv: usize) 
         && nv <= u32::MAX as usize
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
+    mixed_qkv: &Tensor,
+    weight: &Tensor,
+    conv_state: &Tensor,
+    kernel_size: usize,
+    nk: usize,
+    dk: usize,
+    nv: usize,
+    dv: usize,
+) -> bool {
+    if metal_gdn_qkv_conv_norm_disabled() || metal_gdn_qk_norm_disabled() {
+        return false;
+    }
+    if kernel_size != 4 || dk != 128 || dv != 128 {
+        return false;
+    }
+    if !matches!(mixed_qkv.device(), Device::Metal(_))
+        || !matches!(weight.device(), Device::Metal(_))
+        || !matches!(conv_state.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if mixed_qkv.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || conv_state.dtype() != DType::F32
+    {
+        return false;
+    }
+    let Ok((batch, seq_len, channels)) = mixed_qkv.dims3() else {
+        return false;
+    };
+    let qk_dim = nk.saturating_mul(dk);
+    let v_dim = nv.saturating_mul(dv);
+    let Some(expected_channels) = qk_dim.checked_mul(2).and_then(|n| n.checked_add(v_dim)) else {
+        return false;
+    };
+    let weight_ok = match weight.rank() {
+        3 => weight
+            .dims3()
+            .is_ok_and(|(c, one, k)| c == channels && one == 1 && k == kernel_size),
+        2 => weight
+            .dims2()
+            .is_ok_and(|(c, k)| c == channels && k == kernel_size),
+        _ => false,
+    };
+    batch == 1
+        && seq_len == 1
+        && channels == expected_channels
+        && nk > 0
+        && nv > nk
+        && nv % nk == 0
+        && weight_ok
+        && conv_state
+            .dims3()
+            .is_ok_and(|(b, c, k)| (b, c, k) == (batch, channels, kernel_size - 1))
+        && channels <= u32::MAX as usize
+        && nk <= u32::MAX as usize
+        && nv <= u32::MAX as usize
+}
+
 pub(crate) fn metal_rotary_embedding_supports(
     q: &Tensor,
     k: &Tensor,
@@ -1580,6 +1649,102 @@ kernel void kiln_gdn_qk_norm_gqa_f32_bf16(
             q_out[dst_idx] = static_cast<bfloat>(q_norm);
             k_out[dst_idx] = static_cast<bfloat>(k_norm);
         }
+    }
+}
+"#;
+
+const METAL_GDN_DECODE_QKV_CONV_NORM_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
+    device const bfloat* mixed_qkv [[buffer(0)]],
+    device const bfloat* weight [[buffer(1)]],
+    device float* conv_state [[buffer(2)]],
+    device bfloat* q_out [[buffer(3)]],
+    device bfloat* k_out [[buffer(4)]],
+    device bfloat* v_out [[buffer(5)]],
+    constant uint& nk [[buffer(6)]],
+    constant uint& nv [[buffer(7)]],
+    constant float& q_scale [[buffer(8)]],
+    constant float& eps [[buffer(9)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    constexpr uint D = 128;
+    threadgroup float values[D];
+    threadgroup float sum_scratch[D];
+
+    const uint rows_per_batch = nk + nk + nv;
+    const uint batch = row / rows_per_batch;
+    const uint local_row = row - batch * rows_per_batch;
+    const uint qk_dim = nk * D;
+    const uint channels = qk_dim + qk_dim + nv * D;
+
+    uint channel = 0;
+    bool is_q = false;
+    bool is_k = false;
+    bool is_v = false;
+    uint src_head = 0;
+    uint v_head = 0;
+
+    if (local_row < nk) {
+        is_q = true;
+        src_head = local_row;
+        channel = src_head * D + tid;
+    } else if (local_row < nk + nk) {
+        is_k = true;
+        src_head = local_row - nk;
+        channel = qk_dim + src_head * D + tid;
+    } else {
+        is_v = true;
+        v_head = local_row - nk - nk;
+        channel = qk_dim + qk_dim + v_head * D + tid;
+    }
+
+    const uint token_idx = batch * channels + channel;
+    const uint state_base = (batch * channels + channel) * 3;
+    const uint weight_base = channel * 4;
+
+    const float s0 = conv_state[state_base + 0];
+    const float s1 = conv_state[state_base + 1];
+    const float s2 = conv_state[state_base + 2];
+    const float x0 = static_cast<float>(mixed_qkv[token_idx]);
+    const float acc =
+        s0 * static_cast<float>(weight[weight_base + 0]) +
+        s1 * static_cast<float>(weight[weight_base + 1]) +
+        s2 * static_cast<float>(weight[weight_base + 2]) +
+        x0 * static_cast<float>(weight[weight_base + 3]);
+    const float y = acc / (1.0f + exp(-acc));
+
+    conv_state[state_base + 0] = s1;
+    conv_state[state_base + 1] = s2;
+    conv_state[state_base + 2] = x0;
+
+    if (is_v) {
+        const uint out_idx = (batch * nv + v_head) * D + tid;
+        v_out[out_idx] = static_cast<bfloat>(y);
+        return;
+    }
+
+    values[tid] = y;
+    sum_scratch[tid] = y * y;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = D / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sum_scratch[tid] += sum_scratch[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inv = rsqrt(sum_scratch[0] + eps);
+    const float norm = values[tid] * inv * (is_q ? q_scale : 1.0f);
+    const uint dst_idx = (batch * nk + src_head) * D + tid;
+    if (is_q) {
+        q_out[dst_idx] = static_cast<bfloat>(norm);
+    } else if (is_k) {
+        k_out[dst_idx] = static_cast<bfloat>(norm);
     }
 }
 "#;
@@ -2177,6 +2342,7 @@ fn metal_shared_library(
         METAL_RMSNORM_KERNEL,
         METAL_ROTARY_QK_KERNEL,
         METAL_GDN_QK_NORM_KERNEL,
+        METAL_GDN_DECODE_QKV_CONV_NORM_KERNEL,
         METAL_GDN_GATES_KERNEL,
         METAL_GATED_RMSNORM_KERNEL,
         METAL_GDN_RECURRENT_KERNEL,
@@ -2313,6 +2479,35 @@ fn metal_gdn_qk_norm_gqa_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn qk norm gqa pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_decode_qkv_conv_norm_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn decode qkv conv/norm pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_decode_qkv_conv_norm_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn decode qkv conv/norm function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn decode qkv conv/norm pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -4120,6 +4315,140 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
     }
 
     Ok((q_out, k_out))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
+    mixed_qkv: &Tensor,
+    weight: &Tensor,
+    conv_state: &mut Tensor,
+    kernel_size: usize,
+    nk: usize,
+    dk: usize,
+    nv: usize,
+    dv: usize,
+    q_scale: f32,
+    eps: f32,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_gdn_decode_qkv_conv_norm_supports(
+            mixed_qkv,
+            weight,
+            conv_state,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv
+        ),
+        "metal gdn decode qkv conv/norm unsupported shape"
+    );
+    let (batch, _, channels) = mixed_qkv.dims3()?;
+    let rows = batch * (nk + nk + nv);
+    anyhow::ensure!(
+        rows <= u32::MAX as usize,
+        "metal gdn decode qkv conv/norm shape too large"
+    );
+
+    let mixed_qkv = mixed_qkv.contiguous()?;
+    let weight = match weight.rank() {
+        3 => weight.reshape((channels, kernel_size))?,
+        2 => weight.clone(),
+        r => anyhow::bail!("metal gdn decode qkv conv/norm weight rank must be 2 or 3, got {r}"),
+    }
+    .contiguous()?;
+    if !conv_state.is_contiguous() {
+        *conv_state = conv_state.contiguous()?;
+    }
+
+    // The kernel writes every unexpanded Q/K and V element, and updates each
+    // convolution state channel exactly once.
+    let q_out = unsafe { Tensor::empty((batch, 1usize, nk, dk), DType::BF16, mixed_qkv.device())? };
+    let k_out = unsafe { Tensor::empty((batch, 1usize, nk, dk), DType::BF16, mixed_qkv.device())? };
+    let v_out = unsafe { Tensor::empty((batch, 1usize, nv, dv), DType::BF16, mixed_qkv.device())? };
+
+    let Device::Metal(device) = mixed_qkv.device() else {
+        anyhow::bail!("metal gdn decode qkv conv/norm requires Metal tensors");
+    };
+    let pipeline = metal_gdn_decode_qkv_conv_norm_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_decode_qkv_conv_norm_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = mixed_qkv.storage_and_layout();
+        let (w_storage, w_layout) = weight.storage_and_layout();
+        let (s_storage, s_layout) = conv_state.storage_and_layout();
+        let (qo_storage, qo_layout) = q_out.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+        let (vo_storage, vo_layout) = v_out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode qkv conv/norm mixed_qkv must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode qkv conv/norm weight must be on Metal"),
+        };
+        let s_metal = match &*s_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode qkv conv/norm state must be on Metal"),
+        };
+        let qo_metal = match &*qo_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode qkv conv/norm q_out must be on Metal"),
+        };
+        let ko_metal = match &*ko_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode qkv conv/norm k_out must be on Metal"),
+        };
+        let vo_metal = match &*vo_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn decode qkv conv/norm v_out must be on Metal"),
+        };
+
+        let x_buf =
+            candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, mixed_qkv.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
+        let s_buf =
+            candle_core::metal_backend::buffer_o(s_metal.buffer(), &s_layout, conv_state.dtype());
+        let qo_buf =
+            candle_core::metal_backend::buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
+        let ko_buf =
+            candle_core::metal_backend::buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+        let vo_buf =
+            candle_core::metal_backend::buffer_o(vo_metal.buffer(), &vo_layout, v_out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(s_buf.buffer), s_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(qo_buf.buffer), qo_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(ko_buf.buffer), ko_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(vo_buf.buffer), vo_buf.offset_in_bytes);
+
+        let nk_u32 = nk as u32;
+        let nv_u32 = nv as u32;
+        encoder.set_bytes(6, &nk_u32);
+        encoder.set_bytes(7, &nv_u32);
+        encoder.set_bytes(8, &q_scale);
+        encoder.set_bytes(9, &eps);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: rows,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((q_out, k_out, v_out))
 }
 
 const METAL_GDN_GATES_KERNEL: &str = r#"
@@ -7143,6 +7472,118 @@ mod tests {
             Tensor::zeros((1usize, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
         assert!(!metal_gdn_in_proj_decode_supports(
             &x_prefill, &qkv_t, &z_t, &a_t, &b_t
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_decode_qkv_conv_norm_matches_split_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let nk = 2usize;
+        let nv = 4usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let kernel_size = 4usize;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let channels = qk_dim * 2 + v_dim;
+        let scale = 1.0f32 / (dk as f32).sqrt();
+
+        let mixed_data: Vec<f32> = (0..channels)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+            .collect();
+        let weight_data: Vec<f32> = (0..(channels * kernel_size))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.015625)
+            .collect();
+        let state_data: Vec<f32> = (0..(channels * (kernel_size - 1)))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0078125)
+            .collect();
+
+        let mixed_qkv = Tensor::from_slice(&mixed_data, (1usize, 1usize, channels), &device)?
+            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
+            .to_dtype(DType::BF16)?;
+        let mut state_ref =
+            Tensor::from_slice(&state_data, (1usize, channels, kernel_size - 1), &device)?;
+        let mut state_fused =
+            Tensor::from_slice(&state_data, (1usize, channels, kernel_size - 1), &device)?;
+
+        assert!(metal_gdn_decode_qkv_conv_norm_supports(
+            &mixed_qkv,
+            &weight,
+            &state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv
+        ));
+
+        let conv_ref = metal_causal_conv1d_update_bf16_f32_k4(
+            &mixed_qkv.transpose(1, 2)?.contiguous()?,
+            &weight,
+            &mut state_ref,
+            kernel_size,
+        )?
+        .transpose(1, 2)?;
+        let q_ref = conv_ref
+            .narrow(2, 0, qk_dim)?
+            .reshape((1usize, 1usize, nk, dk))?;
+        let k_ref = conv_ref
+            .narrow(2, qk_dim, qk_dim)?
+            .reshape((1usize, 1usize, nk, dk))?;
+        let v_ref = conv_ref
+            .narrow(2, 2 * qk_dim, v_dim)?
+            .reshape((1usize, 1usize, nv, dv))?
+            .to_dtype(DType::BF16)?;
+        let (q_ref, k_ref) = gdn_qk_norm_reference(&q_ref, &k_ref, scale as f64, 1e-6)?;
+
+        let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
+            &mixed_qkv,
+            &weight,
+            &mut state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv,
+            scale,
+            1e-6,
+        )?;
+
+        assert_eq!(q_fused.dims(), &[1usize, 1usize, nk, dk]);
+        assert_eq!(k_fused.dims(), &[1usize, 1usize, nk, dk]);
+        assert_eq!(v_fused.dims(), &[1usize, 1usize, nv, dv]);
+        assert_eq!(q_fused.dtype(), DType::BF16);
+        assert_eq!(k_fused.dtype(), DType::BF16);
+        assert_eq!(v_fused.dtype(), DType::BF16);
+
+        let q_max = max_abs_diff(&q_ref, &q_fused)?;
+        let k_max = max_abs_diff(&k_ref, &k_fused)?;
+        let v_max = max_abs_diff(&v_ref, &v_fused)?;
+        let state_max = max_abs_diff(&state_ref, &state_fused)?;
+        assert!(q_max < 2e-2, "fused q max_abs_diff={q_max:e}");
+        assert!(k_max < 2e-2, "fused k max_abs_diff={k_max:e}");
+        assert!(v_max < 1e-6, "fused v max_abs_diff={v_max:e}");
+        assert!(
+            state_max < 1e-6,
+            "fused conv state max_abs_diff={state_max:e}"
+        );
+
+        let prefill_mixed = Tensor::zeros((1usize, 2usize, channels), DType::BF16, &device)?;
+        assert!(!metal_gdn_decode_qkv_conv_norm_supports(
+            &prefill_mixed,
+            &weight,
+            &state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv
         ));
 
         Ok(())
