@@ -1,0 +1,6 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
+98.9,144576983,1,144576983.0,144576983.0,144576983,144576983,0.0,PushPop,:kiln/gdn/in_proj
+0.8,1097066,1,1097066.0,1097066.0,1097066,1097066,0.0,PushPop,:kiln/norm/pre_attn
+0.2,250360,1,250360.0,250360.0,250360,250360,0.0,PushPop,:kiln/gdn/conv
+0.1,189640,1,189640.0,189640.0,189640,189640,0.0,PushPop,:kiln/gdn/conv/prefill_update
+0.0,53620,1,53620.0,53620.0,53620,53620,0.0,PushPop,:kiln/gdn/conv/layout

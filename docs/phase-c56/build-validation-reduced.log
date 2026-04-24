@@ -1,0 +1,35 @@
+== commit ==
+f1530071bb489b4d72bbf8e6ad0062281b52c0bf
+== gpu ==
+NVIDIA RTX A6000, 8.6, 49140 MiB, 550.127.08
+== nsight installed ==
+NVIDIA Nsight Systems version 2024.5.1.113-245134619542v0
+== kiln-conv1d-kernel tests ==
+running 4 tests
+test tests::supports_accepts_qwen_shape ... ok
+test tests::supports_rejects_wrong_width ... ok
+test tests::parity_qwen35_decode_shape ... ok
+test tests::parity_qwen35_prefill_shape ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+== update fallback parity ==
+running 1 test
+test forward::tests::test_causal_conv1d_update_matches_fallback ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.38s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+== prefill tests ==
+running 1 test
+conv1d_prefill vs fallback: max_abs_diff=1.4901161e-8 mean_abs_diff=2.4152896e-10
+conv1d_prefill state parity: max_abs_diff=0e0
+test forward::tests::test_causal_conv1d_prefill_matches_fallback ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.36s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+== bench binary ==
+-rwxr-xr-x 2 root root 44M Apr 24 08:04 target/release/kiln-bench
