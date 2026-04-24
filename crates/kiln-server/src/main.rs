@@ -123,7 +123,6 @@ async fn main() -> Result<()> {
         vocab_size = tokenizer.vocab_size(),
         "tokenizer loaded successfully"
     );
-    warm_tokenizer(&tokenizer);
 
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
@@ -200,6 +199,7 @@ async fn main() -> Result<()> {
     let shutdown_flag = state.shutdown.clone();
     kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
 
+    let tokenizer_prewarm = state.tokenizer.clone();
     let prewarm_state = state.clone();
     let app = api::router(state);
 
@@ -211,6 +211,7 @@ async fn main() -> Result<()> {
         model_path = model_path.unwrap_or("none (mock mode)"),
         "kiln listening"
     );
+    spawn_tokenizer_warmup(tokenizer_prewarm);
     spawn_backend_prewarm(prewarm_state);
     // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
     // then force-exit after a timeout.
@@ -321,6 +322,12 @@ fn spawn_backend_prewarm(state: AppState) {
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
         prewarm_complete.store(true, Ordering::Release);
+    });
+}
+
+fn spawn_tokenizer_warmup(tokenizer: Arc<KilnTokenizer>) {
+    tokio::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || warm_tokenizer(&tokenizer)).await;
     });
 }
 
