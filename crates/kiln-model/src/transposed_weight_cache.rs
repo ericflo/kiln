@@ -1,10 +1,14 @@
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+#[cfg(test)]
+use std::io::Read;
 
 use anyhow::{Context, Result};
+use memmap2::Mmap;
 
 use crate::forward::transposed_weight_bytes_2d;
 use crate::weights::WeightTensor;
@@ -19,14 +23,41 @@ struct CacheKey {
     shape: [usize; 2],
 }
 
-pub(crate) fn transposed_weight_bytes_2d_cached(
+pub(crate) struct CachedTransposedWeightBytes {
+    storage: CachedTransposedWeightStorage,
+    shape: [usize; 2],
+}
+
+enum CachedTransposedWeightStorage {
+    Owned(Vec<u8>),
+    Mapped { mmap: Mmap, payload: Range<usize> },
+}
+
+impl CachedTransposedWeightBytes {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        match &self.storage {
+            CachedTransposedWeightStorage::Owned(bytes) => bytes.as_slice(),
+            CachedTransposedWeightStorage::Mapped { mmap, payload } => &mmap[payload.clone()],
+        }
+    }
+
+    pub(crate) fn shape(&self) -> [usize; 2] {
+        self.shape
+    }
+}
+
+pub(crate) fn transposed_weight_bytes_2d_cached_bytes(
     weight: &WeightTensor,
-) -> Result<(Vec<u8>, [usize; 2])> {
+) -> Result<CachedTransposedWeightBytes> {
     let Some(cache_key) = cache_key(weight) else {
-        return transposed_weight_bytes_2d(weight);
+        let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
+        return Ok(CachedTransposedWeightBytes {
+            storage: CachedTransposedWeightStorage::Owned(bytes),
+            shape,
+        });
     };
 
-    if let Some(bytes) = try_read_cached(&cache_key)? {
+    if let Some(bytes) = try_mmap_cached(&cache_key)? {
         tracing::debug!(
             tensor = %weight
                 .source
@@ -38,16 +69,19 @@ pub(crate) fn transposed_weight_bytes_2d_cached(
                 .as_ref()
                 .map(|s| s.shard_path.display().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string()),
-            "loaded transposed weight from disk cache"
+            "mapped transposed weight from disk cache"
         );
-        return Ok((bytes, cache_key.shape));
+        return Ok(bytes);
     }
 
-    let result = transposed_weight_bytes_2d(weight)?;
-    if let Err(err) = try_write_cached(&cache_key, &result.0) {
+    let (bytes, shape) = transposed_weight_bytes_2d(weight)?;
+    if let Err(err) = try_write_cached(&cache_key, &bytes) {
         tracing::debug!(error = %err, "failed to write transposed weight cache entry");
     }
-    Ok(result)
+    Ok(CachedTransposedWeightBytes {
+        storage: CachedTransposedWeightStorage::Owned(bytes),
+        shape,
+    })
 }
 
 fn cache_key(weight: &WeightTensor) -> Option<CacheKey> {
@@ -77,22 +111,33 @@ fn cache_key(weight: &WeightTensor) -> Option<CacheKey> {
     })
 }
 
-fn try_read_cached(cache_key: &CacheKey) -> Result<Option<Vec<u8>>> {
-    let mut file = match fs::File::open(&cache_key.file_path) {
+fn try_mmap_cached(cache_key: &CacheKey) -> Result<Option<CachedTransposedWeightBytes>> {
+    let file = match fs::File::open(&cache_key.file_path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(err).with_context(|| {
                 format!(
-                    "reading transposed weight cache {}",
+                    "opening transposed weight cache {}",
                     cache_key.file_path.display()
                 )
             });
         }
     };
 
-    match read_cached_payload(cache_key, &mut file) {
-        Ok(payload) => Ok(Some(payload)),
+    // SAFETY: Cache files are immutable after an atomic rename into place.
+    let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
+        format!(
+            "mapping transposed weight cache {}",
+            cache_key.file_path.display()
+        )
+    })?;
+
+    match cached_payload_range(cache_key, &mmap[..]) {
+        Ok(payload) => Ok(Some(CachedTransposedWeightBytes {
+            storage: CachedTransposedWeightStorage::Mapped { mmap, payload },
+            shape: cache_key.shape,
+        })),
         Err(err) => {
             tracing::debug!(
                 path = %cache_key.file_path.display(),
@@ -105,6 +150,7 @@ fn try_read_cached(cache_key: &CacheKey) -> Result<Option<Vec<u8>>> {
     }
 }
 
+#[cfg(test)]
 fn read_cached_payload<R: Read>(cache_key: &CacheKey, reader: &mut R) -> Result<Vec<u8>> {
     let mut magic = [0u8; CACHE_MAGIC.len()];
     reader
@@ -112,10 +158,10 @@ fn read_cached_payload<R: Read>(cache_key: &CacheKey, reader: &mut R) -> Result<
         .context("cache entry truncated before magic")?;
     anyhow::ensure!(&magic == CACHE_MAGIC, "cache entry magic mismatch");
 
-    let version = read_u32_le(reader).context("reading cache entry version")?;
+    let version = read_u32_le_reader(reader).context("reading cache entry version")?;
     anyhow::ensure!(version == CACHE_VERSION, "cache entry version mismatch");
 
-    let key_len = read_u32_le(reader).context("reading cache entry key length")? as usize;
+    let key_len = read_u32_le_reader(reader).context("reading cache entry key length")? as usize;
     anyhow::ensure!(
         key_len == cache_key.key_bytes.len(),
         "cache key length mismatch: expected {}, got {}",
@@ -131,7 +177,7 @@ fn read_cached_payload<R: Read>(cache_key: &CacheKey, reader: &mut R) -> Result<
         "cache key mismatch"
     );
 
-    let data_len_u64 = read_u64_le(reader).context("reading cache entry payload length")?;
+    let data_len_u64 = read_u64_le_reader(reader).context("reading cache entry payload length")?;
     let data_len = usize::try_from(data_len_u64).context("cache payload length overflows usize")?;
     anyhow::ensure!(
         data_len == cache_key.expected_len,
@@ -156,13 +202,98 @@ fn read_cached_payload<R: Read>(cache_key: &CacheKey, reader: &mut R) -> Result<
     Ok(payload)
 }
 
-fn read_u32_le(reader: &mut impl Read) -> Result<u32> {
+fn cached_payload_range(cache_key: &CacheKey, bytes: &[u8]) -> Result<Range<usize>> {
+    let mut offset = 0usize;
+    let magic = take_bytes(
+        bytes,
+        &mut offset,
+        CACHE_MAGIC.len(),
+        "cache entry truncated before magic",
+    )?;
+    anyhow::ensure!(magic == CACHE_MAGIC, "cache entry magic mismatch");
+
+    let version = read_u32_le_slice(bytes, &mut offset, "cache entry truncated before version")?;
+    anyhow::ensure!(version == CACHE_VERSION, "cache entry version mismatch");
+
+    let key_len = read_u32_le_slice(
+        bytes,
+        &mut offset,
+        "cache entry truncated before key length",
+    )? as usize;
+    anyhow::ensure!(
+        key_len == cache_key.key_bytes.len(),
+        "cache key length mismatch: expected {}, got {}",
+        cache_key.key_bytes.len(),
+        key_len
+    );
+    let cached_key = take_bytes(bytes, &mut offset, key_len, "cache entry truncated in key")?;
+    anyhow::ensure!(
+        cached_key == cache_key.key_bytes.as_slice(),
+        "cache key mismatch"
+    );
+
+    let data_len_u64 = read_u64_le_slice(
+        bytes,
+        &mut offset,
+        "cache entry truncated before payload length",
+    )?;
+    let data_len = usize::try_from(data_len_u64).context("cache payload length overflows usize")?;
+    anyhow::ensure!(
+        data_len == cache_key.expected_len,
+        "cache payload length mismatch: expected {}, got {}",
+        cache_key.expected_len,
+        data_len
+    );
+
+    let payload_start = offset;
+    let payload_end = payload_start
+        .checked_add(data_len)
+        .context("cache payload range overflow")?;
+    anyhow::ensure!(
+        payload_end <= bytes.len(),
+        "cache entry truncated in payload"
+    );
+    anyhow::ensure!(
+        payload_end == bytes.len(),
+        "cache entry contains trailing bytes"
+    );
+    Ok(payload_start..payload_end)
+}
+
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+    truncated: &'static str,
+) -> Result<&'a [u8]> {
+    let end = offset
+        .checked_add(len)
+        .context("cache entry offset overflow")?;
+    anyhow::ensure!(end <= bytes.len(), truncated);
+    let out = &bytes[*offset..end];
+    *offset = end;
+    Ok(out)
+}
+
+fn read_u32_le_slice(bytes: &[u8], offset: &mut usize, truncated: &'static str) -> Result<u32> {
+    let raw = take_bytes(bytes, offset, 4, truncated)?;
+    Ok(u32::from_le_bytes(raw.try_into().expect("u32 byte width")))
+}
+
+fn read_u64_le_slice(bytes: &[u8], offset: &mut usize, truncated: &'static str) -> Result<u64> {
+    let raw = take_bytes(bytes, offset, 8, truncated)?;
+    Ok(u64::from_le_bytes(raw.try_into().expect("u64 byte width")))
+}
+
+#[cfg(test)]
+fn read_u32_le_reader(reader: &mut impl Read) -> Result<u32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes)?;
     Ok(u32::from_le_bytes(bytes))
 }
 
-fn read_u64_le(reader: &mut impl Read) -> Result<u64> {
+#[cfg(test)]
+fn read_u64_le_reader(reader: &mut impl Read) -> Result<u64> {
     let mut bytes = [0u8; 8];
     reader.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
@@ -318,6 +449,21 @@ mod tests {
         let got = read_cached_payload(&cache_key, &mut Cursor::new(bytes))?;
 
         assert_eq!(got, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn try_mmap_cached_returns_payload_without_allocating_vec() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cache_key = test_cache_key(4);
+        cache_key.file_path = dir.path().join("entry.bin");
+        let payload = [1u8, 2, 3, 4];
+        std::fs::write(&cache_key.file_path, cache_entry(&cache_key, &payload))?;
+
+        let got = try_mmap_cached(&cache_key)?.context("expected cache hit")?;
+
+        assert_eq!(got.as_bytes(), payload);
+        assert_eq!(got.shape(), [2, 2]);
         Ok(())
     }
 
