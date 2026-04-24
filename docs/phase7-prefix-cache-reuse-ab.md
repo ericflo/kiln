@@ -61,7 +61,7 @@ KILN_SPEC_ENABLED=0
 KILN_PREFIX_CACHE_ENABLED=1   # ON arm; 0 for OFF arm
 ```
 
-CUDA graphs were disabled intentionally. With graphs enabled, `generate_real` currently bypasses `generate_paged_shared_tokens_with_prefix_cache(...)` and calls `generate_paged_shared_tokens(...)`.
+CUDA graphs were disabled intentionally. With graphs enabled, `generate_real` currently bypasses `generate_paged_shared_tokens_with_prefix_cache(...)` and calls `generate_paged_shared_tokens(...)`. As a follow-up, the server now emits a one-time structured warning when `RealPrefixCache` is enabled but CUDA graphs force that non-prefix path, so operators do not silently expect cache reuse from real chat completions. Full CUDA-graph prefix-cache integration remains separate work.
 
 ## Prompt Design
 
