@@ -24,6 +24,7 @@ const DISABLE_METAL_GDN_QK_NORM: &str = "KILN_DISABLE_METAL_GDN_QK_NORM";
 const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
+const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 
 #[derive(Debug)]
 pub struct MetalBackend {
@@ -40,6 +41,7 @@ struct MetalKernelDisables {
     gdn_recurrent: bool,
     gdn_gates: bool,
     gated_rms_norm: bool,
+    gdn_in_proj: bool,
 }
 
 impl MetalKernelDisables {
@@ -54,6 +56,7 @@ impl MetalKernelDisables {
             gdn_recurrent: gdn_kernel || env_truthy(DISABLE_METAL_GDN_RECURRENT),
             gdn_gates: env_present(DISABLE_FUSED_GDN_GATES) || env_truthy(DISABLE_METAL_GDN_GATES),
             gated_rms_norm: env_truthy(DISABLE_METAL_GATED_RMSNORM),
+            gdn_in_proj: gdn_kernel || env_truthy(DISABLE_METAL_GDN_IN_PROJ_FUSION),
         }
     }
 }
@@ -86,6 +89,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_gdn_qk_norm_gqa_pipeline(metal_device)?;
     metal_gdn_gates_pipeline(metal_device)?;
     metal_gated_rms_norm_pipeline(metal_device)?;
+    metal_gdn_in_proj_pipeline(metal_device)?;
     metal_gdn_recurrent_pipeline(metal_device)?;
     metal_gdn_recurrent_prefill_head_last_pipeline(metal_device)?;
     metal_gdn_forward_substitution_pipeline(metal_device)?;
@@ -517,6 +521,31 @@ impl BackendRuntime for MetalBackend {
         }
         let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, beta, g, state)
             .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn gdn_in_proj_decode(
+        &self,
+        x: &Tensor,
+        in_proj_qkv_t: &Tensor,
+        in_proj_z_t: &Tensor,
+        in_proj_a_t: &Tensor,
+        in_proj_b_t: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
+        if self.disable.gdn_in_proj
+            || !metal_gdn_in_proj_decode_supports(
+                x,
+                in_proj_qkv_t,
+                in_proj_z_t,
+                in_proj_a_t,
+                in_proj_b_t,
+            )
+        {
+            return Ok(None);
+        }
+        let out =
+            metal_gdn_in_proj_decode_bf16(x, in_proj_qkv_t, in_proj_z_t, in_proj_a_t, in_proj_b_t)
+                .context("metal gdn_in_proj_decode kernel failed")?;
         Ok(Some(out))
     }
 
@@ -1534,6 +1563,60 @@ kernel void kiln_mlp_gate_up_bf16(
 }
 "#;
 
+const METAL_GDN_IN_PROJ_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_gdn_in_proj_decode_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* qkv_t [[buffer(1)]],
+    device const bfloat* z_t [[buffer(2)]],
+    device const bfloat* a_t [[buffer(3)]],
+    device const bfloat* b_t [[buffer(4)]],
+    device bfloat* qkv_out [[buffer(5)]],
+    device bfloat* z_out [[buffer(6)]],
+    device bfloat* a_out [[buffer(7)]],
+    device bfloat* b_out [[buffer(8)]],
+    constant uint& hidden [[buffer(9)]],
+    constant uint& qkv_dim [[buffer(10)]],
+    constant uint& z_dim [[buffer(11)]],
+    constant uint& nv [[buffer(12)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = qkv_dim + z_dim + (nv * 2);
+    if (gid >= total) {
+        return;
+    }
+
+    float acc = 0.0f;
+    if (gid < qkv_dim) {
+        const uint col = gid;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(x[i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+        }
+        qkv_out[col] = static_cast<bfloat>(acc);
+    } else if (gid < qkv_dim + z_dim) {
+        const uint col = gid - qkv_dim;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(x[i]) * static_cast<float>(z_t[i * z_dim + col]);
+        }
+        z_out[col] = static_cast<bfloat>(acc);
+    } else if (gid < qkv_dim + z_dim + nv) {
+        const uint col = gid - qkv_dim - z_dim;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
+        }
+        a_out[col] = static_cast<bfloat>(acc);
+    } else {
+        const uint col = gid - qkv_dim - z_dim - nv;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+        }
+        b_out[col] = static_cast<bfloat>(acc);
+    }
+}
+"#;
+
 const METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -1637,6 +1720,7 @@ fn metal_shared_library(
         METAL_CONV1D_UPDATE_KERNEL,
         METAL_LM_HEAD_KERNEL,
         METAL_MLP_GATE_UP_KERNEL,
+        METAL_GDN_IN_PROJ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
     ]
@@ -1819,6 +1903,35 @@ fn metal_mlp_gate_up_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal mlp gate/up pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_gdn_in_proj_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn in-proj pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_in_proj_decode_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn in-proj function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn in-proj pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -2091,6 +2204,206 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
     }
 
     Ok(out)
+}
+
+fn metal_gdn_in_proj_decode_supports(
+    x: &Tensor,
+    qkv_t: &Tensor,
+    z_t: &Tensor,
+    a_t: &Tensor,
+    b_t: &Tensor,
+) -> bool {
+    if x.dtype() != DType::BF16
+        || qkv_t.dtype() != DType::BF16
+        || z_t.dtype() != DType::BF16
+        || a_t.dtype() != DType::BF16
+        || b_t.dtype() != DType::BF16
+    {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_))
+        || !matches!(qkv_t.device(), Device::Metal(_))
+        || !matches!(z_t.device(), Device::Metal(_))
+        || !matches!(a_t.device(), Device::Metal(_))
+        || !matches!(b_t.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !x.is_contiguous()
+        || !qkv_t.is_contiguous()
+        || !z_t.is_contiguous()
+        || !a_t.is_contiguous()
+        || !b_t.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return false;
+    };
+    let Ok((qkv_hidden, qkv_dim)) = qkv_t.dims2() else {
+        return false;
+    };
+    let Ok((z_hidden, z_dim)) = z_t.dims2() else {
+        return false;
+    };
+    let Ok((a_hidden, nv)) = a_t.dims2() else {
+        return false;
+    };
+    let Ok((b_hidden, b_nv)) = b_t.dims2() else {
+        return false;
+    };
+    let Some(total) = qkv_dim
+        .checked_add(z_dim)
+        .and_then(|n| n.checked_add(nv))
+        .and_then(|n| n.checked_add(b_nv))
+    else {
+        return false;
+    };
+
+    batch == 1
+        && seq_len == 1
+        && hidden == qkv_hidden
+        && hidden == z_hidden
+        && hidden == a_hidden
+        && hidden == b_hidden
+        && nv == b_nv
+        && hidden <= u32::MAX as usize
+        && qkv_dim <= u32::MAX as usize
+        && z_dim <= u32::MAX as usize
+        && nv <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
+fn metal_gdn_in_proj_decode_bf16(
+    x: &Tensor,
+    qkv_t: &Tensor,
+    z_t: &Tensor,
+    a_t: &Tensor,
+    b_t: &Tensor,
+) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_gdn_in_proj_decode_supports(x, qkv_t, z_t, a_t, b_t),
+        "metal gdn in-proj supports only BF16 [1,1,H] x [H,*] on Metal"
+    );
+    let (_, _, hidden) = x.dims3()?;
+    let (_, qkv_dim) = qkv_t.dims2()?;
+    let (_, z_dim) = z_t.dims2()?;
+    let (_, nv) = a_t.dims2()?;
+    let total = qkv_dim + z_dim + (nv * 2);
+
+    // The kernel writes every output element exactly once.
+    let qkv_out = unsafe { Tensor::empty((1usize, 1usize, qkv_dim), DType::BF16, x.device())? };
+    let z_out = unsafe { Tensor::empty((1usize, 1usize, z_dim), DType::BF16, x.device())? };
+    let a_out = unsafe { Tensor::empty((1usize, 1usize, nv), DType::BF16, x.device())? };
+    let b_out = unsafe { Tensor::empty((1usize, 1usize, nv), DType::BF16, x.device())? };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal gdn in-proj requires Metal tensors");
+    };
+    let pipeline = metal_gdn_in_proj_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_in_proj_decode_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (qkv_storage, qkv_layout) = qkv_t.storage_and_layout();
+        let (z_storage, z_layout) = z_t.storage_and_layout();
+        let (a_storage, a_layout) = a_t.storage_and_layout();
+        let (b_storage, b_layout) = b_t.storage_and_layout();
+        let (qkv_o_storage, qkv_o_layout) = qkv_out.storage_and_layout();
+        let (z_o_storage, z_o_layout) = z_out.storage_and_layout();
+        let (a_o_storage, a_o_layout) = a_out.storage_and_layout();
+        let (b_o_storage, b_o_layout) = b_out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj x must be on Metal"),
+        };
+        let qkv_metal = match &*qkv_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj qkv_t must be on Metal"),
+        };
+        let z_metal = match &*z_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj z_t must be on Metal"),
+        };
+        let a_metal = match &*a_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj a_t must be on Metal"),
+        };
+        let b_metal = match &*b_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj b_t must be on Metal"),
+        };
+        let qkv_o_metal = match &*qkv_o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj qkv_out must be on Metal"),
+        };
+        let z_o_metal = match &*z_o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj z_out must be on Metal"),
+        };
+        let a_o_metal = match &*a_o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj a_out must be on Metal"),
+        };
+        let b_o_metal = match &*b_o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn in-proj b_out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let qkv_buf =
+            candle_core::metal_backend::buffer_o(qkv_metal.buffer(), &qkv_layout, qkv_t.dtype());
+        let z_buf = candle_core::metal_backend::buffer_o(z_metal.buffer(), &z_layout, z_t.dtype());
+        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_t.dtype());
+        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b_t.dtype());
+        let qkv_o_buf = candle_core::metal_backend::buffer_o(
+            qkv_o_metal.buffer(),
+            &qkv_o_layout,
+            qkv_out.dtype(),
+        );
+        let z_o_buf =
+            candle_core::metal_backend::buffer_o(z_o_metal.buffer(), &z_o_layout, z_out.dtype());
+        let a_o_buf =
+            candle_core::metal_backend::buffer_o(a_o_metal.buffer(), &a_o_layout, a_out.dtype());
+        let b_o_buf =
+            candle_core::metal_backend::buffer_o(b_o_metal.buffer(), &b_o_layout, b_out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(qkv_buf.buffer), qkv_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(z_buf.buffer), z_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(a_buf.buffer), a_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(b_buf.buffer), b_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(qkv_o_buf.buffer), qkv_o_buf.offset_in_bytes);
+        encoder.set_buffer(6, Some(z_o_buf.buffer), z_o_buf.offset_in_bytes);
+        encoder.set_buffer(7, Some(a_o_buf.buffer), a_o_buf.offset_in_bytes);
+        encoder.set_buffer(8, Some(b_o_buf.buffer), b_o_buf.offset_in_bytes);
+
+        let hidden_u32 = hidden as u32;
+        let qkv_dim_u32 = qkv_dim as u32;
+        let z_dim_u32 = z_dim as u32;
+        let nv_u32 = nv as u32;
+        encoder.set_bytes(9, &hidden_u32);
+        encoder.set_bytes(10, &qkv_dim_u32);
+        encoder.set_bytes(11, &z_dim_u32);
+        encoder.set_bytes(12, &nv_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((qkv_out, z_out, a_out, b_out))
 }
 
 pub(crate) fn metal_rotary_embedding_bf16(
@@ -5342,6 +5655,79 @@ mod tests {
             mean < 2e-3,
             "Metal MLP gate/up mean_abs_diff={mean:e} exceeds tolerance"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_in_proj_decode_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let hidden = 64usize;
+        let qkv_dim = 131usize;
+        let z_dim = 97usize;
+        let nv = 17usize;
+        let x_data: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
+            .collect();
+        let qkv_data: Vec<f32> = (0..(hidden * qkv_dim))
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.0078125)
+            .collect();
+        let z_data: Vec<f32> = (0..(hidden * z_dim))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.0078125)
+            .collect();
+        let a_data: Vec<f32> = (0..(hidden * nv))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.015625)
+            .collect();
+        let b_data: Vec<f32> = (0..(hidden * nv))
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.015625)
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let qkv_t =
+            Tensor::from_slice(&qkv_data, (hidden, qkv_dim), &device)?.to_dtype(DType::BF16)?;
+        let z_t = Tensor::from_slice(&z_data, (hidden, z_dim), &device)?.to_dtype(DType::BF16)?;
+        let a_t = Tensor::from_slice(&a_data, (hidden, nv), &device)?.to_dtype(DType::BF16)?;
+        let b_t = Tensor::from_slice(&b_data, (hidden, nv), &device)?.to_dtype(DType::BF16)?;
+
+        assert!(metal_gdn_in_proj_decode_supports(
+            &x, &qkv_t, &z_t, &a_t, &b_t
+        ));
+        let (qkv_fused, z_fused, a_fused, b_fused) =
+            metal_gdn_in_proj_decode_bf16(&x, &qkv_t, &z_t, &a_t, &b_t)?;
+
+        let qkv_ref = x.broadcast_matmul(&qkv_t)?;
+        let z_ref = x.broadcast_matmul(&z_t)?;
+        let a_ref = x.broadcast_matmul(&a_t)?;
+        let b_ref = x.broadcast_matmul(&b_t)?;
+
+        for (name, got, want) in [
+            ("qkv", &qkv_fused, &qkv_ref),
+            ("z", &z_fused, &z_ref),
+            ("a", &a_fused, &a_ref),
+            ("b", &b_fused, &b_ref),
+        ] {
+            assert_eq!(got.dtype(), DType::BF16);
+            let max = max_abs_diff(got, want)?;
+            let mean = mean_abs_diff(got, want)?;
+            assert!(
+                max < 2e-2,
+                "GDN in-proj {name} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "GDN in-proj {name} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+        }
+
+        let x_prefill =
+            Tensor::zeros((1usize, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
+        assert!(!metal_gdn_in_proj_decode_supports(
+            &x_prefill, &qkv_t, &z_t, &a_t, &b_t
+        ));
 
         Ok(())
     }
