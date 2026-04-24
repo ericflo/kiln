@@ -248,3 +248,94 @@ within the tighter mask on both seeds, while the selected row fails the tighter
 mask and dominates the first-order contribution budget. The next exact target is
 therefore the provenance of `layer_1_input_norm_last_row_flat_values` feeding the
 row-shaped broadcast multiply.
+
+## 2026-04-24 C46 row-side provenance verdict
+
+PR #451 left the next exact target as the row-side operand feeding
+`layer_1_input_norm_last_row_flat_values`, because the C45 operand budget showed
+row-side drift dominated the otherwise-correct row-shaped broadcast multiply.
+C46 adds a minimal upstream provenance slice for that operand only:
+
+- `layer_1_input_norm_selected_row_before_rmsnorm`: layer-1 input row selected
+  before RMSNorm replay or dtype promotion;
+- `layer_1_input_norm_selected_row_after_f32_cast`: the same row after F32
+  promotion;
+- `layer_1_input_norm_selected_row_after_contiguous`: the row after contiguous
+  materialization;
+- `layer_1_input_norm_selected_row_after_flatten`: the flattened row operand;
+- `layer_1_input_norm_last_row_flat_values`: the exact C45 row operand
+  reconstruction.
+
+GPU validation used the mandatory RunPod image on pod `98ez1btmml8eu5`
+(`NVIDIA RTX A6000`, CUDA 12.4 image `ghcr.io/ericflo/kiln-runpod:latest`) with
+`KILN_BENCH_FORCE_MTP=1` so the representative 512-token prompt shape stayed on
+native MTP for the diagnostic dump.
+
+Commands run on the pod:
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+cargo build --release --features cuda --bin kiln-bench
+cargo test --locked -p kiln-model c45 -- --nocapture
+cargo test --locked -p kiln-model c46 -- --nocapture
+python3 -m py_compile scripts/mtp_h_main_reference_dump.py scripts/mtp_compare.py
+
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_PATH='profiling-artifacts/c46_row_provenance_seed0_captures/mtp_pos-{pos}/step-{step}.safetensors' \
+KILN_MTP_DUMP_POS=0 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_C46_ROW_PROVENANCE=1 \
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 8 --skip-training --seed 0
+
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump 'profiling-artifacts/c46_row_provenance_seed0_captures/mtp_pos-0/step-{step}.safetensors' \
+  --out profiling-artifacts/c46_row_provenance_seed0_ref_bf16.safetensors \
+  --c46-row-provenance-taps --seed 0
+python3 scripts/mtp_compare.py --c46-row-provenance \
+  --kiln 'profiling-artifacts/c46_row_provenance_seed0_captures/mtp_pos-0/step-{step}.safetensors' \
+  --ref profiling-artifacts/c46_row_provenance_seed0_ref_bf16.safetensors \
+  > profiling-artifacts/c46_row_provenance_seed0_compare.txt
+
+KILN_SPEC_METHOD=mtp \
+KILN_BENCH_FORCE_MTP=1 \
+KILN_MTP_DUMP_PATH='profiling-artifacts/c46_row_provenance_seed1_captures/mtp_pos-{pos}/step-{step}.safetensors' \
+KILN_MTP_DUMP_POS=2 \
+KILN_MTP_DUMP_HIDDEN_STATES=1 \
+KILN_MTP_DUMP_C46_ROW_PROVENANCE=1 \
+./target/release/kiln-bench --model-path /workspace/qwen3.5-4b \
+  --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed 1
+
+python3 scripts/mtp_h_main_reference_dump.py \
+  --checkpoint /workspace/qwen3.5-4b \
+  --kiln-dump 'profiling-artifacts/c46_row_provenance_seed1_captures/mtp_pos-2/step-{step}.safetensors' \
+  --out profiling-artifacts/c46_row_provenance_seed1_ref_bf16.safetensors \
+  --c46-row-provenance-taps --seed 1
+python3 scripts/mtp_compare.py --c46-row-provenance \
+  --kiln 'profiling-artifacts/c46_row_provenance_seed1_captures/mtp_pos-2/step-{step}.safetensors' \
+  --ref profiling-artifacts/c46_row_provenance_seed1_ref_bf16.safetensors \
+  > profiling-artifacts/c46_row_provenance_seed1_compare.txt
+```
+
+Seed-specific evidence:
+
+- seed 0 (`mtp_pos=0`): all C46 row-provenance taps pass both the current C45
+  tolerance (`atol=1e-2`, `rtol=1e-1`) and the tighter C45 mask
+  (`atol=1e-3`, `rtol=1e-2`); each tap has `max|Δ|=9.77e-04`,
+  `mean|Δ|=6.67e-05`, `rel_l2=2.65e-03`; prompt=494,
+  prefill=`328.3 ms`, mean ITL=`47.1 ms`, `alpha=0.333`.
+- seed 1 (`mtp_pos=2`): all C46 row-provenance taps pass both tolerances;
+  each tap has `max|Δ|=7.32e-04`, `mean|Δ|=1.08e-04`,
+  `rel_l2=3.47e-03`; prompt=508, prefill=`349.5 ms`, mean ITL=`43.7 ms`,
+  `alpha=0.309`.
+
+Final C46 verdict: there is no row-selection, dtype-cast, contiguous, flatten,
+or exact C45 row-operand reconstruction bug at this boundary. Under the tighter
+mask, the entire C46 row-side provenance slice remains shared-good on both
+representative seeds. Because the fresh C46 replay cannot reproduce a local
+row-provenance failure, no production math fix is justified here; the next
+boundary classification is the existing C45 tolerance artifact rather than row
+selection, dtype cast, flatten/contiguous, or exact operand construction.

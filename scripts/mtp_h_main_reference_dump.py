@@ -246,6 +246,17 @@ C45_LAYER1_ROW_TAP_NAMES: Tuple[str, ...] = (
     "layer_1_input_norm_pre_weight_row_reconstructed",
 )
 
+# Phase C46 — ordered layer-1 row-side provenance bisect tap names. Must stay
+# in lock-step with `C46_ROW_PROVENANCE_TAP_NAMES` in
+# `crates/kiln-model/src/mtp_debug.rs`.
+C46_ROW_PROVENANCE_TAP_NAMES: Tuple[str, ...] = (
+    "layer_1_input_norm_selected_row_before_rmsnorm",
+    "layer_1_input_norm_selected_row_after_f32_cast",
+    "layer_1_input_norm_selected_row_after_contiguous",
+    "layer_1_input_norm_selected_row_after_flatten",
+    "layer_1_input_norm_last_row_flat_values",
+)
+
 
 # -----------------------------------------------------------------------------
 # Kiln-dump loader (mirrors mtp_reference_dump.py's loader)
@@ -431,6 +442,37 @@ def resolve_c45_tap_names(kiln_dump: Dict[str, object]) -> List[str]:
         return from_keys
 
     return list(C45_LAYER1_ROW_TAP_NAMES)
+
+
+
+def resolve_c46_tap_names(kiln_dump: Dict[str, object]) -> List[str]:
+    raw = kiln_dump.get("meta__c46_tap_ids")
+    if isinstance(raw, list) and raw:
+        names: List[str] = []
+        for idx in raw:
+            idx_i = int(idx)
+            if 0 <= idx_i < len(C46_ROW_PROVENANCE_TAP_NAMES):
+                names.append(C46_ROW_PROVENANCE_TAP_NAMES[idx_i])
+        if names:
+            return names
+
+    from_keys = sorted(
+        {
+            key[len("c46__") :]
+            for key in kiln_dump.keys()
+            if key.startswith("c46__")
+        },
+        key=lambda name: (
+            C46_ROW_PROVENANCE_TAP_NAMES.index(name)
+            if name in C46_ROW_PROVENANCE_TAP_NAMES
+            else len(C46_ROW_PROVENANCE_TAP_NAMES),
+            name,
+        ),
+    )
+    if from_keys:
+        return from_keys
+
+    return list(C46_ROW_PROVENANCE_TAP_NAMES)
 
 
 # -----------------------------------------------------------------------------
@@ -1158,6 +1200,39 @@ def _arm_c45_layer1_row_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List
     return handles
 
 
+
+def _arm_c46_row_provenance_hooks(base, taps_out: Dict[str, "torch.Tensor"]) -> List[object]:
+    """Attach hooks for the Phase C46 C45 row-side operand provenance audit."""
+    handles: List[object] = []
+    layer = base.layers[1]
+    norm = getattr(layer, "input_layernorm", None)
+    if norm is None:
+        return handles
+
+    def _pre_hook(_mod, inputs):
+        tensor = inputs[0][0] if isinstance(inputs[0], tuple) else inputs[0]
+        residual = tensor.detach().clone()
+        selected_row = residual[:, -1:, :]
+        selected_row_f32 = selected_row.to(torch.float32)
+        selected_row_contiguous = selected_row_f32.contiguous()
+        selected_row_flat = selected_row_contiguous.reshape(
+            residual.shape[0], residual.shape[-1]
+        ).contiguous()
+
+        c45_last_row = residual.to(torch.float32)[:, -1:, :].contiguous().reshape(
+            residual.shape[0], residual.shape[-1]
+        ).contiguous()
+
+        taps_out["layer_1_input_norm_selected_row_before_rmsnorm"] = selected_row
+        taps_out["layer_1_input_norm_selected_row_after_f32_cast"] = selected_row_f32
+        taps_out["layer_1_input_norm_selected_row_after_contiguous"] = selected_row_contiguous
+        taps_out["layer_1_input_norm_selected_row_after_flatten"] = selected_row_flat
+        taps_out["layer_1_input_norm_last_row_flat_values"] = c45_last_row
+
+    handles.append(norm.register_forward_pre_hook(_pre_hook))
+    return handles
+
+
 # -----------------------------------------------------------------------------
 # Reference forward
 # -----------------------------------------------------------------------------
@@ -1180,6 +1255,8 @@ def run_reference_forward(
     c44_tap_names: Optional[List[str]] = None,
     capture_c45: bool = False,
     c45_tap_names: Optional[List[str]] = None,
+    capture_c46: bool = False,
+    c46_tap_names: Optional[List[str]] = None,
     fp32: bool = False,
 ) -> Dict[str, torch.Tensor]:
     """Run HF Qwen3-Next / Qwen3.5 forward with `output_hidden_states=True`.
@@ -1202,6 +1279,8 @@ def run_reference_forward(
       taps under `c44__<name>` keys.
     - `capture_c45=True`: layer-1 row-local scalar tensor + extracted scalar
       + flat scalar-multiply + reconstructed row taps under `c45__<name>` keys.
+    - `capture_c46=True`: layer-1 row-side provenance taps feeding C45's
+      `layer_1_input_norm_last_row_flat_values` under `c46__<name>` keys.
     - `fp32=True`: load the HF model in float32 (instead of bfloat16) so the
       comparator can distinguish bf16-accumulation noise from real divergence.
     """
@@ -1249,10 +1328,11 @@ def run_reference_forward(
             capture_c43,
             capture_c44,
             capture_c45,
+            capture_c46,
         )
     ) > 1:
         raise ValueError(
-            "capture_b11_layer0, capture_c41, capture_c42, capture_c43, capture_c44, and capture_c45 are mutually exclusive"
+            "capture_b11_layer0, capture_c41, capture_c42, capture_c43, capture_c44, capture_c45, and capture_c46 are mutually exclusive"
         )
 
     # Set up B11b/C41 instrumentation + forward hooks BEFORE the forward.
@@ -1263,6 +1343,7 @@ def run_reference_forward(
     c43_captures: Dict[str, torch.Tensor] = {}
     c44_captures: Dict[str, torch.Tensor] = {}
     c45_captures: Dict[str, torch.Tensor] = {}
+    c46_captures: Dict[str, torch.Tensor] = {}
     hook_handles: List[object] = []
     orig_gdn_forward = None
     if capture_b11_layer0:
@@ -1340,6 +1421,13 @@ def run_reference_forward(
         print(
             "[mtp_h_main_ref] C45 instrumentation armed: layer 1 row-local "
             "scalar / extracted-scalar / multiply / reconstruction audit hooks",
+            file=sys.stderr,
+        )
+    elif capture_c46:
+        hook_handles.extend(_arm_c46_row_provenance_hooks(base, c46_captures))
+        print(
+            "[mtp_h_main_ref] C46 instrumentation armed: layer 1 row-side "
+            "selection / cast / contiguous / flatten provenance hooks",
             file=sys.stderr,
         )
 
@@ -1513,6 +1601,18 @@ def run_reference_forward(
             if name in c45_captures:
                 taps[f"c45__{name}"] = c45_captures[name].contiguous()
 
+    if capture_c46:
+        wanted = c46_tap_names or list(C46_ROW_PROVENANCE_TAP_NAMES)
+        missing = [n for n in wanted if n not in c46_captures]
+        if missing:
+            print(
+                f"[mtp_h_main_ref] WARNING: C46 instrumentation missed taps: {missing}",
+                file=sys.stderr,
+            )
+        for name in wanted:
+            if name in c46_captures:
+                taps[f"c46__{name}"] = c46_captures[name].contiguous()
+
     # Free the model and all retained activations before returning.
     del model, out, hs
     if device.type == "cuda":
@@ -1636,6 +1736,18 @@ def main() -> int:
         ),
     )
     ap.add_argument(
+        "--c46-row-provenance-taps",
+        action="store_true",
+        help=(
+            "Also capture the explicit Phase C46 layer-1 row-side provenance "
+            "tap set feeding C45's layer_1_input_norm_last_row_flat_values. "
+            "Output tensors are emitted under `c46__<name>` keys matching "
+            "C46_ROW_PROVENANCE_TAP_NAMES in crates/kiln-model/src/mtp_debug.rs. "
+            "The exact tap order is resolved from the kiln dump's "
+            "`meta__c46_tap_ids` when present."
+        ),
+    )
+    ap.add_argument(
         "--fp32",
         action="store_true",
         help=(
@@ -1660,6 +1772,9 @@ def main() -> int:
     c43_tap_names = resolve_c43_tap_names(kiln) if args.c43_taps else None
     c44_tap_names = resolve_c44_tap_names(kiln) if args.c44_taps else None
     c45_tap_names = resolve_c45_tap_names(kiln) if args.c45_taps else None
+    c46_tap_names = (
+        resolve_c46_tap_names(kiln) if args.c46_row_provenance_taps else None
+    )
     draft_token_id = int(kiln.get("meta__draft_token_id", -1))
     mtp_pos = int(kiln.get("meta__mtp_pos", -1))
     print(
@@ -1734,6 +1849,8 @@ def main() -> int:
         c44_tap_names=c44_tap_names,
         capture_c45=args.c45_taps,
         c45_tap_names=c45_tap_names,
+        capture_c46=args.c46_row_provenance_taps,
+        c46_tap_names=c46_tap_names,
         fp32=args.fp32,
     )
 
@@ -1780,6 +1897,11 @@ def main() -> int:
     if c45_tap_names:
         out_dict["meta__c45_tap_ids"] = torch.tensor(
             [C45_LAYER1_ROW_TAP_NAMES.index(name) for name in c45_tap_names],
+            dtype=torch.int32,
+        )
+    if c46_tap_names:
+        out_dict["meta__c46_tap_ids"] = torch.tensor(
+            [C46_ROW_PROVENANCE_TAP_NAMES.index(name) for name in c46_tap_names],
             dtype=torch.int32,
         )
     # Also write the resolved prompt tokens so later reruns can reproduce
