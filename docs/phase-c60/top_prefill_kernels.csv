@@ -1,0 +1,11 @@
+rank,kernel,time_percent,total_time_ns,instances,avg_ns,median_ns
+1,"<unnamed>::gdn_full_chunk_forward_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, int)",27.9,526055433,1512,347920.3,349777.5
+2,ucopy_bf16,22.3,419698014,10065,41698.8,9504.0
+3,"void Marlin<(int)256, (int)4, (int)16, (int)4, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)",9.8,183711740,520,353291.8,392129.0
+4,ucopy_f32,3.7,69374802,1704,40712.9,3168.0
+5,bmul_f32,2.6,48780670,3145,15510.5,2752.0
+6,ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_nn,2.5,47220065,48,983751.4,987459.5
+7,cast_bf16_f32,2.4,45715491,2416,18922.0,1248.0
+8,"void Marlin<(int)256, (int)1, (int)8, (int)8, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)",1.9,35625075,1664,21409.3,21088.0
+9,"void kiln_flash::flash_fwd_kernel<Flash_fwd_kernel_traits<(int)256, (int)64, (int)64, (int)4, (bool)0, (bool)0, cutlass::bfloat16_t, Flash_kernel_traits<(int)256, (int)64, (int)64, (int)4, cutlass::bfloat16_t>>, (bool)0, (bool)1, (bool)0, (bool)0, (bool)0, (bool)1, (bool)0, (bool)0>(kiln_flash::Flash_fwd_params)",1.8,33916988,136,249389.6,178064.5
+10,void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8>(T1::Params),1.6,30692618,17,1805448.1,1804903.0

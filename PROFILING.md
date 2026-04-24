@@ -1,5 +1,87 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#500 current-main profile refresh (2026-04-24)
+
+**Scope:** refresh the Phase 6 CUDA source of truth after PR
+[#500](https://github.com/ericflo/kiln/pull/500) added the CUDA GDN
+`qk_norm_gqa` fast path. This is an artifact-only profile refresh; no
+optimization code changed.
+
+**Precondition outcome:** proceed. `PROFILING.md` did not contain a post-PR-#500
+current-main section at commit `faf8cb3` or newer with both native-MTP decode
+and prompt-heavy prefill top-3 NVTX/kernel hotspot tables.
+
+**Baseline:** fresh `origin/main` was `faf8cb3e1d5ae79fb9a2b3111c3f78052c6a51e7` (`faf8cb3`). This includes PR
+[#500](https://github.com/ericflo/kiln/pull/500).
+
+**Hardware / image:** RunPod on-demand `NVIDIA RTX A6000`, pod
+`93wtgcujidv9ky`, `ghcr.io/ericflo/kiln-runpod:latest`, driver
+`550.127.08`, CUDA toolkit `12.4`, and `KILN_CUDA_ARCHS=86`.
+Nsight Systems `2024.6.2.225-246235244400v0` was installed from the
+NVIDIA apt repo and `/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys`
+was used for both capture and CSV export.
+
+**Build / profile commands:** see `docs/phase-c60/post-500-profile.md`.
+
+Native-MTP decode latency metrics were **23.5
+tok/s**, **42.5 ms** mean ITL, **419.1 ms**
+prefill for **515** prompt tokens, **128** generated tokens, and
+**MTP α = 0.716**. Prompt-heavy prefill metrics were
+**1635.6 ms** prefill for **4090** prompt tokens
+(**2501 tok/s**) and **17** generated tokens.
+
+### C60 top native-MTP decode hotspots
+
+Source: `docs/phase-c60/top_decode_nvtx.csv`. Decode ranking excludes the
+`:kiln/mtp/step` parent wrapper.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/gates` | **12.8%** |
+| 2 | `:kiln/gdn/gated_norm` | **12.1%** |
+| 3 | `:kiln/gdn/qk_norm` | **10.0%** |
+
+Kernel-level cross-check: `docs/phase-c60/top_decode_kernels.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `ucopy_bf16` | **18.2%** |
+| 2 | `Marlin<(256,1,8,8,4,8)>` | **10.0%** |
+| 3 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64...` | **8.7%** |
+
+### C60 top prompt-heavy prefill hotspots
+
+Source: `docs/phase-c60/top_prefill_nvtx.csv`.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/in_proj` | **23.1%** |
+| 2 | `:kiln/gdn/gates` | **10.7%** |
+| 3 | `:kiln/gdn/gated_norm` | **9.2%** |
+
+Kernel-level cross-check: `docs/phase-c60/top_prefill_kernels.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `gdn_full_chunk_forward_kernel` | **27.9%** |
+| 2 | `ucopy_bf16` | **22.3%** |
+| 3 | `Marlin<(256,4,16,4,4,8)>` | **9.8%** |
+
+**Verdict:** PR #500 moved native-MTP `:kiln/gdn/qk_norm` below gates and
+gated_norm in the decode NVTX ranking, so the same qk_norm GQA fusion shape
+should not be retried. Prompt-heavy prefill is still dominated by GDN
+full-chunk/in-projection work, with `gdn_full_chunk_forward_kernel` the largest
+kernel bucket. The next material Phase 6 target should audit and port upstream
+flash-linear-attention/vLLM recurrent-gated-delta improvements into kiln's
+vendored CUDA GDN full-chunk path, rather than hand-rolling another candle
+micro-fusion.
+
+Committed artifacts: `docs/phase-c60/post-500-profile.md`,
+`docs/phase-c60/summary.json`, `docs/phase-c60/top_decode_nvtx.csv`,
+`docs/phase-c60/top_prefill_nvtx.csv`, `docs/phase-c60/top_decode_kernels.csv`,
+`docs/phase-c60/top_prefill_kernels.csv`, raw Nsight CSV exports, and profiler
+logs under `docs/phase-c60/`.
+
 ## Phase 6 C57 native-MTP conv1d prefill recovery profile (2026-04-24)
 
 **Scope:** verify that the C56 CUDA `causal_conv1d_prefill` status-3 blocker is

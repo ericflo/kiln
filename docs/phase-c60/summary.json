@@ -1,0 +1,177 @@
+{
+  "phase": "c60",
+  "profile": "post-pr-500 current-main refresh",
+  "commit": "faf8cb3e1d5ae79fb9a2b3111c3f78052c6a51e7",
+  "short_commit": "faf8cb3",
+  "captured_at_utc": "2026-04-24T14:35:36Z",
+  "hardware": {
+    "pod_id": "93wtgcujidv9ky",
+    "gpu": "NVIDIA RTX A6000",
+    "driver": "550.127.08",
+    "vram": "49140 MiB",
+    "image": "ghcr.io/ericflo/kiln-runpod:latest"
+  },
+  "tools": {
+    "nsight_systems": "2024.6.2.225-246235244400v0",
+    "cuda_toolkit": "12.4",
+    "kiln_cuda_archs": "86"
+  },
+  "runtime_flags": {
+    "KILN_W4A16": "1",
+    "KILN_CUDA_GRAPHS": "true",
+    "decode_extra": {
+      "KILN_SPEC_METHOD": "mtp",
+      "KILN_BENCH_FORCE_MTP": "1",
+      "KILN_MTP_ARGMAX_FP32": "1"
+    }
+  },
+  "decode": {
+    "command_kind": "native-MTP 512 prompt / 128 output humaneval latency-only",
+    "latency": {
+      "prompt_tokens": 515,
+      "prefill_time_ms": 419.08304499999997,
+      "prefill_tokens_per_sec": 1228.873384748839,
+      "time_to_first_token_ms": 419.08304499999997,
+      "mean_inter_token_ms": 42.53726714173231,
+      "p50_inter_token_ms": 29.873797500000002,
+      "p99_inter_token_ms": 112.576723,
+      "num_tokens_generated": 128,
+      "decode_tokens_per_sec": 23.50879751320281,
+      "spec_method": "mtp",
+      "acceptance_rate": 0.7162162162162162,
+      "prompt_subset": "humaneval"
+    },
+    "top_nvtx": [
+      {
+        "rank": 1,
+        "range": ":kiln/gdn/gates",
+        "time_percent": 12.8,
+        "total_time_ns": 574050739,
+        "instances": 2304,
+        "avg_ns": 249154.0,
+        "median_ns": 239925.5
+      },
+      {
+        "rank": 2,
+        "range": ":kiln/gdn/gated_norm",
+        "time_percent": 12.1,
+        "total_time_ns": 542993630,
+        "instances": 2304,
+        "avg_ns": 235674.3,
+        "median_ns": 225955.5
+      },
+      {
+        "rank": 3,
+        "range": ":kiln/gdn/qk_norm",
+        "time_percent": 10.0,
+        "total_time_ns": 449794466,
+        "instances": 2304,
+        "avg_ns": 195223.3,
+        "median_ns": 184586.0
+      }
+    ],
+    "top_kernels": [
+      {
+        "rank": 1,
+        "kernel": "ucopy_bf16",
+        "time_percent": 18.2,
+        "total_time_ns": 384678335,
+        "instances": 20961,
+        "avg_ns": 18352.1,
+        "median_ns": 2880.0
+      },
+      {
+        "rank": 2,
+        "kernel": "void Marlin<(int)256, (int)1, (int)8, (int)8, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)",
+        "time_percent": 10.0,
+        "total_time_ns": 211819184,
+        "instances": 9880,
+        "avg_ns": 21439.2,
+        "median_ns": 21088.0
+      },
+      {
+        "rank": 3,
+        "kernel": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64_32x4_nn_align8>(T1::Params)",
+        "time_percent": 8.7,
+        "total_time_ns": 184540726,
+        "instances": 244,
+        "avg_ns": 756314.5,
+        "median_ns": 76592.5
+      }
+    ]
+  },
+  "prefill": {
+    "command_kind": "prompt-heavy 4096 prompt / 16 output humaneval latency-only",
+    "latency": {
+      "prompt_tokens": 4090,
+      "prefill_time_ms": 1635.622057,
+      "prefill_tokens_per_sec": 2500.577674711561,
+      "time_to_first_token_ms": 1635.622057,
+      "mean_inter_token_ms": 44.531308125,
+      "p50_inter_token_ms": 42.901008999999995,
+      "p99_inter_token_ms": 57.329169,
+      "num_tokens_generated": 17,
+      "decode_tokens_per_sec": 22.456111039742783,
+      "spec_method": "off"
+    },
+    "top_nvtx": [
+      {
+        "rank": 1,
+        "range": ":kiln/gdn/in_proj",
+        "time_percent": 23.1,
+        "total_time_ns": 228914511,
+        "instances": 408,
+        "avg_ns": 561065.0,
+        "median_ns": 90250.0
+      },
+      {
+        "rank": 2,
+        "range": ":kiln/gdn/gates",
+        "time_percent": 10.7,
+        "total_time_ns": 105948063,
+        "instances": 408,
+        "avg_ns": 259676.6,
+        "median_ns": 227956.0
+      },
+      {
+        "rank": 3,
+        "range": ":kiln/gdn/gated_norm",
+        "time_percent": 9.2,
+        "total_time_ns": 91548338,
+        "instances": 408,
+        "avg_ns": 224383.2,
+        "median_ns": 214210.5
+      }
+    ],
+    "top_kernels": [
+      {
+        "rank": 1,
+        "kernel": "<unnamed>::gdn_full_chunk_forward_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, __nv_bfloat16 *, int, int)",
+        "time_percent": 27.9,
+        "total_time_ns": 526055433,
+        "instances": 1512,
+        "avg_ns": 347920.3,
+        "median_ns": 349777.5
+      },
+      {
+        "rank": 2,
+        "kernel": "ucopy_bf16",
+        "time_percent": 22.3,
+        "total_time_ns": 419698014,
+        "instances": 10065,
+        "avg_ns": 41698.8,
+        "median_ns": 9504.0
+      },
+      {
+        "rank": 3,
+        "kernel": "void Marlin<(int)256, (int)4, (int)16, (int)4, (int)4, (int)8>(const int4 *, const int4 *, int4 *, const int4 *, int, int, int, int *)",
+        "time_percent": 9.8,
+        "total_time_ns": 183711740,
+        "instances": 520,
+        "avg_ns": 353291.8,
+        "median_ns": 392129.0
+      }
+    ]
+  },
+  "recommendation": "Do not retry qk_norm GQA fusion; post-#500 native-MTP decode is led by GDN gates/gated_norm, while prompt-heavy prefill is still led by GDN in_proj and gdn_full_chunk_forward_kernel. Next optimization should target the vendored GDN full-chunk/recurrent gated-delta path using upstream FLA/vLLM kernel learnings, not another candle micro-fusion."
+}
