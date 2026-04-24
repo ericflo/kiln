@@ -1,0 +1,67 @@
+MTP numerical bisect — mode: C45 tolerance/reproducer artifact classifier (C47), atol=0.01, rtol=0.1
+
+=== pair ===
+  kiln dump : profiling-artifacts/c47_c45_tolerance_artifact_seed1_captures/mtp_pos-2/step-{step}.safetensors
+  ref  dump : profiling-artifacts/c47_c45_tolerance_artifact_seed1_ref_bf16.safetensors
+Metadata:
+  meta__draft_token_id: kiln=421 ref=421 [OK]
+  meta__mtp_pos: kiln=2 ref=2 [OK]
+  meta__swap_fc_norms: kiln=0 ref=<missing> [MISMATCH]
+  meta__kiln_mtp_pos: kiln=<missing> ref=<missing> [OK]
+  meta__capture_subops: kiln=<missing> ref=<missing> [OK]
+  meta__boundary_layers: kiln=[0, 8, 16, 23, 31] ref=[0, 8, 16, 23, 31] [OK]
+
+tap                    shape                  shape_ok allclose cos_sim    max|Δ|       mean|Δ|     
+----------------------------------------------------------------------------------------------------
+c45__layer_1_input_norm_rms_inv_scalar 1x1x1                  True     True     1.00e+00   9.62e-03     9.62e-03    
+c45__layer_1_input_norm_rms_inv_scalar_extracted_values 1                      True     True     1.00e+00   9.62e-03     9.62e-03    
+c45__layer_1_input_norm_last_row_flat_values 1x2560                 True     True     1.00e+00   7.32e-04     1.08e-04    
+c45__layer_1_input_norm_pre_weight_row_broadcast_output 1x1x2560               True     True     1.00e+00   1.86e-02     2.60e-03    
+c45__layer_1_input_norm_pre_weight_row_scalar_values 1x2560                 True     True     1.00e+00   1.86e-02     2.60e-03    
+c45__layer_1_input_norm_pre_weight_row_reconstructed 1x1x2560               True     True     1.00e+00   1.86e-02     2.60e-03    
+
+  pair verdict: all taps match within tolerance.
+  C45 broadcast operand diagnostic:
+    same-side product residual: kiln max=1.91e-06 mean=6.63e-09; ref max=3.58e-07 mean=6.00e-09
+    cross-side operand drift: row max=7.32e-04 mean=1.08e-04 rel_l2=3.47e-03; scalar max=9.62e-03 mean=9.62e-03 rel_l2=3.97e-04; predicted product max=1.86e-02 mean=2.60e-03 rel_l2=3.44e-03; observed output max=1.86e-02 mean=2.60e-03 rel_l2=3.44e-03; operand-bound max=1.86e-02
+    operand contribution budget: row-term max=1.77e-02 mean=2.60e-03 rel_l2=3.47e-03; scalar-term max=1.86e-02 mean=1.16e-04 rel_l2=3.97e-04; interaction max=7.04e-06 mean=1.03e-06 rel_l2=1.38e-06; dominant=row-side
+    tighter tolerance mask check (atol=0.001, rtol=0.01): row allclose=True current-ratio=5.27e-02 tight-ratio=5.27e-01; scalar allclose=True current-ratio=3.96e-03 tight-ratio=3.96e-02; product allclose=False current-ratio=7.78e-01 tight-ratio=7.78e+00
+    interpretation: if same-side residual is near zero and observed output matches the predicted product, this boundary is operand-drift amplification, not an independent broadcast multiply mismatch; the contribution budget names which tolerated operand dominates the exposed product error.
+
+==============================================================================
+Phase C47 C45 tolerance/reproducer artifact classifier
+==============================================================================
+  current tolerance: atol=0.01, rtol=0.1
+  tight tolerance  : atol=0.001, rtol=0.01
+
+  [pair] C47 artifact boundary details
+    current-mask operand/output stats:
+    row operand          max|Δ|=7.32e-04 mean|Δ|=1.08e-04 rel_l2=3.47e-03 allclose=PASS tol_ratio=5.27e-02
+    scalar operand       max|Δ|=9.62e-03 mean|Δ|=9.62e-03 rel_l2=3.97e-04 allclose=PASS tol_ratio=3.96e-03
+    predicted product    max|Δ|=1.86e-02 mean|Δ|=2.60e-03 rel_l2=3.44e-03 allclose=PASS tol_ratio=7.78e-01
+    observed output      max|Δ|=1.86e-02 mean|Δ|=2.60e-03 rel_l2=3.44e-03 allclose=PASS tol_ratio=7.78e-01
+    tight-mask operand/output stats:
+    row operand          max|Δ|=7.32e-04 mean|Δ|=1.08e-04 rel_l2=3.47e-03 allclose=PASS tol_ratio=5.27e-01
+    scalar operand       max|Δ|=9.62e-03 mean|Δ|=9.62e-03 rel_l2=3.97e-04 allclose=PASS tol_ratio=3.96e-02
+    predicted product    max|Δ|=1.86e-02 mean|Δ|=2.60e-03 rel_l2=3.44e-03 allclose=FAIL tol_ratio=7.78e+00
+    observed output      max|Δ|=1.86e-02 mean|Δ|=2.60e-03 rel_l2=3.44e-03 allclose=FAIL tol_ratio=7.78e+00
+    prediction residual:
+    predicted-vs-observed max|Δ|=2.26e-06 mean|Δ|=8.62e-09 rel_l2=1.35e-05 allclose=FAIL tol_ratio=1.91e+00
+    same-side product residual: kiln max=1.91e-06 mean=6.63e-09; ref max=3.58e-07 mean=6.00e-09
+    output/prediction max diff: observed=1.86e-02 predicted=1.86e-02 residual=2.26e-06
+    contribution budget: row max=1.77e-02 mean=2.60e-03 rel_l2=3.47e-03; scalar max=1.86e-02 mean=1.16e-04 rel_l2=3.97e-04; interaction max=7.04e-06 mean=1.03e-06 rel_l2=1.38e-06; dominant=row-side
+    top offending indices by predicted-product tight tolerance ratio:
+      idx=(0,1001) tight_ratio=7.78e+00 row_k=2.14e-04 row_r=5.80e-04 row_Δ=-3.66e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-8.87e-03 out_Δ=-8.87e-03 resid=-4.07e-10 terms(row=-8.87e-03, scalar=-5.58e-06, inter=3.52e-06)
+      idx=(0,93) tight_ratio=7.07e+00 row_k=-1.22e-04 row_r=1.83e-04 row_Δ=-3.05e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-7.39e-03 out_Δ=-7.39e-03 resid=1.16e-10 terms(row=-7.39e-03, scalar=-1.76e-06, inter=2.94e-06)
+      idx=(0,734) tight_ratio=7.07e+00 row_k=-1.22e-04 row_r=1.83e-04 row_Δ=-3.05e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-7.39e-03 out_Δ=-7.39e-03 resid=1.16e-10 terms(row=-7.39e-03, scalar=-1.76e-06, inter=2.94e-06)
+      idx=(0,2481) tight_ratio=5.70e+00 row_k=-3.97e-04 row_r=-1.53e-04 row_Δ=-2.44e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-5.91e-03 out_Δ=-5.91e-03 resid=5.82e-11 terms(row=-5.91e-03, scalar=1.47e-06, inter=2.35e-06)
+      idx=(0,1484) tight_ratio=5.66e+00 row_k=-4.27e-04 row_r=-1.83e-04 row_Δ=-2.44e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-5.91e-03 out_Δ=-5.91e-03 resid=-1.16e-10 terms(row=-5.91e-03, scalar=1.76e-06, inter=2.35e-06)
+      idx=(0,40) tight_ratio=5.58e+00 row_k=4.88e-04 row_r=2.44e-04 row_Δ=2.44e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=5.91e-03 out_Δ=5.91e-03 resid=0.00e+00 terms(row=5.91e-03, scalar=-2.35e-06, inter=-2.35e-06)
+      idx=(0,975) tight_ratio=5.47e+00 row_k=8.85e-04 row_r=1.17e-03 row_Δ=-2.90e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-7.03e-03 out_Δ=-7.03e-03 resid=1.14e-09 terms(row=-7.02e-03, scalar=-1.13e-05, inter=2.79e-06)
+      idx=(0,420) tight_ratio=5.42e+00 row_k=-6.10e-04 row_r=-3.66e-04 row_Δ=-2.44e-04 scalar_k=2.42e+01 scalar_r=2.42e+01 scalar_Δ=-9.62e-03 pred_Δ=-5.90e-03 out_Δ=-5.90e-03 resid=-2.33e-10 terms(row=-5.91e-03, scalar=3.52e-06, inter=2.35e-06)
+    seed verdict: FULLY_PREDICTED operand-drift/tolerance amplification artifact
+
+Phase C47 verdict: output is fully predicted, but supplied pairs do not reproduce the current-mask C45 failure.
+  -> Treat this as a reproducer alignment issue before changing production math.
+
+Overall verdict: all taps match within tolerance.
