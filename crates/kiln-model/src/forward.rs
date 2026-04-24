@@ -116,6 +116,40 @@ fn linear_with_lora_t_decode_if(
     }
 }
 
+#[cfg(feature = "metal")]
+fn metal_attn_gate_debug_active() -> bool {
+    crate::mtp_debug::is_subop_capture_armed()
+        || crate::mtp_debug::current_b12_layer_is_31()
+        || crate::mtp_debug::is_c7_sdpa_capture_armed()
+        || crate::mtp_debug::is_mtp_fp32_head_armed()
+        || crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+}
+
+fn attention_output_gate_decode_if(
+    use_metal_decode_gemv: bool,
+    attn_output: Tensor,
+    gate: Option<&Tensor>,
+) -> Result<Tensor> {
+    let Some(gate) = gate else {
+        return Ok(attn_output);
+    };
+
+    #[cfg(feature = "metal")]
+    {
+        if use_metal_decode_gemv
+            && !metal_attn_gate_debug_active()
+            && crate::backend::metal::metal_attn_gate_sigmoid_mul_supports(&attn_output, gate)
+        {
+            kiln_nvtx::range!(c"kiln/attn/output_gate_fused");
+            return crate::backend::metal::metal_attn_gate_sigmoid_mul_bf16(&attn_output, gate)
+                .context("metal attn gate sigmoid/mul failed");
+        }
+    }
+
+    let sigmoid_gate = cuda_sigmoid(gate)?;
+    Ok((attn_output * sigmoid_gate)?)
+}
+
 fn full_attn_qkv_proj_decode_if(
     use_metal_decode_gemv: bool,
     x: &Tensor,
@@ -4113,13 +4147,7 @@ pub fn gqa_attention(
         if let Some(attn_output) =
             flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
         {
-            // Apply output gate: attn_output * sigmoid(gate)
-            let attn_output = if let Some(ref gate) = gate {
-                let sigmoid_gate = cuda_sigmoid(gate)?;
-                (attn_output * sigmoid_gate)?
-            } else {
-                attn_output
-            };
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
@@ -4191,13 +4219,8 @@ pub fn gqa_attention(
             .contiguous()?
             .reshape(((), seq_len, num_heads * head_dim))?;
 
-    // Apply output gate: attn_output * sigmoid(gate)
-    let attn_output = if let Some(ref gate) = gate {
-        let sigmoid_gate = cuda_sigmoid(gate)?;
-        (attn_output * sigmoid_gate)?
-    } else {
-        attn_output
-    };
+    let attn_output =
+        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
 
     // Output projection
     let out = {
@@ -4241,6 +4264,7 @@ fn try_flash_attn_paged_decode(
     num_kv_heads: usize,
     head_dim: usize,
     gate: Option<&Tensor>,
+    use_metal_decode_gemv: bool,
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
@@ -4354,12 +4378,8 @@ fn try_flash_attn_paged_decode(
                 // [batch, seq_len, num_heads * head_dim].
                 let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
-                let attn_output = if let Some(gate) = gate {
-                    let sigmoid_gate = cuda_sigmoid(gate)?;
-                    (attn_output * sigmoid_gate)?
-                } else {
-                    attn_output
-                };
+                let attn_output =
+                    attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
                 let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
                 let out = {
@@ -4465,12 +4485,7 @@ fn try_flash_attn_paged_decode(
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
     let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
-    let attn_output = if let Some(gate) = gate {
-        let sigmoid_gate = cuda_sigmoid(gate)?;
-        (attn_output * sigmoid_gate)?
-    } else {
-        attn_output
-    };
+    let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
     let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
     let out = {
@@ -4765,12 +4780,7 @@ fn gqa_attention_paged_with_rope_tables(
             // multiply (if `attn_output_gate`) and BEFORE o_proj, so it
             // matches the HF reference's `attn_output = ... * sigmoid_gate`
             // tap point. Shape: [B, T, num_heads * head_dim].
-            let attn_output = if let Some(ref gate) = gate {
-                let sigmoid_gate = cuda_sigmoid(gate)?;
-                (attn_output * sigmoid_gate)?
-            } else {
-                attn_output
-            };
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
@@ -4863,6 +4873,7 @@ fn gqa_attention_paged_with_rope_tables(
                 num_kv_heads,
                 head_dim,
                 gate.as_ref(),
+                use_metal_decode_gemv,
                 attn_weights,
                 lora_layer,
                 lora_scale,
@@ -4991,12 +5002,7 @@ fn gqa_attention_paged_with_rope_tables(
         if let Some(attn_output) =
             flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)?
         {
-            let attn_output = if let Some(ref gate) = gate {
-                let sigmoid_gate = cuda_sigmoid(gate)?;
-                (attn_output * sigmoid_gate)?
-            } else {
-                attn_output
-            };
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
@@ -5029,13 +5035,7 @@ fn gqa_attention_paged_with_rope_tables(
         if let Some(attn_output) =
             flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
         {
-            // Apply output gate: attn_output * sigmoid(gate)
-            let attn_output = if let Some(ref gate) = gate {
-                let sigmoid_gate = cuda_sigmoid(gate)?;
-                (attn_output * sigmoid_gate)?
-            } else {
-                attn_output
-            };
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             // Phase B12 layer-31 GQA tap (secondary prefill path).
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
@@ -5154,12 +5154,8 @@ fn gqa_attention_paged_with_rope_tables(
             crate::mtp_debug::capture_c7_sdpa_tap("attn_out", &attn_output)?;
         }
 
-        let attn_output = if let Some(ref gate) = gate {
-            let sigmoid_gate = cuda_sigmoid(gate)?;
-            (attn_output * sigmoid_gate)?
-        } else {
-            attn_output
-        };
+        let attn_output =
+            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
         }
@@ -5224,12 +5220,8 @@ fn gqa_attention_paged_with_rope_tables(
         let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
     }
 
-    let attn_output = if let Some(ref gate) = gate {
-        let sigmoid_gate = cuda_sigmoid(gate)?;
-        (attn_output * sigmoid_gate)?
-    } else {
-        attn_output
-    };
+    let attn_output =
+        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
     }
