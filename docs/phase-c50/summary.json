@@ -1,0 +1,64 @@
+{
+  "commit": "7c638e7e2d69cb16772619a2a32d6114767bf7e2",
+  "gpu": "NVIDIA RTX A6000",
+  "command": "env KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_MTP_ARGMAX_FP32=1 ./target/release/kiln-bench --model-path /workspace/qwen3.5-4b --paged --prompt-tokens 512 --max-output-tokens 128 --skip-training --seed <seed> --chat-template --latency-only --prompt-subset humaneval --temperature 0.0",
+  "rows": [
+    {
+      "seed": 0,
+      "acceptance_rate": 0.7887323943661971,
+      "decode_tokens_per_sec": 48.42728823758676,
+      "mean_inter_token_ms": 20.649514692913396,
+      "prefill_time_ms": 362.845716
+    },
+    {
+      "seed": 1,
+      "acceptance_rate": 0.7066666666666667,
+      "decode_tokens_per_sec": 43.99860147292562,
+      "mean_inter_token_ms": 22.72799512992126,
+      "prefill_time_ms": 371.44883899999996
+    },
+    {
+      "seed": 2,
+      "acceptance_rate": 0.5875,
+      "decode_tokens_per_sec": 38.41003112162791,
+      "mean_inter_token_ms": 26.03486565354331,
+      "prefill_time_ms": 350.409227
+    }
+  ],
+  "summary": {
+    "n": 3,
+    "median_acceptance_rate": 0.7066666666666667,
+    "mean_acceptance_rate": 0.6942996870109546,
+    "median_decode_tokens_per_sec": 43.99860147292562,
+    "mean_decode_tokens_per_sec": 43.61197361071343,
+    "median_mean_inter_token_ms": 22.72799512992126,
+    "mean_mean_inter_token_ms": 23.13745849212599,
+    "median_prefill_time_ms": 362.845716,
+    "mean_prefill_time_ms": 361.56792733333333
+  },
+  "top_hotspots": [
+    {
+      "rank": 1,
+      "range": ":kiln/gdn/gates",
+      "wall_clock_share_pct": 17.9,
+      "source": "post442_decode_nvtx_pushpop_sum.csv; C50 nsys importer failed on baked nsys 2023.4.4"
+    },
+    {
+      "rank": 2,
+      "range": ":kiln/gdn/gated_norm",
+      "wall_clock_share_pct": 17.3,
+      "source": "post442_decode_nvtx_pushpop_sum.csv; C50 nsys importer failed on baked nsys 2023.4.4"
+    },
+    {
+      "rank": 3,
+      "range": ":kiln/gdn/qk_norm",
+      "wall_clock_share_pct": 15.0,
+      "source": "post442_decode_nvtx_pushpop_sum.csv; C50 nsys importer failed on baked nsys 2023.4.4"
+    }
+  ],
+  "profile_notes": {
+    "nsys_capture": "C50 nsys capture ran on the restored C40f-style MTP command, but baked nsys 2023.4.4 failed qdstrm import with QuadD EventCollection wrong-event-order before producing .nsys-rep stats.",
+    "hotspot_attribution": "The top hotspot table therefore carries forward the latest successful current-main decode NVTX attribution from post-#442, while C50 establishes that the restored C40f MTP harness remains above alpha/decode gates on current main.",
+    "next_target": "GDN gate/gated-norm fusion or vendored GDN decode-side reduction, not C48 model-math investigation."
+  }
+}
