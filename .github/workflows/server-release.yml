@@ -189,12 +189,20 @@ jobs:
         # NVIDIA's apt repo (faster than the 4 GB local installer). The
         # -dev variants bring headers and import libs that kiln-flash-attn
         # / kiln-marlin-gemm / kiln-gdn-kernel need at link time.
+        #
+        # NVIDIA renamed the cuBLAS / cuRAND apt packages from
+        # `cuda-cublas-*` / `cuda-curand-*` to `libcublas-*` / `libcurand-*`.
+        # Jimver's action auto-prefixes entries in `sub-packages` with
+        # `cuda-`, so those two have to be listed under
+        # `non-cuda-sub-packages` (Linux-only input) which skips the prefix
+        # but still appends `-12-4`.
         uses: Jimver/cuda-toolkit@v0.2.19
         id: cuda-toolkit
         with:
           cuda: '12.4.1'
           method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cublas", "cublas-dev", "curand", "curand-dev", "cccl", "profiler-api"]'
+          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cccl", "profiler-api"]'
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev", "libcurand", "libcurand-dev"]'
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -250,7 +258,11 @@ jobs:
 
   windows-cuda:
     name: Windows / x86_64 / CUDA 12.4
-    runs-on: windows-latest
+    # Pinned to Windows Server 2022. `windows-latest` now points at Server
+    # 2025 (build 10.0.26100), which NVIDIA's CUDA 12.4.1 installer refuses
+    # (silent exit 3772776473 == 0xE0CF2D39). kiln-v0.1.1 shipped green on
+    # Server 2022 with this same config. Revisit when we move to CUDA 13.
+    runs-on: windows-2022
     # See linux-cuda for the rationale on the arch list. Blackwell (SM 120)
     # is excluded because CUDA 12.4's nvcc can't emit it.
     env:
@@ -264,10 +276,12 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install CUDA 12.4 toolkit
-        # Same sub-package set as the Linux job. Jimver/cuda-toolkit
-        # normalizes the hyphen/underscore naming across platforms, so
-        # `cudart-dev` resolves to `cudart_dev` on the Windows network
-        # installer automatically.
+        # Same sub-package set as the Linux job, minus the two packages
+        # that only exist under their `lib*` names in the Linux apt repo
+        # (cuBLAS, cuRAND). On Windows those ship inside the bundled
+        # `cublas` / `curand` installer components, so we list them here.
+        # `non-cuda-sub-packages` is a Linux-only input and is ignored by
+        # the Windows installer path.
         uses: Jimver/cuda-toolkit@v0.2.19
         id: cuda-toolkit
         with:
