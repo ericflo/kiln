@@ -3059,11 +3059,21 @@ pub fn gated_deltanet_forward(
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
     let (mixed_qkv, z, a, b) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
-        let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
-        let z = x.broadcast_matmul(&weights.in_proj_z_t)?; // [B, T, v_dim]
-        let a = x.broadcast_matmul(&weights.in_proj_a_t)?; // [B, T, nv]
-        let b = x.broadcast_matmul(&weights.in_proj_b_t)?; // [B, T, nv]
-        (mixed_qkv, z, a, b)
+        if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
+            x,
+            &weights.in_proj_qkv_t,
+            &weights.in_proj_z_t,
+            &weights.in_proj_a_t,
+            &weights.in_proj_b_t,
+        )? {
+            (mixed_qkv, z, a, b)
+        } else {
+            let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
+            let z = x.broadcast_matmul(&weights.in_proj_z_t)?; // [B, T, v_dim]
+            let a = x.broadcast_matmul(&weights.in_proj_a_t)?; // [B, T, nv]
+            let b = x.broadcast_matmul(&weights.in_proj_b_t)?; // [B, T, nv]
+            (mixed_qkv, z, a, b)
+        }
     };
 
     // Phase B11b tap: `gdn_in_proj`. Matches the HF reference layout

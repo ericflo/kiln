@@ -321,6 +321,23 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Fused GDN decode input projections.
+    ///
+    /// Collapses the four single-token `broadcast_matmul` calls in Step 1
+    /// (`qkv`, `z`, `a`, `b`) into one backend launch for decode. Returns
+    /// `(mixed_qkv, z, a, b)` with shapes matching the portable matmul path.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_in_proj_decode(
+        &self,
+        _x: &Tensor,
+        _in_proj_qkv_t: &Tensor,
+        _in_proj_z_t: &Tensor,
+        _in_proj_a_t: &Tensor,
+        _in_proj_b_t: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
+        Ok(None)
+    }
+
     fn supports_gdn_gates(&self) -> bool {
         false
     }
