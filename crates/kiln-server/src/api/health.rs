@@ -65,13 +65,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Adapter info
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
 
-    let adapters_loaded = std::fs::read_dir(&state.adapter_dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
-                .count()
-        })
+    let adapter_dir = state.adapter_dir.clone();
+    let adapters_loaded = tokio::task::spawn_blocking(move || count_adapter_dirs(&adapter_dir))
+        .await
         .unwrap_or(0);
 
     // Scheduler stats (works for both Mock and Real backends)
@@ -184,6 +180,17 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, Json(response)).into_response()
     }
+}
+
+fn count_adapter_dirs(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 pub fn routes() -> Router<AppState> {
