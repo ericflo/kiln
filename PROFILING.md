@@ -1,5 +1,28 @@
 # Kiln Profiling Report
 
+## Phase 7 CUDA streaming prefill default A/B (2026-04-24)
+
+**Scope:** decide whether to flip the existing CUDA streaming/tiled prefill path from opt-in to default-on for long prompts after PR #507 showed the memory win at 128k.
+
+**Hardware:** RunPod on-demand `NVIDIA A40` fallback, 48 GiB VRAM, sm_86, `ghcr.io/ericflo/kiln-runpod:latest`. The requested A6000 was supply-constrained; A40 is the documented same-VRAM/sm_86 fallback.
+
+**Build:** current main base `76c7614`, `KILN_CUDA_ARCHS=86 cargo build --release --features cuda --bin kiln-bench`.
+
+**A/B command shape:** interleaved `KILN_STREAMING_PREFILL=0` vs `1` at 32768, 65536, and 131072 prompt tokens with `KILN_W4A16=1 KILN_KV_CACHE_FP8=1 KILN_CUDA_GRAPHS=true`, `--paged`, `--max-output-tokens 1`, `--skip-training`, and `--latency-only`. Peak VRAM came from 200 ms `nvidia-smi` sampling.
+
+| Prompt tokens | Mode | Exit | Peak VRAM | TTFT / prefill | Prefill tok/s | First decode ITL |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 32768 | monolithic (`KILN_STREAMING_PREFILL=0`) | 0 | 25319 MiB | 20075.7 ms | 1632 | 102.3 ms |
+| 32768 | streaming (`KILN_STREAMING_PREFILL=1`) | 0 | 20071 MiB | 12881.7 ms | 2544 | 101.1 ms |
+| 65536 | monolithic (`KILN_STREAMING_PREFILL=0`) | 0 | 33063 MiB | 28482.0 ms | 2301 | 169.3 ms |
+| 65536 | streaming (`KILN_STREAMING_PREFILL=1`) | 0 | 21863 MiB | 27693.8 ms | 2366 | 170.7 ms |
+| 131072 | monolithic (`KILN_STREAMING_PREFILL=0`) | 1 | 44455 MiB sampled before OOM | OOM in GDN layer 0 | n/a | n/a |
+| 131072 | streaming (`KILN_STREAMING_PREFILL=1`) | 0 | 25383 MiB | 62930.8 ms | 2083 | 310.6 ms |
+
+**Decision:** enable CUDA streaming prefill by default at `>= 65533` actual prompt tokens. The 65k arm reduced peak memory by 11200 MiB and did not materially regress TTFT or first decode ITL; the 128k monolithic arm OOMed while streaming completed. `KILN_STREAMING_PREFILL=0` remains the kill switch, `KILN_STREAMING_PREFILL=1` remains the force-on override below threshold, and `KILN_STREAMING_TILE_TOKENS` remains the tile-size override.
+
+Detailed artifact: `docs/phase-c63/cuda-streaming-prefill-default.md`.
+
 ## Phase 6 FlashInfer-style paged GQA decode preflight (2026-04-24)
 
 **Scope:** decide whether current `main` still lacks a native CUDA paged GQA

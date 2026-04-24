@@ -1207,7 +1207,9 @@ fn marlin_bf16_drop_disabled() -> bool {
 // ---------------------------------------------------------------------------
 // Phase 7: streaming/tiled GDN prefill — env-derived configuration.
 //
-// Dispatch is opt-in via `KILN_STREAMING_PREFILL=1`. When enabled, prefill is
+// Dispatch can be forced on/off via `KILN_STREAMING_PREFILL=1|0`. Without an
+// override, CUDA and Metal enable streaming for long prompts where tiled
+// prefill materially reduces peak activation memory. When enabled, prefill is
 // performed as a sequence of fixed-size tiles (default 8192 tokens) so the
 // per-layer materialized GDN intermediates only ever cover one tile at a time.
 // The recurrent state in `LinearAttentionState` already provides the O(1)
@@ -1218,9 +1220,25 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
 /// chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 65533;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 4096;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamingPrefillDeviceKind {
+    Cpu,
+    Cuda,
+    Metal,
+}
+
+fn streaming_prefill_device_kind(device: &Device) -> StreamingPrefillDeviceKind {
+    match device {
+        Device::Cuda(_) => StreamingPrefillDeviceKind::Cuda,
+        Device::Metal(_) => StreamingPrefillDeviceKind::Metal,
+        _ => StreamingPrefillDeviceKind::Cpu,
+    }
+}
 
 fn streaming_prefill_env_override() -> Option<bool> {
     std::env::var("KILN_STREAMING_PREFILL")
@@ -1242,16 +1260,24 @@ pub fn streaming_prefill_enabled() -> bool {
     streaming_prefill_env_override().unwrap_or(false)
 }
 
+fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usize) -> bool {
+    match kind {
+        StreamingPrefillDeviceKind::Cuda => seq_len >= STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD,
+        StreamingPrefillDeviceKind::Metal => seq_len >= STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD,
+        StreamingPrefillDeviceKind::Cpu => false,
+    }
+}
+
 /// Device-aware streaming prefill policy for production prefill dispatch.
 ///
-/// Env overrides win. Without an override, long Metal prompts use tiled
-/// prefill by default because it reduces peak intermediates and improves TTFT
-/// on the macOS desktop path.
+/// Env overrides win. Without an override, long CUDA prompts use tiled prefill
+/// by default because it cuts peak GDN activation memory enough to make 128k
+/// prefill fit on 48 GiB GPUs; long Metal prompts keep the desktop default.
 pub fn streaming_prefill_enabled_for(device: &Device, seq_len: usize) -> bool {
     if let Some(enabled) = streaming_prefill_env_override() {
         return enabled;
     }
-    matches!(device, Device::Metal(_)) && seq_len >= STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+    streaming_prefill_default_for(streaming_prefill_device_kind(device), seq_len)
 }
 
 fn streaming_tile_tokens_env_override() -> Option<usize> {
@@ -11317,6 +11343,26 @@ mod tests {
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
         assert!(!streaming_prefill_enabled(), "default must be disabled");
+        assert!(!streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Cpu,
+            STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD
+        ));
+        assert!(!streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Cuda,
+            STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD - 1
+        ));
+        assert!(streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Cuda,
+            STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD
+        ));
+        assert!(!streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Metal,
+            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD - 1
+        ));
+        assert!(streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Metal,
+            STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
+        ));
         assert!(!streaming_prefill_enabled_for(
             &Device::Cpu,
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
