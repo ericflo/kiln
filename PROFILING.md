@@ -1,5 +1,141 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#481 current-main profile refresh (2026-04-24)
+
+**Scope:** refresh the Phase 6 source of truth after PR
+[#481](https://github.com/ericflo/kiln/pull/481) fixed the CUDA conv1d
+prefill launch bounds that had blocked the native-MTP prefill path before
+decode. This is an artifact-only profile PR; no optimization code changed.
+
+**Preflight outcome:** proceed. Fresh `origin/main` was
+`7227b4cf8bc4b117b60865e36214d69024288463`
+(`phase6: fix conv1d prefill launch bounds (#481)`), `PROFILING.md` had no
+post-#481 current-main profile section, and GitHub open-PR search found no
+existing post-#481 profile-refresh PR.
+
+**Hardware / image:** RunPod on-demand `NVIDIA A40` fallback because A6000
+launch returned `SUPPLY_CONSTRAINT`. The pod used
+`ghcr.io/ericflo/kiln-runpod:latest`, driver `580.126.09`, CUDA toolkit
+`12.4`, and `KILN_CUDA_ARCHS=86`. The baked `nsys 2023.4.4` was not used for
+stats; `nsight-systems-2024.6.2` was installed from NVIDIA's apt repo and
+`/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys` was used for both
+capture and CSV export.
+
+**Build / profile commands:**
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+export KILN_MTP_ARGMAX_FP32=1
+cargo build --release --features cuda,nvtx --bin kiln-bench
+
+/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys profile \
+  --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --output=/workspace/post481-profile/post481_decode \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b --paged \
+    --prompt-tokens 512 --max-output-tokens 128 \
+    --skip-training --chat-template --latency-only --temperature 0.0 --seed 1
+
+/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys profile \
+  --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --output=/workspace/post481-profile/post481_prefill \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b --paged \
+    --prompt-tokens 8192 --max-output-tokens 2 \
+    --skip-training --latency-only --temperature 0.0 --seed 1
+
+KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 \
+./target/release/kiln-bench \
+  --model-path /workspace/qwen3.5-4b --paged \
+  --prompt-tokens 512 --max-output-tokens 64 \
+  --skip-training --prompt-subset humaneval --chat-template \
+  --latency-only --temperature 0.0 --seed 1
+```
+
+Latency summary source: `profile-out/post481_latency_summary.log`. The plain
+decode trace reported **494** prompt tokens, **8154.0 ms** prefill, and
+**44.7 ms** mean ITL (**22.4 tok/s**) for **129** generated tokens. The
+prompt-heavy prefill trace reported **8180** prompt tokens, **3447.8 ms**
+prefill, and **2372 tok/s** prompt throughput.
+
+### Decode top hotspots
+
+Source: `profile-out/post481_decode_nvtx_pushpop_sum.csv`.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/qk_norm` | **24.4%** |
+| 2 | `:kiln/gdn/gates` | **12.0%** |
+| 3 | `:kiln/gdn/gated_norm` | **11.2%** |
+
+Decode kernel-level cross-check: `profile-out/post481_decode_cuda_gpu_kern_sum.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `ucopy_bf16` | **15.4%** |
+| 2 | `Marlin<(256,1,8,8,4,8)>` | **13.6%** |
+| 3 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64...` | **11.5%** |
+
+### Prompt-heavy prefill top hotspots
+
+Source: `profile-out/post481_prefill_nvtx_pushpop_sum.csv`. The two-token
+decode tail contributes `:kiln/lm_head` at **17.5%** in this trace and is
+excluded from the prefill ranking below.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/in_proj` | **33.6%** |
+| 2 | `:kiln/attn/full/prefill_initial` | **13.1%** |
+| 3 | `:kiln/gdn/qk_norm` | **3.9%** |
+
+Prefill kernel-level cross-check: `profile-out/post481_prefill_cuda_gpu_kern_sum.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `gdn_full_chunk_forward_kernel` | **34.8%** |
+| 2 | `ucopy_bf16` | **15.1%** |
+| 3 | `Marlin<(256,4,16,4,4,8)>` | **13.5%** |
+
+### Native MTP observation
+
+Source: `profile-out/post481_mtp_latency.log`. Native MTP now reaches decode
+on the standard humaneval latency arm instead of failing during GDN layer-0
+conv1d prefill. The run reported **515** prompt tokens, **340.5 ms** MTP
+prefill (**1513 tok/s**), **64** generated tokens, **24.3 ms** mean ITL,
+**41.2 tok/s** decode, and **α = 0.730** (**27/37** accepted draft tokens).
+This clears the earlier pre-decode blocker from the post-#476/#481 notes, but
+it is a single seed-1 A40 observation, not a new MTP ship verdict.
+
+### Verdict
+
+Post-#481 current `main` is profileable again through the native-MTP path. The
+plain decode top-3 remains GDN-side (`qk_norm`, `gates`, `gated_norm`), while
+prompt-heavy prefill still has GDN full-chunk work as the largest kernel bucket
+(**34.8%**) and `:kiln/gdn/in_proj` as the largest NVTX wall-clock range
+(**33.6%**).
+
+The next Phase 6 source-of-truth candidate should therefore stay on GDN-side
+work unless a follow-up multi-seed MTP sweep confirms that post-#481 native MTP
+acceptance and throughput are durable enough to justify optimization work.
+
+**Committed artifacts:**
+
+- `profile-out/post481_decode_cuda_gpu_kern_sum.csv`
+- `profile-out/post481_decode_nvtx_kern_sum.csv`
+- `profile-out/post481_decode_nvtx_pushpop_sum.csv`
+- `profile-out/post481_prefill_cuda_gpu_kern_sum.csv`
+- `profile-out/post481_prefill_nvtx_kern_sum.csv`
+- `profile-out/post481_prefill_nvtx_pushpop_sum.csv`
+- `profile-out/post481_latency_summary.log`
+- `profile-out/post481_mtp_latency.log`
+
 ## Phase 6 post-#442 vLLM full-chunk GDN audit (2026-04-23)
 
 **Scope:** audit current vLLM Gated DeltaNet kernels against Kiln's vendored
