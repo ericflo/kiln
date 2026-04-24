@@ -1,0 +1,158 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-24T01:25:54.920451Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-24T01:25:54.921678Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-24T01:25:54.921848Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-24T01:25:54.921857Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-24T01:25:54.921928Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+Model loaded in 2.42s (backend: cuda, VRAM: 16342 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=48] (508 prompt tokens)...
+    Prefill (MTP): 353.1ms (1439 tok/s)
+[2m2026-04-24T01:25:58.188689Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m deferred native MTP CPU load complete [3mload_elapsed_ms[0m[2m=[0m1
+[2m2026-04-24T01:25:58.242665Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m lazy native MTP GPU upload complete [3mupload_elapsed_ms[0m[2m=[0m53
+    Decode (MTP): 128 tokens, mean ITL 37.3ms (26.8 tok/s), α = 0.309 (30/97)
+
+--- Training Benchmark (skipped) ---
+[2m2026-04-24T01:26:03.324794Z[0m [32m INFO[0m [2mkiln_model::cuda_graph[0m[2m:[0m CUDA graphs enabled for decode
+
+--- Inference Throughput Benchmarks ---
+
+1 sequential runs:
+  Warmup...
+  Running 1 sequential generations...
+    Run 1/1: 128 tokens in 3142.8ms (40.7 tok/s)
+  => 40.7 tok/s aggregate
+
+4 sequential runs:
+  Warmup...
+  Running 4 sequential generations...
+    Run 1/4: 128 tokens in 3142.2ms (40.7 tok/s)
+    Run 2/4: 128 tokens in 3147.0ms (40.7 tok/s)
+    Run 3/4: 128 tokens in 3148.9ms (40.6 tok/s)
+    Run 4/4: 128 tokens in 3152.6ms (40.6 tok/s)
+  => 40.7 tok/s aggregate
+
+8 sequential runs:
+  Warmup...
+  Running 8 sequential generations...
+    Run 1/8: 128 tokens in 3155.6ms (40.6 tok/s)
+    Run 2/8: 128 tokens in 3155.7ms (40.6 tok/s)
+    Run 3/8: 128 tokens in 3150.9ms (40.6 tok/s)
+    Run 4/8: 128 tokens in 3150.0ms (40.6 tok/s)
+    Run 5/8: 128 tokens in 3157.4ms (40.5 tok/s)
+    Run 6/8: 128 tokens in 3154.0ms (40.6 tok/s)
+    Run 7/8: 128 tokens in 3150.1ms (40.6 tok/s)
+    Run 8/8: 128 tokens in 3150.8ms (40.6 tok/s)
+  => 40.6 tok/s aggregate
+
+16 sequential runs:
+  Warmup...
+  Running 16 sequential generations...
+    Run 1/16: 128 tokens in 3151.3ms (40.6 tok/s)
+    Run 2/16: 128 tokens in 3151.3ms (40.6 tok/s)
+    Run 3/16: 128 tokens in 3151.5ms (40.6 tok/s)
+    Run 4/16: 128 tokens in 3150.7ms (40.6 tok/s)
+    Run 5/16: 128 tokens in 3149.4ms (40.6 tok/s)
+    Run 6/16: 128 tokens in 3149.4ms (40.6 tok/s)
+    Run 7/16: 128 tokens in 3152.0ms (40.6 tok/s)
+    Run 8/16: 128 tokens in 3150.6ms (40.6 tok/s)
+    Run 9/16: 128 tokens in 3152.4ms (40.6 tok/s)
+    Run 10/16: 128 tokens in 3147.8ms (40.7 tok/s)
+    Run 11/16: 128 tokens in 3151.4ms (40.6 tok/s)
+    Run 12/16: 128 tokens in 3143.4ms (40.7 tok/s)
+    Run 13/16: 128 tokens in 3150.4ms (40.6 tok/s)
+    Run 14/16: 128 tokens in 3151.7ms (40.6 tok/s)
+    Run 15/16: 128 tokens in 3151.6ms (40.6 tok/s)
+    Run 16/16: 128 tokens in 3151.5ms (40.6 tok/s)
+  => 40.6 tok/s aggregate
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 2.42s (VRAM: 16342 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+1               508        128         40.7      17288
+4               508        512         40.7      17288
+8               508       1024         40.6      17288
+16              508       2048         40.6      17288
+
+--- Latency (single request) ---
+Prompt tokens:         508
+Prefill time:          353.1 ms (1439 tok/s)
+Time to first token:   353.1 ms
+Mean inter-token:      37.3 ms (26.8 tok/s)
+P50 inter-token:       48.6 ms
+P99 inter-token:       60.2 ms
+Tokens generated:      128
+Spec method:           mtp
+Draft acceptance α:    0.309
+
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 2.424639471,
+    "model_vram_mb": 16342
+  },
+  "inference": [
+    {
+      "batch_size": 1,
+      "prompt_tokens": 508,
+      "output_tokens": 128,
+      "total_time_secs": 3.142902099,
+      "tokens_per_sec": 40.726690163440566,
+      "peak_vram_mb": 17288
+    },
+    {
+      "batch_size": 4,
+      "prompt_tokens": 508,
+      "output_tokens": 512,
+      "total_time_secs": 12.590960055,
+      "tokens_per_sec": 40.664095332164884,
+      "peak_vram_mb": 17288
+    },
+    {
+      "batch_size": 8,
+      "prompt_tokens": 508,
+      "output_tokens": 1024,
+      "total_time_secs": 25.22486265,
+      "tokens_per_sec": 40.594869205363146,
+      "peak_vram_mb": 17288
+    },
+    {
+      "batch_size": 16,
+      "prompt_tokens": 508,
+      "output_tokens": 2048,
+      "total_time_secs": 50.407295849,
+      "tokens_per_sec": 40.62903921954046,
+      "peak_vram_mb": 17288
+    }
+  ],
+  "latency": {
+    "prompt_tokens": 508,
+    "prefill_time_ms": 353.096548,
+    "prefill_tokens_per_sec": 1438.6999897829644,
+    "time_to_first_token_ms": 353.096548,
+    "mean_inter_token_ms": 37.27018491338582,
+    "p50_inter_token_ms": 48.596043,
+    "p99_inter_token_ms": 60.233885,
+    "num_tokens_generated": 128,
+    "decode_tokens_per_sec": 26.831098432271094,
+    "spec_method": "mtp",
+    "acceptance_rate": 0.30927835051546393,
+    "prompt_subset": "all"
+  },
+  "training": null
+}
