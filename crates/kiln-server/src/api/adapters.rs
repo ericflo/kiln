@@ -122,8 +122,9 @@ async fn load_adapter(
     .map_err(|e| ApiError::internal(format!("join error: {e}")))?
     .map_err(ApiError::adapter_load_failed)?;
 
-    // Update the shared active adapter name.
+    // Update the shared active adapter name and drop stale real-backend prefix state.
     *state.active_adapter_name.write().unwrap() = Some(req.name.clone());
+    state.clear_real_prefix_cache();
 
     tracing::info!(adapter = %req.name, path = %adapter_path.display(), operation = "load", "loaded LoRA adapter");
 
@@ -152,8 +153,9 @@ async fn unload_adapter(
     .await
     .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
 
-    // Clear the shared active adapter name.
+    // Clear the shared active adapter name and drop stale real-backend prefix state.
     *state.active_adapter_name.write().unwrap() = None;
+    state.clear_real_prefix_cache();
 
     tracing::info!(operation = "unload", "unloaded LoRA adapter — reverted to base model");
 

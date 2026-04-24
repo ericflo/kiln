@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 
 use candle_core::DType;
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
+use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
-use kiln_model::{ModelRunner, PagedKvCache};
-use kiln_scheduler::Scheduler;
+use kiln_model::{LinearAttentionState, ModelRunner, PagedKvCache, PagedPrefixRegistration};
+use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_train::TrainingState;
 use serde::Serialize;
 
@@ -146,6 +147,220 @@ pub struct TrainingJobInfo {
 /// Thread-safe map of tracked training jobs.
 pub type TrainingJobs = Arc<std::sync::RwLock<HashMap<String, TrainingJobInfo>>>;
 
+pub struct RealPrefixCache {
+    enabled: bool,
+    max_blocks: usize,
+    block_size: usize,
+    next_entry_id: u64,
+    entries: Vec<RealPrefixCacheEntry>,
+    block_refcounts: HashMap<u32, usize>,
+    stats: PrefixCacheStats,
+}
+
+struct RealPrefixCacheEntry {
+    id: u64,
+    adapter: Option<String>,
+    prompt_tokens: Vec<TokenId>,
+    block_ids: Vec<u32>,
+    linear_state: LinearAttentionState,
+    last_used: u64,
+    active_uses: usize,
+}
+
+pub struct RealPrefixCacheHit {
+    pub entry_id: u64,
+    pub cached_tokens: usize,
+    pub block_ids: Vec<u32>,
+    pub linear_state: LinearAttentionState,
+}
+
+pub struct RealPrefixCacheRegisterOutcome {
+    pub retained_blocks: Vec<u32>,
+    pub evicted_blocks: Vec<u32>,
+}
+
+impl RealPrefixCache {
+    pub fn new(enabled: bool, block_size: usize, max_blocks: usize) -> Self {
+        Self {
+            enabled,
+            max_blocks,
+            block_size,
+            next_entry_id: 1,
+            entries: Vec::new(),
+            block_refcounts: HashMap::new(),
+            stats: PrefixCacheStats {
+                max_blocks,
+                ..PrefixCacheStats::default()
+            },
+        }
+    }
+
+    pub fn disabled(block_size: usize) -> Self {
+        Self::new(false, block_size, 0)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && self.max_blocks > 0
+    }
+
+    pub fn lookup(
+        &mut self,
+        adapter: &Option<String>,
+        prompt_tokens: &[TokenId],
+    ) -> anyhow::Result<Option<RealPrefixCacheHit>> {
+        if !self.is_enabled() {
+            return Ok(None);
+        }
+
+        let best_idx = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                &entry.adapter == adapter
+                    && prompt_tokens.len() > entry.prompt_tokens.len()
+                    && prompt_tokens.starts_with(&entry.prompt_tokens)
+                    && entry.prompt_tokens.len() % self.block_size == 0
+            })
+            .max_by_key(|(_, entry)| entry.prompt_tokens.len())
+            .map(|(idx, _)| idx);
+
+        let Some(idx) = best_idx else {
+            self.stats.lookup_misses += 1;
+            return Ok(None);
+        };
+
+        self.stats.lookup_hits += 1;
+        self.stats.hit_tokens += self.entries[idx].prompt_tokens.len() as u64;
+        self.stats.hit_blocks += self.entries[idx].block_ids.len() as u64;
+        self.entries[idx].last_used = self.stats.lookup_hits + self.stats.lookup_misses;
+        self.entries[idx].active_uses += 1;
+
+        Ok(Some(RealPrefixCacheHit {
+            entry_id: self.entries[idx].id,
+            cached_tokens: self.entries[idx].prompt_tokens.len(),
+            block_ids: self.entries[idx].block_ids.clone(),
+            linear_state: self.entries[idx].linear_state.snapshot()?,
+        }))
+    }
+
+    pub fn release_hit(&mut self, entry_id: u64) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == entry_id) {
+            entry.active_uses = entry.active_uses.saturating_sub(1);
+        }
+    }
+
+    pub fn register(
+        &mut self,
+        adapter: Option<String>,
+        registration: PagedPrefixRegistration,
+    ) -> RealPrefixCacheRegisterOutcome {
+        if !self.is_enabled()
+            || registration.prompt_tokens.is_empty()
+            || registration.prompt_tokens.len() % self.block_size != 0
+            || registration.block_ids.is_empty()
+        {
+            return RealPrefixCacheRegisterOutcome {
+                retained_blocks: Vec::new(),
+                evicted_blocks: Vec::new(),
+            };
+        }
+
+        if self.entries.iter().any(|entry| {
+            entry.adapter == adapter && entry.prompt_tokens == registration.prompt_tokens
+        }) {
+            return RealPrefixCacheRegisterOutcome {
+                retained_blocks: Vec::new(),
+                evicted_blocks: Vec::new(),
+            };
+        }
+
+        let mut evicted_blocks = Vec::new();
+        let needed_new_blocks = registration
+            .block_ids
+            .iter()
+            .filter(|block_id| !self.block_refcounts.contains_key(block_id))
+            .count();
+        while self.cached_blocks() + needed_new_blocks > self.max_blocks {
+            let Some(evict_idx) = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.active_uses == 0)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(idx, _)| idx)
+            else {
+                return RealPrefixCacheRegisterOutcome {
+                    retained_blocks: Vec::new(),
+                    evicted_blocks,
+                };
+            };
+            let evicted = self.entries.remove(evict_idx);
+            evicted_blocks.extend(self.release_entry_blocks(&evicted.block_ids));
+        }
+
+        let retained_blocks: Vec<u32> = registration
+            .block_ids
+            .iter()
+            .copied()
+            .filter(|block_id| !self.block_refcounts.contains_key(block_id))
+            .collect();
+        for &block_id in &registration.block_ids {
+            *self.block_refcounts.entry(block_id).or_insert(0) += 1;
+        }
+        let id = self.next_entry_id;
+        self.next_entry_id += 1;
+        let last_used = self.stats.lookup_hits + self.stats.lookup_misses;
+        self.entries.push(RealPrefixCacheEntry {
+            id,
+            adapter,
+            prompt_tokens: registration.prompt_tokens,
+            block_ids: registration.block_ids,
+            linear_state: registration.linear_state,
+            last_used,
+            active_uses: 0,
+        });
+        RealPrefixCacheRegisterOutcome {
+            retained_blocks,
+            evicted_blocks,
+        }
+    }
+
+    pub fn clear(&mut self) -> Vec<u32> {
+        let mut blocks = Vec::new();
+        self.entries.clear();
+        blocks.extend(self.block_refcounts.keys().copied());
+        self.block_refcounts.clear();
+        blocks
+    }
+
+    fn release_entry_blocks(&mut self, block_ids: &[u32]) -> Vec<u32> {
+        let mut freed = Vec::new();
+        for &block_id in block_ids {
+            if let Some(refcount) = self.block_refcounts.get_mut(&block_id) {
+                *refcount = refcount.saturating_sub(1);
+                if *refcount == 0 {
+                    self.block_refcounts.remove(&block_id);
+                    freed.push(block_id);
+                }
+            }
+        }
+        freed
+    }
+
+    pub fn stats(&self) -> PrefixCacheStats {
+        PrefixCacheStats {
+            cached_blocks: self.cached_blocks(),
+            max_blocks: self.max_blocks,
+            ..self.stats
+        }
+    }
+
+    fn cached_blocks(&self) -> usize {
+        self.block_refcounts.len()
+    }
+}
+
 /// Which inference backend the server is using.
 pub enum ModelBackend {
     /// Mock engine + scheduler for testing without real weights.
@@ -158,6 +373,7 @@ pub enum ModelBackend {
         runner: Arc<std::sync::RwLock<ModelRunner>>,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
         paged_cache: Arc<std::sync::Mutex<PagedKvCache>>,
+        prefix_cache: Arc<std::sync::Mutex<RealPrefixCache>>,
     },
 }
 
@@ -202,6 +418,25 @@ pub struct AppState {
 
 impl AppState {
     /// Create an AppState with the mock engine backend.
+    pub fn clear_real_prefix_cache(&self) {
+        let ModelBackend::Real {
+            block_manager,
+            prefix_cache,
+            ..
+        } = self.backend.as_ref()
+        else {
+            return;
+        };
+        let blocks = {
+            let mut cache = prefix_cache.lock().unwrap();
+            cache.clear()
+        };
+        if !blocks.is_empty() {
+            let mut bm = block_manager.lock().unwrap();
+            bm.free_all(&blocks);
+        }
+    }
+
     pub fn new_mock(
         model_config: ModelConfig,
         scheduler: Scheduler,
@@ -255,6 +490,7 @@ impl AppState {
         memory_cfg: &crate::config::MemoryConfig,
         request_timeout_secs: u64,
         served_model_id: String,
+        prefix_cache_cfg: &crate::config::PrefixCacheConfig,
     ) -> Self {
         let block_size = DEFAULT_BLOCK_SIZE;
 
@@ -407,12 +643,24 @@ impl AppState {
             "GPU memory budget"
         );
 
+        let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
+            prefix_cache_cfg.max_blocks.unwrap_or(num_blocks / 4)
+        } else {
+            0
+        };
+        let prefix_cache = RealPrefixCache::new(
+            prefix_cache_cfg.enabled,
+            block_size,
+            prefix_cache_max_blocks,
+        );
+
         Self {
             model_config,
             backend: Arc::new(ModelBackend::Real {
                 runner: Arc::new(std::sync::RwLock::new(runner)),
                 block_manager: Arc::new(std::sync::Mutex::new(block_manager)),
                 paged_cache: Arc::new(std::sync::Mutex::new(paged_cache)),
+                prefix_cache: Arc::new(std::sync::Mutex::new(prefix_cache)),
             }),
             tokenizer: Arc::new(tokenizer),
             adapter_dir,
@@ -546,6 +794,96 @@ fn detected_gpu_total_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_linear_config() -> ModelConfig {
+        ModelConfig {
+            hidden_size: 8,
+            num_layers: 2,
+            num_attention_heads: 2,
+            num_kv_heads: 1,
+            head_dim: 4,
+            intermediate_size: 16,
+            vocab_size: 32,
+            max_position_embeddings: 64,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 2,
+            attn_output_gate: false,
+            linear_num_key_heads: 1,
+            linear_key_head_dim: 2,
+            linear_num_value_heads: 1,
+            linear_value_head_dim: 2,
+            linear_conv_kernel_dim: 2,
+            partial_rotary_factor: 0.5,
+        }
+    }
+
+    #[test]
+    fn real_prefix_cache_records_hits_misses_and_cached_blocks() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let state = LinearAttentionState::new(&config, &device)?;
+        let mut cache = RealPrefixCache::new(true, 4, 4);
+
+        let registration = PagedPrefixRegistration {
+            prompt_tokens: vec![1, 2, 3, 4],
+            block_ids: vec![9],
+            linear_state: state,
+        };
+        let outcome = cache.register(None, registration);
+        assert_eq!(outcome.retained_blocks, vec![9]);
+        assert!(outcome.evicted_blocks.is_empty());
+
+        assert!(
+            cache
+                .lookup(&None, &[7, 8, 9, 10, 11])
+                .is_ok_and(|hit| hit.is_none())
+        );
+        let hit = cache.lookup(&None, &[1, 2, 3, 4, 5])?.expect("prefix hit");
+        assert_eq!(hit.cached_tokens, 4);
+        assert_eq!(hit.block_ids, vec![9]);
+        cache.release_hit(hit.entry_id);
+
+        let stats = cache.stats();
+        assert_eq!(stats.lookup_hits, 1);
+        assert_eq!(stats.lookup_misses, 1);
+        assert_eq!(stats.hit_tokens, 4);
+        assert_eq!(stats.hit_blocks, 1);
+        assert_eq!(stats.cached_blocks, 1);
+        assert_eq!(stats.max_blocks, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_keys_by_adapter() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let state = LinearAttentionState::new(&config, &device)?;
+        let mut cache = RealPrefixCache::new(true, 4, 4);
+        cache.register(
+            Some("adapter-a".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![9],
+                linear_state: state,
+            },
+        );
+
+        assert!(cache.lookup(&None, &[1, 2, 3, 4, 5])?.is_none());
+        assert!(
+            cache
+                .lookup(&Some("adapter-b".to_string()), &[1, 2, 3, 4, 5])?
+                .is_none()
+        );
+        assert!(
+            cache
+                .lookup(&Some("adapter-a".to_string()), &[1, 2, 3, 4, 5])?
+                .is_some()
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_memory_budget_cpu_mode() {
