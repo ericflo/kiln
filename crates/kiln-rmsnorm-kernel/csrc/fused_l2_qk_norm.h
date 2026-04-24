@@ -71,6 +71,29 @@ kiln_l2_qk_norm_status_t kiln_fused_l2_qk_norm(
     void *stream
 );
 
+// Fused GQA head-expand + L2-norm(Q) + scale(Q) + L2-norm(K).
+//
+// Input layout:  q_in, k_in   [batch, seq, nk, hidden] bf16 contiguous.
+// Output layout: q_out, k_out [batch, seq, nv, hidden] bf16 contiguous,
+// where `nv = nk * ratio` and each normalized input head is repeated `ratio`
+// times in the output head axis.
+//
+// Scope is intentionally narrow for Qwen3.5 GDN: bf16, forward-only,
+// hidden == 128, nv a positive multiple of nk.
+kiln_l2_qk_norm_status_t kiln_fused_l2_qk_norm_gqa(
+    const void *q_in,
+    const void *k_in,
+    void *q_out,
+    void *k_out,
+    int rows,
+    int nk,
+    int ratio,
+    int hidden,
+    float q_scale,
+    float eps,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif

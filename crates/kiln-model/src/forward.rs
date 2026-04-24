@@ -3523,27 +3523,61 @@ fn gated_deltanet_forward_decode_if(
             }
             #[cfg(not(feature = "metal"))]
             {
-                let (q, k) = {
-                    kiln_nvtx::range!(c"kiln/gdn/head_expand");
-                    if gqa_ratio > 1 {
-                        let q = q
-                            .unsqueeze(3)?
-                            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                            .contiguous()?
-                            .reshape((batch, seq_len, nv, dk))?;
-                        let k = k
-                            .unsqueeze(3)?
-                            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
-                            .contiguous()?
-                            .reshape((batch, seq_len, nv, dk))?;
-                        (q, k)
-                    } else {
-                        (q.contiguous()?, k.contiguous()?)
+                let fused_gqa = {
+                    #[cfg(feature = "cuda")]
+                    {
+                        let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
+                        if !disabled
+                            && input_dtype == DType::BF16
+                            && gqa_ratio > 1
+                            && kiln_rmsnorm_kernel::supports_l2_qk_norm_gqa(&q, &k, nv)
+                        {
+                            kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
+                            Some(
+                                kiln_rmsnorm_kernel::fused_l2_qk_norm_gqa(
+                                    &q,
+                                    &k,
+                                    nv,
+                                    scale as f32,
+                                    1e-6,
+                                )
+                                .context("fused_l2_qk_norm_gqa kernel failed")?,
+                            )
+                        } else {
+                            None
+                        }
+                    }
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        None
                     }
                 };
-                kiln_nvtx::range!(c"kiln/gdn/qk_norm");
-                let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                (q, k, true)
+
+                if let Some((q, k)) = fused_gqa {
+                    (q, k, true)
+                } else {
+                    let (q, k) = {
+                        kiln_nvtx::range!(c"kiln/gdn/head_expand");
+                        if gqa_ratio > 1 {
+                            let q = q
+                                .unsqueeze(3)?
+                                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                                .contiguous()?
+                                .reshape((batch, seq_len, nv, dk))?;
+                            let k = k
+                                .unsqueeze(3)?
+                                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                                .contiguous()?
+                                .reshape((batch, seq_len, nv, dk))?;
+                            (q, k)
+                        } else {
+                            (q.contiguous()?, k.contiguous()?)
+                        }
+                    };
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm");
+                    let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                    (q, k, true)
+                }
             }
         };
         (q, k, v, z, qk_expanded)
