@@ -160,6 +160,14 @@ jobs:
     # trimming the list to 4 arches keeps CI under ~30 min.
     env:
       KILN_CUDA_ARCHS: '80;86;89;90'
+      # candle-kernels' build.rs shells out to `nvidia-smi` to pick the SM
+      # to compile for. GitHub runners don't have GPUs, so it fails with
+      # `ComputeCapDetectionFailed`. Pin SM80 (Ampere baseline) — the
+      # resulting PTX is forward-compatible via JIT to every arch we
+      # target (86/89/90). kiln's own kernel crates compile the full
+      # `KILN_CUDA_ARCHS` list, so this only affects candle's baseline
+      # kernels, not the perf-critical ones.
+      CUDA_COMPUTE_CAP: '80'
     steps:
       - name: Free disk space
         # The CUDA 12.4 toolkit (~5 GB installed) plus the cargo target dir
@@ -189,12 +197,20 @@ jobs:
         # NVIDIA's apt repo (faster than the 4 GB local installer). The
         # -dev variants bring headers and import libs that kiln-flash-attn
         # / kiln-marlin-gemm / kiln-gdn-kernel need at link time.
+        #
+        # NVIDIA renamed the cuBLAS / cuRAND apt packages from
+        # `cuda-cublas-*` / `cuda-curand-*` to `libcublas-*` / `libcurand-*`.
+        # Jimver's action auto-prefixes entries in `sub-packages` with
+        # `cuda-`, so those two have to be listed under
+        # `non-cuda-sub-packages` (Linux-only input) which skips the prefix
+        # but still appends `-12-4`.
         uses: Jimver/cuda-toolkit@v0.2.19
         id: cuda-toolkit
         with:
           cuda: '12.4.1'
           method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cublas", "cublas-dev", "curand", "curand-dev", "cccl", "profiler-api"]'
+          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cccl", "profiler-api"]'
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev", "libcurand", "libcurand-dev"]'
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -250,11 +266,19 @@ jobs:
 
   windows-cuda:
     name: Windows / x86_64 / CUDA 12.4
-    runs-on: windows-latest
+    # Pinned to Windows Server 2022. CUDA 12.4.1 predates Windows Server
+    # 2025 and NVIDIA hasn't shipped a 12.4 installer that knows how to
+    # run there. Server 2022 is supported through 2031, so there's no
+    # rush to move until we bump to CUDA 13.
+    runs-on: windows-2022
     # See linux-cuda for the rationale on the arch list. Blackwell (SM 120)
     # is excluded because CUDA 12.4's nvcc can't emit it.
     env:
       KILN_CUDA_ARCHS: '80;86;89;90'
+      # Same reason as linux-cuda: candle-kernels runs `nvidia-smi` at
+      # build time to pick an SM and the CI runner has no GPU. SM80 PTX
+      # JIT-compiles to every arch we target.
+      CUDA_COMPUTE_CAP: '80'
     steps:
       - uses: actions/checkout@v4
 
@@ -264,16 +288,24 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install CUDA 12.4 toolkit
-        # Same sub-package set as the Linux job. Jimver/cuda-toolkit
-        # normalizes the hyphen/underscore naming across platforms, so
-        # `cudart-dev` resolves to `cudart_dev` on the Windows network
-        # installer automatically.
+        # Install the full toolkit rather than filtering with
+        # `sub-packages`. NVIDIA's Windows installer only accepts a fixed
+        # set of component names (`nvcc_12.4`, `cudart_12.4`,
+        # `cublas_dev_12.4`, etc., all underscore-separated), while
+        # Jimver/cuda-toolkit passes whatever we hand it with `_<major>.
+        # <minor>` appended. Our Linux-style hyphenated names
+        # (`cudart-dev` -> `cudart-dev_12.4`) don't match any component
+        # and the installer bails silently with exit 3772776473
+        # (0xE0CF2D39). Public workflows (kokkos, green-sky's llama.cpp
+        # fork) confirm `_dev` sub-packages have long been broken on
+        # Windows with this action; the working pattern is a full
+        # `method: local` install. That's only ~3 GB extra on the runner
+        # and we already have the disk headroom.
         uses: Jimver/cuda-toolkit@v0.2.19
         id: cuda-toolkit
         with:
           cuda: '12.4.1'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cudart-dev", "nvrtc", "nvrtc-dev", "cublas", "cublas-dev", "curand", "curand-dev", "cccl", "profiler-api"]'
+          method: 'local'
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
