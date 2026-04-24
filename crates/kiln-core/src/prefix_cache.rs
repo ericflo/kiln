@@ -9,34 +9,36 @@ use crate::token::TokenId;
 /// recomputing them. Blocks are reference-counted so they aren't freed while
 /// still in use, and evicted via LRU when memory pressure requires it.
 ///
-/// Uses hash chaining: each block's key is derived from the tokens in that block
-/// AND the previous block's hash. This means any prefix that matches block-by-block
-/// from the start will find the longest cached run, even if different suffixes
-/// were registered from different prompts.
+/// Uses a radix/trie layout over block-token hashes. Each edge is one full token
+/// block, each non-root node owns the physical KV cache block for that prefix
+/// position, and siblings share their common prefix nodes.
 #[derive(Debug)]
 pub struct PrefixCache {
     /// Maximum number of physical blocks the prefix cache may hold.
     max_blocks: usize,
-    /// Total physical blocks currently held by cached entries.
+    /// Total physical blocks currently held by cached trie nodes.
     total_cached_blocks: usize,
     /// Monotonically increasing counter used for LRU ordering.
     clock: u64,
     /// Block size in tokens — must match the block manager's block_size.
     block_size: usize,
-    /// Hash chain key → cached block entry.
-    /// Each entry represents one block at a specific position in a specific prefix.
-    entries: HashMap<u64, BlockCacheEntry>,
+    /// Radix/trie nodes. Node 0 is always the root and does not own a block.
+    nodes: Vec<RadixNode>,
     /// Reference counts for individual physical block IDs.
-    /// A block with refcount > 0 must not be evicted.
+    /// A block with refcount > 0 must not be freed by the block manager.
     refcounts: HashMap<u32, usize>,
 }
 
 #[derive(Debug, Clone)]
-struct BlockCacheEntry {
-    /// Physical block ID for this cached block.
-    block_id: u32,
-    /// The hash chain value at this position (used as the key).
-    chain_hash: u64,
+struct RadixNode {
+    /// Physical block ID for this cached block. The root has no block.
+    block_id: Option<u32>,
+    /// Parent node ID. The root has no parent.
+    parent: Option<usize>,
+    /// Edge key from the parent to this node.
+    edge_hash: u64,
+    /// Child edge key → node ID.
+    children: HashMap<u64, usize>,
     /// Last-access timestamp for LRU eviction.
     last_used: u64,
 }
@@ -48,7 +50,7 @@ impl PrefixCache {
             total_cached_blocks: 0,
             clock: 0,
             block_size,
-            entries: HashMap::new(),
+            nodes: vec![RadixNode::root()],
             refcounts: HashMap::new(),
         }
     }
@@ -58,7 +60,7 @@ impl PrefixCache {
     }
 
     pub fn num_cached_entries(&self) -> usize {
-        self.entries.len()
+        self.total_cached_blocks
     }
 
     pub fn total_cached_blocks(&self) -> usize {
@@ -80,111 +82,94 @@ impl PrefixCache {
             return None;
         }
 
+        let mut node_id = 0;
+        let mut matched_nodes = Vec::new();
         let mut cached_blocks = Vec::new();
-        let mut prev_hash: u64 = 0;
 
         for block_idx in 0..num_full_blocks {
-            let start = block_idx * self.block_size;
-            let end = start + self.block_size;
-            let block_tokens = &tokens[start..end];
-            let chain_hash = Self::chain_hash(prev_hash, block_tokens);
+            let block_hash = self.block_hash_at(tokens, block_idx);
+            let Some(&child_id) = self.nodes[node_id].children.get(&block_hash) else {
+                break;
+            };
+            let Some(block_id) = self.nodes[child_id].block_id else {
+                break;
+            };
 
-            if let Some(entry) = self.entries.get(&chain_hash) {
-                cached_blocks.push(entry.block_id);
-                prev_hash = chain_hash;
-            } else {
-                break; // Chain broken — no more cached blocks
-            }
+            matched_nodes.push(child_id);
+            cached_blocks.push(block_id);
+            node_id = child_id;
         }
 
         if cached_blocks.is_empty() {
             return None;
         }
 
-        let cached_tokens = cached_blocks.len() * self.block_size;
-
-        // Bump LRU timestamps for all matched entries
         self.clock += 1;
         let ts = self.clock;
-        let mut ph: u64 = 0;
-        for block_idx in 0..cached_blocks.len() {
-            let start = block_idx * self.block_size;
-            let end = start + self.block_size;
-            let block_tokens = &tokens[start..end];
-            let ch = Self::chain_hash(ph, block_tokens);
-            if let Some(entry) = self.entries.get_mut(&ch) {
-                entry.last_used = ts;
-            }
-            ph = ch;
+        for &matched_node in &matched_nodes {
+            self.nodes[matched_node].last_used = ts;
         }
 
-        // Increment refcounts
-        for &bid in &cached_blocks {
-            *self.refcounts.entry(bid).or_insert(0) += 1;
+        for &block_id in &cached_blocks {
+            *self.refcounts.entry(block_id).or_insert(0) += 1;
         }
 
-        Some((cached_tokens, cached_blocks))
+        Some((cached_blocks.len() * self.block_size, cached_blocks))
     }
 
     /// Register a completed prefix so future requests can reuse it.
     ///
     /// `tokens` is the full prompt, `block_ids` are the physical blocks that
-    /// hold its KV cache. Registers each block-aligned block in the hash chain.
+    /// hold its KV cache. Registers each block-aligned block in the radix tree.
     pub fn register(&mut self, tokens: &[TokenId], block_ids: &[u32]) {
         let num_full_blocks = tokens.len() / self.block_size;
-        if num_full_blocks == 0 || block_ids.len() < num_full_blocks {
+        if self.max_blocks == 0 || num_full_blocks == 0 || block_ids.len() < num_full_blocks {
             return;
         }
 
         self.clock += 1;
         let ts = self.clock;
-        let mut prev_hash: u64 = 0;
+        let mut node_id = 0;
 
-        for block_idx in 0..num_full_blocks {
-            let start = block_idx * self.block_size;
-            let end = start + self.block_size;
-            let block_tokens = &tokens[start..end];
-            let chain_hash = Self::chain_hash(prev_hash, block_tokens);
+        for (block_idx, &block_id) in block_ids.iter().take(num_full_blocks).enumerate() {
+            let block_hash = self.block_hash_at(tokens, block_idx);
 
-            if self.entries.contains_key(&chain_hash) {
-                // Already cached — just bump LRU
-                if let Some(entry) = self.entries.get_mut(&chain_hash) {
-                    entry.last_used = ts;
-                }
-            } else {
-                // Evict if needed to make room for one block
-                while self.total_cached_blocks >= self.max_blocks {
-                    if !self.evict_one() {
-                        // Can't evict anything — stop caching
-                        prev_hash = chain_hash;
-                        continue;
-                    }
-                }
-
-                // Increment refcount for this block
-                *self.refcounts.entry(block_ids[block_idx]).or_insert(0) += 1;
-                self.total_cached_blocks += 1;
-
-                self.entries.insert(
-                    chain_hash,
-                    BlockCacheEntry {
-                        block_id: block_ids[block_idx],
-                        chain_hash,
-                        last_used: ts,
-                    },
-                );
+            if let Some(&child_id) = self.nodes[node_id].children.get(&block_hash) {
+                self.nodes[child_id].last_used = ts;
+                node_id = child_id;
+                continue;
             }
 
-            prev_hash = chain_hash;
+            while self.total_cached_blocks >= self.max_blocks {
+                if !self.evict_one() {
+                    return;
+                }
+            }
+
+            let child_id = self.nodes.len();
+            self.nodes.push(RadixNode {
+                block_id: Some(block_id),
+                parent: Some(node_id),
+                edge_hash: block_hash,
+                children: HashMap::new(),
+                last_used: ts,
+            });
+            self.nodes[node_id].children.insert(block_hash, child_id);
+            *self.refcounts.entry(block_id).or_insert(0) += 1;
+            self.total_cached_blocks += 1;
+            node_id = child_id;
         }
     }
 
     /// Decrement refcounts for blocks that were obtained via `lookup`.
     /// Call this when a request that used cached prefix blocks finishes.
     pub fn release_blocks(&mut self, block_ids: &[u32]) {
-        for &bid in block_ids {
-            if let Some(rc) = self.refcounts.get_mut(&bid) {
-                *rc = rc.saturating_sub(1);
+        for &block_id in block_ids {
+            if let Some(refcount) = self.refcounts.get_mut(&block_id) {
+                *refcount = refcount.saturating_sub(1);
+                if *refcount == 0 {
+                    self.refcounts.remove(&block_id);
+                }
             }
         }
     }
@@ -192,7 +177,7 @@ impl PrefixCache {
     /// Returns the set of physical block IDs that are held by the prefix cache.
     /// The block manager must not free these blocks.
     pub fn held_block_ids(&self) -> Vec<u32> {
-        let mut ids: Vec<u32> = self.entries.values().map(|e| e.block_id).collect();
+        let mut ids: Vec<u32> = self.nodes.iter().filter_map(|node| node.block_id).collect();
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -204,47 +189,79 @@ impl PrefixCache {
         self.refcounts.get(&block_id).copied().unwrap_or(0) > 0
     }
 
-    /// Evict the least-recently-used block entry whose block has refcount ≤ 1
+    /// Evict the least-recently-used leaf node whose block has refcount ≤ 1
     /// (i.e. only the cache itself holds it, no active requests).
     /// Returns true if an entry was evicted.
     fn evict_one(&mut self) -> bool {
-        let mut best_hash: Option<u64> = None;
+        let mut best_node: Option<usize> = None;
         let mut best_ts = u64::MAX;
 
-        for (&hash, entry) in &self.entries {
-            if entry.last_used < best_ts {
-                let rc = self.refcounts.get(&entry.block_id).copied().unwrap_or(0);
-                if rc <= 1 {
-                    best_hash = Some(hash);
-                    best_ts = entry.last_used;
-                }
+        for (node_id, node) in self.nodes.iter().enumerate().skip(1) {
+            let Some(block_id) = node.block_id else {
+                continue;
+            };
+            if !node.children.is_empty() || node.last_used >= best_ts {
+                continue;
+            }
+            let refcount = self.refcounts.get(&block_id).copied().unwrap_or(0);
+            if refcount <= 1 {
+                best_node = Some(node_id);
+                best_ts = node.last_used;
             }
         }
 
-        if let Some(hash) = best_hash {
-            if let Some(entry) = self.entries.remove(&hash) {
-                self.total_cached_blocks -= 1;
-                if let Some(rc) = self.refcounts.get_mut(&entry.block_id) {
-                    *rc = rc.saturating_sub(1);
-                    if *rc == 0 {
-                        self.refcounts.remove(&entry.block_id);
-                    }
-                }
-                return true;
-            }
-        }
-        false
+        let Some(node_id) = best_node else {
+            return false;
+        };
+        self.remove_leaf(node_id);
+        true
     }
 
-    /// Compute a chained hash for a block of tokens, incorporating the previous block's hash.
-    /// This ensures that the same token block at different positions (after different prefixes)
-    /// gets different hashes.
-    fn chain_hash(prev_hash: u64, block_tokens: &[TokenId]) -> u64 {
+    fn remove_leaf(&mut self, node_id: usize) {
+        debug_assert!(node_id != 0);
+        debug_assert!(self.nodes[node_id].children.is_empty());
+
+        let parent_id = self.nodes[node_id]
+            .parent
+            .expect("non-root radix node must have a parent");
+        let edge_hash = self.nodes[node_id].edge_hash;
+        self.nodes[parent_id].children.remove(&edge_hash);
+
+        if let Some(block_id) = self.nodes[node_id].block_id.take() {
+            self.total_cached_blocks -= 1;
+            if let Some(refcount) = self.refcounts.get_mut(&block_id) {
+                *refcount = refcount.saturating_sub(1);
+                if *refcount == 0 {
+                    self.refcounts.remove(&block_id);
+                }
+            }
+        }
+    }
+
+    fn block_hash_at(&self, tokens: &[TokenId], block_idx: usize) -> u64 {
+        let start = block_idx * self.block_size;
+        let end = start + self.block_size;
+        Self::block_hash(&tokens[start..end])
+    }
+
+    /// Compute the edge hash for one full block of tokens.
+    fn block_hash(block_tokens: &[TokenId]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        prev_hash.hash(&mut hasher);
         block_tokens.hash(&mut hasher);
         hasher.finish()
+    }
+}
+
+impl RadixNode {
+    fn root() -> Self {
+        Self {
+            block_id: None,
+            parent: None,
+            edge_hash: 0,
+            children: HashMap::new(),
+            last_used: 0,
+        }
     }
 }
 
@@ -262,19 +279,19 @@ mod tests {
         let block_ids = vec![10, 20, 30];
         cache.register(&tokens, &block_ids);
 
-        assert_eq!(cache.num_cached_entries(), 3); // one per block
+        assert_eq!(cache.num_cached_entries(), 3);
         assert_eq!(cache.total_cached_blocks(), 3);
 
-        // Look up the same tokens — should find all 3 blocks
+        // Look up the same prefix
         let result = cache.lookup(&tokens);
         assert!(result.is_some());
         let (cached_tokens, found_blocks) = result.unwrap();
         assert_eq!(cached_tokens, 12);
-        assert_eq!(found_blocks, vec![10, 20, 30]);
+        assert_eq!(found_blocks, block_ids);
     }
 
     #[test]
-    fn test_partial_prefix_match() {
+    fn test_partial_prefix_hit() {
         let block_size = 4;
         let mut cache = PrefixCache::new(block_size, 100);
 
@@ -291,6 +308,25 @@ mod tests {
         let (cached_tokens, found_blocks) = result.unwrap();
         assert_eq!(cached_tokens, 12);
         assert_eq!(found_blocks, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_sibling_prefixes_share_common_parent() {
+        let block_size = 4;
+        let mut cache = PrefixCache::new(block_size, 100);
+
+        let mut tokens_a: Vec<TokenId> = (0..8).collect();
+        tokens_a.extend_from_slice(&[10, 11, 12, 13]);
+        cache.register(&tokens_a, &[100, 200, 300]);
+
+        let mut tokens_b: Vec<TokenId> = (0..8).collect();
+        tokens_b.extend_from_slice(&[20, 21, 22, 23]);
+        cache.register(&tokens_b, &[100, 200, 400]);
+
+        assert_eq!(cache.num_cached_entries(), 4);
+        assert_eq!(cache.lookup(&tokens_a).unwrap(), (12, vec![100, 200, 300]));
+        assert_eq!(cache.lookup(&tokens_b).unwrap(), (12, vec![100, 200, 400]));
+        assert_eq!(cache.held_block_ids(), vec![100, 200, 300, 400]);
     }
 
     #[test]
@@ -358,7 +394,7 @@ mod tests {
         cache.register(&tokens_b, &[30, 40]);
         assert_eq!(cache.total_cached_blocks(), 4);
 
-        // Register prefix C (2 blocks) — should evict A's blocks (oldest)
+        // Register prefix C (2 blocks) — should evict A's leaf, then A's parent
         let tokens_c: Vec<TokenId> = (200..208).collect();
         cache.register(&tokens_c, &[50, 60]);
         assert_eq!(cache.total_cached_blocks(), 4);
@@ -368,6 +404,29 @@ mod tests {
         // B and C should still be there
         assert!(cache.lookup(&tokens_b).is_some());
         assert!(cache.lookup(&tokens_c).is_some());
+    }
+
+    #[test]
+    fn test_lru_eviction_keeps_shared_internal_prefix_until_leaf() {
+        let block_size = 4;
+        let mut cache = PrefixCache::new(block_size, 4);
+
+        let mut tokens_a: Vec<TokenId> = (0..8).collect();
+        tokens_a.extend_from_slice(&[10, 11, 12, 13]);
+        let mut tokens_b: Vec<TokenId> = (0..8).collect();
+        tokens_b.extend_from_slice(&[20, 21, 22, 23]);
+
+        cache.register(&tokens_a, &[1, 2, 3]);
+        cache.register(&tokens_b, &[1, 2, 4]);
+        assert_eq!(cache.total_cached_blocks(), 4);
+
+        let tokens_c: Vec<TokenId> = (100..108).collect();
+        cache.register(&tokens_c, &[5, 6]);
+
+        assert_eq!(cache.total_cached_blocks(), 4);
+        assert_eq!(cache.lookup(&tokens_a).unwrap(), (8, vec![1, 2]));
+        assert_eq!(cache.lookup(&tokens_b).unwrap(), (8, vec![1, 2]));
+        assert_eq!(cache.lookup(&tokens_c).unwrap(), (8, vec![5, 6]));
     }
 
     #[test]
