@@ -1,5 +1,39 @@
 # Kiln Profiling Report
 
+## Phase 6 FlashInfer-style paged GQA decode preflight (2026-04-24)
+
+**Scope:** decide whether current `main` still lacks a native CUDA paged GQA
+decode kernel for single-token full-attention decode before creating a new
+minimal FlashInfer-style kernel crate.
+
+**Preflight outcome:** stop with a documentation-only PR. `gh pr list -R
+ericflo/kiln --limit 10` returned no open overlapping PRs, and the required
+current-main files show the remaining-work precondition fails: the paged
+full-attention decode path is still active in `crates/kiln-model/src/forward.rs`,
+but it already routes eligible single-token GQA decode calls through the native
+CUDA `kiln-flash-attn` paged-decode C ABI.
+
+**Code evidence:** `try_flash_attn_paged_decode(...)` borrows raw per-layer K/V
+pools with `PagedKvCache::pool_tensors(...)`, builds the paged block-table
+tensor, and calls `backend.flash_attn_paged_decode(...)`. The vendored CUDA
+backend is `kiln_flash_attn_fwd_paged_decode(...)`, exposed from
+`crates/kiln-flash-attn/csrc/flash_attn/flash_api_c.h` and wrapped by
+`crates/kiln-flash-attn/src/lib.rs` as `flash_attn_paged_decode(...)` for bf16,
+single-query GQA decode.
+
+**Decision:** no new `kiln-paged-gqa-kernel` crate and no RunPod spend. Current
+`main` does not lack the native CUDA single-token paged GQA decode capability
+this task was gated on. Adding a second FlashInfer-style crate would duplicate
+the existing backend while the post-PR-#500 / PR #502 profile still points Phase
+6 at GDN-dominated decode/prefill work rather than full-attention paged decode.
+
+**Validation:** no pod launched; no CUDA files changed; no build or benchmark
+commands run because the precondition failed before source edits. Local
+validation: `git diff --check`.
+
+Detailed artifact:
+`docs/phase-c61/flashinfer-paged-gqa-decode-preflight.md`.
+
 ## Phase 6 post-#502 GDN full-chunk audit (2026-04-24)
 
 **Scope:** audit whether the freshly merged PR #502 post-PR-#500 profile leaves
