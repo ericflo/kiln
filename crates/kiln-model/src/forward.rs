@@ -3537,10 +3537,58 @@ fn gated_deltanet_forward_decode_if(
         *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
     }
 
-    let fused_decode_gates_recurrent = {
+    let fused_decode_gates_recurrent_rmsnorm = {
         #[cfg(feature = "metal")]
         {
             if recurrent_unexpanded_qk
+                && seq_len == 1
+                && !capture_b11_taps
+                && !capture_c41_taps
+                && crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_supports(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &weights.a_log,
+                    &weights.dt_bias,
+                    recurrent_state,
+                    &z,
+                    &weights.norm,
+                )
+            {
+                kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
+                Some(
+                    crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                        &q,
+                        &k,
+                        &v,
+                        &a,
+                        &b,
+                        &weights.a_log,
+                        &weights.dt_bias,
+                        recurrent_state,
+                        &z,
+                        &weights.norm,
+                        config.rms_norm_eps as f32,
+                    )
+                    .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?,
+                )
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            None
+        }
+    };
+
+    let fused_decode_gates_recurrent = {
+        #[cfg(feature = "metal")]
+        {
+            if fused_decode_gates_recurrent_rmsnorm.is_none()
+                && recurrent_unexpanded_qk
                 && seq_len == 1
                 && !capture_b11_taps
                 && !capture_c41_taps
@@ -3579,8 +3627,12 @@ fn gated_deltanet_forward_decode_if(
         }
     };
 
-    let (attn_out, attn_out_head_last) = if let Some(attn_out) = fused_decode_gates_recurrent {
-        (attn_out, true) // [B, T, nv, dv], contiguous
+    let (attn_out, attn_out_head_last, attn_out_already_gated_norm) = if let Some(attn_out) =
+        fused_decode_gates_recurrent_rmsnorm
+    {
+        (attn_out, true, true) // [B, T, nv, dv], contiguous and gated-normalized
+    } else if let Some(attn_out) = fused_decode_gates_recurrent {
+        (attn_out, true, false) // [B, T, nv, dv], contiguous
     } else {
         // --- Step 6: Compute gates ---
         //
@@ -3636,7 +3688,7 @@ fn gated_deltanet_forward_decode_if(
         };
 
         if let Some(attn_out) = native_recurrent_prefill {
-            (attn_out, true) // [B, T, nv, dv], contiguous
+            (attn_out, true, false) // [B, T, nv, dv], contiguous
         } else {
             // Cast v back to input_dtype so the recurrence stays in bf16. The
             // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
@@ -3659,7 +3711,7 @@ fn gated_deltanet_forward_decode_if(
             if let Some(attn_out) =
                 gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)?
             {
-                (attn_out, true) // [B, T, nv, dv], contiguous
+                (attn_out, true, false) // [B, T, nv, dv], contiguous
             } else {
                 match gdn_chunkwise_recurrence_head_last_full_chunks(
                     backend,
@@ -3671,7 +3723,7 @@ fn gated_deltanet_forward_decode_if(
                     recurrent_state,
                     GDN_CHUNK_SIZE,
                 )? {
-                    Some(attn_out) => (attn_out, true), // [B, T, nv, dv], contiguous
+                    Some(attn_out) => (attn_out, true, false), // [B, T, nv, dv], contiguous
                     None => (
                         gdn_chunkwise_recurrence(
                             backend,
@@ -3683,6 +3735,7 @@ fn gated_deltanet_forward_decode_if(
                             recurrent_state,
                             GDN_CHUNK_SIZE,
                         )?,
+                        false,
                         false,
                     ), // [B, nv, T, dv]
                 }
@@ -3723,7 +3776,11 @@ fn gated_deltanet_forward_decode_if(
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
-        let attn_out = gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?;
+        let attn_out = if attn_out_already_gated_norm {
+            attn_out
+        } else {
+            gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?
+        };
         // Reshape to [B, T, v_dim] and cast back to input dtype
         attn_out
             .reshape((batch, seq_len, v_dim))?
@@ -10175,7 +10232,7 @@ mod tests {
 
         let batch = 1usize;
         let channels = 8192usize; // Qwen3.5-4B linear_qkv_dim
-        let seq_len = 16usize;
+        let seq_len = 512usize;
         let kernel_size = 4usize;
 
         let mut rng = StdRng::seed_from_u64(0xC0_1DC0DE);
