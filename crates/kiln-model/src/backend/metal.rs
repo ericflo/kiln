@@ -4238,7 +4238,10 @@ pub(crate) fn metal_paged_kv_write_token_major_supports(
     {
         return false;
     }
-    if !k_pool.is_contiguous() || !v_pool.is_contiguous() || !k.is_contiguous() || !v.is_contiguous()
+    if !k_pool.is_contiguous()
+        || !v_pool.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
     {
         return false;
     }
