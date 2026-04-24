@@ -1,5 +1,141 @@
 # Kiln Profiling Report
 
+## Phase 6 post-#486 current-main profile refresh (2026-04-24)
+
+**Scope:** refresh the Phase 6 CUDA source of truth after PR
+[#486](https://github.com/ericflo/kiln/pull/486) made fused GDN qk_norm the
+default. This is an artifact-only profile refresh; no optimization code
+changed.
+
+**Preflight outcome:** proceed. GitHub open-PR search found no existing
+post-#486 profile-refresh PR, and `PROFILING.md` had no post-#486 current-main
+section with both decode and prompt-heavy prefill top-3 NVTX/kernel hotspots.
+
+**Baseline:** fresh `origin/main` was
+`4d96c9f117108f915fadf1177b517f170252ba41`
+(`[codex] fuse Metal GDN gates with recurrent decode`, PR
+[#489](https://github.com/ericflo/kiln/pull/489)). This includes PR
+[#486](https://github.com/ericflo/kiln/pull/486) at
+`e1430086d04345d8ca1ff64820bfe1bf1a5c5700`, plus the subsequent non-CUDA
+mainline PRs #487-#489.
+
+**Hardware / image:** RunPod on-demand `NVIDIA A40` fallback because A6000
+launch returned `SUPPLY_CONSTRAINT`. The pod used
+`ghcr.io/ericflo/kiln-runpod:latest`, driver `580.126.09`, CUDA toolkit
+`12.4`, and `KILN_CUDA_ARCHS=86`. Nsight Systems `2024.6.2` was installed from
+the NVIDIA apt repo and
+`/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys` was used for both
+capture and CSV export.
+
+**Build / profile commands:**
+
+```bash
+source /root/.kiln-build-env
+cd /workspace/kiln
+git fetch origin main
+git reset --hard origin/main
+export KILN_CUDA_ARCHS=86
+export KILN_W4A16=1
+export KILN_CUDA_GRAPHS=true
+cargo build --release --features cuda,nvtx --bin kiln-bench
+
+/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys profile \
+  --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --output=/workspace/post486-profile/post486_decode \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b --paged \
+    --prompt-tokens 512 --max-output-tokens 128 \
+    --skip-training --chat-template --latency-only --temperature 0.0 --seed 1
+
+/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys profile \
+  --force-overwrite=true --trace=cuda,nvtx --sample=none --cpuctxsw=none \
+  --output=/workspace/post486-profile/post486_prefill \
+  ./target/release/kiln-bench \
+    --model-path /workspace/qwen3.5-4b --paged \
+    --prompt-tokens 8192 --max-output-tokens 2 \
+    --skip-training --latency-only --temperature 0.0 --seed 1
+
+/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys stats \
+  --report cuda_gpu_kern_sum \
+  --report nvtx_kern_sum \
+  --report nvtx_pushpop_sum \
+  --format csv --output /workspace/post486-profile/post486_decode \
+  /workspace/post486-profile/post486_decode.nsys-rep
+
+/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys stats \
+  --report cuda_gpu_kern_sum \
+  --report nvtx_kern_sum \
+  --report nvtx_pushpop_sum \
+  --format csv --output /workspace/post486-profile/post486_prefill \
+  /workspace/post486-profile/post486_prefill.nsys-rep
+```
+
+Latency metrics were captured from profiler stdout. The plain decode trace
+reported **494** prompt tokens, **8450.8 ms** prefill, and **47.5 ms** mean ITL
+(**21.1 tok/s**) for **129** generated tokens. The prompt-heavy prefill trace
+reported **8180** prompt tokens, **3451.8 ms** prefill, and **2370 tok/s**
+prompt throughput.
+
+### Decode top hotspots
+
+Source: `profile-out/post486_decode_nvtx_pushpop_sum.csv`.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/qk_norm` | **24.8%** |
+| 2 | `:kiln/gdn/gates` | **11.9%** |
+| 3 | `:kiln/gdn/gated_norm` | **11.2%** |
+
+Decode kernel-level cross-check: `profile-out/post486_decode_cuda_gpu_kern_sum.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `ucopy_bf16` | **15.4%** |
+| 2 | `Marlin<(256,1,8,8,4,8)>` | **13.6%** |
+| 3 | `cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x64...` | **11.5%** |
+
+### Prompt-heavy prefill top hotspots
+
+Source: `profile-out/post486_prefill_nvtx_pushpop_sum.csv`. The two-token
+decode tail contributes `:kiln/lm_head` at **17.9%** in this trace and is
+excluded from the prefill ranking below.
+
+| Rank | NVTX range | Wall-clock share |
+| ---: | --- | ---: |
+| 1 | `:kiln/gdn/in_proj` | **30.4%** |
+| 2 | `:kiln/attn/full/prefill_initial` | **12.7%** |
+| 3 | `:kiln/gdn/gated_norm` | **5.0%** |
+
+Prefill kernel-level cross-check: `profile-out/post486_prefill_cuda_gpu_kern_sum.csv`.
+
+| Rank | Kernel | GPU-kernel share |
+| ---: | --- | ---: |
+| 1 | `gdn_full_chunk_forward_kernel` | **34.8%** |
+| 2 | `ucopy_bf16` | **15.1%** |
+| 3 | `Marlin<(256,4,16,4,4,8)>` | **13.4%** |
+
+### Verdict
+
+Default-on fused GDN qk_norm does **not** change the Phase 6 source of truth:
+plain decode remains dominated by the GDN norm/gate trio, with `qk_norm` still
+the largest NVTX bucket, while prompt-heavy prefill is still dominated by GDN
+full-chunk/in-projection work. Because standalone qk_norm fusion has already
+landed and still leaves `:kiln/gdn/qk_norm` at **24.8%**, the next optimization
+task should **not** retry qk_norm micro-fusion. Based only on this fresh
+profile, the next material CUDA target is the GDN prefill/full-chunk path:
+audit the current vendored `gdn_full_chunk_forward_kernel` against newer
+flash-linear-attention/vLLM recurrent-gated-delta tuning and port a minimal
+bf16/f32 forward-path improvement if the diff exposes a concrete kernel win.
+
+Committed artifacts:
+
+- `profile-out/post486_decode_cuda_gpu_kern_sum.csv`
+- `profile-out/post486_decode_nvtx_kern_sum.csv`
+- `profile-out/post486_decode_nvtx_pushpop_sum.csv`
+- `profile-out/post486_prefill_cuda_gpu_kern_sum.csv`
+- `profile-out/post486_prefill_nvtx_kern_sum.csv`
+- `profile-out/post486_prefill_nvtx_pushpop_sum.csv`
+
 ## Phase 6 default-on fused GDN qk_norm validation (2026-04-24)
 
 PR scope: make the existing CUDA fused L2 Q/K norm path the default for bf16
