@@ -85,6 +85,13 @@ enum PrefillSampleSource {
     GreedyToken(TokenId),
 }
 
+/// Result of streaming paged generation plus prefix-cache ownership metadata.
+pub struct PrefixCachedStreamingOutput {
+    pub receiver: mpsc::Receiver<StreamEvent>,
+    pub registration: Option<PagedPrefixRegistration>,
+    pub allocated_blocks: Vec<u32>,
+}
+
 /// Output from a native MTP speculative generation call.
 ///
 /// Carries everything [`GenerationOutput`] does plus the per-call MTP draft
@@ -2761,6 +2768,26 @@ impl ModelRunner {
         )
     }
 
+    /// Same as [`generate_streaming_paged_shared_tokens`], but optionally reuses
+    /// a block-aligned cached prefix and returns completed prompt metadata that
+    /// the caller may register after successful generation.
+    pub fn generate_streaming_paged_shared_tokens_with_prefix_cache(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        cached_prefix: Option<PagedPrefixReuse>,
+    ) -> Result<PrefixCachedStreamingOutput> {
+        self.generate_from_tokens_streaming_paged_interleaved_with_prefix_cache(
+            prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+            cached_prefix,
+        )
+    }
+
     pub fn generate_streaming_paged_speculative_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
@@ -2870,6 +2897,157 @@ impl ModelRunner {
         result
     }
 
+    fn generate_from_tokens_streaming_paged_interleaved_with_prefix_cache(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        cached_prefix: Option<PagedPrefixReuse>,
+    ) -> Result<PrefixCachedStreamingOutput> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let cuda_graph_enabled = self
+            .cuda_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
+            .is_enabled();
+        anyhow::ensure!(
+            !cuda_graph_enabled,
+            "streaming prefix cache path does not support CUDA graph replay"
+        );
+
+        let block_size = {
+            let bm_guard = lock_block_manager(block_manager)?;
+            bm_guard.block_size()
+        };
+
+        let cached_prefix = cached_prefix.filter(|prefix| {
+            prefix.cached_tokens > 0
+                && prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0
+                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+        });
+
+        let cached_blocks = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.block_ids.as_slice())
+            .unwrap_or(&[]);
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let total_blocks = Self::blocks_needed(max_total, block_size);
+        let additional_blocks_needed = total_blocks.saturating_sub(cached_blocks.len());
+        let allocated_blocks = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            bm_guard
+                .allocate(additional_blocks_needed)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+        let block_table = append_prefix_block_table(cached_blocks, &allocated_blocks);
+
+        let result = self.generate_from_tokens_streaming_paged_interleaved_with_prefix_blocks(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+            cached_prefix,
+            block_size,
+        );
+
+        match result {
+            Ok(mut output) => {
+                output.allocated_blocks = allocated_blocks;
+                Ok(output)
+            }
+            Err(err) => {
+                if !allocated_blocks.is_empty() {
+                    let mut bm_guard = lock_block_manager(block_manager)?;
+                    bm_guard.free_all(&allocated_blocks);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn generate_from_tokens_streaming_paged_interleaved_with_prefix_blocks(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        cached_prefix: Option<PagedPrefixReuse>,
+        block_size: usize,
+    ) -> Result<PrefixCachedStreamingOutput> {
+        let cached_tokens = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.cached_tokens)
+            .unwrap_or(0);
+        let mut linear_state = match cached_prefix {
+            Some(prefix) => prefix.linear_state,
+            None => self.new_linear_state()?,
+        };
+
+        let prefill_tokens = &prompt_tokens[cached_tokens..];
+        anyhow::ensure!(
+            !prefill_tokens.is_empty(),
+            "streaming prefix cache hit must leave at least one suffix token"
+        );
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
+                model_forward_paged_streaming(
+                    &*self.backend,
+                    prefill_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                )
+                .context("prefill forward pass (streaming paged prefix cache) failed")?
+            } else {
+                model_forward_paged_last_token(
+                    &*self.backend,
+                    prefill_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged prefix cache) failed")?
+            }
+        };
+
+        let registration = self.completed_prompt_registration(
+            prompt_tokens,
+            block_table,
+            &linear_state,
+            block_size,
+        )?;
+
+        let receiver = self.stream_decode_from_prefill_logits(
+            logits,
+            prompt_tokens.len(),
+            params,
+            paged_cache,
+            block_table,
+            &mut linear_state,
+        )?;
+
+        Ok(PrefixCachedStreamingOutput {
+            receiver,
+            registration,
+            allocated_blocks: Vec::new(),
+        })
+    }
+
     fn generate_from_tokens_streaming_paged_interleaved(
         &self,
         prompt_tokens: &[TokenId],
@@ -2877,7 +3055,6 @@ impl ModelRunner {
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
-        let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
         let logits = {
@@ -2912,7 +3089,26 @@ impl ModelRunner {
             }
         };
 
-        let mut seq_len = prompt_tokens.len();
+        self.stream_decode_from_prefill_logits(
+            logits,
+            prompt_tokens.len(),
+            params,
+            paged_cache,
+            block_table,
+            &mut linear_state,
+        )
+    }
+
+    fn stream_decode_from_prefill_logits(
+        &self,
+        logits: candle_core::Tensor,
+        mut seq_len: usize,
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let (tx, rx) = mpsc::channel();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
@@ -2964,7 +3160,7 @@ impl ModelRunner {
                 paged_cache,
                 block_table,
                 seq_len,
-                &mut linear_state,
+                linear_state,
                 step_seed,
             )?;
             seq_len += 1;

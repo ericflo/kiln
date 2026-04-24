@@ -15,7 +15,7 @@
 | ON | `KILN_PREFIX_CACHE_ENABLED=1` | 7.711s | 7.718s | 7.678s | 7.777s | 16 each | 10 hits, 20,480 hit tokens, 1,280 hit blocks |
 | OFF | `KILN_PREFIX_CACHE_ENABLED=0` | 26.923s | 26.501s | 24.455s | 27.227s | 16 each | counters stayed zero |
 
-**Result:** prefix cache ON was **3.49x faster** on median total latency for the 5 paired A/B suffix requests after warming the shared prefix. TTFT is not reported because the non-streaming chat-completions path is the only path wired to real prefix-cache reuse; the streaming path currently bypasses the real prefix cache.
+**Result:** prefix cache ON was **3.49x faster** on median total latency for the 5 paired A/B suffix requests after warming the shared prefix. TTFT was not reported in this A/B because it used non-streaming requests; streaming chat completions now use the same real prefix-cache lookup/register path when CUDA graphs are disabled, so streaming hits increment the same `/metrics` prefix-cache counters.
 
 **Metrics after ON arm:**
 
@@ -30,7 +30,7 @@ kiln_prefix_cache_max_blocks 2048
 
 **Exact-repeat caveat:** repeating the warmed 2,048-token prompt increments a miss rather than a hit because cache lookup requires `prompt_tokens.len() > entry.prompt_tokens.len()` and next-token logits are not cached. The exact-repeat request completed in 0.823s with 1 output token, but it did not count as a prefix-cache hit.
 
-**Verdict / next task:** the real append-prefix cache is functionally effective for append-only shared prefixes, but only with CUDA graphs disabled and only for non-streaming completions. Next, add a safe CUDA-graphs/prefix-cache integration decision point (or explicit config warning) and separately consider a partial-prompt registration API so normal chat suffix variants do not need delimiter-shaped prompts to reuse a shared prefix.
+**Verdict / next task:** the real append-prefix cache is functionally effective for append-only shared prefixes on both non-streaming and streaming chat completions when CUDA graphs are disabled. CUDA graphs still bypass the cache and emit the one-time warning added for that configuration; CUDA-graph prefix-cache integration and partial-prompt registration remain separate work.
 
 Detailed artifact: `docs/phase7-prefix-cache-reuse-ab.md`.
 

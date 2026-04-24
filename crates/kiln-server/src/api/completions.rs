@@ -326,13 +326,14 @@ async fn chat_completions_inner(
                 runner,
                 block_manager,
                 paged_cache,
-                ..
+                prefix_cache,
             } => {
                 generate_real_streaming(
                     state,
                     runner,
                     block_manager,
                     paged_cache,
+                    prefix_cache,
                     &prompt_text,
                     &prompt_tokens,
                     &sampling,
@@ -665,6 +666,7 @@ async fn generate_real_streaming(
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
+    prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
@@ -685,9 +687,11 @@ async fn generate_real_streaming(
     let runner = runner.clone();
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
+    let prefix_cache = prefix_cache.clone();
     let prompt = prompt_text.to_owned();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
+    let adapter = req.adapter.clone();
     let model = req
         .model
         .clone()
@@ -696,6 +700,8 @@ async fn generate_real_streaming(
     let created = now_epoch();
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
+    let prefix_cache_cuda_graphs_bypass_warned =
+        state.prefix_cache_cuda_graphs_bypass_warned.clone();
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -734,12 +740,88 @@ async fn generate_real_streaming(
                         // Acquire GPU coordination read lock
                         let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
-                        runner_guard.generate_streaming_paged_shared_tokens(
-                            &prompt_tokens,
-                            &params,
-                            bm.as_ref(),
-                            pc.as_ref(),
-                        )
+                        let prefix_enabled = {
+                            let cache = prefix_cache.lock().unwrap();
+                            cache.is_enabled()
+                        };
+                        let cuda_graphs_enabled = runner_guard.cuda_graph_enabled()?;
+                        if prefix_enabled && cuda_graphs_enabled {
+                            let already_warned = prefix_cache_cuda_graphs_bypass_warned
+                                .swap(true, Ordering::Relaxed);
+                            if !already_warned {
+                                tracing::warn!(
+                                    prefix_cache_enabled = true,
+                                    cuda_graphs_enabled = true,
+                                    "real prefix cache is enabled but CUDA graphs are active; real streaming chat completions bypass prefix-cache lookup and registration until CUDA-graph prefix-cache integration is implemented"
+                                );
+                            }
+                        }
+                        if !prefix_enabled || cuda_graphs_enabled {
+                            runner_guard.generate_streaming_paged_shared_tokens(
+                                &prompt_tokens,
+                                &params,
+                                bm.as_ref(),
+                                pc.as_ref(),
+                            )
+                        } else {
+                            let hit = {
+                                let mut cache = prefix_cache.lock().unwrap();
+                                cache.lookup(&adapter, &prompt_tokens)?
+                            };
+                            let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
+                            let cached_prefix = hit.map(|hit| PagedPrefixReuse {
+                                cached_tokens: hit.cached_tokens,
+                                block_ids: hit.block_ids,
+                                linear_state: hit.linear_state,
+                            });
+
+                            let result = runner_guard
+                                .generate_streaming_paged_shared_tokens_with_prefix_cache(
+                                    &prompt_tokens,
+                                    &params,
+                                    bm.as_ref(),
+                                    pc.as_ref(),
+                                    cached_prefix,
+                                );
+
+                            let mut output = match result {
+                                Ok(output) => output,
+                                Err(err) => {
+                                    if let Some(entry_id) = hit_entry_id {
+                                        let mut cache = prefix_cache.lock().unwrap();
+                                        cache.release_hit(entry_id);
+                                    }
+                                    return Err(err);
+                                }
+                            };
+                            let registration = output.registration.take();
+                            let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+                            let mut retained_blocks = Vec::new();
+                            let mut evicted_blocks = Vec::new();
+                            {
+                                let mut cache = prefix_cache.lock().unwrap();
+                                if let Some(entry_id) = hit_entry_id {
+                                    cache.release_hit(entry_id);
+                                }
+                                if let Some(registration) = registration {
+                                    let outcome = cache.register(adapter.clone(), registration);
+                                    retained_blocks = outcome.retained_blocks;
+                                    evicted_blocks = outcome.evicted_blocks;
+                                }
+                            }
+
+                            let mut blocks_to_free: Vec<u32> = allocated_blocks
+                                .into_iter()
+                                .filter(|block_id| !retained_blocks.contains(block_id))
+                                .collect();
+                            blocks_to_free.extend(evicted_blocks);
+                            if !blocks_to_free.is_empty() {
+                                let mut bm_guard = bm.lock().unwrap();
+                                bm_guard.free_all(&blocks_to_free);
+                            }
+
+                            Ok(output.receiver)
+                        }
                     })
                     .await
                     {
