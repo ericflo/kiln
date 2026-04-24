@@ -50,6 +50,7 @@
 namespace {
 
 constexpr int kThreadsPerBlock = 64;
+constexpr int kPrefillThreadsPerBlock = 256;
 constexpr int kWidth = 4;  // specialisation — Qwen3.5 GDN
 
 template <bool kSilu>
@@ -106,7 +107,7 @@ __global__ __launch_bounds__(kThreadsPerBlock) void kiln_conv1d_update_k4_kernel
 }
 
 template <bool kSilu>
-__global__ __launch_bounds__(kThreadsPerBlock) void kiln_conv1d_prefill_k4_kernel(
+__global__ __launch_bounds__(kPrefillThreadsPerBlock) void kiln_conv1d_prefill_k4_kernel(
     const __nv_bfloat16 *__restrict__ x,        // [B, C, T]
     const __nv_bfloat16 *__restrict__ weight,   // [C, K]
     float *__restrict__ conv_state,             // [B, C, K-1]
@@ -236,7 +237,9 @@ extern "C" kiln_conv1d_status_t kiln_causal_conv1d_prefill_bf16_f32(
         return 2;
     }
 
-    const int threads = seq_len <= 32 ? 32 : (seq_len <= 64 ? 64 : (seq_len <= 128 ? 128 : 256));
+    const int threads = seq_len <= 32 ? 32
+                        : (seq_len <= 64 ? 64
+                                          : (seq_len <= 128 ? 128 : kPrefillThreadsPerBlock));
     dim3 grid(batch * channels);
     dim3 block(threads);
     cudaStream_t cu_stream = static_cast<cudaStream_t>(stream);

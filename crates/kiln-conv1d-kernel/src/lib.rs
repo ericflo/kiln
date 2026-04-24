@@ -83,6 +83,15 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn conv1d_status_description(status: i32) -> &'static str {
+    match status {
+        1 => "unsupported kernel width (only kernel_size=4 is compiled)",
+        2 => "invalid launch dimensions",
+        3 => "CUDA launch failed; check the kernel launch bounds and requested block size",
+        _ => "unknown CUDA conv1d kernel failure",
+    }
+}
+
 /// Whether the fused kernel can handle this call.
 ///
 /// Returns `true` only for the exact bf16/f32/K=4 envelope the vendored
@@ -322,7 +331,8 @@ pub fn causal_conv1d_update(
 
             if status != 0 {
                 candle_core::bail!(
-                    "kiln_causal_conv1d_update_bf16_f32 failed with status {status}"
+                    "kiln_causal_conv1d_update_bf16_f32 failed with status {status}: {} (batch={batch}, channels={channels}, kernel_size={kernel_size})",
+                    conv1d_status_description(status)
                 );
             }
         }
@@ -478,7 +488,8 @@ pub fn causal_conv1d_prefill(
 
             if status != 0 {
                 candle_core::bail!(
-                    "kiln_causal_conv1d_prefill_bf16_f32 failed with status {status}"
+                    "kiln_causal_conv1d_prefill_bf16_f32 failed with status {status}: {} (batch={batch}, channels={channels}, seq_len={seq_len}, kernel_size={kernel_size})",
+                    conv1d_status_description(status)
                 );
             }
         }
@@ -634,7 +645,7 @@ mod tests {
 
         let batch = 1;
         let channels = 8192;
-        let seq_len = 16;
+        let seq_len = 512;
         let kernel_size = 4;
 
         let raw_x = seeded(batch * channels * seq_len, 0x1234_9876, 0.5);
