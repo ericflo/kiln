@@ -85,7 +85,7 @@ The `(a+b+c)/peak` column for those rows therefore uses the A6000 ceiling
 as the denominator. The **true** relative share of `(a+b+c)` is higher, because
 the true peak would exceed 48 GB.
 
-Raw bench log: [`docs/flce_preflight_raw_2026-04-20.log`](./flce_preflight_raw_2026-04-20.log).
+Raw bench log: removed from working tree; preserved in git history at `3d923bca29730e8b0e2d196700f2ad4c8cd4be00` — fetch with `git show 3d923bca29730e8b0e2d196700f2ad4c8cd4be00:docs/flce_preflight_raw_2026-04-20.log`.
 
 ## Verdict
 

@@ -77,7 +77,7 @@ Each row covers one named hypothesis attempt. "Verdict" is the doc's own word. "
 | Phase / PR | Hypothesis | Doc-only? | Verdict | Α moved? | Evidence file |
 | --- | --- | :---: | --- | :---: | --- |
 | B Tier 2 #260 | KILN_MTP_DEBUG instrumentation | No | DELIVERED — produced the α=0.154 / 46% identity-bias trace that opened the entire C-hypothesis tree | n/a | logs only |
-| B12 #309 | Layer-31 drift signal | No (bench) | RULED OUT — layer-31 drift is benign bf16 accumulation | No | `docs/MTP_PHASE_B12.md` |
+| B12 #309 | Layer-31 drift signal | No (bench) | RULED OUT — layer-31 drift is benign bf16 accumulation | No | `docs/audits/MTP_PHASE_B12.md` |
 | C1 #311 | Per-step accept/reject CSV attribution | No (bench) | DELIVERED — α=15.11%, Class A=0, Class B=87.6%, head bug not accept-path bug | n/a | `docs/archive/phase-c/phase-c1/` |
 | C2 #313 | RoPE position threading bisect | No (bench) | CONFIRMED — RoPE divergence at mtp_pos≥1 | n/a (pre-fix) | `docs/archive/phase-c/phase-c2/` |
 | C3 #314 | RoPE fix (apply C2 verdict) | No (bench) | LANDED — pre-RoPE cos_sim 1.000 at all positions | No (α stayed at 0.124) | `docs/archive/phase-c/phase-c3/` |
@@ -278,7 +278,7 @@ Verified at audit time:
 | `gh pr list -R ericflo/kiln --state open --search "mtp" --limit 20` | `[]` (no open MTP PRs) |
 | `gh pr list -R ericflo/kiln --state open --limit 10` | `[]` (no open PRs at all at audit start) |
 | Recent MTP-named PRs | last MTP-named was #382 merged 2026-04-22; nothing since has the H-hypothesis or state-of-play shape |
-| Existing phase7 docs | `docs/phase7-prefix-cache-reuse-ab.md` (PR #517), `docs/phase7-sglang-radix-audit.md` (PR #526) — neither covers MTP |
+| Existing phase7 docs | `docs/audits/phase7-prefix-cache-reuse-ab.md` (PR #517), `docs/audits/phase7-sglang-radix-audit.md` (PR #526) — neither covers MTP |
 
 No prior PR or open task overlaps the consolidated audit shape proposed by this doc. The doc-only redirect pattern (precedent: PR #525 vLLM GDN audit, PR #526 SGLang radix audit) is the right shape for this PR.
 
@@ -286,7 +286,7 @@ No prior PR or open task overlaps the consolidated audit shape proposed by this 
 
 ### Phase B / C primary docs (in order of citation)
 
-- `docs/MTP_PHASE_B12.md` — Phase B12 verdict (layer-31 drift benign)
+- `docs/audits/MTP_PHASE_B12.md` — Phase B12 verdict (layer-31 drift benign)
 - `docs/archive/phase-c/phase-c1/c1-mtp-acceptance-attribution.md` — C1 verdict (Class B 87.6% head bug)
 - `docs/archive/phase-c/phase-c5/c5-bench-report.md` — C5 ship-floor MISS verdict
 - `docs/archive/phase-c/phase-c8/` through `docs/archive/phase-c/phase-c14/` — pre-C18 splice / SDPA / weight-loading bisect chain

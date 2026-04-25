@@ -15,7 +15,7 @@ There are two disjoint prefix caches in the current tree:
 1. `kiln-core/src/prefix_cache.rs` — a true radix tree with sibling sharing, LRU leaf eviction, and refcount-protected eviction (PR #512, 508 lines, 12 unit tests). Used only by `kiln-scheduler` on the **mock backend** path.
 2. `kiln-server/src/state.rs::RealPrefixCache` — a flat `Vec<RealPrefixCacheEntry>` with linear scan, per-adapter filter, LRU by `last_used`, and per-entry `LinearAttentionState` for GDN (PRs #515, #520, #521). Used by the **real backend** on every chat completion, streaming or not, CUDA-graph path or not.
 
-The 3.49× median total-latency speedup reported in `docs/phase7-prefix-cache-reuse-ab.md` (PR #517) was measured on the flat cache with exactly one entry, two append-only suffix variants, 5 paired runs, CUDA graphs off. That is the most favorable possible shape for any prefix cache and is not apples-to-apples comparable to SGLang's published numbers against vLLM PagedAttention across multi-turn, ReAct, chained-judge, and tree-of-thought workloads.
+The 3.49× median total-latency speedup reported in `docs/audits/phase7-prefix-cache-reuse-ab.md` (PR #517) was measured on the flat cache with exactly one entry, two append-only suffix variants, 5 paired runs, CUDA graphs off. That is the most favorable possible shape for any prefix cache and is not apples-to-apples comparable to SGLang's published numbers against vLLM PagedAttention across multi-turn, ReAct, chained-judge, and tree-of-thought workloads.
 
 ## Verdict
 
@@ -32,7 +32,7 @@ Reopen precondition: a real kiln workload (human chat, GRPO, RAG) where measured
 | Precondition | Status | Evidence |
 | --- | --- | --- |
 | PR #512 on main, radix nodes in prefix_cache.rs | Verified | `git log --oneline 847ad57 -- crates/kiln-core/src/prefix_cache.rs` shows `3345c5f Implement radix prefix cache core (#512)`. File uses `RadixNode { block_id, parent, edge_hash, children: HashMap<u64, usize>, last_used }` and operates on edge-keyed children per block. |
-| PR #517 doc exists with 3.49× | Verified | `docs/phase7-prefix-cache-reuse-ab.md` at `847ad57`. Median 7.711s ON vs 26.923s OFF = 3.49× on n=10 paired suffix requests. |
+| PR #517 doc exists with 3.49× | Verified | `docs/audits/phase7-prefix-cache-reuse-ab.md` at `847ad57`. Median 7.711s ON vs 26.923s OFF = 3.49× on n=10 paired suffix requests. |
 | PR #520 streaming reuse merged | Verified | `git log` includes `7c2821a Wire streaming real prefix cache reuse (#520)`. `crates/kiln-server/src/api/completions.rs:749` calls `generate_streaming_paged_shared_tokens_with_prefix_cache`. |
 | PR #521 CUDA graphs reuse merged | Verified | `git log` includes `0fda0e6 Use prefix cache with CUDA graphs (#521)`. Confirmed by the removed "CUDA graphs bypass prefix cache" warning and the same `_with_prefix_cache` helpers used under graph-enabled runners. |
 | PR #523 single-turn A/B noise result | Verified | `git log` includes `d22eb00 phase7: prefix-cache A/B rules out cache hooks as bench regression source (#523)`. PROFILING.md line 37 summarizes: cache hooks are not the regression source; `kiln-bench --paged` does not exercise cache hooks (agent note `kiln-bench-prefix-cache-no-effect`). |
@@ -47,7 +47,7 @@ Reopen precondition: a real kiln workload (human chat, GRPO, RAG) where measured
 - `crates/kiln-server/src/state.rs:150-362` — `RealPrefixCache`. Flat `Vec<RealPrefixCacheEntry>` with `adapter: Option<String>`, `prompt_tokens: Vec<TokenId>`, `block_ids: Vec<u32>`, `linear_state: LinearAttentionState`, `last_used: u64`, `active_uses: usize`. Lookup is linear scan with `.filter(...)` + `.max_by_key(prompt_tokens.len())`. Register enforces block alignment and no-duplicate check, then LRU-evicts entries with `active_uses == 0`.
 - `crates/kiln-server/src/api/completions.rs:460-568` (non-streaming real path), `:653-780` (streaming real path). Both lock the `RealPrefixCache` mutex, call `lookup`, pass `PagedPrefixReuse` into generation helpers, and register block-aligned completed prompts on success.
 - `crates/kiln-model/src/generate.rs` — `generate_paged_shared_tokens_with_prefix_cache`, `generate_streaming_paged_shared_tokens_with_prefix_cache`. These are the real-backend entrypoints that accept `PagedPrefixReuse { cached_tokens, block_ids, linear_state }` and reuse both the paged KV for full-attention layers and the recurrent GDN `LinearAttentionState` across the suffix prefill.
-- `docs/phase7-prefix-cache-reuse-ab.md` — PR #517's A/B: 2,048-token block-aligned shared prefix, 10 suffix variants, 3.49× median speedup, metrics match `10 * 2048 = 20480` hit tokens.
+- `docs/audits/phase7-prefix-cache-reuse-ab.md` — PR #517's A/B: 2,048-token block-aligned shared prefix, 10 suffix variants, 3.49× median speedup, metrics match `10 * 2048 = 20480` hit tokens.
 - `PROFILING.md` §"Phase 7 real prefix-cache reuse A/B (2026-04-24)" (line 231) — canonical artifact referencing the doc.
 
 ### SGLang source (commit `76da28f6`, 2026-04-24)

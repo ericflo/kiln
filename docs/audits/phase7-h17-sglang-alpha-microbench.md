@@ -95,7 +95,7 @@ Crash is in `write_cache_indices` Triton kernel compile — unrelated to the EAG
 
 ## Workload (matched to PR #529)
 
-Identical to PR #530's `docs/phase7-h15c-vllm-alpha-microbench.md` §"Workload", swapping vLLM for SGLang. Byte-equal at prefill boundary:
+Identical to PR #530's `docs/audits/phase7-h15c-vllm-alpha-microbench.md` §"Workload", swapping vLLM for SGLang. Byte-equal at prefill boundary:
 
 | field | value | source |
 | --- | --- | --- |
@@ -223,7 +223,7 @@ Concrete options the next planning cycle should pick from, ranked by estimated s
 
 | path | purpose |
 | --- | --- |
-| `docs/phase7-h17-sglang-alpha-microbench.md` | this audit doc |
+| `docs/audits/phase7-h17-sglang-alpha-microbench.md` | this audit doc |
 | `docs/archive/phase-c/phase-c29-v3-sglang/verdict.json` | machine-readable verdict |
 | `docs/archive/phase-c/phase-c29-v3-sglang/compare.json` | full kiln + SGLang side-by-side |
 | `docs/archive/phase-c/phase-c29-v3-sglang/compare.md` | per-seed table + decision rule |
@@ -248,11 +248,11 @@ The H17 verdict shifts from `sglang_mtp_unsupported_dense_4b` to a different bra
 
 ### kiln docs (commit `b33d129`)
 
-- `docs/phase7-h16-external-alpha-options-audit.md` (PR #531) — direct predecessor; enumerated 8 external-α reference candidates and queued this H17 SGLang microbench with pre-registered decision rule.
-- `docs/phase7-h15c-vllm-alpha-microbench.md` (PR #530) — sibling predecessor; same structural shape, `vllm_mtp_unsupported` verdict. Source of kiln α baseline (0.3636) re-used here via `scripts/h15c_kiln_alpha_from_csv.py`.
-- `docs/phase7-h15b-stratified-c29-v2.md` (PR #529) — established `kiln_native_ceiling` verdict and provided the c1_attr CSVs.
-- `docs/phase7-mtp-acceptance-state-of-play.md` (PR #527) — original state-of-play doc enumerating the external-α-reference idea.
-- `docs/phase7-sglang-radix-audit.md` (PR #526) — disambiguates "SGLang has Qwen3.5 MTP class" (yes, per PR #531) from "SGLang's RadixAttention is MTP-aware" (not yet). H17 confirms the former is structurally true (class exists, loads, dispatches) but fails at native runtime on A6000.
+- `docs/audits/phase7-h16-external-alpha-options-audit.md` (PR #531) — direct predecessor; enumerated 8 external-α reference candidates and queued this H17 SGLang microbench with pre-registered decision rule.
+- `docs/audits/phase7-h15c-vllm-alpha-microbench.md` (PR #530) — sibling predecessor; same structural shape, `vllm_mtp_unsupported` verdict. Source of kiln α baseline (0.3636) re-used here via `scripts/h15c_kiln_alpha_from_csv.py`.
+- `docs/audits/phase7-h15b-stratified-c29-v2.md` (PR #529) — established `kiln_native_ceiling` verdict and provided the c1_attr CSVs.
+- `docs/audits/phase7-mtp-acceptance-state-of-play.md` (PR #527) — original state-of-play doc enumerating the external-α-reference idea.
+- `docs/audits/phase7-sglang-radix-audit.md` (PR #526) — disambiguates "SGLang has Qwen3.5 MTP class" (yes, per PR #531) from "SGLang's RadixAttention is MTP-aware" (not yet). H17 confirms the former is structurally true (class exists, loads, dispatches) but fails at native runtime on A6000.
 
 ### Cited upstream sources
 

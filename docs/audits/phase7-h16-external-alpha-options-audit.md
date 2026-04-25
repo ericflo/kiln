@@ -99,7 +99,7 @@ Identical to PR #530's matched-workload table, swapping vLLM for SGLang:
 
 ### Required files in H17 PR
 
-- `docs/phase7-h17-sglang-alpha-microbench.md` (full audit doc, mirroring PR #530's `docs/phase7-h15c-vllm-alpha-microbench.md` shape)
+- `docs/audits/phase7-h17-sglang-alpha-microbench.md` (full audit doc, mirroring PR #530's `docs/audits/phase7-h15c-vllm-alpha-microbench.md` shape)
 - `scripts/h17_sglang_alpha_dump.py` (SGLang driver — re-runnable, version-agnostic)
 - `scripts/h17_compare.py` (apply decision rule, emit verdict.json)
 - `docs/archive/phase-c/phase-c29-v3-sglang/{verdict,compare,kiln_alpha_per_seed,sglang_alpha_per_seed}.json`
@@ -192,7 +192,7 @@ The closest existing neighbors are #527 (MTP state-of-play, listed H15a/b as que
 
 | path | purpose |
 | --- | --- |
-| `docs/phase7-h16-external-alpha-options-audit.md` | this audit doc |
+| `docs/audits/phase7-h16-external-alpha-options-audit.md` | this audit doc |
 | `PROFILING.md` (top-of-file pointer) | one-paragraph link entry matching #525/#526/#527/#530 shape |
 
 No production source files (`crates/**/*.rs`, scripts run on a pod) are touched in this PR.
@@ -211,10 +211,10 @@ The H16 verdict shifts from `external_reference_exists` to a different branch un
 
 ### kiln docs (commit `045bc9c`)
 
-- `docs/phase7-h15c-vllm-alpha-microbench.md` — direct predecessor; defined the H16 free-text preconditions in §"Queued next action" item (a)/(b).
-- `docs/phase7-h15b-stratified-c29-v2.md` — established `kiln_native_ceiling` verdict; framed the open question for H15c and H16.
-- `docs/phase7-mtp-acceptance-state-of-play.md` (PR #527) — listed the 4 options in §"Fallback if H15b is also null" that this audit operationalizes.
-- `docs/phase7-sglang-radix-audit.md` (PR #526) — disambiguates the SGLang "has Qwen3.5 MTP class" finding from the orthogonal "RadixAttention is MTP-aware" question. PR #526 audited the latter; H16 audits the former.
+- `docs/audits/phase7-h15c-vllm-alpha-microbench.md` — direct predecessor; defined the H16 free-text preconditions in §"Queued next action" item (a)/(b).
+- `docs/audits/phase7-h15b-stratified-c29-v2.md` — established `kiln_native_ceiling` verdict; framed the open question for H15c and H16.
+- `docs/audits/phase7-mtp-acceptance-state-of-play.md` (PR #527) — listed the 4 options in §"Fallback if H15b is also null" that this audit operationalizes.
+- `docs/audits/phase7-sglang-radix-audit.md` (PR #526) — disambiguates the SGLang "has Qwen3.5 MTP class" finding from the orthogonal "RadixAttention is MTP-aware" question. PR #526 audited the latter; H16 audits the former.
 
 ### Cited upstream sources
 
