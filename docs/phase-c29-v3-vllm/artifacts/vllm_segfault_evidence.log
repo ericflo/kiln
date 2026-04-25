@@ -1,0 +1,87 @@
+# Trimmed evidence log: 3 vLLM 0.19.1 attempts to load Qwen3.5-4B + native MTP
+# All three attempts segfault at the same point (post drafter weight load,
+# during V1 engine init / encoder cache profile / KV cache setup), even with
+# enforce_eager=True and limit_mm_per_prompt={image:0,video:0}+skip_mm_profiling=True.
+#
+# Log harvested from /tmp/vllm_bench.log on RunPod pod wl4oh30qxnzyqz, 2026-04-25.
+# Verbose vLLM compilation_config / SpeculativeConfig dumps elided with [...] for clarity.
+
+[h15c_vllm] loading tokenizer from /workspace/qwen3.5-4b
+[h15c_vllm] seed=0 prompt_tokens=494 prompt_prefix="Janet's ducks lay sixteen eggs per day. ..."
+[h15c_vllm] seed=1 prompt_tokens=508 prompt_prefix='A robe takes two bolts of blue fiber ...'
+[h15c_vllm] seed=2 prompt_tokens=501 prompt_prefix='Josh buys a run-down property ...'
+
+# ------------------------------------------------------------
+# Attempt 1: speculative_config={'method': 'qwen3_5_mtp', 'num_speculative_tokens': 1}
+#            + enforce_eager=True + limit_mm_per_prompt={'image':0,'video':0} + skip_mm_profiling=True
+# ------------------------------------------------------------
+INFO 04-25 01:06:44 [utils.py:233] non-default args: {... 'enforce_eager': True, 'limit_mm_per_prompt': {'image': 0, 'video': 0}, 'skip_mm_profiling': True, 'speculative_config': {'method': 'qwen3_5_mtp', 'num_speculative_tokens': 1}, ...}
+INFO 04-25 01:06:44 [model.py:549] Resolved architecture: Qwen3_5ForConditionalGeneration
+WARNING 04-25 01:06:44 [speculative.py:368] method `qwen3_5_mtp` is deprecated and replaced with mtp.
+INFO 04-25 01:06:44 [model.py:549] Resolved architecture: Qwen3_5MTP
+INFO 04-25 01:06:46 [config.py:281] Setting attention block size to 528 tokens to ensure that attention page size is >= mamba page size.
+INFO 04-25 01:06:47 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=4722) INFO 04-25 01:06:54 [core.py:105] Initializing a V1 LLM engine (v0.19.1) with config: model='/workspace/qwen3.5-4b', speculative_config=SpeculativeConfig(method='mtp', model='/workspace/qwen3.5-4b', num_spec_tokens=1) [...]
+(EngineCore pid=4722) INFO 04-25 01:06:57 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=4722) INFO 04-25 01:07:01 [eagle.py:1377] Detected MTP model. Sharing target model embedding weights with the draft model.
+(EngineCore pid=4722) INFO 04-25 01:07:01 [eagle.py:1433] Detected MTP model. Sharing target model lm_head weights with the draft model.
+(EngineCore pid=4722) INFO 04-25 01:07:01 [gpu_model_runner.py:4820] Model loading took 8.21 GiB memory and 3.631704 seconds
+!!!!!!! Segfault encountered !!!!!!!
+[ Python C-call backtrace: 70+ frames of _PyEval_EvalFrameDefault /
+  _PyFunction_Vectorcall / PyObject_Call / THPFunction_apply, no Python file
+  symbols (compiled extension crash, not a Python exception).
+  See raw /tmp/vllm_bench.log for the full unsymbolicated frames. ]
+RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+
+# ------------------------------------------------------------
+# Attempt 2: speculative_config={'method': 'mtp', 'num_speculative_tokens': 1}
+#            (same enforce_eager + skip_mm_profiling base)
+# ------------------------------------------------------------
+INFO 04-25 01:07:06 [utils.py:233] non-default args: {... 'speculative_config': {'method': 'mtp', 'num_speculative_tokens': 1}, ...}
+INFO 04-25 01:07:06 [model.py:549] Resolved architecture: Qwen3_5ForConditionalGeneration
+INFO 04-25 01:07:06 [model.py:549] Resolved architecture: Qwen3_5MTP
+INFO 04-25 01:07:06 [config.py:281] Setting attention block size to 528 tokens to ensure that attention page size is >= mamba page size.
+(EngineCore pid=5122) INFO 04-25 01:07:13 [core.py:105] Initializing a V1 LLM engine (v0.19.1) with config: model='/workspace/qwen3.5-4b', speculative_config=SpeculativeConfig(method='mtp', model='/workspace/qwen3.5-4b', num_spec_tokens=1) [...]
+(EngineCore pid=5122) INFO 04-25 01:07:16 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=5122) INFO 04-25 01:07:20 [eagle.py:1377] Detected MTP model. Sharing target model embedding weights with the draft model.
+(EngineCore pid=5122) INFO 04-25 01:07:20 [eagle.py:1433] Detected MTP model. Sharing target model lm_head weights with the draft model.
+(EngineCore pid=5122) INFO 04-25 01:07:21 [gpu_model_runner.py:4820] Model loading took 8.21 GiB memory and 3.491643 seconds
+!!!!!!! Segfault encountered !!!!!!!
+[ same C-call backtrace pattern as attempt 1 ]
+RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+
+# ------------------------------------------------------------
+# Attempt 3: speculative_config={'method': 'qwen3_next_mtp', 'num_speculative_tokens': 1}
+# ------------------------------------------------------------
+INFO 04-25 01:07:25 [utils.py:233] non-default args: {... 'speculative_config': {'method': 'qwen3_next_mtp', 'num_speculative_tokens': 1}, ...}
+INFO 04-25 01:07:25 [model.py:549] Resolved architecture: Qwen3_5ForConditionalGeneration
+WARNING 04-25 01:07:25 [speculative.py:368] method `qwen3_next_mtp` is deprecated and replaced with mtp.
+INFO 04-25 01:07:25 [model.py:549] Resolved architecture: Qwen3_5MTP
+INFO 04-25 01:07:25 [config.py:281] Setting attention block size to 528 tokens to ensure that attention page size is >= mamba page size.
+(EngineCore pid=5502) INFO 04-25 01:07:33 [core.py:105] Initializing a V1 LLM engine (v0.19.1) [...]
+(EngineCore pid=5502) INFO 04-25 01:07:35 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=5502) INFO 04-25 01:07:36 [gpu_model_runner.py:4735] Starting to load model /workspace/qwen3.5-4b...
+(EngineCore pid=5502) INFO 04-25 01:07:39 [eagle.py:1377] Detected MTP model. Sharing target model embedding weights with the draft model.
+(EngineCore pid=5502) INFO 04-25 01:07:39 [eagle.py:1433] Detected MTP model. Sharing target model lm_head weights with the draft model.
+(EngineCore pid=5502) INFO 04-25 01:07:40 [gpu_model_runner.py:4820] Model loading took 8.21 GiB memory and 3.530000 seconds
+!!!!!!! Segfault encountered !!!!!!!
+[ same C-call backtrace pattern ]
+RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+
+# ------------------------------------------------------------
+# Verdict from the driver:
+# {"mtp_supported": false, "reason": "vLLM failed to load Qwen3.5-4B with MTP
+#  speculative config: vLLM failed to load with any MTP speculative config..."}
+#
+# All three method aliases (qwen3_5_mtp / mtp / qwen3_next_mtp) consistently
+# crash at the same V1-engine init point: drafter weights load successfully,
+# tied embed/lm_head get attached, model_runner reports "Model loading took
+# 8.21 GiB", then a native segfault terminates the EngineCore worker. The
+# segfault has no Python file symbols (only THPFunction_apply C frames), which
+# is the signature of a CUDA / native-extension crash inside an autograd
+# function call invoked during V1 engine post-load setup.
+#
+# enforce_eager=True (no torch.compile / no CUDA graphs), skip_mm_profiling=True,
+# and limit_mm_per_prompt={image:0,video:0} all DID take effect (see the
+# "running in text-only mode" / "Cudagraph is disabled under eager mode" log
+# lines). The crash is NOT in graph capture or MM dummy profile.

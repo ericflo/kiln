@@ -1,0 +1,55 @@
+{
+  "mtp_supported": false,
+  "reason": "vLLM 0.19.1 segfaults during V1 engine init when loading Qwen3.5-4B with native MTP speculative decoding on A6000, post drafter weight load. All three method aliases (qwen3_5_mtp -> deprecated to mtp / mtp / qwen3_next_mtp -> deprecated to mtp) reach the same crash point and produce identical native-extension backtraces with no Python file symbols. enforce_eager=True (CUDA graphs off), limit_mm_per_prompt={image:0,video:0}, and skip_mm_profiling=True all took effect (vLLM logs 'running in text-only mode' and 'Cudagraph is disabled under eager mode') yet the segfault still fires. See artifacts/vllm_segfault_evidence.log for the trimmed log evidence and reproduction context.",
+  "vllm_version": "0.19.1",
+  "torch_version": "2.10.0+cu128",
+  "cuda_runtime": "12.8",
+  "gpu": "NVIDIA RTX A6000 sm_86",
+  "model_path": "/workspace/qwen3.5-4b",
+  "model_arch": "Qwen3_5ForConditionalGeneration",
+  "spec_arch_resolved_to": "Qwen3_5MTP",
+  "config_attempts": [
+    {
+      "method": "qwen3_5_mtp",
+      "num_speculative_tokens": 1,
+      "outcome": "EngineCore segfault @ post drafter load",
+      "engine_core_pid": 4722
+    },
+    {
+      "method": "mtp",
+      "num_speculative_tokens": 1,
+      "outcome": "EngineCore segfault @ post drafter load",
+      "engine_core_pid": 5122
+    },
+    {
+      "method": "qwen3_next_mtp",
+      "num_speculative_tokens": 1,
+      "outcome": "EngineCore segfault @ post drafter load",
+      "engine_core_pid": 5502
+    }
+  ],
+  "workarounds_attempted_but_did_not_help": [
+    "enforce_eager=True (disables torch.compile + CUDA graphs)",
+    "limit_mm_per_prompt={image:0, video:0} (skips MM dummy profile)",
+    "skip_mm_profiling=True",
+    "max_model_len=1024 (limits KV cache)",
+    "gpu_memory_utilization=0.85"
+  ],
+  "crash_signature": {
+    "marker": "!!!!!!! Segfault encountered !!!!!!!",
+    "fires_after": "INFO [gpu_model_runner.py:4820] Model loading took 8.21 GiB memory and ~3.5 seconds (drafter MTP weights successfully attached: 'Detected MTP model. Sharing target model embedding/lm_head weights with the draft model.')",
+    "backtrace_pattern": "70+ frames of _PyEval_EvalFrameDefault / _PyFunction_Vectorcall / PyObject_Call / THPFunction_apply with no Python file symbols (compiled-extension crash inside an autograd function)"
+  },
+  "per_seed": [],
+  "median_alpha": null,
+  "n_seeds": 0,
+  "vllm_config": {
+    "dtype": "bfloat16",
+    "max_model_len": 1024,
+    "enforce_eager": true,
+    "limit_mm_per_prompt": {"image": 0, "video": 0},
+    "skip_mm_profiling": true,
+    "num_spec_tokens": 1,
+    "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": -1}
+  }
+}
