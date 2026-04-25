@@ -25,7 +25,7 @@ kiln-rmsnorm-kernel = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
-indicatif = "0.17"
+indicatif = "0.18"
 console = "0.16"
 half = { version = "2", optional = true }
 objc2-metal = { version = "0.3", optional = true }
