@@ -260,29 +260,41 @@ async fn test_upload_rejects_path_escape_in_archive() {
     let state = make_state(tmp.path().to_path_buf());
     let app = api::router(state);
 
-    // Build a tar that tries to write outside the staging dir via `..`.
-    // We use `append_data` with a path that contains `..` — this is exactly
-    // the kind of payload the path validator must reject.
+    // Build a tar.gz with one normal entry and one whose path contains `..`
+    // pointing outside the prefix. `tar::Builder::append_data` validates
+    // paths via `prepare_header_path` and refuses `..`, so we hand-write the
+    // malicious name into the GNU header's `name` field and use
+    // `Builder::append` (which copies header bytes verbatim with no path
+    // check). This mirrors what a hostile tar producer could ship and is the
+    // payload the server's extraction code must defeat.
     let buf: Vec<u8> = Vec::new();
     let gz = GzEncoder::new(buf, Compression::default());
     let mut tar = tar::Builder::new(gz);
 
-    // Entry 1: a normal-looking file under the prefix so strip_prefix engages.
     let mut h1 = tar::Header::new_gnu();
     h1.set_size(5);
     h1.set_mode(0o644);
     h1.set_entry_type(tar::EntryType::Regular);
     h1.set_cksum();
-    tar.append_data(&mut h1, "evil/ok.txt", &b"hello"[..]).unwrap();
+    tar.append_data(&mut h1, "evil/ok.txt", &b"hello"[..])
+        .unwrap();
 
-    // Entry 2: the malicious path — `..` to escape staging.
     let mut h2 = tar::Header::new_gnu();
     h2.set_size(11);
     h2.set_mode(0o644);
     h2.set_entry_type(tar::EntryType::Regular);
+    {
+        let evil_name = b"evil/../../etc/passwd";
+        let gnu = h2.as_gnu_mut().expect("GNU header");
+        for b in gnu.name.iter_mut() {
+            *b = 0;
+        }
+        gnu.name[..evil_name.len()].copy_from_slice(evil_name);
+    }
+    // set_cksum must run AFTER the name bytes are in place so the checksum
+    // covers the final header.
     h2.set_cksum();
-    tar.append_data(&mut h2, "evil/../../etc/passwd", &b"PWNED-DATA!"[..])
-        .unwrap();
+    tar.append(&h2, &b"PWNED-DATA!"[..]).unwrap();
 
     let gz = tar.into_inner().unwrap();
     let archive = gz.finish().unwrap();
@@ -301,10 +313,10 @@ async fn test_upload_rejects_path_escape_in_archive() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    // Must be a 4xx — the request was malformed (unsafe path).
     assert!(
-        status.is_client_error() || status.is_server_error(),
-        "expected error response, got {status}"
+        status.is_client_error(),
+        "expected 4xx, got {status}: {}",
+        String::from_utf8_lossy(&body_bytes)
     );
     let code = json["error"]["code"].as_str().unwrap_or("");
     assert!(
