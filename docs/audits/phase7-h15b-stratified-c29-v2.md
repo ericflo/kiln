@@ -246,7 +246,7 @@ floor. No position-dependent reject-row drift; the pos=3 accept p10
 - `docs/archive/phase-c/phase-c29-v2/c29-v2-stratified-compare.md` — human-readable verdict tables
 - `docs/archive/phase-c/phase-c29-v2/verdict.json` — machine-readable decision record
 - `docs/archive/phase-c/phase-c29/c29-h9-verdict.md` — parent C29 (H9) verdict
-- `docs/phase7-mtp-acceptance-state-of-play.md` — PR #527 state-of-play
-- `docs/phase7-h15a-marlin-determinism.md` — PR #528 H15a result
+- `docs/audits/phase7-mtp-acceptance-state-of-play.md` — PR #527 state-of-play
+- `docs/audits/phase7-h15a-marlin-determinism.md` — PR #528 H15a result
 - Agent notes: `mtp-head-audit-needs-topk-jaccard`, `mtp-bench-workload-sensitivity`,
   `kiln-ssh-polling-deadlock`, `runpod-always-on-demand`, `runpod-gpu-minimum-a6000`

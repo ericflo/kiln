@@ -145,7 +145,7 @@ took this kind of small-N sensitivity into account when setting the
 | --- | --- |
 | `scripts/h18_hf_alpha_dump.py` | hand-rolled HF transformers α driver (~430 LOC) |
 | `scripts/h18_compare.py` | applies pre-registered decision rule, emits `verdict.json` |
-| `docs/phase7-h18-hf-transformers-alpha-reference.md` | this audit doc |
+| `docs/audits/phase7-h18-hf-transformers-alpha-reference.md` | this audit doc |
 | `docs/archive/phase-c/phase-c29-v3-hf/verdict.json` | machine-readable verdict |
 | `docs/archive/phase-c/phase-c29-v3-hf/compare.json` | full kiln + HF side-by-side |
 | `docs/archive/phase-c/phase-c29-v3-hf/compare.md` | per-seed table + decision-rule application |

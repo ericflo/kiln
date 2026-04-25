@@ -233,7 +233,7 @@ several non-α optimization paths; this verdict refocuses Phase 7 onto those):
 
 | path | purpose |
 | --- | --- |
-| `docs/phase7-h15c-vllm-alpha-microbench.md` | this audit doc |
+| `docs/audits/phase7-h15c-vllm-alpha-microbench.md` | this audit doc |
 | `docs/archive/phase-c/phase-c29-v3-vllm/verdict.json` | machine-readable verdict |
 | `docs/archive/phase-c/phase-c29-v3-vllm/compare.json` | full kiln + vllm side-by-side |
 | `docs/archive/phase-c/phase-c29-v3-vllm/compare.md` | per-seed table + decision rule |

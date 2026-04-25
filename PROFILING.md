@@ -88,7 +88,7 @@ or future vLLM/SGLang stable that loads on driver 550.x) producing
 α materially > 0.3636; running H18 against a future BF16-only kiln
 build to isolate the W4A16 confounder; or reproducing H18 with
 different seeds and obtaining a materially different median α. See
-[`docs/phase7-h18-hf-transformers-alpha-reference.md`](docs/phase7-h18-hf-transformers-alpha-reference.md)
+[`docs/audits/phase7-h18-hf-transformers-alpha-reference.md`](docs/audits/phase7-h18-hf-transformers-alpha-reference.md)
 for the full verdict, decision-rule application, per-seed
 divergence analysis, anti-duplication evidence, reproduction
 commands, and detailed reopen triggers. Raw data:
@@ -138,7 +138,7 @@ succeeded on first try (no fallback needed); pod
 H17b cap. Reopen preconditions: vLLM publishing a `+cu124`/`+cu128`
 0.20.x wheel; RunPod stock driver upgrade to ≥580; or H18
 hand-rolled reference closing the question independently. See
-[`docs/phase7-h17b-vllm-020-alpha-microbench.md`](docs/phase7-h17b-vllm-020-alpha-microbench.md)
+[`docs/audits/phase7-h17b-vllm-020-alpha-microbench.md`](docs/audits/phase7-h17b-vllm-020-alpha-microbench.md)
 for the full verdict, the runtime-stack delta table, the canonical
 3-attempt crash trace, anti-duplication evidence, reproduction
 commands, and detailed reopen triggers. Raw data:
@@ -183,7 +183,7 @@ opportunistic vLLM v0.20.0 retest (~30 min / $0.25), hand-rolled HF
 transformers reference H18 (~2-4 hrs engineering, $0 GPU), or accept the
 H15b `kiln_native_ceiling` verdict as operational conclusion and
 deprioritize MTP-side α work entirely. See
-[`docs/phase7-h17-sglang-alpha-microbench.md`](docs/phase7-h17-sglang-alpha-microbench.md)
+[`docs/audits/phase7-h17-sglang-alpha-microbench.md`](docs/audits/phase7-h17-sglang-alpha-microbench.md)
 for the full verdict, three crash signatures, per-config outcome table,
 SGLang prerequisites discovered, workload matching, reproduction
 commands, anti-duplication evidence, and detailed reopen triggers. Raw
@@ -228,7 +228,7 @@ PR #530. Re-classifies PR #527's "SGLang has no MTP for Qwen3.5"
 cross-reference: SGLang has had `Qwen3_5ForCausalLMMTP` since 2026-02-09
 PR #18489 — PR #526's accurate claim was about *RadixAttention*
 MTP-awareness, a different question. See
-[`docs/phase7-h16-external-alpha-options-audit.md`](docs/phase7-h16-external-alpha-options-audit.md)
+[`docs/audits/phase7-h16-external-alpha-options-audit.md`](docs/audits/phase7-h16-external-alpha-options-audit.md)
 for the 8-candidate table with file:line evidence and commit SHAs, the
 pre-registered decision rule + application, the H17 task scope, the free
 pre-step protocol, the explicit reopen preconditions per candidate, and
@@ -256,7 +256,7 @@ patch and re-run this PR's `scripts/h15c_*` as-is, or (c) refocus Phase 7
 onto non-α decode-path wins (PR #521 prefix-cache + CUDA graphs landed,
 PR #526 SGLang RadixAttention port queued). Kiln median α at this
 workload (re-derived from PR #529 c1_attr CSVs): 0.3636. See
-[`docs/phase7-h15c-vllm-alpha-microbench.md`](docs/phase7-h15c-vllm-alpha-microbench.md)
+[`docs/audits/phase7-h15c-vllm-alpha-microbench.md`](docs/audits/phase7-h15c-vllm-alpha-microbench.md)
 for the full verdict, segfault signature + crash backtrace, per-seed α
 table, vLLM config used (BF16 confounder vs kiln Marlin W4A16),
 reproduction commands, anti-duplication evidence, and detailed reopen
@@ -285,7 +285,7 @@ Both strata show 100% top-1 agreement and median J@10 = 1.0000. Verifier
 numerical drift on reject rows is RULED OUT on this checkpoint.
 Recommendation: queue a vLLM α microbench next to establish whether an
 external-reference upper bound exists above kiln's current α. See
-[`docs/phase7-h15b-stratified-c29-v2.md`](docs/phase7-h15b-stratified-c29-v2.md)
+[`docs/audits/phase7-h15b-stratified-c29-v2.md`](docs/audits/phase7-h15b-stratified-c29-v2.md)
 for the full verdict, per-position stratified table, decision-rule
 application, anti-duplication evidence, and reopen triggers. Raw data:
 `docs/archive/phase-c/phase-c29-v2/c29-v2-stratified-compare.{json,md}` and
@@ -313,7 +313,7 @@ evidence that α at this anchor is workload-deterministic, not pack-determined.
 A6000 / ~$0.25) per PR #527 §"Recommended next H." Decision belongs to the
 next planning cycle. Full methodology, decision rule, period-10 collision
 table, anti-duplication evidence, and reopen triggers in
-[`docs/phase7-h15a-marlin-determinism.md`](docs/phase7-h15a-marlin-determinism.md).
+[`docs/audits/phase7-h15a-marlin-determinism.md`](docs/audits/phase7-h15a-marlin-determinism.md).
 Raw script + verbatim output: `scripts/phase-c40f/h15a_correlation.py` and
 `docs/archive/phase-c/phase-c40f/h15a_correlation_output.txt`.
 
@@ -336,7 +336,7 @@ the existing dump pipeline but split by accept/reject, since C29's clean
 verdict was measured only on accepted-token positions. Falsification cost
 ~30 min A6000 / ~$0.25. Full inventory table, scoring, anti-duplication
 evidence, and bench plan in
-[`docs/phase7-mtp-acceptance-state-of-play.md`](docs/phase7-mtp-acceptance-state-of-play.md).
+[`docs/audits/phase7-mtp-acceptance-state-of-play.md`](docs/audits/phase7-mtp-acceptance-state-of-play.md).
 
 ## Phase 7 SGLang RadixAttention design audit (2026-04-24)
 
@@ -348,7 +348,7 @@ pod spend, no new Rust code.
 **Outcome:** design parity sufficient for kiln's target workloads; port-to-radix
 on the real path is speculative without branching-workload evidence. Detailed
 findings, 16-feature classification table, and reopen precondition in
-[`docs/phase7-sglang-radix-audit.md`](docs/phase7-sglang-radix-audit.md).
+[`docs/audits/phase7-sglang-radix-audit.md`](docs/audits/phase7-sglang-radix-audit.md).
 
 ## Phase 7 kill-switch bisection follow-up (2026-04-24)
 
@@ -610,7 +610,7 @@ kiln_prefix_cache_max_blocks 2048
 
 **Verdict / current behavior:** the real append-prefix cache is functionally effective for append-only shared prefixes on both non-streaming and streaming chat completions. CUDA graphs no longer bypass prefix-cache lookup/registration for non-speculative real chat completions; `scripts/phase7_cuda_graph_prefix_cache_verify.sh` verifies a CUDA-graph cache hit and absence of the old bypass warning.
 
-Detailed artifact: `docs/phase7-prefix-cache-reuse-ab.md`.
+Detailed artifact: `docs/audits/phase7-prefix-cache-reuse-ab.md`.
 
 ## Phase 7 CUDA streaming prefill default A/B (2026-04-24)
 

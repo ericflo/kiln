@@ -251,7 +251,7 @@ python3 scripts/h17b_compare.py
 
 | path | purpose |
 | --- | --- |
-| `docs/phase7-h17b-vllm-020-alpha-microbench.md` | this audit doc |
+| `docs/audits/phase7-h17b-vllm-020-alpha-microbench.md` | this audit doc |
 | `docs/archive/phase-c/phase-c29-v3-vllm-020/verdict.json` | machine-readable verdict |
 | `docs/archive/phase-c/phase-c29-v3-vllm-020/compare.json` | full kiln + vLLM 0.20.0 side-by-side |
 | `docs/archive/phase-c/phase-c29-v3-vllm-020/compare.md` | per-seed table + decision rule |

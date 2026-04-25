@@ -13,7 +13,7 @@ PR #515 is merged on `main`; the benchmark ran at `8bd7dd0e` whose tip commit is
 - `crates/kiln-server/src/api/completions.rs`: real generation calls `cache.lookup(...)`, passes `PagedPrefixReuse` into the non-streaming or streaming paged-prefix generation helper, then registers completed block-aligned prompts after successful generation.
 - `crates/kiln-server/src/metrics.rs`: metrics are `kiln_prefix_cache_lookups_total{result="hit|miss"}`, `kiln_prefix_cache_hit_tokens_total`, `kiln_prefix_cache_hit_blocks_total`, `kiln_prefix_cache_cached_blocks`, and `kiln_prefix_cache_max_blocks`.
 
-No existing post-#515 artifact for this benchmark was present in `PROFILING.md` or `docs/phase7-prefix-cache-reuse-ab.md` before this run.
+No existing post-#515 artifact for this benchmark was present in `PROFILING.md` or `docs/audits/phase7-prefix-cache-reuse-ab.md` before this run.
 
 ## Commands
 

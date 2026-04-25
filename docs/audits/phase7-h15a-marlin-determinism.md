@@ -143,7 +143,7 @@ PR #527 (the parent) explicitly documents H15a as a "free pre-step (do BEFORE GP
 ### Files read
 
 - `docs/archive/phase-c/phase-c40f/summary.json` (lines 1–222) — input data; 20 rows in `rows[]`, summary block in `summary{}`.
-- `docs/phase7-mtp-acceptance-state-of-play.md` (PR #527) — bench plan §"Free pre-step (do BEFORE GPU spend)" defining the |ρ| > 0.5 threshold and the H15b vs deterministic-pack-repro fork.
+- `docs/audits/phase7-mtp-acceptance-state-of-play.md` (PR #527) — bench plan §"Free pre-step (do BEFORE GPU spend)" defining the |ρ| > 0.5 threshold and the H15b vs deterministic-pack-repro fork.
 - `docs/archive/phase-c/phase-c40f/command-template.txt` — C40f harness invocation (for the period-10 hypothesis in §3).
 - `PROFILING.md` §"Phase 7 MTP acceptance-rate state-of-play audit (2026-04-24)" — pointer pattern reused below.
 
@@ -151,7 +151,7 @@ PR #527 (the parent) explicitly documents H15a as a "free pre-step (do BEFORE GP
 
 - `scripts/phase-c40f/h15a_correlation.py` — stdlib-only Pearson + Spearman correlation analysis script.
 - `docs/archive/phase-c/phase-c40f/h15a_correlation_output.txt` — verbatim script output captured 2026-04-24.
-- `docs/phase7-h15a-marlin-determinism.md` — this audit.
+- `docs/audits/phase7-h15a-marlin-determinism.md` — this audit.
 - `PROFILING.md` — top-of-file pointer added.
 
 ### Agent notes consulted
