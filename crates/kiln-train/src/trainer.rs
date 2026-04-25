@@ -291,25 +291,30 @@ pub struct TrainingProgress {
     pub progress: f32,
 }
 
-/// Build a progress bar for the SFT training step loop.
+/// Build a progress bar for a training step/group loop.
 ///
 /// Returns `None` when stderr is not a TTY so log files, server-mode tracing,
 /// and CI runs stay clean. The structured `tracing::info!` lines and the
 /// `progress_cb` HTTP-status callback remain the source of truth for
 /// non-interactive runs; the bar is purely additive UX for interactive
-/// `kiln train` invocations, where SFT loops often run hundreds–thousands of
-/// steps with no other visual feedback between every-10-step log lines.
-fn make_step_progress(total_steps: usize) -> Option<indicatif::ProgressBar> {
+/// `kiln train` invocations, where SFT and GRPO loops often run
+/// hundreds–thousands of iterations with no other visual feedback between
+/// every-10-step log lines.
+///
+/// `label` is the per-loop prefix shown before the bar (e.g. `"sft training"`
+/// or `"grpo training"`).
+fn make_step_progress(total_steps: usize, label: &str) -> Option<indicatif::ProgressBar> {
     if !console::Term::stderr().features().is_attended() {
         return None;
     }
     let pb = indicatif::ProgressBar::new(total_steps as u64);
+    let template = format!(
+        "  {label} {{bar:40.cyan/blue}} {{pos:>5}}/{{len:5}} step ({{elapsed}}) loss={{msg}}"
+    );
     pb.set_style(
-        indicatif::ProgressStyle::with_template(
-            "  sft training {bar:40.cyan/blue} {pos:>5}/{len:5} step ({elapsed}) loss={msg}",
-        )
-        .expect("static progress template is valid")
-        .progress_chars("##-"),
+        indicatif::ProgressStyle::with_template(&template)
+            .expect("static progress template is valid")
+            .progress_chars("##-"),
     );
     Some(pb)
 }
@@ -399,7 +404,7 @@ pub fn sft_train(
     let mut global_step = 0;
     let mut last_loss = 0.0;
 
-    let pb = make_step_progress(total_steps);
+    let pb = make_step_progress(total_steps, "sft training");
 
     for epoch in 0..config.epochs {
         let mut epoch_loss = 0.0;
@@ -597,6 +602,8 @@ pub fn grpo_train(
     let mut global_step = 0;
     let mut last_loss = 0.0;
 
+    let pb = make_step_progress(total_steps, "grpo training");
+
     for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
         // Compute advantages from rewards (normalize within group)
         let advantages = compute_advantages(&tgroup.rewards);
@@ -723,6 +730,15 @@ pub fn grpo_train(
             loss = format!("{avg_group_loss:.6}"),
             "GRPO group step"
         );
+
+        if let Some(pb) = &pb {
+            pb.set_message(format!("{avg_group_loss:.6}"));
+            pb.inc(1);
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
     // Save the trained adapter
