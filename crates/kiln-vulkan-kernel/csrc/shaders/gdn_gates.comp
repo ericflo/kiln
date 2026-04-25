@@ -1,6 +1,10 @@
 // GDN gates kernel: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
 // Input: a[B,T,nv], b[B,T,nv], a_log[nv], dt_bias[nv]
 // Output: beta[B,T,nv], g[B,T,nv]
+//
+// Fix: numerically stable sigmoid and softplus matching the CUDA reference.
+//   stable_sigmoid(x) = 1/(1+exp(-x))  — works for all practical x ranges
+//   stable_softplus(x) = if x > 20: x else log1p(exp(x))  — avoids exp overflow
 
 #version 450
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -14,6 +18,25 @@ layout(binding = 2) readonly buffer ALogBuf { float data_a_log[]; };
 layout(binding = 3) readonly buffer DtBiasBuf { float data_dt_bias[]; };
 layout(binding = 4) writeonly buffer BetaOutBuf { float data_beta_out[]; };
 layout(binding = 5) writeonly buffer GOutBuf { float data_g_out[]; };
+
+// Numerically stable softplus: matches torch.nn.functional.softplus
+float stable_softplus(float x) {
+    if (x > 20.0) {
+        return x;
+    }
+    return log(1.0 + exp(x));
+}
+
+// Numerically stable sigmoid: handles extreme values
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    } else {
+        float e = exp(x);
+        return e / (1.0 + e);
+    }
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= total) return;
@@ -24,11 +47,11 @@ void main() {
     float a_log_val = data_a_log[nv_idx];
     float dt_bias_val = data_dt_bias[nv_idx];
     
-    // beta = sigmoid(b)
-    data_beta_out[idx] = 1.0 / (1.0 + exp(-b_val));
+    // beta = sigmoid(b) - numerically stable
+    data_beta_out[idx] = stable_sigmoid(b_val);
     
     // g = -exp(A_log) * softplus(a + dt_bias)
     float a_plus_bias = a_val + dt_bias_val;
-    float softplus = log(1.0 + exp(a_plus_bias));
-    data_g_out[idx] = -exp(a_log_val) * softplus;
+    float softplus_val = stable_softplus(a_plus_bias);
+    data_g_out[idx] = -exp(a_log_val) * softplus_val;
 }

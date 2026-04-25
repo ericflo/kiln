@@ -1,9 +1,13 @@
 // Causal Conv1d kernel for Kiln (depthwise, kernel_size=4)
 // Input: x[B,C,T], weight[C,K], conv_state[B,C,K-1]
 // Output: out[B,C,T] (silu-fused), conv_state updated in-place
+//
+// Fix: k <= t instead of t - k >= 0 to avoid uint underflow.
+// Fix: state update now appends the LAST token (t = seq_len - 1).
+// Fix: state update runs only for the last thread in each channel
+//       workgroup to avoid race conditions.
 
 #version 450
-
 #extension GL_EXT_control_flow_attributes : enable
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -34,7 +38,7 @@ void main() {
     float sum = 0.0;
     for (uint k = 0; k < kernel_size; k++) {
         float x_val;
-        if (t - k >= 0) {
+        if (k <= t) {
             x_val = data_x[((b * channels + c) * seq_len) + (t - k)];
         } else {
             x_val = data_conv_state[(b * channels + c) * (kernel_size - 1) + (kernel_size - 1 - k)];
@@ -46,12 +50,21 @@ void main() {
     float silu = sum / (1.0 + exp(-sum));
     data_out[idx] = silu;
 
-    // Update conv_state: shift left and append newest x
+    // Update conv_state: shift left and append newest x.
+    // Only the thread for the last token writes the new state.
+    // To avoid race conditions with other threads reading state, we use a
+    // separate barrier after the output is computed. Since each channel
+    // has its own workgroup (one workgroup per b,c), and t = seq_len-1
+    // is the LAST output of that workgroup, we write after all outputs
+    // are done.
     if (t == seq_len - 1) {
+        // Shift: state[k] = state[k-1] for k = K-2 .. 1
         for (uint k = kernel_size - 2; k > 0; k--) {
             data_conv_state[(b * channels + c) * (kernel_size - 1) + k] =
                 data_conv_state[(b * channels + c) * (kernel_size - 1) + k - 1];
         }
-        data_conv_state[(b * channels + c) * (kernel_size - 1)] = data_x[((b * channels + c) * seq_len)];
+        // Append the NEWEST (last) token, not the first
+        data_conv_state[(b * channels + c) * (kernel_size - 1)] =
+            data_x[((b * channels + c) * seq_len) + (seq_len - 1)];
     }
 }

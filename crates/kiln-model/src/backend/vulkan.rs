@@ -114,7 +114,7 @@ impl VulkanBackend {
             workgroup_count,
             &[q, k, v],
             &output_shape,
-            DType::F32,
+            DType::BF16,
         )?;
 
         Ok(Some(out))
@@ -139,7 +139,9 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
-        self.has_vulkan()
+        // Not yet implemented — returning false so callers don't skip
+        // their preamble work only to get Ok(None) back.
+        false
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
@@ -361,7 +363,7 @@ impl BackendRuntime for VulkanBackend {
         x: &Tensor,
         z: &Tensor,
         weight: &Tensor,
-        _eps: f64,
+        eps: f64,
     ) -> Result<Option<Tensor>> {
         if !self.has_vulkan() || !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
@@ -375,7 +377,7 @@ impl BackendRuntime for VulkanBackend {
         // Output shape matches x shape
         let out_shape = x.dims().as_ref().to_vec();
         let out = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm(
-            vk_device, x, z, weight, 1e-5, &out_shape,
+            vk_device, x, z, weight, eps as f32, &out_shape,
         ).context("gdn_gated_rms_norm kernel failed")?;
         Ok(Some(out))
     }
@@ -428,14 +430,43 @@ impl BackendRuntime for VulkanBackend {
 }
 
 /// Check if Vulkan is available on this system.
+/// Uses a cached result to avoid the expensive VulkanDevice::new() call.
+static VULKAN_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 pub fn vulkan_is_available() -> bool {
-    kiln_vulkan_kernel::VulkanDevice::new().is_ok()
+    *VULKAN_AVAILABLE.get_or_init(|| {
+        kiln_vulkan_kernel::VulkanDevice::new().is_ok()
+    })
 }
 
 /// Precompile Vulkan custom kernels (warm up pipeline cache).
+///
+/// Compiles all known GLSL shaders to SPIR-V at startup to avoid
+/// compilation latency during the first inference request.
 pub fn precompile_custom_kernels(_device: &Device) -> Result<()> {
-    // TODO: Precompile all Vulkan pipelines at startup
-    // This removes pipeline compilation latency from the first request
-    tracing::info!("Vulkan kernel precompile stub (TODO)");
+    let shaders = [
+        "gdn_gates",
+        "gdn_gated_rms_norm",
+        "causal_conv1d",
+        "solve_tri",
+        "gdn_recurrent_prefill",
+        "gdn_chunk_prep",
+        "gdn_full_chunk_forward",
+        "gdn_chunk_scan",
+        "flash_attn",
+    ];
+
+    let base = env!("CARGO_MANIFEST_DIR");
+    let vulkan_base = format!("{}/../kiln-vulkan-kernel/csrc/shaders", base);
+
+    for shader_name in &shaders {
+        let glsl_path = format!("{}/{}.comp", vulkan_base, shader_name);
+        match kiln_vulkan_kernel::pipeline::ShaderPipeline::compile_shader(&glsl_path) {
+            Ok(_) => tracing::info!(shader = %shader_name, "precompiled Vulkan shader"),
+            Err(e) => tracing::warn!(shader = %shader_name, error = %e, "failed to precompile Vulkan shader (will compile on first use)"),
+        }
+    }
+
+    tracing::info!("Vulkan shader precompilation complete");
     Ok(())
 }

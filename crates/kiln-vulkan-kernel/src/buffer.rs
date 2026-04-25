@@ -170,12 +170,12 @@ impl VulkanBuffer {
         dst: &VulkanBuffer,
         data: &[u8],
     ) -> Result<()> {
-        eprintln!("[upload] creating staging buffer");
+        tracing::trace!("[upload] creating staging buffer");
         let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
-        eprintln!("[upload] staging buffer created");
+        tracing::trace!("[upload] staging buffer created");
 
         // Map and copy data to staging buffer
-        eprintln!("[upload] mapping memory");
+        tracing::trace!("[upload] mapping memory");
         let mapped_ptr = unsafe {
             device.map_memory(
                 staging.memory,
@@ -192,7 +192,7 @@ impl VulkanBuffer {
                 data.len(),
             );
         }
-        eprintln!("[upload] data copied to staging");
+        tracing::trace!("[upload] data copied to staging");
 
         // Create command buffer for transfer
         let pool_info = make_pool_info(queue_family_index);

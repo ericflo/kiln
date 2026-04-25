@@ -1,6 +1,9 @@
 // GDN gated RMSNorm kernel: rms_norm(x, weight) * silu(z)
 // Input: x[...hidden], z[...hidden], weight[hidden]
 // Output: out[...hidden]
+//
+// Fix: weight is used directly (not 1+weight), matching the CUDA reference.
+// eps is passed as a float push constant (use eps.to_bits() in Rust).
 
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
@@ -40,12 +43,12 @@ void main() {
     }
     float rms_inv = inversesqrt(sum_sh[0] / float(hidden) + eps);
 
-    // Apply RMS norm * silu(z) * (1 + weight)
+    // Apply RMS norm * silu(z) * weight (not 1+weight)
     for (uint col = tid; col < hidden; col += 256) {
         float xv = data_x[base + col];
         float zv = data_z[base + col];
         float silu_z = zv / (1.0 + exp(-zv));
-        float w = 1.0 + data_weight[col];
+        float w = data_weight[col];
         data_out[base + col] = xv * rms_inv * silu_z * w;
     }
 }

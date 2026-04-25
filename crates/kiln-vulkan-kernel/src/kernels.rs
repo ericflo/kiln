@@ -21,7 +21,7 @@ pub fn dispatch_kernel(
     let queue_family_index = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-    eprintln!("[dispatch] step 0: device acquired");
+    tracing::trace!("[dispatch] step 0: device acquired");
 
     // --- Extract input data (flatten to f32) ---
     let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
@@ -29,7 +29,7 @@ pub fn dispatch_kernel(
         let (data, _) = extract_tensor_bytes(tensor)?;
         input_data.push(data);
     }
-    eprintln!("[dispatch] step 1: input data extracted");
+    tracing::trace!("[dispatch] step 1: input data extracted");
 
     // --- Create output buffer ---
     let elem_count: usize = output_shape.iter().product();
@@ -42,7 +42,7 @@ pub fn dispatch_kernel(
     let output_size = (elem_count * elem_size) as u64;
     let output_buffer = VulkanBuffer::create_device_local(device, device_local_mt, output_size)
         .context("failed to create output buffer")?;
-    eprintln!("[dispatch] step 2: output buffer created");
+    tracing::trace!("[dispatch] step 2: output buffer created");
 
     // --- Create input buffers + upload ---
     let mut input_buffers: Vec<VulkanBuffer> = Vec::with_capacity(input_data.len());
@@ -53,11 +53,11 @@ pub fn dispatch_kernel(
             .context("failed to upload input data")?;
         input_buffers.push(buf);
     }
-    eprintln!("[dispatch] step 3: input buffers created + uploaded");
+    tracing::trace!("[dispatch] step 3: input buffers created + uploaded");
 
     // --- Build combined binding list (inputs first, then output) ---
     let total_bindings = input_buffers.len() + 1;
-    eprintln!("[dispatch] step 4: total_bindings = {}", total_bindings);
+    tracing::trace!("[dispatch] step 4: total_bindings = {}", total_bindings);
     let mut all_handles: Vec<vk::Buffer> = Vec::with_capacity(total_bindings);
     for buf in &input_buffers {
         all_handles.push(buf.handle());
@@ -73,7 +73,7 @@ pub fn dispatch_kernel(
         device.create_shader_module(&shader_module_info, None)
             .context("failed to create shader module")?
     };
-    eprintln!("[dispatch] step 5: shader module created");
+    tracing::trace!("[dispatch] step 5: shader module created");
 
     // --- Descriptor set layout (STORAGE_BUFFER for all bindings) ---
     let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
@@ -94,7 +94,7 @@ pub fn dispatch_kernel(
         device.create_descriptor_set_layout(&set_layout_info, None)
             .context("failed to create descriptor set layout")?
     };
-    eprintln!("[dispatch] step 6: descriptor set layout created");
+    tracing::trace!("[dispatch] step 6: descriptor set layout created");
 
     // --- Pipeline layout ---
     let push_constant_range = vk::PushConstantRange::builder()
@@ -112,7 +112,7 @@ pub fn dispatch_kernel(
         device.create_pipeline_layout(&layout_info, None)
             .context("failed to create pipeline layout")?
     };
-    eprintln!("[dispatch] step 7: pipeline layout created");
+    tracing::trace!("[dispatch] step 7: pipeline layout created");
 
     // --- Compute pipeline ---
     let stage_info = vk::PipelineShaderStageCreateInfo::builder()
@@ -137,7 +137,7 @@ pub fn dispatch_kernel(
             })?
     };
     let pipeline = pipelines[0];
-    eprintln!("[dispatch] step 8: compute pipeline created");
+    tracing::trace!("[dispatch] step 8: compute pipeline created");
 
     // --- Descriptor pool + set (STORAGE_BUFFER) ---
     let pool_size = vk::DescriptorPoolSize::builder()
@@ -164,7 +164,7 @@ pub fn dispatch_kernel(
             .context("failed to allocate descriptor sets")?
     };
     let descriptor_set = descriptor_sets[0];
-    eprintln!("[dispatch] step 9: descriptor pool + set created");
+    tracing::trace!("[dispatch] step 9: descriptor pool + set created");
 
     // --- Descriptor writes using STORAGE_BUFFER (no buffer views needed) ---
     {
@@ -192,7 +192,7 @@ pub fn dispatch_kernel(
             device.update_descriptor_sets(&descriptor_write_infos, &[]);
         }
     }
-    eprintln!("[dispatch] step 10: descriptor sets updated");
+    tracing::trace!("[dispatch] step 10: descriptor sets updated");
 
     // --- Command buffer + dispatch ---
     let cmd_pool_info = make_cmd_pool_info(queue_family_index);
@@ -205,7 +205,7 @@ pub fn dispatch_kernel(
     let command_buffers = crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
         .context("failed to allocate command buffer")?;
     let cmd = command_buffers[0];
-    eprintln!("[dispatch] step 11: command buffer allocated");
+    tracing::trace!("[dispatch] step 11: command buffer allocated");
 
     let begin_info = make_cmd_begin_info();
     unsafe {
@@ -252,7 +252,7 @@ pub fn dispatch_kernel(
         device.end_command_buffer(cmd)
             .context("failed to end command buffer")?;
     }
-    eprintln!("[dispatch] step 12: command buffer ended");
+    tracing::trace!("[dispatch] step 12: command buffer ended");
 
     // --- Submit + wait ---
     let cmds = vec![cmd];
@@ -263,7 +263,7 @@ pub fn dispatch_kernel(
         device.queue_wait_idle(queue)
             .context("failed to wait for queue")?;
     }
-    eprintln!("[dispatch] step 13: submit + wait done");
+    tracing::trace!("[dispatch] step 13: submit + wait done");
 
     // --- Read back output ---
     let output_data = VulkanBuffer::read_back(
@@ -273,7 +273,7 @@ pub fn dispatch_kernel(
         queue_family_index,
         &output_buffer,
     ).context("failed to read back output")?;
-    eprintln!("[dispatch] step 14: output read back");
+    tracing::trace!("[dispatch] step 14: output read back");
 
     // --- Cleanup (input_buffers and output_buffer dropped here) ---
     drop(input_buffers);
@@ -288,7 +288,7 @@ pub fn dispatch_kernel(
         device.free_command_buffers(cmd_pool, &command_buffers);
         device.destroy_command_pool(cmd_pool, None);
     }
-    eprintln!("[dispatch] step 15: cleanup done");
+    tracing::trace!("[dispatch] step 15: cleanup done");
 
     // --- Create output tensor ---
     create_tensor_from_data(&output_data, output_shape, output_dtype)
@@ -719,7 +719,7 @@ pub fn dispatch_gdn_gated_rms_norm(
     // Push constants: rows, hidden, eps
     let hidden = weight_data.len() / 4; // hidden in floats
     let rows = elem_count / hidden;
-    let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps as u32];
+    let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps.to_bits()];
 
     // Workgroup count: one group per row
     let workgroup_count = rows as u32;

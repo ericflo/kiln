@@ -228,3 +228,21 @@ impl VulkanDevice {
         &self.device_name
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vulkan_device_init_fails_gracefully_without_gpu() {
+        // When no Vulkan GPU is available (e.g. CI), new() should return
+        // a clear error rather than panicking.
+        let result = VulkanDevice::new();
+        // On a machine without Vulkan, we expect an error.
+        // On a machine with Vulkan, this test runs as a smoke test.
+        if result.is_ok() {
+            let dev = result.unwrap();
+            assert!(!dev.device_name().is_empty(), "device name should not be empty");
+        }
+    }
+}

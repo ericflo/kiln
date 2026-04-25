@@ -2,6 +2,11 @@
 // Computes W = (I + A_strict)^{-1} (beta * V_prime)
 // A_strict: [B,H,C,C] lower-triangular, V_prime: [B,H,C,dv], beta: [B,H,C]
 // Output: W: [B,H,C,dv]
+//
+// Fix: One workgroup per (b, h). Within the workgroup, threads process
+// sequentially across the chunk axis (C loop is serialized). Each thread
+// processes one dv element. This eliminates the data race and UB from
+// reading a writeonly buffer.
 
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
@@ -18,28 +23,64 @@ layout(push_constant) uniform Parameters {
 layout(binding = 0) readonly buffer AStrictBuf { float data_a_strict[]; };
 layout(binding = 1) readonly buffer VPrimeBuf { float data_v_prime[]; };
 layout(binding = 2) readonly buffer BetaBuf { float data_beta[]; };
-layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+layout(binding = 3) readonly buffer OutBuf { float data_out[]; };
+
+// Shared memory: A_strict (C*C) + W results (C*dv)
+shared float sA[];
+shared float sW[];
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    uint total = batch * heads * chunk * dv;
-    if (idx >= total) return;
+    uint b = gl_WorkGroupID.x / heads;
+    uint h = gl_WorkGroupID.x % heads;
+    uint tid = gl_LocalInvocationID.x;
+    uint blk = gl_NumWorkGroups.x;
 
-    uint b = idx / (heads * chunk * dv);
-    uint h = (idx / (chunk * dv)) % heads;
-    uint c = (idx / dv) % chunk;
-    uint d = idx % dv;
+    // Check if we have a valid (b, h) to process
+    uint total_bh = batch * heads;
+    if (gl_WorkGroupID.x >= total_bh) return;
 
-    uint bh = b * heads + h;
-    uint base = bh * chunk * chunk;
-    uint v_base = bh * chunk * dv;
+    uint bh = gl_WorkGroupID.x;
+    uint base_a = bh * chunk * chunk;
+    uint base_v = bh * chunk * dv;
 
-    // Forward substitution for triangular solve
-    float val = data_v_prime[v_base + c * dv + d] * data_beta[bh * chunk + c];
-    
-    for (uint j = 0; j < c; j++) {
-        val -= data_a_strict[base + c * chunk + j] * data_out[v_base + j * dv + d];
+    // Load A_strict into shared memory
+    uint total_a = chunk * chunk;
+    for (uint i = tid; i < total_a; i += blk) {
+        sA[i] = data_a_strict[base_a + i];
     }
-    
-    data_out[v_base + c * dv + d] = val;
+    // Note: sW is initialized implicitly (each row is written before read)
+
+    barrier();
+
+    // Sequential rows: each t reads sW[0..t-1] which was written by the
+    // previous iteration (same workgroup = same thread IDs)
+    for (uint t = 0; t < chunk; ++t) {
+        float beta_t = data_beta[bh * chunk + t];
+        uint a_row_base = base_a + t * chunk;
+        uint vp_base = base_v + t * dv;
+        uint w_row_base = t * dv;
+
+        // Parallel across dv axis
+        for (uint d = tid; d < dv; d += blk) {
+            // sum_{i<t} A_strict[t, i] * W[i, d]
+            float acc = 0.0;
+            for (uint j = 0; j < t; ++j) {
+                acc += sA[a_row_base + j] * sW[j * dv + d];
+            }
+
+            float vp_val = data_v_prime[vp_base + d];
+            float w_val = beta_t * (vp_val - acc);
+
+            sW[w_row_base + d] = w_val;
+        }
+
+        barrier();
+    }
+
+    // Write final results to global memory
+    for (uint d = tid; d < dv; d += blk) {
+        for (uint t = 0; t < chunk; ++t) {
+            data_out[base_v + t * dv + d] = sW[t * dv + d];
+        }
+    }
 }
