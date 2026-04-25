@@ -44,7 +44,7 @@ repository = "https://github.com/ericflo/kiln"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP server
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 

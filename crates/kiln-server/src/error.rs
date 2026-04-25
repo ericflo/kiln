@@ -183,6 +183,33 @@ impl ApiError {
         }
     }
 
+    pub fn adapter_already_exists(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "adapter_already_exists",
+            message: format!("Adapter '{name}' already exists"),
+            hint: "Run `curl -X DELETE /v1/adapters/{name}` to remove the existing adapter before re-uploading, or upload under a different name.",
+        }
+    }
+
+    pub fn adapter_import_failed(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "adapter_import_failed",
+            message: format!("Failed to import adapter: {detail}"),
+            hint: "Check that the uploaded archive is a valid tar.gz produced by GET /v1/adapters/{name}/download. Server logs have details.",
+        }
+    }
+
+    pub fn adapter_import_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "adapter_import_invalid",
+            message: format!("Invalid adapter upload: {detail}"),
+            hint: "POST multipart/form-data with two fields: 'name' (text, single segment) and 'archive' (file, gzipped tar produced by GET /v1/adapters/{name}/download).",
+        }
+    }
+
     pub fn mock_mode_no_adapters() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

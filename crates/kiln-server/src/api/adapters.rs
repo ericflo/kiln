@@ -1,11 +1,13 @@
-use std::path::Path;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 
 use axum::body::Body;
-use axum::extract::{State, Path as AxumPath};
+use axum::extract::{DefaultBodyLimit, Multipart, State, Path as AxumPath};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
@@ -598,12 +600,389 @@ async fn download_adapter(
         .into_response())
 }
 
+/// Response for POST /v1/adapters/upload.
+#[derive(Serialize)]
+struct UploadAdapterResponse {
+    /// Adapter name as installed on disk.
+    name: String,
+    /// Total bytes written across all extracted files.
+    size_bytes: u64,
+    /// Number of regular files extracted.
+    files: u32,
+}
+
+/// Upper bound on uploaded archive size. Real Qwen3.5-4B rank-8 LoRA adapters
+/// land at ~30-60 MB compressed; 2 GB leaves room for high-rank or multi-LoRA
+/// archives without letting the body extractor become a DoS vector.
+const ADAPTER_UPLOAD_BODY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
+
+/// Maximum total size of extracted bytes per upload. Mirrors the body limit so
+/// a small archive cannot expand into a multi-terabyte tarbomb.
+const ADAPTER_EXTRACT_BYTES_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Maximum number of entries we'll extract from a single archive — guards
+/// against a tar with millions of zero-byte files.
+const ADAPTER_EXTRACT_ENTRIES_LIMIT: u32 = 100_000;
+
+/// Receive a multipart/form-data archive and install it as a new adapter
+/// directory under `adapter_dir`. Symmetric to `download_adapter`.
+async fn upload_adapter(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<UploadAdapterResponse>, ApiError> {
+    let mut name: Option<String> = None;
+    let mut archive_path: Option<PathBuf> = None;
+    let mut tmp_root: Option<PathBuf> = None;
+
+    // Cleanup helper used on every error path to remove the temp dir we
+    // allocated to buffer the upload bytes.
+    let cleanup_tmp = |tmp_root: &Option<PathBuf>| {
+        if let Some(root) = tmp_root.as_ref() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    };
+
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        cleanup_tmp(&tmp_root);
+        ApiError::adapter_import_invalid(format!("multipart parse error: {e}"))
+    })? {
+        let field_name = match field.name() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        match field_name.as_str() {
+            "name" => {
+                let bytes = field.bytes().await.map_err(|e| {
+                    cleanup_tmp(&tmp_root);
+                    ApiError::adapter_import_invalid(format!("reading 'name' field: {e}"))
+                })?;
+                let s = std::str::from_utf8(&bytes)
+                    .map_err(|_| {
+                        cleanup_tmp(&tmp_root);
+                        ApiError::adapter_import_invalid("'name' field must be UTF-8 text")
+                    })?
+                    .trim()
+                    .to_string();
+                if let Err(e) = validate_adapter_name(&s) {
+                    cleanup_tmp(&tmp_root);
+                    return Err(e);
+                }
+                name = Some(s);
+            }
+            "archive" => {
+                // Lazily create a tmp dir under adapter_dir on the first
+                // archive byte. Putting the temp file on the same filesystem
+                // lets the eventual rename into place be atomic.
+                if tmp_root.is_none() {
+                    let suffix: u128 = rand_suffix();
+                    let root = state.adapter_dir.join(format!(".upload-tmp-{suffix:032x}"));
+                    std::fs::create_dir_all(&root).map_err(|e| {
+                        ApiError::adapter_import_failed(format!(
+                            "creating temp dir {}: {e}",
+                            root.display()
+                        ))
+                    })?;
+                    tmp_root = Some(root);
+                }
+                let tmp_dir = tmp_root.as_ref().unwrap();
+                let archive_target = tmp_dir.join("archive.tar.gz");
+                let mut file = std::fs::File::create(&archive_target).map_err(|e| {
+                    cleanup_tmp(&tmp_root);
+                    ApiError::adapter_import_failed(format!(
+                        "creating temp archive {}: {e}",
+                        archive_target.display()
+                    ))
+                })?;
+                let mut total: u64 = 0;
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            total = total.saturating_add(chunk.len() as u64);
+                            if total > ADAPTER_EXTRACT_BYTES_LIMIT {
+                                cleanup_tmp(&tmp_root);
+                                return Err(ApiError::adapter_import_invalid(format!(
+                                    "archive exceeds {} GB byte limit",
+                                    ADAPTER_EXTRACT_BYTES_LIMIT / (1024 * 1024 * 1024)
+                                )));
+                            }
+                            if let Err(e) = file.write_all(&chunk) {
+                                cleanup_tmp(&tmp_root);
+                                return Err(ApiError::adapter_import_failed(format!(
+                                    "writing temp archive: {e}"
+                                )));
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            cleanup_tmp(&tmp_root);
+                            return Err(ApiError::adapter_import_invalid(format!(
+                                "reading 'archive' field: {e}"
+                            )));
+                        }
+                    }
+                }
+                if let Err(e) = file.sync_all() {
+                    cleanup_tmp(&tmp_root);
+                    return Err(ApiError::adapter_import_failed(format!(
+                        "flushing temp archive: {e}"
+                    )));
+                }
+                archive_path = Some(archive_target);
+            }
+            _ => {
+                // Unknown field — drain its body and ignore.
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let name = match name {
+        Some(n) => n,
+        None => {
+            cleanup_tmp(&tmp_root);
+            return Err(ApiError::adapter_import_invalid("missing 'name' field"));
+        }
+    };
+    let archive_path = match archive_path {
+        Some(p) => p,
+        None => {
+            cleanup_tmp(&tmp_root);
+            return Err(ApiError::adapter_import_invalid("missing 'archive' field"));
+        }
+    };
+
+    let target_dir = state.adapter_dir.join(&name);
+    if target_dir.exists() {
+        cleanup_tmp(&tmp_root);
+        return Err(ApiError::adapter_already_exists(&name));
+    }
+
+    // Extract on a blocking thread — tar/flate2 are sync, and decompression of
+    // a real adapter pegs a CPU for ~hundreds of ms.
+    let tmp_root_owned = tmp_root.clone().expect("tmp_root set when archive_path is set");
+    let archive_path_owned = archive_path.clone();
+    let target_dir_owned = target_dir.clone();
+    let extract_result = tokio::task::spawn_blocking(move || -> Result<(u64, u32), ImportError> {
+        let staging = tmp_root_owned.join("staging");
+        std::fs::create_dir_all(&staging).map_err(|e| ImportError::Failed(format!(
+            "creating staging dir: {e}"
+        )))?;
+
+        let file = std::fs::File::open(&archive_path_owned).map_err(|e| ImportError::Failed(format!(
+            "opening archive: {e}"
+        )))?;
+        let gz = GzDecoder::new(file);
+        let mut tar = tar::Archive::new(gz);
+
+        let entries = tar
+            .entries()
+            .map_err(|e| ImportError::Invalid(format!("reading tar entries: {e}")))?;
+
+        let mut bytes_written: u64 = 0;
+        let mut files_written: u32 = 0;
+        let mut strip_prefix: Option<Option<String>> = None;
+
+        let staging_canon = staging.canonicalize().map_err(|e| ImportError::Failed(format!(
+            "canonicalizing staging: {e}"
+        )))?;
+
+        for entry in entries {
+            let mut entry = entry.map_err(|e| ImportError::Invalid(format!(
+                "reading tar entry: {e}"
+            )))?;
+
+            files_written = files_written.saturating_add(1);
+            if files_written > ADAPTER_EXTRACT_ENTRIES_LIMIT {
+                return Err(ImportError::Invalid(format!(
+                    "archive contains more than {ADAPTER_EXTRACT_ENTRIES_LIMIT} entries"
+                )));
+            }
+
+            let entry_type = entry.header().entry_type();
+            if entry_type.is_dir() {
+                files_written = files_written.saturating_sub(1);
+                continue;
+            }
+            // Reject non-regular files (symlinks, hard links, devices, fifos).
+            if !entry_type.is_file() {
+                return Err(ImportError::Invalid(format!(
+                    "archive contains unsupported entry type {entry_type:?}"
+                )));
+            }
+
+            let entry_path = entry
+                .path()
+                .map_err(|e| ImportError::Invalid(format!("decoding entry path: {e}")))?
+                .into_owned();
+
+            // Strip a single leading top-level directory if every entry shares
+            // the same prefix (matches download's `name/<files>` layout).
+            let stripped: PathBuf = {
+                let mut comps = entry_path.components();
+                let first = comps.next();
+                match first {
+                    Some(Component::Normal(first_seg)) => {
+                        let first_str = first_seg.to_string_lossy().to_string();
+                        let observed = strip_prefix.get_or_insert_with(|| Some(first_str.clone()));
+                        match observed {
+                            Some(prefix) if *prefix == first_str => {
+                                let rest: PathBuf = comps.collect();
+                                if rest.as_os_str().is_empty() {
+                                    files_written = files_written.saturating_sub(1);
+                                    continue;
+                                }
+                                rest
+                            }
+                            _ => {
+                                // Mixed prefixes — install entries flat, no
+                                // strip after the first inconsistency.
+                                *observed = None;
+                                entry_path.clone()
+                            }
+                        }
+                    }
+                    _ => entry_path.clone(),
+                }
+            };
+
+            // Reject any path that is absolute, contains `..`, or resolves
+            // outside the staging directory.
+            for comp in stripped.components() {
+                match comp {
+                    Component::Normal(_) => {}
+                    Component::CurDir => {}
+                    _ => {
+                        return Err(ImportError::Invalid(format!(
+                            "archive entry has unsafe path: {}",
+                            stripped.display()
+                        )))
+                    }
+                }
+            }
+            if stripped.as_os_str().is_empty() {
+                files_written = files_written.saturating_sub(1);
+                continue;
+            }
+
+            let dest = staging.join(&stripped);
+            // Ensure dest stays under the staging dir even after canonicalization.
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| ImportError::Failed(format!(
+                    "creating dir {}: {e}",
+                    parent.display()
+                )))?;
+                let parent_canon = parent.canonicalize().map_err(|e| ImportError::Failed(format!(
+                    "canonicalizing {}: {e}",
+                    parent.display()
+                )))?;
+                if !parent_canon.starts_with(&staging_canon) {
+                    return Err(ImportError::Invalid(format!(
+                        "archive entry escapes staging dir: {}",
+                        stripped.display()
+                    )));
+                }
+            }
+
+            let size = entry.size();
+            bytes_written = bytes_written.saturating_add(size);
+            if bytes_written > ADAPTER_EXTRACT_BYTES_LIMIT {
+                return Err(ImportError::Invalid(format!(
+                    "decompressed archive exceeds {} GB limit",
+                    ADAPTER_EXTRACT_BYTES_LIMIT / (1024 * 1024 * 1024)
+                )));
+            }
+
+            let mut out = std::fs::File::create(&dest).map_err(|e| ImportError::Failed(format!(
+                "creating {}: {e}",
+                dest.display()
+            )))?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| ImportError::Failed(format!(
+                "writing {}: {e}",
+                dest.display()
+            )))?;
+        }
+
+        if files_written == 0 {
+            return Err(ImportError::Invalid(
+                "archive contained no regular files".to_string(),
+            ));
+        }
+
+        // Atomic rename of staging → target_dir. On the same filesystem this is
+        // a single inode move; if it fails (e.g. EXDEV) fall back to a copy.
+        std::fs::rename(&staging, &target_dir_owned).map_err(|e| ImportError::Failed(format!(
+            "renaming staging to {}: {e}",
+            target_dir_owned.display()
+        )))?;
+
+        Ok((bytes_written, files_written))
+    })
+    .await
+    .map_err(|e| {
+        cleanup_tmp(&tmp_root);
+        ApiError::adapter_import_failed(format!("join error: {e}"))
+    })?;
+
+    // Always remove the upload temp dir; the staging child has been renamed
+    // out by the success path or cleaned up on failure.
+    cleanup_tmp(&tmp_root);
+
+    let (size_bytes, files) = match extract_result {
+        Ok(v) => v,
+        Err(ImportError::Invalid(msg)) => {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(ApiError::adapter_import_invalid(msg));
+        }
+        Err(ImportError::Failed(msg)) => {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(ApiError::adapter_import_failed(msg));
+        }
+    };
+
+    tracing::info!(
+        adapter = %name,
+        size_bytes,
+        files,
+        operation = "upload",
+        "imported adapter from upload"
+    );
+
+    Ok(Json(UploadAdapterResponse {
+        name,
+        size_bytes,
+        files,
+    }))
+}
+
+/// Internal error type for the blocking extract task — separates user input
+/// problems (400) from server-side I/O failures (500).
+enum ImportError {
+    Invalid(String),
+    Failed(String),
+}
+
+/// Tiny stdlib-only random suffix so concurrent uploads don't collide.
+fn rand_suffix() -> u128 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u128;
+    let addr = &nanos as *const _ as u128;
+    nanos ^ (pid << 64) ^ addr.rotate_left(33)
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/adapters", get(list_adapters))
         .route("/v1/adapters/load", post(load_adapter))
         .route("/v1/adapters/unload", post(unload_adapter))
         .route("/v1/adapters/merge", post(merge_adapters))
+        .route(
+            "/v1/adapters/upload",
+            post(upload_adapter).layer(DefaultBodyLimit::max(ADAPTER_UPLOAD_BODY_LIMIT)),
+        )
         .route("/v1/adapters/{name}", delete(delete_adapter))
         .route("/v1/adapters/{name}/download", get(download_adapter))
 }
