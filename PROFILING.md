@@ -1,5 +1,35 @@
 # Kiln Profiling Report
 
+## Phase 7 H15c vLLM α microbench (2026-04-25)
+
+**Outcome: `vllm_mtp_unsupported`.** vLLM 0.19.1 segfaults during V1 engine
+init when loading Qwen3.5-4B with native MTP speculative decoding on A6000,
+post drafter weight load. All three method aliases (`qwen3_5_mtp` / `mtp`
+/ `qwen3_next_mtp` — vLLM internally rewrites the first and third to
+`mtp` per `vllm/config/speculative.py:323-330`) reach the same crash
+point and produce identical native-extension backtraces with no Python
+file symbols. The vLLM model-dispatch path is correct (`Qwen3_5MTP` arch
+in registry, drafter weights load, tied embed/lm_head attach), the crash
+is in a downstream native code path. Workarounds that took effect but did
+NOT prevent the crash: `enforce_eager=True` (no CUDA graphs),
+`limit_mm_per_prompt={image:0,video:0}` + `skip_mm_profiling=True` (text-
+only mode confirmed in vLLM logs). Per the pre-registered decision rule
+this maps to the `vllm_mtp_unsupported` branch — ship as a doc-only
+redirect PR, queue next H from PR #527 §"Queued next action". Possible
+next paths (next planning cycle picks): (a) build a hand-rolled HF
+transformers reference α as the external upper bound, (b) wait for a vLLM
+patch and re-run this PR's `scripts/h15c_*` as-is, or (c) refocus Phase 7
+onto non-α decode-path wins (PR #521 prefix-cache + CUDA graphs landed,
+PR #526 SGLang RadixAttention port queued). Kiln median α at this
+workload (re-derived from PR #529 c1_attr CSVs): 0.3636. See
+[`docs/phase7-h15c-vllm-alpha-microbench.md`](docs/phase7-h15c-vllm-alpha-microbench.md)
+for the full verdict, segfault signature + crash backtrace, per-seed α
+table, vLLM config used (BF16 confounder vs kiln Marlin W4A16),
+reproduction commands, anti-duplication evidence, and detailed reopen
+triggers. Raw data:
+`docs/phase-c29-v3-vllm/{verdict,compare,kiln_alpha_per_seed,vllm_alpha_per_seed}.json`
+and `docs/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log`.
+
 ## Phase 7 H15b stratified C29 v2 reject-row probe (2026-04-25)
 
 **Scope:** A6000 re-run of PR #355's C29 top-K Jaccard / cos_sim probe on
