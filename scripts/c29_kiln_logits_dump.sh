@@ -80,6 +80,8 @@ for seed in $SEEDS; do
     KILN_MTP_DEBUG=1 \
     KILN_C1_ATTR_PATH="$c1_attr_csv" \
     KILN_SPEC_METHOD=mtp \
+    KILN_SPEC_ENABLED=1 \
+    KILN_BENCH_FORCE_MTP=1 \
     KILN_W4A16=1 \
     "$KILN_BENCH" \
         --model-path "$MODEL_PATH" \
