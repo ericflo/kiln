@@ -19,7 +19,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-indicatif = "0.17"
+indicatif = "0.18"
 console = "0.16"
 
 [features]
