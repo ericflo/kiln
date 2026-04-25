@@ -59,6 +59,28 @@ impl Default for LoadModelOptions {
     }
 }
 
+/// Build a progress bar for the per-layer load loop.
+///
+/// Returns `None` when stderr is not a TTY so log files and piped output stay
+/// clean. The structured `tracing::info!` lines remain the source of truth for
+/// non-interactive runs; the bar is purely additive UX for the first-run
+/// `kiln serve` experience, where 32 layers stream off disk over 5–30s with no
+/// other visual feedback.
+fn make_layer_progress(num_layers: usize) -> Option<indicatif::ProgressBar> {
+    if !console::Term::stderr().features().is_attended() {
+        return None;
+    }
+    let pb = indicatif::ProgressBar::new(num_layers as u64);
+    pb.set_style(
+        indicatif::ProgressStyle::with_template(
+            "  loading layers {bar:40.cyan/blue} {pos:>3}/{len:3} ({elapsed})",
+        )
+        .expect("static progress template is valid")
+        .progress_chars("##-"),
+    );
+    Some(pb)
+}
+
 /// Load Qwen3.5-4B language model weights from a directory of safetensors files.
 ///
 /// Handles both single-file (`model.safetensors`) and sharded checkpoints
@@ -130,10 +152,17 @@ fn load_model_dense(
 
     // Load layers.
     let mut layers = Vec::with_capacity(config.num_layers);
+    let pb = make_layer_progress(config.num_layers);
     for i in 0..config.num_layers {
         let layer_prefix = format!("{prefix}layers.{i}.");
         let layer = load_layer(&tensor_map, &layer_prefix, i, config)?;
         layers.push(layer);
+        if let Some(pb) = &pb {
+            pb.inc(1);
+        }
+    }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
     // Load final norm.
@@ -235,10 +264,17 @@ fn load_model_gptq(
 
     // Load layers — linear projections are GPTQ-quantized, norms are dense.
     let mut layers = Vec::with_capacity(config.num_layers);
+    let pb = make_layer_progress(config.num_layers);
     for i in 0..config.num_layers {
         let layer_prefix = format!("{prefix}layers.{i}.");
         let layer = load_layer_gptq(&tensor_map, &layer_prefix, i, config, gptq_config)?;
         layers.push(layer);
+        if let Some(pb) = &pb {
+            pb.inc(1);
+        }
+    }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
     // Final norm — stored in original precision.
