@@ -484,7 +484,7 @@ The `kiln-marlin-gemm` crate (PR #146, vendored from the IST-DASLab Marlin kerne
 
 Two follow-on cleanups landed alongside the kernel:
 
-- **PR #210 — Marlin pack determinism + speed**. The 96 MLP projections used to pack serially in ~42.8 s at model load; PR #210 made the pack deterministic and parallelized it down to ~16.9 s. (See `MARLIN_MLP_BENCH.md` for the per-projection numbers.)
+- **PR #210 — Marlin pack determinism + speed**. The 96 MLP projections used to pack serially in ~42.8 s at model load; PR #210 made the pack deterministic and parallelized it down to ~16.9 s. (See [`docs/archive/benchmarks/MARLIN_MLP_BENCH.md`](docs/archive/benchmarks/MARLIN_MLP_BENCH.md) for the per-projection numbers.)
 - **PR #206 — BF16 weight VRAM cleanup**. Previously the BF16 MLP weights stayed resident alongside the packed Marlin weights even when `KILN_W4A16=1` (~4.4 GB unused). PR #206 drops the BF16 tensors after packing.
 
 See `crates/kiln-marlin-gemm/` for the kernel and `crates/kiln-model/src/marlin_proj.rs` for the BF16-Linear-compatible wrapper used by the forward path.
