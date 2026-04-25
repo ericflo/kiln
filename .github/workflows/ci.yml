@@ -7,12 +7,14 @@ on:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'deny.toml'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'deny.toml'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
 
@@ -68,3 +70,14 @@ jobs:
 
       - name: Test (default features)
         run: cargo test --locked -- --skip test_env_var_overrides --skip test_health_with_real_backend
+
+  cargo-deny:
+    name: cargo-deny (license / source / bans policy)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          # Run all checks: licenses, sources, bans, advisories
+          arguments: --all-features
