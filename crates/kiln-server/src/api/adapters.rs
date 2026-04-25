@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use kiln_model::adapter_merge::{merge_linear, PeftLora};
+use kiln_model::adapter_merge::{merge_linear, merge_ties, PeftLora};
 use kiln_model::lora_loader::LoraWeights;
 
 use crate::error::ApiError;
@@ -298,10 +298,17 @@ struct MergeAdapterRequest {
     sources: Vec<MergeSource>,
     /// Name of the output adapter (subdirectory created under adapter_dir).
     output_name: String,
-    /// Merge mode. Currently only "weighted_average" (the default) is
-    /// supported. TIES and concatenation will arrive in follow-up PRs.
+    /// Merge mode. Supported values: `"weighted_average"` (the default) and
+    /// `"ties"` (Yadav et al. 2023). Concatenation will arrive in a
+    /// follow-up PR.
     #[serde(default)]
     mode: Option<String>,
+    /// Density used by the TIES merge: keep the top fraction of values per
+    /// adapter per tensor. Required range `(0.0, 1.0]`. Ignored for
+    /// `weighted_average`. Defaults to 0.2 when `mode == "ties"`, following
+    /// the TIES paper's recommendation.
+    #[serde(default)]
+    density: Option<f32>,
 }
 
 /// Source summary echoed back in the merge response.
@@ -333,12 +340,39 @@ async fn merge_adapters(
     Json(req): Json<MergeAdapterRequest>,
 ) -> Result<Json<MergeAdapterResponse>, ApiError> {
     // Validate mode (default = weighted_average).
-    let mode = req.mode.as_deref().unwrap_or("weighted_average");
-    if mode != "weighted_average" {
-        return Err(ApiError::adapter_merge_invalid(format!(
-            "unsupported merge mode '{mode}' — only 'weighted_average' is supported in v1"
-        )));
-    }
+    let mode_str = req.mode.as_deref().unwrap_or("weighted_average");
+    let resolved_mode: &'static str = match mode_str {
+        "weighted_average" => "weighted_average",
+        "ties" => "ties",
+        other => {
+            return Err(ApiError::adapter_merge_invalid(format!(
+                "unsupported merge mode '{other}' — supported modes are 'weighted_average' and 'ties'"
+            )));
+        }
+    };
+
+    // Validate TIES density up-front so callers get a clean 400 before
+    // we touch any I/O.
+    let ties_density: f32 = match resolved_mode {
+        "ties" => {
+            let d = req.density.unwrap_or(0.2);
+            if !(d.is_finite() && d > 0.0 && d <= 1.0) {
+                return Err(ApiError::adapter_merge_invalid(format!(
+                    "density must be in (0.0, 1.0]; got {d}"
+                )));
+            }
+            d
+        }
+        _ => {
+            if req.density.is_some() {
+                return Err(ApiError::adapter_merge_invalid(
+                    "density is only supported when mode == \"ties\"",
+                ));
+            }
+            // Unused for weighted_average.
+            0.0
+        }
+    };
 
     // Need at least one source.
     if req.sources.is_empty() {
@@ -388,6 +422,7 @@ async fn merge_adapters(
     // Run the (potentially slow, CPU-bound) merge work on a blocking thread.
     let output_name_for_task = output_name.clone();
     let output_path_for_task = output_path.clone();
+    let mode_for_task = resolved_mode;
     let merge_result = tokio::task::spawn_blocking(move || -> Result<usize, MergeError> {
         // Load each source adapter from disk.
         let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
@@ -402,7 +437,11 @@ async fn merge_adapters(
         let refs: Vec<(&PeftLora, f32)> =
             loaded.iter().map(|(a, w)| (a, *w)).collect();
 
-        let merged = merge_linear(&refs).map_err(|e| MergeError::Invalid(format!("{e}")))?;
+        let merged = match mode_for_task {
+            "ties" => merge_ties(&refs, ties_density)
+                .map_err(|e| MergeError::Invalid(format!("{e}")))?,
+            _ => merge_linear(&refs).map_err(|e| MergeError::Invalid(format!("{e}")))?,
+        };
         let num_tensors = merged.tensors.len();
         merged
             .save(&output_path_for_task)
@@ -433,7 +472,7 @@ async fn merge_adapters(
         output = %output_name,
         num_sources = req.sources.len(),
         num_tensors,
-        mode,
+        mode = resolved_mode,
         operation = "merge",
         "merged LoRA adapters"
     );
@@ -441,7 +480,7 @@ async fn merge_adapters(
     Ok(Json(MergeAdapterResponse {
         status: "merged",
         output_name,
-        mode: "weighted_average",
+        mode: resolved_mode,
         sources: sources_info,
         num_tensors,
     }))

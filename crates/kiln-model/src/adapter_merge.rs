@@ -1,16 +1,29 @@
-//! Adapter merging via weighted (linear-interpolation) averaging.
+//! Adapter merging across PEFT-compatible LoRA adapters.
 //!
 //! Given a set of `(adapter, weight)` pairs that share the same rank,
 //! target modules, and tensor layout, produces a new PEFT-compatible
-//! LoRA adapter whose A/B matrices are the weighted sum of the inputs:
+//! LoRA adapter whose A/B matrices combine the inputs.
 //!
-//! ```text
-//! merged_A = Σᵢ wᵢ · Aᵢ
-//! merged_B = Σᵢ wᵢ · Bᵢ
-//! ```
+//! Two merge modes are supported:
 //!
-//! This is the "weighted average" / linear-interpolation merge mode.
-//! TIES and concatenation merging are deferred to follow-up PRs.
+//! - **Linear interpolation** (`merge_linear`) — elementwise weighted sum:
+//!   ```text
+//!   merged[k] = Σᵢ wᵢ · adapters[i].tensors[k]
+//!   ```
+//!
+//! - **TIES** (`merge_ties`, Yadav et al. 2023, arXiv 2306.01708) — three
+//!   phases per tensor:
+//!     1. *Trim*: per adapter, zero all values outside the top `density`
+//!        fraction by absolute magnitude.
+//!     2. *Elect sign*: per parameter position, the sign of the
+//!        weight-scaled sum across adapters is the elected sign.
+//!     3. *Disjoint merge*: per parameter position, weight-average only
+//!        the trimmed values whose sign matches the elected sign.
+//!
+//!   TIES typically reduces task interference when merging adapters that
+//!   adapt the same model in conflicting directions.
+//!
+//! Concatenation merging is deferred to a follow-up PR.
 //!
 //! All merging is performed in `f32` on CPU using raw safetensors I/O,
 //! so it does not depend on candle / CUDA and can be unit-tested without
@@ -292,6 +305,199 @@ pub fn merge_linear(adapters: &[(&PeftLora, f32)]) -> Result<PeftLora> {
         config: first.config.clone(),
         tensors: merged,
     })
+}
+
+/// TIES merge of LoRA adapters (Yadav et al. 2023, arXiv 2306.01708).
+///
+/// Three phases applied per tensor key:
+/// 1. **Trim** each adapter's tensor: keep only the top `density` fraction
+///    of values by absolute magnitude. The remainder are zeroed.
+/// 2. **Elect sign** per parameter position: the sign of
+///    `Σⱼ wⱼ · trimmed_j[i]`. Positions where every trimmed value is zero
+///    (or where the signed sum is exactly 0) elect a zero sign.
+/// 3. **Disjoint merge** per parameter position: weight-average only the
+///    trimmed values whose sign matches the elected sign:
+///    ```text
+///    out[i] = (Σ_{j ∈ S(i)} wⱼ · trimmed_j[i]) / (Σ_{j ∈ S(i)} wⱼ)
+///    ```
+///    where `S(i) = { j : sign(trimmed_j[i]) == elected_sign(i) }`.
+///    Positions with a zero elected sign output 0.
+///
+/// `density` controls how aggressively each adapter is trimmed; values in
+/// `(0, 1]` are required. `density = 1.0` keeps every value (no trimming);
+/// `density = 0.2` follows the TIES paper's default and keeps the top 20%
+/// of magnitudes per adapter per tensor.
+///
+/// Validation matches `merge_linear`: at least one adapter, identical
+/// rank, target_modules, base model, tensor key sets, and shapes.
+pub fn merge_ties(adapters: &[(&PeftLora, f32)], density: f32) -> Result<PeftLora> {
+    if adapters.is_empty() {
+        bail!("merge_ties requires at least one source adapter");
+    }
+    if !(density.is_finite() && density > 0.0 && density <= 1.0) {
+        bail!(
+            "merge_ties density must be in (0.0, 1.0]; got {density}"
+        );
+    }
+
+    let (first, _) = adapters[0];
+    let first_rank = first.rank();
+    let first_targets = first.target_modules();
+    let first_base = first.base_model();
+
+    let mut keys: Vec<&String> = first.tensors.keys().collect();
+    keys.sort();
+
+    // Validate every adapter against the first (same shape/config rules
+    // as merge_linear so a TIES merge fails loudly rather than silently
+    // producing nonsense).
+    for (idx, (adapter, _)) in adapters.iter().enumerate().skip(1) {
+        if adapter.rank() != first_rank {
+            bail!(
+                "adapter rank mismatch: source[0] has r={:?}, source[{idx}] has r={:?} \
+                 (TIES merge requires identical rank)",
+                first_rank,
+                adapter.rank()
+            );
+        }
+        let targets = adapter.target_modules();
+        if !same_string_set(&first_targets, &targets) {
+            bail!(
+                "adapter target_modules mismatch: source[0] has {:?}, source[{idx}] has {:?}",
+                first_targets,
+                targets
+            );
+        }
+        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model()) {
+            if a != b {
+                bail!(
+                    "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
+                     source[{idx}] is {b:?}"
+                );
+            }
+        }
+        if first.tensors.len() != adapter.tensors.len() {
+            bail!(
+                "adapter tensor count mismatch: source[0] has {} tensors, source[{idx}] has {}",
+                first.tensors.len(),
+                adapter.tensors.len()
+            );
+        }
+        for key in adapter.tensors.keys() {
+            if !first.tensors.contains_key(key.as_str()) {
+                bail!(
+                    "adapter tensor key mismatch: source[{idx}] has tensor {:?} not present in source[0]",
+                    key
+                );
+            }
+        }
+        for key in &keys {
+            let a = &first.tensors[key.as_str()];
+            let b = adapter.tensors.get(key.as_str()).ok_or_else(|| {
+                anyhow!("adapter tensor key mismatch: source[{idx}] missing tensor {:?}", key)
+            })?;
+            if a.shape != b.shape {
+                bail!(
+                    "tensor shape mismatch for {key:?}: source[0] is {:?}, source[{idx}] is {:?}",
+                    a.shape,
+                    b.shape
+                );
+            }
+        }
+    }
+
+    let mut merged: BTreeMap<String, MergeTensor> = BTreeMap::new();
+    for key in &keys {
+        let key_str = key.as_str();
+        let template = &first.tensors[key_str];
+        let n = template.numel();
+
+        // Phase 1 — trim each adapter's tensor independently.
+        let trimmed: Vec<Vec<f32>> = adapters
+            .iter()
+            .map(|(adapter, _)| trim_top_density(&adapter.tensors[key_str].data, density))
+            .collect();
+
+        let mut out = vec![0.0_f32; n];
+        for i in 0..n {
+            // Phase 2 — elect sign from the weight-scaled sum.
+            let mut signed_sum = 0.0_f32;
+            for (j, (_, w)) in adapters.iter().enumerate() {
+                signed_sum += w * trimmed[j][i];
+            }
+            let elected = if signed_sum > 0.0 {
+                1.0_f32
+            } else if signed_sum < 0.0 {
+                -1.0_f32
+            } else {
+                0.0_f32
+            };
+            if elected == 0.0 {
+                continue; // out[i] stays 0.0
+            }
+
+            // Phase 3 — disjoint weighted average over sign-matching adapters.
+            let mut weighted_sum = 0.0_f32;
+            let mut weight_sum = 0.0_f32;
+            for (j, (_, w)) in adapters.iter().enumerate() {
+                let v = trimmed[j][i];
+                let v_sign = if v > 0.0 {
+                    1.0_f32
+                } else if v < 0.0 {
+                    -1.0_f32
+                } else {
+                    0.0_f32
+                };
+                if v_sign == elected {
+                    weighted_sum += w * v;
+                    weight_sum += w;
+                }
+            }
+            if weight_sum != 0.0 {
+                out[i] = weighted_sum / weight_sum;
+            }
+        }
+
+        merged.insert(
+            key_str.to_string(),
+            MergeTensor {
+                shape: template.shape.clone(),
+                data: out,
+            },
+        );
+    }
+
+    Ok(PeftLora {
+        config: first.config.clone(),
+        tensors: merged,
+    })
+}
+
+/// Trim a flat tensor: keep only the top `density` fraction of values by
+/// absolute magnitude; zero the remainder. `density >= 1.0` is a no-op.
+///
+/// On ties at the magnitude threshold, all tied values are kept (so the
+/// number of non-zeros may slightly exceed `round(density * n)`).
+fn trim_top_density(values: &[f32], density: f32) -> Vec<f32> {
+    let n = values.len();
+    if n == 0 || density >= 1.0 {
+        return values.to_vec();
+    }
+    let keep_count = ((density * n as f32).round() as usize).min(n);
+    if keep_count == 0 {
+        return vec![0.0; n];
+    }
+    if keep_count >= n {
+        return values.to_vec();
+    }
+    let mut abs_vals: Vec<f32> = values.iter().map(|v| v.abs()).collect();
+    abs_vals
+        .sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold = abs_vals[keep_count - 1];
+    values
+        .iter()
+        .map(|&v| if v.abs() >= threshold { v } else { 0.0 })
+        .collect()
 }
 
 fn same_string_set(a: &[String], b: &[String]) -> bool {
@@ -644,6 +850,191 @@ mod tests {
             ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
         for v in &b.data {
             assert!((*v - 3.0).abs() < 1e-6);
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // TIES merge tests
+    // -----------------------------------------------------------------
+
+    fn lora_a_key() -> &'static str {
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+    }
+
+    fn lora_b_key() -> &'static str {
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"
+    }
+
+    #[test]
+    fn test_merge_ties_density_one_equals_linear_when_signs_agree() -> Result<()> {
+        // density = 1.0 (no trim) + all-positive values + weights summing
+        // to 1.0 means TIES collapses to merge_linear's weighted sum.
+        let adapter1 = make_adapter(2, vec![2.0_f32; 8], vec![4.0_f32; 6]);
+        let adapter2 = make_adapter(2, vec![6.0_f32; 8], vec![8.0_f32; 6]);
+
+        let ties = merge_ties(&[(&adapter1, 0.5), (&adapter2, 0.5)], 1.0)?;
+        let linear = merge_linear(&[(&adapter1, 0.5), (&adapter2, 0.5)])?;
+
+        for key in linear.tensors.keys() {
+            let t = &ties.tensors[key];
+            let l = &linear.tensors[key];
+            assert_eq!(t.shape, l.shape, "shape mismatch for {key}");
+            assert_eq!(t.data.len(), l.data.len(), "len mismatch for {key}");
+            for (i, (a, b)) in t.data.iter().zip(l.data.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "ties[{key}][{i}]={a} vs linear={b}"
+                );
+            }
+        }
+
+        // Spot-check exact values: 0.5*2 + 0.5*6 = 4 in A, 0.5*4 + 0.5*8 = 6 in B.
+        for v in &ties.tensors[lora_a_key()].data {
+            assert!((*v - 4.0).abs() < 1e-6, "expected 4.0 in A, got {v}");
+        }
+        for v in &ties.tensors[lora_b_key()].data {
+            assert!((*v - 6.0).abs() < 1e-6, "expected 6.0 in B, got {v}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_ties_trims_low_magnitude_values() -> Result<()> {
+        // Distinct magnitudes so the threshold cut is unambiguous. With a
+        // single adapter, sign election and the disjoint merge collapse
+        // back to "trimmed value", so the output equals the trimmed input.
+        let a_data: Vec<f32> = vec![1.0, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0];
+        let b_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let adapter = make_adapter(2, a_data, b_data);
+
+        let merged = merge_ties(&[(&adapter, 1.0)], 0.5)?;
+
+        // A: top 4 by abs are [8,7,6,5]; threshold = 5; keep abs >= 5.
+        let expected_a: Vec<f32> = vec![0.0, 5.0, 0.0, 6.0, 0.0, 7.0, 0.0, 8.0];
+        // B: top 3 by abs are [6,5,4]; threshold = 4; keep abs >= 4.
+        let expected_b: Vec<f32> = vec![0.0, 0.0, 0.0, 4.0, 5.0, 6.0];
+
+        let a_out = &merged.tensors[lora_a_key()].data;
+        let b_out = &merged.tensors[lora_b_key()].data;
+        assert_eq!(a_out.len(), expected_a.len());
+        assert_eq!(b_out.len(), expected_b.len());
+        for (got, want) in a_out.iter().zip(expected_a.iter()) {
+            assert!((got - want).abs() < 1e-6, "A: got {got}, want {want}");
+        }
+        for (got, want) in b_out.iter().zip(expected_b.iter()) {
+            assert!((got - want).abs() < 1e-6, "B: got {got}, want {want}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_ties_sign_election_resolves_conflicts() -> Result<()> {
+        // Two adapters, one all-positive +10, one all-negative -10. The
+        // higher-weighted side should drive both the elected sign and
+        // the final value (its magnitude wins because the other side's
+        // adapters are excluded from the disjoint average).
+        let pos = make_adapter(2, vec![10.0_f32; 8], vec![10.0_f32; 6]);
+        let neg = make_adapter(2, vec![-10.0_f32; 8], vec![-10.0_f32; 6]);
+
+        // Positive side wins (0.7 > 0.3).
+        let merged = merge_ties(&[(&pos, 0.7), (&neg, 0.3)], 1.0)?;
+        for v in &merged.tensors[lora_a_key()].data {
+            assert!((*v - 10.0).abs() < 1e-6, "expected +10 in A, got {v}");
+        }
+        for v in &merged.tensors[lora_b_key()].data {
+            assert!((*v - 10.0).abs() < 1e-6, "expected +10 in B, got {v}");
+        }
+
+        // Negative side wins (0.7 > 0.3).
+        let merged = merge_ties(&[(&pos, 0.3), (&neg, 0.7)], 1.0)?;
+        for v in &merged.tensors[lora_a_key()].data {
+            assert!((*v + 10.0).abs() < 1e-6, "expected -10 in A, got {v}");
+        }
+        for v in &merged.tensors[lora_b_key()].data {
+            assert!((*v + 10.0).abs() < 1e-6, "expected -10 in B, got {v}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_ties_validates_density_range() {
+        let a = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+
+        // density = 0.0 is excluded (open lower bound).
+        let err = merge_ties(&[(&a, 1.0)], 0.0).unwrap_err();
+        assert!(
+            format!("{err}").contains("density"),
+            "expected density error, got: {err}"
+        );
+
+        // density > 1.0 is excluded.
+        let err = merge_ties(&[(&a, 1.0)], 1.5).unwrap_err();
+        assert!(
+            format!("{err}").contains("density"),
+            "expected density error, got: {err}"
+        );
+
+        // negative density rejected.
+        let err = merge_ties(&[(&a, 1.0)], -0.5).unwrap_err();
+        assert!(
+            format!("{err}").contains("density"),
+            "expected density error, got: {err}"
+        );
+
+        // NaN rejected.
+        let err = merge_ties(&[(&a, 1.0)], f32::NAN).unwrap_err();
+        assert!(
+            format!("{err}").contains("density"),
+            "expected density error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_ties_empty_errors() {
+        let err = merge_ties(&[], 0.5).unwrap_err();
+        assert!(
+            format!("{err}").contains("at least one source adapter"),
+            "expected empty error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_ties_rank_mismatch_errors() {
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        let a2 = make_adapter(4, vec![1.0_f32; 16], vec![1.0_f32; 12]);
+        let err = merge_ties(&[(&a1, 0.5), (&a2, 0.5)], 0.5).unwrap_err();
+        assert!(
+            format!("{err}").contains("rank mismatch"),
+            "expected rank mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_ties_save_and_load_roundtrip() -> Result<()> {
+        // Smoke-test that a TIES-merged adapter is on-disk PEFT-compatible
+        // and round-trips through PeftLora::save/load like a linear merge.
+        let dir = tempdir()?;
+        let merged_dir = dir.path().join("merged");
+
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        let a2 = make_adapter(2, vec![3.0_f32; 8], vec![3.0_f32; 6]);
+        let merged = merge_ties(&[(&a1, 0.5), (&a2, 0.5)], 1.0)?;
+        merged.save(&merged_dir)?;
+
+        let loaded = PeftLora::load(&merged_dir)?;
+        assert_eq!(loaded.rank(), Some(2));
+        assert_eq!(loaded.target_modules(), vec!["q_proj".to_string()]);
+        // (0.5*1 + 0.5*3)/(0.5+0.5) = 2.0 in both A and B.
+        for v in &loaded.tensors[lora_a_key()].data {
+            assert!((*v - 2.0).abs() < 1e-6);
+        }
+        for v in &loaded.tensors[lora_b_key()].data {
+            assert!((*v - 2.0).abs() < 1e-6);
         }
 
         Ok(())
