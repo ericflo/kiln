@@ -1,5 +1,14 @@
 # Phase C39 — post-#423 replay-context fix + fresh seed bisect
 
+> **Note on artifact links below:** Raw nvtx CSVs and bench logs were
+> removed from the working tree on 2026-04-25 to clean up the top-level
+> directory. The exact files cited in this report are preserved in git
+> history at commit `07993f0272b0ef229246e4f3cc979abb7b05e145` (origin/main immediately before the
+> cleanup PR). To inspect any referenced artifact, run:
+> `git show 07993f0272b0ef229246e4f3cc979abb7b05e145:<path>` (e.g. `profile-out/...`, `c12-out/...`,
+> `profiling-artifacts/...`).
+
+
 **Date:** 2026-04-23  
 **Current main:** `61badb6` (PR #423 on `main`)  
 **Hardware:** RunPod `NVIDIA A40` via `ghcr.io/ericflo/kiln-runpod:latest`

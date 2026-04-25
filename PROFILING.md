@@ -1,5 +1,14 @@
 # Kiln Profiling Report
 
+> **Note on artifact links below:** Raw nvtx CSVs and bench logs were removed
+> from the working tree on 2026-04-25 to clean up the top-level directory.
+> The exact files cited in this report are preserved in git history at commit
+> `07993f0272b0ef229246e4f3cc979abb7b05e145` (origin/main immediately before
+> the cleanup PR). To inspect any referenced artifact, run:
+> `git show 07993f0272b0ef229246e4f3cc979abb7b05e145:profile-out/<file>`
+> (or whichever path is cited — `c12-out/`, `profile/`, `profiling/`, or
+> `profiling-artifacts/`).
+
 ## Phase 7 end-to-end native-MTP self-spec decode bench (2026-04-25)
 
 **Verdict: `mtp_no_decode_win`.** End-to-end MTP-On vs MTP-Off

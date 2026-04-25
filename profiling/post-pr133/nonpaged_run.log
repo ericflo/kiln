@@ -1,55 +1,0 @@
-[36m=== kiln-runpod image ===[0m
-  GPU: NVIDIA RTX A6000, 550.127.08
-  CUDA toolkit: release 12.4
-  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
-  rustc: 1.95.0 | cargo: 1.95.0
-  sccache: 0.9.1 | nextest: (65e806bd5
-  torch: 2.4.1+cu124 (cuda=12.4)
-
-Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
-
-=== Kiln Benchmark Suite ===
-
-GPU: NVIDIA RTX A6000 (49140 MB)
-Loading model from /root/models/qwen3.5-4b...
-[2m2026-04-18T08:27:13.485804Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /root/models/qwen3.5-4b (2 shards)
-[2m2026-04-18T08:27:13.487813Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
-[2m2026-04-18T08:27:20.251665Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
-Model loaded in 11.67s (VRAM: 16367 MB)
-
---- Latency Benchmark ---
-  Measuring latency (506 prompt tokens)...
-    Prefill: 435.9ms (1161 tok/s)
-    Decode: 129 tokens, mean ITL 41.4ms (24.2 tok/s)
-
---- Training Benchmark (skipped) ---
-[2m2026-04-18T08:27:31.812388Z[0m [32m INFO[0m [2mkiln_model::cuda_graph[0m[2m:[0m CUDA graphs enabled for decode
-
---- Inference Throughput Benchmarks ---
-
-1 sequential runs:
-  Warmup...
-  Running 1 sequential generations...
-    Run 1/1: 128 tokens in 4447.7ms (28.8 tok/s)
-  => 28.8 tok/s aggregate
-
-4 sequential runs:
-  Warmup...
-  Running 4 sequential generations...
-    Run 1/4: 128 tokens in 3268.5ms (39.2 tok/s)
-    Run 2/4: 128 tokens in 3264.9ms (39.2 tok/s)
-    Run 3/4: 128 tokens in 3269.2ms (39.2 tok/s)
-    Run 4/4: 128 tokens in 3264.7ms (39.2 tok/s)
-  => 39.2 tok/s aggregate
-
-8 sequential runs:
-  Warmup...
-  Running 8 sequential generations...
-    Run 1/8: 128 tokens in 3275.2ms (39.1 tok/s)
-    Run 2/8: 128 tokens in 3277.9ms (39.0 tok/s)
-Collecting data...
-Generating '/tmp/nsys-report-fcaf.qdstrm'
-[1/1] [0%                          ] profile_nonpaged.nsys-rep[1/1] [0%                          ] profile_nonpaged.nsys-rep[1/1] [==20%                       ] profile_nonpaged.nsys-rep[1/1] [======35%                   ] profile_nonpaged.nsys-rep[1/1] [=======39%                  ] profile_nonpaged.nsys-rep[1/1] [=========43%                ] profile_nonpaged.nsys-rep[1/1] [=========45%                ] profile_nonpaged.nsys-rep[1/1] [==========48%               ] profile_nonpaged.nsys-rep[1/1] [===========50%              ] profile_nonpaged.nsys-rep[1/1] [===========52%              ] profile_nonpaged.nsys-rep[1/1] [============54%             ] profile_nonpaged.nsys-rep[1/1] [============55%             ] profile_nonpaged.nsys-rep[1/1] [============56%             ] profile_nonpaged.nsys-rep[1/1] [============57%             ] profile_nonpaged.nsys-rep[1/1] [=============58%            ] profile_nonpaged.nsys-rep[1/1] [=============59%            ] profile_nonpaged.nsys-rep[1/1] [=============60%            ] profile_nonpaged.nsys-rep[1/1] [==============61%           ] profile_nonpaged.nsys-rep[1/1] [==============62%           ] profile_nonpaged.nsys-rep[1/1] [===============65%          ] profile_nonpaged.nsys-rep[1/1] [================69%         ] profile_nonpaged.nsys-rep[1/1] [=================72%        ] profile_nonpaged.nsys-rep[1/1] [==================75%       ] profile_nonpaged.nsys-rep[1/1] [==================76%       ] profile_nonpaged.nsys-rep[1/1] [==================77%       ] profile_nonpaged.nsys-rep[1/1] [==================78%       ] profile_nonpaged.nsys-rep[1/1] [===================79%      ] profile_nonpaged.nsys-rep[1/1] [===================80%      ] profile_nonpaged.nsys-rep[1/1] [===================81%      ] profile_nonpaged.nsys-rep[1/1] [===================82%      ] profile_nonpaged.nsys-rep[1/1] [====================83%     ] profile_nonpaged.nsys-rep[1/1] [====================84%     ] profile_nonpaged.nsys-rep[1/1] [====================85%     ] profile_nonpaged.nsys-rep[1/1] [=====================86%    ] profile_nonpaged.nsys-rep[1/1] [=====================87%    ] profile_nonpaged.nsys-rep[1/1] [=====================88%    ] profile_nonpaged.nsys-rep[1/1] [======================91%   ] profile_nonpaged.nsys-rep[1/1] [=======================94%  ] profile_nonpaged.nsys-rep[1/1] [=======================95%  ] profile_nonpaged.nsys-rep[1/1] [=======================96%  ] profile_nonpaged.nsys-rep[1/1] [0%                          ] profile_nonpaged.nsys-rep[1/1] [==21%                       ] profile_nonpaged.nsys-rep[1/1] [=17%                        ] profile_nonpaged.nsys-rep[1/1] [14%                         ] profile_nonpaged.nsys-rep[1/1] [12%                         ] profile_nonpaged.nsys-rep[1/1] [10%                         ] profile_nonpaged.nsys-rep[1/1] [9%                          ] profile_nonpaged.nsys-rep[1/1] [8%                          ] profile_nonpaged.nsys-rep[1/1] [7%                          ] profile_nonpaged.nsys-rep[1/1] [6%                          ] profile_nonpaged.nsys-rep[1/1] [5%                          ] profile_nonpaged.nsys-rep[1/1] [0%                          ] profile_nonpaged.nsys-rep[1/1] [5%                          ] profile_nonpaged.nsys-rep[1/1] [6%                          ] profile_nonpaged.nsys-rep[1/1] [7%                          ] profile_nonpaged.nsys-rep[1/1] [8%                          ] profile_nonpaged.nsys-rep[1/1] [9%                          ] profile_nonpaged.nsys-rep[1/1] [10%                         ] profile_nonpaged.nsys-rep[1/1] [11%                         ] profile_nonpaged.nsys-rep[1/1] [12%                         ] profile_nonpaged.nsys-rep[1/1] [13%                         ] profile_nonpaged.nsys-rep[1/1] [14%                         ] profile_nonpaged.nsys-rep[1/1] [=15%                        ] profile_nonpaged.nsys-rep[1/1] [=16%                        ] profile_nonpaged.nsys-rep[1/1] [=17%                        ] profile_nonpaged.nsys-rep[1/1] [==18%                       ] profile_nonpaged.nsys-rep[1/1] [==19%                       ] profile_nonpaged.nsys-rep[1/1] [==20%                       ] profile_nonpaged.nsys-rep[1/1] [==21%                       ] profile_nonpaged.nsys-rep[1/1] [===22%                      ] profile_nonpaged.nsys-rep[1/1] [===23%                      ] profile_nonpaged.nsys-rep[1/1] [===24%                      ] profile_nonpaged.nsys-rep[1/1] [====25%                     ] profile_nonpaged.nsys-rep[1/1] [====26%                     ] profile_nonpaged.nsys-rep[1/1] [====27%                     ] profile_nonpaged.nsys-rep[1/1] [====28%                     ] profile_nonpaged.nsys-rep[1/1] [=====29%                    ] profile_nonpaged.nsys-rep[1/1] [=====30%                    ] profile_nonpaged.nsys-rep[1/1] [=====31%                    ] profile_nonpaged.nsys-rep[1/1] [=====32%                    ] profile_nonpaged.nsys-rep[1/1] [======33%                   ] profile_nonpaged.nsys-rep[1/1] [======34%                   ] profile_nonpaged.nsys-rep[1/1] [======35%                   ] profile_nonpaged.nsys-rep[1/1] [=======36%                  ] profile_nonpaged.nsys-rep[1/1] [=======37%                  ] profile_nonpaged.nsys-rep[1/1] [=======38%                  ] profile_nonpaged.nsys-rep[1/1] [=======39%                  ] profile_nonpaged.nsys-rep[1/1] [========40%                 ] profile_nonpaged.nsys-rep[1/1] [========41%                 ] profile_nonpaged.nsys-rep[1/1] [========42%                 ] profile_nonpaged.nsys-rep[1/1] [=========43%                ] profile_nonpaged.nsys-rep[1/1] [=========44%                ] profile_nonpaged.nsys-rep[1/1] [=========45%                ] profile_nonpaged.nsys-rep[1/1] [=========46%                ] profile_nonpaged.nsys-rep[1/1] [==========47%               ] profile_nonpaged.nsys-rep[1/1] [==========48%               ] profile_nonpaged.nsys-rep[1/1] [==========49%               ] profile_nonpaged.nsys-rep[1/1] [===========50%              ] profile_nonpaged.nsys-rep[1/1] [===========51%              ] profile_nonpaged.nsys-rep[1/1] [===========52%              ] profile_nonpaged.nsys-rep[1/1] [===========53%              ] profile_nonpaged.nsys-rep[1/1] [============54%             ] profile_nonpaged.nsys-rep[1/1] [============55%             ] profile_nonpaged.nsys-rep[1/1] [============56%             ] profile_nonpaged.nsys-rep[1/1] [============57%             ] profile_nonpaged.nsys-rep[1/1] [=============58%            ] profile_nonpaged.nsys-rep[1/1] [=============59%            ] profile_nonpaged.nsys-rep[1/1] [=============60%            ] profile_nonpaged.nsys-rep[1/1] [==============61%           ] profile_nonpaged.nsys-rep[1/1] [==============62%           ] profile_nonpaged.nsys-rep[1/1] [==============63%           ] profile_nonpaged.nsys-rep[1/1] [==============64%           ] profile_nonpaged.nsys-rep[1/1] [===============65%          ] profile_nonpaged.nsys-rep[1/1] [===============66%          ] profile_nonpaged.nsys-rep[1/1] [===============67%          ] profile_nonpaged.nsys-rep[1/1] [================68%         ] profile_nonpaged.nsys-rep[1/1] [================69%         ] profile_nonpaged.nsys-rep[1/1] [================70%         ] profile_nonpaged.nsys-rep[1/1] [========================100%] profile_nonpaged.nsys-rep[1/1] [========================100%] profile_nonpaged.nsys-rep
-Generated:
-    /tmp/profile_nonpaged.nsys-rep
-EXIT_CODE=143

@@ -1,4 +1,0 @@
-attempt,graphs_setting,bench_prefill_ms,bench_prefill_tok_s,artifact,error_status,error_excerpt
-post403-main-control,true,4785.148922,1709.455679,not-run,control_only,"Required same-pod fresh-main control before the branch run"
-post403-branch-triangular-masks,true,3348.251686,2443.066044,not-run,warm_bias_suspected,"Front-half triangular shared-mask packing looked faster, but it ran second on the pod"
-post403-main-warm-rerun,true,3347.088583,2443.915002,not-run,revert_after_warm_control,"Fresh-main rerun after the branch matched the branch nearly exactly, so the kernel diff was reverted"

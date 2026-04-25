@@ -1,5 +1,14 @@
 # Phase C37 — post-#420 seed0-vs-seed1 `h_main` drift audit
 
+> **Note on artifact links below:** Raw nvtx CSVs and bench logs were
+> removed from the working tree on 2026-04-25 to clean up the top-level
+> directory. The exact files cited in this report are preserved in git
+> history at commit `07993f0272b0ef229246e4f3cc979abb7b05e145` (origin/main immediately before the
+> cleanup PR). To inspect any referenced artifact, run:
+> `git show 07993f0272b0ef229246e4f3cc979abb7b05e145:<path>` (e.g. `profile-out/...`, `c12-out/...`,
+> `profiling-artifacts/...`).
+
+
 **Date:** 2026-04-23  
 **Current main:** `59ea3b5` (PR #419 merged; PR #420 already on `main`)  
 **Hardware:** RunPod `NVIDIA A40` via `ghcr.io/ericflo/kiln-runpod:latest`  
