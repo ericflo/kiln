@@ -130,6 +130,37 @@ pub enum AdapterCommands {
     },
 }
 
+/// Probe GPU 0 via `nvidia-smi` for device name and VRAM (total, free) in MiB.
+///
+/// Returns `None` if nvidia-smi is missing, exits non-zero, or output cannot be parsed.
+/// Banner display is purely cosmetic, so any failure is silent.
+fn probe_gpu_info() -> Option<(String, u64, u64)> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,memory.free",
+            "--format=csv,noheader,nounits",
+            "-i",
+            "0",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    let line = stdout.lines().next()?.trim();
+    let mut parts = line.split(',').map(str::trim);
+    let name = parts.next()?.to_string();
+    let total_mib: u64 = parts.next()?.parse().ok()?;
+    let free_mib: u64 = parts.next()?.parse().ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, total_mib, free_mib))
+}
+
 /// Print the startup banner with config details.
 pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path: Option<&str>) {
     let mut stderr = std::io::stderr();
@@ -195,6 +226,22 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
         style("not available").yellow()
     };
     let _ = writeln!(stderr, "  {} {}", style("CUDA:").dim(), cuda_status);
+
+    if let Some((name, total_mib, free_mib)) = probe_gpu_info() {
+        let _ = writeln!(
+            stderr,
+            "  {} {}",
+            style("GPU:").dim(),
+            style(name).white().bold()
+        );
+        let _ = writeln!(
+            stderr,
+            "  {} {} MiB total, {} MiB free",
+            style("VRAM:").dim(),
+            style(format!("{total_mib}")).cyan().bold(),
+            style(format!("{free_mib}")).cyan()
+        );
+    }
 
     let _ = writeln!(
         stderr,
