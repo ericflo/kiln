@@ -204,7 +204,7 @@ jobs:
         # `cuda-`, so those two have to be listed under
         # `non-cuda-sub-packages` (Linux-only input) which skips the prefix
         # but still appends `-12-4`.
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
           cuda: '12.4.1'
@@ -309,7 +309,7 @@ jobs:
         # Windows with this action; the working pattern is a full
         # `method: local` install. That's only ~3 GB extra on the runner
         # and we already have the disk headroom.
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
           cuda: '12.4.1'
