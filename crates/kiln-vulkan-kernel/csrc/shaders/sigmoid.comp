@@ -1,0 +1,11 @@
+// Sigmoid activation kernel
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters { uint count; };
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= count) return;
+    data_out[idx] = 1.0 / (1.0 + exp(-data_x[idx]));
+}

@@ -1,0 +1,57 @@
+// Causal Conv1d kernel for Kiln (depthwise, kernel_size=4)
+// Input: x[B,C,T], weight[C,K], conv_state[B,C,K-1]
+// Output: out[B,C,T] (silu-fused), conv_state updated in-place
+
+#version 450
+
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) buffer ConvStateBuf { float data_conv_state[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint total = batch * channels * seq_len;
+    if (idx >= total) {
+        return;
+    }
+
+    const uint b = idx / (channels * seq_len);
+    const uint c = (idx / seq_len) % channels;
+    const uint t = idx % seq_len;
+
+    float sum = 0.0;
+    for (uint k = 0; k < kernel_size; k++) {
+        float x_val;
+        if (t - k >= 0) {
+            x_val = data_x[((b * channels + c) * seq_len) + (t - k)];
+        } else {
+            x_val = data_conv_state[(b * channels + c) * (kernel_size - 1) + (kernel_size - 1 - k)];
+        }
+        sum += x_val * data_weight[c * kernel_size + k];
+    }
+
+    // Silu activation: x * sigmoid(x)
+    float silu = sum / (1.0 + exp(-sum));
+    data_out[idx] = silu;
+
+    // Update conv_state: shift left and append newest x
+    if (t == seq_len - 1) {
+        for (uint k = kernel_size - 2; k > 0; k--) {
+            data_conv_state[(b * channels + c) * (kernel_size - 1) + k] =
+                data_conv_state[(b * channels + c) * (kernel_size - 1) + k - 1];
+        }
+        data_conv_state[(b * channels + c) * (kernel_size - 1)] = data_x[((b * channels + c) * seq_len)];
+    }
+}

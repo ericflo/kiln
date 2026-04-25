@@ -23,6 +23,7 @@ kiln-flash-attn = { workspace = true, optional = true }
 kiln-gdn-kernel = { workspace = true, optional = true }
 kiln-marlin-gemm = { workspace = true, optional = true }
 kiln-rmsnorm-kernel = { workspace = true, optional = true }
+kiln-vulkan-kernel = { workspace = true, optional = true }
 kiln-nvtx = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -30,6 +31,7 @@ indicatif = "0.18"
 console = "0.16"
 half = { version = "2", optional = true }
 objc2-metal = { version = "0.3", optional = true }
+
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:half"]
@@ -40,6 +42,11 @@ metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "de
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
 # link line. Pair with `--features cuda,nvtx`.
 nvtx = ["kiln-nvtx/nvtx"]
+# Enable Vulkan backend for AMD/Intel GPUs. Uses vulkan-rs with GLSL compute
+# shaders compiled to SPIR-V at build time. candle-core has no native Vulkan
+# device, so the Vulkan backend manages its own vk::Device and copies tensor
+# data through the CPU path at kernel boundaries.
+vulkan = ["dep:kiln-vulkan-kernel"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

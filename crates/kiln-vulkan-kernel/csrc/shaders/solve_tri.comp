@@ -1,0 +1,45 @@
+// GDN forward substitution kernel (solve_tri)
+// Computes W = (I + A_strict)^{-1} (beta * V_prime)
+// A_strict: [B,H,C,C] lower-triangular, V_prime: [B,H,C,dv], beta: [B,H,C]
+// Output: W: [B,H,C,dv]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint chunk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer AStrictBuf { float data_a_strict[]; };
+layout(binding = 1) readonly buffer VPrimeBuf { float data_v_prime[]; };
+layout(binding = 2) readonly buffer BetaBuf { float data_beta[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * heads * chunk * dv;
+    if (idx >= total) return;
+
+    uint b = idx / (heads * chunk * dv);
+    uint h = (idx / (chunk * dv)) % heads;
+    uint c = (idx / dv) % chunk;
+    uint d = idx % dv;
+
+    uint bh = b * heads + h;
+    uint base = bh * chunk * chunk;
+    uint v_base = bh * chunk * dv;
+
+    // Forward substitution for triangular solve
+    float val = data_v_prime[v_base + c * dv + d] * data_beta[bh * chunk + c];
+    
+    for (uint j = 0; j < c; j++) {
+        val -= data_a_strict[base + c * chunk + j] * data_out[v_base + j * dv + d];
+    }
+    
+    data_out[v_base + c * dv + d] = val;
+}

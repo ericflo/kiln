@@ -1,0 +1,95 @@
+// FlashAttention-2 kernel for Kiln (simplified, prefill path)
+// Input: q[B,S,H,D], k[B,S,H,D], v[B,S,H,D]
+// Output: out[B,S,H,D]
+// Layout: row-major [batch, seq, head, dim], float32
+
+#version 450
+
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint seq_len;
+    uint num_heads;
+    uint head_dim;
+    float softmax_scale;
+    bool causal;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf { float data_v[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+layout(binding = 4) writeonly buffer LseBuf { float data_lse[]; };
+
+shared float s_q[256 * 64];
+shared float s_k[256 * 64];
+shared float s_v[256 * 64];
+
+void main() {
+    const uint head = gl_WorkGroupID.x;
+    const uint seq = gl_WorkGroupID.y;
+    const uint batch = gl_WorkGroupID.z;
+    const uint tid = gl_LocalInvocationID.x;
+
+    if (head >= num_heads || seq >= seq_len || batch >= batch) {
+        return;
+    }
+
+    const uint q_base = (batch * seq_len + seq) * num_heads * head_dim + head * head_dim;
+    const uint k_base = (batch * seq_len + seq) * num_heads * head_dim + head * head_dim;
+    const uint v_base = (batch * seq_len + seq) * num_heads * head_dim + head * head_dim;
+    const uint out_base = q_base;
+
+    // Load Q into shared memory
+    for (uint i = tid; i < head_dim; i += 256) {
+        s_q[tid * head_dim + i] = data_q[q_base + i];
+    }
+    barrier();
+
+    // Compute attention scores and weighted sum
+    float max_logit = -1e20;
+    float sum_logit = 0.0;
+    float out[64];
+    for (uint d = 0; d < head_dim; d++) {
+        out[d] = 0.0;
+    }
+
+    for (uint s = 0; s < seq_len; s++) {
+        uint k_offset = (batch * seq_len + s) * num_heads * head_dim + head * head_dim;
+        uint v_offset = k_offset;
+
+        float logit = 0.0;
+        for (uint d = 0; d < head_dim; d++) {
+            logit += s_q[tid * head_dim + d] * data_k[k_offset + d];
+        }
+        logit *= softmax_scale;
+
+        if (causal && s > seq) {
+            logit = -1e20;
+        }
+
+        float old_max = max_logit;
+        max_logit = max(max_logit, logit);
+        float alpha = exp(old_max - max_logit);
+        float exp_logit = exp(logit - max_logit);
+
+        sum_logit = sum_logit * alpha + exp_logit;
+
+        for (uint d = 0; d < head_dim; d++) {
+            out[d] = out[d] * alpha + exp_logit * data_v[v_offset + d];
+        }
+    }
+
+    // Normalize and write output
+    for (uint d = tid; d < head_dim; d += 256) {
+        data_out[out_base + d] = out[d] / sum_logit;
+    }
+
+    // Write log-sum-exp
+    if (tid == 0) {
+        data_lse[batch * seq_len * num_heads + seq * num_heads + head] = max_logit + log(sum_logit);
+    }
+}

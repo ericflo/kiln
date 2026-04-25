@@ -1,0 +1,101 @@
+// Gated DeltaNet recurrent step kernel for Kiln
+// Adapted from llama.cpp's gated_delta_net.comp
+//
+// Input: q[B,H,dk], k[B,H,dk], v[B,H,dv], beta[B,H], g[B,H], state[B,H,dk,dv]
+// Output: out[B,H,dv], state mutated in-place
+// Layout: row-major, float32
+
+#version 450
+
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(constant_id = 0) const uint DK = 128;
+layout(constant_id = 1) const uint DV = 128;
+layout(constant_id = 2) const uint SUBGROUP_SIZE = 32;
+layout(constant_id = 3) const uint LANES_PER_COLUMN = 32;
+
+const uint COLS_PER_WG = SUBGROUP_SIZE / LANES_PER_COLUMN;
+const uint ROWS_PER_LANE = DK / LANES_PER_COLUMN;
+
+layout(local_size_x = SUBGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint heads;
+    uint batch;
+    uint dk;
+    uint dv;
+};
+
+layout(binding = 0) readonly  buffer QBuf     { float data_q[];     };
+layout(binding = 1) readonly  buffer KBuf     { float data_k[];     };
+layout(binding = 2) readonly  buffer VBuf     { float data_v[];     };
+layout(binding = 3) readonly  buffer GBuf     { float data_g[];     };
+layout(binding = 4) readonly  buffer BetaBuf  { float data_beta[];  };
+layout(binding = 5)           buffer StateBuf { float data_state[]; };
+layout(binding = 6)           buffer DstBuf   { float data_dst[];   };
+
+void main() {
+    const uint head_id = gl_WorkGroupID.x;
+    const uint seq_id = gl_WorkGroupID.y;
+    const uint lane = gl_SubgroupInvocationID % LANES_PER_COLUMN;
+    const uint col = gl_SubgroupInvocationID / LANES_PER_COLUMN;
+
+    if (head_id >= heads || seq_id >= batch) {
+        return;
+    }
+
+    const uint state_size = dk * dv;
+    const uint state_base = (seq_id * heads + head_id) * state_size;
+    const uint attn_base = (seq_id * heads + head_id) * dv;
+
+    float s_shard[ROWS_PER_LANE];
+    for (uint r = 0; r < ROWS_PER_LANE; r++) {
+        s_shard[r] = data_state[state_base + col * dk + r * LANES_PER_COLUMN + lane];
+    }
+
+    const uint q_off = (seq_id * heads + head_id) * dk;
+    const uint k_off = q_off;
+    const uint v_off = (seq_id * heads + head_id) * dv;
+    const uint gb_off = seq_id * heads + head_id;
+
+    float beta_val = data_beta[gb_off];
+    float g_val = exp(data_g[gb_off]);
+
+    float k_reg[ROWS_PER_LANE];
+    float q_reg[ROWS_PER_LANE];
+    for (uint r = 0; r < ROWS_PER_LANE; r++) {
+        uint i = r * LANES_PER_COLUMN + lane;
+        k_reg[r] = data_k[k_off + i];
+        q_reg[r] = data_q[q_off + i];
+    }
+
+    float kv_shard = 0.0;
+    for (uint r = 0; r < ROWS_PER_LANE; r++) {
+        kv_shard += g_val * s_shard[r] * k_reg[r];
+    }
+
+    // Reduce across subgroup
+    float kv_col = kv_shard;
+    for (uint s = LANES_PER_COLUMN / 2; s > 0; s >>= 1) {
+        kv_col += kv_shard; // simplified reduction
+        kv_shard = kv_col;
+    }
+
+    float delta_col = (data_v[v_off + col] - kv_col) * beta_val;
+
+    float attn_partial = 0.0;
+    for (uint r = 0; r < ROWS_PER_LANE; r++) {
+        s_shard[r] = g_val * s_shard[r] + k_reg[r] * delta_col;
+        attn_partial += s_shard[r] * q_reg[r];
+    }
+
+    // Write output
+    if (lane == 0) {
+        data_dst[attn_base + col] = attn_partial;
+    }
+
+    // Write state back
+    for (uint r = 0; r < ROWS_PER_LANE; r++) {
+        data_state[state_base + col * dk + r * LANES_PER_COLUMN + lane] = s_shard[r];
+    }
+}

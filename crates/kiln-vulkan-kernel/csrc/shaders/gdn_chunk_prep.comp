@@ -1,0 +1,67 @@
+// GDN chunk prep kernel
+// Computes: a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last
+// Input: g[B,H,C], v[B,H,C,dv], kkt[B,H,C,C], qkt[B,H,C,C],
+//         ks_entry[B,H,C,dv], q_s[B,H,C,dv]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint chunk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer GBuf { float data_g[]; };
+layout(binding = 1) readonly buffer VBuf { float data_v[]; };
+layout(binding = 2) readonly buffer KktBuf { float data_kkt[]; };
+layout(binding = 3) readonly buffer QktBuf { float data_qkt[]; };
+layout(binding = 4) readonly buffer KsEntryBuf { float data_ks_entry[]; };
+layout(binding = 5) readonly buffer QSBuf { float data_q_s[]; };
+layout(binding = 6) writeonly buffer AStrictBuf { float data_a_strict[]; };
+layout(binding = 7) writeonly buffer BMaskBuf { float data_b_mask[]; };
+layout(binding = 8) writeonly buffer VPrimeBuf { float data_v_prime[]; };
+layout(binding = 9) writeonly buffer QSScaledBuf { float data_q_s_scaled[]; };
+layout(binding = 10) writeonly buffer DecayLastColBuf { float data_decay_last_col[]; };
+layout(binding = 11) writeonly buffer PLastBuf { float data_p_last[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_bh = batch * heads;
+    if (idx >= total_bh * chunk * chunk + total_bh * chunk * dv * 2) return;
+
+    uint bh = idx / (chunk * chunk + chunk * dv * 2);
+    uint local = idx % (chunk * chunk + chunk * dv * 2);
+
+    uint g_base = bh * chunk;
+    uint cc_base = bh * chunk * chunk;
+    uint cv_base = bh * chunk * dv;
+
+    if (local < chunk * chunk) {
+        uint c1 = local / chunk;
+        uint c2 = local % chunk;
+        float decay;
+        if (c1 > c2) {
+            decay = exp(data_g[g_base + c1] - data_g[g_base + c2]);
+        } else {
+            decay = 0.0;
+        }
+        // a_strict: kkt * decay * strict_lower
+        data_a_strict[cc_base + local] = (c1 > c2) ? data_kkt[cc_base + local] * decay : 0.0;
+        // b_mask: qkt * decay * causal_lower (c1 >= c2)
+        data_b_mask[cc_base + local] = (c1 >= c2) ? data_qkt[cc_base + local] * decay : 0.0;
+    } else if (local < chunk * chunk + chunk * dv) {
+        uint cv = (local - chunk * chunk) / dv;
+        uint d = (local - chunk * chunk) % dv;
+        float p = exp(data_g[g_base + chunk - 1] - data_g[g_base + cv]);
+        // v_prime: v - ks_entry * p
+        data_v_prime[cv_base + cv * dv + d] = data_v[cv_base + cv * dv + d] - data_ks_entry[cv_base + cv * dv + d] * p;
+        // q_s_scaled: q_s * p
+        data_q_s_scaled[cv_base + cv * dv + d] = data_q_s[cv_base + cv * dv + d] * p;
+    } else {
+        // decay_last_col and p_last handled separately
+    }
+}

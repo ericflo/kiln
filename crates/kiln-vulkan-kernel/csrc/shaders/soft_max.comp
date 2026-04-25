@@ -1,0 +1,51 @@
+// Softmax kernel (row-wise on last dimension)
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint cols;
+};
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+shared float max_sh[256];
+shared float sum_sh[256];
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * cols;
+    
+    // Find max
+    float local_max = -1e20;
+    for (uint col = tid; col < cols; col += 256) {
+        local_max = max(local_max, data_x[base + col]);
+    }
+    max_sh[tid] = local_max;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) max_sh[tid] = max(max_sh[tid], max_sh[tid + s]);
+        barrier();
+    }
+    float row_max = max_sh[0];
+    
+    // Compute exp and sum
+    float local_sum = 0.0;
+    for (uint col = tid; col < cols; col += 256) {
+        float v = exp(data_x[base + col] - row_max);
+        data_out[base + col] = v;
+        local_sum += v;
+    }
+    sum_sh[tid] = local_sum;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) sum_sh[tid] += sum_sh[tid + s];
+        barrier();
+    }
+    float row_sum = sum_sh[0];
+    
+    // Normalize
+    for (uint col = tid; col < cols; col += 256) {
+        data_out[base + col] /= row_sum;
+    }
+}

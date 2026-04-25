@@ -29,6 +29,9 @@ pub mod cuda;
 #[cfg(feature = "metal")]
 pub mod metal;
 
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
+
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
@@ -482,12 +485,25 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 /// backend and Metal kernels. The former MLX bridge was removed because it
 /// only accelerated attention while paying Candle<->MLX host-copy overheads
 /// and bypassing Kiln's Qwen3.5 GDN decode kernels.
+///
+/// Vulkan devices are detected at runtime — candle-core has no native Vulkan
+/// device, so we always pass a CPU device to `VulkanBackend` and let it
+/// manage its own `vk::Device` internally.
 pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
     match device {
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(device.clone())),
         #[cfg(feature = "metal")]
         Device::Metal(_) => Arc::new(metal::MetalBackend::new(device.clone())),
-        _ => Arc::new(cpu::CpuBackend::new(device.clone())),
+        _ => {
+            // Vulkan: candle-core has no Device::Vulkan, so we detect at runtime
+            #[cfg(feature = "vulkan")]
+            {
+                if vulkan::vulkan_is_available() {
+                    return Arc::new(vulkan::VulkanBackend::new(device.clone()));
+                }
+            }
+            Arc::new(cpu::CpuBackend::new(device.clone()))
+        }
     }
 }

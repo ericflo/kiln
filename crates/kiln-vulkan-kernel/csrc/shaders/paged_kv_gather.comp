@@ -1,0 +1,39 @@
+// Paged KV gather kernel
+// Gathers K/V from paged pool into contiguous buffer using block table
+// Input: k_pool[total_slots, num_kv_heads, head_dim], v_pool[total_slots, num_kv_heads, head_dim],
+//        block_table[batch, max_blocks]
+// Output: k_contig[batch, max_blocks*block_size, num_kv_heads, head_dim],
+//         v_contig[batch, max_blocks*block_size, num_kv_heads, head_dim]
+
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint max_blocks;
+    uint block_size;
+    uint num_kv_heads;
+    uint head_dim;
+};
+layout(binding = 0) readonly buffer KPoolBuf { float data_k_pool[]; };
+layout(binding = 1) readonly buffer VPoolBuf { float data_v_pool[]; };
+layout(binding = 2) readonly buffer BlockTableBuf { uint data_block_table[]; };
+layout(binding = 3) writeonly buffer KContigBuf { float data_k_contig[]; };
+layout(binding = 4) writeonly buffer VContigBuf { float data_v_contig[]; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * max_blocks * block_size * num_kv_heads * head_dim;
+    if (idx >= total) return;
+    
+    uint b = idx / (max_blocks * block_size * num_kv_heads * head_dim);
+    uint local = idx % (max_blocks * block_size * num_kv_heads * head_dim);
+    uint block_pos = local / (block_size * num_kv_heads * head_dim);
+    uint slot_in_block = (local / (num_kv_heads * head_dim)) % block_size;
+    uint hv = local % (num_kv_heads * head_dim);
+    
+    uint block_id = data_block_table[b * max_blocks + block_pos];
+    uint src_slot = block_id * block_size + slot_in_block;
+    uint src_idx = src_slot * num_kv_heads * head_dim + hv;
+    
+    data_k_contig[idx] = data_k_pool[src_idx];
+    data_v_contig[idx] = data_v_pool[src_idx];
+}

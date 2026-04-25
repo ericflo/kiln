@@ -1,0 +1,50 @@
+// GDN chunk scan kernel
+// Performs the scan operation for chunkwise recurrence
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint chunk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer AStrictBuf { float data_a_strict[]; };
+layout(binding = 1) readonly buffer BMaskBuf { float data_b_mask[]; };
+layout(binding = 2) readonly buffer VPrimeBuf { float data_v_prime[]; };
+layout(binding = 3) readonly buffer QSScaledBuf { float data_q_s_scaled[]; };
+layout(binding = 4) readonly buffer BetaBuf { float data_beta[]; };
+layout(binding = 5) readonly buffer DecayLastColBuf { float data_decay_last_col[]; };
+layout(binding = 6) writeonly buffer OutBuf { float data_out[]; };
+layout(binding = 7) writeonly buffer POutBuf { float data_p_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * heads * chunk * dv;
+    if (idx >= total) return;
+
+    uint b = idx / (heads * chunk * dv);
+    uint h = (idx / (chunk * dv)) % heads;
+    uint c = (idx / dv) % chunk;
+    uint d = idx % dv;
+
+    uint bh = b * heads + h;
+    uint base = bh * chunk * dv;
+    uint cc_base = bh * chunk * chunk;
+
+    // Scan: accumulate through the chunk
+    float acc = 0.0;
+    for (uint j = 0; j <= c; j++) {
+        float product = 1.0;
+        for (uint k = j + 1; k <= c; k++) {
+            product *= data_a_strict[cc_base + k * chunk + j];
+        }
+        acc += product * data_v_prime[base + j * dv + d];
+    }
+    
+    data_out[base + c * dv + d] = acc * data_beta[bh * chunk + c];
+}

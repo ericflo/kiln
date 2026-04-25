@@ -1,0 +1,38 @@
+// GDN input projection decode kernel (fused matmul)
+// Computes: mixed_qkv = x @ W_qkv^T, z = x @ W_z^T, a = x @ W_a^T, b = x @ W_b^T
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint hidden;
+    uint qkv_size;
+    uint z_size;
+    uint a_size;
+    uint b_size;
+};
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WQkvBuf { float data_w_qkv_t[]; };
+layout(binding = 2) readonly buffer WZBuf { float data_w_z_t[]; };
+layout(binding = 3) readonly buffer WA_buf { float data_w_a_t[]; };
+layout(binding = 4) readonly buffer WB_buf { float data_w_b_t[]; };
+layout(binding = 5) writeonly buffer QkvOutBuf { float data_qkv_out[]; };
+layout(binding = 6) writeonly buffer ZOutBuf { float data_z_out[]; };
+layout(binding = 7) writeonly buffer AOutBuf { float data_a_out[]; };
+layout(binding = 8) writeonly buffer BOutBuf { float data_b_out[]; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint b = idx / (qkv_size + z_size + a_size + b_size);
+    uint local = idx % (qkv_size + z_size + b_size + a_size);
+    if (b >= batch) return;
+    
+    uint x_off = b * hidden;
+    
+    // Compute matmul for each output
+    float acc = 0.0;
+    for (uint i = 0; i < hidden; i++) {
+        acc += data_x[x_off + i] * data_w_qkv_t[i * qkv_size + local % qkv_size];
+    }
+    if (local < qkv_size) {
+        data_qkv_out[b * qkv_size + local] = acc;
+    }
+}

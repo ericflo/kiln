@@ -1,0 +1,34 @@
+// GDN gates kernel: beta = sigmoid(b), g = -exp(A_log) * softplus(a + dt_bias)
+// Input: a[B,T,nv], b[B,T,nv], a_log[nv], dt_bias[nv]
+// Output: beta[B,T,nv], g[B,T,nv]
+
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters {
+    uint total;
+    uint nv;
+};
+layout(binding = 0) readonly buffer ABuf { float data_a[]; };
+layout(binding = 1) readonly buffer BBuf { float data_b[]; };
+layout(binding = 2) readonly buffer ALogBuf { float data_a_log[]; };
+layout(binding = 3) readonly buffer DtBiasBuf { float data_dt_bias[]; };
+layout(binding = 4) writeonly buffer BetaOutBuf { float data_beta_out[]; };
+layout(binding = 5) writeonly buffer GOutBuf { float data_g_out[]; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= total) return;
+    uint nv_idx = idx % nv;
+    
+    float a_val = data_a[idx];
+    float b_val = data_b[idx];
+    float a_log_val = data_a_log[nv_idx];
+    float dt_bias_val = data_dt_bias[nv_idx];
+    
+    // beta = sigmoid(b)
+    data_beta_out[idx] = 1.0 / (1.0 + exp(-b_val));
+    
+    // g = -exp(A_log) * softplus(a + dt_bias)
+    float a_plus_bias = a_val + dt_bias_val;
+    float softplus = log(1.0 + exp(a_plus_bias));
+    data_g_out[idx] = -exp(a_log_val) * softplus;
+}

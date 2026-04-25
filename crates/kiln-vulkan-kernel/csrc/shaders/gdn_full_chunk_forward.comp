@@ -1,0 +1,62 @@
+// GDN full chunk forward kernel (fused prep + scan)
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint chunk;
+    uint dk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer GBuf { float data_g[]; };
+layout(binding = 1) readonly buffer VBuf { float data_v[]; };
+layout(binding = 2) readonly buffer KktBuf { float data_kkt[]; };
+layout(binding = 3) readonly buffer QktBuf { float data_qkt[]; };
+layout(binding = 4) readonly buffer KsEntryBuf { float data_ks_entry[]; };
+layout(binding = 5) readonly buffer QSBuf { float data_q_s[]; };
+layout(binding = 6) readonly buffer BetaBuf { float data_beta[]; };
+layout(binding = 7) readonly buffer KTBuf { float data_k_t[]; };
+layout(binding = 8) buffer StateBuf { float data_state[]; };
+layout(binding = 9) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * heads * chunk * dv;
+    if (idx >= total) return;
+
+    uint b = idx / (heads * chunk * dv);
+    uint h = (idx / (chunk * dv)) % heads;
+    uint c = (idx / dv) % chunk;
+    uint d = idx % dv;
+
+    uint bh = b * heads + h;
+    uint g_base = bh * chunk;
+    uint cc_base = bh * chunk * chunk;
+    uint cv_base = bh * chunk * dv;
+
+    // Compute decay
+    float decay = exp(data_g[g_base + c]);
+    
+    // Compute v_prime and q_s_scaled
+    float p = exp(data_g[g_base + chunk - 1] - data_g[g_base + c]);
+    float v_prime = data_v[cv_base + c * dv + d] - data_ks_entry[cv_base + c * dv + d] * p;
+    float q_s_scaled = data_q_s[cv_base + c * dv + d] * p;
+
+    // Scan through chunk
+    float acc = 0.0;
+    for (uint j = 0; j <= c; j++) {
+        float product = 1.0;
+        for (uint k = j + 1; k <= c; k++) {
+            product *= (k > j) ? data_kkt[cc_base + k * chunk + j] * exp(data_g[g_base + k] - data_g[g_base + j]) : 1.0;
+        }
+        float pj = exp(data_g[g_base + chunk - 1] - data_g[g_base + j]);
+        float vp_j = data_v[cv_base + j * dv + d] - data_ks_entry[cv_base + j * dv + d] * pj;
+        acc += product * vp_j;
+    }
+
+    data_out[cv_base + c * dv + d] = acc * data_beta[bh * chunk + c];
+}

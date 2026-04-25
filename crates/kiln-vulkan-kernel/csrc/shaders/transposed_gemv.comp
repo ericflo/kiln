@@ -1,0 +1,21 @@
+// Transposed GEMV kernel (for LoRA delta decode)
+// out = x @ weight^T where weight is non-contiguous
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+};
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= out_dim) return;
+    
+    float acc = 0.0;
+    for (uint i = 0; i < hidden; i++) {
+        acc += data_x[i] * data_weight[i * out_dim + idx];
+    }
+    data_out[idx] = acc;
+}
