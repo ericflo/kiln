@@ -684,6 +684,7 @@ async fn generate_real_streaming(
     let created = now_epoch();
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
+    let decode_stats = state.decode_stats.clone();
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -881,6 +882,9 @@ async fn generate_real_streaming(
                         match join_result {
                             Ok((rx_back, Ok(StreamEvent::Token(token)))) => {
                                 maybe_rx = Some(rx_back);
+                                if let Ok(mut stats) = decode_stats.lock() {
+                                    stats.record_token(std::time::Instant::now());
+                                }
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
