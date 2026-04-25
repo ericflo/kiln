@@ -1,5 +1,55 @@
 # Kiln Profiling Report
 
+## Phase 7 H17b vLLM v0.20.0 α microbench retest (2026-04-25)
+
+**Verdict: `vllm_020_mtp_unsupported_dense_4b`.** vLLM v0.20.0
+prerelease (the "free pre-step" branch from PR #531's pre-registered
+decision rule, fired by PR #532's `sglang_mtp_unsupported_dense_4b`)
+also cannot serve Qwen3.5-4B dense BF16 + native MTP on A6000 sm_86 —
+this run, however, fails for a distinct **runtime-stack** reason
+rather than another segfault inside dispatched MTP code. The vLLM
+0.20.0 prerelease wheel `vllm-0.20.0+cu129` (the only x86_64 wheel
+published as of 2026-04-25 for the v0.20.0 release tag of 2026-04-23)
+pulls `torch 2.11.0+cu130` as a transitive dep; that wheel requires
+NVIDIA driver ≥575 to load CUDA 12.9 runtime libs and ≥580 for CUDA
+13.0. RunPod's `kiln-runpod` stock image ships driver 550.127.08
+(CUDA 12.4 max), so `torch.cuda.is_available()` returns `False` with
+warning `"NVIDIA driver on your system is too old (found version
+12040)"`, and vLLM's V1 EngineCore subprocess crashes at first GPU
+init with `RuntimeError: Cannot re-initialize CUDA in forked
+subprocess` at `torch.accelerator.set_device_index()` →
+`torch._C._accelerator_setDeviceIndex()` →
+`torch/cuda/__init__.py:466 _lazy_init`. Reproduced for all three
+method aliases (`qwen3_5_mtp` / `mtp` / `qwen3_next_mtp`); each
+takes ~1-3 s wall-clock and each crashes inside the same CUDA-init
+code path before any MTP-specific dispatch can run. Per the
+pre-registered decision rule, `mtp_supported == false` maps to the
+`vllm_020_mtp_unsupported_dense_4b` branch — ship as a doc-only
+redirect PR. Kiln median α at this workload (unchanged from PR #530
+/ PR #532, re-derived from PR #529 c1_attr CSVs): 0.3636. vLLM 0.20.0
+median α: UNAVAILABLE. PyPI does not yet publish 0.20.0 (still
+0.19.1 latest); the only published wheels are `+cu129` and `+cu130`
+on `wheels.vllm.ai/0.20.0/`, both incompatible with current RunPod
+stock A6000 driver. The H17b run cannot make any statement about
+whether 0.20.0's MTP path actually works correctly — it never
+reaches MTP code at all. With vLLM 0.19.1 (PR #530) AND vLLM 0.20.0
+(this run) AND SGLang main HEAD (PR #532) all blocked, the
+external-α reference question now points unambiguously to the
+hand-rolled HF transformers H18 reference (PR #531 candidate 8) as
+the only remaining viable path. Bench envelope: pool acquire
+succeeded on first try (no fallback needed); pod
+`mfk88l8i8tab02`, ~13 min wall-clock / ~$0.10 — well under $0.40
+H17b cap. Reopen preconditions: vLLM publishing a `+cu124`/`+cu128`
+0.20.x wheel; RunPod stock driver upgrade to ≥580; or H18
+hand-rolled reference closing the question independently. See
+[`docs/phase7-h17b-vllm-020-alpha-microbench.md`](docs/phase7-h17b-vllm-020-alpha-microbench.md)
+for the full verdict, the runtime-stack delta table, the canonical
+3-attempt crash trace, anti-duplication evidence, reproduction
+commands, and detailed reopen triggers. Raw data:
+`docs/phase-c29-v3-vllm-020/{verdict,compare,kiln_alpha_per_seed,vllm_020_alpha_per_seed}.json`,
+`docs/phase-c29-v3-vllm-020/compare.md`, and
+`docs/phase-c29-v3-vllm-020/artifacts/{vllm_020_failure_evidence,driver_full}.log`.
+
 ## Phase 7 H17 SGLang α microbench (2026-04-25)
 
 **Verdict: `sglang_mtp_unsupported_dense_4b`.** SGLang 0.5.10.post1 +
