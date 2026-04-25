@@ -102,6 +102,24 @@ impl ApiError {
         }
     }
 
+    pub fn invalid_adapter_name(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_adapter_name",
+            message: format!("Invalid adapter name '{name}'"),
+            hint: "Adapter names must be a single path segment: no '/', '\\', or '..', and not absolute.",
+        }
+    }
+
+    pub fn adapter_export_failed(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "adapter_export_failed",
+            message: format!("Failed to export adapter: {detail}"),
+            hint: "Check server logs and that the adapter directory is readable.",
+        }
+    }
+
     pub fn adapter_load_failed(detail: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
