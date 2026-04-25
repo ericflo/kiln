@@ -12,6 +12,7 @@ mod completions;
 mod adapters;
 mod training;
 mod config;
+mod stats;
 mod ui;
 
 #[cfg(test)]
@@ -60,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .merge(adapters::routes())
         .merge(training::routes())
         .merge(config::routes())
+        .merge(stats::routes())
         .merge(ui::routes())
         .with_state(state)
         .layer(CorsLayer::permissive())

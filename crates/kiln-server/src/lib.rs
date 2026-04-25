@@ -3,6 +3,7 @@
 pub mod api;
 pub mod cli;
 pub mod config;
+pub mod decode_stats;
 pub mod device;
 pub mod error;
 pub mod logging;

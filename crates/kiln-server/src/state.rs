@@ -15,6 +15,7 @@ use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_train::TrainingState;
 use serde::Serialize;
 
+use crate::decode_stats::DecodeStatsRing;
 use crate::metrics::Metrics;
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
@@ -414,6 +415,8 @@ pub struct AppState {
     pub checkpoint_interval: Option<usize>,
     /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
     pub served_model_id: String,
+    /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
+    pub decode_stats: Arc<std::sync::Mutex<DecodeStatsRing>>,
 }
 
 impl AppState {
@@ -469,6 +472,7 @@ impl AppState {
             inference_prewarm_complete: Arc::new(AtomicBool::new(true)),
             checkpoint_interval: None,
             served_model_id,
+            decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
         }
     }
 
@@ -680,6 +684,7 @@ impl AppState {
             ))),
             checkpoint_interval: None,
             served_model_id,
+            decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
         }
     }
 }

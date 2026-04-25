@@ -419,6 +419,14 @@ textarea { resize: vertical; min-height: 80px; }
     </div>
   </div>
 
+  <!-- Decode Performance -->
+  <div class="panel">
+    <div class="panel-head"><h2>Decode Performance</h2></div>
+    <div class="panel-body" id="decode-perf-panel">
+      <div class="empty">Loading...</div>
+    </div>
+  </div>
+
   <!-- Adapters -->
   <div class="panel">
     <div class="panel-head">
@@ -674,6 +682,39 @@ function renderServerStatus(h) {
   }
 
   el.innerHTML = vramHtml + schedHtml + checksHtml || '<div class="empty">No data</div>';
+}
+
+// --- Decode Performance ---
+async function pollDecodePerf() {
+  const el = document.getElementById('decode-perf-panel');
+  if (!el) return;
+  try {
+    const data = await api('/v1/stats/decode');
+    const window = data.window_secs ? Math.round(data.window_secs) : 60;
+    if (!data.sample_count || data.sample_count < 1) {
+      el.innerHTML = `<div class="sched-stats">
+        <div class="sched-stat"><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat"><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
+        <div class="sched-stat"><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
+        <div class="sched-stat"><div class="num">0</div><div class="lbl">samples (last ${window}s)</div></div>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--text2)">No streaming completions in the last ${window}s.</div>`;
+      return;
+    }
+    const tps = data.tok_per_sec.toFixed(1);
+    const p50 = data.p50_itl_ms.toFixed(1) + ' ms';
+    const p99 = data.p99_itl_ms.toFixed(1) + ' ms';
+    const mean = data.mean_itl_ms.toFixed(1);
+    el.innerHTML = `<div class="sched-stats">
+        <div class="sched-stat"><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat"><div class="num">${p50}</div><div class="lbl">p50 ITL</div></div>
+        <div class="sched-stat"><div class="num">${p99}</div><div class="lbl">p99 ITL</div></div>
+        <div class="sched-stat"><div class="num">${data.sample_count}</div><div class="lbl">samples (last ${window}s)</div></div>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--text2)">Mean inter-token latency: ${mean} ms</div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+  }
 }
 
 // --- Adapters ---
@@ -999,10 +1040,12 @@ renderChat();
 pollHealth();
 pollAdapters();
 pollTraining();
+pollDecodePerf();
 
 setInterval(pollHealth, 2000);
 setInterval(pollAdapters, 5000);
 setInterval(pollTraining, 3000);
+setInterval(pollDecodePerf, 2000);
 
 })();
 </script>
