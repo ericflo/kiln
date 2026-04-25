@@ -161,9 +161,9 @@ still close the HumanEval gap.
 
 | Phase | PR | Branch | Commit data path |
 | --- | --- | --- | --- |
-| C35 | #364 | `ce/mtp-c35-h13-residual-ab` | `docs/phase-c35/` |
-| C36 | #368 | `ce/mtp-c36-h14a-decode-length-sweep` | `docs/phase-c36/` |
-| C37 | #369 | `ce/mtp-c37-variance-reanchor` | `docs/phase-c37/` |
+| C35 | #364 | `ce/mtp-c35-h13-residual-ab` | `docs/archive/phase-c/phase-c35/` |
+| C36 | #368 | `ce/mtp-c36-h14a-decode-length-sweep` | `docs/archive/phase-c/phase-c36/` |
+| C37 | #369 | `ce/mtp-c37-variance-reanchor` | `docs/archive/phase-c/phase-c37/` |
 | C38 | #370 | `ce/mtp-c38-expanded-prompt-pool` | `crates/kiln-server/src/bench.rs` (30-prompt pool) |
 | C39 | #371 | `ce/mtp-c39-humaneval-domain` | `PROFILING-MTP-C39.md`, pod path `/workspace/c39-results/seed-{0..19}.json` |
 | **C40** | **this PR** | `ce/mtp-c40-per-domain-floors-docs` | docs-only synthesis |
@@ -187,8 +187,8 @@ rng=12345.
 
 ## Cross-references
 
-- C35 anchor: PR #364 — `docs/phase-c35/c35-h13-residual-ab.md`
-- C36 decode-length sweep: PR #368 — `docs/phase-c36/c36-h14a-decode-length-sweep.md`
-- C37 variance re-anchor: PR #369 — `docs/phase-c37/c37-variance-reanchor.md`
+- C35 anchor: PR #364 — `docs/archive/phase-c/phase-c35/c35-h13-residual-ab.md`
+- C36 decode-length sweep: PR #368 — `docs/archive/phase-c/phase-c36/c36-h14a-decode-length-sweep.md`
+- C37 variance re-anchor: PR #369 — `docs/archive/phase-c/phase-c37/c37-variance-reanchor.md`
 - C38 expanded prompt pool: PR #370 — `crates/kiln-server/src/bench.rs`
 - C39 HumanEval-only: PR #371 — `PROFILING-MTP-C39.md`

@@ -2,8 +2,8 @@
 """H15c — apply the pre-registered decision rule.
 
 Inputs:
-    docs/phase-c29-v3-vllm/vllm_alpha_per_seed.json  (from h15c_vllm_alpha_dump.py)
-    docs/phase-c29-v3-vllm/kiln_alpha_per_seed.json  (from h15c_kiln_alpha_from_csv.py)
+    docs/archive/phase-c/phase-c29-v3-vllm/vllm_alpha_per_seed.json  (from h15c_vllm_alpha_dump.py)
+    docs/archive/phase-c/phase-c29-v3-vllm/kiln_alpha_per_seed.json  (from h15c_kiln_alpha_from_csv.py)
 
 Decision rule (set BEFORE the run, do NOT adjust after):
 
@@ -14,9 +14,9 @@ Decision rule (set BEFORE the run, do NOT adjust after):
     delta <  -0.02          → kiln_above_vllm
 
 Emits:
-    docs/phase-c29-v3-vllm/verdict.json
-    docs/phase-c29-v3-vllm/compare.json
-    docs/phase-c29-v3-vllm/compare.md
+    docs/archive/phase-c/phase-c29-v3-vllm/verdict.json
+    docs/archive/phase-c/phase-c29-v3-vllm/compare.json
+    docs/archive/phase-c/phase-c29-v3-vllm/compare.md
 """
 from __future__ import annotations
 
@@ -81,15 +81,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--vllm",
-        default="docs/phase-c29-v3-vllm/vllm_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-vllm/vllm_alpha_per_seed.json",
     )
     ap.add_argument(
         "--kiln",
-        default="docs/phase-c29-v3-vllm/kiln_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-vllm/kiln_alpha_per_seed.json",
     )
     ap.add_argument(
         "--out-dir",
-        default="docs/phase-c29-v3-vllm",
+        default="docs/archive/phase-c/phase-c29-v3-vllm",
     )
     args = ap.parse_args()
 

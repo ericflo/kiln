@@ -41,7 +41,7 @@ queue the next H from PR #527 §"Queued next action".
 | `vllm_median_alpha` | **UNAVAILABLE** (segfault) |
 | `delta` | **UNAVAILABLE** |
 
-Per-seed kiln α (from `docs/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`,
+Per-seed kiln α (from `docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`,
 all 11/12/11 rows per seed, not only the H15b-probed subset):
 
 | seed | accept / steps | α |
@@ -67,7 +67,7 @@ splice-dumped ones — that's the strict kiln α at this workload.
 | `vllm.mtp_supported == false` | **`vllm_mtp_unsupported`** ← **THIS RUN** | doc-only redirect PR; queue next H from PR #527 |
 
 The rule is implemented in `scripts/h15c_compare.py` and emitted
-`docs/phase-c29-v3-vllm/verdict.json`.
+`docs/archive/phase-c/phase-c29-v3-vllm/verdict.json`.
 
 ## Crash signature
 
@@ -96,7 +96,7 @@ The crash is therefore NOT in CUDA graph capture, NOT in MM dummy profiling,
 and NOT a clean OOM. It is a native-code crash inside the vLLM V1 engine
 post-load setup that's specific to the (Qwen3_5 + MTP) combination at vLLM
 0.19.1 + torch 2.10.0 + CUDA 12.8 on sm_86. See
-`docs/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log` for the trimmed
+`docs/archive/phase-c/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log` for the trimmed
 log capture (3 attempts × ~13 lines each, EngineCore PIDs 4722 / 5122 / 5502).
 
 ## Workload (matched to PR #529)
@@ -132,13 +132,13 @@ python3 scripts/h15c_vllm_alpha_dump.py \
     --model-path /workspace/qwen3.5-4b \
     --prompt-tokens 512 --max-tokens 16 \
     --seeds 0 1 2 --num-spec-tokens 1 \
-    --out docs/phase-c29-v3-vllm/vllm_alpha_per_seed.json
+    --out docs/archive/phase-c/phase-c29-v3-vllm/vllm_alpha_per_seed.json
 # Outcome: writes mtp_supported=false JSON; exit code 3.
 
 # 2. kiln α (re-derived from PR #529's c1_attr CSVs — no GPU needed, runs anywhere)
 python3 scripts/h15c_kiln_alpha_from_csv.py \
-    --csv-dir docs/phase-c29-v2/artifacts \
-    --out docs/phase-c29-v3-vllm/kiln_alpha_per_seed.json
+    --csv-dir docs/archive/phase-c/phase-c29-v2/artifacts \
+    --out docs/archive/phase-c/phase-c29-v3-vllm/kiln_alpha_per_seed.json
 # Outcome: median_alpha = 0.3636.
 
 # 3. Apply decision rule
@@ -234,12 +234,12 @@ several non-α optimization paths; this verdict refocuses Phase 7 onto those):
 | path | purpose |
 | --- | --- |
 | `docs/phase7-h15c-vllm-alpha-microbench.md` | this audit doc |
-| `docs/phase-c29-v3-vllm/verdict.json` | machine-readable verdict |
-| `docs/phase-c29-v3-vllm/compare.json` | full kiln + vllm side-by-side |
-| `docs/phase-c29-v3-vllm/compare.md` | per-seed table + decision rule |
-| `docs/phase-c29-v3-vllm/kiln_alpha_per_seed.json` | re-derived kiln α |
-| `docs/phase-c29-v3-vllm/vllm_alpha_per_seed.json` | trimmed vLLM failure record |
-| `docs/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log` | trimmed pod log of all 3 segfaults |
+| `docs/archive/phase-c/phase-c29-v3-vllm/verdict.json` | machine-readable verdict |
+| `docs/archive/phase-c/phase-c29-v3-vllm/compare.json` | full kiln + vllm side-by-side |
+| `docs/archive/phase-c/phase-c29-v3-vllm/compare.md` | per-seed table + decision rule |
+| `docs/archive/phase-c/phase-c29-v3-vllm/kiln_alpha_per_seed.json` | re-derived kiln α |
+| `docs/archive/phase-c/phase-c29-v3-vllm/vllm_alpha_per_seed.json` | trimmed vLLM failure record |
+| `docs/archive/phase-c/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log` | trimmed pod log of all 3 segfaults |
 | `scripts/h15c_kiln_alpha_from_csv.py` | derives kiln α from PR #529 CSVs |
 | `scripts/h15c_vllm_alpha_dump.py` | vLLM driver (re-runnable when vLLM is fixed) |
 | `scripts/h15c_compare.py` | applies decision rule, emits verdict.json |

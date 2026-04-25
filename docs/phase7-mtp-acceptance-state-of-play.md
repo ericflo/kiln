@@ -35,11 +35,11 @@ Reopen precondition for the optimization track: a single seed on the C40f-style 
 | Precondition | Status | Evidence |
 | --- | --- | --- |
 | Latest MTP-named PR before this audit | #382 (`Reconcile C40 MTP docs after C40f`), merged 2026-04-22 | `gh pr list -R ericflo/kiln --state all --search "mtp in:title" --limit 100`. Subsequent MTP-touching PRs were profile-refresh (#417, #420, #426, #454, #462, #464, #465, #468, #470, #480, #491, #493, #495) and Metal-routing (#400, #402, #437) — none added a new H or moved α. |
-| C40f N=20 anchor still canonical | Yes — `docs/phase-c40f/summary.json` is the most recent N≥20 α distribution. | C50/C51/C57/C60 are single-seed or 3-seed refreshes that anchor against C40f's median. |
+| C40f N=20 anchor still canonical | Yes — `docs/archive/phase-c/phase-c40f/summary.json` is the most recent N≥20 α distribution. | C50/C51/C57/C60 are single-seed or 3-seed refreshes that anchor against C40f's median. |
 | Post-#500 / post-#502 GDN refactors do not silently fix α | Yes — C60 single seed: α=0.716. C57 single seed: α=0.764. Within C40f distribution. No code path was changed that would alter MTP head output between #382 and #502. | `git log --oneline 2f38eb6..382 -- crates/kiln-model/src/speculative.rs crates/kiln-model/src/forward.rs | grep mtp` shows only the conv1d prefill fix (#481) and Metal-routing changes (none of which touch CUDA MTP draft-head output). |
 | No open or pending PR already covering this state-of-play | Verified | `gh pr list -R ericflo/kiln --state all --search "mtp acceptance state-of-play" --limit 5` returned `[]`; same for `"mtp audit consolidated"` and `"mtp" --state open`. |
 | C29 top-K Jaccard verdict still cited as "head logits clean" | Yes, with caveat | C29 measured cos_sim 0.999978 / top-1 match 100% / Jaccard@5 median 1.0 across 49 paired dumps — but only on accepted-token positions (h_main was reference-echoed). C36 demonstrated this does not contradict 80.85% reject-row identity bias because the C29 dumps were not stratified by accept/reject. |
-| C16 / C30 accept-reject + KV rollback static audits | Yes — both REJECTED on direct source reading. The accept/reject machinery is not the bug. | `docs/phase-c16/c16-mtp-accept-reject-audit.md`, `docs/phase-c30/c30-accept-reject-kv-rollback.md`. |
+| C16 / C30 accept-reject + KV rollback static audits | Yes — both REJECTED on direct source reading. The accept/reject machinery is not the bug. | `docs/archive/phase-c/phase-c16/c16-mtp-accept-reject-audit.md`, `docs/archive/phase-c/phase-c30/c30-accept-reject-kv-rollback.md`. |
 
 ## Sources
 
@@ -78,51 +78,51 @@ Each row covers one named hypothesis attempt. "Verdict" is the doc's own word. "
 | --- | --- | :---: | --- | :---: | --- |
 | B Tier 2 #260 | KILN_MTP_DEBUG instrumentation | No | DELIVERED — produced the α=0.154 / 46% identity-bias trace that opened the entire C-hypothesis tree | n/a | logs only |
 | B12 #309 | Layer-31 drift signal | No (bench) | RULED OUT — layer-31 drift is benign bf16 accumulation | No | `docs/MTP_PHASE_B12.md` |
-| C1 #311 | Per-step accept/reject CSV attribution | No (bench) | DELIVERED — α=15.11%, Class A=0, Class B=87.6%, head bug not accept-path bug | n/a | `docs/phase-c1/` |
-| C2 #313 | RoPE position threading bisect | No (bench) | CONFIRMED — RoPE divergence at mtp_pos≥1 | n/a (pre-fix) | `docs/phase-c2/` |
-| C3 #314 | RoPE fix (apply C2 verdict) | No (bench) | LANDED — pre-RoPE cos_sim 1.000 at all positions | No (α stayed at 0.124) | `docs/phase-c3/` |
-| C5 #316 | Bench α + decode tok/s post-C3 | No (bench) | MISS on both axes (α 0.124 / decode -25.1%) | No | `docs/phase-c5/` |
-| C6/C7/C8 #317/#319/#320 | Pre-RoPE input bisect → SDPA-internal bisect → kv_len single-site fix | Mixed | DELIVERED — kv_len mismatch fixed at single site | No (α-impact deferred to later C-row bench) | `docs/phase-c8/` |
-| C9 #322 | fc_output drift | No (bench) | NULL — bf16 noise, not α signal | No | `docs/phase-c9/` |
-| C10 #325 | fp32 HF reference comparator (WIP) | Partial | EXECUTION BLOCKED — comparator scaffold only | n/a | `docs/phase-c10/` |
-| C11 #326 | Marlin W4A16 per-channel scale drift (H?) | No | NULL on static audit | No | `docs/phase-c11/` |
-| C12 #329 | fp32 draft head kill switch (H?) | No (bench) | PRIMARY-NEGATIVE — α 0.0325 vs 0.0325, costs 8.3% tok/s | No | `docs/phase-c12/` |
-| C13 #331 | MTP weight-loading + pre-projection splice | Partial | DELIVERED audit + dump tap | No | `docs/phase-c13/` |
-| C14 #334 | Post-MTP-transformer-block splice dump | Partial | DELIVERED dump | No | `docs/phase-c14/` |
-| C15 #338 | h_main drift across decode steps | No (bench) | DELIVERED — found 2.0–2.4× kiln/HF magnitude ratio on h_main, smoking gun for missing RMSNorm | n/a | `docs/phase-c15/` |
-| C16 #339 | Accept/Reject plumbing audit (4 sub-H) | Yes | ALL FOUR REJECTED on static audit | No | `docs/phase-c16/` |
-| C17 #340 | h_prev reference-frame audit | Yes | CONFIRMED — kiln passed pre-final-norm `h_prev` instead of post-final-norm | n/a (pre-fix) | `docs/phase-c17/` |
-| C18 #341 | h_prev post-norm fix | No (bench) | LANDED + α 0.000 → 0.153 (4.7×). Below 0.5 floor; residual gap to C19+. | **+0.153** | `docs/phase-c18/` |
-| C19 #343 | mtp.fc_norm reuse (H1 of C18 handoff) | Yes | DISPROVEN — Qwen3.5-4B has no `mtp.fc_norm.weight`; it has `pre_fc_norm_{embedding,hidden}` and kiln already loads + applies both | No | `docs/phase-c19/` |
-| C20 #344 | MTP-block dual-norm wiring (H2) | Yes | DISPROVEN — kiln binds the four MTP-specific RMSNorms in canonical order | No | `docs/phase-c20/` |
-| C21 #346 | Rotary mtp_pos offset (H3 static) | Yes | INCONCLUSIVE — vLLM has two conventions, kiln matches DFlash one | No | `docs/phase-c21/` |
-| C22 #347 | fc + residual parameterization (H4) | Yes | DISPROVEN — line-for-line match to vLLM | No | `docs/phase-c22/` |
-| C23 #348 | Draft-side sampler / temp / penalty (H5) | Yes | DISPROVEN — `_params` underscore-prefixed proves non-consumption | No | `docs/phase-c23/` |
-| C24 #350 | Rotary mtp_pos hardware A/B (H3) | No (bench) | REJECTED — Δα +0.010 inside ±0.05 null band; both conventions essentially identical | No | `docs/phase-c24/` |
-| C25 #351 | Verifier vs draft logit path (H6) | Yes | NULL — both paths tied to embed_tokens_t, both feed post-final-norm | No | `docs/phase-c25/` |
-| C26 #352 | MTP weight-reload sanity (H7) | Yes | NULL — 15 tensors land with expected names/shapes/dtypes, escape Marlin packing cleanly | No | `docs/phase-c26/` |
-| C27 #353 | MTP block sequencing + paged-KV carryover (H8) | Yes | RULED OUT — 5/5 sub-properties consistent | No | `docs/phase-c27/` |
-| C28 #354 | h_prev post-norm contract (H10) | Yes | RULED OUT — kiln matches the 4-step vLLM contract bit-for-bit structurally | No | `docs/phase-c28/` |
-| C29 #355 | Empirical MTP logits compare (H9) | No (bench) | TOP-K JACCARD CLEAN on 49 paired dumps. **Caveat: only on accepted-token positions.** | No | `docs/phase-c29/` |
-| C30 #356 | Accept/Reject + KV rollback (H11) | Yes | REFUTED on static audit (3 sub-H) | No | `docs/phase-c30/` |
-| C31 #358 | Class B head-trio bisect | Yes | REFUTED — head trio is the most exhaustively audited surface | No | `docs/phase-c31/` |
-| C32 #359 | h_main fp32 parity (final Class B) | Yes | REFUTED via prior-evidence consolidation (C15+C18+C29 transitively) | No | `docs/phase-c32/` |
-| C33 #360 | MTP head fine-tune budget (H12) | Yes | N/A — kiln has no MTP fine-tune path; weights only ever come from the published checkpoint | No | `docs/phase-c33/` |
-| C34 #362 | Sampler contract parity vs vLLM (H13 static) | Yes | INCONCLUSIVE — kiln matches the rejection_sampler all_greedy branch functionally; two non-zero deltas (chat-template, fp32 argmax) flagged for C35 to A/B | No | `docs/phase-c34/` |
-| C35 #364 | H13 4-cell A/B (prose/chat × BF16/FP32) | No (bench) | REFUTED on dtype residual; CONFIRMED-PARTIAL on prompt-workload residual. **Chat-templated α 0.6076 vs prose 0.176; +234% absolute. One seed hit 0.764.** | **+0.43** (anchor moved to chat-template) | `docs/phase-c35/` |
-| C36 #368 / #420 | H14a decode-length sweep + post-#417 identity-bias re-measure | No (bench) | H14a NULL (decode-length not the issue); identity-bias dominant on reject rows (80.85%); seed split unexplained | No | `docs/phase-c36/` |
-| C37 #369 | N=10 variance re-anchor at C35 Cell D | No (bench) | Median α 0.6076 (matched C35); 3-seed sampling was too thin | No | `docs/phase-c37/` |
-| C38 #370 | Expand prompt pool 8→30 | No (bench) | Confirmed seed-1 stays in low-α regime even with broader pool | No | `docs/phase-c38/` |
-| C39 #371 | HumanEval-only N=20 domain-focused α | No (bench) | Domain matters but does not close the gap | No | `docs/phase-c39/` |
-| C40+C40a–C40f #372–#382 | Per-domain α floors synthesis + N=20 distribution | No (bench) | **C40f N=20: median α 0.689, 95% CI [0.652, 0.723], 6/20 seeds ≥ 0.72.** Anchor for everything since. | No | `docs/phase-c40f/summary.json` |
-| C41–C45 #427–#445 | Layer-1 sub-op bisect (input layernorm) | No (bench) | DELIVERED — localized seed-1 upstream `h_main` divergence to a layer-1 input_norm broadcast tolerance boundary | No | `docs/phase-c4{1..5}/` |
+| C1 #311 | Per-step accept/reject CSV attribution | No (bench) | DELIVERED — α=15.11%, Class A=0, Class B=87.6%, head bug not accept-path bug | n/a | `docs/archive/phase-c/phase-c1/` |
+| C2 #313 | RoPE position threading bisect | No (bench) | CONFIRMED — RoPE divergence at mtp_pos≥1 | n/a (pre-fix) | `docs/archive/phase-c/phase-c2/` |
+| C3 #314 | RoPE fix (apply C2 verdict) | No (bench) | LANDED — pre-RoPE cos_sim 1.000 at all positions | No (α stayed at 0.124) | `docs/archive/phase-c/phase-c3/` |
+| C5 #316 | Bench α + decode tok/s post-C3 | No (bench) | MISS on both axes (α 0.124 / decode -25.1%) | No | `docs/archive/phase-c/phase-c5/` |
+| C6/C7/C8 #317/#319/#320 | Pre-RoPE input bisect → SDPA-internal bisect → kv_len single-site fix | Mixed | DELIVERED — kv_len mismatch fixed at single site | No (α-impact deferred to later C-row bench) | `docs/archive/phase-c/phase-c8/` |
+| C9 #322 | fc_output drift | No (bench) | NULL — bf16 noise, not α signal | No | `docs/archive/phase-c/phase-c9/` |
+| C10 #325 | fp32 HF reference comparator (WIP) | Partial | EXECUTION BLOCKED — comparator scaffold only | n/a | `docs/archive/phase-c/phase-c10/` |
+| C11 #326 | Marlin W4A16 per-channel scale drift (H?) | No | NULL on static audit | No | `docs/archive/phase-c/phase-c11/` |
+| C12 #329 | fp32 draft head kill switch (H?) | No (bench) | PRIMARY-NEGATIVE — α 0.0325 vs 0.0325, costs 8.3% tok/s | No | `docs/archive/phase-c/phase-c12/` |
+| C13 #331 | MTP weight-loading + pre-projection splice | Partial | DELIVERED audit + dump tap | No | `docs/archive/phase-c/phase-c13/` |
+| C14 #334 | Post-MTP-transformer-block splice dump | Partial | DELIVERED dump | No | `docs/archive/phase-c/phase-c14/` |
+| C15 #338 | h_main drift across decode steps | No (bench) | DELIVERED — found 2.0–2.4× kiln/HF magnitude ratio on h_main, smoking gun for missing RMSNorm | n/a | `docs/archive/phase-c/phase-c15/` |
+| C16 #339 | Accept/Reject plumbing audit (4 sub-H) | Yes | ALL FOUR REJECTED on static audit | No | `docs/archive/phase-c/phase-c16/` |
+| C17 #340 | h_prev reference-frame audit | Yes | CONFIRMED — kiln passed pre-final-norm `h_prev` instead of post-final-norm | n/a (pre-fix) | `docs/archive/phase-c/phase-c17/` |
+| C18 #341 | h_prev post-norm fix | No (bench) | LANDED + α 0.000 → 0.153 (4.7×). Below 0.5 floor; residual gap to C19+. | **+0.153** | `docs/archive/phase-c/phase-c18/` |
+| C19 #343 | mtp.fc_norm reuse (H1 of C18 handoff) | Yes | DISPROVEN — Qwen3.5-4B has no `mtp.fc_norm.weight`; it has `pre_fc_norm_{embedding,hidden}` and kiln already loads + applies both | No | `docs/archive/phase-c/phase-c19/` |
+| C20 #344 | MTP-block dual-norm wiring (H2) | Yes | DISPROVEN — kiln binds the four MTP-specific RMSNorms in canonical order | No | `docs/archive/phase-c/phase-c20/` |
+| C21 #346 | Rotary mtp_pos offset (H3 static) | Yes | INCONCLUSIVE — vLLM has two conventions, kiln matches DFlash one | No | `docs/archive/phase-c/phase-c21/` |
+| C22 #347 | fc + residual parameterization (H4) | Yes | DISPROVEN — line-for-line match to vLLM | No | `docs/archive/phase-c/phase-c22/` |
+| C23 #348 | Draft-side sampler / temp / penalty (H5) | Yes | DISPROVEN — `_params` underscore-prefixed proves non-consumption | No | `docs/archive/phase-c/phase-c23/` |
+| C24 #350 | Rotary mtp_pos hardware A/B (H3) | No (bench) | REJECTED — Δα +0.010 inside ±0.05 null band; both conventions essentially identical | No | `docs/archive/phase-c/phase-c24/` |
+| C25 #351 | Verifier vs draft logit path (H6) | Yes | NULL — both paths tied to embed_tokens_t, both feed post-final-norm | No | `docs/archive/phase-c/phase-c25/` |
+| C26 #352 | MTP weight-reload sanity (H7) | Yes | NULL — 15 tensors land with expected names/shapes/dtypes, escape Marlin packing cleanly | No | `docs/archive/phase-c/phase-c26/` |
+| C27 #353 | MTP block sequencing + paged-KV carryover (H8) | Yes | RULED OUT — 5/5 sub-properties consistent | No | `docs/archive/phase-c/phase-c27/` |
+| C28 #354 | h_prev post-norm contract (H10) | Yes | RULED OUT — kiln matches the 4-step vLLM contract bit-for-bit structurally | No | `docs/archive/phase-c/phase-c28/` |
+| C29 #355 | Empirical MTP logits compare (H9) | No (bench) | TOP-K JACCARD CLEAN on 49 paired dumps. **Caveat: only on accepted-token positions.** | No | `docs/archive/phase-c/phase-c29/` |
+| C30 #356 | Accept/Reject + KV rollback (H11) | Yes | REFUTED on static audit (3 sub-H) | No | `docs/archive/phase-c/phase-c30/` |
+| C31 #358 | Class B head-trio bisect | Yes | REFUTED — head trio is the most exhaustively audited surface | No | `docs/archive/phase-c/phase-c31/` |
+| C32 #359 | h_main fp32 parity (final Class B) | Yes | REFUTED via prior-evidence consolidation (C15+C18+C29 transitively) | No | `docs/archive/phase-c/phase-c32/` |
+| C33 #360 | MTP head fine-tune budget (H12) | Yes | N/A — kiln has no MTP fine-tune path; weights only ever come from the published checkpoint | No | `docs/archive/phase-c/phase-c33/` |
+| C34 #362 | Sampler contract parity vs vLLM (H13 static) | Yes | INCONCLUSIVE — kiln matches the rejection_sampler all_greedy branch functionally; two non-zero deltas (chat-template, fp32 argmax) flagged for C35 to A/B | No | `docs/archive/phase-c/phase-c34/` |
+| C35 #364 | H13 4-cell A/B (prose/chat × BF16/FP32) | No (bench) | REFUTED on dtype residual; CONFIRMED-PARTIAL on prompt-workload residual. **Chat-templated α 0.6076 vs prose 0.176; +234% absolute. One seed hit 0.764.** | **+0.43** (anchor moved to chat-template) | `docs/archive/phase-c/phase-c35/` |
+| C36 #368 / #420 | H14a decode-length sweep + post-#417 identity-bias re-measure | No (bench) | H14a NULL (decode-length not the issue); identity-bias dominant on reject rows (80.85%); seed split unexplained | No | `docs/archive/phase-c/phase-c36/` |
+| C37 #369 | N=10 variance re-anchor at C35 Cell D | No (bench) | Median α 0.6076 (matched C35); 3-seed sampling was too thin | No | `docs/archive/phase-c/phase-c37/` |
+| C38 #370 | Expand prompt pool 8→30 | No (bench) | Confirmed seed-1 stays in low-α regime even with broader pool | No | `docs/archive/phase-c/phase-c38/` |
+| C39 #371 | HumanEval-only N=20 domain-focused α | No (bench) | Domain matters but does not close the gap | No | `docs/archive/phase-c/phase-c39/` |
+| C40+C40a–C40f #372–#382 | Per-domain α floors synthesis + N=20 distribution | No (bench) | **C40f N=20: median α 0.689, 95% CI [0.652, 0.723], 6/20 seeds ≥ 0.72.** Anchor for everything since. | No | `docs/archive/phase-c/phase-c40f/summary.json` |
+| C41–C45 #427–#445 | Layer-1 sub-op bisect (input layernorm) | No (bench) | DELIVERED — localized seed-1 upstream `h_main` divergence to a layer-1 input_norm broadcast tolerance boundary | No | `docs/archive/phase-c/phase-c4{1..5}/` |
 | C47 #459 | Tolerance-artifact classification at C45 boundary | Yes | OUT-OF-SCOPE for production-math change. Stop condition: do not change inference math unless a fresh current-main reproducer again fails the current mask. | No | logged in PROFILING.md C45 §"2026-04-24 C47" |
 | C48–C50 #462–#465 | Forced-MTP A6000 benchmark refresh + harness-parity A/B | No (bench) | C48 regression was a harness/workload comparability artifact (C49/C50 verdict). C40f-style anchor restored. | No | `docs/phase-c{48,49,50}/` |
 | C51–C57 #468–#495 | Post-#466/#476/#481/#498 native-MTP profile refreshes | No (bench) | DELIVERED decode hotspot tables; α stayed in [0.588, 0.789] band. | No | `docs/phase-c{51,52,53,54,57}/` |
 | C58–C60 #498–#502 | CUDA GDN decode fusion + post-#500 / post-#502 audits | No (bench) | LANDED kernels (gates+gated_norm+qk_norm GQA fast paths). α did not move materially. | No | `docs/phase-c{58,59,60}/` |
-| C62 #506-class | GDN prefill memory preflight | No (bench) | Activation-bound at ~33 GiB peak at 64k; streaming prefill path validated | No | `docs/phase-c62/` |
-| C63 #511 | CUDA streaming prefill default ≥65k | No (bench) | LANDED (not an MTP-axis change) | No | `docs/phase-c63/` |
-| C64 #524 | Post-#521 fused-kernel kill-switch bisection (perf, not α) | No (bench) | NULL — no single fused kernel default path explains the 7.9% post-#521 decode regression vs post-#166 baseline | No | `docs/phase-c64/post523-killswitch-bisection.md` |
+| C62 #506-class | GDN prefill memory preflight | No (bench) | Activation-bound at ~33 GiB peak at 64k; streaming prefill path validated | No | `docs/archive/phase-c/phase-c62/` |
+| C63 #511 | CUDA streaming prefill default ≥65k | No (bench) | LANDED (not an MTP-axis change) | No | `docs/archive/phase-c/phase-c63/` |
+| C64 #524 | Post-#521 fused-kernel kill-switch bisection (perf, not α) | No (bench) | NULL — no single fused kernel default path explains the 7.9% post-#521 decode regression vs post-#166 baseline | No | `docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md` |
 
 **Net inventory: 34 MTP-named PRs, 1 fix landed that moved α (C18: +0.153), 1 anchor change that re-classified the workload baseline (C35: +0.43 absolute via chat-template flag), and ~20 doc-only static audits that ruled out individual hypotheses without α movement.** No PR after #382 has moved the α median by >0.02.
 
@@ -130,13 +130,13 @@ Each row covers one named hypothesis attempt. "Verdict" is the doc's own word. "
 
 | Metric | Current value | Target | Gap | Source |
 | --- | ---: | ---: | ---: | --- |
-| Median α (C40f anchor, N=20, A6000, chat-template + W4A16 + FP32 argmax + humaneval) | **0.689** | **0.720** (Qwen3.5 paper floor); **0.80–0.85** stretch (DeepSeek-V3 / Qwen3-Next published k=1 MTP rates) | **−0.031** to floor; **−0.111 to −0.161** to stretch | `docs/phase-c40f/summary.json` |
+| Median α (C40f anchor, N=20, A6000, chat-template + W4A16 + FP32 argmax + humaneval) | **0.689** | **0.720** (Qwen3.5 paper floor); **0.80–0.85** stretch (DeepSeek-V3 / Qwen3-Next published k=1 MTP rates) | **−0.031** to floor; **−0.111 to −0.161** to stretch | `docs/archive/phase-c/phase-c40f/summary.json` |
 | 95% CI of median α | `[0.652, 0.723]` | floor inside interval would clear | floor 0.72 is at the edge of the upper CI | same |
 | Seeds ≥ 0.72 (out of N=20) | **6 / 20 = 30%** | "most seeds" (>50%) for shipping confidence | -20 percentage points | same |
 | Median decode tok/s (C40f anchor) | **38.25** | **49.76 × 1.10 = 54.7** to clear +10% MTP-on vs plain-decode floor on the same hardware | **−16.5 tok/s** (-30%) | C40f vs PR #166 baseline |
 | MTP single-seed decode (post-#481, A40 fallback, single seed-1) | 41.2 tok/s at α=0.730 | match plain-decode 49.76 tok/s baseline | -8.6 tok/s | PROFILING.md §"Phase 6 post-#481 current-main profile refresh" |
-| Post-#500 / C60 single seed | 23.5 tok/s at α=0.716 (Nsight overhead included) / unprofiled 36.5 tok/s | n/a (profile-only) | n/a | `docs/phase-c60/summary.json` |
-| Identity-bias rate on reject rows (C36 post-#417, 3 seeds, default workload) | **80.85%** | "expected baseline" unknown — not measured on a healthy MTP impl. Hypothesis: <40% on a clean run. | unknown — diagnostic gap | `docs/phase-c36/c36-identity-bias.md` |
+| Post-#500 / C60 single seed | 23.5 tok/s at α=0.716 (Nsight overhead included) / unprofiled 36.5 tok/s | n/a (profile-only) | n/a | `docs/archive/phase-c/phase-c60/summary.json` |
+| Identity-bias rate on reject rows (C36 post-#417, 3 seeds, default workload) | **80.85%** | "expected baseline" unknown — not measured on a healthy MTP impl. Hypothesis: <40% on a clean run. | unknown — diagnostic gap | `docs/archive/phase-c/phase-c36/c36-identity-bias.md` |
 | Identity-bias rate on accept rows (C36) | **0%** | 0% trivially | n/a (consistent) | same |
 | Seed split (C36, default workload, 3 seeds) | seed 0 α=0.74; seeds 1+2 α=0.31, 0.40 | uniform >0.6 | bimodal regime split | same |
 
@@ -243,7 +243,7 @@ python3 scripts/mtp_compare.py --c29-v2 \
 
 **Free pre-step (do BEFORE GPU spend):**
 
-Before queueing the bench task, do a $0 doc-only correlation analysis on `docs/phase-c40f/summary.json`'s `rows[].model_load_secs` vs `rows[].acceptance_rate` (H15a). This is 5 minutes of Python — Spearman + scatter plot. If the correlation is significant (|ρ| > 0.5), the next H becomes "MTP cold-load determinism" instead of H15b, and the bench plan changes accordingly.
+Before queueing the bench task, do a $0 doc-only correlation analysis on `docs/archive/phase-c/phase-c40f/summary.json`'s `rows[].model_load_secs` vs `rows[].acceptance_rate` (H15a). This is 5 minutes of Python — Spearman + scatter plot. If the correlation is significant (|ρ| > 0.5), the next H becomes "MTP cold-load determinism" instead of H15b, and the bench plan changes accordingly.
 
 ### What NOT to queue
 
@@ -287,27 +287,27 @@ No prior PR or open task overlaps the consolidated audit shape proposed by this 
 ### Phase B / C primary docs (in order of citation)
 
 - `docs/MTP_PHASE_B12.md` — Phase B12 verdict (layer-31 drift benign)
-- `docs/phase-c1/c1-mtp-acceptance-attribution.md` — C1 verdict (Class B 87.6% head bug)
-- `docs/phase-c5/c5-bench-report.md` — C5 ship-floor MISS verdict
-- `docs/phase-c8/` through `docs/phase-c14/` — pre-C18 splice / SDPA / weight-loading bisect chain
-- `docs/phase-c15/c15-h-main-drift-verdict.md` — 2.0–2.4× kiln/HF magnitude smoking gun
-- `docs/phase-c16/c16-mtp-accept-reject-audit.md` — H1–H4 all REJECTED
-- `docs/phase-c17/c17-h-prev-reference-frame-audit.md` — h_prev pre-norm vs post-norm verdict
-- `docs/phase-c18/c18-h-prev-post-norm-fix.md` — α 0.000 → 0.153 (4.7×)
+- `docs/archive/phase-c/phase-c1/c1-mtp-acceptance-attribution.md` — C1 verdict (Class B 87.6% head bug)
+- `docs/archive/phase-c/phase-c5/c5-bench-report.md` — C5 ship-floor MISS verdict
+- `docs/archive/phase-c/phase-c8/` through `docs/archive/phase-c/phase-c14/` — pre-C18 splice / SDPA / weight-loading bisect chain
+- `docs/archive/phase-c/phase-c15/c15-h-main-drift-verdict.md` — 2.0–2.4× kiln/HF magnitude smoking gun
+- `docs/archive/phase-c/phase-c16/c16-mtp-accept-reject-audit.md` — H1–H4 all REJECTED
+- `docs/archive/phase-c/phase-c17/c17-h-prev-reference-frame-audit.md` — h_prev pre-norm vs post-norm verdict
+- `docs/archive/phase-c/phase-c18/c18-h-prev-post-norm-fix.md` — α 0.000 → 0.153 (4.7×)
 - `docs/phase-c{19..32}/` — H1–H11 + Class B head trio + h_main fp32 parity static audits
-- `docs/phase-c33/c33-mtp-finetune-static-audit.md` — H12 N/A (no fine-tune path)
-- `docs/phase-c34/c34-sampler-parity-audit.md` — H13 INCONCLUSIVE on static
-- `docs/phase-c35/` — H13 4-cell A/B; chat-template +234% α
-- `docs/phase-c36/c36-identity-bias.md` — post-#417 identity-bias re-measure (80.85% / 0%, seed split)
-- `docs/phase-c36/c36-h14a-decode-length-sweep.md` — H14a NULL
-- `docs/phase-c37/` — N=10 variance re-anchor at C35 Cell D
-- `docs/phase-c38/c38-post422-seed1-upstream-bisect.md` — seed1 upstream split
+- `docs/archive/phase-c/phase-c33/c33-mtp-finetune-static-audit.md` — H12 N/A (no fine-tune path)
+- `docs/archive/phase-c/phase-c34/c34-sampler-parity-audit.md` — H13 INCONCLUSIVE on static
+- `docs/archive/phase-c/phase-c35/` — H13 4-cell A/B; chat-template +234% α
+- `docs/archive/phase-c/phase-c36/c36-identity-bias.md` — post-#417 identity-bias re-measure (80.85% / 0%, seed split)
+- `docs/archive/phase-c/phase-c36/c36-h14a-decode-length-sweep.md` — H14a NULL
+- `docs/archive/phase-c/phase-c37/` — N=10 variance re-anchor at C35 Cell D
+- `docs/archive/phase-c/phase-c38/c38-post422-seed1-upstream-bisect.md` — seed1 upstream split
 - `docs/phase-c{39..47}/` — layer-1 input-layernorm row-broadcast bisect → C47 OUT-OF-SCOPE classification
-- `docs/phase-c40f/summary.json` — **canonical N=20 α distribution anchor**
+- `docs/archive/phase-c/phase-c40f/summary.json` — **canonical N=20 α distribution anchor**
 - `docs/phase-c{48,49,50}/` — harness-parity verdict
 - `docs/phase-c{51,52,53,54,57}/` — post-#466/#476/#481 profile refreshes
 - `docs/phase-c{58,59,60}/` — CUDA GDN decode fusion audits
-- `docs/phase-c64/post523-killswitch-bisection.md` — perf-axis NULL kill-switch bisection
+- `docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md` — perf-axis NULL kill-switch bisection
 
 ### PROFILING.md anchors
 

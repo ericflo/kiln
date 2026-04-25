@@ -46,7 +46,7 @@ corresponds to the K-th splice dump at `mtp_pos=N`. We key on this index.
 This alignment is only valid when the accept-labels CSV was produced by
 the **same bench run** that produced the C29 v2 dumps (i.e., C1 attribution
 and splice dump armed simultaneously in one kiln-bench invocation). Cross-
-run alignment (e.g., using a separate `docs/phase-c36/c1_seed*.csv` that
+run alignment (e.g., using a separate `docs/archive/phase-c/phase-c36/c1_seed*.csv` that
 was produced with different `--chat-template` / `--max-output-tokens` /
 sampling settings) would match wrong rows — the bench trajectory and
 accept pattern differ across runs. The driver script

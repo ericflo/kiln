@@ -52,7 +52,7 @@ Usage on a RunPod A6000 with HF transformers + safetensors installed:
         --checkpoint /workspace/qwen3.5-4b \\
         --prompt-tokens 512 --max-output-tokens 16 \\
         --seeds 0 1 2 \\
-        --out docs/phase-c29-v3-hf/hf_alpha_per_seed.json
+        --out docs/archive/phase-c/phase-c29-v3-hf/hf_alpha_per_seed.json
 """
 from __future__ import annotations
 
@@ -465,11 +465,11 @@ def main() -> int:
     ap.add_argument("--rms-eps", type=float, default=1e-6)
     ap.add_argument(
         "--out",
-        default="docs/phase-c29-v3-hf/hf_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-hf/hf_alpha_per_seed.json",
     )
     ap.add_argument(
         "--trace-dir",
-        default="docs/phase-c29-v3-hf/artifacts",
+        default="docs/archive/phase-c/phase-c29-v3-hf/artifacts",
         help="Directory for per-seed trace dumps (one JSON per seed)",
     )
     args = ap.parse_args()

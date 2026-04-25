@@ -2,8 +2,8 @@
 """H17 — apply the pre-registered decision rule for SGLang α vs kiln α.
 
 Inputs:
-    docs/phase-c29-v3-sglang/sglang_alpha_per_seed.json  (from h17_sglang_alpha_dump.py)
-    docs/phase-c29-v3-sglang/kiln_alpha_per_seed.json    (from h15c_kiln_alpha_from_csv.py)
+    docs/archive/phase-c/phase-c29-v3-sglang/sglang_alpha_per_seed.json  (from h17_sglang_alpha_dump.py)
+    docs/archive/phase-c/phase-c29-v3-sglang/kiln_alpha_per_seed.json    (from h15c_kiln_alpha_from_csv.py)
 
 Decision rule (set BEFORE the run in PR #531 audit, do NOT adjust after):
 
@@ -15,9 +15,9 @@ Decision rule (set BEFORE the run in PR #531 audit, do NOT adjust after):
     sglang.mtp_supported == false     → sglang_mtp_unsupported_dense_4b
 
 Emits:
-    docs/phase-c29-v3-sglang/verdict.json
-    docs/phase-c29-v3-sglang/compare.json
-    docs/phase-c29-v3-sglang/compare.md
+    docs/archive/phase-c/phase-c29-v3-sglang/verdict.json
+    docs/archive/phase-c/phase-c29-v3-sglang/compare.json
+    docs/archive/phase-c/phase-c29-v3-sglang/compare.md
 """
 from __future__ import annotations
 
@@ -89,20 +89,20 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--sglang",
-        default="docs/phase-c29-v3-sglang/sglang_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-sglang/sglang_alpha_per_seed.json",
     )
     ap.add_argument(
         "--kiln",
-        default="docs/phase-c29-v3-sglang/kiln_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-sglang/kiln_alpha_per_seed.json",
     )
     ap.add_argument(
         "--vllm-v020",
-        default="docs/phase-c29-v3-sglang/vllm_v020_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-sglang/vllm_v020_alpha_per_seed.json",
         help="Optional vLLM v0.20.0 retest dump (free pre-step). Absent = skipped.",
     )
     ap.add_argument(
         "--out-dir",
-        default="docs/phase-c29-v3-sglang",
+        default="docs/archive/phase-c/phase-c29-v3-sglang",
     )
     args = ap.parse_args()
 

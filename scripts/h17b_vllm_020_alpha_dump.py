@@ -25,7 +25,7 @@ Usage on a RunPod A6000 pod with vllm==0.20.x installed:
         --model-path /workspace/qwen3.5-4b \
         --prompt-tokens 512 --max-tokens 16 \
         --seeds 1 2 3 --num-spec-tokens 1 \
-        --out docs/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json
+        --out docs/archive/phase-c/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json
 
 The driver is intentionally version-agnostic — see PR #530 §
 "Reproduction" for why we re-run with the same script under a new
@@ -81,7 +81,7 @@ def main() -> int:
     ap.add_argument("--num-spec-tokens", type=int, default=1)
     ap.add_argument(
         "--out",
-        default="docs/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json",
     )
     args = ap.parse_args()
 

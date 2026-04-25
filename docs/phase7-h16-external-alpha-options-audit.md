@@ -102,8 +102,8 @@ Identical to PR #530's matched-workload table, swapping vLLM for SGLang:
 - `docs/phase7-h17-sglang-alpha-microbench.md` (full audit doc, mirroring PR #530's `docs/phase7-h15c-vllm-alpha-microbench.md` shape)
 - `scripts/h17_sglang_alpha_dump.py` (SGLang driver — re-runnable, version-agnostic)
 - `scripts/h17_compare.py` (apply decision rule, emit verdict.json)
-- `docs/phase-c29-v3-sglang/{verdict,compare,kiln_alpha_per_seed,sglang_alpha_per_seed}.json`
-- `docs/phase-c29-v3-sglang/compare.md`
+- `docs/archive/phase-c/phase-c29-v3-sglang/{verdict,compare,kiln_alpha_per_seed,sglang_alpha_per_seed}.json`
+- `docs/archive/phase-c/phase-c29-v3-sglang/compare.md`
 - PROFILING.md top-of-file pointer entry
 
 ### Free pre-step (do BEFORE H17 GPU spend)

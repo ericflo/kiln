@@ -210,8 +210,8 @@ A new question surfaces from C40a:
 ## Artifacts
 
 - Branch: `ce/mtp-c40a-humaneval-no-chat-template`
-- Raw per-seed JSON: `docs/phase-c40a/seed-{0..19}.json`
-- Analysis script: `docs/phase-c40a/analyze_c40a.py` (ships with PR for
+- Raw per-seed JSON: `docs/archive/phase-c/phase-c40a/seed-{0..19}.json`
+- Analysis script: `scripts/phase-c40a/analyze_c40a.py` (ships with PR for
   reproducibility)
 
 ## Reproduction

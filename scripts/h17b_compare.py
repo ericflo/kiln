@@ -4,8 +4,8 @@
 Direct lineage: scripts/h15c_compare.py (PR #530, vLLM 0.19.1).
 
 Inputs:
-    docs/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json
-    docs/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json
+    docs/archive/phase-c/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json
+    docs/archive/phase-c/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json
 
 Decision rule (set BEFORE the run, do NOT adjust after):
 
@@ -17,9 +17,9 @@ Decision rule (set BEFORE the run, do NOT adjust after):
     mtp_supported == false  → vllm_020_mtp_unsupported_dense_4b
 
 Emits:
-    docs/phase-c29-v3-vllm-020/verdict.json
-    docs/phase-c29-v3-vllm-020/compare.json
-    docs/phase-c29-v3-vllm-020/compare.md
+    docs/archive/phase-c/phase-c29-v3-vllm-020/verdict.json
+    docs/archive/phase-c/phase-c29-v3-vllm-020/compare.json
+    docs/archive/phase-c/phase-c29-v3-vllm-020/compare.md
 """
 from __future__ import annotations
 
@@ -87,15 +87,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--vllm",
-        default="docs/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json",
     )
     ap.add_argument(
         "--kiln",
-        default="docs/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json",
     )
     ap.add_argument(
         "--out-dir",
-        default="docs/phase-c29-v3-vllm-020",
+        default="docs/archive/phase-c/phase-c29-v3-vllm-020",
     )
     args = ap.parse_args()
 

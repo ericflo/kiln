@@ -3,7 +3,7 @@
 Date: 2026-04-24
 kiln main at audit time: `2f38eb6` (post-PR #527)
 Parent PR: [#527 — phase7: MTP acceptance-rate state-of-play audit (doc-only)](https://github.com/ericflo/kiln/pull/527) (merged 2026-04-24T23:38)
-Scope: $0 doc-only correlation analysis on existing `docs/phase-c40f/summary.json`. No pod, no SSH, no GPU spend, no Rust changes.
+Scope: $0 doc-only correlation analysis on existing `docs/archive/phase-c/phase-c40f/summary.json`. No pod, no SSH, no GPU spend, no Rust changes.
 
 ## Summary
 
@@ -30,7 +30,7 @@ Reopen precondition: a fresh anchor (e.g. post-Marlin-refactor, larger N, or dif
 
 ### Inputs
 
-- `docs/phase-c40f/summary.json` — N=20 paper-floor sweep, anchor PR [#379](https://github.com/ericflo/kiln/pull/379) (2026-04-22). Each row contains `seed`, `model_load_secs`, `acceptance_rate`, plus throughput / VRAM fields not used here.
+- `docs/archive/phase-c/phase-c40f/summary.json` — N=20 paper-floor sweep, anchor PR [#379](https://github.com/ericflo/kiln/pull/379) (2026-04-22). Each row contains `seed`, `model_load_secs`, `acceptance_rate`, plus throughput / VRAM fields not used here.
 - 20 seed indices: 0–19. All `model_vram_mb` values are 16791 (one row at 16790 — within rounding noise).
 
 ### Metrics extracted
@@ -39,7 +39,7 @@ For each row, the pair `(model_load_secs, acceptance_rate)` is the unit of analy
 
 ### Correlation method
 
-Stdlib only — no numpy / scipy. Implemented in `docs/phase-c40f/h15a_correlation.py`:
+Stdlib only — no numpy / scipy. Implemented in `scripts/phase-c40f/h15a_correlation.py`:
 
 - **Pearson r** computed by hand from sums of products and standard deviations.
 - **Spearman ρ** computed as Pearson on average-ranks (1-indexed, mean-rank tie handling).
@@ -69,7 +69,7 @@ n=20 from the canonical C40f sweep is the largest single-anchor MTP α distribut
 
 ### Raw script output
 
-See `docs/phase-c40f/h15a_correlation_output.txt`. Salient numbers:
+See `docs/archive/phase-c/phase-c40f/h15a_correlation_output.txt`. Salient numbers:
 
 | Metric | Value |
 | --- | --- |
@@ -110,7 +110,7 @@ The C40f anchor's `acceptance_rate` field exhibits a strong structural artifact:
 
 Across all 10 seed-pairs, α is bit-identical despite `model_load_secs` differing by 8–116%. **If Marlin pack output were physically nondeterministic and α-determining, paired seeds with materially different load times would not converge on the same α to nine decimal places.** This is independent corroboration of the RULED OUT verdict.
 
-The most parsimonious mechanistic explanation is that the C40f harness seeds a workload sub-selection (humaneval prompt subset shuffle) with period 10, while the model state per-prompt is seed-deterministic given the same packed weights — i.e. the harness re-uses the same 10 effective workloads across the 20 seeds. This is consistent with the C40f command template (`docs/phase-c40f/command-template.txt`) using `--prompt-subset humaneval` with `--seeds 0..19` against a fixed prompt pool. Confirming this is out of scope for H15a (it does not affect the determinism verdict) but is filed as an open observation in §4.
+The most parsimonious mechanistic explanation is that the C40f harness seeds a workload sub-selection (humaneval prompt subset shuffle) with period 10, while the model state per-prompt is seed-deterministic given the same packed weights — i.e. the harness re-uses the same 10 effective workloads across the 20 seeds. This is consistent with the C40f command template (`docs/archive/phase-c/phase-c40f/command-template.txt`) using `--prompt-subset humaneval` with `--seeds 0..19` against a fixed prompt pool. Confirming this is out of scope for H15a (it does not affect the determinism verdict) but is filed as an open observation in §4.
 
 ### Cross-check vs known structure of the C40f anchor
 
@@ -142,15 +142,15 @@ PR #527 (the parent) explicitly documents H15a as a "free pre-step (do BEFORE GP
 
 ### Files read
 
-- `docs/phase-c40f/summary.json` (lines 1–222) — input data; 20 rows in `rows[]`, summary block in `summary{}`.
+- `docs/archive/phase-c/phase-c40f/summary.json` (lines 1–222) — input data; 20 rows in `rows[]`, summary block in `summary{}`.
 - `docs/phase7-mtp-acceptance-state-of-play.md` (PR #527) — bench plan §"Free pre-step (do BEFORE GPU spend)" defining the |ρ| > 0.5 threshold and the H15b vs deterministic-pack-repro fork.
-- `docs/phase-c40f/command-template.txt` — C40f harness invocation (for the period-10 hypothesis in §3).
+- `docs/archive/phase-c/phase-c40f/command-template.txt` — C40f harness invocation (for the period-10 hypothesis in §3).
 - `PROFILING.md` §"Phase 7 MTP acceptance-rate state-of-play audit (2026-04-24)" — pointer pattern reused below.
 
 ### Files written
 
-- `docs/phase-c40f/h15a_correlation.py` — stdlib-only Pearson + Spearman correlation analysis script.
-- `docs/phase-c40f/h15a_correlation_output.txt` — verbatim script output captured 2026-04-24.
+- `scripts/phase-c40f/h15a_correlation.py` — stdlib-only Pearson + Spearman correlation analysis script.
+- `docs/archive/phase-c/phase-c40f/h15a_correlation_output.txt` — verbatim script output captured 2026-04-24.
 - `docs/phase7-h15a-marlin-determinism.md` — this audit.
 - `PROFILING.md` — top-of-file pointer added.
 
@@ -182,5 +182,5 @@ H15a should be re-run if any of the following changes:
 - [PR #525 — Phase 7 vLLM GDN audit (doc-only)](https://github.com/ericflo/kiln/pull/525) — doc-only audit precedent
 - [PR #526 — Phase 7 SGLang radix audit (doc-only)](https://github.com/ericflo/kiln/pull/526) — doc-only audit precedent
 - [PR #210 — Marlin parallel pack](https://github.com/ericflo/kiln/pull/210) — pack pipeline this audit is testing
-- `docs/phase-c36/c36-identity-bias.md` — the leading remaining hypothesis (identity-bias regime split) that H15b targets
+- `docs/archive/phase-c/phase-c36/c36-identity-bias.md` — the leading remaining hypothesis (identity-bias regime split) that H15b targets
 - `PROFILING.md` §"Phase 7 MTP acceptance-rate state-of-play audit (2026-04-24)" — the parent state-of-play

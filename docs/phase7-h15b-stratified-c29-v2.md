@@ -60,7 +60,7 @@ H15b is unambiguously new work.
 
 Reuses the PR #355 C29 harness (`scripts/c29_kiln_logits_dump.sh`) with one
 additive change: **`KILN_C1_ATTR_PATH` is now also set**, so a per-seed
-C1 attribution CSV (same schema as `docs/phase-c36/c1_seed*.csv`) is emitted
+C1 attribution CSV (same schema as `docs/archive/phase-c/phase-c36/c1_seed*.csv`) is emitted
 alongside the splice dumps from the same bench run. This guarantees
 per-site accept/reject labels align with splice-dump coordinates — see
 "Label alignment" below.
@@ -109,7 +109,7 @@ CSV row with `mtp_pos=N` corresponds to the K-th splice dump at
 `mtp_pos=N`. The comparator's `load_accept_labels` enforces this by
 counting per-`mtp_pos` occurrences and indexing into them.
 
-**Why not use `docs/phase-c36/c1_seed*.csv` directly?** Those were
+**Why not use `docs/archive/phase-c/phase-c36/c1_seed*.csv` directly?** Those were
 produced by the C36 H14a decode-length sweep with `--chat-template`,
 `KILN_MTP_ARGMAX_FP32=1`, and variable `--max-output-tokens` (128/256/512/
 1024). The C29 v2 harness runs with the prose PROMPT_POOL (no chat
@@ -128,7 +128,7 @@ Expected spend: ~30 min on A6000 ≈ $0.25 (PR #527 §"Recommended next H").
 
 ## Verdict
 
-Machine-readable record: [`docs/phase-c29-v2/verdict.json`](phase-c29-v2/verdict.json).
+Machine-readable record: [`docs/archive/phase-c/phase-c29-v2/verdict.json`](phase-c29-v2/verdict.json).
 
 | field | value |
 | --- | --- |
@@ -210,7 +210,7 @@ floor. No position-dependent reject-row drift; the pos=3 accept p10
   extra at `mtp_pos=0 step=1`).
 - **HF reference dumps produced**: 22/22 (0 errors, 0 missing taps).
 - **C1 attribution rows**: 37 total (12 + 13 + 12). Kept under
-  `docs/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`.
+  `docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`.
 
 ## Pod spend
 
@@ -242,10 +242,10 @@ floor. No position-dependent reject-row drift; the pos=3 accept p10
 
 - `scripts/c29_logits_compare_v2.py` — new stratified comparator
 - `scripts/c29_kiln_logits_dump.sh` — now emits per-seed `c1_attr.csv`
-- `docs/phase-c29-v2/c29-v2-stratified-compare.json` — full per-(seed, pos, step) breakdown
-- `docs/phase-c29-v2/c29-v2-stratified-compare.md` — human-readable verdict tables
-- `docs/phase-c29-v2/verdict.json` — machine-readable decision record
-- `docs/phase-c29/c29-h9-verdict.md` — parent C29 (H9) verdict
+- `docs/archive/phase-c/phase-c29-v2/c29-v2-stratified-compare.json` — full per-(seed, pos, step) breakdown
+- `docs/archive/phase-c/phase-c29-v2/c29-v2-stratified-compare.md` — human-readable verdict tables
+- `docs/archive/phase-c/phase-c29-v2/verdict.json` — machine-readable decision record
+- `docs/archive/phase-c/phase-c29/c29-h9-verdict.md` — parent C29 (H9) verdict
 - `docs/phase7-mtp-acceptance-state-of-play.md` — PR #527 state-of-play
 - `docs/phase7-h15a-marlin-determinism.md` — PR #528 H15a result
 - Agent notes: `mtp-head-audit-needs-topk-jaccard`, `mtp-bench-workload-sensitivity`,

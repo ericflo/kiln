@@ -1,0 +1,10 @@
+Generating SQLite file /tmp/kiln-c54/c54-conv-child-ranges.sqlite from /tmp/kiln-c54/c54-conv-child-ranges.nsys-rep
+Processing [/tmp/kiln-c54/c54-conv-child-ranges.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_sum.py] to [docs/archive/phase-c/phase-c54/c54_nvtx_sum.csv]... SKIPPED: output file docs/archive/phase-c/phase-c54/c54_nvtx_sum.csv exists.
+
+Processing [/tmp/kiln-c54/c54-conv-child-ranges.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_pushpop_trace.py] to [docs/archive/phase-c/phase-c54/c54_nvtx_pushpop_trace.csv]... SKIPPED: output file docs/archive/phase-c/phase-c54/c54_nvtx_pushpop_trace.csv exists.
+
+Processing [/tmp/kiln-c54/c54-conv-child-ranges.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_gpu_kern_sum.py] to [docs/archive/phase-c/phase-c54/c54_cuda_gpu_kern_sum.csv]... SKIPPED: output file docs/archive/phase-c/phase-c54/c54_cuda_gpu_kern_sum.csv exists.
+
+Processing [/tmp/kiln-c54/c54-conv-child-ranges.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_api_sum.py] to [docs/archive/phase-c/phase-c54/c54_cuda_api_sum.csv]... SKIPPED: output file docs/archive/phase-c/phase-c54/c54_cuda_api_sum.csv exists.
+
+Processing [/tmp/kiln-c54/c54-conv-child-ranges.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_kern_exec_sum.py] to [docs/archive/phase-c/phase-c54/c54_cuda_kern_exec_sum.csv]... SKIPPED: output file docs/archive/phase-c/phase-c54/c54_cuda_kern_exec_sum.csv exists.
