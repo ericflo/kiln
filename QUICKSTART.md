@@ -82,9 +82,6 @@ path = "./Qwen3.5-4B"
 
 [server]
 port = 8420
-
-[logging]
-format = "human"
 ```
 
 Then start with:
@@ -92,6 +89,12 @@ Then start with:
 ```bash
 ./target/release/kiln serve --config kiln.toml
 ```
+
+By default, Kiln logs in colored "pretty" format when stderr is an interactive
+terminal and switches to structured JSON when stderr is piped or redirected
+(systemd, docker, CI). To force a specific format, set `KILN_LOG_FORMAT=json`
+or `KILN_LOG_FORMAT=pretty` (or the equivalent `[logging] format = "..."` in
+`kiln.toml`).
 
 You'll see the startup banner:
 
@@ -249,7 +252,7 @@ Key settings:
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
-| `logging.format` | — | json | Log format: json, human, pretty, text |
+| `logging.format` | `KILN_LOG_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
 | `prefix_cache.enabled` | — | true | Reuse KV cache for shared prefixes |
 
 ## Running with Docker

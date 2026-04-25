@@ -276,7 +276,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             level: "info".into(),
-            format: "json".into(),
+            format: "auto".into(),
         }
     }
 }
@@ -607,7 +607,7 @@ mod tests {
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert_eq!(config.logging.level, "info");
-        assert_eq!(config.logging.format, "json");
+        assert_eq!(config.logging.format, "auto");
         assert!(config.prefix_cache.enabled);
         assert!(config.prefix_cache.max_blocks.is_none());
         assert!(!config.speculative.enabled);
