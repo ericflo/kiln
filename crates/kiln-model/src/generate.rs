@@ -1840,7 +1840,7 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut rng = match params.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-            None => rand::rngs::StdRng::from_entropy(),
+            None => rand::rngs::StdRng::from_os_rng(),
         };
 
         // Sample first token from prefill logits
@@ -2144,7 +2144,7 @@ impl ModelRunner {
 
         let mut rng = match params.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-            None => rand::rngs::StdRng::from_entropy(),
+            None => rand::rngs::StdRng::from_os_rng(),
         };
 
         loop {
@@ -2358,7 +2358,7 @@ impl ModelRunner {
         let mut finish_reason = FinishReason::MaxTokens;
         let mut rng = match params.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-            None => rand::rngs::StdRng::from_entropy(),
+            None => rand::rngs::StdRng::from_os_rng(),
         };
 
         let mut last_token = if params.temperature == 0.0 {
@@ -2593,7 +2593,7 @@ impl ModelRunner {
         let mut finish_reason = FinishReason::MaxTokens;
         let mut rng = match params.seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
-            None => rand::rngs::StdRng::from_entropy(),
+            None => rand::rngs::StdRng::from_os_rng(),
         };
 
         loop {

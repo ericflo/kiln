@@ -233,7 +233,7 @@ pub fn rejection_sample(
         1.0
     };
 
-    let r: f32 = rng.r#gen();
+    let r: f32 = rng.random();
 
     if r < accept_prob {
         // Accept the draft token
@@ -260,7 +260,7 @@ fn resample_adjusted(
     let sum: f32 = adjusted.iter().sum();
     if sum <= 0.0 {
         // Fallback: sample from target distribution directly
-        let r: f32 = rng.r#gen();
+        let r: f32 = rng.random();
         let mut cumsum = 0.0;
         for (i, &p) in target_probs.iter().enumerate() {
             cumsum += p;
@@ -272,7 +272,7 @@ fn resample_adjusted(
     }
 
     // Normalize and sample
-    let r: f32 = rng.r#gen::<f32>() * sum;
+    let r: f32 = rng.random::<f32>() * sum;
     let mut cumsum = 0.0;
     for (i, &p) in adjusted.iter().enumerate() {
         cumsum += p;
