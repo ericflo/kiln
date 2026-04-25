@@ -47,6 +47,12 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
+# Only fail CI when an UNMAINTAINED advisory targets a workspace crate's direct
+# dependency. Transitive unmaintained deps (e.g. paste, number_prefix pulled in
+# via indicatif) are not actionable here — there is no upstream fix and dropping
+# the parent crate is out of scope. Real security vulnerabilities still fail
+# regardless of where in the tree they appear.
+unmaintained = "workspace"
 
 [sources]
 unknown-registry = "deny"
