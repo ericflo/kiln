@@ -19,6 +19,8 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+indicatif = "0.17"
+console = "0.15"
 
 [features]
 cuda = ["kiln-model/cuda"]

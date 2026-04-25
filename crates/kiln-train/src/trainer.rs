@@ -291,6 +291,29 @@ pub struct TrainingProgress {
     pub progress: f32,
 }
 
+/// Build a progress bar for the SFT training step loop.
+///
+/// Returns `None` when stderr is not a TTY so log files, server-mode tracing,
+/// and CI runs stay clean. The structured `tracing::info!` lines and the
+/// `progress_cb` HTTP-status callback remain the source of truth for
+/// non-interactive runs; the bar is purely additive UX for interactive
+/// `kiln train` invocations, where SFT loops often run hundreds–thousands of
+/// steps with no other visual feedback between every-10-step log lines.
+fn make_step_progress(total_steps: usize) -> Option<indicatif::ProgressBar> {
+    if !console::Term::stderr().features().is_attended() {
+        return None;
+    }
+    let pb = indicatif::ProgressBar::new(total_steps as u64);
+    pb.set_style(
+        indicatif::ProgressStyle::with_template(
+            "  sft training {bar:40.cyan/blue} {pos:>5}/{len:5} step ({elapsed}) loss={msg}",
+        )
+        .expect("static progress template is valid")
+        .progress_chars("##-"),
+    );
+    Some(pb)
+}
+
 /// Run SFT training on the provided examples using the already-loaded model.
 ///
 /// This runs in the calling thread (blocking). The caller should spawn this
@@ -376,6 +399,8 @@ pub fn sft_train(
     let mut global_step = 0;
     let mut last_loss = 0.0;
 
+    let pb = make_step_progress(total_steps);
+
     for epoch in 0..config.epochs {
         let mut epoch_loss = 0.0;
 
@@ -449,6 +474,11 @@ pub fn sft_train(
                     "training step"
                 );
             }
+
+            if let Some(pb) = &pb {
+                pb.set_message(format!("{loss_val:.6}"));
+                pb.inc(1);
+            }
         }
 
         let avg_loss = epoch_loss / tokenized.len() as f64;
@@ -457,6 +487,10 @@ pub fn sft_train(
             avg_loss = format!("{avg_loss:.6}"),
             "epoch complete"
         );
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
     // Save the trained adapter
