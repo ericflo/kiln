@@ -1864,6 +1864,8 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "chrono",
+ "console",
+ "indicatif",
  "kiln-core",
  "kiln-flce-kernel",
  "kiln-model",
