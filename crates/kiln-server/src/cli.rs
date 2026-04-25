@@ -125,6 +125,16 @@ pub enum TrainCommands {
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
+    /// Show training queue / per-job status
+    Status {
+        /// Specific job ID to look up. If omitted, shows the full queue.
+        #[arg(long)]
+        job_id: Option<String>,
+
+        /// Server URL
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -569,13 +579,20 @@ pub async fn run_train_sft(
             "{} Training job submitted",
             style("✓").green().bold()
         );
-        if let Some(job_id) = resp_body.get("job_id").and_then(|j| j.as_str()) {
-            println!("  {} {}", style("Job ID:").dim(), job_id);
+        let job_id = resp_body.get("job_id").and_then(|j| j.as_str());
+        if let Some(id) = job_id {
+            println!("  {} {}", style("Job ID:").dim(), id);
         }
-        println!(
-            "  {} kiln health --url {url}",
-            style("Check status:").dim()
-        );
+        match job_id {
+            Some(id) => println!(
+                "  {} kiln train status --job-id {id} --url {url}",
+                style("Check status:").dim()
+            ),
+            None => println!(
+                "  {} kiln train status --url {url}",
+                style("Check status:").dim()
+            ),
+        }
     } else {
         eprintln!(
             "{} Training submission failed: {}",
@@ -626,8 +643,19 @@ pub async fn run_train_grpo(url: &str, file: &str, adapter: &str) -> anyhow::Res
             "{} GRPO training job submitted",
             style("✓").green().bold()
         );
-        if let Some(job_id) = resp_body.get("job_id").and_then(|j| j.as_str()) {
-            println!("  {} {}", style("Job ID:").dim(), job_id);
+        let job_id = resp_body.get("job_id").and_then(|j| j.as_str());
+        if let Some(id) = job_id {
+            println!("  {} {}", style("Job ID:").dim(), id);
+        }
+        match job_id {
+            Some(id) => println!(
+                "  {} kiln train status --job-id {id} --url {url}",
+                style("Check status:").dim()
+            ),
+            None => println!(
+                "  {} kiln train status --url {url}",
+                style("Check status:").dim()
+            ),
         }
     } else {
         eprintln!(
@@ -638,6 +666,162 @@ pub async fn run_train_grpo(url: &str, file: &str, adapter: &str) -> anyhow::Res
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Run the `train status` CLI subcommand.
+///
+/// With `job_id` set, GETs `/v1/train/status/{id}` and prints a one-job summary.
+/// Without `job_id`, GETs `/v1/train/status` (overall list) and prints all jobs
+/// grouped by state: running first, then queued, then completed/failed.
+pub async fn run_train_status(url: &str, job_id: Option<&str>) -> anyhow::Result<()> {
+    if let Some(id) = job_id {
+        return print_single_job_status(url, id).await;
+    }
+    print_all_job_statuses(url).await
+}
+
+async fn print_single_job_status(url: &str, id: &str) -> anyhow::Result<()> {
+    let resp = reqwest::get(format!("{url}/v1/train/status/{id}")).await?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        eprintln!(
+            "{} Failed to get status for job '{}': {}",
+            style("✗").red().bold(),
+            id,
+            render_api_error(&body, status)
+        );
+        std::process::exit(1);
+    }
+
+    print_job_summary(&body);
+    Ok(())
+}
+
+async fn print_all_job_statuses(url: &str) -> anyhow::Result<()> {
+    let resp = reqwest::get(format!("{url}/v1/train/status")).await?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        eprintln!(
+            "{} Server returned {}",
+            style("✗").red().bold(),
+            style(status).red()
+        );
+        eprintln!("{}", serde_json::to_string_pretty(&body)?);
+        std::process::exit(1);
+    }
+
+    // The server returns a bare JSON array; some older shapes wrap it as
+    // {"jobs": [...]}. Accept either.
+    let jobs = body
+        .as_array()
+        .cloned()
+        .or_else(|| body.get("jobs").and_then(|j| j.as_array()).cloned())
+        .unwrap_or_default();
+
+    if jobs.is_empty() {
+        println!("{}", style("No training jobs").dim());
+        return Ok(());
+    }
+
+    // Group by state; order: running, queued, completed, failed
+    let mut running = Vec::new();
+    let mut queued = Vec::new();
+    let mut terminal = Vec::new();
+    for job in &jobs {
+        match job.get("state").and_then(|s| s.as_str()).unwrap_or("") {
+            "running" => running.push(job),
+            "queued" => queued.push(job),
+            _ => terminal.push(job),
+        }
+    }
+    // Sort terminal by elapsed_secs ascending (most recent submissions last).
+    terminal.sort_by(|a, b| {
+        let ea = a.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let eb = b.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        ea.partial_cmp(&eb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    println!(
+        "{} {} job(s):",
+        style("✓").green().bold(),
+        jobs.len()
+    );
+    for job in running.iter().chain(queued.iter()).chain(terminal.iter()) {
+        print_job_line(job);
+    }
+    Ok(())
+}
+
+fn style_state(state: &str) -> console::StyledObject<String> {
+    let s = state.to_string();
+    match state {
+        "queued" => style(s).dim(),
+        "running" => style(s).cyan(),
+        "completed" => style(s).green(),
+        "failed" => style(s).red(),
+        _ => style(s),
+    }
+}
+
+fn print_job_summary(job: &serde_json::Value) {
+    let id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("?");
+    let state = job.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+    let adapter = job
+        .get("adapter_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let progress_pct = (job
+        .get("progress")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        * 100.0)
+        .round() as i64;
+    let elapsed = job
+        .get("elapsed_secs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        .round() as i64;
+
+    println!("{} Job {}", style("✓").green().bold(), style(id).white().bold());
+    println!("  {} {}", style("State:").dim(), style_state(state));
+    println!("  {} {}", style("Adapter:").dim(), style(adapter).white());
+    println!("  {} {}%", style("Progress:").dim(), progress_pct);
+    if let Some(loss) = job.get("current_loss").and_then(|v| v.as_f64()) {
+        println!("  {} {loss:.4}", style("Loss:").dim());
+    }
+    println!("  {} {}s", style("Elapsed:").dim(), elapsed);
+}
+
+fn print_job_line(job: &serde_json::Value) {
+    let id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("?");
+    let state = job.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+    let adapter = job
+        .get("adapter_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let progress_pct = (job
+        .get("progress")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        * 100.0)
+        .round() as i64;
+    let elapsed = job
+        .get("elapsed_secs")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        .round() as i64;
+    println!(
+        "  {} [{}] adapter={} {}% ({}s)",
+        style(id).white().bold(),
+        style_state(state),
+        adapter,
+        progress_pct,
+        elapsed
+    );
 }
 
 #[cfg(test)]
@@ -705,5 +889,52 @@ mod tests {
             out.contains("502"),
             "expected HTTP status fallback, got: {out}"
         );
+    }
+
+    #[test]
+    fn parses_status_subcommand() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "train", "status", "--job-id", "abc"])
+            .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Status { job_id, url })) => {
+                assert_eq!(job_id.as_deref(), Some("abc"));
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected Train(Status), got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parses_status_subcommand_no_job_id() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "train", "status"]).expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Status { job_id, url })) => {
+                assert!(job_id.is_none(), "expected no job_id");
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected Train(Status), got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parses_status_subcommand_custom_url() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "kiln",
+            "train",
+            "status",
+            "--url",
+            "http://example.com:9000",
+        ])
+        .expect("parse failed");
+        match cli.command {
+            Some(Commands::Train(TrainCommands::Status { job_id, url })) => {
+                assert!(job_id.is_none());
+                assert_eq!(url, "http://example.com:9000");
+            }
+            other => panic!("expected Train(Status), got {:?}", other.is_some()),
+        }
     }
 }
