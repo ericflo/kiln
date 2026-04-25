@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use kiln_model::adapter_merge::{merge_linear, merge_ties, PeftLora};
+use kiln_model::adapter_merge::{merge_concat, merge_linear, merge_ties, PeftLora};
 use kiln_model::lora_loader::LoraWeights;
 
 use crate::error::ApiError;
@@ -298,14 +298,14 @@ struct MergeAdapterRequest {
     sources: Vec<MergeSource>,
     /// Name of the output adapter (subdirectory created under adapter_dir).
     output_name: String,
-    /// Merge mode. Supported values: `"weighted_average"` (the default) and
-    /// `"ties"` (Yadav et al. 2023). Concatenation will arrive in a
-    /// follow-up PR.
+    /// Merge mode. Supported values: `"weighted_average"` (the default),
+    /// `"ties"` (Yadav et al. 2023), and `"concat"` (rank concatenation —
+    /// produces a higher-rank adapter where `r_total = Σᵢ rᵢ`).
     #[serde(default)]
     mode: Option<String>,
     /// Density used by the TIES merge: keep the top fraction of values per
-    /// adapter per tensor. Required range `(0.0, 1.0]`. Ignored for
-    /// `weighted_average`. Defaults to 0.2 when `mode == "ties"`, following
+    /// adapter per tensor. Required range `(0.0, 1.0]`. Only valid with
+    /// `mode == "ties"`. Defaults to 0.2 when `mode == "ties"`, following
     /// the TIES paper's recommendation.
     #[serde(default)]
     density: Option<f32>,
@@ -329,12 +329,21 @@ struct MergeAdapterResponse {
     num_tensors: usize,
 }
 
-/// Merge multiple LoRA adapters via linear interpolation.
+/// Merge multiple LoRA adapters via one of three modes.
 ///
-/// For each tensor key shared across the input adapters, computes the
-/// weighted sum `Σᵢ wᵢ · tensor_i` and writes the result to a new adapter
-/// directory in `adapter_dir`. Source adapters must have identical rank,
-/// target_modules, base model, and tensor shapes.
+/// - `weighted_average` (default) — elementwise weighted sum across
+///   tensors. Source adapters must have identical rank, target_modules,
+///   base model, and tensor shapes.
+/// - `ties` — TIES merge (Yadav et al. 2023). Same shape requirements
+///   as weighted_average; additionally accepts a `density` parameter
+///   in `(0.0, 1.0]` that controls per-adapter trimming (default 0.2).
+/// - `concat` — concatenate ranks. Produces a merged adapter with
+///   `r_total = Σᵢ rᵢ`; ranks may differ across sources. `lora_A` is
+///   row-stacked, `lora_B` is column-stacked with each block scaled by
+///   its source weight, and `B_concat @ A_concat = Σᵢ wᵢ · (Bᵢ @ Aᵢ)`.
+///
+/// In every mode the result is written to a new adapter directory in
+/// `adapter_dir`.
 async fn merge_adapters(
     State(state): State<AppState>,
     Json(req): Json<MergeAdapterRequest>,
@@ -344,9 +353,10 @@ async fn merge_adapters(
     let resolved_mode: &'static str = match mode_str {
         "weighted_average" => "weighted_average",
         "ties" => "ties",
+        "concat" => "concat",
         other => {
             return Err(ApiError::adapter_merge_invalid(format!(
-                "unsupported merge mode '{other}' — supported modes are 'weighted_average' and 'ties'"
+                "unsupported merge mode '{other}' — supported modes are 'weighted_average', 'ties', and 'concat'"
             )));
         }
     };
@@ -439,6 +449,8 @@ async fn merge_adapters(
 
         let merged = match mode_for_task {
             "ties" => merge_ties(&refs, ties_density)
+                .map_err(|e| MergeError::Invalid(format!("{e}")))?,
+            "concat" => merge_concat(&refs)
                 .map_err(|e| MergeError::Invalid(format!("{e}")))?,
             _ => merge_linear(&refs).map_err(|e| MergeError::Invalid(format!("{e}")))?,
         };
