@@ -1,0 +1,70 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.08
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+[h18_hf] transformers=5.7.0.dev0 torch=2.4.1+cu124
+[h18_hf] device=cuda dtype=torch.bfloat16
+[h18_hf] loading MTP weights from /workspace/qwen3.5-4b
+[mtp_ref] embed_tokens loaded from `model.language_model.embed_tokens.weight` shape=(248320, 2560)
+[mtp_ref] MTP prefix = `mtp.` fc.shape=(2560, 5120)
+[h18_hf] MTP head loaded: V=248320 H=2560 fc.shape=(2560, 5120)
+[h18_hf] rope_theta=10000000.0 rotary_frac=0.25
+[h18_hf] loading tokenizer from /workspace/qwen3.5-4b
+[h18_hf] loading base model from /workspace/qwen3.5-4b (dtype=torch.bfloat16, device=cuda, trust_remote_code=True)
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/426 [00:00<?, ?it/s]Loading weights: 100%|██████████| 426/426 [00:00<00:00, 6094.67it/s]
+[h18_hf] base model loaded: class=Qwen3_5ForCausalLM
+[h18_hf] eos_token_ids=[248044, 248046]
+[h18_hf] seed=0 prompt_tokens=494 prompt_prefix="Janet's ducks lay sixteen eggs per day. She eats three for breakfast every morni"
+[h18_hf] seed=0 α=0.3636 n_accept=4 n_steps=11 hit_eos=False elapsed=9.39s generated_head=' First subtract eaten and baked eggs from the'
+[h18_hf] seed=1 prompt_tokens=508 prompt_prefix='A robe takes two bolts of blue fiber and half that much white fiber. The bolts a'
+[h18_hf] seed=1 α=0.2308 n_accept=3 n_steps=13 hit_eos=False elapsed=10.81s generated_head=' Half of two bolts is one bolt of'
+[h18_hf] seed=2 prompt_tokens=501 prompt_prefix='Josh buys a run-down property for eighty thousand dollars and then spends fifty '
+[h18_hf] seed=2 α=0.2500 n_accept=3 n_steps=12 hit_eos=False elapsed=10.04s generated_head=' Compute the new value using the percentage increase'
+  seed=0 α=0.3636 (4/11)
+  seed=1 α=0.2308 (3/13)
+  seed=2 α=0.2500 (3/12)
+{
+  "mtp_supported": true,
+  "median_alpha": 0.25,
+  "mean_alpha": 0.28146853146853146,
+  "min_alpha": 0.23076923076923078,
+  "max_alpha": 0.36363636363636365,
+  "n_seeds": 3,
+  "transformers_version": "5.7.0.dev0",
+  "torch_version": "2.4.1+cu124",
+  "config": {
+    "checkpoint": "/workspace/qwen3.5-4b",
+    "dtype": "torch.bfloat16",
+    "device": "cuda",
+    "prompt_tokens": 512,
+    "max_output_tokens": 16,
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "rms_eps": 1e-06,
+    "rope_theta": 10000000.0,
+    "rotary_frac": 0.25,
+    "eos_token_ids": [
+      248044,
+      248046
+    ],
+    "chat_template": false,
+    "spec_method": "qwen3_5_mtp_handrolled_hf",
+    "num_speculative_tokens": 1,
+    "sampling": {
+      "temperature": 0.0,
+      "greedy": true
+    }
+  },
+  "total_elapsed_s": 30.754949748516083
+}
