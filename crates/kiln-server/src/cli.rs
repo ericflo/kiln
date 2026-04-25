@@ -5,6 +5,37 @@ use std::io::Write;
 use clap::{Parser, Subcommand};
 use console::style;
 
+/// Render a structured server error response. Falls back to HTTP status if the body
+/// is not the expected `{error: {code, message, hint}}` shape.
+///
+/// The server's `ApiError` returns errors in OpenAI's nested-object form (see
+/// `crates/kiln-server/src/error.rs`). The CLI previously assumed `error` was a
+/// bare string and silently dropped the helpful `hint` field; this helper plugs
+/// the CLI back into that contract.
+fn render_api_error(body: &serde_json::Value, status: reqwest::StatusCode) -> String {
+    if let Some(err) = body.get("error").and_then(|e| e.as_object()) {
+        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        let hint = err.get("hint").and_then(|h| h.as_str()).unwrap_or("");
+        let code = err.get("code").and_then(|c| c.as_str()).unwrap_or("");
+        let mut out = if msg.is_empty() {
+            status.to_string()
+        } else {
+            msg.to_string()
+        };
+        if !code.is_empty() {
+            out = format!("{out} ({code})");
+        }
+        if !hint.is_empty() {
+            out = format!("{out}\n  {} {hint}", style("hint:").dim().cyan());
+        }
+        out
+    } else if let Some(s) = body.get("error").and_then(|e| e.as_str()) {
+        s.to_string()
+    } else {
+        status.to_string()
+    }
+}
+
 /// Kiln — single-model inference server with live online learning
 #[derive(Parser)]
 #[command(
@@ -424,9 +455,7 @@ pub async fn run_adapters_load(url: &str, name: &str) -> anyhow::Result<()> {
             "{} Failed to load adapter '{}': {}",
             style("✗").red().bold(),
             name,
-            body.get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or(&status.to_string())
+            render_api_error(&body, status)
         );
         std::process::exit(1);
     }
@@ -454,9 +483,7 @@ pub async fn run_adapters_unload(url: &str, name: &str) -> anyhow::Result<()> {
             "{} Failed to unload adapter '{}': {}",
             style("✗").red().bold(),
             name,
-            body.get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or(&status.to_string())
+            render_api_error(&body, status)
         );
         std::process::exit(1);
     }
@@ -484,9 +511,7 @@ pub async fn run_adapters_delete(url: &str, name: &str) -> anyhow::Result<()> {
             "{} Failed to delete adapter '{}': {}",
             style("✗").red().bold(),
             name,
-            body.get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or(&status.to_string())
+            render_api_error(&body, status)
         );
         std::process::exit(1);
     }
@@ -555,10 +580,7 @@ pub async fn run_train_sft(
         eprintln!(
             "{} Training submission failed: {}",
             style("✗").red().bold(),
-            resp_body
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or(&status.to_string())
+            render_api_error(&resp_body, status)
         );
         std::process::exit(1);
     }
@@ -611,12 +633,77 @@ pub async fn run_train_grpo(url: &str, file: &str, adapter: &str) -> anyhow::Res
         eprintln!(
             "{} GRPO submission failed: {}",
             style("✗").red().bold(),
-            resp_body
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or(&status.to_string())
+            render_api_error(&resp_body, status)
         );
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn render_api_error_structured_with_hint() {
+        let body = json!({
+            "error": {
+                "code": "adapter_not_found",
+                "message": "Adapter 'foo' does not exist",
+                "hint": "List available adapters with GET /v1/adapters",
+            }
+        });
+        let out = render_api_error(&body, StatusCode::NOT_FOUND);
+        assert!(
+            out.contains("Adapter 'foo' does not exist"),
+            "expected message in output, got: {out}"
+        );
+        assert!(
+            out.contains("(adapter_not_found)"),
+            "expected code annotation in output, got: {out}"
+        );
+        assert!(
+            out.contains("List available adapters with GET /v1/adapters"),
+            "expected hint in output, got: {out}"
+        );
+        // The "hint:" label is emitted (possibly with ANSI styling around it).
+        assert!(out.contains("hint:"), "expected hint label, got: {out}");
+    }
+
+    #[test]
+    fn render_api_error_structured_without_hint() {
+        let body = json!({
+            "error": {
+                "code": "invalid_messages",
+                "message": "Bad request",
+            }
+        });
+        let out = render_api_error(&body, StatusCode::BAD_REQUEST);
+        assert!(out.contains("Bad request"));
+        assert!(out.contains("(invalid_messages)"));
+        assert!(
+            !out.contains("hint:"),
+            "should not render a hint label when hint is missing, got: {out}"
+        );
+    }
+
+    #[test]
+    fn render_api_error_legacy_string_shape() {
+        // Older / non-ApiError handlers may still return error as a bare string.
+        let body = json!({"error": "boom"});
+        let out = render_api_error(&body, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(out, "boom");
+    }
+
+    #[test]
+    fn render_api_error_missing_error_key_falls_back_to_status() {
+        let body = json!({"unrelated": "field"});
+        let out = render_api_error(&body, StatusCode::BAD_GATEWAY);
+        assert!(
+            out.contains("502"),
+            "expected HTTP status fallback, got: {out}"
+        );
+    }
 }
