@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """H15c — derive kiln MTP α per seed from PR #529's c1_attr CSVs.
 
-Reads docs/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv and computes
+Reads docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv and computes
 
     alpha_seed = sum(accepted) / n_rows
 
@@ -42,12 +42,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--csv-dir",
-        default="docs/phase-c29-v2/artifacts",
+        default="docs/archive/phase-c/phase-c29-v2/artifacts",
         help="Directory containing c1_attr_seed{0,1,2}.csv",
     )
     ap.add_argument(
         "--out",
-        default="docs/phase-c29-v3-vllm/kiln_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-vllm/kiln_alpha_per_seed.json",
         help="Output JSON path",
     )
     ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])

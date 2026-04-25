@@ -146,13 +146,13 @@ took this kind of small-N sensitivity into account when setting the
 | `scripts/h18_hf_alpha_dump.py` | hand-rolled HF transformers α driver (~430 LOC) |
 | `scripts/h18_compare.py` | applies pre-registered decision rule, emits `verdict.json` |
 | `docs/phase7-h18-hf-transformers-alpha-reference.md` | this audit doc |
-| `docs/phase-c29-v3-hf/verdict.json` | machine-readable verdict |
-| `docs/phase-c29-v3-hf/compare.json` | full kiln + HF side-by-side |
-| `docs/phase-c29-v3-hf/compare.md` | per-seed table + decision-rule application |
-| `docs/phase-c29-v3-hf/hf_alpha_per_seed.json` | HF α dump (per-seed + aggregate) |
-| `docs/phase-c29-v3-hf/kiln_alpha_per_seed.json` | re-derived kiln α (0.3636) |
-| `docs/phase-c29-v3-hf/artifacts/hf_run.log` | full driver run log (~70 lines) |
-| `docs/phase-c29-v3-hf/artifacts/hf_trace_seed{0,1,2}.json` | per-seed step-by-step accept/reject trace |
+| `docs/archive/phase-c/phase-c29-v3-hf/verdict.json` | machine-readable verdict |
+| `docs/archive/phase-c/phase-c29-v3-hf/compare.json` | full kiln + HF side-by-side |
+| `docs/archive/phase-c/phase-c29-v3-hf/compare.md` | per-seed table + decision-rule application |
+| `docs/archive/phase-c/phase-c29-v3-hf/hf_alpha_per_seed.json` | HF α dump (per-seed + aggregate) |
+| `docs/archive/phase-c/phase-c29-v3-hf/kiln_alpha_per_seed.json` | re-derived kiln α (0.3636) |
+| `docs/archive/phase-c/phase-c29-v3-hf/artifacts/hf_run.log` | full driver run log (~70 lines) |
+| `docs/archive/phase-c/phase-c29-v3-hf/artifacts/hf_trace_seed{0,1,2}.json` | per-seed step-by-step accept/reject trace |
 | `PROFILING.md` | top-of-file pointer entry mirroring PR #525-#533 |
 
 ### Reuse strategy
@@ -298,11 +298,11 @@ python3 $RP wait-file "$POD_ID" /workspace/h18_out/hf_alpha_per_seed.json \
 
 # 5. scp results back
 scp -i /data/ssh-keys/id_ed25519 -P "$SCP_PORT" \
-    "root@$SCP_HOST:/workspace/h18_out/*" docs/phase-c29-v3-hf/
+    "root@$SCP_HOST:/workspace/h18_out/*" docs/archive/phase-c/phase-c29-v3-hf/
 
 # 6. Re-derive kiln α from PR #529 c1_attr CSVs
 python3 scripts/h15c_kiln_alpha_from_csv.py \
-    --out docs/phase-c29-v3-hf/kiln_alpha_per_seed.json
+    --out docs/archive/phase-c/phase-c29-v3-hf/kiln_alpha_per_seed.json
 
 # 7. Apply pre-registered decision rule
 python3 scripts/h18_compare.py

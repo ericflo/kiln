@@ -1,0 +1,11 @@
+Generating SQLite file /tmp/kiln-c56/c56-post-476-mtp.sqlite from /tmp/kiln-c56/c56-post-476-mtp.nsys-rep
+Processing [/tmp/kiln-c56/c56-post-476-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_sum.py] to [docs/archive/phase-c/phase-c56/c56-failed-prefill_nvtx_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c56/c56-post-476-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_pushpop_trace.py] to [docs/archive/phase-c/phase-c56/c56-failed-prefill_nvtx_pushpop_trace.csv]... PROCESSED
+
+Processing [/tmp/kiln-c56/c56-post-476-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_gpu_kern_sum.py] to [docs/archive/phase-c/phase-c56/c56-failed-prefill_cuda_gpu_kern_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c56/c56-post-476-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_api_sum.py] to [docs/archive/phase-c/phase-c56/c56-failed-prefill_cuda_api_sum.csv]... PROCESSED
+
+Processing [/tmp/kiln-c56/c56-post-476-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_kern_exec_sum.py] to [docs/archive/phase-c/phase-c56/c56-failed-prefill_cuda_kern_exec_sum.csv]... PROCESSED
+

@@ -243,7 +243,7 @@ def main() -> int:
     ap.add_argument("--num-spec-tokens", type=int, default=1)
     ap.add_argument(
         "--out",
-        default="docs/phase-c29-v3-sglang/sglang_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-sglang/sglang_alpha_per_seed.json",
     )
     args = ap.parse_args()
 

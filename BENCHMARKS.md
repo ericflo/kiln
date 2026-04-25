@@ -43,8 +43,8 @@ processes. Median-of-3 governs.
 | P99 ITL (ms) | 27.33 |
 | Peak VRAM | ~10 GB |
 
-Source: `docs/phase-c66/post-535-mtp-decode-bench.csv` (PR #536), with the
-hotspot mix and post-#534 comparison in `docs/phase-c65/post-534-profile.md`
+Source: `docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv` (PR #536), with the
+hotspot mix and post-#534 comparison in `docs/archive/phase-c/phase-c65/post-534-profile.md`
 (PR #535).
 
 ### Multi-engine comparison (Qwen3.5-4B + native MTP, A6000 sm_86)
@@ -123,7 +123,7 @@ still below the bs=1 break-even floor of α≈0.72; one seed (α=0.778) cleared
 the floor at +8.5 %, the other two (α=0.620, α=0.684) lost 9.2 % and 4.3 %
 respectively. P99 ITL roughly doubles when MTP is on because rejected-draft
 steps add a heavy tail. `KILN_SPEC_METHOD=mtp` therefore stays opt-in and
-gated on prompt length; see PR #536 and `docs/phase-c66/` for reopen
+gated on prompt length; see PR #536 and `docs/archive/phase-c/phase-c66/` for reopen
 triggers.
 
 This is the operative reason kiln's headline decode tok/s is what it is: the
@@ -246,9 +246,9 @@ llama.cpp side (still on the `f3d5089` head-to-head shape, 512 → 256):
 
 Raw JSON for the historical RTX 6000 Ada head-to-head is checked in under
 [`bench-results/`](bench-results/). The post-#536 A6000 per-seed CSV is at
-[`docs/phase-c66/post-535-mtp-decode-bench.csv`](docs/phase-c66/post-535-mtp-decode-bench.csv);
+[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv`](docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv);
 the post-#534 NVTX hotspot tables are in
-[`docs/phase-c65/`](docs/phase-c65/).
+[`docs/archive/phase-c/phase-c65/`](docs/archive/phase-c/phase-c65/).
 
 ## macOS / Apple Silicon (Metal)
 

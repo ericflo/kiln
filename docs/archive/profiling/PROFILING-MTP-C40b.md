@@ -248,10 +248,10 @@ C39 distribution's modal cluster. Default-path numbers are safe.
 - Branch: `ce/mtp-c40b-humaneval-temperature`
 - Code change: `crates/kiln-server/src/bench.rs` — adds `--temperature`
   CLI flag (default `0.0`), threads through 4 SamplingParams sites.
-- Raw per-seed JSON: `docs/phase-c40b/c40b_seed{0..19}_temp0.1.json`
+- Raw per-seed JSON: `docs/archive/phase-c/phase-c40b/c40b_seed{0..19}_temp0.1.json`
 - Sanity JSON (default-path byte-identity check):
-  `docs/phase-c40b/sanity_seed0_temp0.json`
-- Analysis script: `docs/phase-c40b/analyze_c40b.py` (ships with PR for
+  `docs/archive/phase-c/phase-c40b/sanity_seed0_temp0.json`
+- Analysis script: `scripts/phase-c40b/analyze_c40b.py` (ships with PR for
   reproducibility; mirrors C39/C40a stats: 10,000 bootstrap resamples,
   rng=12345, percentile method [0.025, 0.975]).
 
@@ -285,7 +285,7 @@ for seed in $(seq 0 19); do
     --seed $seed --temperature 0.1
 done
 
-python3 docs/phase-c40b/analyze_c40b.py /path/to/results
+python3 scripts/phase-c40b/analyze_c40b.py /path/to/results
 ```
 
 The only flag that differs from C39 across the N=20 sweep is

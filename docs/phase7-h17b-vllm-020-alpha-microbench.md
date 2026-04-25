@@ -93,7 +93,7 @@ driver process. Each crash is ~1.5-3s wall-clock from
 exception. Wall-clock for the entire 3-attempt loop: ~33 s (including
 tokenizer load + 3 × engine init).
 
-Trimmed evidence: `docs/phase-c29-v3-vllm-020/artifacts/vllm_020_failure_evidence.log`
+Trimmed evidence: `docs/archive/phase-c/phase-c29-v3-vllm-020/artifacts/vllm_020_failure_evidence.log`
 (the full driver log retained at `artifacts/driver_full.log`, 276 lines,
 89 KB; the trimmed evidence is 105 lines, 65 KB — covers header
 context + first attempt's full traceback + the multi-attempt summary
@@ -241,7 +241,7 @@ python3 scripts/h17b_vllm_020_alpha_dump.py \
 
 # 4. Re-derive kiln α (no GPU needed; reuses PR #529 CSVs)
 python3 scripts/h15c_kiln_alpha_from_csv.py \
-    --out docs/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json
+    --out docs/archive/phase-c/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json
 
 # 5. Apply decision rule
 python3 scripts/h17b_compare.py
@@ -252,13 +252,13 @@ python3 scripts/h17b_compare.py
 | path | purpose |
 | --- | --- |
 | `docs/phase7-h17b-vllm-020-alpha-microbench.md` | this audit doc |
-| `docs/phase-c29-v3-vllm-020/verdict.json` | machine-readable verdict |
-| `docs/phase-c29-v3-vllm-020/compare.json` | full kiln + vLLM 0.20.0 side-by-side |
-| `docs/phase-c29-v3-vllm-020/compare.md` | per-seed table + decision rule |
-| `docs/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json` | re-derived kiln α (0.3636) |
-| `docs/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json` | full vLLM 0.20.0 failure record |
-| `docs/phase-c29-v3-vllm-020/artifacts/vllm_020_failure_evidence.log` | trimmed driver log (105 lines) |
-| `docs/phase-c29-v3-vllm-020/artifacts/driver_full.log` | full driver log (276 lines, retained for completeness) |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/verdict.json` | machine-readable verdict |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/compare.json` | full kiln + vLLM 0.20.0 side-by-side |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/compare.md` | per-seed table + decision rule |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/kiln_alpha_per_seed.json` | re-derived kiln α (0.3636) |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/vllm_020_alpha_per_seed.json` | full vLLM 0.20.0 failure record |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/artifacts/vllm_020_failure_evidence.log` | trimmed driver log (105 lines) |
+| `docs/archive/phase-c/phase-c29-v3-vllm-020/artifacts/driver_full.log` | full driver log (276 lines, retained for completeness) |
 | `scripts/h17b_vllm_020_alpha_dump.py` | re-runnable v0.20-specific driver |
 | `scripts/h17b_compare.py` | applies decision rule, emits verdict.json |
 | `PROFILING.md` | top-of-file pointer entry mirroring PR #525-#532 |

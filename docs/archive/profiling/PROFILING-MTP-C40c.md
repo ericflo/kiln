@@ -127,13 +127,13 @@ the BF16-vs-W4A16 comparison.
 ## Artifacts
 
 - Sanity JSON:
-  `docs/phase-c40c/sanity_seed0_temp0.json`
+  `docs/archive/phase-c/phase-c40c/sanity_seed0_temp0.json`
 - Sanity rerun JSON:
-  `docs/phase-c40c/sanity_seed0_temp0_rerun.json`
+  `docs/archive/phase-c/phase-c40c/sanity_seed0_temp0_rerun.json`
 - Sanity stderr log:
-  `docs/phase-c40c/sanity_seed0_temp0.log`
+  `docs/archive/phase-c/phase-c40c/sanity_seed0_temp0.log`
 - Sanity rerun stderr log:
-  `docs/phase-c40c/sanity_seed0_temp0_rerun.log`
+  `docs/archive/phase-c/phase-c40c/sanity_seed0_temp0_rerun.log`
 
 ## Cost Summary
 

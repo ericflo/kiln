@@ -33,7 +33,7 @@ All required stop-condition checks passed before pod spend:
 4. In a fresh clone, all required bench-surface files existed:
    - `crates/kiln-server/src/bench.rs`
    - `PROFILING-MTP-C40e.md`
-   - `docs/phase-c40e/`
+   - `docs/archive/phase-c/phase-c40e/`
 5. `origin/main` was still exactly the `#378` merge commit
    `199d16bcc65251c9a34fc60249c9a17840d15514`, so no post-C40e bench-path
    drift existed to confound the comparison.
@@ -206,14 +206,14 @@ HumanEval N=20 distribution on current `main`.**
 ## Artifacts
 
 - Raw BF16 outputs and stderr logs:
-  `docs/phase-c40f/seed-{0..19}.json`,
-  `docs/phase-c40f/seed-{0..19}.log`,
-  `docs/phase-c40f/seed-{0..19}.exit`
+  `docs/archive/phase-c/phase-c40f/seed-{0..19}.json`,
+  `docs/archive/phase-c/phase-c40f/seed-{0..19}.log`,
+  `docs/archive/phase-c/phase-c40f/seed-{0..19}.exit`
 - Exact env and command:
-  `docs/phase-c40f/common-env.txt`,
-  `docs/phase-c40f/command-template.txt`,
-  `docs/phase-c40f/run-all-seeds.sh`
+  `docs/archive/phase-c/phase-c40f/common-env.txt`,
+  `docs/archive/phase-c/phase-c40f/command-template.txt`,
+  `scripts/phase-c40f/run-all-seeds.sh`
 - Binary hash:
-  `docs/phase-c40f/kiln-bench.sha256`
+  `docs/archive/phase-c/phase-c40f/kiln-bench.sha256`
 - Analysis script:
-  `docs/phase-c40f/analyze.py`
+  `scripts/phase-c40f/analyze.py`

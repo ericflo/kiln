@@ -32,7 +32,7 @@
 # via `KILN_C1_ATTR_PATH`. This guarantees row K of `mtp_pos=N` lines up
 # with splice dump `mtp_pos-N/step-K.safetensors` — both fire inside
 # `speculative_mtp_decode_step`, once per call. Cross-run labels (e.g.
-# `docs/phase-c36/c1_seed*.csv`, which used --chat-template and longer
+# `docs/archive/phase-c/phase-c36/c1_seed*.csv`, which used --chat-template and longer
 # decode) would NOT align because the decode trajectory and accept pattern
 # differ across bench configs.
 

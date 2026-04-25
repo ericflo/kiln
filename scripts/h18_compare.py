@@ -4,8 +4,8 @@
 Direct lineage: scripts/h17b_compare.py (PR #533, vLLM v0.20.0).
 
 Inputs:
-    docs/phase-c29-v3-hf/hf_alpha_per_seed.json
-    docs/phase-c29-v3-hf/kiln_alpha_per_seed.json
+    docs/archive/phase-c/phase-c29-v3-hf/hf_alpha_per_seed.json
+    docs/archive/phase-c/phase-c29-v3-hf/kiln_alpha_per_seed.json
 
 Decision rule (set BEFORE the run, do NOT adjust after):
 
@@ -17,9 +17,9 @@ Decision rule (set BEFORE the run, do NOT adjust after):
     mtp_supported == false  → hf_mtp_load_failure
 
 Emits:
-    docs/phase-c29-v3-hf/verdict.json
-    docs/phase-c29-v3-hf/compare.json
-    docs/phase-c29-v3-hf/compare.md
+    docs/archive/phase-c/phase-c29-v3-hf/verdict.json
+    docs/archive/phase-c/phase-c29-v3-hf/compare.json
+    docs/archive/phase-c/phase-c29-v3-hf/compare.md
 """
 from __future__ import annotations
 
@@ -98,15 +98,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--hf",
-        default="docs/phase-c29-v3-hf/hf_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-hf/hf_alpha_per_seed.json",
     )
     ap.add_argument(
         "--kiln",
-        default="docs/phase-c29-v3-hf/kiln_alpha_per_seed.json",
+        default="docs/archive/phase-c/phase-c29-v3-hf/kiln_alpha_per_seed.json",
     )
     ap.add_argument(
         "--out-dir",
-        default="docs/phase-c29-v3-hf",
+        default="docs/archive/phase-c/phase-c29-v3-hf",
     )
     args = ap.parse_args()
 

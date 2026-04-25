@@ -115,8 +115,8 @@ Usage
 
     python3 scripts/c11_marlin_audit.py \\
         --checkpoint /workspace/qwen3.5-4b \\
-        --out docs/phase-c11/c11-marlin-audit.md \\
-        --out-json docs/phase-c11/c11-marlin-audit.json
+        --out docs/archive/phase-c/phase-c11/c11-marlin-audit.md \\
+        --out-json docs/archive/phase-c/phase-c11/c11-marlin-audit.json
 """
 from __future__ import annotations
 

@@ -1,0 +1,7 @@
+
+NOTICE: Existing SQLite export found: /tmp/kiln-post468-mtp.sqlite
+        It is assumed file was previously exported from: /tmp/kiln-post468-mtp.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [/tmp/kiln-post468-mtp.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/nvtx_gpu_proj_sum.py] to [docs/archive/phase-c/phase-c52/nvtx_gpu_proj_sum_nvtx_gpu_proj_sum.csv]... PROCESSED
+

@@ -83,7 +83,7 @@ Usage
         --pair seed42-pos1:/tmp/kiln-seed42-pos1.safetensors \\
         --pair seed42-pos2:/tmp/kiln-seed42-pos2.safetensors \\
         [--pair ...]
-        --out docs/phase-c10/c10_splice_bisect_table.md
+        --out docs/archive/phase-c/phase-c10/c10_splice_bisect_table.md
 """
 from __future__ import annotations
 

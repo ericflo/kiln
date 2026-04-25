@@ -1,0 +1,191 @@
+{
+  "kiln": {
+    "per_seed": [
+      {
+        "seed": 0,
+        "alpha": 0.36363636363636365,
+        "n_steps": 11,
+        "n_accept": 4
+      },
+      {
+        "seed": 1,
+        "alpha": 0.3333333333333333,
+        "n_steps": 12,
+        "n_accept": 4
+      },
+      {
+        "seed": 2,
+        "alpha": 0.45454545454545453,
+        "n_steps": 11,
+        "n_accept": 5
+      }
+    ],
+    "median_alpha": 0.36363636363636365,
+    "mean_alpha": 0.3838383838383838,
+    "min_alpha": 0.3333333333333333,
+    "max_alpha": 0.45454545454545453,
+    "n_seeds": 3,
+    "source_csvs": [
+      "docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed0.csv",
+      "docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed1.csv",
+      "docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed2.csv"
+    ],
+    "methodology": "alpha_seed = sum(accepted column) / n_rows in c1_attr_seed{N}.csv; median computed across seeds. Source run: PR #529 (scripts/c29_kiln_logits_dump.sh), KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_W4A16=1, greedy (temperature=0), --paged, seeds=[0,1,2] indexing PROMPT_POOL[seed%30] (= GSM8K prose prompts 0,1,2), --prompt-tokens 512, --max-output-tokens 16, no chat template, splice dumps captured at POSITIONS=0..3 \u00d7 MAX_STEPS=2. NOTE: the task brief's 7/22 \u2248 0.318 hint refers to the subset of {accept-labeled, reject-labeled} splice rows used by the H15b C29 v2 top-K probe. This script uses all 11/12/11 rows per seed from the full c1_attr CSV (every speculative_mtp_decode_step call, not only dumped rows)."
+  },
+  "sglang": {
+    "mtp_supported": false,
+    "reason": "SGLang 0.5.10.post1 + Qwen3.5-4B dense BF16 + native MTP segfaults on A6000 sm_86 across three distinct serving configurations. All three attempts produced Segmentation fault / exit code -11 in native-extension code with no Python file symbols at the crash point. This mirrors the vLLM 0.19.1 failure class observed in PR #530 but manifests in different upstream code paths.",
+    "sglang_version": "0.5.10.post1",
+    "sglang_kernel_version": "0.4.1",
+    "torch_version": "2.9.1+cu128",
+    "cuda_runtime": "12.8",
+    "gpu": "NVIDIA RTX A6000 sm_86",
+    "model_path": "/workspace/qwen3.5-4b",
+    "model_arch": "Qwen3_5ForConditionalGeneration",
+    "drafter_arch": "Qwen3_5ForCausalLMMTP",
+    "sglang_prerequisites_discovered": {
+      "libnuma1_apt_package": "required (sgl_kernel common_ops.abi3.so dlopens libnuma.so.1); install with apt-get install -y libnuma1 libnuma-dev after apt-get update. First attempt failed with libnuma.so.1: cannot open shared object file.",
+      "SGLANG_ENABLE_SPEC_V2_env": "=1 required for Qwen3.5 + MTP + radix cache; otherwise server_args raises 'Speculative decoding for Qwen3_5ForConditionalGeneration is not compatible with radix cache when using --mamba-scheduler-strategy no_buffer'",
+      "mamba_scheduler_strategy": "must be 'extra_buffer' (default 'no_buffer' triggers the radix-cache incompatibility error above)"
+    },
+    "speculative_algorithm_resolution": {
+      "MTP_as_requested_in_task": "REJECTED \u2014 SpeculativeAlgorithm.from_string() at sglang/srt/speculative/spec_info.py:31 raises ValueError('Unknown speculative algorithm name: MTP')",
+      "EAGLE_is_modern_alias": "per sglang/srt/speculative/spec_info.py the enum contains exactly {EAGLE, EAGLE3, STANDALONE, NGRAM, NONE}; NEXTN auto-rewrites to EAGLE at server_args.py:2984. Qwen3.5's pretrained MTP head IS loaded as an EAGLE drafter with arch Qwen3_5ForCausalLMMTP (no separate draft_model_path)",
+      "speculative_eagle_topk_required": "must be an int >=1 \u2014 None triggers TypeError: '>' not supported between instances of 'NoneType' and 'int' at server_args.py:1669",
+      "resolved_drafter_arch": "Qwen3_5ForCausalLMMTP (drafter weights loaded from /workspace/qwen3.5-4b, 1.41 GB resident, reuses base model's embedding + lm_head)"
+    },
+    "config_attempts": [
+      {
+        "attempt_num": 1,
+        "description": "Default flashinfer attention backend + CUDA graphs enabled",
+        "kwargs": {
+          "speculative_algorithm": "EAGLE",
+          "speculative_num_draft_tokens": 1,
+          "speculative_num_steps": 1,
+          "speculative_eagle_topk": 1,
+          "disable_cuda_graph": false,
+          "attention_backend": "flashinfer",
+          "mamba_scheduler_strategy": "extra_buffer"
+        },
+        "outcome": "Segfault during init_device_graphs CUDA graph capture in flashinfer begin_forward for EAGLE prefill path",
+        "crash_stack_summary": "cuda_graph_runner.py:981 capture_one_batch_size -> hybrid_linear_attn_backend.py:758 init_forward_metadata_capture_cuda_graph -> flashinfer_backend.py:616 init_forward_metadata_capture_cuda_graph -> flashinfer_backend.py:1257 update_single_wrapper -> flashinfer_backend.py:1448 call_begin_forward -> eagle_info.py:188 generate_attn_arg_prefill -> triton JIT compile crash",
+        "exit_code": "-11 (SIGSEGV) scheduler / 137 parent",
+        "wall_clock_to_crash_s": 49
+      },
+      {
+        "attempt_num": 2,
+        "description": "Graphs disabled, flashinfer kept",
+        "kwargs": {
+          "speculative_algorithm": "EAGLE",
+          "speculative_num_draft_tokens": 1,
+          "speculative_num_steps": 1,
+          "speculative_eagle_topk": 1,
+          "disable_cuda_graph": true,
+          "attention_backend": "flashinfer",
+          "mamba_scheduler_strategy": "extra_buffer"
+        },
+        "outcome": "Scheduler subprocess SIGSEGV during init, before the driver could reach prefill. Also retried with speculative_algorithm='NEXTN' (auto-rewrites to EAGLE), same crash: RuntimeError: 'Rank 0 scheduler died during initialization (exit code: -11)'",
+        "crash_stack_summary": "Scheduler SIGSEGV during init; native backtrace had no Python file symbols",
+        "exit_code": "-11 scheduler / 137 parent",
+        "wall_clock_to_crash_s": 33
+      },
+      {
+        "attempt_num": 3,
+        "description": "Triton attention backend, graphs disabled",
+        "kwargs": {
+          "speculative_algorithm": "EAGLE",
+          "speculative_num_draft_tokens": 1,
+          "speculative_num_steps": 1,
+          "speculative_eagle_topk": 1,
+          "disable_cuda_graph": true,
+          "attention_backend": "triton",
+          "mamba_scheduler_strategy": "extra_buffer"
+        },
+        "outcome": "Engine loaded successfully \u2014 Qwen3_5ForConditionalGeneration target (8.62 GB) and Qwen3_5ForCausalLMMTP drafter (1.41 GB) weights read; hybrid GDN + full-attn dispatched via TritonGDNKernel; KV + mamba cache allocated. Then SIGSEGV fired during scheduler event_loop_overlap -> _get_new_batch_prefill_raw -> prepare_for_extend -> alloc_for_extend -> write_cache_indices -> Triton JIT compile of write_cache_indices kernel. Note: script's sampling_params used top_k=-1 (SGLang convention) which the engine accepted; crash was in mem_cache allocation, not sampling.",
+        "crash_stack_summary": "sglang/srt/mem_cache/common.py:98 write_cache_indices -> triton/runtime/jit.py:419 <lambda> -> triton/runtime/jit.py:861 _do_compile -> triton/compiler/compiler.py:300 compile -> triton/compiler/code_generator.py:316 __init__",
+        "exit_code": "-11 scheduler / 137 parent",
+        "wall_clock_to_crash_s": 33,
+        "engine_load_progress": {
+          "target_model_load_GB": 8.62,
+          "target_model_arch": "Qwen3_5ForConditionalGeneration",
+          "drafter_model_load_GB": 1.41,
+          "drafter_model_arch": "Qwen3_5ForCausalLMMTP",
+          "gdn_kernel_dispatcher": "decode=TritonGDNKernel, extend=TritonGDNKernel, verify=TritonGDNKernel packed_decode=True",
+          "kv_cache_tokens": 464641,
+          "kv_cache_K_GB": 7.09,
+          "kv_cache_V_GB": 7.09,
+          "mamba_cache_max_size": 265,
+          "ssm_state_GB": 12.47,
+          "conv_state_GB": 0.29,
+          "intermediate_ssm_state_cache_GB": 4.59,
+          "intermediate_conv_window_cache_GB": 0.11,
+          "max_total_num_tokens": 464641,
+          "max_running_requests": 48,
+          "available_gpu_mem_after_init_GB": 4.91,
+          "chat_template": "default HuggingFace (openai content format)",
+          "gloo_init_s": 0.27,
+          "target_weight_load_s": 2.67,
+          "drafter_weight_load_s": 0.11
+        }
+      }
+    ],
+    "common_crash_signature": {
+      "marker": "!!!!!!! Segfault encountered !!!!!!!",
+      "python_backtrace_pattern": "70+ frames of pthread_kill / raise / _PyEval_EvalFrameDefault / _PyFunction_Vectorcall / PyObject_Call with no Python file symbols at the crash frame (identical shape to PR #530's vLLM 0.19.1 crash; both indicate compiled-extension crashes in Triton JIT or flashinfer native code)",
+      "sglang_handler_response": "Subprocess scheduler_0 crashed with exit code -11. Triggering SIGQUIT for cleanup... SIGQUIT received. It usually means one child failed."
+    },
+    "workarounds_attempted_but_did_not_help": [
+      "disable_cuda_graph=True (attempt 2 \u2014 scheduler segfaulted during init even with graphs off)",
+      "attention_backend='triton' (attempt 3 \u2014 moved crash from flashinfer eagle_info.generate_attn_arg_prefill to Triton JIT of write_cache_indices in mem_cache allocation; no progress)",
+      "mamba_scheduler_strategy='extra_buffer' (required to pass radix-cache validation but does not prevent segfault)",
+      "speculative_algorithm='NEXTN' (auto-rewrites to EAGLE per server_args.py:2984; identical crash signature)"
+    ],
+    "per_seed": [],
+    "median_alpha": null,
+    "mean_alpha": null,
+    "min_alpha": null,
+    "max_alpha": null,
+    "n_seeds": 0,
+    "sglang_config": {
+      "model_path": "/workspace/qwen3.5-4b",
+      "dtype": "bfloat16",
+      "prompt_tokens": 512,
+      "max_tokens": 16,
+      "num_spec_tokens": 1,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": -1
+      },
+      "mem_fraction_static": 0.85,
+      "context_length": 1024
+    }
+  },
+  "vllm_v020": null,
+  "verdict": {
+    "verdict": "sglang_mtp_unsupported_dense_4b",
+    "decision_rule": {
+      "external_ceiling_exists": {
+        "bound": "delta >= +0.05",
+        "next_action": "SGLang MTP heads beat kiln MTP heads at same workload. Queue an H18 serving-difference bisect (sampler / KV layout / quantization path / RoPE / MTP-head wiring) to find what kiln diverges on. Since kiln is Marlin W4A16 and SGLang is BF16 this confounder must be isolated first (re-run kiln in BF16 or port SGLang's quant path)."
+      },
+      "mtp_head_quality_ceiling": {
+        "bound": "-0.02 <= delta < +0.05",
+        "next_action": "Both implementations hit the pretrained MTP head's quality ceiling. No external \u03b1 headroom available from SGLang either. Close the external-\u03b1 reference family. Pivot Phase 7 to: (a) MTP head retraining (H18 candidate), or (b) non-MTP speculative decoding (Eagle-style draft model trained from scratch on kiln logs)."
+      },
+      "kiln_above_sglang": {
+        "bound": "delta < -0.02",
+        "next_action": "Unexpected \u2014 kiln \u03b1 exceeds SGLang at same workload. Sanity-check SGLang args (spec_algorithm, num_draft_tokens, sampler, dtype). If confirmed, no external reference path can help raise \u03b1. Close H17 family and document kiln-native ceiling."
+      },
+      "sglang_mtp_unsupported_dense_4b": {
+        "bound": "sglang_alpha_per_seed.json.mtp_supported == false",
+        "next_action": "SGLang does not yet support Qwen3.5-4B dense + native MTP end-to-end at the installed version. Escalate to free pre-step (vLLM v0.20.0 retest of PR #530 segfault) \u2014 if also fails, queue hand-rolled HF transformers H18 reference (PR #531 candidate 8)."
+      }
+    },
+    "kiln_median_alpha": 0.36363636363636365,
+    "sglang_median_alpha": null,
+    "delta": null,
+    "next_action": "SGLang does not yet support Qwen3.5-4B dense + native MTP end-to-end at the installed version. Escalate to free pre-step (vLLM v0.20.0 retest of PR #530 segfault) \u2014 if also fails, queue hand-rolled HF transformers H18 reference (PR #531 candidate 8).",
+    "reason": "SGLang 0.5.10.post1 + Qwen3.5-4B dense BF16 + native MTP segfaults on A6000 sm_86 across three distinct serving configurations. All three attempts produced Segmentation fault / exit code -11 in native-extension code with no Python file symbols at the crash point. This mirrors the vLLM 0.19.1 failure class observed in PR #530 but manifests in different upstream code paths."
+  }
+}

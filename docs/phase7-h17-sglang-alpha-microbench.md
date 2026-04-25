@@ -13,7 +13,7 @@ The remaining open question, inherited from PR #530's `vllm_mtp_unsupported` ver
 
 > Does any external serving system hit a **higher α** than kiln on this same Qwen3.5-4B checkpoint at A6000 bs=1?
 
-H17 attempted to answer this by running SGLang 0.5.10.post1 with the native `Qwen3_5ForCausalLMMTP` drafter on the *identical* prompt / seed / prefill / decode workload PR #529 used, and comparing α to kiln's α derived from PR #530's `docs/phase-c29-v3-vllm/kiln_alpha_per_seed.json` (re-derived from PR #529's c1_attr CSVs — no re-run needed).
+H17 attempted to answer this by running SGLang 0.5.10.post1 with the native `Qwen3_5ForCausalLMMTP` drafter on the *identical* prompt / seed / prefill / decode workload PR #529 used, and comparing α to kiln's α derived from PR #530's `docs/archive/phase-c/phase-c29-v3-vllm/kiln_alpha_per_seed.json` (re-derived from PR #529's c1_attr CSVs — no re-run needed).
 
 ## Outcome
 
@@ -27,7 +27,7 @@ Identical high-level shape to PR #530's vLLM 0.19.1 failure: engine-side dispatc
 | `sglang_median_alpha` | **UNAVAILABLE** (segfault across 3 configs) |
 | `delta` | **UNAVAILABLE** |
 
-Per-seed kiln α (copy of PR #530 table, from `docs/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`):
+Per-seed kiln α (copy of PR #530 table, from `docs/archive/phase-c/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`):
 
 | seed | accept / steps | α |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ Per-seed kiln α (copy of PR #530 table, from `docs/phase-c29-v2/artifacts/c1_at
 | < −0.02 | `kiln_above_sglang` (unexpected) | sanity-check SGLang args; if confirmed, close H17 family |
 | `sglang.mtp_supported == false` | **`sglang_mtp_unsupported_dense_4b`** ← **THIS RUN** | doc-only redirect PR; escalate to free pre-step (vLLM v0.20.0 retest) OR queue hand-rolled HF transformers H18 |
 
-The rule is implemented in `scripts/h17_compare.py` and emitted `docs/phase-c29-v3-sglang/verdict.json`.
+The rule is implemented in `scripts/h17_compare.py` and emitted `docs/archive/phase-c/phase-c29-v3-sglang/verdict.json`.
 
 ## Free pre-step (vLLM v0.20.0 retest) — SKIPPED per task brief
 
@@ -55,7 +55,7 @@ SGLang install + three diagnostic attempts consumed ~35 min of the 75 min combin
 
 ## Crash signatures
 
-All three configs crash in native code with no Python file symbols at the terminal frame — identical pattern to PR #530's vLLM 0.19.1 crash. Detailed crash info in `docs/phase-c29-v3-sglang/sglang_alpha_per_seed.json` and `docs/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log`.
+All three configs crash in native code with no Python file symbols at the terminal frame — identical pattern to PR #530's vLLM 0.19.1 crash. Detailed crash info in `docs/archive/phase-c/phase-c29-v3-sglang/sglang_alpha_per_seed.json` and `docs/archive/phase-c/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log`.
 
 ### Attempt 1: flashinfer attention backend, CUDA graphs enabled (default)
 
@@ -146,13 +146,13 @@ python3 scripts/h17_sglang_alpha_dump.py \
     --model-path /workspace/qwen3.5-4b \
     --prompt-tokens 512 --max-tokens 16 \
     --seeds 0 1 2 --num-spec-tokens 1 \
-    --out docs/phase-c29-v3-sglang/sglang_alpha_per_seed.json
+    --out docs/archive/phase-c/phase-c29-v3-sglang/sglang_alpha_per_seed.json
 # Outcome: writes mtp_supported=false JSON; exit code 3.
 
 # 3. kiln α (re-derived from PR #529's c1_attr CSVs — no GPU needed, runs anywhere)
 python3 scripts/h15c_kiln_alpha_from_csv.py \
-    --csv-dir docs/phase-c29-v2/artifacts \
-    --out docs/phase-c29-v3-sglang/kiln_alpha_per_seed.json
+    --csv-dir docs/archive/phase-c/phase-c29-v2/artifacts \
+    --out docs/archive/phase-c/phase-c29-v3-sglang/kiln_alpha_per_seed.json
 # Outcome: median_alpha = 0.3636.
 
 # 4. Apply decision rule
@@ -224,12 +224,12 @@ Concrete options the next planning cycle should pick from, ranked by estimated s
 | path | purpose |
 | --- | --- |
 | `docs/phase7-h17-sglang-alpha-microbench.md` | this audit doc |
-| `docs/phase-c29-v3-sglang/verdict.json` | machine-readable verdict |
-| `docs/phase-c29-v3-sglang/compare.json` | full kiln + SGLang side-by-side |
-| `docs/phase-c29-v3-sglang/compare.md` | per-seed table + decision rule |
-| `docs/phase-c29-v3-sglang/kiln_alpha_per_seed.json` | re-derived kiln α (same data as PR #530) |
-| `docs/phase-c29-v3-sglang/sglang_alpha_per_seed.json` | full SGLang failure record with all 3 config attempts |
-| `docs/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log` | trimmed pod log with crash stack for attempt 3 (triton backend) |
+| `docs/archive/phase-c/phase-c29-v3-sglang/verdict.json` | machine-readable verdict |
+| `docs/archive/phase-c/phase-c29-v3-sglang/compare.json` | full kiln + SGLang side-by-side |
+| `docs/archive/phase-c/phase-c29-v3-sglang/compare.md` | per-seed table + decision rule |
+| `docs/archive/phase-c/phase-c29-v3-sglang/kiln_alpha_per_seed.json` | re-derived kiln α (same data as PR #530) |
+| `docs/archive/phase-c/phase-c29-v3-sglang/sglang_alpha_per_seed.json` | full SGLang failure record with all 3 config attempts |
+| `docs/archive/phase-c/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log` | trimmed pod log with crash stack for attempt 3 (triton backend) |
 | `scripts/h17_sglang_alpha_dump.py` | SGLang driver (re-runnable when SGLang is fixed) |
 | `scripts/h17_compare.py` | applies decision rule, emits verdict.json |
 | `PROFILING.md` | top-of-file pointer updated |

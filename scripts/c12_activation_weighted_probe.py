@@ -63,9 +63,9 @@ Usage
 
     python3 scripts/c12_activation_weighted_probe.py \\
         --checkpoint /workspace/qwen3.5-4b \\
-        --c11-json docs/phase-c11/c11-marlin-audit.json \\
-        --out docs/phase-c12/c12-weighted-drift.md \\
-        --out-json docs/phase-c12/c12-weighted-drift.json \\
+        --c11-json docs/archive/phase-c/phase-c11/c11-marlin-audit.json \\
+        --out docs/archive/phase-c/phase-c12/c12-weighted-drift.md \\
+        --out-json docs/archive/phase-c/phase-c12/c12-weighted-drift.json \\
         [--device cuda] [--dtype bf16] [--max-prompts 32] [--max-tokens 96]
 
 Exit codes
@@ -415,7 +415,7 @@ def main() -> int:
                     "Corroborates PRIMARY-POSITIVE on the C12 fp32-head bench.\n")
         if c11_summary is not None:
             f.write("\n## C11 cross-reference\n\n")
-            f.write("See `docs/phase-c11/c11-marlin-audit.md` for the unweighted "
+            f.write("See `docs/archive/phase-c/phase-c11/c11-marlin-audit.md` for the unweighted "
                     "per-channel drift audit. This probe re-weights that drift by "
                     "empirical activation mass on a 32-prompt calibration set, which "
                     "is the realistic input distribution the model actually sees.\n")

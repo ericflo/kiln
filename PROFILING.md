@@ -38,14 +38,14 @@ GPU spend. Reopen triggers: median α reliably clearing 0.72 across
 humaneval+gsm8k+c4 with ≥10 seeds, a fused/short-circuit verifier
 landing, k>1 MTP variant, or workload-distribution shift to
 genuinely chat-template-heavy traffic. See
-[`docs/phase-c66/post-535-mtp-decode-bench.md`](docs/phase-c66/post-535-mtp-decode-bench.md)
+[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.md`](docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.md)
 for the full protocol, anti-duplication evidence, per-run table
 (off vs `mtp_forced` vs the resolver-downgraded `mtp_unforced`
 control), decision-rule application, paired-seed delta breakdown,
 P99 ITL bimodality discussion, α progression timeline (PR #316 →
 this PR), and reproduction commands. Raw data:
-[`docs/phase-c66/post-535-mtp-decode-bench.csv`](docs/phase-c66/post-535-mtp-decode-bench.csv)
-and [`docs/phase-c66/artifacts/`](docs/phase-c66/artifacts/) (9 raw
+[`docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv`](docs/archive/phase-c/phase-c66/post-535-mtp-decode-bench.csv)
+and [`docs/archive/phase-c/phase-c66/artifacts/`](docs/archive/phase-c/phase-c66/artifacts/) (9 raw
 bench logs, 3 seeds × 3 arms).
 
 ## Phase 7 H18 hand-rolled HF transformers MTP α reference (2026-04-25)
@@ -92,8 +92,8 @@ different seeds and obtaining a materially different median α. See
 for the full verdict, decision-rule application, per-seed
 divergence analysis, anti-duplication evidence, reproduction
 commands, and detailed reopen triggers. Raw data:
-`docs/phase-c29-v3-hf/{verdict,compare,hf_alpha_per_seed,kiln_alpha_per_seed}.json`,
-`docs/phase-c29-v3-hf/compare.md`, and `docs/phase-c29-v3-hf/artifacts/`
+`docs/archive/phase-c/phase-c29-v3-hf/{verdict,compare,hf_alpha_per_seed,kiln_alpha_per_seed}.json`,
+`docs/archive/phase-c/phase-c29-v3-hf/compare.md`, and `docs/archive/phase-c/phase-c29-v3-hf/artifacts/`
 (per-seed traces + run log).
 
 ## Phase 7 H17b vLLM v0.20.0 α microbench retest (2026-04-25)
@@ -142,9 +142,9 @@ hand-rolled reference closing the question independently. See
 for the full verdict, the runtime-stack delta table, the canonical
 3-attempt crash trace, anti-duplication evidence, reproduction
 commands, and detailed reopen triggers. Raw data:
-`docs/phase-c29-v3-vllm-020/{verdict,compare,kiln_alpha_per_seed,vllm_020_alpha_per_seed}.json`,
-`docs/phase-c29-v3-vllm-020/compare.md`, and
-`docs/phase-c29-v3-vllm-020/artifacts/{vllm_020_failure_evidence,driver_full}.log`.
+`docs/archive/phase-c/phase-c29-v3-vllm-020/{verdict,compare,kiln_alpha_per_seed,vllm_020_alpha_per_seed}.json`,
+`docs/archive/phase-c/phase-c29-v3-vllm-020/compare.md`, and
+`docs/archive/phase-c/phase-c29-v3-vllm-020/artifacts/{vllm_020_failure_evidence,driver_full}.log`.
 
 ## Phase 7 H17 SGLang α microbench (2026-04-25)
 
@@ -188,9 +188,9 @@ for the full verdict, three crash signatures, per-config outcome table,
 SGLang prerequisites discovered, workload matching, reproduction
 commands, anti-duplication evidence, and detailed reopen triggers. Raw
 data:
-`docs/phase-c29-v3-sglang/{verdict,compare,kiln_alpha_per_seed,sglang_alpha_per_seed}.json`,
-`docs/phase-c29-v3-sglang/compare.md`, and
-`docs/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log`.
+`docs/archive/phase-c/phase-c29-v3-sglang/{verdict,compare,kiln_alpha_per_seed,sglang_alpha_per_seed}.json`,
+`docs/archive/phase-c/phase-c29-v3-sglang/compare.md`, and
+`docs/archive/phase-c/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log`.
 
 ## Phase 7 H16 external-α reference options audit (2026-04-25)
 
@@ -261,8 +261,8 @@ for the full verdict, segfault signature + crash backtrace, per-seed α
 table, vLLM config used (BF16 confounder vs kiln Marlin W4A16),
 reproduction commands, anti-duplication evidence, and detailed reopen
 triggers. Raw data:
-`docs/phase-c29-v3-vllm/{verdict,compare,kiln_alpha_per_seed,vllm_alpha_per_seed}.json`
-and `docs/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log`.
+`docs/archive/phase-c/phase-c29-v3-vllm/{verdict,compare,kiln_alpha_per_seed,vllm_alpha_per_seed}.json`
+and `docs/archive/phase-c/phase-c29-v3-vllm/artifacts/vllm_segfault_evidence.log`.
 
 ## Phase 7 H15b stratified C29 v2 reject-row probe (2026-04-25)
 
@@ -288,13 +288,13 @@ external-reference upper bound exists above kiln's current α. See
 [`docs/phase7-h15b-stratified-c29-v2.md`](docs/phase7-h15b-stratified-c29-v2.md)
 for the full verdict, per-position stratified table, decision-rule
 application, anti-duplication evidence, and reopen triggers. Raw data:
-`docs/phase-c29-v2/c29-v2-stratified-compare.{json,md}` and
-`docs/phase-c29-v2/verdict.json`.
+`docs/archive/phase-c/phase-c29-v2/c29-v2-stratified-compare.{json,md}` and
+`docs/archive/phase-c/phase-c29-v2/verdict.json`.
 
 ## Phase 7 H15a Marlin pack determinism correlation (2026-04-24)
 
 **Scope:** $0 doc-only correlation analysis on the existing C40f N=20 anchor
-(`docs/phase-c40f/summary.json`, PR #379). Executes the "free pre-step (do
+(`docs/archive/phase-c/phase-c40f/summary.json`, PR #379). Executes the "free pre-step (do
 BEFORE GPU spend)" called out in PR #527's bench plan: Spearman + Pearson
 between `model_load_secs` and `acceptance_rate` to test whether load-time
 variance in Marlin packed weights drives MTP α variance. No pod, no SSH, no
@@ -314,8 +314,8 @@ A6000 / ~$0.25) per PR #527 §"Recommended next H." Decision belongs to the
 next planning cycle. Full methodology, decision rule, period-10 collision
 table, anti-duplication evidence, and reopen triggers in
 [`docs/phase7-h15a-marlin-determinism.md`](docs/phase7-h15a-marlin-determinism.md).
-Raw script + verbatim output: `docs/phase-c40f/h15a_correlation.py` and
-`docs/phase-c40f/h15a_correlation_output.txt`.
+Raw script + verbatim output: `scripts/phase-c40f/h15a_correlation.py` and
+`docs/archive/phase-c/phase-c40f/h15a_correlation_output.txt`.
 
 ## Phase 7 MTP acceptance-rate state-of-play audit (2026-04-24)
 
@@ -358,7 +358,7 @@ fused-kernel kill switch per arm (`KILN_DISABLE_FUSED_GDN_GATES`,
 `KILN_DISABLE_FUSED_CONV1D`, `KILN_DISABLE_FUSED_PAGED_DECODE`) to isolate the
 post-#166 decode regression. Full per-arm tables, variance analysis, and
 recommended next steps in
-[`docs/phase-c64/post523-killswitch-bisection.md`](docs/phase-c64/post523-killswitch-bisection.md).
+[`docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md`](docs/archive/phase-c/phase-c64/post523-killswitch-bisection.md).
 
 **Outcome: null. No single fused-kernel default path accounts for the gap.**
 
@@ -391,7 +391,7 @@ post-#521 profile refresh below. Toggles `KILN_PREFIX_CACHE_ENABLED` on and off
 on current main (`821ccd3`, PR #522 docs-only) and compares decode tok/s,
 ITL, and prefill on `kiln-bench --paged`. Full methodology, per-run tables,
 and structural analysis in
-[`docs/phase-c64/post522-prefix-cache-ab.md`](docs/phase-c64/post522-prefix-cache-ab.md).
+[`docs/archive/phase-c/phase-c64/post522-prefix-cache-ab.md`](docs/archive/phase-c/phase-c64/post522-prefix-cache-ab.md).
 
 **Outcome: prefix-cache hooks are not the source of the bench-visible regression.**
 Both structurally and empirically:
@@ -446,7 +446,7 @@ and `/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys` was used
 for both capture and CSV export (per agent notes
 `kiln-nsys-baked-importer-broken` and `kiln-nsight-profiling-gotchas`).
 
-**Build / profile commands:** see `docs/phase-c64/post-521-profile.md`.
+**Build / profile commands:** see `docs/archive/phase-c/phase-c64/post-521-profile.md`.
 
 ### Decode bench median-of-3 (no profiler)
 
@@ -489,7 +489,7 @@ flagged"* — flagging here.
 
 ### Decode top NVTX ranges
 
-Source: `docs/phase-c64/post521_decode_nvtx_pushpop_sum.csv`. Capture
+Source: `docs/archive/phase-c/phase-c64/post521_decode_nvtx_pushpop_sum.csv`. Capture
 shape: 1 paged prefill (494 prompt tokens) + 128 paged decode steps; the
 prefill `:kiln/attn/full/prefill_initial` range is only **0.8 %** of
 total wall-clock, so this ranking is decode-dominated.
@@ -509,7 +509,7 @@ total wall-clock, so this ranking is decode-dominated.
 
 ### Decode top CUDA kernels
 
-Source: `docs/phase-c64/post521_decode_cuda_gpu_kern_sum.csv`.
+Source: `docs/archive/phase-c/phase-c64/post521_decode_cuda_gpu_kern_sum.csv`.
 
 | Rank | Kernel | GPU-kernel share |
 | ---: | --- | ---: |
@@ -569,10 +569,10 @@ share is also essentially unchanged (15.4 % → 15.9 %).
   (`KILN_KV_CACHE_FP8=1`) for context capability, and / or self-spec
   end-to-end benching — not another `ucopy_bf16` audit.
 
-Committed artifacts: `docs/phase-c64/post-521-profile.md`,
-`docs/phase-c64/post521_decode_nvtx_pushpop_sum.csv`,
-`docs/phase-c64/post521_decode_cuda_gpu_kern_sum.csv`,
-`docs/phase-c64/post521_decode_nvtx_kern_sum.csv`. The full
+Committed artifacts: `docs/archive/phase-c/phase-c64/post-521-profile.md`,
+`docs/archive/phase-c/phase-c64/post521_decode_nvtx_pushpop_sum.csv`,
+`docs/archive/phase-c/phase-c64/post521_decode_cuda_gpu_kern_sum.csv`,
+`docs/archive/phase-c/phase-c64/post521_decode_nvtx_kern_sum.csv`. The full
 `post521_decode.nsys-rep` (110 MB) is not committed because it exceeds
 the in-repo artifact-size convention; it remains at
 `/tmp/kiln-post521/post521_decode.nsys-rep` for the lifetime of pod
@@ -633,7 +633,7 @@ Detailed artifact: `docs/phase7-prefix-cache-reuse-ab.md`.
 
 **Decision:** enable CUDA streaming prefill by default at `>= 65533` actual prompt tokens. The 65k arm reduced peak memory by 11200 MiB and did not materially regress TTFT or first decode ITL; the 128k monolithic arm OOMed while streaming completed. `KILN_STREAMING_PREFILL=0` remains the kill switch, `KILN_STREAMING_PREFILL=1` remains the force-on override below threshold, and `KILN_STREAMING_TILE_TOKENS` remains the tile-size override.
 
-Detailed artifact: `docs/phase-c63/cuda-streaming-prefill-default.md`.
+Detailed artifact: `docs/archive/phase-c/phase-c63/cuda-streaming-prefill-default.md`.
 
 ## Phase 6 FlashInfer-style paged GQA decode preflight (2026-04-24)
 
@@ -667,7 +667,7 @@ commands run because the precondition failed before source edits. Local
 validation: `git diff --check`.
 
 Detailed artifact:
-`docs/phase-c61/flashinfer-paged-gqa-decode-preflight.md`.
+`docs/archive/phase-c/phase-c61/flashinfer-paged-gqa-decode-preflight.md`.
 
 ## Phase 6 post-#502 GDN full-chunk audit (2026-04-24)
 
@@ -686,7 +686,7 @@ audit found no remaining bounded micro-port inside the task envelope.
 `101240f396a6b53e452defb371e3d6e98211535a` and `vllm-project/vllm` commit
 `9f771b3ab92d26a7d91a8255572c5d8d2b3ad601`, specifically the chunk gated-delta
 and fused recurrent kernels documented in
-`docs/phase-c60/post-502-gdn-full-chunk-audit.md`.
+`docs/archive/phase-c/phase-c60/post-502-gdn-full-chunk-audit.md`.
 
 **Audit result:** no CUDA source change. Current upstream still gets its
 remaining full-chunk advantage from a structural state-ownership model: WY-style
@@ -709,7 +709,7 @@ post-#442 vLLM audit already concluded the remaining delta is structural only.
 remaining-work precondition failed before source edits. Local validation:
 `git diff --check`.
 
-Detailed artifact: `docs/phase-c60/post-502-gdn-full-chunk-audit.md`.
+Detailed artifact: `docs/archive/phase-c/phase-c60/post-502-gdn-full-chunk-audit.md`.
 
 ## Phase 6 post-#500 current-main profile refresh (2026-04-24)
 
@@ -732,7 +732,7 @@ Nsight Systems `2024.6.2.225-246235244400v0` was installed from the
 NVIDIA apt repo and `/opt/nvidia/nsight-systems/2024.6.2/target-linux-x64/nsys`
 was used for both capture and CSV export.
 
-**Build / profile commands:** see `docs/phase-c60/post-500-profile.md`.
+**Build / profile commands:** see `docs/archive/phase-c/phase-c60/post-500-profile.md`.
 
 Native-MTP decode latency metrics were **23.5
 tok/s**, **42.5 ms** mean ITL, **419.1 ms**
@@ -743,7 +743,7 @@ prefill for **515** prompt tokens, **128** generated tokens, and
 
 ### C60 top native-MTP decode hotspots
 
-Source: `docs/phase-c60/top_decode_nvtx.csv`. Decode ranking excludes the
+Source: `docs/archive/phase-c/phase-c60/top_decode_nvtx.csv`. Decode ranking excludes the
 `:kiln/mtp/step` parent wrapper.
 
 | Rank | NVTX range | Wall-clock share |
@@ -752,7 +752,7 @@ Source: `docs/phase-c60/top_decode_nvtx.csv`. Decode ranking excludes the
 | 2 | `:kiln/gdn/gated_norm` | **12.1%** |
 | 3 | `:kiln/gdn/qk_norm` | **10.0%** |
 
-Kernel-level cross-check: `docs/phase-c60/top_decode_kernels.csv`.
+Kernel-level cross-check: `docs/archive/phase-c/phase-c60/top_decode_kernels.csv`.
 
 | Rank | Kernel | GPU-kernel share |
 | ---: | --- | ---: |
@@ -762,7 +762,7 @@ Kernel-level cross-check: `docs/phase-c60/top_decode_kernels.csv`.
 
 ### C60 top prompt-heavy prefill hotspots
 
-Source: `docs/phase-c60/top_prefill_nvtx.csv`.
+Source: `docs/archive/phase-c/phase-c60/top_prefill_nvtx.csv`.
 
 | Rank | NVTX range | Wall-clock share |
 | ---: | --- | ---: |
@@ -770,7 +770,7 @@ Source: `docs/phase-c60/top_prefill_nvtx.csv`.
 | 2 | `:kiln/gdn/gates` | **10.7%** |
 | 3 | `:kiln/gdn/gated_norm` | **9.2%** |
 
-Kernel-level cross-check: `docs/phase-c60/top_prefill_kernels.csv`.
+Kernel-level cross-check: `docs/archive/phase-c/phase-c60/top_prefill_kernels.csv`.
 
 | Rank | Kernel | GPU-kernel share |
 | ---: | --- | ---: |
@@ -787,11 +787,11 @@ flash-linear-attention/vLLM recurrent-gated-delta improvements into kiln's
 vendored CUDA GDN full-chunk path, rather than hand-rolling another candle
 micro-fusion.
 
-Committed artifacts: `docs/phase-c60/post-500-profile.md`,
-`docs/phase-c60/summary.json`, `docs/phase-c60/top_decode_nvtx.csv`,
-`docs/phase-c60/top_prefill_nvtx.csv`, `docs/phase-c60/top_decode_kernels.csv`,
-`docs/phase-c60/top_prefill_kernels.csv`, raw Nsight CSV exports, and profiler
-logs under `docs/phase-c60/`.
+Committed artifacts: `docs/archive/phase-c/phase-c60/post-500-profile.md`,
+`docs/archive/phase-c/phase-c60/summary.json`, `docs/archive/phase-c/phase-c60/top_decode_nvtx.csv`,
+`docs/archive/phase-c/phase-c60/top_prefill_nvtx.csv`, `docs/archive/phase-c/phase-c60/top_decode_kernels.csv`,
+`docs/archive/phase-c/phase-c60/top_prefill_kernels.csv`, raw Nsight CSV exports, and profiler
+logs under `docs/archive/phase-c/phase-c60/`.
 
 ## Phase 6 C57 native-MTP conv1d prefill recovery profile (2026-04-24)
 
@@ -836,7 +836,7 @@ tok/s**, **37.8 ms mean ITL**, and **MTP α = 0.764**.
 
 ### C57 top native-MTP decode hotspots
 
-Source: `docs/phase-c57/top_decode_nvtx.csv`. Decode window is first
+Source: `docs/archive/phase-c/phase-c57/top_decode_nvtx.csv`. Decode window is first
 `:kiln/mtp/step` start through final decode NVTX end, excluding the
 `:kiln/mtp/step` parent wrapper.
 
@@ -848,7 +848,7 @@ Source: `docs/phase-c57/top_decode_nvtx.csv`. Decode window is first
 
 ### C57 top native-MTP prefill hotspots
 
-Source: `docs/phase-c57/top_prefill_nvtx.csv`.
+Source: `docs/archive/phase-c/phase-c57/top_prefill_nvtx.csv`.
 
 | Rank | NVTX range | Wall-clock share |
 | ---: | --- | ---: |
@@ -860,11 +860,11 @@ Source: `docs/phase-c57/top_prefill_nvtx.csv`.
 should use C57, not failed C56, when selecting the next native-MTP decode target.
 The top native-MTP decode buckets are now GDN gates, gated_norm, and qk_norm.
 
-Committed artifacts: `docs/phase-c57/conv-prefill-mtp-profile.md`,
-`docs/phase-c57/summary.json`, `docs/phase-c57/top_decode_nvtx.csv`,
-`docs/phase-c57/top_prefill_nvtx.csv`,
-`docs/phase-c57/c57-mtp-conv-prefill-v2_cuda_gpu_kern_sum.csv`,
-`docs/phase-c57/nsys-profile-v2.log`, and `docs/phase-c57/nsys-stats-v2.log`.
+Committed artifacts: `docs/archive/phase-c/phase-c57/conv-prefill-mtp-profile.md`,
+`docs/archive/phase-c/phase-c57/summary.json`, `docs/archive/phase-c/phase-c57/top_decode_nvtx.csv`,
+`docs/archive/phase-c/phase-c57/top_prefill_nvtx.csv`,
+`docs/archive/phase-c/phase-c57/c57-mtp-conv-prefill-v2_cuda_gpu_kern_sum.csv`,
+`docs/archive/phase-c/phase-c57/nsys-profile-v2.log`, and `docs/archive/phase-c/phase-c57/nsys-stats-v2.log`.
 
 ## Phase 6 post-#486 current-main profile refresh (2026-04-24)
 
@@ -1576,12 +1576,12 @@ bar: median decode tok/s **21.95** and median α **0.3956** across seeds
 
 **Commands run:** build `kiln-bench` on RunPod A6000, then run the standard
 MTP bench three times with `KILN_BENCH_FORCE_MTP=1` and
-`KILN_C1_ATTR_PATH=docs/phase-c36/c1_seed${seed}.csv`, then summarize with:
+`KILN_C1_ATTR_PATH=docs/archive/phase-c/phase-c36/c1_seed${seed}.csv`, then summarize with:
 
 ```bash
 python3 scripts/mtp_c1_summarize.py \
   --json profiling-artifacts/post417_20260423_c1_identity.json \
-  docs/phase-c36/c1_seed0.csv docs/phase-c36/c1_seed1.csv docs/phase-c36/c1_seed2.csv
+  docs/archive/phase-c/phase-c36/c1_seed0.csv docs/archive/phase-c/phase-c36/c1_seed1.csv docs/archive/phase-c/phase-c36/c1_seed2.csv
 ```
 
 ### Fresh metrics
@@ -7669,7 +7669,7 @@ waits used `runpod_api.py wait-file --timeout`; no `until ssh` or
 
 ### Output
 
-- `docs/phase-c12/c12-fp32-head.md` — full verdict report.
+- `docs/archive/phase-c/phase-c12/c12-fp32-head.md` — full verdict report.
 - `c12-out/bench-summary.json` — 3 × 3 trial JSON (seed, α, tok/s, ITL,
   accept line).
 - `c12-out/probe-report.md` + `c12-out/probe-report.json` — main-model
@@ -7685,7 +7685,7 @@ layer 1 `input_layernorm` itself?
 
 **Preflight outcome:** proceed. Fresh `origin/main` at `e569d22` (PR #428
 merged) still had
-[`docs/phase-c41/c41-layer1-subop-bisect.md`](docs/phase-c41/c41-layer1-subop-bisect.md)
+[`docs/archive/phase-c/phase-c41/c41-layer1-subop-bisect.md`](docs/archive/phase-c/phase-c41/c41-layer1-subop-bisect.md)
 as the latest committed source of truth for this path, and that doc still
 recorded `layer_1_post_input_norm` as the earliest shared bad C41 tap for both
 seeds. Fresh main did not already contain committed C42 taps or a doc that
@@ -8307,18 +8307,18 @@ Evidence:
 C48 refreshed the forced-MTP A6000 artifact on current `origin/main` after PR #459
 (`e9c071e`) using the mandatory RunPod image on pod `sl53yvx5seviyx`. Full
 report and per-seed artifacts live in
-`docs/phase-c48/post-c47-mtp-a6000-benchmark.md`.
+`docs/archive/phase-c/phase-c48/post-c47-mtp-a6000-benchmark.md`.
 
 Summary: median alpha = `0.3231`; median decode = `26.91 tok/s`; median mean
 ITL = `37.16 ms`; median prefill = `351.7 ms` across 20 zero-exit seeds.
-Compared with `docs/phase-c40f/summary.json`, C48 is still below the MTP
+Compared with `docs/archive/phase-c/phase-c40f/summary.json`, C48 is still below the MTP
 acceptance floor and decode is `0.703x` of the C40f median, so C47 does not
 change the MTP go/no-go. Next boundary is benchmark harness/prompt-distribution
 parity, not production RMSNorm/broadcast math.
 
 ## 2026-04-24 C49 MTP harness-parity A/B
 
-C49 compares the C48-style forced-MTP command against C40f-style harness flags on the same current-main commit and A6000. See `docs/phase-c49/mtp-harness-parity-ab.md` and `docs/phase-c49/summary.json`.
+C49 compares the C48-style forced-MTP command against C40f-style harness flags on the same current-main commit and A6000. See `docs/archive/phase-c/phase-c49/mtp-harness-parity-ab.md` and `docs/archive/phase-c/phase-c49/summary.json`.
 
 Result: C40f-style flags restore the median acceptance rate from `0.391` to `0.707` and median decode from `28.73 tok/s` to `42.45 tok/s`. The restored arm clears both gates: α ≥ `0.65`, and decode is `1.11x` the C40f historical median of `38.25 tok/s` rather than outside the allowed 10% band.
 
@@ -8331,8 +8331,8 @@ C50 re-ran the restored C40f-style native-MTP harness from C49 on current
 A6000. The three-seed median remained healthy: α `0.707`, decode `44.00 tok/s`,
 and mean ITL `22.73 ms`, so do not reopen the C48 model-math investigation.
 
-Artifact: `docs/phase-c50/mtp-c40f-decode-profile.md`; machine summary:
-`docs/phase-c50/summary.json`.
+Artifact: `docs/archive/phase-c/phase-c50/mtp-c40f-decode-profile.md`; machine summary:
+`docs/archive/phase-c/phase-c50/summary.json`.
 
 The baked Nsight Systems 2023.4.4 importer failed C50 `.qdstrm` import with a
 QuadD wrong-event-order error before stats export, so C50 carries forward the
@@ -8370,8 +8370,8 @@ after PR #466 landed the fused CUDA GDN gated RMSNorm kernel. RunPod used the
 mandatory `ghcr.io/ericflo/kiln-runpod:latest` image on an on-demand NVIDIA RTX
 A6000 at commit `831d879d2ddb2500fd49f76c9b5df89aedd923b1`.
 
-Artifact: `docs/phase-c51/post-466-mtp-decode-profile.md`; machine summary:
-`docs/phase-c51/summary.json`.
+Artifact: `docs/archive/phase-c/phase-c51/post-466-mtp-decode-profile.md`; machine summary:
+`docs/archive/phase-c/phase-c51/summary.json`.
 
 Benchmark command shape: `KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1
 KILN_MTP_ARGMAX_FP32=1`, paged, 512 prompt tokens, 128 output tokens,
@@ -8383,7 +8383,7 @@ was `0.588`. The per-seed decode tok/s values were `41.41`, `37.07`, and
 Profiler status: `nsys profile` exited `0` and generated a `94M` `.qdstrm`, but
 the baked Nsight Systems `2023.4.4` importer failed with the known QuadD
 wrong-event-order error before producing `/tmp/kiln-post466-mtp.nsys-rep`. The
-committed `docs/phase-c51/nsys-profile.log`, `nsys-nvtxsum.txt`,
+committed `docs/archive/phase-c/phase-c51/nsys-profile.log`, `nsys-nvtxsum.txt`,
 `nsys-gpu-kernsum.txt`, and `nsys-cuda-api.txt` preserve the failed capture and
 missing-stats evidence; the multi-MB raw `.qdstrm` is intentionally not
 committed.
@@ -8410,8 +8410,8 @@ native-MTP decode shape used by C51: `KILN_SPEC_METHOD=mtp`,
 128 generated tokens, seed `1`, `--chat-template`, `--latency-only`,
 `--prompt-subset humaneval`, and temperature `0.0`.
 
-Artifact: `docs/phase-c52/post-468-mtp-profiler-attribution.md`; machine
-summary: `docs/phase-c52/summary.json`.
+Artifact: `docs/archive/phase-c/phase-c52/post-468-mtp-profiler-attribution.md`; machine
+summary: `docs/archive/phase-c/phase-c52/summary.json`.
 
 Profiler repair: the baked image still reports Nsight Systems `2023.4.4`, which
 is the version that failed C51 import with the QuadD wrong-event-order error.
@@ -8447,7 +8447,7 @@ NVTX-duration denominator to avoid double-counting that high-level parent.
 ### Top decode kernels
 
 Kernel shares use CUDA GPU trace rows inside the same decode window, reduced to
-`docs/phase-c52/decode-window-kernels.csv` rather than committing the full
+`docs/archive/phase-c/phase-c52/decode-window-kernels.csv` rather than committing the full
 multi-MB raw CUDA trace.
 
 | Rank | Kernel | GPU-time share | Total time | Instances |
@@ -8466,8 +8466,8 @@ choose a next kernel from stale C50/C51 carry-forward percentages.
 
 C53 audited the C52 rank-1 decode hotspot, `:kiln/gdn/conv`, before attempting
 another causal-conv optimization. Artifact:
-`docs/phase-c53/gdn-conv-decode-audit.md`; machine summary:
-`docs/phase-c53/summary.json`.
+`docs/archive/phase-c/phase-c53/gdn-conv-decode-audit.md`; machine summary:
+`docs/archive/phase-c/phase-c53/summary.json`.
 
 Conclusion: **audit-only, no implementation**. The current CUDA path already
 routes supported native-MTP single-token decode calls through
@@ -8501,8 +8501,8 @@ fix task.
 C54 reran the C52 C40f-style native-MTP decode profile on current `origin/main`
 at `13a2a3d437680d299a1f4a17029cbca8b700701f`, after C53 added child NVTX
 ranges under `:kiln/gdn/conv`. Artifact:
-`docs/phase-c54/conv-child-nvtx-profile.md`; machine summary:
-`docs/phase-c54/summary.json`.
+`docs/archive/phase-c/phase-c54/conv-child-nvtx-profile.md`; machine summary:
+`docs/archive/phase-c/phase-c54/summary.json`.
 
 Validation passed on an on-demand RTX A6000 RunPod pool lease
 `pod-c11fe496c432600caf0baa6a` / `sl53yvx5seviyx`: `cargo test -p
@@ -8613,7 +8613,7 @@ Failed-prefill CUDA kernels, included only as diagnostic context:
 
 Recommendation: do not pick the next Phase 6 decode optimization target from C56. First fix or guard the CUDA causal-conv1d prefill fast path for the real native-MTP prefill workload on A6000, then rerun C56. Until that rerun reaches `:kiln/mtp/step`, C54 remains the last valid native-MTP decode-window source of truth.
 
-Full reduced artifact: `docs/phase-c56/post-476-mtp-decode-profile.md`. Machine-readable summary: `docs/phase-c56/summary.json`.
+Full reduced artifact: `docs/archive/phase-c/phase-c56/post-476-mtp-decode-profile.md`. Machine-readable summary: `docs/archive/phase-c/phase-c56/summary.json`.
 
 ## Phase 7 GDN prefill memory preflight (2026-04-24)
 
@@ -8674,7 +8674,7 @@ FP8 KV is not the limiting factor for these long prompts. With `KILN_KV_CACHE_FP
 
 The streaming path is already present and opt-in on CUDA. At 128k it reduces peak memory from 48.6 GiB to 25.4 GiB while preserving roughly the same prefill throughput in this single-run probe (2259 tok/s vs 2244 tok/s). That makes the next Phase 7 slice a defaulting/guarding task, not a new CUDA-kernel task: run a small interleaved regression at 32k/64k/128k with `KILN_STREAMING_PREFILL=0/1`, then enable streaming by default for CUDA prompts above a conservative threshold (recommended first threshold: 65536 tokens) if decode and TTFT stay within noise.
 
-Detailed artifact: `docs/phase-c62/gdn-prefill-memory-preflight.md`.
+Detailed artifact: `docs/archive/phase-c/phase-c62/gdn-prefill-memory-preflight.md`.
 
 ## Re-profile 2026-04-25 (post-PR #534, main SHA `60e298d`)
 
@@ -8717,7 +8717,7 @@ done
 
 ### Decode top NVTX ranges
 
-Source: `docs/phase-c65/post534_decode_nvtx_pushpop_sum.csv`. Capture: 1 paged prefill (494 tokens) + 128 paged decode steps; `:kiln/attn/full/prefill_initial` is 1.0 % of total wall-clock so the ranking is decode-dominated.
+Source: `docs/archive/phase-c/phase-c65/post534_decode_nvtx_pushpop_sum.csv`. Capture: 1 paged prefill (494 tokens) + 128 paged decode steps; `:kiln/attn/full/prefill_initial` is 1.0 % of total wall-clock so the ranking is decode-dominated.
 
 | Rank | NVTX range | Wall-clock share | Instances |
 | ---: | --- | ---: | ---: |
@@ -8734,7 +8734,7 @@ Source: `docs/phase-c65/post534_decode_nvtx_pushpop_sum.csv`. Capture: 1 paged p
 
 ### Decode top CUDA kernels
 
-Source: `docs/phase-c65/post534_decode_cuda_gpu_kern_sum.csv`.
+Source: `docs/archive/phase-c/phase-c65/post534_decode_cuda_gpu_kern_sum.csv`.
 
 | Rank | Kernel | GPU-kernel share | Instances |
 | ---: | --- | ---: | ---: |
@@ -8783,4 +8783,4 @@ This artifact does not queue new tasks. The next planning cycle should pick from
 
 GDN gate-path fusion remains off-limits without new sub-range HBM-traffic evidence: PR #173 (`gates`) and PR #176 (`gates + gated_norm + recurrent`) both closed null, and the post-#534 mix gives no new reason to retry. vLLM's fused `fused_recurrent_gated_delta_rule_packed_decode_kernel` was audited (agent note `vllm-gdn-fused-decode-audit-2026-04-24`) and offers no bounded micro-port win on A6000 under CUDA graphs.
 
-Detailed artifact: `docs/phase-c65/post-534-profile.md`.
+Detailed artifact: `docs/archive/phase-c/phase-c65/post-534-profile.md`.
