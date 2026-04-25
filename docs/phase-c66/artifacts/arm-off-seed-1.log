@@ -1,0 +1,64 @@
+=== Kiln Benchmark Suite ===
+
+GPU: NVIDIA RTX A6000 (49140 MB)
+Loading model from /workspace/qwen3.5-4b...
+[2m2026-04-25T03:26:54.984879Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-25T03:26:54.985987Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-25T03:26:54.986141Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-25T03:26:54.986149Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-25T03:26:54.986226Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+[2m2026-04-25T03:27:20.001347Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m marlin batch pack complete [3mn_inputs[0m[2m=[0m104 [3mn_packed[0m[2m=[0m104 [3mpack_elapsed_ms[0m[2m=[0m23144 [3mparallel[0m[2m=[0mtrue
+[kiln] marlin batch pack: 104/104 projections in 23144 ms (parallel)
+Model loaded in 25.53s (backend: cuda, VRAM: 17526 MB)
+
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=39] (494 prompt tokens)...
+    Prefill (paged): 358.9ms (1377 tok/s)
+    Decode (paged): 129 tokens, mean ITL 22.3ms (44.7 tok/s)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: NVIDIA RTX A6000 (49140 MB VRAM, source: nvidia-smi)
+Model load time: 25.53s (VRAM: 17526 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         494
+Prefill time:          358.9 ms (1377 tok/s)
+Time to first token:   358.9 ms
+Mean inter-token:      22.3 ms (44.7 tok/s)
+P50 inter-token:       21.9 ms
+P99 inter-token:       27.0 ms
+Tokens generated:      129
+Spec method:           off
+
+{
+  "backend": "cuda",
+  "gpu_info": {
+    "name": "NVIDIA RTX A6000",
+    "total_vram_mb": 49140,
+    "vram_source": "nvidia-smi"
+  },
+  "model_load": {
+    "load_time_secs": 25.534248569,
+    "model_vram_mb": 17526
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 494,
+    "prefill_time_ms": 358.87312,
+    "prefill_tokens_per_sec": 1376.5310703682683,
+    "time_to_first_token_ms": 358.87312,
+    "mean_inter_token_ms": 22.3474836484375,
+    "p50_inter_token_ms": 21.854023,
+    "p99_inter_token_ms": 27.045026,
+    "num_tokens_generated": 129,
+    "decode_tokens_per_sec": 44.747767387668205,
+    "spec_method": "off"
+  },
+  "training": null
+}

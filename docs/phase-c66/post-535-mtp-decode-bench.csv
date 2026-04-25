@@ -1,0 +1,10 @@
+arm_label,seed,spec_method_resolved,prompt_tokens,decode_tok_s,mean_itl_ms,p50_itl_ms,p99_itl_ms,alpha,ttft_ms,prefill_ms,num_tokens_generated,log_file
+off,1,off,494,44.748,22.347,21.854,27.045,,358.873,358.873,129,arm-off-seed-1.log
+off,2,off,494,45.014,22.216,22.332,27.331,,346.781,346.781,129,arm-off-seed-2.log
+off,3,off,494,44.231,22.608,22.562,28.19,,355.446,355.446,129,arm-off-seed-3.log
+mtp_forced,1,mtp,515,48.558,20.594,15.564,54.123,0.7778,368.216,368.216,128,arm-mtp-force-seed-1.log
+mtp_forced,2,mtp,510,43.092,23.206,16.059,57.969,0.6842,353.654,353.654,128,arm-mtp-force-seed-2.log
+mtp_forced,3,mtp,494,40.152,24.905,16.133,56.778,0.6203,350.347,350.347,128,arm-mtp-force-seed-3.log
+mtp_unforced,1,off,494,46.253,21.62,21.693,25.234,,366.671,366.671,129,arm-mtp-seed-1.log
+mtp_unforced,2,off,494,44.803,22.32,22.024,27.133,,376.655,376.655,129,arm-mtp-seed-2.log
+mtp_unforced,3,off,494,46.731,21.399,21.169,28.263,,351.632,351.632,129,arm-mtp-seed-3.log

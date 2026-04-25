@@ -1,5 +1,44 @@
 # Kiln Profiling Report
 
+## Phase 7 end-to-end native-MTP self-spec decode bench (2026-04-25)
+
+**Verdict: `mtp_no_decode_win`.** End-to-end MTP-On vs MTP-Off
+decode tok/s bench at bs=1 on RunPod A6000 sm_86 against post-PR
+#535 main (SHA `c5cf77d`, fully cached link-only rebuild). MTP-On
+medians: **decode 43.09 tok/s** (range 40.15–48.56), **mean ITL
+23.21 ms**, **P99 ITL 56.78 ms**, **α 0.6842** (range 0.620–0.778).
+MTP-Off medians: **decode 44.75 tok/s** (range 44.23–45.01), **mean
+ITL 22.35 ms**, **P99 ITL 27.33 ms**. **Δ median decode tok/s =
+−3.7 %**, paired-by-seed median Δ = −4.27%, mean Δ = −1.64%. Per the
+pre-registered decision rule (median Δ < −3% → `mtp_no_decode_win`),
+the MTP path does NOT yet deliver an operational decode-tok/s win
+at bs=1 even with all C3-C40+ fixes landed and α now ~5.5× higher
+than the PR #316 baseline (0.124 → 0.6842). One seed (α=0.778, the
+only seed clearing the 0.72 paper floor) produced +8.51% over its
+paired Off run, but the other two seeds (α=0.620, 0.684) produced
+−9.22% and −4.27%. **P99 ITL doubles** under MTP (27.33 → 56.78 ms,
+~2.08×) — the bimodal verifier-cost signature: P50 actually drops
+from ~22 ms to ~16 ms, but rejected-draft steps create a heavy
+tail. This is a **doc-only redirect**: no code changes,
+`KILN_SPEC_METHOD=mtp` stays opt-in (gated additionally by
+`KILN_BENCH_FORCE_MTP=1` because the bench resolver caps MTP at
+`requested_prompt_tokens ≤ BENCH_MTP_MAX_PROMPT_TOKENS = 128`), no
+default flip proposed. Bench envelope: pool A6000 acquire → release
+~25 min (warm pod, no cold-start), 6 bench runs × ~50 s each, ~$0.21
+GPU spend. Reopen triggers: median α reliably clearing 0.72 across
+humaneval+gsm8k+c4 with ≥10 seeds, a fused/short-circuit verifier
+landing, k>1 MTP variant, or workload-distribution shift to
+genuinely chat-template-heavy traffic. See
+[`docs/phase-c66/post-535-mtp-decode-bench.md`](docs/phase-c66/post-535-mtp-decode-bench.md)
+for the full protocol, anti-duplication evidence, per-run table
+(off vs `mtp_forced` vs the resolver-downgraded `mtp_unforced`
+control), decision-rule application, paired-seed delta breakdown,
+P99 ITL bimodality discussion, α progression timeline (PR #316 →
+this PR), and reproduction commands. Raw data:
+[`docs/phase-c66/post-535-mtp-decode-bench.csv`](docs/phase-c66/post-535-mtp-decode-bench.csv)
+and [`docs/phase-c66/artifacts/`](docs/phase-c66/artifacts/) (9 raw
+bench logs, 3 seeds × 3 arms).
+
 ## Phase 7 H18 hand-rolled HF transformers MTP α reference (2026-04-25)
 
 **Verdict: `kiln_above_hf`.** Hand-rolled HuggingFace transformers
