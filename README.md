@@ -75,7 +75,7 @@ client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
 # 1. Generate candidates
 responses = [
     client.chat.completions.create(
-        model="qwen3.5-4b",
+        model="qwen3.5-4b-kiln",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7
     )
@@ -121,7 +121,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
   │   inference · training · adapters    │
   └─────────────────────────────────────┘
 
-  Version: 0.1.0
+  Version: 0.2.1
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
@@ -216,12 +216,18 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
 
 ```
 crates/
-  kiln-core/         Core types: block manager, config, request lifecycle
-  kiln-flash-attn/   Vendored Flash-Attention-2 CUDA kernels (C-ABI + Rust FFI)
-  kiln-model/        Model loading, forward pass, LoRA, sampling
-  kiln-scheduler/    Continuous batching scheduler with prefix caching
-  kiln-server/       HTTP server, CLI, training queue, metrics, config
-  kiln-train/        SFT and GRPO training loops with gradient checkpointing
+  kiln-core/             Core types: block manager, prefix cache, config, request lifecycle
+  kiln-model/            Model loading, forward pass, LoRA, sampling
+  kiln-scheduler/        Continuous batching scheduler with chunked prefill
+  kiln-server/           HTTP server, CLI, training queue, metrics, config
+  kiln-train/            SFT and GRPO training loops with gradient checkpointing
+  kiln-nvtx/             Thin NVTX range wrapper for nsys attribution (no-op when off)
+  kiln-flce-kernel/      Fused Linear Cross-Entropy (chunked CE without [T, V] logits)
+  kiln-flash-attn/       Vendored Flash-Attention-2 CUDA kernels (C-ABI + Rust FFI) [CUDA only]
+  kiln-gdn-kernel/       Vendored Gated DeltaNet chunkwise + recurrent kernels [CUDA only]
+  kiln-conv1d-kernel/    Vendored mamba-ssm causal_conv1d_update decode kernel [CUDA only]
+  kiln-rmsnorm-kernel/   Fused RMSNorm CUDA kernel (Liger-style) [CUDA only]
+  kiln-marlin-gemm/      Vendored IST-DASLab Marlin W4A16 GEMM kernel [CUDA only]
 ```
 
 ## Configuration
@@ -243,16 +249,17 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 **Windows, Linux, and macOS (Apple Silicon).** The Windows and Linux installers drive the CUDA build of `kiln`; the macOS installer drives the candle-metal build on M-series hardware. Intel Macs are not supported.
 
-**Download — [Kiln Desktop v0.1.11](https://github.com/ericflo/kiln/releases/tag/desktop-v0.1.11):**
+**Download — [Kiln Desktop v0.2.0](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.0):**
 
 See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
 
 | Platform | Installer | Size |
 |---|---|---|
-| Windows | [Kiln.Desktop_0.1.11_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.11/Kiln.Desktop_0.1.11_x64-setup.exe) (NSIS) | 4.3 MB |
-| Windows | [Kiln.Desktop_0.1.11_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.11/Kiln.Desktop_0.1.11_x64_en-US.msi) (MSI) | 6.5 MB |
-| Linux | [Kiln.Desktop_0.1.11_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.11/Kiln.Desktop_0.1.11_amd64.deb) | 8.4 MB |
-| Linux | [Kiln.Desktop_0.1.11_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.1.11/Kiln.Desktop_0.1.11_amd64.AppImage) | 82 MB |
+| macOS (Apple Silicon) | [Kiln.Desktop_0.2.0_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_aarch64.dmg) | 8.1 MB |
+| Windows | [Kiln.Desktop_0.2.0_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_x64-setup.exe) (NSIS) | 4.3 MB |
+| Windows | [Kiln.Desktop_0.2.0_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_x64_en-US.msi) (MSI) | 6.5 MB |
+| Linux | [Kiln.Desktop_0.2.0_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_amd64.deb) | 8.4 MB |
+| Linux | [Kiln.Desktop_0.2.0_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_amd64.AppImage) | 81.7 MB |
 
 The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
 
@@ -285,7 +292,7 @@ sudo systemctl enable --now kiln
 
 ## Status
 
-Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, and production hardening are complete. Inference on macOS / Apple Silicon (Phase 1 port) is shipped via the candle-metal backend. Current work: performance benchmarking and optimization (FP8, CUDA graphs, quantization).
+Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, production hardening, and the Phase 6 performance optimization sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache) are all shipped. Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Current work is Phase 7 — developer experience: quickstart polish, CLI ergonomics, embedded `/ui` dashboard improvements, and architecture documentation. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
 
 Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 

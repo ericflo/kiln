@@ -4,16 +4,23 @@ This document explains how Kiln works internally. It is aimed at contributors an
 
 ## System Overview
 
-Kiln is a single Rust binary built as a Cargo workspace with six crates:
+Kiln is a single Rust binary built as a Cargo workspace with twelve crates — seven portable crates plus five CUDA kernel crates that are only compiled when `--features cuda` is enabled:
 
 ```
 kiln
-├── kiln-core          Core types: block manager, KV cache config, tokenizer, request lifecycle
-├── kiln-flash-attn    Vendored Flash-Attention-2 CUDA kernels with thin C-ABI/Rust FFI
-├── kiln-model         Model loading, forward pass, LoRA, sampling, KV cache, CUDA graphs
-├── kiln-scheduler     Sarathi-style continuous batching scheduler with prefix caching
-├── kiln-server        Axum HTTP server, CLI, training queue, metrics, configuration
-└── kiln-train         SFT and GRPO training loops with gradient checkpointing
+├── kiln-core             Core types: block manager, prefix cache, KV cache config, request lifecycle
+├── kiln-model            Model loading, forward pass, LoRA, sampling, KV cache, CUDA graphs
+├── kiln-scheduler        Sarathi-style continuous batching scheduler with chunked prefill
+├── kiln-server           Axum HTTP server, CLI, training queue, metrics, configuration
+├── kiln-train            SFT and GRPO training loops with gradient checkpointing
+├── kiln-nvtx             Thin NVTX range wrapper for nsys attribution (zero overhead when off)
+├── kiln-flce-kernel      Fused Linear Cross-Entropy: chunked CE without materializing [T, V] logits
+└── (CUDA-only, --features cuda)
+    ├── kiln-flash-attn   Vendored Flash-Attention-2 CUDA kernels with C-ABI/Rust FFI
+    ├── kiln-gdn-kernel   Vendored Gated DeltaNet chunk forward-substitution kernel (mamba-ssm port)
+    ├── kiln-conv1d-kernel Vendored mamba-ssm causal_conv1d_update decode kernel
+    ├── kiln-rmsnorm-kernel Fused RMSNorm CUDA kernel (Liger-style, ~11 launches → 1)
+    └── kiln-marlin-gemm  Vendored IST-DASLab/marlin W4A16 GEMM CUDA kernel
 ```
 
 The dependency graph flows downward:
@@ -519,13 +526,13 @@ Kiln uses layered configuration with priority: environment variables > TOML file
 
 [server]
 host = "0.0.0.0"
-port = 8080
+port = 8420
 request_timeout_secs = 300
 shutdown_timeout_secs = 30
 
 [model]
 path = "/models/Qwen3.5-4B"        # omit for mock mode
-model_id = "qwen3.5-4b"
+model_id = "Qwen/Qwen3.5-4B"       # HuggingFace model ID; served as "qwen3.5-4b-kiln" by default
 adapter_dir = "./adapters"
 
 [memory]
@@ -540,7 +547,7 @@ checkpoint_interval = 100           # save checkpoint every N training steps
 
 [logging]
 level = "info"                      # trace, debug, info, warn, error
-format = "json"                     # json or pretty
+format = "auto"                     # auto (pretty on TTY, JSON otherwise), json, pretty, text, human
 
 [prefix_cache]
 enabled = true

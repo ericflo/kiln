@@ -30,9 +30,9 @@ If you do not hear back within 7 days, send a follow-up — it almost certainly 
 
 ## Supported versions
 
-Kiln has not shipped a v0.1.0 release yet. Until it does, **only `main` is supported** — fixes will land on `main`, and there are no backports.
+Kiln is pre-1.0. **Only the latest tagged release on `main` is supported** — fixes land on `main` and ship in the next release; there are no backports to older minor versions. See [`CHANGELOG.md`](CHANGELOG.md) for the current release.
 
-Once v0.1.0 ships, the latest minor release will be the supported branch. This document will be updated at that point.
+Once a v1.0 release exists, this policy will be revisited.
 
 ## In scope
 
