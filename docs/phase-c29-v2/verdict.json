@@ -1,0 +1,16 @@
+{
+  "accept_cos_sim_median": 0.999979479133117,
+  "accept_cos_sim_p10": 0.9999682113961627,
+  "decision_rule": {
+    "ambiguous": "0.99 <= reject_cos_sim_median < 0.999",
+    "kiln_native_ceiling": "reject_cos_sim_median >= 0.999",
+    "verifier_numerical_drift": "reject_cos_sim_median < 0.99"
+  },
+  "n_accept": 7,
+  "n_reject": 15,
+  "n_unlabeled": 0,
+  "next_action": "Queue a vLLM \u03b1 microbench to establish the external-reference upper bound on Qwen3.5-4B A6000 bs=1 at this workload. Kiln's MTP head logits are at the BF16-noise cosine ceiling even on rejected drafts.",
+  "reject_cos_sim_median": 0.9999776060227605,
+  "reject_cos_sim_p10": 0.9999706320862227,
+  "verdict": "kiln_native_ceiling"
+}

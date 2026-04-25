@@ -19,8 +19,13 @@ reference?** PR #355's C29 run (2026-04-22) reported median cos_sim 0.99998
 aggregated across all 49 dumps — if the reject sub-population hides cos_sim <
 0.99 behind a 90%+ accept floor, the aggregate metric would miss it.
 
-**Verdict: <VERDICT_TOKEN>.** See §"Verdict" below. Decision rule set
-*before* the run:
+**Verdict: kiln_native_ceiling.** The reject sub-population stays at the
+BF16-noise cosine ceiling — `reject_cos_sim_median = 0.999978`, well above
+the 0.999 floor. Top-1 agreement is 100% on both accept and reject rows.
+H15b refutes verifier-numerical-drift as the α-gap source on this
+checkpoint. See §"Verdict" below.
+
+Decision rule set *before* the run:
 
 - `reject_cos_sim_median ≥ 0.999` → **kiln_native_ceiling** → next: queue vLLM α microbench
 - `reject_cos_sim_median <  0.99`  → **verifier_numerical_drift** → next: queue per-layer bisect on reject rows
@@ -123,18 +128,99 @@ Expected spend: ~30 min on A6000 ≈ $0.25 (PR #527 §"Recommended next H").
 
 ## Verdict
 
-*(populated on completion with concrete numbers from `verdict.json`)*
+Machine-readable record: [`docs/phase-c29-v2/verdict.json`](phase-c29-v2/verdict.json).
 
-- `reject_cos_sim_median`: **<FILLED>**
-- `reject_cos_sim_p10`:    **<FILLED>**
-- `accept_cos_sim_median`: **<FILLED>**
-- `accept_cos_sim_p10`:    **<FILLED>**
-- `n_accept` / `n_reject` / `n_unlabeled`: **<FILLED>**
-- Decision rule applied: **<VERDICT_TOKEN>**
-- Queued next action: **<FILLED>**
+| field | value |
+| --- | --- |
+| `verdict` | **kiln_native_ceiling** |
+| `reject_cos_sim_median` | **0.999978** |
+| `reject_cos_sim_p10`    | 0.999971 |
+| `accept_cos_sim_median` | 0.999979 |
+| `accept_cos_sim_p10`    | 0.999968 |
+| `n_accept` / `n_reject` / `n_unlabeled` | 7 / 15 / 0 |
+| `top1_match_rate` (both strata) | **1.0000** |
 
-See `docs/phase-c29-v2/c29-v2-stratified-compare.md` for the full stratified
-table and `docs/phase-c29-v2/verdict.json` for the machine-readable verdict.
+Decision rule applied: `reject_cos_sim_median (0.999978) ≥ 0.999` →
+**kiln_native_ceiling**.
+
+**Queued next action**: queue a vLLM α microbench to establish the
+external-reference upper bound on Qwen3.5-4B A6000 bs=1 at this workload.
+Kiln's MTP head logits are at the BF16-noise cosine ceiling even on
+rejected drafts — the α-gap source is not kiln numerical drift.
+
+### Headline stratified table
+
+| stratum | n | median cos | p10 cos | min cos | top-1 match | median J@10 | median KL(k‖r) |
+| --- | --: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **accept-only**  | 7  | 0.999979 | 0.999968 | 0.999956 | 1.000 | 1.0000 | 2.02e-04 |
+| **reject-only**  | 15 | 0.999978 | 0.999971 | 0.999957 | 1.000 | 1.0000 | 1.78e-04 |
+| all labeled      | 22 | 0.999978 | 0.999970 | 0.999956 | 1.000 | 1.0000 | 1.90e-04 |
+
+The accept and reject sub-populations are statistically indistinguishable
+on every cosine-based metric — there is no reject-row divergence to find.
+
+### Per-position stratified medians
+
+| `mtp_pos` | accept n | accept median cos | accept p10 | reject n | reject median cos | reject p10 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 2 | 0.999979 | 0.999977 | 3 | 0.999977 | 0.999977 |
+| 1 | 1 | 0.999980 | 0.999980 | 5 | 0.999978 | 0.999973 |
+| 2 | 2 | 0.999981 | 0.999980 | 4 | 0.999977 | 0.999961 |
+| 3 | 2 | 0.999966 | 0.999958 | 3 | 0.999983 | 0.999978 |
+
+Every `mtp_pos` × (accept, reject) cell sits comfortably above the 0.999
+floor. No position-dependent reject-row drift; the pos=3 accept p10
+(0.999958) is the worst data point and still 0.000958 above the floor.
+
+### What this rules out
+
+- **Verifier numerical drift on reject rows.** If a bug in the base-model
+  verify path or MTP head produced systematically worse logits when the
+  draft will be rejected, `reject_cos_sim_median` should fall below 0.99.
+  It did not; it's at the ceiling.
+- **Position-dependent reject-row divergence.** All four `mtp_pos` cells
+  show reject cos_sim within BF16 noise of accept cos_sim.
+- **Top-K rotation on reject rows.** J@10 median is 1.0000 on both
+  strata; 100% top-1 agreement on both strata. This mirrors PR #355's
+  aggregate J@10 = 1.0000 finding but now confirms it conditional on
+  rejection.
+
+### What this does NOT rule out
+
+- **External α ceiling.** H15b measures only kiln's internal agreement
+  with an fp32 HF reference. It says nothing about whether another
+  serving system (vLLM, SGLang, reference transformers) would hit a
+  higher α on the same checkpoint. That is the queued next step.
+- **Workload sensitivity.** This run uses prose prompts from
+  PROMPT_POOL with 512-token prefill and 16-token decode. Chat-template
+  prompts may expose a different α regime (per `mtp-bench-workload-sensitivity`
+  note, chat α ≈ 0.588 vs prose α ≈ 0.175 on PR #364).
+- **Downstream sampler divergence.** Under greedy, 100% top-1 agreement
+  is conclusive. Temperature or top-p sampling may still produce
+  different accept patterns if the tail of the distribution drifts
+  more than the head; that is out of scope for this probe.
+
+## Artifact summary
+
+- **Build**: `kiln-bench` release + CUDA, `KILN_CUDA_ARCHS=86`, sccache warm
+  hit rate >99% (rebuild: 2m17s).
+- **Bench invocations**: 3 (one per seed), each `--prompt-tokens 512
+  --max-output-tokens 16 --paged --skip-training`.
+- **Kiln dumps produced**: 22 (seed 0: 7, seed 1: 7, seed 2: 8 — one
+  extra at `mtp_pos=0 step=1`).
+- **HF reference dumps produced**: 22/22 (0 errors, 0 missing taps).
+- **C1 attribution rows**: 37 total (12 + 13 + 12). Kept under
+  `docs/phase-c29-v2/artifacts/c1_attr_seed{0,1,2}.csv`.
+
+## Pod spend
+
+- GPU: NVIDIA RTX A6000 48GB (direct-launch fallback — pool 503'd on
+  all 3 hibernated pods with `capacity_supply_exhausted`; policy lets
+  us bypass the pool when it's at cap or unhealthy, see
+  `runpod-capacity-fallback`).
+- Wall clock: ~35 min lease (launch → kiln-setup → build → dumps → HF
+  ref → compare → pull).
+- Cost estimate: ~$0.30 at $0.49/hr. Well under the 90-min / \$40 cap.
 
 ## Reopen / re-revisit triggers
 

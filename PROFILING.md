@@ -13,7 +13,14 @@ native ceiling even on reject rows, the α-gap source is external and the
 next step is a vLLM α microbench. If reject-row cos_sim is materially
 below the ceiling, per-layer bisect on reject rows localizes the drift.
 
-**Outcome: <VERDICT_TOKEN>.** See
+**Outcome: kiln_native_ceiling.** Reject sub-population stays at the
+BF16-noise cosine ceiling — `reject_cos_sim_median = 0.999978` (p10
+0.999971), vs decision floor 0.999. Accept sub-population is
+statistically identical (`accept_cos_sim_median = 0.999979`, p10 0.999968).
+Both strata show 100% top-1 agreement and median J@10 = 1.0000. Verifier
+numerical drift on reject rows is RULED OUT on this checkpoint.
+Recommendation: queue a vLLM α microbench next to establish whether an
+external-reference upper bound exists above kiln's current α. See
 [`docs/phase7-h15b-stratified-c29-v2.md`](docs/phase7-h15b-stratified-c29-v2.md)
 for the full verdict, per-position stratified table, decision-rule
 application, anti-duplication evidence, and reopen triggers. Raw data:
