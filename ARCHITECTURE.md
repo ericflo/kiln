@@ -166,15 +166,12 @@ FP8 quantization is per-tensor with absmax scaling. Roundtrip error is ~5-10%, w
 
 ### Prefix Caching
 
-When multiple requests share a common prompt prefix (e.g., a system prompt), the prefix cache (`crates/kiln-core/src/prefix_cache.rs`) avoids recomputing KV entries. It uses **hash chaining** for position-aware matching:
+When multiple requests share a common prompt prefix (e.g., a system prompt), the prefix cache avoids recomputing KV entries. Kiln currently has two implementations:
 
-```
-Block 0 hash: H(0, tokens[0..16])
-Block 1 hash: H(block_0_hash, tokens[16..32])
-Block 2 hash: H(block_1_hash, tokens[32..48])
-```
+- **Radix prefix tree** (`crates/kiln-core/src/prefix_cache.rs`, PR #512). A SGLang-style trie over block-aligned token-hash edges. Each node is one cached block; siblings share their longest common prefix; lookups walk the tree from the root and return the longest matching block run. LRU eviction is leaf-only so internal shared prefixes survive until every descendant is evicted. This is the long-term structure used by the mock-backend scheduler today.
+- **Flat `RealPrefixCache`** (`crates/kiln-server/src/state.rs`, PRs #515 / #520 / #521). A linear-scan cache over registered (token-prefix → physical-block-id) entries that backs the production `/v1/chat/completions` path. PR #520 added streaming-reuse so partial decodes can register their KVs incrementally, PR #521 made the cache CUDA-graph-compatible by keeping reused block pointers stable across the graph capture, and PR #518 added a runtime warning when a request configuration would silently bypass the cache (e.g. CUDA graphs replaying with a different block table).
 
-The same tokens at different positions produce different hashes. Lookups walk the chain until a hash miss. Cached blocks are reference-counted and LRU-evicted when the cache is full.
+Both caches use the same block-aligned hash scheme (each block hash mixes the parent block's hash with its own 16 tokens, so identical token runs at different positions still produce different hashes). Cached blocks are reference-counted and LRU-evicted when the budget is full. Future work consolidates the two paths so the radix tree backs production as well.
 
 ### VRAM Budget
 
@@ -259,6 +256,18 @@ Kiln vendors the Flash-Attention-2 CUDA kernels directly, with no PyTorch depend
 - Forward returns `softmax_lse` (log-sum-exp) needed by the backward pass
 
 The build uses `cc` crate to compile CUDA via nvcc with CUTLASS headers. The instantiation matrix is trimmed to only what Qwen3.5-4B needs (BF16, hdim128/256, causal).
+
+### GDN Kernel Implementation
+
+The 24 Gated DeltaNet layers run on the vendored `kiln-gdn-kernel` crate (PR #80, ported from `mamba-ssm`'s `chunk_gla_fwd`). It exposes two CUDA entry points consumed by `CudaBackend`: a chunkwise prefill kernel that processes the full sequence with forward-substitution, and a single-token recurrent decode kernel that updates the per-layer state matrix `S` in place. Decode-side fusion has been pushed as far as the architecture allows:
+
+- **PR #158 — fused gates** (merged). Decay-gate (`γ = -exp(A_log) * softplus(a + dt_bias)`) and write-gate (`β = sigmoid(b)`) are computed in one kernel instead of two candle ops.
+- **PR #173 — fused L2-QK norm** (opt-in, null median). Available behind `KILN_ENABLE_FUSED_L2_QK_NORM=1`. Bench-neutral on A6000 under CUDA graphs (variance reduction only — graph replay already amortizes the launch cost the fusion saved).
+- **PR #176 — big-fusion across recurrent + qk_norm + gated_norm** (closed null). Step 6 (gates) and Step 8 (gated RMSNorm) are separated by Step 7 (the in-place recurrence), so a single mega-kernel was architecturally infeasible.
+
+Cross-stack audit (PR #525) compared `kiln-gdn-kernel` against vLLM's Triton `fused_recurrent_gated_delta_rule_packed_decode_kernel` on A6000. Under CUDA graphs the math ceiling for vendoring vLLM's tile shape is below the 1.05× floor — no portable wins were available, so kiln stays on the mamba-ssm port.
+
+See `crates/kiln-gdn-kernel/` and the `gated_deltanet_forward()` dispatch in `crates/kiln-model/src/forward.rs`.
 
 ## Backend Abstraction
 
@@ -469,29 +478,37 @@ Dequantization: (weight_int4 - zero_int4) × scale → BF16
 
 Currently dequantized to BF16 on CPU during loading. Auto-detected via `quantize_config.json` in the model directory. See `crates/kiln-model/src/quantized.rs`.
 
+### Marlin W4A16 GEMM
+
+The `kiln-marlin-gemm` crate (PR #146, vendored from the IST-DASLab Marlin kernel) provides a hand-tuned W4A16 GEMM that runs the GPTQ-packed weights directly on tensor cores without dequantizing to BF16. It is opt-in via `KILN_W4A16=1` and, when enabled, dispatches the four highest-volume projections through Marlin: `q_proj` plus the MLP `gate_proj`, `up_proj`, and `down_proj`. `k_proj`, `v_proj`, and `o_proj` stay on the BF16 matmul path.
+
+Two follow-on cleanups landed alongside the kernel:
+
+- **PR #210 — Marlin pack determinism + speed**. The 96 MLP projections used to pack serially in ~42.8 s at model load; PR #210 made the pack deterministic and parallelized it down to ~16.9 s. (See `MARLIN_MLP_BENCH.md` for the per-projection numbers.)
+- **PR #206 — BF16 weight VRAM cleanup**. Previously the BF16 MLP weights stayed resident alongside the packed Marlin weights even when `KILN_W4A16=1` (~4.4 GB unused). PR #206 drops the BF16 tensors after packing.
+
+See `crates/kiln-marlin-gemm/` for the kernel and `crates/kiln-model/src/marlin_proj.rs` for the BF16-Linear-compatible wrapper used by the forward path.
+
 ### Speculative Decoding
 
-Self-speculative decoding uses the first N layers (default 8) as a draft model — no separate model needed, no extra VRAM:
+Kiln has two self-speculative-decode paths, both off by default. Both use the same generic verify loop in `crates/kiln-model/src/speculative.rs`; the dispatch is selected at server startup via `KILN_SPEC_METHOD={off|skip_layer|mtp}` (see `crates/kiln-server/src/config.rs`).
 
-```
-Phase 1: Draft — run first 8 layers K times, propose K candidate tokens
-Phase 2: Verify — run full 32 layers on all K+1 positions in one forward pass
-Phase 3: Accept/Reject — for each draft token:
-           if random() < min(1, p_target / p_draft): accept
-           else: resample from max(0, p_target - p_draft) and stop
-Bonus:   If all K accepted, sample one extra token from position K
-```
+- **`skip_layer` (legacy)** — uses the first N layers of the main model as a draft. No extra VRAM, no separate checkpoint. Acceptance rate is workload-dependent and the default is `off`.
+- **`mtp` (native MTP, attempted, null on A6000)** — Qwen3.5-4B ships with a single pretrained MTP (Multi-Token Prediction) head (`mtp.*` tensors in the checkpoint). PRs #535 / #536 vendored this head, ran the existing draft-then-verify loop with the MTP head as the drafter, and benchmarked end-to-end self-spec decode on A6000 bs=1.
 
-Expected speedup: 1.5-2.5x depending on acceptance rate. Configured via `kiln.toml`:
+Result for native MTP: measured acceptance α = **0.69**, below the 0.72 break-even ceiling implied by the kiln-native verify cost (see `PROFILING-MTP-C40*.md`). PR #536 merged the implementation behind `KILN_ENABLE_MTP=0` (default off) so the code path stays exercised but the production decode path is unaffected. The cross-stack audits in PRs #532 (SGLang) and #533 (vLLM), plus the HF-transformers α microbench in PR #534, all corroborated kiln's native α and confirmed there was no missed implementation win — the 0.72 ceiling is a property of the Qwen3.5-4B MTP head, not a kiln bug.
+
+This supersedes the older skip-layer self-spec design described in the agent note `kiln-speculative-decoding-design`. Per-token configuration still flows through `[speculative_decoding]` in `kiln.toml`:
 
 ```toml
 [speculative_decoding]
-enabled = true
-num_speculative_tokens = 4
-draft_layers = 8
+enabled = false                # KILN_SPEC_ENABLED
+method = "off"                 # KILN_SPEC_METHOD: off | skip_layer | mtp
+num_speculative_tokens = 4     # KILN_SPEC_NUM_TOKENS
+draft_layers = 8               # KILN_SPEC_DRAFT_LAYERS (skip_layer only)
 ```
 
-See `crates/kiln-model/src/speculative.rs`.
+See `crates/kiln-model/src/speculative.rs` for the verify loop and `crates/kiln-model/src/mtp_debug.rs` for the per-step instrumentation used during the α investigation.
 
 ## Configuration
 
@@ -603,3 +620,7 @@ See `crates/kiln-server/src/metrics.rs`.
 ### Health Endpoint (`GET /v1/health`)
 
 Returns uptime, model info, scheduler statistics, GPU memory breakdown, active adapter, and training queue state.
+
+## Phase status (2026-04-25)
+
+Phase 6 (performance optimization) is closed. The post-#534 perf shortlist concluded with PRs #525 / #526 (SGLang RadixAttention), #210 / #206 (Marlin pack determinism + BF16 cleanup), #222 (FP8 KV opt-in), and #536 (native MTP self-spec, null at α=0.69). Active work is now Phase 7 (developer experience). For current decode numbers see `BENCHMARKS.md`; for the live profiling hotspot table see `PROFILING.md`.
