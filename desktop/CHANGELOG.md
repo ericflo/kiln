@@ -1,5 +1,14 @@
 # Kiln Desktop Changelog
 
+## desktop-v0.2.2 — 2026-04-25
+
+Coordinated release aligned with kiln-v0.2.2 server. No desktop-side
+behavior changes since desktop-v0.2.0; this cut realigns the desktop
+version number with the server after the unpublished kiln-v0.2.1 cycle
+and ships the new auto-downloaded server binary with all of v0.2.2's
+prefix-cache, Metal/CUDA fusion, MTP audit, dependency, and governance
+work. See [CHANGELOG.md](../CHANGELOG.md) for the full server changelog.
+
 ## desktop-v0.2.0 — 2026-04-24
 - Coordinated release aligned with kiln-v0.2.0 server
 - Picks up macOS startup and KV prefill overhead reductions
