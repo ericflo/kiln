@@ -1,6 +1,95 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.2 — 2026-04-25
+
+Coordinated release aligned with desktop-v0.2.2. Supersedes the unpublished
+kiln-v0.2.1 draft; all v0.2.1 changes are included here. Highlights since
+v0.2.0 are the radix prefix cache reuse path, more Metal/CUDA decode
+fusions, governance docs, and dependency hygiene.
+
+### Phase 7 prefix cache + decode reuse
+- Implement radix prefix cache core (#512)
+- Wire real append prefix cache (#515) and streaming real prefix cache reuse (#520)
+- Use prefix cache with CUDA graphs and warn when bypassed (#518, #521)
+- Expose prefix cache metrics (#513)
+- Speed up greedy paged prefill defaults (#519)
+- Default CUDA streaming prefill for long prompts and lower Metal threshold (#511)
+- Refresh post-#521 profiling artifacts (#522)
+
+### Phase 6 / Phase 7 Metal + CUDA fusions
+- Fuse Metal attention output gate (#514)
+- Fuse Metal GDN gates with recurrent decode
+- Fuse Metal contiguous paged decode attention (#501)
+- Fuse Metal GDN prefill conv split (#499) and Metal paged KV slot writes (#497)
+- Fuse GDN recurrent RMSNorm decode (#496)
+- Add CUDA GDN qk norm GQA fast path (#500)
+- Add opt-in CUDA GDN decode fuse hook (#498)
+- Route shared Metal greedy decode through argmax (#510)
+- Defer transposed cache writer (#508); make transposed cache writes reliable (#506)
+- Precompile Metal kernels before prewarm lock (#505)
+- Batch MTP verifier argmax (#493)
+
+### MTP audits and α-stability work
+- H15c stratified C29 v2 reject-row probe (#529)
+- H17 SGLang and H15c/H17b/H15a vLLM α microbenches (#530, #532, #533)
+- H18 hand-rolled HF transformers MTP α reference (#534)
+- H16 external-α reference options audit (#531)
+- MTP acceptance-rate state-of-play audit (#527)
+- End-to-end native-MTP self-spec decode bench post-#535 (#536)
+
+### Phase 7 CLI / UX
+- Recent requests panel on `/ui` dashboard (last 100) (#551)
+- Live decode tok/s + p50/p99 ITL on `/ui` dashboard (#550)
+- `kiln health` pretty-printed tree output + `--json` escape hatch (#549)
+- `kiln train status` CLI subcommand + fix post-submit hint (#548)
+- Surface structured server error hints in CLI (#545)
+- `KILN_LOG_FORMAT=auto` — TTY-detect pretty vs JSON default (#544)
+- GPU name + VRAM in startup banner (#543)
+- ProgressBars for model load, SFT, GRPO (#540, #541, #542)
+
+### Server runtime
+- Move health adapter scan off runtime
+- Document phase 7 prefix cache reuse benchmark
+- Audit kiln radix prefix cache vs SGLang RadixAttention (#526)
+- Audit vLLM fused_recurrent_gated_delta_rule against kiln-gdn-kernel (#525)
+- Kill-switch bisection ruled out a single fused-kernel owner of the post-#166 decode gap (#524)
+- Prefix-cache A/B ruled out cache hooks as bench regression source (#523)
+- Fast-guard disabled MTP debug taps; reduce safetensors loader map allocations
+- RunPod task tasks no longer pin `KILN_CUDA_ARCHS` (#494)
+
+### Governance + CI
+- Add Dependabot config for cargo + GitHub Actions (#558)
+- Add `cargo-deny` license/source/bans policy and CI check job (#555, #556)
+- Add CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md (#552, #553, #554)
+- Add GitHub issue + PR templates (#557)
+
+### Dependencies
+- Bump tokenizers 0.21.4 → 0.22.2 (#565)
+- Bump indicatif 0.17.11 → 0.18.4 (#564)
+- Bump console 0.15.11 → 0.16.3 (#563)
+- Migrate to rand 0.9 (#567)
+- Bump cc in cargo-minor-and-patch group (#562)
+- Bump docker/login-action 3 → 4 (#561) and docker/build-push-action 5 → 7 (#560)
+- Bump Jimver/cuda-toolkit (#559)
+
+### Docs / repo cleanup
+- Refresh ARCHITECTURE.md for post-Phase-6 outcomes (#539)
+- Refresh BENCHMARKS.md with post-#536 numbers + add vLLM/SGLang comparison (#537)
+- A6000 llama.cpp re-bench at 512 → 128 (#538)
+- README + QUICKSTART refresh (`/ui`, banner GPU/VRAM, logging defaults) (#546, #547)
+- Archive 71 phase-cXX docs subdirs into `docs/archive/phase-c/` (#570)
+- Archive frozen profiling/bench MD reports into `docs/archive/` (#568)
+- Purge profiling artifact dirs from working tree (#569)
+
+### CI fixes carried over from the unpublished v0.2.1
+- Bump Jimver/cuda-toolkit from v0.2.19 to v0.2.35 to handle NVIDIA's renamed installer URLs (#469)
+- Install MSVC dev env on Windows before CUDA build; fixes `M_LOG2E` undefined in `flash_api_c.cu` under MSVC (#472)
+- Force static MSVC CRT on Windows CUDA build; fixes CRT mismatch between `esaxx-rs` and `kiln-marlin-gemm` (#477)
+
 ## kiln-v0.2.1 — 2026-04-24
+
+(unpublished — superseded by kiln-v0.2.2)
+
 
 Server re-cut to include CI fixes that were missing from kiln-v0.2.0. No
 user-facing behavior changes from v0.2.0 in the core server; this cut also
