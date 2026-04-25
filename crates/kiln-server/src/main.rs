@@ -28,8 +28,8 @@ async fn main() -> Result<()> {
 
     match args.command {
         // Client-side commands (talk to a running server)
-        Some(Commands::Health { ref url }) => {
-            return cli::run_health(url).await;
+        Some(Commands::Health { ref url, json }) => {
+            return cli::run_health(url, json).await;
         }
         Some(Commands::ConfigCheck { ref file }) => {
             return cli::run_config_check(file.as_deref().or(args.config.as_deref()));
