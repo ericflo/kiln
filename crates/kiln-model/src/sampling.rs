@@ -170,10 +170,10 @@ pub fn sample_with_params(
     // Categorical sampling (host-side; candle has no GPU categorical RNG).
     let mut rng: StdRng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
+        None => StdRng::from_os_rng(),
     };
 
-    let r: f32 = rng.r#gen();
+    let r: f32 = rng.random();
     let mut cumsum = 0.0_f32;
     for &(idx, p) in &probs {
         cumsum += p;
@@ -221,9 +221,9 @@ fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Resu
 
     let mut rng: StdRng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
+        None => StdRng::from_os_rng(),
     };
-    let threshold = rng.r#gen::<f32>() * sum;
+    let threshold = rng.random::<f32>() * sum;
     let mut cumsum = 0.0_f32;
     for (idx, p) in probs.into_iter().enumerate() {
         cumsum += p;
