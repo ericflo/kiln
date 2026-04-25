@@ -1,5 +1,51 @@
 # Kiln Profiling Report
 
+## Phase 7 H17 SGLang α microbench (2026-04-25)
+
+**Verdict: `sglang_mtp_unsupported_dense_4b`.** SGLang 0.5.10.post1 +
+Qwen3.5-4B dense BF16 + native MTP segfaults on A6000 sm_86 across three
+distinct serving configurations. All three attempts produced SIGSEGV
+(exit code -11) in native-extension code with no Python file symbols at
+the terminal frame — identical high-level shape to PR #530's vLLM 0.19.1
+failure class. The crash frames are structurally distinct per config:
+(1) default flashinfer + CUDA graphs: segfault during
+`flashinfer_backend.call_begin_forward` -> `eagle_info.py:188
+generate_attn_arg_prefill` -> Triton JIT compile (graph capture);
+(2) flashinfer graphs-off: scheduler SIGSEGV during init, before reaching
+prefill, also on retry with `speculative_algorithm=NEXTN` (auto-rewrites
+to EAGLE); (3) triton attention graphs-off: engine loaded successfully
+(8.62 GB target + 1.41 GB drafter, KV + mamba cache allocated, hybrid GDN
+dispatched via TritonGDNKernel), scheduler entered event loop, then
+SIGSEGV fired during `write_cache_indices` Triton JIT compile inside
+`alloc_for_extend` on the first prefill. Engine-side dispatch is correct
+throughout — the bug is downstream of model dispatch in each attempt.
+Per the pre-registered decision rule this maps to branch D
+(`sglang.mtp_supported == false`) — ship as a doc-only redirect PR.
+Newly documented SGLang runtime prerequisites (beyond PR #531's static
+audit): `libnuma1` + `libnuma-dev` apt packages (sgl_kernel dlopens
+libnuma.so.1), `SGLANG_ENABLE_SPEC_V2=1` env var,
+`mamba_scheduler_strategy='extra_buffer'`,
+`speculative_algorithm='EAGLE'` (SGLang enum has no `MTP`; `NEXTN`
+rewrites to EAGLE), `speculative_eagle_topk` required as int. Per PR
+#531 §"Bench envelope", the free pre-step vLLM v0.20.0 retest was
+SKIPPED — SGLang diagnostic attempts consumed ~35 min of the 75 min
+combined cap (pod: ~25 min / ~$0.20, well under $0.40 SGLang cap). Kiln
+median α at this workload (unchanged from PR #530, re-derived from PR
+#529 c1_attr CSVs): 0.3636. With both vLLM 0.19.1 AND SGLang 0.5.10.post1
+blocked, the external-α-reference question remains open — next options:
+opportunistic vLLM v0.20.0 retest (~30 min / $0.25), hand-rolled HF
+transformers reference H18 (~2-4 hrs engineering, $0 GPU), or accept the
+H15b `kiln_native_ceiling` verdict as operational conclusion and
+deprioritize MTP-side α work entirely. See
+[`docs/phase7-h17-sglang-alpha-microbench.md`](docs/phase7-h17-sglang-alpha-microbench.md)
+for the full verdict, three crash signatures, per-config outcome table,
+SGLang prerequisites discovered, workload matching, reproduction
+commands, anti-duplication evidence, and detailed reopen triggers. Raw
+data:
+`docs/phase-c29-v3-sglang/{verdict,compare,kiln_alpha_per_seed,sglang_alpha_per_seed}.json`,
+`docs/phase-c29-v3-sglang/compare.md`, and
+`docs/phase-c29-v3-sglang/artifacts/sglang_segfault_evidence.log`.
+
 ## Phase 7 H16 external-α reference options audit (2026-04-25)
 
 **Verdict: `external_reference_exists`.** Doc-only audit (no pod, $0 GPU
