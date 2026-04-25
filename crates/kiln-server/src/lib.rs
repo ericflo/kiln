@@ -8,5 +8,6 @@ pub mod device;
 pub mod error;
 pub mod logging;
 pub mod metrics;
+pub mod recent_requests;
 pub mod state;
 pub mod training_queue;

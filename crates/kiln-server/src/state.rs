@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use crate::decode_stats::DecodeStatsRing;
 use crate::metrics::Metrics;
+use crate::recent_requests::{DEFAULT_CAPACITY as RECENT_REQUESTS_CAPACITY, RecentRequestsRing};
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
 const DEFAULT_BLOCK_SIZE: usize = 16;
@@ -417,6 +418,8 @@ pub struct AppState {
     pub served_model_id: String,
     /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
     pub decode_stats: Arc<std::sync::Mutex<DecodeStatsRing>>,
+    /// Bounded history of recent chat-completion requests for the /ui dashboard.
+    pub recent_requests: Arc<std::sync::Mutex<RecentRequestsRing>>,
 }
 
 impl AppState {
@@ -473,6 +476,9 @@ impl AppState {
             checkpoint_interval: None,
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
+            recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
+                RECENT_REQUESTS_CAPACITY,
+            ))),
         }
     }
 
@@ -685,6 +691,9 @@ impl AppState {
             checkpoint_interval: None,
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
+            recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
+                RECENT_REQUESTS_CAPACITY,
+            ))),
         }
     }
 }

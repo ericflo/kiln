@@ -379,6 +379,70 @@ textarea { resize: vertical; min-height: 80px; }
   font-size: 13px;
 }
 
+/* Recent Requests */
+.recent-list {
+  max-height: 320px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.recent-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 140px;
+  gap: 12px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  align-items: start;
+}
+.recent-row:last-child { border-bottom: none; }
+.recent-time {
+  font-family: var(--mono);
+  color: var(--text2);
+  white-space: nowrap;
+}
+.recent-previews { min-width: 0; }
+.recent-prompt {
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+.recent-completion {
+  color: var(--text);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  color: var(--text2);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.recent-meta .recent-tokens { color: var(--text); }
+.recent-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  background: var(--surface2);
+  color: var(--text2);
+  border: 1px solid var(--border);
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.recent-pill.streamed { color: var(--accent); border-color: var(--accent); }
+.recent-pill.timeout,
+.recent-pill.error,
+.recent-pill.client_disconnect { color: var(--orange); border-color: var(--orange); }
+
 /* Toast */
 .toast-container {
   position: fixed;
@@ -423,6 +487,14 @@ textarea { resize: vertical; min-height: 80px; }
   <div class="panel">
     <div class="panel-head"><h2>Decode Performance</h2></div>
     <div class="panel-body" id="decode-perf-panel">
+      <div class="empty">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Recent Requests -->
+  <div class="panel" style="grid-column: 1 / -1;">
+    <div class="panel-head"><h2>Recent Requests</h2></div>
+    <div class="panel-body" id="recent-requests-panel">
       <div class="empty">Loading...</div>
     </div>
   </div>
@@ -717,6 +789,79 @@ async function pollDecodePerf() {
   }
 }
 
+// --- Recent Requests ---
+let recentRequestsCache = [];
+
+function fmtRelTime(unixMs) {
+  if (!unixMs) return '-';
+  const now = Date.now();
+  const delta = Math.max(0, Math.round((now - unixMs) / 1000));
+  if (delta < 1) return 'now';
+  if (delta < 60) return delta + 's ago';
+  if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
+  if (delta < 86400) return Math.floor(delta / 3600) + 'h ago';
+  return Math.floor(delta / 86400) + 'd ago';
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderRecentRequests(rows) {
+  const el = document.getElementById('recent-requests-panel');
+  if (!el) return;
+  if (!rows || rows.length === 0) {
+    el.innerHTML = '<div class="empty">No requests yet — try Quick Inference below</div>';
+    return;
+  }
+  const items = rows.map(r => {
+    const finish = r.finish_reason || 'stop';
+    const finishClass = finish.replace(/[^a-z_]/gi, '_');
+    const streamPill = r.streamed ? '<span class="recent-pill streamed">stream</span>' : '';
+    const finishPill = `<span class="recent-pill ${finishClass}">${escapeHtml(finish)}</span>`;
+    const tokens = `${r.prompt_tokens || 0} → ${r.completion_tokens || 0} tok`;
+    const dur = (r.duration_ms != null) ? `${r.duration_ms} ms` : '';
+    const promptText = r.prompt_preview || '—';
+    const completionText = r.completion_preview || '—';
+    return `
+      <li class="recent-row" data-ts="${r.timestamp_unix_ms || 0}">
+        <div class="recent-time">${fmtRelTime(r.timestamp_unix_ms)}</div>
+        <div class="recent-previews">
+          <div class="recent-prompt" title="${escapeHtml(promptText)}">${streamPill}${escapeHtml(promptText)}</div>
+          <div class="recent-completion" title="${escapeHtml(completionText)}">${escapeHtml(completionText)}</div>
+        </div>
+        <div class="recent-meta">
+          <span class="recent-tokens">${tokens}</span>
+          <span>${finishPill}${escapeHtml(dur)}</span>
+        </div>
+      </li>
+    `;
+  }).join('');
+  el.innerHTML = `<ul class="recent-list">${items}</ul>`;
+}
+
+function refreshRecentTimes() {
+  const el = document.getElementById('recent-requests-panel');
+  if (!el) return;
+  el.querySelectorAll('.recent-row').forEach(row => {
+    const ts = Number(row.dataset.ts || 0);
+    if (!ts) return;
+    const tcell = row.querySelector('.recent-time');
+    if (tcell) tcell.textContent = fmtRelTime(ts);
+  });
+}
+
+async function pollRecentRequests() {
+  try {
+    const data = await api('/v1/stats/recent-requests');
+    recentRequestsCache = Array.isArray(data) ? data : [];
+    renderRecentRequests(recentRequestsCache);
+  } catch (e) {
+    const el = document.getElementById('recent-requests-panel');
+    if (el) el.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
 // --- Adapters ---
 async function pollAdapters() {
   try {
@@ -947,10 +1092,6 @@ function renderChat() {
   el.scrollTop = el.scrollHeight;
 }
 
-function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
@@ -1041,11 +1182,15 @@ pollHealth();
 pollAdapters();
 pollTraining();
 pollDecodePerf();
+pollRecentRequests();
 
 setInterval(pollHealth, 2000);
 setInterval(pollAdapters, 5000);
 setInterval(pollTraining, 3000);
 setInterval(pollDecodePerf, 2000);
+setInterval(pollRecentRequests, 2000);
+// Refresh relative timestamps every second without re-fetching the list.
+setInterval(refreshRecentTimes, 1000);
 
 })();
 </script>
