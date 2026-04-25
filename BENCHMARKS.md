@@ -57,19 +57,25 @@ table is not currently producible. The audit results are summarized below.
 | Engine | Status on A6000 sm_86 / driver 550.x | Decode (tok/s) | TTFT | Peak VRAM | Source |
 |---|---|---:|---:|---:|---|
 | **kiln (post-#536)** | runs | **44.75** (median) | 355 ms | ~10 GB | this doc |
-| **llama.cpp** (RTX 6000 Ada, 512 → 256)¹ | runs | **88.43** | ~62 ms | ~8.8 GB | `bench-results/llama-bench.json` |
+| **llama.cpp `9d34231` (current main, 512 → 128)¹** | runs | **68.99** (median) | ~85 ms | ~8.8 GB | `bench-results/llama-bench-a6000-post536.json` |
+| **llama.cpp `9d34231` (current main, 512 → 256)¹** | runs | **69.23** (median) | ~85 ms | ~8.8 GB | `bench-results/llama-bench-a6000-post536.json` |
 | **vLLM v0.19.1** | unsupported² | — | — | — | PR #530 |
 | **vLLM v0.20.0** | unsupported³ | — | — | — | PR #533 |
 | **SGLang 0.5.10.post1** | unsupported⁴ | — | — | — | PR #532 |
 | **HF transformers reference** | runs (α-only)⁵ | — | — | — | PR #534 |
 
-¹ The llama.cpp number is from the original RTX 6000 Ada (sm_89) head-to-head
-on kiln commit `f3d5089` (re-quoted from the committed
-`bench-results/llama-bench.json`, not re-run). It was measured at a 512-token
-prompt → 256 token decode shape with `n_batch=2048`, `n_ubatch=512`,
-`flash_attn=false`, `n_gpu_layers=99`, K/V cache in f16. Compare with caution:
-both the GPU class and the decode-length differ from the kiln post-#536 row.
-A current-main A6000 llama.cpp run is on the Phase 6 / Phase 7 wishlist.
+¹ Current-main llama.cpp A6000 re-bench captured on the same kiln-runpod
+A6000 / driver 550.127.08 base image as the kiln row above. llama-bench
+build commit `9d34231`, Qwen3.5-4B converted to bf16 GGUF via
+`convert_hf_to_gguf.py --outtype bf16`. Flags: `n_batch=2048`,
+`n_ubatch=512`, `flash_attn=false` (`-fa 0`), `n_gpu_layers=99` (`-ngl 99`),
+K/V cache in f16. Three repeats per shape, median-of-3 reported. Decode
+tok/s is essentially flat across decode lengths on this stack (Δ = 0.35 %
+between tg128 and tg256), so the headline 512 → 128 number is what the
+multi-engine apples-to-apples comparison anchors on. Prefill (pp512):
+5989 tok/s (median). The pre-existing RTX 6000 Ada (sm_89) row on kiln
+commit `f3d5089` is now historical (see [section
+below](#historical-llamacpp-head-to-head-on-rtx-6000-ada-kiln-f3d5089)).
 
 ² vLLM 0.19.1 loads the model + drafter weights but segfaults inside
 spec-decode native code during runtime profiling on Qwen3.5-4B + native MTP.
@@ -136,18 +142,22 @@ to-measure list and will follow a future profiling run.
 
 ### Historical: llama.cpp head-to-head on RTX 6000 Ada (kiln `f3d5089`)
 
-Kept for reference. This is the only end-to-end head-to-head with llama.cpp
-that has been formally captured. The kiln side is heavily out of date (decode
-~10 tok/s on `f3d5089` versus ~45 tok/s on post-#536). The llama.cpp side
-remains the row used in the multi-engine table above.
+Kept for reference only. This was the original end-to-end head-to-head
+captured on RTX 6000 Ada (sm_89). The multi-engine row anchors on the
+A6000 sm_86 re-bench above; this section exists so the original numbers
+remain auditable. Both sides are out of date — kiln-side decode is
+~10 tok/s on `f3d5089` versus ~45 tok/s on post-#536, and llama.cpp on
+A6000 sm_86 today is 68.99 tok/s at 512 → 128 / 69.23 at 512 → 256
+versus the 88.43 quoted here at 512 → 256 on RTX 6000 Ada sm_89.
 
 | Engine | Prefill (tok/s) | Decode (tok/s) | TTFT | Peak VRAM |
 |---|---:|---:|---:|---:|
-| llama.cpp `408225b` | **8224.45** | **88.43** | ~62 ms | **8820 MB** |
-| kiln `f3d5089` (pre-Phase-6) | 36.31 | 10.89 | 13934 ms | 10278 MB |
+| llama.cpp `408225b` (RTX 6000 Ada, 512 → 256) | **8224.45** | **88.43** | ~62 ms | **8820 MB** |
+| kiln `f3d5089` (pre-Phase-6, RTX 6000 Ada, 512 → 256) | 36.31 | 10.89 | 13934 ms | 10278 MB |
 
 Raw JSON: `bench-results/kiln-bench.json` (kiln side, stale) and
-`bench-results/llama-bench.json` (llama.cpp side, still current).
+`bench-results/llama-bench.json` (llama.cpp side, RTX 6000 Ada — superseded
+in the multi-engine table by `bench-results/llama-bench-a6000-post536.json`).
 
 ## Interpretation
 
@@ -156,10 +166,15 @@ Raw JSON: `bench-results/kiln-bench.json` (kiln side, stale) and
   W4A16 + CUDA graphs). The Phase 6 fused kernels (RMSNorm, GDN gates, GDN
   qk-norm, paged decode) and the W4A16 Marlin MLP wire-in (PR #152) are
   carrying most of the win.
-- **The remaining gap to llama.cpp on the historical RTX 6000 Ada row is
-  ~2× on decode**, not ~8× as the original doc suggested. A current-main
-  llama.cpp re-bench on A6000 is required to make this rigorous; until then,
-  treat the 2× number as indicative.
+- **The remaining gap to llama.cpp at the same 512 → 128 shape on the same
+  A6000 sm_86 / driver 550.x base image is 1.54×** (kiln 44.75 vs llama.cpp
+  68.99, both median-of-3, current main on both sides). At 512 → 256 the
+  llama.cpp side is essentially flat (69.23 tok/s), so widening the decode
+  window does not change the gap — this is not a TTFT-vs-decode artifact.
+  The original doc estimated ~2× by comparing the kiln post-#536 A6000
+  number against the historical RTX 6000 Ada (sm_89) llama.cpp row at
+  512 → 256; the apples-to-apples A6000 sm_86 re-bench in this refresh
+  closes that measurement gap and lands the actual delta closer to ~1.5×.
 - **vLLM and SGLang comparisons are blocked engine-side**, not because kiln
   is faster. Whenever a vLLM stable wheel ships `+cu124` / `+cu128` (or the
   RunPod kiln-runpod base image upgrades to driver ≥580), the H17b /
