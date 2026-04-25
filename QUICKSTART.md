@@ -108,8 +108,14 @@ You'll see the startup banner:
   Mode:    GPU inference
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
+  GPU:     NVIDIA RTX A6000
+  VRAM:    49140 MiB total, 48891 MiB free
   Listen:  http://0.0.0.0:8420
+
+  Endpoints: /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
+
+The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed. If you launched with `--config kiln.toml`, a `Config:` line appears just below `Version:`.
 
 On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. No config changes needed — the binary selects the backend that was compiled in.
 
@@ -139,7 +145,18 @@ curl -N http://localhost:8420/v1/chat/completions \
   }'
 ```
 
-## 5. Submit SFT Training
+## 5. Open the Browser Dashboard
+
+Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
+
+- **Server Status** — live GPU VRAM breakdown (model / KV cache / training / free) plus scheduler queue depth
+- **Adapters** — list available LoRA adapters and switch the active one
+- **Training** — submit SFT or GRPO jobs from a form, watch the queue, and review recently completed runs
+- **Quick Inference** — chat with the model directly (per-request adapter and temperature pickers) without writing curl
+
+It's a single HTML page served by the `kiln` binary itself — no extra process, no build step, no JS bundle to deploy.
+
+## 6. Submit SFT Training
 
 Create a training file `examples.jsonl` with chat-format examples:
 
@@ -173,7 +190,7 @@ curl -s http://localhost:8420/v1/train/sft \
 
 Training runs in the background. The model continues serving requests during training. When training completes, the new LoRA adapter is hot-swapped — all subsequent requests use the updated weights.
 
-## 6. Check Training Status
+## 7. Check Training Status
 
 Via CLI:
 
@@ -187,7 +204,7 @@ Via curl:
 curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 ```
 
-## 7. Manage Adapters
+## 8. Manage Adapters
 
 ```bash
 # List loaded adapters
@@ -224,6 +241,7 @@ Global options:
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
