@@ -1,5 +1,32 @@
 # Kiln Profiling Report
 
+## Phase 7 H15b stratified C29 v2 reject-row probe (2026-04-25)
+
+**Scope:** A6000 re-run of PR #355's C29 top-K Jaccard / cos_sim probe on
+the `c14__logits` tap, stratified by accept vs reject rows, seeds 0..2,
+POSITIONS=0..3, MAX_STEPS=2. Executes the H15b recommendation queued by
+PR #527 §"Recommended next H" after H15a (PR #528) ruled Marlin pack
+determinism out. The question: does kiln's MTP head stay within the
+BF16-noise cos_sim floor (≥ 0.999) on the *rejected* sub-population, or
+diverge materially (< 0.99) from an fp32 HF reference? If kiln is at the
+native ceiling even on reject rows, the α-gap source is external and the
+next step is a vLLM α microbench. If reject-row cos_sim is materially
+below the ceiling, per-layer bisect on reject rows localizes the drift.
+
+**Outcome: kiln_native_ceiling.** Reject sub-population stays at the
+BF16-noise cosine ceiling — `reject_cos_sim_median = 0.999978` (p10
+0.999971), vs decision floor 0.999. Accept sub-population is
+statistically identical (`accept_cos_sim_median = 0.999979`, p10 0.999968).
+Both strata show 100% top-1 agreement and median J@10 = 1.0000. Verifier
+numerical drift on reject rows is RULED OUT on this checkpoint.
+Recommendation: queue a vLLM α microbench next to establish whether an
+external-reference upper bound exists above kiln's current α. See
+[`docs/phase7-h15b-stratified-c29-v2.md`](docs/phase7-h15b-stratified-c29-v2.md)
+for the full verdict, per-position stratified table, decision-rule
+application, anti-duplication evidence, and reopen triggers. Raw data:
+`docs/phase-c29-v2/c29-v2-stratified-compare.{json,md}` and
+`docs/phase-c29-v2/verdict.json`.
+
 ## Phase 7 H15a Marlin pack determinism correlation (2026-04-24)
 
 **Scope:** $0 doc-only correlation analysis on the existing C40f N=20 anchor
