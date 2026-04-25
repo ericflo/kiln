@@ -64,7 +64,7 @@ jobs:
         # pass (below) reuses the GHA cache and pushes — near-instant because
         # every layer is cache-hit.
         id: build_local
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: deploy/runpod
           load: true
@@ -120,7 +120,7 @@ jobs:
 
       - name: Build and push (uses cache from smoke-test stage)
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: deploy/runpod
           push: true
