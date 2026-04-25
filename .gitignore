@@ -4,3 +4,10 @@
 *~
 .DS_Store
 .claude/
+
+# Profiling artifact dumps (kept in git history only)
+c12-out/
+profile-out/
+profile/
+profiling/
+profiling-artifacts/
