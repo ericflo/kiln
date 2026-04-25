@@ -59,6 +59,7 @@ A 4B model continuously tuned to your specific workload will outperform a generi
 - **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
 - **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
 - **Adapter management** — load, unload, compose, and version LoRA adapters.
+- **Embedded web dashboard** at `/ui` — live server status, VRAM breakdown, adapter management, training monitoring, and a chat playground. No extra service to run.
 - **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
 - **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
 
@@ -123,8 +124,12 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
   Version: 0.1.0
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
+  GPU:     NVIDIA RTX A6000
+  VRAM:    49140 MiB total, 48891 MiB free
   Listen:  http://0.0.0.0:8420
 ```
+
+The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed.
 
 ```bash
 # Chat
@@ -182,6 +187,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | POST | `/v1/adapters/merge` | Merge adapters via weighted average |
 | GET | `/v1/models` | List available models |
+| GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
@@ -228,7 +234,7 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `server.port` | `KILN_PORT` | 8420 | Server listen port |
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
-| `logging.format` | — | json | `json`, `human`, `pretty`, or `text` |
+| `logging.format` | `KILN_LOG_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
 | `prefix_cache.enabled` | — | true | Reuse KV cache for shared prefixes |
 
 ## Desktop App
