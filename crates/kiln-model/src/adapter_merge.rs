@@ -4,7 +4,7 @@
 //! target modules, and tensor layout, produces a new PEFT-compatible
 //! LoRA adapter whose A/B matrices combine the inputs.
 //!
-//! Two merge modes are supported:
+//! Three merge modes are supported:
 //!
 //! - **Linear interpolation** (`merge_linear`) — elementwise weighted sum:
 //!   ```text
@@ -23,7 +23,11 @@
 //!   TIES typically reduces task interference when merging adapters that
 //!   adapt the same model in conflicting directions.
 //!
-//! Concatenation merging is deferred to a follow-up PR.
+//! - **Concatenation** (`merge_concat`) — stack ranks. Output rank is
+//!   `Σᵢ rᵢ`; `lora_A` is row-concatenated and `lora_B` is
+//!   column-concatenated with each block scaled by `wᵢ`. Preserves every
+//!   source's `Bᵢ Aᵢ` rank-update without summing at the A,B level, at
+//!   the cost of a higher-rank output.
 //!
 //! All merging is performed in `f32` on CPU using raw safetensors I/O,
 //! so it does not depend on candle / CUDA and can be unit-tested without
@@ -471,6 +475,307 @@ pub fn merge_ties(adapters: &[(&PeftLora, f32)], density: f32) -> Result<PeftLor
         config: first.config.clone(),
         tensors: merged,
     })
+}
+
+/// Concatenate a set of LoRA adapters by stacking ranks.
+///
+/// Each input `(adapter, weight)` pair contributes its tensors to the
+/// merged adapter at distinct rank-axis positions:
+///
+/// - `merged.lora_A.weight`  = row-concat of the per-source `lora_A`
+///   tensors:  shape `[Σᵢ rᵢ, in_features]`
+/// - `merged.lora_B.weight`  = column-concat of the per-source `lora_B`
+///   tensors with each block scaled by `wᵢ`:
+///   shape `[out_features, Σᵢ rᵢ]`
+///
+/// The product `merged.B @ merged.A` is then exactly
+/// `Σᵢ wᵢ · (Bᵢ @ Aᵢ)` — the same effective rank-update each source
+/// would have applied independently, materialized as a single rank-
+/// `r_total = Σᵢ rᵢ` adapter.
+///
+/// How this differs from `merge_linear`:
+/// - `merge_linear` averages tensors elementwise at the A,B level. Its
+///   product is `(Σᵢ wᵢ Bᵢ) @ (Σⱼ wⱼ Aⱼ)`, a quadratic mix of all
+///   pairwise `Bᵢ Aⱼ` cross-terms.
+/// - `merge_concat` keeps each source's `Bᵢ Aᵢ` distinct in the
+///   higher-rank output, matching the canonical LoRA concatenation used
+///   by PEFT.
+///
+/// Output `adapter_config.json`:
+/// - `r` is set to `r_total = Σᵢ rᵢ`.
+/// - `lora_alpha` is scaled proportionally — `alpha_total = alpha_first
+///   × r_total / r_first` — so the inference-time scaling factor
+///   `alpha / r` is preserved from `source[0]`.
+/// - All other fields are copied from `source[0]`.
+///
+/// Validation (returns `Err` with an actionable message):
+/// - at least one adapter is supplied;
+/// - every source declares an integer `r` in its `adapter_config.json`;
+/// - all adapters share the same `target_modules` (set, order-agnostic);
+/// - all adapters share the same `base_model_name_or_path` (when present
+///   on more than one input);
+/// - all adapters have identical tensor key sets;
+/// - every tensor name ends in `lora_A.weight` or `lora_B.weight` —
+///   embedding LoRAs and DoRA magnitude vectors are not supported by
+///   concat (use `weighted_average` or `ties` instead);
+/// - per `lora_A` key, `in_features` (axis 1) matches across adapters;
+/// - per `lora_B` key, `out_features` (axis 0) matches across adapters;
+/// - per source, the rank axis of each tensor agrees with the `r`
+///   declared in `adapter_config.json`.
+///
+/// Ranks are allowed to differ across sources — the whole point of
+/// concat is to preserve all per-source signal at higher total rank.
+pub fn merge_concat(adapters: &[(&PeftLora, f32)]) -> Result<PeftLora> {
+    if adapters.is_empty() {
+        bail!("merge_concat requires at least one source adapter");
+    }
+
+    let (first, _) = adapters[0];
+    let first_targets = first.target_modules();
+    let first_base = first.base_model();
+
+    let mut keys: Vec<&String> = first.tensors.keys().collect();
+    keys.sort();
+
+    // Concat requires every source to declare its rank in the config so the
+    // rank axis of each tensor can be validated unambiguously.
+    let ranks: Vec<usize> = adapters
+        .iter()
+        .enumerate()
+        .map(|(idx, (adapter, _))| {
+            adapter.rank().map(|r| r as usize).ok_or_else(|| {
+                anyhow!(
+                    "concatenation merge requires every source adapter to declare \
+                     'r' in adapter_config.json (source[{idx}] does not)"
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let r_total: usize = ranks.iter().sum();
+    if r_total == 0 {
+        bail!("concatenation merge requires r_total > 0 (every source had r=0)");
+    }
+
+    // Validate target_modules / base_model / tensor key sets across adapters.
+    for (idx, (adapter, _)) in adapters.iter().enumerate().skip(1) {
+        let targets = adapter.target_modules();
+        if !same_string_set(&first_targets, &targets) {
+            bail!(
+                "adapter target_modules mismatch: source[0] has {:?}, source[{idx}] has {:?}",
+                first_targets,
+                targets
+            );
+        }
+        if let (Some(a), Some(b)) = (&first_base, &adapter.base_model()) {
+            if a != b {
+                bail!(
+                    "adapter base_model_name_or_path mismatch: source[0] is {a:?}, \
+                     source[{idx}] is {b:?}"
+                );
+            }
+        }
+        if first.tensors.len() != adapter.tensors.len() {
+            bail!(
+                "adapter tensor count mismatch: source[0] has {} tensors, source[{idx}] has {}",
+                first.tensors.len(),
+                adapter.tensors.len()
+            );
+        }
+        for key in adapter.tensors.keys() {
+            if !first.tensors.contains_key(key.as_str()) {
+                bail!(
+                    "adapter tensor key mismatch: source[{idx}] has tensor {:?} not present in source[0]",
+                    key
+                );
+            }
+        }
+    }
+
+    let mut merged: BTreeMap<String, MergeTensor> = BTreeMap::new();
+    for key in &keys {
+        let key_str = key.as_str();
+        let template = &first.tensors[key_str];
+        match classify_lora_tensor(key_str) {
+            LoraTensorKind::A => {
+                if template.shape.len() != 2 {
+                    bail!(
+                        "tensor {key_str:?} (lora_A) has shape {:?} but expected 2D [r, in_features]",
+                        template.shape
+                    );
+                }
+                let in_features = template.shape[1];
+                if template.shape[0] != ranks[0] {
+                    bail!(
+                        "tensor {key_str:?} has rank-axis size {} but source[0] declares r={}",
+                        template.shape[0],
+                        ranks[0]
+                    );
+                }
+                for (idx, (adapter, _)) in adapters.iter().enumerate() {
+                    let t = adapter.tensors.get(key_str).ok_or_else(|| {
+                        anyhow!(
+                            "adapter tensor key mismatch: source[{idx}] missing tensor {key_str:?}"
+                        )
+                    })?;
+                    if t.shape.len() != 2 || t.shape[1] != in_features {
+                        bail!(
+                            "tensor {key_str:?} (lora_A) shape mismatch: source[0] has {:?}, source[{idx}] has {:?}",
+                            template.shape,
+                            t.shape
+                        );
+                    }
+                    if t.shape[0] != ranks[idx] {
+                        bail!(
+                            "tensor {key_str:?} has rank-axis size {} but source[{idx}] declares r={}",
+                            t.shape[0],
+                            ranks[idx]
+                        );
+                    }
+                }
+                // Row-concat: append flat data buffers in source order.
+                let mut data: Vec<f32> = Vec::with_capacity(r_total * in_features);
+                for (adapter, _) in adapters {
+                    data.extend_from_slice(&adapter.tensors[key_str].data);
+                }
+                merged.insert(
+                    key_str.to_string(),
+                    MergeTensor {
+                        shape: vec![r_total, in_features],
+                        data,
+                    },
+                );
+            }
+            LoraTensorKind::B => {
+                if template.shape.len() != 2 {
+                    bail!(
+                        "tensor {key_str:?} (lora_B) has shape {:?} but expected 2D [out_features, r]",
+                        template.shape
+                    );
+                }
+                let out_features = template.shape[0];
+                if template.shape[1] != ranks[0] {
+                    bail!(
+                        "tensor {key_str:?} has rank-axis size {} but source[0] declares r={}",
+                        template.shape[1],
+                        ranks[0]
+                    );
+                }
+                for (idx, (adapter, _)) in adapters.iter().enumerate() {
+                    let t = adapter.tensors.get(key_str).ok_or_else(|| {
+                        anyhow!(
+                            "adapter tensor key mismatch: source[{idx}] missing tensor {key_str:?}"
+                        )
+                    })?;
+                    if t.shape.len() != 2 || t.shape[0] != out_features {
+                        bail!(
+                            "tensor {key_str:?} (lora_B) shape mismatch: source[0] has {:?}, source[{idx}] has {:?}",
+                            template.shape,
+                            t.shape
+                        );
+                    }
+                    if t.shape[1] != ranks[idx] {
+                        bail!(
+                            "tensor {key_str:?} has rank-axis size {} but source[{idx}] declares r={}",
+                            t.shape[1],
+                            ranks[idx]
+                        );
+                    }
+                }
+                // Column-concat with per-block weight. Output is row-major
+                // [out_features, r_total]: row j packs B_1[j,:], B_2[j,:], …
+                // each scaled by its source weight.
+                let mut data: Vec<f32> = vec![0.0_f32; out_features * r_total];
+                let mut col_offset = 0_usize;
+                for (idx, (adapter, weight)) in adapters.iter().enumerate() {
+                    let t = &adapter.tensors[key_str];
+                    let r_i = ranks[idx];
+                    let w = *weight;
+                    for j in 0..out_features {
+                        let dst_row_start = j * r_total + col_offset;
+                        let src_row_start = j * r_i;
+                        for c in 0..r_i {
+                            data[dst_row_start + c] = w * t.data[src_row_start + c];
+                        }
+                    }
+                    col_offset += r_i;
+                }
+                merged.insert(
+                    key_str.to_string(),
+                    MergeTensor {
+                        shape: vec![out_features, r_total],
+                        data,
+                    },
+                );
+            }
+            LoraTensorKind::Other => {
+                bail!(
+                    "concatenation merge only supports tensors named lora_A.weight or \
+                     lora_B.weight; got {key_str:?}. Use 'weighted_average' or 'ties' \
+                     for adapters with embedding LoRAs, DoRA magnitude vectors, or \
+                     other auxiliary tensors."
+                );
+            }
+        }
+    }
+
+    // Build merged config: clone source[0], set r = r_total, scale lora_alpha
+    // proportionally so the inference-time scale alpha/r is preserved from
+    // source[0] (matches PEFT's standard scaling convention).
+    let mut config = first.config.clone();
+    if let Some(r_field) = config.get_mut("r") {
+        *r_field = Value::Number(serde_json::Number::from(r_total as u64));
+    }
+    let r_first = ranks[0] as f64;
+    if r_first > 0.0 {
+        if let Some(alpha_val) = config.get("lora_alpha").cloned() {
+            if let Some(alpha_first) = alpha_val.as_f64() {
+                let alpha_total = alpha_first * (r_total as f64) / r_first;
+                let int_round = alpha_total.round();
+                let new_alpha = if alpha_val.is_i64()
+                    && (alpha_total - int_round).abs() < 1e-9
+                    && int_round.is_finite()
+                    && int_round >= 0.0
+                    && int_round <= u64::MAX as f64
+                {
+                    Value::Number(serde_json::Number::from(int_round as u64))
+                } else {
+                    serde_json::Number::from_f64(alpha_total)
+                        .map(Value::Number)
+                        .unwrap_or(alpha_val.clone())
+                };
+                if let Some(alpha_field) = config.get_mut("lora_alpha") {
+                    *alpha_field = new_alpha;
+                }
+            }
+        }
+    }
+
+    Ok(PeftLora {
+        config,
+        tensors: merged,
+    })
+}
+
+/// Classification of a PEFT-format tensor name for concatenation merging.
+enum LoraTensorKind {
+    /// `…lora_A.weight` — row-stacked along the rank axis (axis 0).
+    A,
+    /// `…lora_B.weight` — column-stacked along the rank axis (axis 1).
+    B,
+    /// Anything else (embedding LoRA, DoRA magnitude vectors, biases,
+    /// etc.). Concatenation merge does not know how to combine these
+    /// across sources and rejects them with a clear error.
+    Other,
+}
+
+fn classify_lora_tensor(name: &str) -> LoraTensorKind {
+    if name.ends_with("lora_A.weight") {
+        LoraTensorKind::A
+    } else if name.ends_with("lora_B.weight") {
+        LoraTensorKind::B
+    } else {
+        LoraTensorKind::Other
+    }
 }
 
 /// Trim a flat tensor: keep only the top `density` fraction of values by
@@ -1060,6 +1365,330 @@ mod tests {
         let device = Device::Cpu;
         let loaded = LoraWeights::load(&merged_dir, 1, &device)?;
         assert_eq!(loaded.rank, 2);
+        assert!(loaded.layers[0].q_proj.is_some());
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Concatenation merge tests
+    // -----------------------------------------------------------------
+
+    /// `out = b @ a`, with `b` shape [out, r] and `a` shape [r, in].
+    /// Used to verify the algebraic identity that concat preserves.
+    fn matmul_ba(b: &MergeTensor, a: &MergeTensor) -> Vec<f32> {
+        assert_eq!(b.shape.len(), 2);
+        assert_eq!(a.shape.len(), 2);
+        let out = b.shape[0];
+        let r = b.shape[1];
+        let in_features = a.shape[1];
+        assert_eq!(a.shape[0], r);
+        let mut result = vec![0.0_f32; out * in_features];
+        for j in 0..out {
+            for k in 0..in_features {
+                let mut acc = 0.0_f32;
+                for ri in 0..r {
+                    acc += b.data[j * r + ri] * a.data[ri * in_features + k];
+                }
+                result[j * in_features + k] = acc;
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn test_merge_concat_rank_grows_additively() -> Result<()> {
+        // 2 sources of rank 2 -> output rank 4. Shapes are the canonical
+        // identity: A grows along axis 0, B grows along axis 1.
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![2.0_f32; 6]);
+        let a2 = make_adapter(2, vec![3.0_f32; 8], vec![4.0_f32; 6]);
+
+        let merged = merge_concat(&[(&a1, 0.5), (&a2, 0.5)])?;
+
+        assert_eq!(merged.rank(), Some(4));
+        assert_eq!(merged.target_modules(), vec!["q_proj".to_string()]);
+
+        let merged_a = &merged.tensors[lora_a_key()];
+        let merged_b = &merged.tensors[lora_b_key()];
+        assert_eq!(merged_a.shape, vec![4, 4]);
+        assert_eq!(merged_b.shape, vec![3, 4]);
+        // A is row-concat of A_1 (rows 0..2) and A_2 (rows 2..4).
+        for v in &merged_a.data[0..8] {
+            assert!((*v - 1.0).abs() < 1e-6, "expected 1.0 in A row block 0, got {v}");
+        }
+        for v in &merged_a.data[8..16] {
+            assert!((*v - 3.0).abs() < 1e-6, "expected 3.0 in A row block 1, got {v}");
+        }
+        // B is column-concat of 0.5*B_1 then 0.5*B_2. Each row [j, 0..4]
+        // should be [1.0, 1.0, 2.0, 2.0] given B_1=2 with w=0.5 and
+        // B_2=4 with w=0.5.
+        for j in 0..3 {
+            let row = &merged_b.data[j * 4..(j + 1) * 4];
+            assert!((row[0] - 1.0).abs() < 1e-6, "row {j} col 0: {row:?}");
+            assert!((row[1] - 1.0).abs() < 1e-6, "row {j} col 1: {row:?}");
+            assert!((row[2] - 2.0).abs() < 1e-6, "row {j} col 2: {row:?}");
+            assert!((row[3] - 2.0).abs() < 1e-6, "row {j} col 3: {row:?}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_concat_ba_equals_weighted_sum_of_per_source_products() -> Result<()> {
+        // The defining property of concat: B_concat @ A_concat must equal
+        // Σᵢ wᵢ · (Bᵢ @ Aᵢ) exactly. Use distinct values per source so
+        // collisions can't accidentally satisfy the identity.
+        let mut rng_seed = 1u64;
+        let mut next = || {
+            rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((rng_seed >> 33) as f32) / (u32::MAX as f32) - 0.5
+        };
+        let a1_data: Vec<f32> = (0..8).map(|_| next()).collect();
+        let b1_data: Vec<f32> = (0..6).map(|_| next()).collect();
+        let a2_data: Vec<f32> = (0..8).map(|_| next()).collect();
+        let b2_data: Vec<f32> = (0..6).map(|_| next()).collect();
+
+        let a1 = make_adapter(2, a1_data, b1_data);
+        let a2 = make_adapter(2, a2_data, b2_data);
+
+        let weights = (0.7_f32, 0.3_f32);
+        let merged = merge_concat(&[(&a1, weights.0), (&a2, weights.1)])?;
+
+        let got = matmul_ba(
+            &merged.tensors[lora_b_key()],
+            &merged.tensors[lora_a_key()],
+        );
+
+        let part1 = matmul_ba(&a1.tensors[lora_b_key()], &a1.tensors[lora_a_key()]);
+        let part2 = matmul_ba(&a2.tensors[lora_b_key()], &a2.tensors[lora_a_key()]);
+
+        assert_eq!(got.len(), part1.len());
+        assert_eq!(got.len(), part2.len());
+        for i in 0..got.len() {
+            let want = weights.0 * part1[i] + weights.1 * part2[i];
+            assert!(
+                (got[i] - want).abs() < 1e-5,
+                "BA[{i}] = {} but expected {want}",
+                got[i]
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_concat_different_ranks() -> Result<()> {
+        // rank 2 + rank 3 -> total rank 5. Validates that ranks need not
+        // match (the whole point of concat).
+        let a_r2 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        // rank 3: A is [3,4]=12, B is [3,3]=9
+        let a_r3 = make_adapter(3, vec![2.0_f32; 12], vec![3.0_f32; 9]);
+
+        let merged = merge_concat(&[(&a_r2, 1.0), (&a_r3, 1.0)])?;
+        assert_eq!(merged.rank(), Some(5));
+
+        let a = &merged.tensors[lora_a_key()];
+        let b = &merged.tensors[lora_b_key()];
+        assert_eq!(a.shape, vec![5, 4]);
+        assert_eq!(b.shape, vec![3, 5]);
+
+        // First 8 of A came from a_r2 (=1.0), next 12 from a_r3 (=2.0).
+        for v in &a.data[0..8] {
+            assert!((*v - 1.0).abs() < 1e-6);
+        }
+        for v in &a.data[8..20] {
+            assert!((*v - 2.0).abs() < 1e-6);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_concat_three_adapters_and_alpha_scaling() -> Result<()> {
+        // 3 sources of rank 2 -> total rank 6. lora_alpha in make_adapter
+        // is rank * 2 = 4 for each source. After concat, alpha should
+        // be scaled to alpha_first * (r_total / r_first) = 4 * (6/2) = 12.
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        let a2 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        let a3 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+
+        let merged = merge_concat(&[(&a1, 1.0), (&a2, 1.0), (&a3, 1.0)])?;
+        assert_eq!(merged.rank(), Some(6));
+        let alpha = merged
+            .config
+            .get("lora_alpha")
+            .and_then(|v| v.as_f64())
+            .expect("lora_alpha must be numeric");
+        assert!((alpha - 12.0).abs() < 1e-9, "got alpha = {alpha}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_concat_single_source_rescales_b() -> Result<()> {
+        // Concat with one source: B is scaled by w, A is unchanged, r is
+        // unchanged. Useful as a sanity-check of the column-scaling code
+        // path when there's only one rank block.
+        let a = make_adapter(2, vec![1.0_f32; 8], vec![10.0_f32; 6]);
+        let merged = merge_concat(&[(&a, 0.5)])?;
+        assert_eq!(merged.rank(), Some(2));
+        for v in &merged.tensors[lora_a_key()].data {
+            assert!((*v - 1.0).abs() < 1e-6);
+        }
+        for v in &merged.tensors[lora_b_key()].data {
+            assert!((*v - 5.0).abs() < 1e-6, "expected 5.0 in B, got {v}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_concat_empty_errors() {
+        let err = merge_concat(&[]).unwrap_err();
+        assert!(
+            format!("{err}").contains("at least one source adapter"),
+            "expected empty error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_concat_target_modules_mismatch_errors() {
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        let mut a2 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        a2.config["target_modules"] = json!(["k_proj"]);
+        let err = merge_concat(&[(&a1, 0.5), (&a2, 0.5)]).unwrap_err();
+        assert!(
+            format!("{err}").contains("target_modules mismatch"),
+            "expected target_modules error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_concat_in_features_mismatch_errors() {
+        // a_r2 has lora_A shape [2,4]; build a second adapter whose lora_A
+        // has in_features=5 instead. Concat should reject because
+        // row-stacking with mismatched in_features is undefined.
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![1.0_f32; 6]);
+        let mut tensors: BTreeMap<String, MergeTensor> = BTreeMap::new();
+        tensors.insert(
+            lora_a_key().to_string(),
+            MergeTensor {
+                shape: vec![2, 5],
+                data: vec![1.0_f32; 10],
+            },
+        );
+        tensors.insert(
+            lora_b_key().to_string(),
+            MergeTensor {
+                shape: vec![3, 2],
+                data: vec![1.0_f32; 6],
+            },
+        );
+        let a2 = PeftLora {
+            config: json!({
+                "r": 2,
+                "lora_alpha": 4.0,
+                "target_modules": ["q_proj"],
+                "task_type": "CAUSAL_LM",
+                "peft_type": "LORA",
+                "base_model_name_or_path": "Qwen/Qwen3.5-4B"
+            }),
+            tensors,
+        };
+
+        let err = merge_concat(&[(&a1, 0.5), (&a2, 0.5)]).unwrap_err();
+        assert!(
+            format!("{err}").contains("shape mismatch"),
+            "expected shape mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_merge_concat_unsupported_tensor_errors() {
+        // An adapter with a non-lora_A/B tensor (e.g. DoRA magnitude
+        // vector) should be rejected by concat with a clear message.
+        let make_dora = || {
+            let mut tensors: BTreeMap<String, MergeTensor> = BTreeMap::new();
+            tensors.insert(
+                lora_a_key().to_string(),
+                MergeTensor {
+                    shape: vec![2, 4],
+                    data: vec![1.0_f32; 8],
+                },
+            );
+            tensors.insert(
+                lora_b_key().to_string(),
+                MergeTensor {
+                    shape: vec![3, 2],
+                    data: vec![1.0_f32; 6],
+                },
+            );
+            tensors.insert(
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_magnitude_vector".to_string(),
+                MergeTensor {
+                    shape: vec![3],
+                    data: vec![1.0_f32; 3],
+                },
+            );
+            PeftLora {
+                config: json!({
+                    "r": 2,
+                    "lora_alpha": 4.0,
+                    "target_modules": ["q_proj"],
+                    "base_model_name_or_path": "Qwen/Qwen3.5-4B"
+                }),
+                tensors,
+            }
+        };
+        let a = make_dora();
+        let b = make_dora();
+        let err = merge_concat(&[(&a, 0.5), (&b, 0.5)]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("only supports tensors named lora_A.weight or lora_B.weight"),
+            "expected unsupported-tensor error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_merge_concat_save_and_load_roundtrip() -> Result<()> {
+        // Disk round-trip preserves shapes, rank, and tensor contents.
+        let dir = tempdir()?;
+        let merged_dir = dir.path().join("merged");
+
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![2.0_f32; 6]);
+        let a2 = make_adapter(2, vec![3.0_f32; 8], vec![4.0_f32; 6]);
+        let merged = merge_concat(&[(&a1, 0.5), (&a2, 0.5)])?;
+        merged.save(&merged_dir)?;
+
+        let loaded = PeftLora::load(&merged_dir)?;
+        assert_eq!(loaded.rank(), Some(4));
+        assert_eq!(loaded.target_modules(), vec!["q_proj".to_string()]);
+        let a = &loaded.tensors[lora_a_key()];
+        let b = &loaded.tensors[lora_b_key()];
+        assert_eq!(a.shape, vec![4, 4]);
+        assert_eq!(b.shape, vec![3, 4]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_merge_concat_loadable_by_lora_weights() -> Result<()> {
+        // Concat output must remain loadable by the production
+        // LoraWeights::load() pipeline at its new (higher) rank.
+        use crate::lora_loader::LoraWeights;
+        use candle_core::Device;
+
+        let dir = tempdir()?;
+        let merged_dir = dir.path().join("merged");
+
+        let a1 = make_adapter(2, vec![1.0_f32; 8], vec![2.0_f32; 6]);
+        let a2 = make_adapter(2, vec![3.0_f32; 8], vec![4.0_f32; 6]);
+        let merged = merge_concat(&[(&a1, 1.0), (&a2, 1.0)])?;
+        merged.save(&merged_dir)?;
+
+        let device = Device::Cpu;
+        let loaded = LoraWeights::load(&merged_dir, 1, &device)?;
+        assert_eq!(loaded.rank, 4);
         assert!(loaded.layers[0].q_proj.is_some());
 
         Ok(())
