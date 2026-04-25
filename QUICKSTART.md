@@ -101,7 +101,7 @@ You'll see the startup banner:
 ```
   ┌─────────────────────────────────────┐
   │           🔥 K I L N 🔥             │
-  │   inference · training · adapters    │
+  │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
   Version: 0.1.0
