@@ -43,6 +43,8 @@ indicatif = "0.18"
 console = "0.16"
 reqwest = { version = "0.12", features = ["json"] }
 rand = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda"]

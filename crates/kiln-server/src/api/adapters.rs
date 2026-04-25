@@ -1,9 +1,16 @@
 use std::path::Path;
 
+use axum::body::Body;
 use axum::extract::{State, Path as AxumPath};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use kiln_model::adapter_merge::{merge_linear, PeftLora};
 use kiln_model::lora_loader::LoraWeights;
@@ -461,6 +468,136 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
+/// Reject names that aren't safe single-segment identifiers. Read-only export
+/// of managed adapters only — never absolute paths, never path traversal.
+fn validate_adapter_name(name: &str) -> Result<(), ApiError> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || Path::new(name).is_absolute()
+    {
+        return Err(ApiError::invalid_adapter_name(name));
+    }
+    Ok(())
+}
+
+/// Recursively append all regular files in `dir` to a tar builder. The first
+/// path component in each entry name is the adapter's directory name, so
+/// extracting the archive recreates the on-disk layout. Non-file entries
+/// (symlinks, sockets, devices) are silently skipped to keep export robust.
+fn append_dir_to_tar<W: std::io::Write>(
+    tar: &mut tar::Builder<W>,
+    dir: &Path,
+    name_prefix: &Path,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let entry_name = name_prefix.join(entry.file_name());
+        if metadata.is_file() {
+            let mut file = std::fs::File::open(&entry_path)?;
+            tar.append_file(&entry_name, &mut file)?;
+        } else if metadata.is_dir() {
+            append_dir_to_tar(tar, &entry_path, &entry_name)?;
+        }
+        // Skip symlinks, devices, sockets, etc.
+    }
+    Ok(())
+}
+
+/// Stream a tar.gz of the adapter directory. The body is built on a blocking
+/// thread and pushed through a bounded mpsc channel so the response streams to
+/// the client without buffering the whole archive in memory.
+async fn download_adapter(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Response, ApiError> {
+    validate_adapter_name(&name)?;
+
+    let adapter_path = state.adapter_dir.join(&name);
+    if !adapter_path.exists() || !adapter_path.is_dir() {
+        return Err(ApiError::adapter_not_found(&name));
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
+
+    let adapter_path_for_task = adapter_path.clone();
+    let name_for_task = name.clone();
+    let tx_for_task = tx.clone();
+    tokio::task::spawn_blocking(move || {
+        struct ChannelWriter {
+            tx: mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+        }
+        impl std::io::Write for ChannelWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let chunk = buf.to_vec();
+                let len = chunk.len();
+                self.tx
+                    .blocking_send(Ok(chunk))
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "client disconnected",
+                        )
+                    })?;
+                Ok(len)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let writer = ChannelWriter {
+            tx: tx_for_task.clone(),
+        };
+        let gz = GzEncoder::new(writer, Compression::default());
+        let mut tar = tar::Builder::new(gz);
+
+        let prefix = Path::new(&name_for_task);
+        if let Err(e) = append_dir_to_tar(&mut tar, &adapter_path_for_task, prefix) {
+            let _ = tx_for_task.blocking_send(Err(e));
+            return;
+        }
+        match tar.into_inner() {
+            Ok(gz) => {
+                if let Err(e) = gz.finish() {
+                    let _ = tx_for_task.blocking_send(Err(e));
+                }
+            }
+            Err(e) => {
+                let _ = tx_for_task.blocking_send(Err(e));
+            }
+        }
+    });
+    drop(tx);
+
+    let stream = ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
+
+    let disposition = format!("attachment; filename=\"{name}.tar.gz\"");
+    let disposition_value = HeaderValue::from_str(&disposition)
+        .map_err(|e| ApiError::adapter_export_failed(format!("invalid filename header: {e}")))?;
+
+    tracing::info!(adapter = %name, operation = "download", "streaming adapter tar.gz");
+
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/gzip")),
+            (header::CONTENT_DISPOSITION, disposition_value),
+        ],
+        body,
+    )
+        .into_response())
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/adapters", get(list_adapters))
@@ -468,4 +605,5 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/adapters/unload", post(unload_adapter))
         .route("/v1/adapters/merge", post(merge_adapters))
         .route("/v1/adapters/{name}", delete(delete_adapter))
+        .route("/v1/adapters/{name}/download", get(download_adapter))
 }
