@@ -20,7 +20,36 @@ use kiln_model::{GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeCon
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::metrics::RequestStatus;
+use crate::recent_requests::{RequestRecord, now_unix_ms, truncate_chars};
 use crate::state::{AppState, ModelBackend, RealPrefixCache};
+
+/// Max characters retained in the prompt preview for the recent-requests panel.
+const PROMPT_PREVIEW_MAX_CHARS: usize = 120;
+/// Max characters retained in the completion preview for the recent-requests panel.
+const COMPLETION_PREVIEW_MAX_CHARS: usize = 200;
+
+/// Pull the most recent user-authored message text from a request, falling
+/// back to the very last message if no user role is present. Returns an empty
+/// string if there are no messages.
+fn last_user_message_text(req: &ChatCompletionRequest) -> String {
+    req.messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .or_else(|| req.messages.last())
+        .map(|m| m.content.clone())
+        .unwrap_or_default()
+}
+
+/// Push a [`RequestRecord`] into the dashboard's recent-requests ring. Logs a
+/// warning if the lock is poisoned but otherwise never panics — request
+/// recording must not fail the user's request.
+fn record_recent_request(state: &AppState, record: RequestRecord) {
+    match state.recent_requests.lock() {
+        Ok(mut ring) => ring.record(record),
+        Err(poisoned) => poisoned.into_inner().record(record),
+    }
+}
 
 /// OpenAI-compatible chat completion request.
 #[derive(Debug, Deserialize)]
@@ -283,6 +312,11 @@ async fn chat_completions_inner(
     state: &AppState,
     req: ChatCompletionRequest,
 ) -> Result<Response, ApiError> {
+    // Captured at the top of the request so the recent-requests panel reflects
+    // wall-clock time including chat-template formatting and tokenization, not
+    // just generation. Streaming and non-streaming paths both consume this.
+    let request_start = std::time::Instant::now();
+
     // Convert request messages to ChatMessage for template formatting
     let chat_messages: Vec<ChatMessage> = req
         .messages
@@ -336,6 +370,7 @@ async fn chat_completions_inner(
                     &prompt_tokens,
                     &sampling,
                     &req,
+                    request_start,
                 )
                 .await
             }
@@ -359,6 +394,7 @@ async fn chat_completions_inner(
                     &prompt_tokens,
                     &sampling,
                     &req,
+                    request_start,
                 )
                 .await?;
                 // Count generated tokens for metrics.
@@ -368,8 +404,16 @@ async fn chat_completions_inner(
                 Ok(Json(resp).into_response())
             }
             ModelBackend::Mock { scheduler, engine } => {
-                let resp =
-                    generate_mock(state, scheduler, engine, &prompt_text, &sampling, &req).await?;
+                let resp = generate_mock(
+                    state,
+                    scheduler,
+                    engine,
+                    &prompt_text,
+                    &sampling,
+                    &req,
+                    request_start,
+                )
+                .await?;
                 state
                     .metrics
                     .add_tokens(resp.usage.completion_tokens as u64);
@@ -462,6 +506,7 @@ async fn generate_real(
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let prompt_token_count = prompt_tokens.len();
 
@@ -611,27 +656,47 @@ async fn generate_real(
     };
 
     let now = now_epoch();
+    let id = format!("chatcmpl-{}", Uuid::new_v4());
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
+    let completion_tokens = output.token_ids.len();
+    let completion_text = output.text;
+
+    record_recent_request(
+        state,
+        RequestRecord {
+            id: id.clone(),
+            timestamp_unix_ms: now_unix_ms(),
+            model: model.clone(),
+            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
+            completion_preview: truncate_chars(&completion_text, COMPLETION_PREVIEW_MAX_CHARS),
+            prompt_tokens: prompt_token_count as u32,
+            completion_tokens: completion_tokens as u32,
+            duration_ms: request_start.elapsed().as_millis() as u64,
+            streamed: false,
+            finish_reason: finish_reason.to_string(),
+        },
+    );
 
     Ok(ChatCompletionResponse {
-        id: format!("chatcmpl-{}", Uuid::new_v4()),
+        id,
         object: "chat.completion",
         created: now,
-        model: req
-            .model
-            .clone()
-            .unwrap_or_else(|| state.served_model_id.clone()),
+        model,
         choices: vec![Choice {
             index: 0,
             message: Message {
                 role: "assistant".to_string(),
-                content: output.text,
+                content: completion_text,
             },
             finish_reason: finish_reason.to_string(),
         }],
         usage: Usage {
             prompt_tokens: prompt_token_count,
-            completion_tokens: output.token_ids.len(),
-            total_tokens: prompt_token_count + output.token_ids.len(),
+            completion_tokens,
+            total_tokens: prompt_token_count + completion_tokens,
         },
     })
 }
@@ -655,6 +720,7 @@ async fn generate_real_streaming(
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
 ) -> Result<Response, ApiError> {
     let (mtp_supported, has_active_lora) = {
         let guard = runner.read().unwrap();
@@ -673,6 +739,7 @@ async fn generate_real_streaming(
     let pc = paged_cache.clone();
     let prefix_cache = prefix_cache.clone();
     let prompt = prompt_text.to_owned();
+    let prompt_token_count = prompt_tokens.len();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
     let adapter = req.adapter.clone();
@@ -685,6 +752,8 @@ async fn generate_real_streaming(
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
     let decode_stats = state.decode_stats.clone();
+    let recent_requests = state.recent_requests.clone();
+    let prompt_preview = truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS);
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -694,6 +763,36 @@ async fn generate_real_streaming(
         let id = completion_id.clone();
         let model = model.clone();
         async move {
+            // Accumulate the assistant content so we can store a preview in the
+            // recent-requests ring once generation completes (or times out, or
+            // the client disconnects).
+            let mut completion_buf = String::new();
+            let mut completion_token_count: u32 = 0;
+
+            let record = |finish_reason: String,
+                          completion: &str,
+                          completion_tokens: u32| {
+                let record = RequestRecord {
+                    id: id.clone(),
+                    timestamp_unix_ms: now_unix_ms(),
+                    model: model.clone(),
+                    prompt_preview: prompt_preview.clone(),
+                    completion_preview: truncate_chars(
+                        completion,
+                        COMPLETION_PREVIEW_MAX_CHARS,
+                    ),
+                    prompt_tokens: prompt_token_count as u32,
+                    completion_tokens,
+                    duration_ms: request_start.elapsed().as_millis() as u64,
+                    streamed: true,
+                    finish_reason,
+                };
+                match recent_requests.lock() {
+                    Ok(mut ring) => ring.record(record),
+                    Err(poisoned) => poisoned.into_inner().record(record),
+                }
+            };
+
             // Send initial role chunk
             let role_chunk = ChatCompletionChunk {
                 id: id.clone(),
@@ -714,6 +813,11 @@ async fn generate_real_streaming(
                 .await
                 .is_err()
             {
+                record(
+                    "client_disconnect".to_string(),
+                    &completion_buf,
+                    completion_token_count,
+                );
                 return;
             }
 
@@ -798,6 +902,11 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         _ => {
+                            record(
+                                "error".to_string(),
+                                &completion_buf,
+                                completion_token_count,
+                            );
                             let _ = tx.send(Event::default().data("[DONE]")).await;
                             return;
                         }
@@ -831,6 +940,11 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         _ => {
+                            record(
+                                "error".to_string(),
+                                &completion_buf,
+                                completion_token_count,
+                            );
                             let _ = tx.send(Event::default().data("[DONE]")).await;
                             return;
                         }
@@ -846,6 +960,11 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         _ => {
+                            record(
+                                "error".to_string(),
+                                &completion_buf,
+                                completion_token_count,
+                            );
                             let _ = tx.send(Event::default().data("[DONE]")).await;
                             return;
                         }
@@ -885,6 +1004,12 @@ async fn generate_real_streaming(
                                 if let Ok(mut stats) = decode_stats.lock() {
                                     stats.record_token(std::time::Instant::now());
                                 }
+                                completion_token_count = completion_token_count.saturating_add(1);
+                                // Cap the buffered preview text so an unbounded
+                                // generation doesn't keep allocating.
+                                if completion_buf.chars().count() < COMPLETION_PREVIEW_MAX_CHARS + 16 {
+                                    completion_buf.push_str(&token.text);
+                                }
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
@@ -908,6 +1033,11 @@ async fn generate_real_streaming(
                                     .is_err()
                                 {
                                     // Client disconnected — drop rx to stop generation
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
                                     return;
                                 }
                             }
@@ -938,11 +1068,21 @@ async fn generate_real_streaming(
                                     )
                                     .await;
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
+                                record(
+                                    finish.to_string(),
+                                    &completion_buf,
+                                    completion_token_count,
+                                );
                                 return;
                             }
                             _ => {
                                 // Channel closed or join error
                                 let _ = tx.send(Event::default().data("[DONE]")).await;
+                                record(
+                                    "error".to_string(),
+                                    &completion_buf,
+                                    completion_token_count,
+                                );
                                 return;
                             }
                         }
@@ -976,6 +1116,11 @@ async fn generate_real_streaming(
                     .send(Event::default().data(serde_json::to_string(&error_chunk).unwrap()))
                     .await;
                 let _ = tx.send(Event::default().data("[DONE]")).await;
+                record(
+                    "timeout".to_string(),
+                    &completion_buf,
+                    completion_token_count,
+                );
             }
         }
     });
@@ -995,6 +1140,7 @@ async fn generate_mock(
     prompt_text: &str,
     sampling: &SamplingParams,
     req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
 ) -> Result<ChatCompletionResponse, ApiError> {
     let prompt_tokens = state
         .tokenizer
@@ -1073,15 +1219,34 @@ async fn generate_mock(
         .unwrap_or_else(|_| format!("[{} tokens, decode failed]", output_tokens.len()));
 
     let now = now_epoch();
+    let id = format!("chatcmpl-{}", Uuid::new_v4());
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
+    let completion_tokens = output_tokens.len();
+
+    record_recent_request(
+        state,
+        RequestRecord {
+            id: id.clone(),
+            timestamp_unix_ms: now_unix_ms(),
+            model: model.clone(),
+            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
+            completion_preview: truncate_chars(&completion_text, COMPLETION_PREVIEW_MAX_CHARS),
+            prompt_tokens: prompt_token_count as u32,
+            completion_tokens: completion_tokens as u32,
+            duration_ms: request_start.elapsed().as_millis() as u64,
+            streamed: false,
+            finish_reason: "stop".to_string(),
+        },
+    );
 
     Ok(ChatCompletionResponse {
-        id: format!("chatcmpl-{}", Uuid::new_v4()),
+        id,
         object: "chat.completion",
         created: now,
-        model: req
-            .model
-            .clone()
-            .unwrap_or_else(|| state.served_model_id.clone()),
+        model,
         choices: vec![Choice {
             index: 0,
             message: Message {
@@ -1092,8 +1257,8 @@ async fn generate_mock(
         }],
         usage: Usage {
             prompt_tokens: prompt_token_count,
-            completion_tokens: output_tokens.len(),
-            total_tokens: prompt_token_count + output_tokens.len(),
+            completion_tokens,
+            total_tokens: prompt_token_count + completion_tokens,
         },
     })
 }
