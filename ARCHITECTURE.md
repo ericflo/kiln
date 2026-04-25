@@ -57,7 +57,7 @@ The journey from HTTP request to generated text:
 
 ```
                               ┌─────────────────────────────────────────────────────────┐
-                              │                    kiln-server                           │
+                              │                    kiln-server                          │
                               │                                                         │
   HTTP Request ──────────────►│  POST /v1/chat/completions                              │
   (OpenAI-compatible)         │       │                                                 │
@@ -68,34 +68,34 @@ The journey from HTTP request to generated text:
                               │  ensure_adapter() ──► Two-phase LoRA load if needed     │
                               │       │                                                 │
                               │       ▼                                                 │
-                              │  ┌─────────────────────────────────────────────────┐    │
-                              │  │  Acquire GPU read lock (concurrent inference OK) │    │
-                              │  │                                                  │    │
-                              │  │  ModelRunner::generate_paged()                   │    │
-                              │  │       │                                          │    │
-                              │  │       ▼                                          │    │
-                              │  │  ┌────────────────────────┐                      │    │
-                              │  │  │  PREFILL               │                      │    │
-                              │  │  │  Embed prompt tokens   │                      │    │
-                              │  │  │  Forward through 32    │                      │    │
-                              │  │  │  layers (GDN + GQA)    │                      │    │
-                              │  │  │  Write KV cache        │                      │    │
-                              │  │  │  Sample first token    │                      │    │
-                              │  │  └────────┬───────────────┘                      │    │
-                              │  │           │                                      │    │
-                              │  │           ▼                                      │    │
-                              │  │  ┌────────────────────────┐                      │    │
-                              │  │  │  DECODE (loop)         │◄──── CUDA Graph      │    │
-                              │  │  │  Embed 1 token         │      Replay          │    │
-                              │  │  │  Forward through 32    │      (after warmup)   │    │
-                              │  │  │  layers, read KV cache │                      │    │
-                              │  │  │  Sample next token     │                      │    │
-                              │  │  │  Check stop conditions │                      │    │
-                              │  │  └────────┬───────────────┘                      │    │
-                              │  │           │ (EOS / max_tokens / stop sequence)    │    │
-                              │  │           ▼                                      │    │
-                              │  │  Return generated text + usage stats             │    │
-                              │  └──────────────────────────────────────────────────┘    │
+                              │  ┌──────────────────────────────────────────────────┐   │
+                              │  │  Acquire GPU read lock (concurrent inference OK) │   │
+                              │  │                                                  │   │
+                              │  │  ModelRunner::generate_paged()                   │   │
+                              │  │       │                                          │   │
+                              │  │       ▼                                          │   │
+                              │  │  ┌────────────────────────┐                      │   │
+                              │  │  │  PREFILL               │                      │   │
+                              │  │  │  Embed prompt tokens   │                      │   │
+                              │  │  │  Forward through 32    │                      │   │
+                              │  │  │  layers (GDN + GQA)    │                      │   │
+                              │  │  │  Write KV cache        │                      │   │
+                              │  │  │  Sample first token    │                      │   │
+                              │  │  └────────┬───────────────┘                      │   │
+                              │  │           │                                      │   │
+                              │  │           ▼                                      │   │
+                              │  │  ┌────────────────────────┐                      │   │
+                              │  │  │  DECODE (loop)         │◄──── CUDA Graph      │   │
+                              │  │  │  Embed 1 token         │      Replay          │   │
+                              │  │  │  Forward through 32    │      (after warmup)  │   │
+                              │  │  │  layers, read KV cache │                      │   │
+                              │  │  │  Sample next token     │                      │   │
+                              │  │  │  Check stop conditions │                      │   │
+                              │  │  └────────┬───────────────┘                      │   │
+                              │  │           │ (EOS / max_tokens / stop sequence)   │   │
+                              │  │           ▼                                      │   │
+                              │  │  Return generated text + usage stats             │   │
+                              │  └──────────────────────────────────────────────────┘   │
                               │       │                                                 │
                               │       ▼                                                 │
   HTTP Response ◄─────────────│  JSON response (or SSE stream)                          │
@@ -151,7 +151,7 @@ Kiln uses paged virtual memory for the KV cache, inspired by vLLM's PagedAttenti
   Physical Block Pool:  ┌──────────────────────────────────┐
   [total_slots × num_kv_heads × head_dim]                  │
   │ block 0 │ ... │ block 4 │ ... │ block 7 │ ... │ ...    │
-  └──────────────────────────────────────────────────────────┘
+  └────────────────────────────────────────────────────────┘
 
   Address translation:
     token_pos 35 (block_size=16) → logical block 2 → physical block 4 → offset 3

@@ -224,7 +224,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(
         stderr,
         "  {}",
-        style("│   inference · training · adapters    │").cyan()
+        style("│   inference · training · adapters   │").cyan()
     );
     let _ = writeln!(
         stderr,

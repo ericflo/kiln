@@ -126,7 +126,7 @@ The `install_latest_server` function already handles steps 1-4. The new
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ 1. discover_asset()  — newest kiln-v* release for this target │
+│ 1. discover_asset()  — newest kiln-v* release for this target  │
 │ 2. Compare versions; no-op if current >= latest                │
 │ 3. download_with_progress()  → staging tarball + sha256        │
 │ 4. fetch_expected_sha256() + compare; abort+delete on mismatch │
