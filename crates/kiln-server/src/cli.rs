@@ -76,6 +76,10 @@ pub enum Commands {
         /// Server URL
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
+
+        /// Emit raw JSON instead of the pretty-printed tree
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
     /// Validate a config file without starting the server
@@ -300,8 +304,163 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(stderr);
 }
 
+/// Format a uptime duration in seconds as a compact human string ("1h 23m 4s",
+/// "5m 30s", "12s"). Drops leading zero units. Used by the pretty health view.
+fn format_uptime_secs(total: u64) -> String {
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}h {m}m {s}s")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Render the /health response body as a pretty tree matching the `kiln config`
+/// style. Pure function over a parsed JSON value so tests can pin the layout
+/// without standing up a live server. Returns the body to print *after* the
+/// "✓ Server is healthy" header, with no leading or trailing newline.
+pub fn format_health_pretty(body: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+
+    let version = body.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+    let uptime_secs = body
+        .get("uptime_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("?");
+    let backend = body.get("backend").and_then(|v| v.as_str()).unwrap_or("?");
+    let active_adapter = body
+        .get("active_adapter")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| "(none)".to_string());
+    let adapters_loaded = body
+        .get("adapters_loaded")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let _ = writeln!(out, "  {} {}", style("Version:").dim(), style(version).white().bold());
+    let _ = writeln!(
+        out,
+        "  {}  {}",
+        style("Uptime:").dim(),
+        style(format_uptime_secs(uptime_secs)).white().bold()
+    );
+    let _ = writeln!(out, "  {}   {}", style("Model:").dim(), style(model).white().bold());
+    let _ = writeln!(out, "  {} {}", style("Backend:").dim(), style(backend).white().bold());
+    let _ = writeln!(
+        out,
+        "  {} {}",
+        style("Adapter:").dim(),
+        style(&active_adapter).white().bold()
+    );
+    let _ = writeln!(
+        out,
+        "  {} {} loaded",
+        style("Adapters:").dim(),
+        style(adapters_loaded).cyan().bold()
+    );
+
+    if let Some(sched) = body.get("scheduler").and_then(|v| v.as_object()) {
+        let waiting = sched.get("waiting").and_then(|v| v.as_u64()).unwrap_or(0);
+        let running = sched.get("running").and_then(|v| v.as_u64()).unwrap_or(0);
+        let blocks_used = sched.get("blocks_used").and_then(|v| v.as_u64()).unwrap_or(0);
+        let blocks_free = sched.get("blocks_free").and_then(|v| v.as_u64()).unwrap_or(0);
+        let blocks_total = sched.get("blocks_total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "  {} waiting={} running={}  blocks={}/{} ({} free)",
+            style("Scheduler:").dim(),
+            style(waiting).cyan(),
+            style(running).cyan(),
+            style(blocks_used).cyan(),
+            style(blocks_total).cyan(),
+            style(blocks_free).cyan()
+        );
+    }
+
+    if let Some(gpu) = body.get("gpu_memory").and_then(|v| v.as_object()) {
+        let total = gpu.get("total_vram_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let model_gb = gpu.get("model_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let kv = gpu.get("kv_cache_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let train = gpu
+            .get("training_budget_gb")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let _ = writeln!(
+            out,
+            "  {} {} GB total  model={} GB  kv={} GB  train={} GB",
+            style("GPU VRAM:").dim(),
+            style(format!("{total:.1}")).cyan().bold(),
+            style(format!("{model_gb:.1}")).cyan(),
+            style(format!("{kv:.1}")).cyan(),
+            style(format!("{train:.1}")).cyan()
+        );
+    }
+
+    let training = body.get("training").and_then(|v| v.as_object());
+    let active_job = training
+        .and_then(|t| t.get("active_job"))
+        .and_then(|v| v.as_object());
+    let queued = training
+        .and_then(|t| t.get("queued"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    if let Some(job) = active_job {
+        let job_id = job.get("job_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let progress = job.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let _ = writeln!(
+            out,
+            "  {} running job={} progress={}%",
+            style("Training:").dim(),
+            style(job_id).white().bold(),
+            style(format!("{:.1}", progress * 100.0)).cyan().bold()
+        );
+    } else if queued > 0 {
+        let _ = writeln!(
+            out,
+            "  {} idle (queued={})",
+            style("Training:").dim(),
+            style(queued).cyan()
+        );
+    } else {
+        let _ = writeln!(out, "  {} idle", style("Training:").dim());
+    }
+
+    if let Some(checks) = body.get("checks").and_then(|v| v.as_array()) {
+        if !checks.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "  {}", style("Checks:").dim());
+            for c in checks {
+                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let pass = c.get("pass").and_then(|v| v.as_bool()).unwrap_or(false);
+                if pass {
+                    let _ = writeln!(out, "    {} {}", style("✓").green().bold(), name);
+                } else {
+                    let _ = writeln!(out, "    {} {}", style("✗").red().bold(), name);
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// Run the `health` CLI subcommand: GET /health on the server.
-pub async fn run_health(url: &str) -> anyhow::Result<()> {
+///
+/// `json=false` (default) renders a tree-style diagnostic that matches
+/// `kiln config`. `json=true` preserves the older raw `serde_json::to_string_pretty`
+/// behavior — useful when scripting or piping into `jq`. On non-success status,
+/// the raw JSON error body is always printed regardless of `json` so failure
+/// diagnostics are never lossy.
+pub async fn run_health(url: &str, json: bool) -> anyhow::Result<()> {
     let resp = reqwest::get(format!("{url}/health")).await?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
@@ -311,7 +470,12 @@ pub async fn run_health(url: &str) -> anyhow::Result<()> {
             "{} Server is healthy",
             style("✓").green().bold()
         );
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&body)?);
+        } else {
+            println!();
+            print!("{}", format_health_pretty(&body));
+        }
     } else {
         eprintln!(
             "{} Server returned {}",
@@ -935,6 +1099,208 @@ mod tests {
                 assert_eq!(url, "http://example.com:9000");
             }
             other => panic!("expected Train(Status), got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn format_uptime_secs_renders_compact() {
+        assert_eq!(format_uptime_secs(0), "0s");
+        assert_eq!(format_uptime_secs(45), "45s");
+        assert_eq!(format_uptime_secs(60), "1m 0s");
+        assert_eq!(format_uptime_secs(330), "5m 30s");
+        assert_eq!(format_uptime_secs(3600), "1h 0m 0s");
+        assert_eq!(format_uptime_secs(4984), "1h 23m 4s");
+    }
+
+    #[test]
+    fn format_health_pretty_full() {
+        let body = json!({
+            "status": "ok",
+            "version": "0.1.0",
+            "uptime_seconds": 4984,
+            "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+            "backend": "model",
+            "active_adapter": "my-adapter",
+            "adapters_loaded": 3,
+            "scheduler": {
+                "waiting": 1,
+                "running": 2,
+                "blocks_used": 100,
+                "blocks_free": 156,
+                "blocks_total": 256,
+            },
+            "gpu_memory": {
+                "total_vram_gb": 47.5,
+                "model_gb": 8.2,
+                "kv_cache_gb": 12.4,
+                "training_budget_gb": 6.0,
+                "inference_memory_fraction": 0.85,
+            },
+            "training": {
+                "active_job": null,
+                "queued": 0,
+            },
+            "checks": [
+                {"name": "model_loaded", "pass": true},
+                {"name": "scheduler_responsive", "pass": true},
+            ],
+        });
+        let out = format_health_pretty(&body);
+        assert!(out.contains("Version:"), "got: {out}");
+        assert!(out.contains("0.1.0"), "got: {out}");
+        assert!(out.contains("Uptime:"), "got: {out}");
+        assert!(out.contains("1h 23m 4s"), "got: {out}");
+        assert!(out.contains("Model:"), "got: {out}");
+        assert!(out.contains("qwen3.5-4b-kiln"), "got: {out}");
+        assert!(out.contains("Backend:"), "got: {out}");
+        assert!(out.contains("model"), "got: {out}");
+        assert!(out.contains("Adapter:"), "got: {out}");
+        assert!(out.contains("my-adapter"), "got: {out}");
+        assert!(out.contains("Adapters:"), "got: {out}");
+        assert!(out.contains("3 loaded"), "got: {out}");
+        assert!(out.contains("Scheduler:"), "got: {out}");
+        assert!(out.contains("waiting=1"), "got: {out}");
+        assert!(out.contains("running=2"), "got: {out}");
+        assert!(out.contains("blocks=100/256"), "got: {out}");
+        assert!(out.contains("(156 free)"), "got: {out}");
+        assert!(out.contains("GPU VRAM:"), "got: {out}");
+        assert!(out.contains("47.5 GB total"), "got: {out}");
+        assert!(out.contains("model=8.2 GB"), "got: {out}");
+        assert!(out.contains("kv=12.4 GB"), "got: {out}");
+        assert!(out.contains("train=6.0 GB"), "got: {out}");
+        assert!(out.contains("Training:"), "got: {out}");
+        assert!(out.contains("idle"), "got: {out}");
+        assert!(out.contains("Checks:"), "got: {out}");
+        assert!(out.contains("model_loaded"), "got: {out}");
+        assert!(out.contains("scheduler_responsive"), "got: {out}");
+        // ✓ glyph appears at least twice (once per check, plus the runtime header is rendered separately)
+        assert!(out.contains("✓"), "expected at least one ✓ glyph, got: {out}");
+    }
+
+    #[test]
+    fn format_health_pretty_minimal() {
+        // Mock backend without GPU memory budget, no checks, no scheduler stats.
+        let body = json!({
+            "status": "ok",
+            "version": "0.1.0",
+            "uptime_seconds": 12,
+            "model": "mock-model",
+            "backend": "mock",
+            "active_adapter": null,
+            "adapters_loaded": 0,
+            "scheduler": null,
+            "gpu_memory": null,
+            "training": {
+                "active_job": null,
+                "queued": 0,
+            },
+            "checks": [],
+        });
+        let out = format_health_pretty(&body);
+        assert!(out.contains("Version:"), "got: {out}");
+        assert!(out.contains("Uptime:"), "got: {out}");
+        assert!(out.contains("12s"), "got: {out}");
+        assert!(out.contains("Adapter:"), "got: {out}");
+        assert!(out.contains("(none)"), "got: {out}");
+        assert!(out.contains("0 loaded"), "got: {out}");
+        assert!(out.contains("Training:"), "got: {out}");
+        assert!(out.contains("idle"), "got: {out}");
+        // Subgroups must be ABSENT when the corresponding fields are null/empty.
+        assert!(
+            !out.contains("Scheduler:"),
+            "scheduler subgroup should not render when null, got: {out}"
+        );
+        assert!(
+            !out.contains("GPU VRAM:"),
+            "gpu_memory subgroup should not render when null, got: {out}"
+        );
+        assert!(
+            !out.contains("Checks:"),
+            "checks subgroup should not render when empty, got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_health_pretty_active_job() {
+        let body = json!({
+            "status": "ok",
+            "version": "0.1.0",
+            "uptime_seconds": 60,
+            "model": "qwen3.5-4b-kiln",
+            "backend": "model",
+            "active_adapter": null,
+            "adapters_loaded": 0,
+            "scheduler": null,
+            "gpu_memory": null,
+            "training": {
+                "active_job": {
+                    "job_id": "sft-7f9c",
+                    "progress": 0.4237,
+                },
+                "queued": 2,
+            },
+            "checks": [],
+        });
+        let out = format_health_pretty(&body);
+        assert!(out.contains("Training:"), "got: {out}");
+        assert!(out.contains("running"), "got: {out}");
+        assert!(out.contains("job=sft-7f9c"), "got: {out}");
+        assert!(out.contains("progress=42.4%"), "got: {out}");
+        // Active job line should NOT also say "idle".
+        assert!(
+            !out.contains("idle"),
+            "active job render should not include 'idle', got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_health_pretty_queued_only() {
+        // No active job but queue is non-empty: idle line must include the queue depth.
+        let body = json!({
+            "status": "ok",
+            "version": "0.1.0",
+            "uptime_seconds": 60,
+            "model": "qwen3.5-4b-kiln",
+            "backend": "model",
+            "active_adapter": null,
+            "adapters_loaded": 0,
+            "scheduler": null,
+            "gpu_memory": null,
+            "training": {
+                "active_job": null,
+                "queued": 5,
+            },
+            "checks": [],
+        });
+        let out = format_health_pretty(&body);
+        assert!(out.contains("Training:"), "got: {out}");
+        assert!(out.contains("idle"), "got: {out}");
+        assert!(out.contains("queued=5"), "got: {out}");
+    }
+
+    #[test]
+    fn parses_health_with_json_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "health", "--json"]).expect("parse failed");
+        match cli.command {
+            Some(Commands::Health { url, json }) => {
+                assert_eq!(url, "http://localhost:8420");
+                assert!(json, "--json should set json=true");
+            }
+            other => panic!("expected Health, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parses_health_default_is_pretty() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "health"]).expect("parse failed");
+        match cli.command {
+            Some(Commands::Health { url, json }) => {
+                assert_eq!(url, "http://localhost:8420");
+                assert!(!json, "default json flag should be false");
+            }
+            other => panic!("expected Health, got {:?}", other.is_some()),
         }
     }
 }
