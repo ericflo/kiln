@@ -1,5 +1,47 @@
 # Kiln Profiling Report
 
+## Phase 7 H16 external-α reference options audit (2026-04-25)
+
+**Verdict: `external_reference_exists`.** Doc-only audit (no pod, $0 GPU
+spend) classifying every viable external Qwen3.5-MTP α-reference path
+after PR #530's `vllm_mtp_unsupported` blocked the vLLM 0.19.1 upper-bound
+route. Eight mandatory candidates classified as supported / unsupported /
+unknown with file:line evidence and commit SHAs:
+**1 supported** (SGLang main `a4facdf` — `Qwen3_5ForCausalLMMTP` class
+present since PR #18489 2026-02-09, dense 4B fix landed PR #21347
+2026-03-24, spec_v2 enabled PR #19391 2026-03-04; caveat: open PR #23331
+fixes adaptive-DSD bug, kiln workload is non-DSD greedy);
+**2 unknown** (vLLM main `bc2ae5a` and v0.20.0 release — same code state;
+qwen3_5_mtp.py file unchanged from v0.19.1 except NVFP4 workaround, but
+the segfault was downstream in native code where significant Eagle /
+spec_decode / GDN / autograd changes have landed in the v0.19.1→v0.20.0
+window: #37588, #38496, #40732, #37813, #38047, #38361, #38981);
+**4 unsupported** (HF transformers — has `Qwen3_5ForCausalLM` but no MTP
+class and no candidate-generator type that loads Qwen3.5's pretrained
+`mtp.*` head; SafeAILab/EAGLE `cb7e0841` — only Qwen-2 + Qwen3 in eagle/
+model/, no qwen3.5 modeling file, also wrong architecture since Eagle
+trains its own draft head; FasterDecoding/Medusa `e2a5d20` — stale 2024,
+same architecture mismatch; NVIDIA/TensorRT-LLM `1989520` — has only
+Qwen-1/2 era `QWenForCausalLM` in tensorrt_llm/models/qwen/, no
+Qwen3.5 path);
+**1 feasible-but-not-strict** (hand-rolled HF reference — algorithmically
+straightforward but ~300-500 LOC of new Python; reserved as fallback).
+Decision rule fires branch 1 (≥1 supported): queue exactly ONE H17
+SGLang α microbench task with PR #530's prefill-byte-equal workload
+(seeds {0,1,2}, 512 prompt tokens, 16 max output, k=1 native MTP, A6000
+greedy, ≤45 min / ≤$0.40), plus a $0.25 bounded vLLM v0.20.0 retest as
+opportunistic free pre-step. SGLang BF16 vs kiln Marlin W4A16 is the
+acknowledged confounder, identical to the vLLM-vs-kiln confounder in
+PR #530. Re-classifies PR #527's "SGLang has no MTP for Qwen3.5"
+cross-reference: SGLang has had `Qwen3_5ForCausalLMMTP` since 2026-02-09
+PR #18489 — PR #526's accurate claim was about *RadixAttention*
+MTP-awareness, a different question. See
+[`docs/phase7-h16-external-alpha-options-audit.md`](docs/phase7-h16-external-alpha-options-audit.md)
+for the 8-candidate table with file:line evidence and commit SHAs, the
+pre-registered decision rule + application, the H17 task scope, the free
+pre-step protocol, the explicit reopen preconditions per candidate, and
+anti-duplication evidence. No raw data files (doc-only PR).
+
 ## Phase 7 H15c vLLM α microbench (2026-04-25)
 
 **Outcome: `vllm_mtp_unsupported`.** vLLM 0.19.1 segfaults during V1 engine
