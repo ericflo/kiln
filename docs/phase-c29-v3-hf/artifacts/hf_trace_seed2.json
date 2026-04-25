@@ -1,0 +1,120 @@
+{
+  "seed": 2,
+  "alpha": 0.25,
+  "n_accept": 3,
+  "n_steps": 12,
+  "n_generated": 16,
+  "hit_eos": false,
+  "elapsed_s": 10.035144411027431,
+  "generated_head": " Compute the new value using the percentage increase",
+  "trace": [
+    {
+      "step_idx": 0,
+      "base_pos": 501,
+      "mtp_pos": 0,
+      "last_token": 21902,
+      "mtp_top1": 21902,
+      "main_top1": 279,
+      "accepted": 0
+    },
+    {
+      "step_idx": 1,
+      "base_pos": 502,
+      "mtp_pos": 0,
+      "last_token": 279,
+      "mtp_top1": 491,
+      "main_top1": 491,
+      "accepted": 1
+    },
+    {
+      "step_idx": 2,
+      "base_pos": 504,
+      "mtp_pos": 1,
+      "last_token": 869,
+      "mtp_top1": 869,
+      "main_top1": 1608,
+      "accepted": 0
+    },
+    {
+      "step_idx": 3,
+      "base_pos": 505,
+      "mtp_pos": 1,
+      "last_token": 1608,
+      "mtp_top1": 1608,
+      "main_top1": 279,
+      "accepted": 0
+    },
+    {
+      "step_idx": 4,
+      "base_pos": 506,
+      "mtp_pos": 1,
+      "last_token": 279,
+      "mtp_top1": 279,
+      "main_top1": 11086,
+      "accepted": 0
+    },
+    {
+      "step_idx": 5,
+      "base_pos": 507,
+      "mtp_pos": 1,
+      "last_token": 11086,
+      "mtp_top1": 11086,
+      "main_top1": 5096,
+      "accepted": 0
+    },
+    {
+      "step_idx": 6,
+      "base_pos": 508,
+      "mtp_pos": 1,
+      "last_token": 5096,
+      "mtp_top1": 5096,
+      "main_top1": 11,
+      "accepted": 0
+    },
+    {
+      "step_idx": 7,
+      "base_pos": 509,
+      "mtp_pos": 1,
+      "last_token": 11,
+      "mtp_top1": 1179,
+      "main_top1": 1179,
+      "accepted": 1
+    },
+    {
+      "step_idx": 8,
+      "base_pos": 511,
+      "mtp_pos": 2,
+      "last_token": 31192,
+      "mtp_top1": 31192,
+      "main_top1": 279,
+      "accepted": 0
+    },
+    {
+      "step_idx": 9,
+      "base_pos": 512,
+      "mtp_pos": 2,
+      "last_token": 279,
+      "mtp_top1": 7384,
+      "main_top1": 3240,
+      "accepted": 0
+    },
+    {
+      "step_idx": 10,
+      "base_pos": 513,
+      "mtp_pos": 2,
+      "last_token": 3240,
+      "mtp_top1": 364,
+      "main_top1": 314,
+      "accepted": 0
+    },
+    {
+      "step_idx": 11,
+      "base_pos": 514,
+      "mtp_pos": 2,
+      "last_token": 314,
+      "mtp_top1": 279,
+      "main_top1": 279,
+      "accepted": 1
+    }
+  ]
+}

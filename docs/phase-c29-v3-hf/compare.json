@@ -1,0 +1,131 @@
+{
+  "kiln": {
+    "per_seed": [
+      {
+        "seed": 0,
+        "alpha": 0.36363636363636365,
+        "n_steps": 11,
+        "n_accept": 4
+      },
+      {
+        "seed": 1,
+        "alpha": 0.3333333333333333,
+        "n_steps": 12,
+        "n_accept": 4
+      },
+      {
+        "seed": 2,
+        "alpha": 0.45454545454545453,
+        "n_steps": 11,
+        "n_accept": 5
+      }
+    ],
+    "median_alpha": 0.36363636363636365,
+    "mean_alpha": 0.3838383838383838,
+    "min_alpha": 0.3333333333333333,
+    "max_alpha": 0.45454545454545453,
+    "n_seeds": 3,
+    "source_csvs": [
+      "docs/phase-c29-v2/artifacts/c1_attr_seed0.csv",
+      "docs/phase-c29-v2/artifacts/c1_attr_seed1.csv",
+      "docs/phase-c29-v2/artifacts/c1_attr_seed2.csv"
+    ],
+    "methodology": "alpha_seed = sum(accepted column) / n_rows in c1_attr_seed{N}.csv; median computed across seeds. Source run: PR #529 (scripts/c29_kiln_logits_dump.sh), KILN_SPEC_METHOD=mtp KILN_BENCH_FORCE_MTP=1 KILN_W4A16=1, greedy (temperature=0), --paged, seeds=[0,1,2] indexing PROMPT_POOL[seed%30] (= GSM8K prose prompts 0,1,2), --prompt-tokens 512, --max-output-tokens 16, no chat template, splice dumps captured at POSITIONS=0..3 \u00d7 MAX_STEPS=2. NOTE: the task brief's 7/22 \u2248 0.318 hint refers to the subset of {accept-labeled, reject-labeled} splice rows used by the H15b C29 v2 top-K probe. This script uses all 11/12/11 rows per seed from the full c1_attr CSV (every speculative_mtp_decode_step call, not only dumped rows)."
+  },
+  "hf": {
+    "mtp_supported": true,
+    "per_seed": [
+      {
+        "seed": 0,
+        "alpha": 0.36363636363636365,
+        "n_accept": 4,
+        "n_steps": 11,
+        "n_generated": 16,
+        "hit_eos": false,
+        "elapsed_s": 9.391312807798386,
+        "generated_head": " First subtract eaten and baked eggs from the"
+      },
+      {
+        "seed": 1,
+        "alpha": 0.23076923076923078,
+        "n_accept": 3,
+        "n_steps": 13,
+        "n_generated": 16,
+        "hit_eos": false,
+        "elapsed_s": 10.813735660165548,
+        "generated_head": " Half of two bolts is one bolt of"
+      },
+      {
+        "seed": 2,
+        "alpha": 0.25,
+        "n_accept": 3,
+        "n_steps": 12,
+        "n_generated": 16,
+        "hit_eos": false,
+        "elapsed_s": 10.035144411027431,
+        "generated_head": " Compute the new value using the percentage increase"
+      }
+    ],
+    "median_alpha": 0.25,
+    "mean_alpha": 0.28146853146853146,
+    "min_alpha": 0.23076923076923078,
+    "max_alpha": 0.36363636363636365,
+    "n_seeds": 3,
+    "transformers_version": "5.7.0.dev0",
+    "torch_version": "2.4.1+cu124",
+    "config": {
+      "checkpoint": "/workspace/qwen3.5-4b",
+      "dtype": "torch.bfloat16",
+      "device": "cuda",
+      "prompt_tokens": 512,
+      "max_output_tokens": 16,
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "rms_eps": 1e-06,
+      "rope_theta": 10000000.0,
+      "rotary_frac": 0.25,
+      "eos_token_ids": [
+        248044,
+        248046
+      ],
+      "chat_template": false,
+      "spec_method": "qwen3_5_mtp_handrolled_hf",
+      "num_speculative_tokens": 1,
+      "sampling": {
+        "temperature": 0.0,
+        "greedy": true
+      }
+    },
+    "total_elapsed_s": 30.754949748516083
+  },
+  "verdict": {
+    "verdict": "kiln_above_hf",
+    "decision_rule": {
+      "external_ceiling_exists_hf": {
+        "bound": "delta >= +0.05",
+        "next_action": "HF transformers reference \u03b1 exceeds kiln \u03b1 by \u2265 0.05. Kiln has \u03b1-quality work to do \u2014 queue an \u03b1-improvement task to bisect the kiln-vs-HF MTP-head implementation difference (likely candidates from prior phases: Marlin W4A16 quantization drift, fc.weight transpose convention, or pre_fc_norm swap). The kiln-native-ceiling verdict from H15b is *displaced* by this finding."
+      },
+      "mtp_head_quality_ceiling": {
+        "bound": "-0.02 <= delta < +0.05",
+        "next_action": "Both implementations land within \u00b10.05 of each other. The pretrained MTP head's checkpoint quality is the dominant ceiling. Accept and refocus Phase 7 on non-\u03b1 decode-path wins (post-PR #521 prefix-cache + CUDA graph work, SGLang RadixAttention port from PR #526). The H15b `kiln_native_ceiling` verdict stands as the operative checkpoint-quality ceiling."
+      },
+      "kiln_above_hf": {
+        "bound": "delta < -0.02",
+        "next_action": "Kiln \u03b1 exceeds the HF transformers reference by > 0.02 \u2014 unexpected for an MTP head that should be implementation-deterministic at greedy decode. Sanity-check the HF reference (MTP head loader prefix, pre_fc_norm swap convention, RoPE position threading). If confirmed, the H15b kiln-native-ceiling verdict stands as a safe lower bound and the H17/H18 family closes."
+      },
+      "hf_mtp_load_failure": {
+        "bound": "hf_alpha_per_seed.json.mtp_supported == false",
+        "next_action": "Hand-rolled HF transformers reference also failed to load or drive the pretrained MTP head end-to-end. With vLLM 0.19.1 + v0.20.0 (PR #530, #533), SGLang main HEAD (PR #532), AND HF transformers all blocked, no external \u03b1 reference is available for Qwen3.5-4B + native MTP on A6000 sm_86. Close the external-\u03b1 reference family with the `kiln_native_ceiling` verdict from H15b as the operative checkpoint-quality ceiling. Phase 7 next steps: refocus on non-\u03b1 decode-path wins (prefix-cache + CUDA graphs, RadixAttention port)."
+      }
+    },
+    "kiln_median_alpha": 0.36363636363636365,
+    "hf_median_alpha": 0.25,
+    "delta": -0.11363636363636365,
+    "next_action": "Kiln \u03b1 exceeds the HF transformers reference by > 0.02 \u2014 unexpected for an MTP head that should be implementation-deterministic at greedy decode. Sanity-check the HF reference (MTP head loader prefix, pre_fc_norm swap convention, RoPE position threading). If confirmed, the H15b kiln-native-ceiling verdict stands as a safe lower bound and the H17/H18 family closes.",
+    "transformers_version": "5.7.0.dev0",
+    "torch_version": "2.4.1+cu124"
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "seed": 0,
+  "alpha": 0.36363636363636365,
+  "n_accept": 4,
+  "n_steps": 11,
+  "n_generated": 16,
+  "hit_eos": false,
+  "elapsed_s": 9.391312807798386,
+  "generated_head": " First subtract eaten and baked eggs from the",
+  "trace": [
+    {
+      "step_idx": 0,
+      "base_pos": 494,
+      "mtp_pos": 0,
+      "last_token": 5339,
+      "mtp_top1": 11,
+      "main_top1": 31192,
+      "accepted": 0
+    },
+    {
+      "step_idx": 1,
+      "base_pos": 495,
+      "mtp_pos": 0,
+      "last_token": 31192,
+      "mtp_top1": 31192,
+      "main_top1": 33416,
+      "accepted": 0
+    },
+    {
+      "step_idx": 2,
+      "base_pos": 496,
+      "mtp_pos": 0,
+      "last_token": 33416,
+      "mtp_top1": 33416,
+      "main_top1": 321,
+      "accepted": 0
+    },
+    {
+      "step_idx": 3,
+      "base_pos": 497,
+      "mtp_pos": 0,
+      "last_token": 321,
+      "mtp_top1": 39334,
+      "main_top1": 39334,
+      "accepted": 1
+    },
+    {
+      "step_idx": 4,
+      "base_pos": 499,
+      "mtp_pos": 1,
+      "last_token": 18237,
+      "mtp_top1": 18237,
+      "main_top1": 494,
+      "accepted": 0
+    },
+    {
+      "step_idx": 5,
+      "base_pos": 500,
+      "mtp_pos": 1,
+      "last_token": 494,
+      "mtp_top1": 279,
+      "main_top1": 279,
+      "accepted": 1
+    },
+    {
+      "step_idx": 6,
+      "base_pos": 502,
+      "mtp_pos": 2,
+      "last_token": 7071,
+      "mtp_top1": 21261,
+      "main_top1": 10641,
+      "accepted": 0
+    },
+    {
+      "step_idx": 7,
+      "base_pos": 503,
+      "mtp_pos": 2,
+      "last_token": 10641,
+      "mtp_top1": 10641,
+      "main_top1": 11,
+      "accepted": 0
+    },
+    {
+      "step_idx": 8,
+      "base_pos": 504,
+      "mtp_pos": 2,
+      "last_token": 11,
+      "mtp_top1": 1179,
+      "main_top1": 1179,
+      "accepted": 1
+    },
+    {
+      "step_idx": 9,
+      "base_pos": 506,
+      "mtp_pos": 3,
+      "last_token": 29283,
+      "mtp_top1": 279,
+      "main_top1": 279,
+      "accepted": 1
+    },
+    {
+      "step_idx": 10,
+      "base_pos": 508,
+      "mtp_pos": 4,
+      "last_token": 62266,
+      "mtp_top1": 62266,
+      "main_top1": 1698,
+      "accepted": 0
+    }
+  ]
+}

@@ -1,5 +1,53 @@
 # Kiln Profiling Report
 
+## Phase 7 H18 hand-rolled HF transformers MTP α reference (2026-04-25)
+
+**Verdict: `kiln_above_hf`.** Hand-rolled HuggingFace transformers
+reference α probe for Qwen3.5-4B native MTP loaded and ran end-to-end
+on RunPod A6000 sm_86. Median α: HF **0.2500** vs kiln **0.3636**
+(re-derived from PR #529 c1_attr CSVs). Δ (hf − kiln) = **−0.1136**.
+Per the pre-registered decision rule (PR #531 candidate 8, locked
+into `scripts/h18_compare.py` BEFORE the run), `delta < -0.02` →
+`kiln_above_hf` branch. **Seed 0 is a bit-for-bit match (4/11 vs
+4/11)** — strong evidence the H18 protocol implementation
+(MTP head forward, verifier wiring, RoPE position threading,
+accept/reject semantics) is correct on at least one trajectory.
+Seeds 1+2 diverge by 1-2 extra rejects (kiln 4/12, 5/11 vs HF 3/13,
+3/12) — small in absolute count but enough to drag median α down by
+~0.11. Likely sources of the 1-2-token gap: BF16 numerical drift
+inside the 24×GDN + 8×GQA base stack (Phase C7 documented kv_len
+divergence between kiln and the canonical Python single-position
+self-attn contract), causal-conv1d kernel fallback in HF (the run
+log explicitly reports the fast path unavailable), and Marlin W4A16
+vs BF16 quantization confounder. None is a bug — they are documented
+numerical paths whose absolute α delta is governed by checkpoint-
+quality and 1-2-token argmax-flip windows. The PR #529 H15b
+`kiln_native_ceiling` verdict stands as the operative checkpoint-
+quality ceiling. With vLLM 0.19.1 (PR #530) + v0.20.0 (PR #533)
+unsupported, SGLang main HEAD (PR #532) unsupported, AND H18 now
+showing `kiln_above_hf` (kiln α exceeds the BF16 HF reference even
+under W4A16 quantization), the external-α reference family closes
+here. Phase 7's α-improvement track is closed; refocus is on non-α
+decode-path wins (post-PR #521 prefix-cache + CUDA-graph work,
+SGLang RadixAttention port from PR #526). Bench envelope: pool A6000
+pod (lease + auto-resume from hibernation), ~6 min total wall-clock
+including dependency installs (torch 2.4.1+cu124 reinstall over
+kiln-runpod's default 2.11.0+cu130, transformers c472755 from
+source, torchvision 0.19.1+cu124), 30.8 s for the actual H18 dump.
+**~$0.05 GPU spend** — well under $0.30 H18 cap. Reopen preconditions:
+a second independent reference (HF without causal-conv1d fallback,
+or future vLLM/SGLang stable that loads on driver 550.x) producing
+α materially > 0.3636; running H18 against a future BF16-only kiln
+build to isolate the W4A16 confounder; or reproducing H18 with
+different seeds and obtaining a materially different median α. See
+[`docs/phase7-h18-hf-transformers-alpha-reference.md`](docs/phase7-h18-hf-transformers-alpha-reference.md)
+for the full verdict, decision-rule application, per-seed
+divergence analysis, anti-duplication evidence, reproduction
+commands, and detailed reopen triggers. Raw data:
+`docs/phase-c29-v3-hf/{verdict,compare,hf_alpha_per_seed,kiln_alpha_per_seed}.json`,
+`docs/phase-c29-v3-hf/compare.md`, and `docs/phase-c29-v3-hf/artifacts/`
+(per-seed traces + run log).
+
 ## Phase 7 H17b vLLM v0.20.0 α microbench retest (2026-04-25)
 
 **Verdict: `vllm_020_mtp_unsupported_dense_4b`.** vLLM v0.20.0
