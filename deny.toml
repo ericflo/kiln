@@ -50,6 +50,12 @@ yanked = "warn"
 # via indicatif) are not actionable here — there is no upstream fix and dropping
 # the parent crate is out of scope. Real security vulnerabilities still fail
 # regardless of where in the tree they appear.
+#
+# Version note: under `version = 2`, cargo-deny ≥ 0.18 parses `unmaintained` as
+# a Scope (one of "all" | "workspace" | "transitive" | "none"). Earlier
+# versions (≤ 0.17) parse it as a deprecated LintLevel and reject "workspace".
+# CI pins the cargo-deny-action SHA in `.github/workflows/ci.yml` so the
+# bundled CLI version cannot drift below 0.18 silently.
 unmaintained = "workspace"
 
 [sources]
