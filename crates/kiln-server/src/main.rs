@@ -496,7 +496,7 @@ fn precompile_metal_custom_kernels(_device: &candle_core::Device) {}
 #[cfg(feature = "vulkan")]
 fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {
     let start = std::time::Instant::now();
-    match kiln_model::backend::vulkan::precompile_custom_kernels(_device) {
+    match kiln_model::backend::vulkan::precompile_custom_kernels() {
         Ok(()) => tracing::info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
             "Vulkan custom kernels precompiled during background prewarm"

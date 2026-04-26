@@ -35,6 +35,37 @@ impl std::fmt::Debug for VulkanDevice {
 }
 
 impl VulkanDevice {
+    /// Cheap probe: check if Vulkan is available without creating a logical device.
+    ///
+    /// Creates a minimal Vulkan instance and enumerates physical devices.
+    /// Does NOT allocate a logical device or queues (~hundreds of microseconds
+    /// vs ~tens of milliseconds for `new()`).
+    pub fn probe() -> bool {
+        let entry = match unsafe { ash::Entry::load() } {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        let app_info = vk::ApplicationInfo::builder()
+            .application_name(CStr::from_bytes_with_nul(b"Kiln Probe\0").unwrap())
+            .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
+            .api_version(vk::make_api_version(0, 1, 2, 0));
+
+        let instance_info = vk::InstanceCreateInfo::builder().application_info(&app_info);
+
+        let instance = match unsafe { entry.create_instance(&instance_info, None) } {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+
+        let devices = match unsafe { instance.enumerate_physical_devices() } {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+
+        !devices.is_empty()
+    }
+
     /// Create a new Vulkan device, selecting the best available GPU.
     pub fn new() -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }.map_err(|e| anyhow::anyhow!("failed to load Vulkan entry: {}", e))?;

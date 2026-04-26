@@ -1,11 +1,15 @@
-// Causal Conv1d kernel for Kiln (depthwise, kernel_size=4)
-// Input: x[B,C,T], weight[C,K], conv_state[B,C,K-1]
-// Output: out[B,C,T] (silu-fused), conv_state updated in-place
+// Causal Conv1d dispatch 1: compute outputs only (no state writes)
+// Computes out[B,C,T] = silu(depthwise_conv(x, weight))
 //
-// Fix: k <= t instead of t - k >= 0 to avoid uint underflow.
-// Fix: state update now appends the LAST token (t = seq_len - 1).
-// Fix: state update runs only for the last thread in each channel
-//       workgroup to avoid race conditions.
+// This dispatch ONLY computes outputs. State advancement is handled by the
+// separate `causal_conv1d_state_advance.comp` dispatch, eliminating the race
+// condition where t=seq_len-1 writes conv_state while other threads for the
+// same (b,c) are still reading it.
+//
+// Input:  x[B,C,T], weight[C,K]
+// Output: out[B,C,T]
+//
+// Push constants: batch, channels, seq_len, kernel_size
 
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
@@ -21,8 +25,7 @@ layout(push_constant) uniform Parameters {
 
 layout(binding = 0) readonly buffer XBuf { float data_x[]; };
 layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
-layout(binding = 2) buffer ConvStateBuf { float data_conv_state[]; };
-layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
 
 void main() {
     const uint idx = gl_GlobalInvocationID.x;
@@ -41,7 +44,9 @@ void main() {
         if (k <= t) {
             x_val = data_x[((b * channels + c) * seq_len) + (t - k)];
         } else {
-            x_val = data_conv_state[(b * channels + c) * (kernel_size - 1) + (kernel_size - 1 - k)];
+            // Missing taps: zero for prefill.
+            // State handling is done by the separate advance_state dispatch.
+            x_val = 0.0;
         }
         sum += x_val * data_weight[c * kernel_size + k];
     }
@@ -49,22 +54,4 @@ void main() {
     // Silu activation: x * sigmoid(x)
     float silu = sum / (1.0 + exp(-sum));
     data_out[idx] = silu;
-
-    // Update conv_state: shift left and append newest x.
-    // Only the thread for the last token writes the new state.
-    // To avoid race conditions with other threads reading state, we use a
-    // separate barrier after the output is computed. Since each channel
-    // has its own workgroup (one workgroup per b,c), and t = seq_len-1
-    // is the LAST output of that workgroup, we write after all outputs
-    // are done.
-    if (t == seq_len - 1) {
-        // Shift: state[k] = state[k-1] for k = K-2 .. 1
-        for (uint k = kernel_size - 2; k > 0; k--) {
-            data_conv_state[(b * channels + c) * (kernel_size - 1) + k] =
-                data_conv_state[(b * channels + c) * (kernel_size - 1) + k - 1];
-        }
-        // Append the NEWEST (last) token, not the first
-        data_conv_state[(b * channels + c) * (kernel_size - 1)] =
-            data_x[((b * channels + c) * seq_len) + (seq_len - 1)];
-    }
 }

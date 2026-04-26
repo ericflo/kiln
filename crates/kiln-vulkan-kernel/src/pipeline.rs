@@ -78,6 +78,20 @@ impl ShaderPipeline {
                 .context(format!("failed to read pre-compiled SPIR-V: {}", spv_path));
         }
 
+        // Check that glslc is available
+        let glslc_status = std::process::Command::new("glslc")
+            .arg("--help")
+            .output();
+        if glslc_status.is_err() {
+            anyhow::bail!(
+                "Vulkan SPIR-V '{}' was not compiled at build time and glslc is not on PATH. \
+                 Install glslc (part of the SPIR-V Tools package) and rebuild kiln-vulkan-kernel, \
+                 or pre-compile the shader to {} and place it alongside the .comp source.",
+                glsl_path,
+                spv_path
+            );
+        }
+
         // Compile with glslc
         // Defines match llama.cpp Vulkan defaults for RDNA GPUs
         let output = std::process::Command::new("glslc")
@@ -93,7 +107,9 @@ impl ShaderPipeline {
 
         if !output.status.success() {
             anyhow::bail!(
-                "glslc failed: {}",
+                "glslc failed to compile '{}': {} \
+                 (Install glslc and rebuild kiln-vulkan-kernel, or place a pre-compiled .spv file)",
+                glsl_path,
                 String::from_utf8_lossy(&output.stderr)
             );
         }

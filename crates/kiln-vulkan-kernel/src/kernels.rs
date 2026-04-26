@@ -21,15 +21,12 @@ pub fn dispatch_kernel(
     let queue_family_index = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-    tracing::trace!("[dispatch] step 0: device acquired");
-
     // --- Extract input data (flatten to f32) ---
     let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
     for tensor in input_tensors {
         let (data, _) = extract_tensor_bytes(tensor)?;
         input_data.push(data);
     }
-    tracing::trace!("[dispatch] step 1: input data extracted");
 
     // --- Create output buffer ---
     let elem_count: usize = output_shape.iter().product();
@@ -42,7 +39,6 @@ pub fn dispatch_kernel(
     let output_size = (elem_count * elem_size) as u64;
     let output_buffer = VulkanBuffer::create_device_local(device, device_local_mt, output_size)
         .context("failed to create output buffer")?;
-    tracing::trace!("[dispatch] step 2: output buffer created");
 
     // --- Create input buffers + upload ---
     let mut input_buffers: Vec<VulkanBuffer> = Vec::with_capacity(input_data.len());
@@ -53,11 +49,10 @@ pub fn dispatch_kernel(
             .context("failed to upload input data")?;
         input_buffers.push(buf);
     }
-    tracing::trace!("[dispatch] step 3: input buffers created + uploaded");
 
     // --- Build combined binding list (inputs first, then output) ---
     let total_bindings = input_buffers.len() + 1;
-    tracing::trace!("[dispatch] step 4: total_bindings = {}", total_bindings);
+    tracing::trace!(total_bindings, inputs = input_tensors.len(), "Vulkan dispatch start");
     let mut all_handles: Vec<vk::Buffer> = Vec::with_capacity(total_bindings);
     for buf in &input_buffers {
         all_handles.push(buf.handle());
@@ -73,7 +68,6 @@ pub fn dispatch_kernel(
         device.create_shader_module(&shader_module_info, None)
             .context("failed to create shader module")?
     };
-    tracing::trace!("[dispatch] step 5: shader module created");
 
     // --- Descriptor set layout (STORAGE_BUFFER for all bindings) ---
     let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
@@ -94,7 +88,6 @@ pub fn dispatch_kernel(
         device.create_descriptor_set_layout(&set_layout_info, None)
             .context("failed to create descriptor set layout")?
     };
-    tracing::trace!("[dispatch] step 6: descriptor set layout created");
 
     // --- Pipeline layout ---
     let push_constant_range = vk::PushConstantRange::builder()
@@ -112,7 +105,6 @@ pub fn dispatch_kernel(
         device.create_pipeline_layout(&layout_info, None)
             .context("failed to create pipeline layout")?
     };
-    tracing::trace!("[dispatch] step 7: pipeline layout created");
 
     // --- Compute pipeline ---
     let stage_info = vk::PipelineShaderStageCreateInfo::builder()
@@ -137,7 +129,6 @@ pub fn dispatch_kernel(
             })?
     };
     let pipeline = pipelines[0];
-    tracing::trace!("[dispatch] step 8: compute pipeline created");
 
     // --- Descriptor pool + set (STORAGE_BUFFER) ---
     let pool_size = vk::DescriptorPoolSize::builder()
@@ -164,7 +155,6 @@ pub fn dispatch_kernel(
             .context("failed to allocate descriptor sets")?
     };
     let descriptor_set = descriptor_sets[0];
-    tracing::trace!("[dispatch] step 9: descriptor pool + set created");
 
     // --- Descriptor writes using STORAGE_BUFFER (no buffer views needed) ---
     {
@@ -192,7 +182,6 @@ pub fn dispatch_kernel(
             device.update_descriptor_sets(&descriptor_write_infos, &[]);
         }
     }
-    tracing::trace!("[dispatch] step 10: descriptor sets updated");
 
     // --- Command buffer + dispatch ---
     let cmd_pool_info = make_cmd_pool_info(queue_family_index);
@@ -205,7 +194,6 @@ pub fn dispatch_kernel(
     let command_buffers = crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
         .context("failed to allocate command buffer")?;
     let cmd = command_buffers[0];
-    tracing::trace!("[dispatch] step 11: command buffer allocated");
 
     let begin_info = make_cmd_begin_info();
     unsafe {
@@ -252,7 +240,6 @@ pub fn dispatch_kernel(
         device.end_command_buffer(cmd)
             .context("failed to end command buffer")?;
     }
-    tracing::trace!("[dispatch] step 12: command buffer ended");
 
     // --- Submit + wait ---
     let cmds = vec![cmd];
@@ -263,7 +250,6 @@ pub fn dispatch_kernel(
         device.queue_wait_idle(queue)
             .context("failed to wait for queue")?;
     }
-    tracing::trace!("[dispatch] step 13: submit + wait done");
 
     // --- Read back output ---
     let output_data = VulkanBuffer::read_back(
@@ -273,7 +259,6 @@ pub fn dispatch_kernel(
         queue_family_index,
         &output_buffer,
     ).context("failed to read back output")?;
-    tracing::trace!("[dispatch] step 14: output read back");
 
     // --- Cleanup (input_buffers and output_buffer dropped here) ---
     drop(input_buffers);
@@ -288,7 +273,7 @@ pub fn dispatch_kernel(
         device.free_command_buffers(cmd_pool, &command_buffers);
         device.destroy_command_pool(cmd_pool, None);
     }
-    tracing::trace!("[dispatch] step 15: cleanup done");
+    tracing::trace!("Vulkan dispatch complete");
 
     // --- Create output tensor ---
     create_tensor_from_data(&output_data, output_shape, output_dtype)
@@ -900,6 +885,10 @@ pub fn dispatch_gdn_gated_rms_norm(
 /// Depthwise conv1d with kernel_size=4, silu-fused.
 /// `x`: `[B, C, 1]` bf16. `weight`: `[C, K]` bf16. `conv_state`: `[B, C, K-1]` f32.
 /// Returns `out: [B, C, 1]` f32 and updates `conv_state` in-place.
+///
+/// Two-dispatch approach to avoid data races on conv_state:
+/// 1. `causal_conv1d.comp` — computes output only (no state writes)
+/// 2. `causal_conv1d_state_advance.comp` — advances state per (b, c) pair
 pub fn dispatch_causal_conv1d_update(
     vk_device: &VulkanDevice,
     x: &Tensor,
@@ -922,13 +911,6 @@ pub fn dispatch_causal_conv1d_update(
     let weight_data = extract_tensor_bytes(weight)?.0;
     let state_data = extract_tensor_bytes(conv_state)?.0;
 
-    // Compile shader
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/causal_conv1d.comp"
-    );
-    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
     // Parse shape [B, C, T]
     let dims = x.dims();
     let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
@@ -948,164 +930,50 @@ pub fn dispatch_causal_conv1d_update(
     let out_size = (batch * channels * seq_len * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
 
-    // Push constants: batch, channels, seq_len, kernel_size
-    let push_constants: [u32; 4] = [batch as u32, channels as u32, seq_len as u32, kernel_size as u32];
+    // ---- Dispatch 1: causal_conv1d.comp (output only, no state writes) ----
+    let glsl_output = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d.comp"
+    );
+    let spirv_output = crate::pipeline::ShaderPipeline::compile_shader(glsl_output)?;
 
-    // Workgroup count: total elements / 256
-    let total = batch * channels * seq_len;
-    let workgroup_count = ((total + 255) / 256) as u32;
-
-    // Bindings: x=0, weight=1, conv_state=2, out=3
-    let all_handles = vec![
+    // Bindings for output shader: x=0, weight=1, out=2
+    let output_handles: Vec<vk::Buffer> = vec![
         x_buf.handle(),
         weight_buf.handle(),
-        state_buf.handle(),
         out_buf.handle(),
     ];
-    let total_bindings = all_handles.len();
+    let output_push: [u32; 4] = [batch as u32, channels as u32, seq_len as u32, kernel_size as u32];
+    let total = batch * channels * seq_len;
+    let output_wg = ((total + 255) / 256) as u32;
 
-    // Build pipeline
-    let spirv_words: &[u32] = bytemuck::cast_slice(&spirv);
-    let shader_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::builder().code(spirv_words).build(),
-            None,
-        ).context("failed to create shader module")?
-    };
+    run_compute_pipeline(
+        device, queue, qfi, &spirv_output,
+        &output_handles, 3,
+        &output_push, output_wg,
+    )?;
 
-    let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
-        .map(|i| {
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(i)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build()
-        })
-        .collect();
-    let set_layout = unsafe {
-        device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&desc_bindings).build(),
-            None,
-        ).context("failed to create descriptor set layout")?
-    };
+    // ---- Dispatch 2: causal_conv1d_state_advance.comp (state update only) ----
+    // Each workgroup handles one (b, c) pair: batch * channels workgroups
+    let glsl_state = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d_state_advance.comp"
+    );
+    let spirv_state = crate::pipeline::ShaderPipeline::compile_shader(glsl_state)?;
 
-    let push_constant_range = vk::PushConstantRange::builder()
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        .size((push_constants.len() * 4) as u32)
-        .build();
-    let set_layouts = vec![set_layout];
-    let layout = unsafe {
-        device.create_pipeline_layout(
-            &vk::PipelineLayoutCreateInfo::builder()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&[push_constant_range])
-                .build(),
-            None,
-        ).context("failed to create pipeline layout")?
-    };
+    // Bindings for state shader: x=0, conv_state=1
+    let state_handles: Vec<vk::Buffer> = vec![
+        x_buf.handle(),
+        state_buf.handle(),
+    ];
+    let state_push: [u32; 4] = [batch as u32, channels as u32, seq_len as u32, kernel_size as u32];
+    let state_wg = (batch * channels) as u32;
 
-    let stage_info = vk::PipelineShaderStageCreateInfo::builder()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(shader_module)
-        .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap())
-        .build();
-    let pipeline = unsafe {
-        device.create_compute_pipelines(
-            vk::PipelineCache::null(),
-            &[vk::ComputePipelineCreateInfo::builder().stage(stage_info).layout(layout).build()],
-            None,
-        ).map_err(|(errs, _)| {
-            if !errs.is_empty() {
-                anyhow::anyhow!("failed to create compute pipeline: {:?}", errs[0])
-            } else {
-                anyhow::anyhow!("failed to create compute pipeline")
-            }
-        })?[0]
-    };
-
-    let pool = unsafe {
-        device.create_descriptor_pool(
-            &vk::DescriptorPoolCreateInfo::builder()
-                .max_sets(1)
-                .pool_sizes(&[vk::DescriptorPoolSize::builder()
-                    .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(total_bindings as u32)
-                    .build()])
-                .build(),
-            None,
-        ).context("failed to create descriptor pool")?
-    };
-    let descriptor_set = unsafe {
-        device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(pool)
-                .set_layouts(&set_layouts)
-                .build(),
-        ).context("failed to allocate descriptor sets")?[0]
-    };
-
-    // Descriptor writes
-    {
-        let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
-            .iter()
-            .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
-                    .buffer(h)
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE)
-                    .build()
-            })
-            .collect();
-        let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
-            .iter()
-            .enumerate()
-            .map(|(i, bui)| make_write_descriptor_set_buf(descriptor_set, i as u32, bui))
-            .collect();
-        unsafe {
-            device.update_descriptor_sets(&descriptor_write_infos, &[]);
-        }
-    }
-
-    // Command buffer + dispatch
-    let cmd_pool = unsafe {
-        device.create_command_pool(&make_cmd_pool_info(qfi), None)
-            .context("failed to create command pool")?
-    };
-    let cmd_alloc_info = make_cmd_alloc_info(cmd_pool);
-    let command_buffers = crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
-        .context("failed to allocate command buffer")?;
-    let cmd = command_buffers[0];
-
-    unsafe {
-        device.begin_command_buffer(cmd, &make_cmd_begin_info())
-            .context("failed to begin command buffer")?;
-        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
-        device.cmd_bind_descriptor_sets(
-            cmd, vk::PipelineBindPoint::COMPUTE, layout, 0,
-            &[descriptor_set], &[],
-        );
-        device.cmd_push_constants(
-            cmd, layout, vk::ShaderStageFlags::COMPUTE, 0,
-            bytemuck::cast_slice(&push_constants),
-        );
-        device.cmd_dispatch(cmd, workgroup_count, 1, 1);
-
-        let barrier = make_memory_barrier(
-            vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::TRANSFER_READ,
-        );
-        device.cmd_pipeline_barrier(
-            cmd, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(), &[barrier], &[], &[],
-        );
-        device.end_command_buffer(cmd).context("failed to end command buffer")?;
-    }
-
-    unsafe {
-        device.queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit")?;
-        device.queue_wait_idle(queue).context("failed to wait for queue")?;
-    }
+    run_compute_pipeline(
+        device, queue, qfi, &spirv_state,
+        &state_handles, 2,
+        &state_push, state_wg,
+    )?;
 
     // Read back both output and updated state
     let out_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &out_buf)?;
@@ -1113,15 +981,6 @@ pub fn dispatch_causal_conv1d_update(
 
     // Cleanup
     drop(x_buf); drop(weight_buf); drop(state_buf); drop(out_buf);
-    unsafe {
-        device.destroy_pipeline(pipeline, None);
-        device.destroy_pipeline_layout(layout, None);
-        device.destroy_descriptor_set_layout(set_layout, None);
-        device.destroy_descriptor_pool(pool, None);
-        device.destroy_shader_module(shader_module, None);
-        device.free_command_buffers(cmd_pool, &command_buffers);
-        device.destroy_command_pool(cmd_pool, None);
-    }
 
     // Create output tensors
     let out_shape = x.dims().as_ref().to_vec();
@@ -1135,6 +994,10 @@ pub fn dispatch_causal_conv1d_update(
 /// Depthwise conv1d with kernel_size=4, silu-fused.
 /// `x`: `[B, C, T]` bf16. `weight`: `[C, K]` bf16. `conv_state`: `[B, C, K-1]` f32.
 /// Returns `out: [B, C, T]` f32 and updates `conv_state` in-place.
+///
+/// Two-dispatch approach to avoid data races on conv_state:
+/// 1. `causal_conv1d.comp` — computes output only (no state writes)
+/// 2. `causal_conv1d_state_advance.comp` — advances state per (b, c) pair
 pub fn dispatch_causal_conv1d_prefill(
     vk_device: &VulkanDevice,
     x: &Tensor,
@@ -1157,13 +1020,6 @@ pub fn dispatch_causal_conv1d_prefill(
     let weight_data = extract_tensor_bytes(weight)?.0;
     let state_data = extract_tensor_bytes(conv_state)?.0;
 
-    // Compile shader
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/causal_conv1d.comp"
-    );
-    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
     // Parse shape [B, C, T]
     let dims = x.dims();
     let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
@@ -1183,164 +1039,50 @@ pub fn dispatch_causal_conv1d_prefill(
     let out_size = (batch * channels * seq_len * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
 
-    // Push constants: batch, channels, seq_len, kernel_size
-    let push_constants: [u32; 4] = [batch as u32, channels as u32, seq_len as u32, kernel_size as u32];
+    // ---- Dispatch 1: causal_conv1d.comp (output only, no state writes) ----
+    let glsl_output = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d.comp"
+    );
+    let spirv_output = crate::pipeline::ShaderPipeline::compile_shader(glsl_output)?;
 
-    // Workgroup count: total elements / 256
-    let total = batch * channels * seq_len;
-    let workgroup_count = ((total + 255) / 256) as u32;
-
-    // Bindings: x=0, weight=1, conv_state=2, out=3
-    let all_handles = vec![
+    // Bindings for output shader: x=0, weight=1, out=2
+    let output_handles: Vec<vk::Buffer> = vec![
         x_buf.handle(),
         weight_buf.handle(),
-        state_buf.handle(),
         out_buf.handle(),
     ];
-    let total_bindings = all_handles.len();
+    let output_push: [u32; 4] = [batch as u32, channels as u32, seq_len as u32, kernel_size as u32];
+    let total = batch * channels * seq_len;
+    let output_wg = ((total + 255) / 256) as u32;
 
-    // Build pipeline
-    let spirv_words: &[u32] = bytemuck::cast_slice(&spirv);
-    let shader_module = unsafe {
-        device.create_shader_module(
-            &vk::ShaderModuleCreateInfo::builder().code(spirv_words).build(),
-            None,
-        ).context("failed to create shader module")?
-    };
+    run_compute_pipeline(
+        device, queue, qfi, &spirv_output,
+        &output_handles, 3,
+        &output_push, output_wg,
+    )?;
 
-    let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
-        .map(|i| {
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(i)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build()
-        })
-        .collect();
-    let set_layout = unsafe {
-        device.create_descriptor_set_layout(
-            &vk::DescriptorSetLayoutCreateInfo::builder().bindings(&desc_bindings).build(),
-            None,
-        ).context("failed to create descriptor set layout")?
-    };
+    // ---- Dispatch 2: causal_conv1d_state_advance.comp (state update only) ----
+    // Each workgroup handles one (b, c) pair: batch * channels workgroups
+    let glsl_state = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d_state_advance.comp"
+    );
+    let spirv_state = crate::pipeline::ShaderPipeline::compile_shader(glsl_state)?;
 
-    let push_constant_range = vk::PushConstantRange::builder()
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        .size((push_constants.len() * 4) as u32)
-        .build();
-    let set_layouts = vec![set_layout];
-    let layout = unsafe {
-        device.create_pipeline_layout(
-            &vk::PipelineLayoutCreateInfo::builder()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&[push_constant_range])
-                .build(),
-            None,
-        ).context("failed to create pipeline layout")?
-    };
+    // Bindings for state shader: x=0, conv_state=1
+    let state_handles: Vec<vk::Buffer> = vec![
+        x_buf.handle(),
+        state_buf.handle(),
+    ];
+    let state_push: [u32; 4] = [batch as u32, channels as u32, seq_len as u32, kernel_size as u32];
+    let state_wg = (batch * channels) as u32;
 
-    let stage_info = vk::PipelineShaderStageCreateInfo::builder()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(shader_module)
-        .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap())
-        .build();
-    let pipeline = unsafe {
-        device.create_compute_pipelines(
-            vk::PipelineCache::null(),
-            &[vk::ComputePipelineCreateInfo::builder().stage(stage_info).layout(layout).build()],
-            None,
-        ).map_err(|(errs, _)| {
-            if !errs.is_empty() {
-                anyhow::anyhow!("failed to create compute pipeline: {:?}", errs[0])
-            } else {
-                anyhow::anyhow!("failed to create compute pipeline")
-            }
-        })?[0]
-    };
-
-    let pool = unsafe {
-        device.create_descriptor_pool(
-            &vk::DescriptorPoolCreateInfo::builder()
-                .max_sets(1)
-                .pool_sizes(&[vk::DescriptorPoolSize::builder()
-                    .ty(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(total_bindings as u32)
-                    .build()])
-                .build(),
-            None,
-        ).context("failed to create descriptor pool")?
-    };
-    let descriptor_set = unsafe {
-        device.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(pool)
-                .set_layouts(&set_layouts)
-                .build(),
-        ).context("failed to allocate descriptor sets")?[0]
-    };
-
-    // Descriptor writes
-    {
-        let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
-            .iter()
-            .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
-                    .buffer(h)
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE)
-                    .build()
-            })
-            .collect();
-        let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
-            .iter()
-            .enumerate()
-            .map(|(i, bui)| make_write_descriptor_set_buf(descriptor_set, i as u32, bui))
-            .collect();
-        unsafe {
-            device.update_descriptor_sets(&descriptor_write_infos, &[]);
-        }
-    }
-
-    // Command buffer + dispatch
-    let cmd_pool = unsafe {
-        device.create_command_pool(&make_cmd_pool_info(qfi), None)
-            .context("failed to create command pool")?
-    };
-    let cmd_alloc_info = make_cmd_alloc_info(cmd_pool);
-    let command_buffers = crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
-        .context("failed to allocate command buffer")?;
-    let cmd = command_buffers[0];
-
-    unsafe {
-        device.begin_command_buffer(cmd, &make_cmd_begin_info())
-            .context("failed to begin command buffer")?;
-        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
-        device.cmd_bind_descriptor_sets(
-            cmd, vk::PipelineBindPoint::COMPUTE, layout, 0,
-            &[descriptor_set], &[],
-        );
-        device.cmd_push_constants(
-            cmd, layout, vk::ShaderStageFlags::COMPUTE, 0,
-            bytemuck::cast_slice(&push_constants),
-        );
-        device.cmd_dispatch(cmd, workgroup_count, 1, 1);
-
-        let barrier = make_memory_barrier(
-            vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::TRANSFER_READ,
-        );
-        device.cmd_pipeline_barrier(
-            cmd, vk::PipelineStageFlags::COMPUTE_SHADER, vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(), &[barrier], &[], &[],
-        );
-        device.end_command_buffer(cmd).context("failed to end command buffer")?;
-    }
-
-    unsafe {
-        device.queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit")?;
-        device.queue_wait_idle(queue).context("failed to wait for queue")?;
-    }
+    run_compute_pipeline(
+        device, queue, qfi, &spirv_state,
+        &state_handles, 2,
+        &state_push, state_wg,
+    )?;
 
     // Read back both output and updated state
     let out_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &out_buf)?;
@@ -1348,15 +1090,6 @@ pub fn dispatch_causal_conv1d_prefill(
 
     // Cleanup
     drop(x_buf); drop(weight_buf); drop(state_buf); drop(out_buf);
-    unsafe {
-        device.destroy_pipeline(pipeline, None);
-        device.destroy_pipeline_layout(layout, None);
-        device.destroy_descriptor_set_layout(set_layout, None);
-        device.destroy_descriptor_pool(pool, None);
-        device.destroy_shader_module(shader_module, None);
-        device.free_command_buffers(cmd_pool, &command_buffers);
-        device.destroy_command_pool(cmd_pool, None);
-    }
 
     // Create output tensors
     let out_shape = x.dims().as_ref().to_vec();
@@ -1371,11 +1104,14 @@ pub fn dispatch_causal_conv1d_prefill(
 // Common pipeline build + dispatch helper to reduce code duplication
 // ---------------------------------------------------------------------------
 
-/// Build a Vulkan compute pipeline and dispatch it.
+/// Build a Vulkan compute pipeline, dispatch it, wait for completion,
+/// and clean up all resources.
 ///
-/// This helper reduces code duplication across specialized dispatch functions.
-/// All Vulkan resources are cleaned up before returning.
-fn build_and_dispatch_pipeline(
+/// This helper is used by causal_conv1d (two-dispatch path) and gdn
+/// kernels. All Vulkan resources (shader module, pipeline layout, compute
+/// pipeline, descriptor pool, command pool) are created and destroyed
+/// within this function to keep individual dispatch functions focused.
+pub fn run_compute_pipeline(
     device: &ash::Device,
     queue: vk::Queue,
     qfi: u32,
@@ -1609,7 +1345,7 @@ pub fn dispatch_gdn_forward_substitution(
     let total_bindings = all_handles.len();
 
     // Build pipeline
-    build_and_dispatch_pipeline(
+    run_compute_pipeline(
         device, queue, qfi, &spirv, &all_handles, total_bindings,
         &push_constants, workgroup_count,
     )?;
@@ -1714,7 +1450,7 @@ pub fn dispatch_gdn_recurrent_step(
     let total_bindings = all_handles.len();
 
     // Build pipeline
-    build_and_dispatch_pipeline(
+    run_compute_pipeline(
         device, queue, qfi, &spirv, &all_handles, total_bindings,
         &push_constants, workgroup_count,
     )?;
@@ -1833,7 +1569,7 @@ pub fn dispatch_gdn_chunk_prep(
     let total_bindings = all_handles.len();
 
     // Build pipeline
-    build_and_dispatch_pipeline(
+    run_compute_pipeline(
         device, queue, qfi, &spirv, &all_handles, total_bindings,
         &push_constants, workgroup_count,
     )?;
@@ -1975,7 +1711,7 @@ pub fn dispatch_gdn_full_chunk_forward(
     let total_bindings = all_handles.len();
 
     // Build pipeline
-    build_and_dispatch_pipeline(
+    run_compute_pipeline(
         device, queue, qfi, &spirv, &all_handles, total_bindings,
         &push_constants, workgroup_count,
     )?;
@@ -2088,7 +1824,7 @@ pub fn dispatch_gdn_chunk_scan(
     let total_bindings = all_handles.len();
 
     // Build pipeline
-    build_and_dispatch_pipeline(
+    run_compute_pipeline(
         device, queue, qfi, &spirv, &all_handles, total_bindings,
         &push_constants, workgroup_count,
     )?;

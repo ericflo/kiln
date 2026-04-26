@@ -3,10 +3,21 @@
 // A_strict: [B,H,C,C] lower-triangular, V_prime: [B,H,C,dv], beta: [B,H,C]
 // Output: W: [B,H,C,dv]
 //
-// Fix: One workgroup per (b, h). Within the workgroup, threads process
-// sequentially across the chunk axis (C loop is serialized). Each thread
-// processes one dv element. This eliminates the data race and UB from
-// reading a writeonly buffer.
+// Design: One workgroup per (b, h). Threads are parallel across the dv axis.
+// The C-loop (forward-substitution) runs sequentially within the thread —
+// each thread reads sW[0..t-1] (shared memory) which was written by the
+// previous iteration of the same workgroup.
+//
+// Shared memory layout:
+//   sA[0..C*C-1]    = A_strict (loaded once)
+//   sW[0..C*dv-1]   = W results (written row-by-row, read back)
+//
+// Compile-time upper bounds:
+//   C ≤ 128 (per trait doc, kiln uses C=64)
+//   dv ≤ 256 (Qwen3.5-4B head_dim)
+//
+// Note: This kernel is EXPERIMENTAL. It compiles but has not yet been
+// validated against CPU parity. It is disabled by default (KILN_DISABLE_VULKAN_GDN_FORWARD_SUB).
 
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
@@ -23,46 +34,40 @@ layout(push_constant) uniform Parameters {
 layout(binding = 0) readonly buffer AStrictBuf { float data_a_strict[]; };
 layout(binding = 1) readonly buffer VPrimeBuf { float data_v_prime[]; };
 layout(binding = 2) readonly buffer BetaBuf { float data_beta[]; };
-layout(binding = 3) readonly buffer OutBuf { float data_out[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
 
-// Shared memory: A_strict (C*C) + W results (C*dv)
-shared float sA[];
-shared float sW[];
+// Shared memory with compile-time upper bounds
+// C ≤ 128, dv ≤ 256
+shared float sA[16384]; // 128 * 128
+shared float sW[32768]; // 128 * 256
 
 void main() {
-    uint b = gl_WorkGroupID.x / heads;
-    uint h = gl_WorkGroupID.x % heads;
-    uint tid = gl_LocalInvocationID.x;
-    uint blk = gl_NumWorkGroups.x;
-
-    // Check if we have a valid (b, h) to process
     uint total_bh = batch * heads;
     if (gl_WorkGroupID.x >= total_bh) return;
 
     uint bh = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint blk = gl_WorkGroupSize.x; // 256 — thread count per workgroup
+
     uint base_a = bh * chunk * chunk;
     uint base_v = bh * chunk * dv;
 
-    // Load A_strict into shared memory
+    // Load A_strict into shared memory (global offset → local index)
     uint total_a = chunk * chunk;
     for (uint i = tid; i < total_a; i += blk) {
         sA[i] = data_a_strict[base_a + i];
     }
-    // Note: sW is initialized implicitly (each row is written before read)
 
     barrier();
 
-    // Sequential rows: each t reads sW[0..t-1] which was written by the
-    // previous iteration (same workgroup = same thread IDs)
+    // Sequential rows; parallel across dv axis
     for (uint t = 0; t < chunk; ++t) {
         float beta_t = data_beta[bh * chunk + t];
-        uint a_row_base = base_a + t * chunk;
-        uint vp_base = base_v + t * dv;
-        uint w_row_base = t * dv;
+        uint a_row_base = t * chunk;          // local index into sA
+        uint vp_base = base_v + t * dv;       // global offset into VPrime
+        uint w_row_base = t * dv;             // local index into sW
 
-        // Parallel across dv axis
         for (uint d = tid; d < dv; d += blk) {
-            // sum_{i<t} A_strict[t, i] * W[i, d]
             float acc = 0.0;
             for (uint j = 0; j < t; ++j) {
                 acc += sA[a_row_base + j] * sW[j * dv + d];
@@ -77,10 +82,11 @@ void main() {
         barrier();
     }
 
-    // Write final results to global memory
-    for (uint d = tid; d < dv; d += blk) {
-        for (uint t = 0; t < chunk; ++t) {
-            data_out[base_v + t * dv + d] = sW[t * dv + d];
+    // Write final results: outer-`t` inner-`d` for coalesced writes
+    for (uint t = 0; t < chunk; ++t) {
+        uint row_base = base_v + t * dv;
+        for (uint d = tid; d < dv; d += blk) {
+            data_out[row_base + d] = sW[t * dv + d];
         }
     }
 }

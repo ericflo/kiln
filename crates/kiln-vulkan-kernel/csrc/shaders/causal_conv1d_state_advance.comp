@@ -1,0 +1,47 @@
+// Causal Conv1d dispatch 2: advance conv_state
+// Advances conv_state: shift left and append newest x token
+//
+// Dispatched once per (batch, channels) pair after the output dispatch.
+// Each workgroup handles one (b,c) pair.
+//
+// Input:  x[B,C,T] (reads only the LAST token: x[b,c,T-1])
+// Output: conv_state[B,C,K-1] (in-place shift + append)
+//
+// Push constants: batch, channels, seq_len, kernel_size
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) buffer ConvStateBuf { float data_conv_state[]; };
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint total_bc = batch * channels;
+    if (idx >= total_bc) {
+        return;
+    }
+
+    const uint b = idx / channels;
+    const uint c = idx % channels;
+
+    const uint state_base = (b * channels + c) * (kernel_size - 1);
+    const uint x_base = (b * channels + c) * seq_len;
+
+    // Shift: state[k] = state[k-1] for k = K-2 .. 1
+    for (uint k = kernel_size - 2; k > 0; k--) {
+        data_conv_state[state_base + k] = data_conv_state[state_base + k - 1];
+    }
+
+    // Append the LAST token (x[b,c,T-1]), not the first
+    data_conv_state[state_base] = data_x[x_base + seq_len - 1];
+}

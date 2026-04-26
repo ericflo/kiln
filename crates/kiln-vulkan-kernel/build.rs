@@ -54,19 +54,20 @@ fn main() {
 
         match &output {
             Ok(output) if output.status.success() => {
-                println!("cargo:warning=Compiled Vulkan shader: {}", name);
+                // Status message (not cargo:warning — that's for actual problems)
+                println!("Vulkan shader compiled: {}", name);
             }
             Ok(output) => {
                 eprintln!(
-                    "cargo:warning=glslc failed for {}: {}",
+                    "cargo:warning=glslc failed for {}: {} — shaders will compile at runtime", 
                     name,
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
             Err(e) => {
                 eprintln!(
-                    "cargo:warning=Failed to run glslc for {}: {}. Shaders will be compiled at runtime.",
-                    name, e
+                    "cargo:warning=glslc not found ({}) — Vulkan shaders will compile at runtime (or fail with a clear error)",
+                    e
                 );
             }
         }
@@ -113,4 +114,5 @@ fn main() {
 
     println!("cargo:rerun-if-changed=csrc/shaders/");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=PATH");
 }

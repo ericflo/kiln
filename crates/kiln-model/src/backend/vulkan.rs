@@ -2,12 +2,17 @@
 //!
 //! candle-core 0.10.x has no native Vulkan device, so this backend manages
 //! its own `vk::Device` and copies tensor data through the CPU path at
-//! kernel boundaries. This matches llama.cpp's Vulkan approach.
+//! kernel boundaries. The model's main forward pass (matmuls, MLP, lm_head)
+//! runs on CPU; only GDN-specific kernel calls reach Vulkan. This means
+//! each kernel call pays a CPU→GPU→CPU roundtrip, which is the primary
+//! bottleneck for this backend. PR2 will introduce `KilnVulkanStorage` to
+//! keep tensors resident on GPU between kernel calls.
 //!
 //! `Ok(None)` responses route the caller to the portable candle path.
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
+use std::sync::Arc;
 
 use super::BackendRuntime;
 
@@ -131,11 +136,15 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
-        self.has_vulkan()
+        // flash_attn_prefill is a placeholder — only works for head_dim=128
+        // and is missing scratch/LSE/causal-mask buffers. Return false
+        // so callers don't skip their preamble work only to get Ok(None).
+        false
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        self.has_vulkan()
+        // Not implemented — return false so callers keep their preamble.
+        false
     }
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
@@ -145,7 +154,13 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
-        self.has_vulkan() && self.gdn_enabled
+        // solve_tri kernel is experimental: shared-memory layout is not yet
+        // validated against CPU parity. Disabled by default behind a kill-switch
+        // so it can be enabled for testing without landing unverified code.
+        self.has_vulkan()
+            && self.gdn_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_GDN_FORWARD_SUB").is_err()
+            && std::env::var("KILN_ENABLE_VULKAN_GDN_FORWARD_SUB").is_ok()
     }
 
     fn supports_gdn_recurrent_step(&self) -> bool {
@@ -430,43 +445,69 @@ impl BackendRuntime for VulkanBackend {
 }
 
 /// Check if Vulkan is available on this system.
-/// Uses a cached result to avoid the expensive VulkanDevice::new() call.
-static VULKAN_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
+/// Uses a cheap probe (instance + physical-device enumeration only) cached
+/// with OnceLock to avoid repeated checks.
 pub fn vulkan_is_available() -> bool {
-    *VULKAN_AVAILABLE.get_or_init(|| {
-        kiln_vulkan_kernel::VulkanDevice::new().is_ok()
-    })
+    static VULKAN_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VULKAN_AVAILABLE.get_or_init(kiln_vulkan_kernel::VulkanDevice::probe)
 }
 
-/// Precompile Vulkan custom kernels (warm up pipeline cache).
+/// Precompile Vulkan custom kernels.
 ///
-/// Compiles all known GLSL shaders to SPIR-V at startup to avoid
-/// compilation latency during the first inference request.
-pub fn precompile_custom_kernels(_device: &Device) -> Result<()> {
+/// In PR1 this verifies that all SPIR-V modules load correctly and the
+/// shaders can be compiled. The pipelines are created and destroyed within
+/// this call; they are NOT cached across dispatch calls. Proper pipeline
+/// caching (ShaderPipeline owned by VulkanBackend, looked up by dispatch
+/// functions) is the load-bearing PR2 item.
+///
+/// Creates a temporary VulkanDevice internally; the caller doesn't need
+/// to own or pass one.
+pub fn precompile_custom_kernels() -> Result<()> {
+    let vk_device = match kiln_vulkan_kernel::VulkanDevice::new() {
+        Ok(dev) => dev,
+        Err(_) => return Ok(()),
+    };
+    let device = vk_device.device();
+
     let shaders = [
-        "gdn_gates",
-        "gdn_gated_rms_norm",
-        "causal_conv1d",
-        "solve_tri",
-        "gdn_recurrent_prefill",
-        "gdn_chunk_prep",
-        "gdn_full_chunk_forward",
-        "gdn_chunk_scan",
-        "flash_attn",
+        ("gdn_gates", 16),
+        ("gdn_gated_rms_norm", 16),
+        ("causal_conv1d", 16),
+        ("solve_tri", 16),
+        ("gdn_recurrent_prefill", 16),
+        ("gdn_chunk_prep", 16),
+        ("gdn_full_chunk_forward", 16),
+        ("gdn_chunk_scan", 16),
+        ("flash_attn", 24),
     ];
 
     let base = env!("CARGO_MANIFEST_DIR");
     let vulkan_base = format!("{}/../kiln-vulkan-kernel/csrc/shaders", base);
 
-    for shader_name in &shaders {
+    // Build a ShaderPipeline to verify each shader compiles.
+    // In PR2 this will be replaced with a shared cache owned by VulkanBackend.
+    let mut pipeline_cache = kiln_vulkan_kernel::pipeline::ShaderPipeline::new(&Arc::clone(device));
+
+    for (shader_name, push_bytes) in &shaders {
         let glsl_path = format!("{}/{}.comp", vulkan_base, shader_name);
-        match kiln_vulkan_kernel::pipeline::ShaderPipeline::compile_shader(&glsl_path) {
-            Ok(_) => tracing::info!(shader = %shader_name, "precompiled Vulkan shader"),
-            Err(e) => tracing::warn!(shader = %shader_name, error = %e, "failed to precompile Vulkan shader (will compile on first use)"),
+        let spv = match kiln_vulkan_kernel::pipeline::ShaderPipeline::compile_shader(&glsl_path) {
+            Ok(spv) => spv,
+            Err(e) => {
+                tracing::warn!(shader = %shader_name, error = %e, "failed to precompile Vulkan shader");
+                continue;
+            }
+        };
+
+        match pipeline_cache.get_or_create(shader_name, &spv, *push_bytes) {
+            Ok(_) => tracing::info!(shader = %shader_name, "Vulkan shader verified"),
+            Err(e) => tracing::warn!(shader = %shader_name, error = %e, "failed to create Vulkan pipeline"),
         }
     }
 
-    tracing::info!("Vulkan shader precompilation complete");
+    // Pipeline cache is dropped here; pipelines are NOT persisted.
+    // PR2 will wire ShaderPipeline into VulkanBackend for true caching.
+    drop(pipeline_cache);
+
+    tracing::info!("Vulkan shader verification complete (pipeline caching deferred to PR2)");
     Ok(())
 }
