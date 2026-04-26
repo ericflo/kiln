@@ -35,6 +35,9 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
 
+      - name: Fetch dependencies
+        run: cargo fetch
+
       - name: Build (default features — no GPU)
         run: cargo build --locked
 
@@ -67,6 +70,9 @@ jobs:
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch
 
       - name: Build (default features — no CUDA)
         run: cargo build --locked
