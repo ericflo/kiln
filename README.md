@@ -58,9 +58,11 @@ A 4B model continuously tuned to your specific workload will outperform a generi
 - **FP8 KV cache** — optional quantization doubles effective context length.
 - **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
 - **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
-- **Adapter management** — load, unload, compose, and version LoRA adapters.
+- **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters.
+- **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling, or merge them server-side via weighted_average / TIES / concatenation.
 - **Embedded web dashboard** at `/ui` — live server status, VRAM breakdown, adapter management, training monitoring, and a chat playground. No extra service to run.
 - **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
+- **Training webhooks** — POST a JSON event to a configured URL on training job completion or failure.
 - **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
 
 ## The GRPO Loop
@@ -179,13 +181,16 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | Method | Path | Description |
 |---|---|---|
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible) |
+| POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request) |
 | POST | `/v1/train/sft` | Submit SFT training examples |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/adapters` | List loaded LoRA adapters |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
-| POST | `/v1/adapters/merge` | Merge adapters via weighted average |
+| POST | `/v1/adapters/upload` | Multipart tar.gz import of an adapter |
+| GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
+| POST | `/v1/adapters/merge` | Merge adapters (weighted_average, TIES, or concatenation modes) |
 | GET | `/v1/models` | List available models |
 | GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/health` | Server health and diagnostics |
@@ -292,7 +297,7 @@ sudo systemctl enable --now kiln
 
 ## Status
 
-Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, production hardening, and the Phase 6 performance optimization sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache) are all shipped. Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Current work is Phase 7 — developer experience: quickstart polish, CLI ergonomics, embedded `/ui` dashboard improvements, and architecture documentation. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
+Kiln is in active development. Core inference, LoRA serving, SFT training, GRPO training, production hardening, and the Phase 6 performance optimization sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache) are all shipped. Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Phase 7 (developer experience) and Phase 8 (advanced features: adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks) have shipped. Current work is Phase 9 — public release preparation. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
 
 Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 
