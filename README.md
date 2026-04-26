@@ -337,4 +337,6 @@ Kiln builds on ideas from:
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+Third-party dependency licenses: see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

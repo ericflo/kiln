@@ -1,0 +1,45 @@
+# cargo-about configuration for generating THIRD_PARTY_LICENSES.md.
+#
+# The `accepted` allowlist mirrors deny.toml's [licenses].allow list. If you
+# add a license here, also add it to deny.toml so cargo-deny accepts the new
+# dep and cargo-about can attribute it.
+#
+# `targets` covers the platforms we publish prebuilt release binaries for on
+# every kiln-v* tag (Linux+CUDA server, macOS Metal desktop, Windows+CUDA
+# server). Crates that are target-gated to other platforms are skipped.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    "CDLA-Permissive-2.0",
+]
+
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+# Don't fail on private workspace crates that don't publish to crates.io.
+private = { ignore = true }
+
+# Don't follow build-time-only deps into the attribution doc — only crates
+# that link into the shipped binaries matter for redistribution.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+
+# Default workarounds (e.g. ring's complex license fingerprint) — opt in
+# only if cargo-about complains about a specific dep we can't attribute
+# from the manifest alone.
+workarounds = []
