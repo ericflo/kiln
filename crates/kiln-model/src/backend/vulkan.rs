@@ -49,7 +49,8 @@ impl VulkanBackend {
         // forward_sub: solve_tri shared-memory layout not yet validated against
         //   CPU parity; also may exceed maxComputeSharedMemorySize on many GPUs.
         // Enabling either without PR2 parity tests risks silently wrong output.
-        let fused_conv1d_enabled = std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_ok();
+        let fused_conv1d_enabled = gdn_enabled
+            && std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_ok();
         let gdn_forward_sub_enabled = gdn_enabled
             && std::env::var("KILN_ENABLE_VULKAN_GDN_FORWARD_SUB").is_ok();
 
