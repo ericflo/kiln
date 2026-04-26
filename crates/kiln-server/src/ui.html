@@ -507,6 +507,42 @@ textarea { resize: vertical; min-height: 80px; }
     <div class="panel-body" id="adapters-panel">
       <div class="empty">Loading...</div>
     </div>
+    <div class="panel-body" style="border-top:1px solid var(--border);">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Upload Adapter</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:center;">
+        <input type="text" id="upload-name" placeholder="adapter name">
+        <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" style="font-family:var(--sans);font-size:12px;">
+        <button class="btn btn-primary" onclick="uploadAdapter()">Upload</button>
+      </div>
+    </div>
+    <div class="panel-body" style="border-top:1px solid var(--border);">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Merge Adapters</div>
+      <div id="merge-sources" style="margin-bottom:6px;"></div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <button type="button" class="btn btn-sm" onclick="addMergeSource()">+ Add source</button>
+      </div>
+      <div class="form-row" style="margin-bottom:8px;">
+        <div class="form-group" style="margin-bottom:0;">
+          <label>Output Name</label>
+          <input type="text" id="merge-output-name" placeholder="merged-adapter">
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label>Mode</label>
+          <select id="merge-mode" onchange="onMergeModeChange()">
+            <option value="weighted_average">weighted_average</option>
+            <option value="ties">ties</option>
+            <option value="concat">concat</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" id="merge-density-wrap" style="display:none;margin-bottom:8px;">
+        <label>Density (TIES, in (0, 1])</label>
+        <input type="number" id="merge-density" step="0.05" min="0.01" max="1" value="0.2">
+      </div>
+      <div style="display:flex;justify-content:flex-end;">
+        <button class="btn btn-primary" onclick="mergeAdapters()">Merge</button>
+      </div>
+    </div>
   </div>
 
   <!-- Training -->
@@ -863,11 +899,15 @@ async function pollRecentRequests() {
 }
 
 // --- Adapters ---
+let lastAdapters = null;
+
 async function pollAdapters() {
   try {
     const data = await api('/v1/adapters');
+    lastAdapters = data;
     renderAdapters(data);
     updateAdapterSelect(data);
+    renderMergeSources();
   } catch (e) {
     document.getElementById('adapters-panel').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
   }
@@ -890,6 +930,7 @@ function renderAdapters(data) {
           ${isActive
             ? `<button class="btn btn-sm" onclick="unloadAdapter()">Unload</button>`
             : `<button class="btn btn-sm" onclick="loadAdapter('${a.name.replace(/'/g, "\\'")}')">Load</button>`}
+          <button class="btn btn-sm" onclick="downloadAdapter('${a.name.replace(/'/g, "\\'")}')">Download</button>
           <button class="btn btn-sm btn-danger" onclick="deleteAdapter('${a.name.replace(/'/g, "\\'")}')">Delete</button>
         </div>
       </li>
@@ -936,6 +977,126 @@ window.deleteAdapter = async function(name) {
   try {
     await api('/v1/adapters/' + encodeURIComponent(name), { method: 'DELETE' });
     toast('Deleted adapter: ' + name);
+    pollAdapters();
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+window.downloadAdapter = function(name) {
+  // Browser saves the response via Content-Disposition: attachment.
+  window.location.href = '/v1/adapters/' + encodeURIComponent(name) + '/download';
+};
+
+window.uploadAdapter = async function() {
+  const nameEl = document.getElementById('upload-name');
+  const fileEl = document.getElementById('upload-archive');
+  const name = nameEl.value.trim();
+  const file = fileEl.files[0];
+  if (!name) { toast('Adapter name is required', 'err'); return; }
+  if (!file) { toast('Choose a .tar.gz archive', 'err'); return; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('archive', file);
+  try {
+    // NOTE: do not set Content-Type — the browser sets the multipart boundary.
+    const res = await fetch('/v1/adapters/upload', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    toast(`Uploaded ${data.name} (${fmtBytes(data.size_bytes)}, ${data.files} files)`);
+    nameEl.value = '';
+    fileEl.value = '';
+    pollAdapters();
+  } catch (e) { toast(e.message, 'err'); }
+};
+
+// --- Adapter Merge ---
+let mergeSourceCount = 2;
+
+function renderMergeSources() {
+  const list = document.getElementById('merge-sources');
+  if (!list) return;
+  // Preserve current values across re-renders.
+  const existing = Array.from(list.querySelectorAll('.merge-source')).map(row => ({
+    name: row.querySelector('.merge-src-name').value,
+    weight: row.querySelector('.merge-src-weight').value,
+  }));
+  const adapterOptions = (lastAdapters && lastAdapters.available || [])
+    .map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)}</option>`)
+    .join('');
+  let html = '';
+  for (let i = 0; i < mergeSourceCount; i++) {
+    const sel = existing[i] ? existing[i].name : '';
+    const w = existing[i] ? existing[i].weight : '0.5';
+    html += `<div class="merge-source" style="display:grid;grid-template-columns:1fr 90px auto;gap:6px;margin-bottom:6px;align-items:center;">
+      <select class="merge-src-name"><option value="">(select adapter)</option>${adapterOptions}</select>
+      <input type="number" class="merge-src-weight" step="0.05" value="${w}">
+      <button type="button" class="btn btn-sm btn-danger" onclick="removeMergeSource(${i})" ${mergeSourceCount <= 1 ? 'disabled' : ''}>−</button>
+    </div>`;
+  }
+  list.innerHTML = html;
+  // Re-apply preserved selections after innerHTML replacement.
+  Array.from(list.querySelectorAll('.merge-source')).forEach((row, i) => {
+    if (existing[i]) row.querySelector('.merge-src-name').value = existing[i].name;
+  });
+}
+
+window.addMergeSource = function() { mergeSourceCount += 1; renderMergeSources(); };
+window.removeMergeSource = function(idx) {
+  if (mergeSourceCount <= 1) return;
+  // Drop the row at idx by reading current values, removing it, then re-rendering.
+  const list = document.getElementById('merge-sources');
+  const rows = Array.from(list.querySelectorAll('.merge-source'));
+  const kept = rows.filter((_, i) => i !== idx).map(row => ({
+    name: row.querySelector('.merge-src-name').value,
+    weight: row.querySelector('.merge-src-weight').value,
+  }));
+  mergeSourceCount = Math.max(1, kept.length);
+  renderMergeSources();
+  // Re-apply preserved values to the freshly rendered rows.
+  const newRows = list.querySelectorAll('.merge-source');
+  kept.forEach((v, i) => {
+    if (!newRows[i]) return;
+    newRows[i].querySelector('.merge-src-name').value = v.name;
+    newRows[i].querySelector('.merge-src-weight').value = v.weight;
+  });
+};
+
+window.onMergeModeChange = function() {
+  const mode = document.getElementById('merge-mode').value;
+  const densityWrap = document.getElementById('merge-density-wrap');
+  if (densityWrap) densityWrap.style.display = (mode === 'ties') ? '' : 'none';
+};
+
+window.mergeAdapters = async function() {
+  const list = document.getElementById('merge-sources');
+  const rows = Array.from(list.querySelectorAll('.merge-source'));
+  const sources = [];
+  for (const row of rows) {
+    const name = row.querySelector('.merge-src-name').value.trim();
+    const weight = parseFloat(row.querySelector('.merge-src-weight').value);
+    if (!name) { toast('Each merge source needs an adapter', 'err'); return; }
+    if (!Number.isFinite(weight)) { toast('Each merge source needs a numeric weight', 'err'); return; }
+    sources.push({ name, weight });
+  }
+  if (sources.length === 0) { toast('Add at least one source', 'err'); return; }
+  const outputName = document.getElementById('merge-output-name').value.trim();
+  if (!outputName) { toast('Output name is required', 'err'); return; }
+  const mode = document.getElementById('merge-mode').value;
+  const body = { sources, output_name: outputName, mode };
+  if (mode === 'ties') {
+    const d = parseFloat(document.getElementById('merge-density').value);
+    if (!Number.isFinite(d) || d <= 0 || d > 1) { toast('Density must be in (0, 1]', 'err'); return; }
+    body.density = d;
+  }
+  try {
+    const res = await api('/v1/adapters/merge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    toast(`Merged ${res.sources.length} sources → ${res.output_name} (${res.num_tensors} tensors, mode=${res.mode})`);
     pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
 };
