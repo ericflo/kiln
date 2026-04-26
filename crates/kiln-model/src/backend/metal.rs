@@ -195,12 +195,17 @@ impl BackendRuntime for MetalBackend {
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
-        true
+        std::env::var("KILN_DISABLE_METAL_SDPA").is_err()
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        true
+        std::env::var("KILN_DISABLE_METAL_SDPA").is_err()
     }
+
+    // Note: keep `supports_*` returning true so the planner picks the SDPA
+    // path; the per-call gate inside the kernel functions then decides
+    // whether the *specific* shape is safe and silently falls back to the
+    // naive softmax+matmul path when it isn't.
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
         true
@@ -296,13 +301,21 @@ impl BackendRuntime for MetalBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
+        if std::env::var("KILN_DISABLE_METAL_SDPA").is_ok() {
+            return Ok(None);
+        }
         // Decline (caller falls back to the portable path) when candle's SDPA
         // can't handle the shape/dtype. Cheaper than surfacing a kernel error
         // from inside the fused path.
         if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
             return Ok(None);
         }
-        if !metal_sdpa_supports_head_dim(q.dim(candle_core::D::Minus1)?) {
+        let head_dim = q.dim(candle_core::D::Minus1)?;
+        if !metal_sdpa_supports_head_dim(head_dim) {
+            return Ok(None);
+        }
+        let q_seq = q.dim(2)?;
+        if !metal_sdpa_full_safe_for_q_seq(head_dim, q_seq) {
             return Ok(None);
         }
 
@@ -327,10 +340,18 @@ impl BackendRuntime for MetalBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
+        if std::env::var("KILN_DISABLE_METAL_SDPA").is_ok() {
+            return Ok(None);
+        }
         if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
             return Ok(None);
         }
-        if !metal_sdpa_supports_head_dim(q.dim(candle_core::D::Minus1)?) {
+        let head_dim = q.dim(candle_core::D::Minus1)?;
+        if !metal_sdpa_supports_head_dim(head_dim) {
+            return Ok(None);
+        }
+        let q_seq = q.dim(2)?;
+        if !metal_sdpa_full_safe_for_q_seq(head_dim, q_seq) {
             return Ok(None);
         }
 
@@ -695,6 +716,31 @@ impl BackendRuntime for MetalBackend {
 /// slower). Re-check this on candle bumps.
 fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
     matches!(head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256 | 512)
+}
+
+/// candle-metal-kernels 0.10.2's `call_sdpa_full` (steel attention) routes
+/// `q_seq <= 8` to a vector kernel and `q_seq > 8` to the tiled "full" kernel
+/// with `bq = 32` for `head_dim < 512`. Every BF16 prefill we issue with
+/// `8 < q_seq < bq` (for example a 16-token Qwen3.5 chat prompt) returns an
+/// all-NaN output buffer — root-caused by tracing layer-by-layer hidden state
+/// statistics: `post-layer-3` (the first full_attention block) flips from
+/// finite to `nan=N` exactly when `q_seq` lives in this band, regardless of
+/// which Metal fused kernels are enabled (`KILN_DISABLE_METAL_*` env vars,
+/// prefix cache off, lm_head matmul fallback). Disabling the SDPA path
+/// (`KILN_DISABLE_METAL_SDPA=1`) immediately recovers correct generation.
+///
+/// Until the upstream kernel handles this band correctly, decline the
+/// fused path here and let the caller fall back to the naive
+/// softmax+matmul prefill, which is bit-exact and only ~50–80 ms slower
+/// for a single short prompt.
+fn metal_sdpa_full_safe_for_q_seq(head_dim: usize, q_seq: usize) -> bool {
+    // q_seq <= 8 routes to the vector kernel which is unaffected.
+    if q_seq <= 8 {
+        return true;
+    }
+    // Tiled "full" kernel uses bq = 32 except at head_dim == 512 (bq = 8).
+    let bq = if head_dim == 512 { 8 } else { 32 };
+    q_seq >= bq
 }
 
 fn metal_gdn_qk_norm_disabled() -> bool {
