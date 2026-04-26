@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### CI / release
+
+- Publish prebuilt server Docker image to `ghcr.io/ericflo/kiln-server` on every `kiln-v*` tag (#XXX)
+
 ## kiln-v0.2.3 — 2026-04-26
 
 Phase 8 advanced features release: batch generation, adapter upload/download,

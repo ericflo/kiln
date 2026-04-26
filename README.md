@@ -286,12 +286,34 @@ Build and dev docs for the desktop app live in [desktop/README.md](desktop/READM
 
 ## Deployment
 
+### Docker — pull a prebuilt image
+
+Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to GHCR:
+
 ```bash
-# Docker
+docker pull ghcr.io/ericflo/kiln-server:latest
+# or pin a version:
+docker pull ghcr.io/ericflo/kiln-server:0.2.3
+```
+
+Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
+
+```bash
+docker run --gpus all -p 8420:8420 \
+  -v /path/to/Qwen3.5-4B:/models \
+  ghcr.io/ericflo/kiln-server:latest serve
+```
+
+### Docker — build from source
+
+```bash
 docker build -f deploy/Dockerfile -t kiln .
 docker run --gpus all -v /path/to/Qwen3.5-4B:/models -p 8420:8420 kiln serve
+```
 
-# systemd
+### systemd
+
+```bash
 sudo cp target/release/kiln /usr/local/bin/
 sudo cp deploy/kiln.service /etc/systemd/system/
 sudo systemctl enable --now kiln

@@ -1,0 +1,99 @@
+name: Build and publish kiln-server image
+
+# Publishes the production kiln server Docker image to
+# `ghcr.io/ericflo/kiln-server` on every `kiln-v*` tag push, mirroring the
+# binary release flow in `server-release.yml`. Phase 9 release-prep:
+# users should be able to `docker pull ghcr.io/ericflo/kiln-server:latest`
+# (or pin a version) instead of building from source.
+#
+# The first publish for a given tag creates the GHCR package; subsequent
+# pushes update it. `GITHUB_TOKEN` is sufficient because the package lives
+# under the same owner (`ericflo`) as the repo — same setup that
+# `runpod-image.yml` uses for `ghcr.io/ericflo/kiln-runpod`.
+#
+# `workflow_dispatch` is wired up too so we can validate the workflow
+# end-to-end without cutting a real tag, but the manual run does NOT push
+# (push is gated on `startsWith(github.ref, 'refs/tags/kiln-v')`).
+
+on:
+  push:
+    tags:
+      - "kiln-v*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ericflo/kiln-server
+
+jobs:
+  docker-server:
+    name: Build and push kiln-server image
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free disk space
+        # The CUDA 12.4 devel base image (~10 GB) plus the cargo target
+        # dir for `--features cuda` (~5 GB of CUDA kernel artifacts)
+        # exceed the default ~14 GB free on ubuntu-22.04 runners. Mirrors
+        # the runner hygiene used in `runpod-image.yml` and the linux-cuda
+        # job in `server-release.yml`.
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version from tag
+        id: version
+        # On `push` to a `kiln-v*` tag, derive the version from the ref
+        # (e.g. `kiln-v0.2.3` -> `0.2.3`) so the tagged image and the
+        # binary release always share the same version string. On
+        # `workflow_dispatch`, fall back to `dev` — the publish step is
+        # gated separately so this tag is only ever produced as a local
+        # smoke build, never pushed.
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/kiln-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#kiln-v}"
+          else
+            VERSION="dev"
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "Computed VERSION=${VERSION}"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: ${{ startsWith(github.ref, 'refs/tags/kiln-v') }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # provenance + sbom both off so buildx pushes a plain Docker v2
+          # manifest (not just an OCI index). Older Docker daemons —
+          # including the one RunPod ships — reject OCI-only pulls with
+          # "denied: denied" even for public packages. Same rationale as
+          # `runpod-image.yml`.
+          provenance: false
+          sbom: false
