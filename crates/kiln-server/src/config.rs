@@ -122,6 +122,12 @@ pub struct TrainingConfig {
     /// Override via `KILN_TRAINING_WEBHOOK_URL`. To clear a TOML-set
     /// URL via env, set the variable to the empty string.
     pub webhook_url: Option<String>,
+    /// Maximum number of training jobs that may sit in the queue at once.
+    /// Submissions to `/v1/train/sft` and `/v1/train/grpo` while the queue
+    /// is at this cap return HTTP 503 with a `Retry-After: 30` header
+    /// instead of growing the in-memory queue without bound.
+    /// Override via `KILN_TRAINING_MAX_QUEUED_JOBS`. Default: 32.
+    pub max_queued_jobs: usize,
 }
 
 /// Logging settings.
@@ -295,6 +301,7 @@ impl Default for TrainingConfig {
             no_grad_checkpoint: false,
             checkpoint_interval: None,
             webhook_url: None,
+            max_queued_jobs: 32,
         }
     }
 }
@@ -510,6 +517,11 @@ impl KilnConfig {
             // Empty string explicitly clears any TOML-set URL.
             self.training.webhook_url = if v.is_empty() { None } else { Some(v) };
         }
+        if let Ok(v) = std::env::var("KILN_TRAINING_MAX_QUEUED_JOBS") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.training.max_queued_jobs = n;
+            }
+        }
 
         // Logging
         if let Ok(v) = std::env::var("KILN_LOG_LEVEL") {
@@ -638,6 +650,7 @@ mod tests {
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert!(config.training.webhook_url.is_none());
+        assert_eq!(config.training.max_queued_jobs, 32);
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "auto");
         assert!(config.prefix_cache.enabled);
@@ -678,6 +691,7 @@ grad_checkpoint_segments = 8
 no_grad_checkpoint = false
 checkpoint_interval = 50
 webhook_url = "https://example.com/hook"
+max_queued_jobs = 4
 
 [logging]
 level = "debug"
@@ -715,6 +729,7 @@ last_token_lm_head = false
             config.training.webhook_url.as_deref(),
             Some("https://example.com/hook")
         );
+        assert_eq!(config.training.max_queued_jobs, 4);
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "pretty");
         assert!(!config.prefix_cache.enabled);
@@ -816,6 +831,7 @@ port = 3000
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
             std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
             std::env::set_var("KILN_TRAINING_WEBHOOK_URL", "https://hook.example/notify");
+            std::env::set_var("KILN_TRAINING_MAX_QUEUED_JOBS", "7");
             std::env::set_var("KILN_KV_CACHE_FP8", "1");
             std::env::set_var("KILN_CUDA_GRAPHS", "false");
             std::env::set_var("KILN_PREFIX_CACHE_ENABLED", "false");
@@ -842,6 +858,7 @@ port = 3000
             config.training.webhook_url.as_deref(),
             Some("https://hook.example/notify")
         );
+        assert_eq!(config.training.max_queued_jobs, 7);
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert!(!config.prefix_cache.enabled);
@@ -863,6 +880,7 @@ port = 3000
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
             std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
             std::env::remove_var("KILN_TRAINING_WEBHOOK_URL");
+            std::env::remove_var("KILN_TRAINING_MAX_QUEUED_JOBS");
             std::env::remove_var("KILN_KV_CACHE_FP8");
             std::env::remove_var("KILN_CUDA_GRAPHS");
             std::env::remove_var("KILN_PREFIX_CACHE_ENABLED");

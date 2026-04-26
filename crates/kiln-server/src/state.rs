@@ -418,6 +418,11 @@ pub struct AppState {
     /// job completes or fails. `None` disables webhook firing entirely.
     /// See `TrainingConfig::webhook_url` for the payload contract.
     pub training_webhook_url: Option<String>,
+    /// Maximum number of training jobs that may sit in `training_queue`
+    /// at once. Submissions while the queue is at this cap are rejected
+    /// with HTTP 503 + `Retry-After: 30`. Mirrors
+    /// `TrainingConfig::max_queued_jobs` (default 32).
+    pub max_queued_training_jobs: usize,
     /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
     pub served_model_id: String,
     /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
@@ -479,6 +484,7 @@ impl AppState {
             inference_prewarm_complete: Arc::new(AtomicBool::new(true)),
             checkpoint_interval: None,
             training_webhook_url: None,
+            max_queued_training_jobs: 32,
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
@@ -695,6 +701,7 @@ impl AppState {
             ))),
             checkpoint_interval: None,
             training_webhook_url: None,
+            max_queued_training_jobs: 32,
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(

@@ -241,9 +241,14 @@ async fn main() -> Result<()> {
     // Apply server-level checkpoint_interval from config
     state.checkpoint_interval = config.training.checkpoint_interval;
     state.training_webhook_url = config.training.webhook_url.clone();
+    state.max_queued_training_jobs = config.training.max_queued_jobs;
     if let Some(ref url) = state.training_webhook_url {
         tracing::info!(url = %url, "training completion webhook configured");
     }
+    tracing::info!(
+        cap = state.max_queued_training_jobs,
+        "training queue cap configured"
+    );
 
     // Spawn the background training queue worker
     let shutdown_flag = state.shutdown.clone();
