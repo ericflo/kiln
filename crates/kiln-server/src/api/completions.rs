@@ -1046,20 +1046,28 @@ async fn generate_real_streaming(
 
             let sync_rx = match speculative_mode {
                 ResolvedSpeculativeMode::Off => {
+                    // Spawn-via-blocking so that prefill (which is itself a
+                    // blocking GPU call) runs off the async runtime, then
+                    // hands the receiver back. The actual decode loop runs on
+                    // its own `std::thread` inside `spawn_streaming_*`, so
+                    // this `spawn_blocking` returns as soon as prefill emits
+                    // the first token — *not* after `max_tokens` steps. That
+                    // is what makes `stream: true` actually stream over SSE
+                    // instead of buffering everything until generation is
+                    // done.
                     match tokio::task::spawn_blocking(move || {
-                        // Acquire GPU coordination read lock
                         let _gpu_guard = gpu_lock.read().unwrap();
-                        let runner_guard = runner.read().unwrap();
                         let prefix_enabled = {
                             let cache = prefix_cache.lock().unwrap();
                             cache.is_enabled()
                         };
                         if !prefix_enabled {
-                            runner_guard.generate_streaming_paged_shared_tokens(
-                                &prompt_tokens,
-                                &params,
-                                bm.as_ref(),
-                                pc.as_ref(),
+                            kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
+                                runner.clone(),
+                                prompt_tokens.clone(),
+                                params.clone(),
+                                bm.clone(),
+                                pc.clone(),
                             )
                         } else {
                             let hit = {
@@ -1073,12 +1081,13 @@ async fn generate_real_streaming(
                                 linear_state: hit.linear_state,
                             });
 
-                            let result = runner_guard
-                                .generate_streaming_paged_shared_tokens_with_prefix_cache(
-                                    &prompt_tokens,
-                                    &params,
-                                    bm.as_ref(),
-                                    pc.as_ref(),
+                            let result = kiln_model::ModelRunner::
+                                spawn_streaming_paged_shared_tokens_with_prefix_cache(
+                                    runner.clone(),
+                                    prompt_tokens.clone(),
+                                    params.clone(),
+                                    bm.clone(),
+                                    pc.clone(),
                                     cached_prefix,
                                 );
 

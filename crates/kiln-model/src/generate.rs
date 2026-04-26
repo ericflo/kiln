@@ -188,6 +188,23 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
     block_table
 }
 
+fn sample_first_decode_token(
+    logits: &candle_core::Tensor,
+    params: &SamplingParams,
+) -> Result<TokenId> {
+    if params.temperature == 0.0 {
+        Ok(greedy_sample(logits)?)
+    } else {
+        Ok(sample_with_params(
+            logits,
+            params.temperature,
+            params.top_p,
+            params.top_k,
+            params.seed,
+        )?)
+    }
+}
+
 fn emit_stream_token(
     tx: &mpsc::Sender<StreamEvent>,
     tokenizer: &KilnTokenizer,
@@ -2778,6 +2795,344 @@ impl ModelRunner {
         )
     }
 
+    /// Threaded variant of [`generate_streaming_paged_shared_tokens`] that
+    /// performs prefill on the calling thread and runs the decode loop on a
+    /// spawned `std::thread`. The returned receiver yields tokens as they are
+    /// produced, instead of after the entire `max_tokens` loop has completed
+    /// (which is the behavior of the legacy `&self` variant — fine for unit
+    /// tests but it makes `stream: true` look hung at the HTTP layer because
+    /// the receiver only becomes observable when generation finishes).
+    ///
+    /// Holds an `Arc<RwLock<Self>>` so the spawned worker can re-acquire a
+    /// read lock for decode steps without keeping the lock guard alive across
+    /// thread boundaries (which `RwLockReadGuard` cannot do).
+    pub fn spawn_streaming_paged_shared_tokens(
+        runner_lock: Arc<std::sync::RwLock<Self>>,
+        prompt_tokens: Vec<TokenId>,
+        params: SamplingParams,
+        block_manager: Arc<Mutex<BlockManager>>,
+        paged_cache: Arc<Mutex<PagedKvCache>>,
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        // Allocate the full block reservation up front so the prompt + decode
+        // window has its KV cache pages laid out before we hand the receiver
+        // back to the caller. The legacy synchronous path uses
+        // `SharedBlockReservation` for RAII free-on-drop; here we own the
+        // block ids through to the end of the spawned thread instead.
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let block_table = {
+            let mut bm_guard = lock_block_manager(block_manager.as_ref())?;
+            let block_size = bm_guard.block_size();
+            let num_blocks = Self::blocks_needed(max_total, block_size);
+            let block_ids = bm_guard
+                .allocate(num_blocks)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut block_table = BlockTable::new();
+            for &block_id in &block_ids {
+                block_table.push(block_id);
+            }
+            block_table
+        };
+
+        // Run prefill on the calling thread so a malformed prompt fails the
+        // request synchronously rather than via an SSE error chunk. The decode
+        // loop is what actually benefits from being threaded.
+        let (logits, mut linear_state) = {
+            let runner_guard = runner_lock
+                .read()
+                .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+            let mut linear_state = runner_guard.new_linear_state()?;
+            let logits = {
+                let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                if streaming_prefill_enabled_for(
+                    runner_guard.backend.device(),
+                    prompt_tokens.len(),
+                ) {
+                    model_forward_paged_streaming(
+                        &*runner_guard.backend,
+                        &prompt_tokens,
+                        &runner_guard.weights,
+                        &runner_guard.config,
+                        &mut pc_guard,
+                        &block_table,
+                        0,
+                        Some(&mut linear_state),
+                        runner_guard.active_lora.as_ref(),
+                    )
+                    .context("prefill forward pass (paged, streaming) failed")?
+                } else {
+                    model_forward_paged_last_token(
+                        &*runner_guard.backend,
+                        &prompt_tokens,
+                        &runner_guard.weights,
+                        &runner_guard.config,
+                        &mut pc_guard,
+                        &block_table,
+                        0,
+                        Some(&mut linear_state),
+                        runner_guard.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("prefill forward pass (paged) failed")?
+                }
+            };
+            (logits, linear_state)
+        };
+
+        let next_token = sample_first_decode_token(&logits, &params)?;
+        drop(logits);
+
+        let (tx, rx) = mpsc::channel();
+        let seq_len = prompt_tokens.len();
+        let runner_for_thread = runner_lock;
+        let bm_for_thread = block_manager;
+        let pc_for_thread = paged_cache;
+        let block_ids_to_free: Vec<u32> = block_table.blocks.clone();
+
+        std::thread::Builder::new()
+            .name("kiln-stream-decode".to_string())
+            .spawn(move || {
+                let result = (|| -> Result<()> {
+                    let runner_guard = runner_for_thread
+                        .read()
+                        .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock in decode thread: {e}"))?;
+                    runner_guard.run_stream_decode_loop_with_first(
+                        &tx,
+                        next_token,
+                        seq_len,
+                        &params,
+                        pc_for_thread.as_ref(),
+                        &block_table,
+                        &mut linear_state,
+                    )
+                })();
+                if let Err(err) = result {
+                    tracing::error!(error = %err, "spawn_streaming_paged_shared_tokens decode thread failed");
+                    let _ = tx.send(StreamEvent::Done(StreamDone {
+                        finish_reason: FinishReason::MaxTokens,
+                        completion_tokens: 0,
+                    }));
+                }
+                drop(tx);
+                if !block_ids_to_free.is_empty() {
+                    match bm_for_thread.lock() {
+                        Ok(mut guard) => guard.free_all(&block_ids_to_free),
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "failed to lock block manager to free blocks after streaming decode"
+                        ),
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn streaming decode thread: {e}"))?;
+
+        Ok(rx)
+    }
+
+    /// Threaded variant of
+    /// [`generate_streaming_paged_shared_tokens_with_prefix_cache`]. Same
+    /// motivation as [`spawn_streaming_paged_shared_tokens`]: hand the
+    /// receiver back before decode starts so the SSE layer can stream tokens
+    /// in real time.
+    pub fn spawn_streaming_paged_shared_tokens_with_prefix_cache(
+        runner_lock: Arc<std::sync::RwLock<Self>>,
+        prompt_tokens: Vec<TokenId>,
+        params: SamplingParams,
+        block_manager: Arc<Mutex<BlockManager>>,
+        paged_cache: Arc<Mutex<PagedKvCache>>,
+        cached_prefix: Option<PagedPrefixReuse>,
+    ) -> Result<PrefixCachedStreamingOutput> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let block_size = {
+            let bm_guard = lock_block_manager(block_manager.as_ref())?;
+            bm_guard.block_size()
+        };
+
+        let cached_prefix = cached_prefix.filter(|prefix| {
+            prefix.cached_tokens > 0
+                && prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0
+                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+        });
+
+        let cached_blocks = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.block_ids.as_slice())
+            .unwrap_or(&[]);
+        let cached_tokens = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.cached_tokens)
+            .unwrap_or(0);
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let total_blocks = Self::blocks_needed(max_total, block_size);
+        let additional_blocks_needed = total_blocks.saturating_sub(cached_blocks.len());
+        let allocated_blocks = {
+            let mut bm_guard = lock_block_manager(block_manager.as_ref())?;
+            bm_guard
+                .allocate(additional_blocks_needed)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+        let block_table = append_prefix_block_table(cached_blocks, &allocated_blocks);
+
+        // Free helper for failure paths so a prefill error does not leak the
+        // freshly-allocated suffix blocks (the cached-prefix blocks remain
+        // owned by the prefix cache and must not be freed here).
+        let free_allocated = |allocated: &[u32]| {
+            if allocated.is_empty() {
+                return;
+            }
+            match block_manager.lock() {
+                Ok(mut guard) => guard.free_all(allocated),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "failed to lock block manager to free blocks after prefix-cache prefill error"
+                ),
+            }
+        };
+
+        let prefill_result = (|| -> Result<(candle_core::Tensor, LinearAttentionState, Option<PagedPrefixRegistration>)> {
+            let mut linear_state = match cached_prefix {
+                Some(prefix) => prefix.linear_state,
+                None => {
+                    let runner_guard = runner_lock
+                        .read()
+                        .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                    runner_guard.new_linear_state()?
+                }
+            };
+
+            let prefill_tokens = &prompt_tokens[cached_tokens..];
+            anyhow::ensure!(
+                !prefill_tokens.is_empty(),
+                "streaming prefix cache hit must leave at least one suffix token"
+            );
+
+            let runner_guard = runner_lock
+                .read()
+                .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+            let logits = {
+                let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                if streaming_prefill_enabled_for(
+                    runner_guard.backend.device(),
+                    prompt_tokens.len(),
+                ) {
+                    model_forward_paged_streaming(
+                        &*runner_guard.backend,
+                        prefill_tokens,
+                        &runner_guard.weights,
+                        &runner_guard.config,
+                        &mut pc_guard,
+                        &block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        runner_guard.active_lora.as_ref(),
+                    )
+                    .context("prefill forward pass (streaming paged prefix cache) failed")?
+                } else {
+                    model_forward_paged_last_token(
+                        &*runner_guard.backend,
+                        prefill_tokens,
+                        &runner_guard.weights,
+                        &runner_guard.config,
+                        &mut pc_guard,
+                        &block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        runner_guard.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("prefill forward pass (paged prefix cache) failed")?
+                }
+            };
+            let registration = runner_guard.completed_prompt_registration(
+                &prompt_tokens,
+                &block_table,
+                &linear_state,
+                block_size,
+            )?;
+            Ok((logits, linear_state, registration))
+        })();
+
+        let (logits, mut linear_state, registration) = match prefill_result {
+            Ok(t) => t,
+            Err(err) => {
+                free_allocated(&allocated_blocks);
+                return Err(err);
+            }
+        };
+
+        let next_token = match sample_first_decode_token(&logits, &params) {
+            Ok(t) => t,
+            Err(err) => {
+                free_allocated(&allocated_blocks);
+                return Err(err);
+            }
+        };
+        drop(logits);
+
+        let (tx, rx) = mpsc::channel();
+        let seq_len = prompt_tokens.len();
+        let runner_for_thread = runner_lock;
+        let bm_for_thread = block_manager;
+        let pc_for_thread = paged_cache;
+        // The decode thread frees blocks on exit so the BlockManager doesn't
+        // leak across a long generation. The completions handler still owns
+        // the prefix-cache registration callback (registered/evicted blocks
+        // are managed there because the cache may retain a subset of these
+        // ids), so we do NOT free `allocated_blocks` from the spawn — only
+        // free them via the registration outcome path. Pass an empty list to
+        // the thread; the API layer's existing register/retain logic computes
+        // the correct free set.
+        let block_ids_to_free: Vec<u32> = Vec::new();
+        let block_table_for_thread = block_table.clone();
+
+        std::thread::Builder::new()
+            .name("kiln-stream-decode-prefix".to_string())
+            .spawn(move || {
+                let result = (|| -> Result<()> {
+                    let runner_guard = runner_for_thread
+                        .read()
+                        .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock in decode thread: {e}"))?;
+                    runner_guard.run_stream_decode_loop_with_first(
+                        &tx,
+                        next_token,
+                        seq_len,
+                        &params,
+                        pc_for_thread.as_ref(),
+                        &block_table_for_thread,
+                        &mut linear_state,
+                    )
+                })();
+                if let Err(err) = result {
+                    tracing::error!(error = %err, "spawn_streaming_paged_shared_tokens_with_prefix_cache decode thread failed");
+                    let _ = tx.send(StreamEvent::Done(StreamDone {
+                        finish_reason: FinishReason::MaxTokens,
+                        completion_tokens: 0,
+                    }));
+                }
+                drop(tx);
+                if !block_ids_to_free.is_empty() {
+                    match bm_for_thread.lock() {
+                        Ok(mut guard) => guard.free_all(&block_ids_to_free),
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            "failed to lock block manager to free blocks after streaming decode (prefix cache)"
+                        ),
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn streaming decode thread: {e}"))?;
+
+        Ok(PrefixCachedStreamingOutput {
+            receiver: rx,
+            registration,
+            allocated_blocks,
+        })
+    }
+
     pub fn generate_streaming_paged_speculative_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
@@ -3082,28 +3437,50 @@ impl ModelRunner {
     fn stream_decode_from_prefill_logits(
         &self,
         logits: candle_core::Tensor,
-        mut seq_len: usize,
+        seq_len: usize,
         params: &SamplingParams,
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = mpsc::channel();
+        // Sample the first decode token from prefill logits and run the loop on
+        // the calling thread. Used by tests and the synchronous (non-spawned)
+        // entry points. The receiver is fully populated by the time we return.
+        // Threaded callers should use [`run_stream_decode_loop_with_first`]
+        // directly so they can sample the first token before spawning.
+        let next_token = sample_first_decode_token(&logits, params)?;
+        self.run_stream_decode_loop_with_first(
+            &tx,
+            next_token,
+            seq_len,
+            params,
+            paged_cache,
+            block_table,
+            linear_state,
+        )?;
+        Ok(rx)
+    }
+
+    /// Streaming decode loop body, sending each generated token to `tx` as it
+    /// is produced. The `next_token` argument is the first token to emit (the
+    /// argmax/sample of the prefill logits). The caller owns `tx` so that
+    /// threaded callers can spawn the loop and return the receiver to the
+    /// async layer immediately, instead of waiting for `max_tokens` decode
+    /// steps before the receiver becomes observable.
+    pub(crate) fn run_stream_decode_loop_with_first(
+        &self,
+        tx: &mpsc::Sender<StreamEvent>,
+        mut next_token: TokenId,
+        mut seq_len: usize,
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<()> {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
-
-        let mut next_token = if params.temperature == 0.0 {
-            greedy_sample(&logits)?
-        } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
-        };
 
         for _step in 0..params.max_tokens {
             if let Some(s) = step_seed.as_mut() {
@@ -3116,7 +3493,7 @@ impl ModelRunner {
             }
 
             match emit_stream_token(
-                &tx,
+                tx,
                 &self.tokenizer,
                 &mut generated_tokens,
                 next_token,
@@ -3127,7 +3504,7 @@ impl ModelRunner {
                     finish_reason = reason;
                     break;
                 }
-                StreamTokenDisposition::ReceiverDropped => return Ok(rx),
+                StreamTokenDisposition::ReceiverDropped => return Ok(()),
             }
 
             if generated_tokens.len() >= params.max_tokens {
@@ -3151,7 +3528,7 @@ impl ModelRunner {
             completion_tokens: generated_tokens.len(),
         }));
 
-        Ok(rx)
+        Ok(())
     }
 
     fn generate_from_tokens_streaming_paged_speculative_interleaved(
