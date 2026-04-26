@@ -47,6 +47,16 @@ async fn submit_sft(
         return Err(ApiError::shutting_down());
     }
 
+    // Reject when the queue is at its configured cap. This protects the
+    // server from queue-exhaustion DoS where a client submits jobs faster
+    // than the trainer can drain them. Audit reference: security-audit-v0.1
+    // §4 part 1.
+    let max_queued = state.max_queued_training_jobs;
+    let queued_now = state.training_queue.lock().unwrap().len();
+    if queued_now >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+
     let num_examples = req.examples.len();
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
@@ -108,6 +118,14 @@ async fn submit_grpo(
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
         return Err(ApiError::shutting_down());
+    }
+
+    // Reject when the queue is at its configured cap. See submit_sft above
+    // for the audit reference.
+    let max_queued = state.max_queued_training_jobs;
+    let queued_now = state.training_queue.lock().unwrap().len();
+    if queued_now >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
     }
 
     let num_groups = req.groups.len();
