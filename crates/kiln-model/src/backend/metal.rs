@@ -718,29 +718,38 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
     matches!(head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256 | 512)
 }
 
-/// candle-metal-kernels 0.10.2's `call_sdpa_full` (steel attention) routes
-/// `q_seq <= 8` to a vector kernel and `q_seq > 8` to the tiled "full" kernel
-/// with `bq = 32` for `head_dim < 512`. Every BF16 prefill we issue with
-/// `8 < q_seq < bq` (for example a 16-token Qwen3.5 chat prompt) returns an
-/// all-NaN output buffer — root-caused by tracing layer-by-layer hidden state
-/// statistics: `post-layer-3` (the first full_attention block) flips from
-/// finite to `nan=N` exactly when `q_seq` lives in this band, regardless of
-/// which Metal fused kernels are enabled (`KILN_DISABLE_METAL_*` env vars,
-/// prefix cache off, lm_head matmul fallback). Disabling the SDPA path
-/// (`KILN_DISABLE_METAL_SDPA=1`) immediately recovers correct generation.
+/// candle-metal-kernels 0.10.2's `call_sdpa_full` (steel attention) silently
+/// returns an all-NaN output buffer for many BF16 prefill shapes on the
+/// Qwen3.5-4B (head_dim=256) layout. Reproduced empirically by varying
+/// q_seq while holding all other model state constant (greedy, prefix cache
+/// off, no streaming prefill, no fused mlp/qkv/attn-gate kernels):
 ///
-/// Until the upstream kernel handles this band correctly, decline the
-/// fused path here and let the caller fall back to the naive
-/// softmax+matmul prefill, which is bit-exact and only ~50–80 ms slower
-/// for a single short prompt.
-fn metal_sdpa_full_safe_for_q_seq(head_dim: usize, q_seq: usize) -> bool {
-    // q_seq <= 8 routes to the vector kernel which is unaffected.
+///   ptoks=120 → NaN     ptoks=266 → NaN
+///   ptoks=138 → finite  ptoks=330 → NaN
+///   ptoks=170 → finite  ptoks=410 → finite
+///   ptoks=210 → finite  ptoks=522 → NaN
+///                       ptoks=610 → NaN
+///
+/// There is no clean alignment / `q_seq mod bq` rule — the failure depends
+/// on internal kernel state we cannot inspect from outside candle.
+/// Short q_seq <= 8 (the "vector" kernel path) is unaffected, and a
+/// previously-suspected `8 < q_seq < bq` boundary turned out to be only
+/// one slice of a larger NaN surface.
+///
+/// Until upstream candle fixes the kernel, decline the SDPA full path for
+/// any q_seq > 8 and let the caller fall back to the naive softmax+matmul
+/// prefill (which is bit-exact, just ~5–10× slower per prefill — typically
+/// <1 s extra at chat-context sizes, and the per-token decode hot path is
+/// untouched). Set `KILN_ENABLE_METAL_SDPA_FULL=1` to opt back in for
+/// benchmarking once the upstream fix lands.
+fn metal_sdpa_full_safe_for_q_seq(_head_dim: usize, q_seq: usize) -> bool {
     if q_seq <= 8 {
         return true;
     }
-    // Tiled "full" kernel uses bq = 32 except at head_dim == 512 (bq = 8).
-    let bq = if head_dim == 512 { 8 } else { 32 };
-    q_seq >= bq
+    matches!(
+        std::env::var("KILN_ENABLE_METAL_SDPA_FULL").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
 }
 
 fn metal_gdn_qk_norm_disabled() -> bool {
