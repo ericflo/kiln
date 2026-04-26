@@ -120,6 +120,8 @@ The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it
 
 Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachable from the network. To accept connections from other hosts, set `server.host = "0.0.0.0"` in your TOML config or `KILN_HOST=0.0.0.0` and put Kiln behind a trusted reverse proxy (auth is out of scope for v0.1).
 
+**Training endpoints are privileged.** `/v1/train/sft` and `/v1/train/grpo` apply a faithful gradient update to whatever structurally-valid examples you POST — kiln does not validate the *content* of training data. A poisoned example will permanently influence the active adapter until you unload it. Do not expose training endpoints to untrusted inputs, and treat your training corpus as security-sensitive. See the README's [Security model](README.md#security-model) section for the full picture.
+
 On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. No config changes needed — the binary selects the backend that was compiled in.
 
 ## 4. Test Inference

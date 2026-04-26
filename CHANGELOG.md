@@ -14,6 +14,9 @@
 ### Reproducibility / release
 - docker: use `--locked` in `deploy/Dockerfile` cargo builds so the published `ghcr.io/ericflo/kiln-server` image matches the exact Cargo.lock dependency set (#601)
 
+### Documentation
+- docs(security): document training-data trust invariants (security audit §3 / item 12) in README + QUICKSTART. Calls out that `/v1/train/sft` and `/v1/train/grpo` apply a faithful gradient update to anything POSTed — kiln validates structure, not semantics — so the operator's training corpus must be treated as security-sensitive.
+
 ## kiln-v0.2.6 — 2026-04-26
 
 Patch release: 3 server bug fixes + first release with bundled
