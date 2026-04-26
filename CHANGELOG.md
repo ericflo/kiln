@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## kiln-v0.2.3 — 2026-04-26
+
+Phase 8 advanced features release: batch generation, adapter upload/download,
+TIES + concatenation merge modes, per-request adapter composition, and webhook
+notifications on training completion. Also lands the Phase 7 `/ui` adapter
+controls, refreshed Phase 8 documentation (QUICKSTART, README, ARCHITECTURE,
+plus a new docs/GRPO_GUIDE.md), and governance hygiene marking all workspace
+crates `publish=false` and tightening cargo-deny wildcards to `deny`.
+
 ### Phase 8 advanced features
 - POST /v1/completions/batch — efficient multi-prompt batch generation API for GRPO (#583)
 - POST /v1/adapters/upload — multipart tar.gz import (#577)
