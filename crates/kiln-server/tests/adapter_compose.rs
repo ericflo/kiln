@@ -320,6 +320,35 @@ async fn test_compose_endpoint_rejects_empty_list() {
     assert_eq!(parsed["error"]["code"], "invalid_compose_request");
 }
 
+/// `adapters` list with more than `MAX_COMPOSE_ADAPTERS` (16) entries is a
+/// 400. Caps the cheapest DoS shape from §6 of the v0.1 security audit:
+/// without this cap a single request could trigger N safetensors reads + an
+/// N-way `merge_concat` for arbitrarily large N.
+#[tokio::test]
+async fn test_compose_endpoint_rejects_oversized_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = make_state(tmp.path().to_path_buf());
+    let app = api::router(state);
+
+    // 17 entries > cap (16). Names need not point at real adapters — the cap
+    // check runs before any disk lookup, so the request is rejected purely
+    // on shape.
+    let entries: Vec<Value> = (0..17)
+        .map(|_| json!({ "name": "a", "scale": 1.0 }))
+        .collect();
+    let resp = app
+        .clone()
+        .oneshot(chat_with_adapters(json!(entries)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(parsed["error"]["code"], "invalid_compose_request");
+}
+
 /// Missing source adapter surfaces as 404.
 #[tokio::test]
 async fn test_compose_endpoint_404_when_source_missing() {
