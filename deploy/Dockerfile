@@ -19,6 +19,19 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
+# CUDA architecture targets for the in-Docker build (no GPU is available, so
+# nvidia-smi-based auto-detect cannot run).
+#   CUDA_COMPUTE_CAP — consumed by cudaforge (used by candle-kernels). Single
+#     value only; sm_80 covers the Ampere+ baseline kiln supports, and PTX from
+#     sm_80 JIT-compiles forward to sm_86/89/90 at runtime.
+#   KILN_CUDA_ARCHS — consumed by kiln-flash-attn for fat-binary CUDA codegen.
+#     Semicolon-separated list; matches the crate's own default.
+# Override either at build time with `--build-arg CUDA_COMPUTE_CAP=90` etc.
+ARG CUDA_COMPUTE_CAP=80
+ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
+ARG KILN_CUDA_ARCHS="80;89;90"
+ENV KILN_CUDA_ARCHS=${KILN_CUDA_ARCHS}
+
 # Copy manifests first for layer caching
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/kiln-core/Cargo.toml          crates/kiln-core/Cargo.toml
