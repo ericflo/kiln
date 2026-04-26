@@ -33,6 +33,7 @@ impl std::fmt::Debug for VulkanDevice {
         f.debug_struct("VulkanDevice")
             .field("device_name", &self.device_name)
             .field("vendor_id", &self.vendor_id)
+            .field("max_compute_shared_memory_size", &self.max_compute_shared_memory_size)
             .finish()
     }
 }
@@ -44,8 +45,8 @@ impl VulkanDevice {
     /// Does NOT allocate a logical device or queues (~hundreds of microseconds
     /// vs ~tens of milliseconds for `new()`).
     ///
-    /// The instance is explicitly destroyed before returning to avoid leaking
-    /// the Vulkan instance handle (ash 0.37 does not auto-destroy on drop).
+    /// The instance is explicitly destroyed on every path (ash 0.37 does not
+    /// auto-destroy on drop) so no Vulkan instance handle is leaked.
     pub fn probe() -> bool {
         let entry = match unsafe { ash::Entry::load() } {
             Ok(e) => e,
@@ -64,12 +65,9 @@ impl VulkanDevice {
             Err(_) => return false,
         };
 
-        let devices = match unsafe { instance.enumerate_physical_devices() } {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let available = !devices.is_empty();
+        let available = unsafe { instance.enumerate_physical_devices() }
+            .map(|d| !d.is_empty())
+            .unwrap_or(false);
         unsafe { instance.destroy_instance(None); }
         available
     }
