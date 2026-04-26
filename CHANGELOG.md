@@ -6,6 +6,7 @@
 - Fix path traversal in `DELETE /v1/adapters/:name` and `POST /v1/adapters/load` (Phase 9 audit §2b/§2c, HIGH).
 - Validate source adapter names in `POST /v1/adapters/merge` (Phase 9 audit §2d, LOW).
 - Per-route body-size limits on training + completions endpoints: 64 MiB for `/v1/train/sft` and `/v1/train/grpo`, 8 MiB for `/v1/chat/completions` and `/v1/completions/batch` (Phase 9 audit §1, LOW).
+- Disable HTTP redirects on the training-completion webhook client to prevent server-side redirect chasing into internal infra (Phase 9 audit §7, item 10, LOW).
 
 ### Changed
 - Default server listen host changed from `0.0.0.0` to `127.0.0.1` (loopback). Set `server.host = "0.0.0.0"` or `KILN_HOST=0.0.0.0` to accept remote connections; pair with a trusted reverse proxy. Closes security-audit-v0.1 MEDIUM §9.

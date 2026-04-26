@@ -214,6 +214,8 @@ The `reqwest::Client` is built with a 5s timeout (`training_queue.rs:52`). One n
 
 **Severity:** NONE for the threat as posed (operator-controlled URL). Tightening reqwest to `redirect::Policy::none()` is a small hardening step worth taking.
 
+**Resolution:** Disabled redirects via `reqwest::redirect::Policy::none()` in branch `ce/phase9-webhook-disable-redirects` (`crates/kiln-server/src/training_queue.rs:fire_completion_webhook`).
+
 ---
 
 ## 8. Disk exhaustion via adapter uploads — `[LOW]`
@@ -342,7 +344,7 @@ Ordered by severity, then by effort.
 7. ~~**Per-route body-size limits** (§1). Set `DefaultBodyLimit` explicitly on `/v1/train/sft`, `/v1/train/grpo`, `/v1/chat/completions`, `/v1/completions/batch`.~~ **Fixed** in branch `ce/phase9-per-route-body-limits` (64 MiB for training, 8 MiB for completions).
 8. **Cap composed-adapter cache size** (§6, §8). LRU-evict `.composed/<hash>/` entries above N total or M GiB.
 9. **Cap total adapter-dir disk usage** (§8). Reject uploads that would push total adapter-dir size above `adapters.max_disk_bytes`.
-10. **Disable redirects on webhook reqwest client** (§7). Belt-and-suspenders against a misconfigured webhook URL pointing at a public 302.
+10. ~~**Disable redirects on webhook reqwest client** (§7). Belt-and-suspenders against a misconfigured webhook URL pointing at a public 302.~~ **Fixed** in branch `ce/phase9-webhook-disable-redirects`.
 11. **Migrate `deny.toml`** (§12). Replace `unmaintained = "workspace"` with the post-PR-611 shape; pin the CI cargo-deny version explicitly.
 12. **Document training-data invariants** (§3). One short README section: "Kiln applies a faithful gradient update to whatever you POST. Treat your training corpus as security-sensitive."
 
