@@ -128,6 +128,22 @@ pub struct TrainingConfig {
     /// instead of growing the in-memory queue without bound.
     /// Override via `KILN_TRAINING_MAX_QUEUED_JOBS`. Default: 32.
     pub max_queued_jobs: usize,
+    /// Maximum number of tracked training jobs (queued, running, completed,
+    /// or failed) that may live in the in-memory tracking map at once.
+    /// Submissions while the tracking map is at this cap return HTTP 503
+    /// with `Retry-After: 30` and the `training_tracked_full` error code.
+    /// The training worker continuously evicts terminal entries older than
+    /// `tracked_job_ttl_secs`, so a healthy server will rarely hit this
+    /// cap. Override via `KILN_TRAINING_MAX_TRACKED_JOBS`. Default: 1024.
+    pub max_tracked_jobs: usize,
+    /// TTL in seconds for tracked training jobs in the `Completed` or
+    /// `Failed` state. The training worker periodically removes terminal
+    /// entries whose `finished_at` timestamp is older than this many
+    /// seconds, bounding the steady-state size of the tracking map.
+    /// Active jobs (`Queued` / `Running`) are never GC'd, regardless of
+    /// age. Override via `KILN_TRAINING_TRACKED_JOB_TTL_SECS`. Default:
+    /// 3600 (1 hour).
+    pub tracked_job_ttl_secs: u64,
 }
 
 /// Logging settings.
@@ -302,6 +318,8 @@ impl Default for TrainingConfig {
             checkpoint_interval: None,
             webhook_url: None,
             max_queued_jobs: 32,
+            max_tracked_jobs: 1024,
+            tracked_job_ttl_secs: 3600,
         }
     }
 }
@@ -522,6 +540,16 @@ impl KilnConfig {
                 self.training.max_queued_jobs = n;
             }
         }
+        if let Ok(v) = std::env::var("KILN_TRAINING_MAX_TRACKED_JOBS") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.training.max_tracked_jobs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_TRAINING_TRACKED_JOB_TTL_SECS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.training.tracked_job_ttl_secs = n;
+            }
+        }
 
         // Logging
         if let Ok(v) = std::env::var("KILN_LOG_LEVEL") {
@@ -651,6 +679,8 @@ mod tests {
         assert!(config.training.checkpoint_interval.is_none());
         assert!(config.training.webhook_url.is_none());
         assert_eq!(config.training.max_queued_jobs, 32);
+        assert_eq!(config.training.max_tracked_jobs, 1024);
+        assert_eq!(config.training.tracked_job_ttl_secs, 3600);
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "auto");
         assert!(config.prefix_cache.enabled);
@@ -692,6 +722,8 @@ no_grad_checkpoint = false
 checkpoint_interval = 50
 webhook_url = "https://example.com/hook"
 max_queued_jobs = 4
+max_tracked_jobs = 16
+tracked_job_ttl_secs = 120
 
 [logging]
 level = "debug"
@@ -730,6 +762,8 @@ last_token_lm_head = false
             Some("https://example.com/hook")
         );
         assert_eq!(config.training.max_queued_jobs, 4);
+        assert_eq!(config.training.max_tracked_jobs, 16);
+        assert_eq!(config.training.tracked_job_ttl_secs, 120);
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "pretty");
         assert!(!config.prefix_cache.enabled);
@@ -832,6 +866,8 @@ port = 3000
             std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
             std::env::set_var("KILN_TRAINING_WEBHOOK_URL", "https://hook.example/notify");
             std::env::set_var("KILN_TRAINING_MAX_QUEUED_JOBS", "7");
+            std::env::set_var("KILN_TRAINING_MAX_TRACKED_JOBS", "9");
+            std::env::set_var("KILN_TRAINING_TRACKED_JOB_TTL_SECS", "11");
             std::env::set_var("KILN_KV_CACHE_FP8", "1");
             std::env::set_var("KILN_CUDA_GRAPHS", "false");
             std::env::set_var("KILN_PREFIX_CACHE_ENABLED", "false");
@@ -859,6 +895,8 @@ port = 3000
             Some("https://hook.example/notify")
         );
         assert_eq!(config.training.max_queued_jobs, 7);
+        assert_eq!(config.training.max_tracked_jobs, 9);
+        assert_eq!(config.training.tracked_job_ttl_secs, 11);
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert!(!config.prefix_cache.enabled);
@@ -881,6 +919,8 @@ port = 3000
             std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
             std::env::remove_var("KILN_TRAINING_WEBHOOK_URL");
             std::env::remove_var("KILN_TRAINING_MAX_QUEUED_JOBS");
+            std::env::remove_var("KILN_TRAINING_MAX_TRACKED_JOBS");
+            std::env::remove_var("KILN_TRAINING_TRACKED_JOB_TTL_SECS");
             std::env::remove_var("KILN_KV_CACHE_FP8");
             std::env::remove_var("KILN_CUDA_GRAPHS");
             std::env::remove_var("KILN_PREFIX_CACHE_ENABLED");

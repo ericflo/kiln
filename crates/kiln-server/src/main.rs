@@ -242,12 +242,20 @@ async fn main() -> Result<()> {
     state.checkpoint_interval = config.training.checkpoint_interval;
     state.training_webhook_url = config.training.webhook_url.clone();
     state.max_queued_training_jobs = config.training.max_queued_jobs;
+    state.max_tracked_jobs = config.training.max_tracked_jobs;
+    state.tracked_job_ttl =
+        std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     if let Some(ref url) = state.training_webhook_url {
         tracing::info!(url = %url, "training completion webhook configured");
     }
     tracing::info!(
         cap = state.max_queued_training_jobs,
         "training queue cap configured"
+    );
+    tracing::info!(
+        cap = state.max_tracked_jobs,
+        ttl_secs = config.training.tracked_job_ttl_secs,
+        "training tracked-jobs cap and TTL configured"
     );
 
     // Spawn the background training queue worker
