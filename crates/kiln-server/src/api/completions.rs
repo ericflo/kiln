@@ -9,11 +9,12 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::ChatMessage;
+use kiln_model::adapter_merge::{merge_concat, PeftLora};
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent};
 
@@ -75,6 +76,19 @@ pub struct ChatCompletionRequest {
     /// Kiln extension: which LoRA adapter to use for this request.
     #[serde(default)]
     pub adapter: Option<String>,
+    /// Kiln extension: stack multiple LoRA adapters with per-source scaling.
+    /// Mutually exclusive with `adapter`. The composed adapter is merged once
+    /// (via `merge_concat`) and cached on disk under `adapter_dir/.composed/`,
+    /// keyed by a hash of the (name, scale) pairs.
+    #[serde(default)]
+    pub adapters: Option<Vec<AdapterRef>>,
+}
+
+/// A single source adapter for per-request composition.
+#[derive(Debug, Deserialize)]
+pub struct AdapterRef {
+    pub name: String,
+    pub scale: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -347,9 +361,40 @@ async fn chat_completions_inner(
         ..Default::default()
     };
 
+    // Validate adapter / adapters mutual exclusion. Done up front (before
+    // backend dispatch) so 400-on-misuse is observable from any backend.
+    if req.adapter.is_some() && req.adapters.is_some() {
+        return Err(ApiError::invalid_compose_request(
+            "specify either 'adapter' (single name) or 'adapters' (list), not both",
+        ));
+    }
+    if let Some(ref list) = req.adapters {
+        if list.is_empty() {
+            return Err(ApiError::invalid_compose_request(
+                "'adapters' must be a non-empty list when present",
+            ));
+        }
+        for src in list {
+            validate_compose_name(&src.name)?;
+        }
+    }
+
+    // If `adapters` is set, synthesize (or reuse cached) composed adapter on
+    // disk. Runs regardless of backend so the cache is populated even in mock
+    // mode tests; only the actual hot-swap is gated on the Real backend.
+    let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
+        Some(synthesize_composed_adapter(&state.adapter_dir, list).await?)
+    } else {
+        None
+    };
+
     // Ensure the correct LoRA adapter is active for this request.
     if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
-        ensure_adapter(state, runner, &req.adapter).await?;
+        if let Some(ref target) = composed_target {
+            ensure_composed_adapter_swap(state, runner, target).await?;
+        } else {
+            ensure_adapter(state, runner, &req.adapter).await?;
+        }
     }
 
     if req.stream {
@@ -495,6 +540,174 @@ async fn ensure_adapter(
     Ok(())
 }
 
+/// Disk handle for a composed adapter ready to be loaded.
+#[derive(Debug, Clone)]
+struct ComposedTarget {
+    /// Stable cache name embedded in `active_adapter_name` once swapped in,
+    /// e.g. `"__composed:abc123..."`. Used for cache-hit comparison and as
+    /// the prefix-cache adapter key.
+    active_name: String,
+    /// On-disk directory holding the synthesized PEFT adapter.
+    cache_dir: PathBuf,
+}
+
+/// Validate a single source-adapter name from an `adapters: [...]` request.
+///
+/// Names must be a single path segment with no separators or traversal — same
+/// rules as `validate_adapter_name` in `api/adapters.rs`. Centralized here so
+/// `chat_completions` can return a 404-shaped error consistent with the
+/// existing single-adapter path (`adapter_not_found`).
+fn validate_compose_name(name: &str) -> Result<(), ApiError> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || Path::new(name).is_absolute()
+    {
+        return Err(ApiError::invalid_adapter_name(name));
+    }
+    Ok(())
+}
+
+/// Compute a stable hex hash for an `adapters` composition spec.
+///
+/// Hashes the sorted list of `"<name>@<scale>"` pairs with `DefaultHasher`
+/// (deterministic SipHash-1-3 with key (0,0)). Used as the cache directory
+/// name and the suffix of `active_adapter_name`.
+fn composition_hash(adapters: &[AdapterRef]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut entries: Vec<String> = adapters
+        .iter()
+        .map(|a| format!("{}@{}", a.name, a.scale))
+        .collect();
+    entries.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for e in &entries {
+        e.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Synthesize (or reuse the on-disk cache for) a composed adapter spec.
+///
+/// On first call for a given hash, loads each source adapter, runs
+/// `merge_concat`, and writes the result under `<adapter_dir>/.composed/<hash>/`.
+/// On subsequent calls for the same hash, returns immediately without touching
+/// the source files. Source-adapter lookup uses the same path resolution as
+/// `ensure_adapter`: each `name` is treated as a single segment under
+/// `adapter_dir`, missing sources surface as 404.
+async fn synthesize_composed_adapter(
+    adapter_dir: &Path,
+    adapters: &[AdapterRef],
+) -> Result<ComposedTarget, ApiError> {
+    let hash = composition_hash(adapters);
+    let active_name = format!("__composed:{hash}");
+    let composed_root = adapter_dir.join(".composed");
+    let cache_dir = composed_root.join(&hash);
+
+    if cache_dir.exists() {
+        return Ok(ComposedTarget {
+            active_name,
+            cache_dir,
+        });
+    }
+
+    // Confirm every source exists before doing any merge work.
+    let mut source_paths: Vec<(String, f32, PathBuf)> = Vec::with_capacity(adapters.len());
+    for src in adapters {
+        let path = adapter_dir.join(&src.name);
+        if !path.exists() || !path.is_dir() {
+            return Err(ApiError::adapter_not_found(&src.name));
+        }
+        source_paths.push((src.name.clone(), src.scale, path));
+    }
+
+    let composed_root = composed_root.clone();
+    let cache_dir_for_task = cache_dir.clone();
+    let merge_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&composed_root)
+            .map_err(|e| format!("creating composed-cache dir: {e}"))?;
+
+        let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
+        for (name, scale, path) in source_paths {
+            let adapter = PeftLora::load(&path)
+                .map_err(|e| format!("loading source '{name}' from {}: {e}", path.display()))?;
+            loaded.push((adapter, scale));
+        }
+
+        let refs: Vec<(&PeftLora, f32)> = loaded.iter().map(|(a, s)| (a, *s)).collect();
+        let merged = merge_concat(&refs).map_err(|e| format!("merge_concat: {e}"))?;
+        merged
+            .save(&cache_dir_for_task)
+            .map_err(|e| format!("saving composed adapter: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("join error: {e}")))?;
+
+    if let Err(msg) = merge_result {
+        // Best-effort cleanup if we partially wrote anything before failing.
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        return Err(ApiError::adapter_merge_failed(msg));
+    }
+
+    Ok(ComposedTarget {
+        active_name,
+        cache_dir,
+    })
+}
+
+/// Hot-swap the runner onto a synthesized composed adapter.
+///
+/// Mirrors `ensure_adapter`'s two-phase RwLock pattern (read device + num
+/// layers, load weights outside any lock, then write-lock to swap). No-op if
+/// the composed adapter is already active.
+async fn ensure_composed_adapter_swap(
+    state: &AppState,
+    runner: &std::sync::Arc<std::sync::RwLock<ModelRunner>>,
+    target: &ComposedTarget,
+) -> Result<(), ApiError> {
+    {
+        let current = state.active_adapter_name.read().unwrap();
+        if current.as_deref() == Some(target.active_name.as_str()) {
+            return Ok(());
+        }
+    }
+
+    let (device, num_layers) = {
+        let guard = runner.read().unwrap();
+        (
+            guard.weights.embed_tokens.device().clone(),
+            guard.config.num_layers,
+        )
+    };
+
+    let runner = runner.clone();
+    let active_name = state.active_adapter_name.clone();
+    let cache_dir = target.cache_dir.clone();
+    let composed_active = target.active_name.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let lora = LoraWeights::load(&cache_dir, num_layers, &device)
+            .map_err(|e| format!("{e}"))?;
+        let mut guard = runner.write().unwrap();
+        guard.swap_lora(Some(lora));
+        *active_name.write().unwrap() = Some(composed_active);
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("join error: {e}")))?
+    .map_err(ApiError::adapter_load_failed)?;
+    state.clear_real_prefix_cache();
+
+    Ok(())
+}
+
 /// Generate using the real ModelRunner with paged KV cache.
 async fn generate_real(
     state: &AppState,
@@ -531,7 +744,12 @@ async fn generate_real(
     let prompt = prompt_text.to_owned();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
-    let adapter = req.adapter.clone();
+    // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
+    // state.active_adapter_name reflects the actually-loaded adapter (a
+    // `__composed:<hash>` name when the request used `adapters: [...]`), which
+    // is what we want as the cache key — distinct compositions and the base
+    // model must not share cached blocks.
+    let adapter = state.active_adapter_name.read().unwrap().clone();
 
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
@@ -742,7 +960,12 @@ async fn generate_real_streaming(
     let prompt_token_count = prompt_tokens.len();
     let prompt_tokens = prompt_tokens.to_vec();
     let params = sampling.clone();
-    let adapter = req.adapter.clone();
+    // For prefix-cache keying. After ensure_adapter / ensure_composed_adapter_swap,
+    // state.active_adapter_name reflects the actually-loaded adapter (a
+    // `__composed:<hash>` name when the request used `adapters: [...]`), which
+    // is what we want as the cache key — distinct compositions and the base
+    // model must not share cached blocks.
+    let adapter = state.active_adapter_name.read().unwrap().clone();
     let model = req
         .model
         .clone()
