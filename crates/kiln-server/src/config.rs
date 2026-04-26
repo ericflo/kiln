@@ -96,6 +96,32 @@ pub struct TrainingConfig {
     /// Save adapter weights every N training steps during a job.
     /// Per-job config overrides this. None = only save at the end.
     pub checkpoint_interval: Option<usize>,
+    /// HTTP(S) URL to POST a JSON notification to when a training job
+    /// (SFT or GRPO) completes or fails.
+    ///
+    /// When `None` (the default), no webhook is fired. When set, a
+    /// fire-and-forget POST is sent with a 5-second timeout after the
+    /// job's terminal state is recorded. Webhook failures are logged
+    /// but never propagate back into the training job's outcome — a
+    /// successful training job stays "completed" even if the webhook
+    /// POST fails.
+    ///
+    /// Payload (Content-Type: application/json):
+    /// ```json
+    /// {
+    ///   "job_id": "<uuid>",
+    ///   "job_type": "sft" | "grpo",
+    ///   "status": "completed" | "failed",
+    ///   "adapter_name": "<name>",
+    ///   "adapter_path": "<path or null>",
+    ///   "error": "<message or null>",
+    ///   "timestamp": "<RFC3339>"
+    /// }
+    /// ```
+    ///
+    /// Override via `KILN_TRAINING_WEBHOOK_URL`. To clear a TOML-set
+    /// URL via env, set the variable to the empty string.
+    pub webhook_url: Option<String>,
 }
 
 /// Logging settings.
@@ -268,6 +294,7 @@ impl Default for TrainingConfig {
             grad_checkpoint_segments: None,
             no_grad_checkpoint: false,
             checkpoint_interval: None,
+            webhook_url: None,
         }
     }
 }
@@ -479,6 +506,10 @@ impl KilnConfig {
                 self.training.checkpoint_interval = Some(n);
             }
         }
+        if let Ok(v) = std::env::var("KILN_TRAINING_WEBHOOK_URL") {
+            // Empty string explicitly clears any TOML-set URL.
+            self.training.webhook_url = if v.is_empty() { None } else { Some(v) };
+        }
 
         // Logging
         if let Ok(v) = std::env::var("KILN_LOG_LEVEL") {
@@ -606,6 +637,7 @@ mod tests {
         assert!(config.memory.cuda_graphs);
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
+        assert!(config.training.webhook_url.is_none());
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "auto");
         assert!(config.prefix_cache.enabled);
@@ -645,6 +677,7 @@ cuda_graphs = false
 grad_checkpoint_segments = 8
 no_grad_checkpoint = false
 checkpoint_interval = 50
+webhook_url = "https://example.com/hook"
 
 [logging]
 level = "debug"
@@ -678,6 +711,10 @@ last_token_lm_head = false
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
         assert_eq!(config.training.checkpoint_interval, Some(50));
+        assert_eq!(
+            config.training.webhook_url.as_deref(),
+            Some("https://example.com/hook")
+        );
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "pretty");
         assert!(!config.prefix_cache.enabled);
@@ -778,6 +815,7 @@ port = 3000
             std::env::set_var("KILN_LOG_LEVEL", "debug");
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
             std::env::set_var("KILN_CHECKPOINT_INTERVAL", "25");
+            std::env::set_var("KILN_TRAINING_WEBHOOK_URL", "https://hook.example/notify");
             std::env::set_var("KILN_KV_CACHE_FP8", "1");
             std::env::set_var("KILN_CUDA_GRAPHS", "false");
             std::env::set_var("KILN_PREFIX_CACHE_ENABLED", "false");
@@ -800,6 +838,10 @@ port = 3000
         assert_eq!(config.logging.level, "debug");
         assert!(config.training.no_grad_checkpoint);
         assert_eq!(config.training.checkpoint_interval, Some(25));
+        assert_eq!(
+            config.training.webhook_url.as_deref(),
+            Some("https://hook.example/notify")
+        );
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert!(!config.prefix_cache.enabled);
@@ -820,6 +862,7 @@ port = 3000
             std::env::remove_var("KILN_LOG_LEVEL");
             std::env::remove_var("KILN_NO_GRAD_CHECKPOINT");
             std::env::remove_var("KILN_CHECKPOINT_INTERVAL");
+            std::env::remove_var("KILN_TRAINING_WEBHOOK_URL");
             std::env::remove_var("KILN_KV_CACHE_FP8");
             std::env::remove_var("KILN_CUDA_GRAPHS");
             std::env::remove_var("KILN_PREFIX_CACHE_ENABLED");
@@ -830,6 +873,31 @@ port = 3000
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
+        }
+    }
+
+    #[test]
+    fn test_training_webhook_env_empty_string_clears_toml_value() {
+        let toml_str = r#"
+[training]
+webhook_url = "https://from-toml.example/hook"
+"#;
+        let mut config: KilnConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.training.webhook_url.as_deref(),
+            Some("https://from-toml.example/hook")
+        );
+
+        unsafe {
+            std::env::set_var("KILN_TRAINING_WEBHOOK_URL", "");
+        }
+        config.apply_env_overrides();
+        assert!(
+            config.training.webhook_url.is_none(),
+            "empty env var should clear the TOML-set webhook URL"
+        );
+        unsafe {
+            std::env::remove_var("KILN_TRAINING_WEBHOOK_URL");
         }
     }
 
