@@ -6,6 +6,9 @@
 - Fix path traversal in `DELETE /v1/adapters/:name` and `POST /v1/adapters/load` (Phase 9 audit §2b/§2c, HIGH).
 - Validate source adapter names in `POST /v1/adapters/merge` (Phase 9 audit §2d, LOW).
 
+### Changed
+- Default server listen host changed from `0.0.0.0` to `127.0.0.1` (loopback). Set `server.host = "0.0.0.0"` or `KILN_HOST=0.0.0.0` to accept remote connections; pair with a trusted reverse proxy. Closes security-audit-v0.1 MEDIUM §9.
+
 ### Reproducibility / release
 - docker: use `--locked` in `deploy/Dockerfile` cargo builds so the published `ghcr.io/ericflo/kiln-server` image matches the exact Cargo.lock dependency set (#601)
 

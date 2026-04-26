@@ -111,12 +111,14 @@ You'll see the startup banner:
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
   VRAM:    49140 MiB total, 48891 MiB free
-  Listen:  http://0.0.0.0:8420
+  Listen:  http://127.0.0.1:8420
 
   Endpoints: /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed. If you launched with `--config kiln.toml`, a `Config:` line appears just below `Version:`.
+
+Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachable from the network. To accept connections from other hosts, set `server.host = "0.0.0.0"` in your TOML config or `KILN_HOST=0.0.0.0` and put Kiln behind a trusted reverse proxy (auth is out of scope for v0.1).
 
 On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. No config changes needed — the binary selects the backend that was compiled in.
 
