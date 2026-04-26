@@ -95,6 +95,8 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
 # 4. Next inference already uses the improved weights
 ```
 
+See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examples (math, JSON, code).
+
 ## Quick Start
 
 **Prerequisites:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+ **OR** Apple Silicon Mac with 16GB+ unified memory. Rust stable toolchain on both.

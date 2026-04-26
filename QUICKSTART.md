@@ -227,6 +227,8 @@ curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 
 `/v1/completions/batch` returns one HTTP response covering many prompts × `n` completions per prompt. The iteration-level scheduler batches the underlying prefill/decode steps, so this is far cheaper than N parallel calls. Hard cap: `prompts.len() * n <= 64`. `stream` is not supported on this endpoint. `seed` is per-batch — each completion uses `seed.wrapping_add(prompt_idx * n + completion_idx)` so identical prompts produce distinct outputs.
 
+For the full generate→score→train loop with three worked verifiable-reward examples (math correctness, JSON-validity, code-runs), see [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md).
+
 ```bash
 curl -s http://localhost:8420/v1/completions/batch \
   -H "Content-Type: application/json" \
