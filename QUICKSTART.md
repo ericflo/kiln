@@ -221,6 +221,108 @@ curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 ./target/release/kiln adapters delete default
 ```
 
+## 9. Phase 8 API Examples
+
+### 9.1 Batch generation (efficient for GRPO rollouts)
+
+`/v1/completions/batch` returns one HTTP response covering many prompts × `n` completions per prompt. The iteration-level scheduler batches the underlying prefill/decode steps, so this is far cheaper than N parallel calls. Hard cap: `prompts.len() * n <= 64`. `stream` is not supported on this endpoint. `seed` is per-batch — each completion uses `seed.wrapping_add(prompt_idx * n + completion_idx)` so identical prompts produce distinct outputs.
+
+```bash
+curl -s http://localhost:8420/v1/completions/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompts": [
+      [{"role": "user", "content": "What is 2+2?"}],
+      [{"role": "user", "content": "What is the capital of France?"}]
+    ],
+    "n": 4,
+    "max_tokens": 32,
+    "temperature": 0.7,
+    "seed": 42
+  }' | python3 -m json.tool
+```
+
+### 9.2 Export an adapter (download tar.gz)
+
+```bash
+curl -s -OJ http://localhost:8420/v1/adapters/default/download
+# -> writes default.tar.gz to the current directory
+```
+
+The body is a streamed `application/gzip` tar archive containing the adapter directory.
+
+### 9.3 Import an adapter (upload tar.gz)
+
+Multipart fields: `name` (target adapter directory name) and `archive` (the tar.gz body).
+
+```bash
+curl -s http://localhost:8420/v1/adapters/upload \
+  -F name=imported \
+  -F archive=@default.tar.gz | python3 -m json.tool
+# -> {"name":"imported","size_bytes":...,"files":...}
+```
+
+Body limit is 2 GB compressed / 4 GB extracted. Uploads fail with 409 if the target name already exists.
+
+### 9.4 Merge adapters (TIES)
+
+Combine multiple adapters into a new on-disk adapter. Modes: `weighted_average` (default), `ties`, `concat`. `weighted_average` and `ties` require identical rank, target_modules, and shapes; `concat` produces a higher-rank adapter (`r_total = Σᵢ rᵢ`) and accepts mismatched ranks.
+
+```bash
+curl -s http://localhost:8420/v1/adapters/merge \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sources": [
+      {"name": "math", "weight": 0.6},
+      {"name": "code", "weight": 0.4}
+    ],
+    "output_name": "math_code_ties",
+    "mode": "ties",
+    "density": 0.2
+  }' | python3 -m json.tool
+```
+
+### 9.5 Compose adapters per-request
+
+The standard `/v1/chat/completions` endpoint accepts a request-body `adapters` array as a Kiln extension (mutually exclusive with `adapter`). Each entry is `{"name", "scale"}`. The server merges the composed adapter once via `merge_concat`, caches it on disk under `adapter_dir/.composed/` keyed by `(name, scale)` hash, and reuses the cache on subsequent requests with the same composition. `/v1/completions/batch` accepts the same `adapters` field for the whole batch.
+
+```bash
+curl -s http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Refactor this Python loop into a comprehension"}],
+    "max_tokens": 128,
+    "adapters": [
+      {"name": "code", "scale": 1.0},
+      {"name": "style-eric", "scale": 0.5}
+    ]
+  }' | python3 -m json.tool
+```
+
+### 9.6 Training completion webhooks
+
+Kiln POSTs a JSON event to a configured URL when an SFT or GRPO job reaches a terminal state. Configured via `[training] webhook_url` in `kiln.toml` or the `KILN_TRAINING_WEBHOOK_URL` environment variable (set to the empty string to clear a TOML-set value). Delivery is fire-and-forget with a 5-second timeout — webhook failures are logged but never affect job state.
+
+```toml
+# kiln.toml
+[training]
+webhook_url = "https://example.com/kiln-hooks/training"
+```
+
+Payload (`Content-Type: application/json`):
+
+```json
+{
+  "job_id": "<uuid>",
+  "job_type": "sft" | "grpo",
+  "status": "completed" | "failed",
+  "adapter_name": "<name>",
+  "adapter_path": "<path or null>",
+  "error": "<message or null>",
+  "timestamp": "<RFC3339>"
+}
+```
+
 ## CLI Reference
 
 ```
@@ -246,17 +348,22 @@ Global options:
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
-| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible) |
+| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extension: per-request `adapter` (single name) or `adapters: [{name, scale}, …]` for adapter composition (see [9.5](#95-compose-adapters-per-request)). |
+| POST | `/v1/completions/batch` | Multi-prompt batch generation — efficient for GRPO rollouts (see [9.1](#91-batch-generation-efficient-for-grpo-rollouts)). |
 | GET | `/v1/adapters` | List LoRA adapters |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |
+| GET | `/v1/adapters/{name}/download` | Stream adapter as `application/gzip` tar.gz (see [9.2](#92-export-an-adapter-download-targz)). |
+| POST | `/v1/adapters/upload` | Import adapter from a multipart `archive` tar.gz (see [9.3](#93-import-an-adapter-upload-targz)). |
+| POST | `/v1/adapters/merge` | Combine adapters via `weighted_average`, `ties`, or `concat` mode (see [9.4](#94-merge-adapters-ties)). |
 | POST | `/v1/train/sft` | Submit SFT training examples |
 | POST | `/v1/train/grpo` | Submit GRPO training batch |
 | GET | `/v1/train/status` | Training queue status |
 | GET | `/v1/train/status/{job_id}` | Individual job status |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
+| (config) | `[training].webhook_url` | Fire-and-forget POST on training completion — set in `kiln.toml` or via `KILN_TRAINING_WEBHOOK_URL` (see [9.6](#96-training-completion-webhooks)). |
 | GET | `/v1/config` | Current server configuration |
 
 ## Configuration
