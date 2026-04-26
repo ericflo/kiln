@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+## kiln-v0.2.5 — 2026-04-26
+
+Patch release: 4 server bug fixes since v0.2.4.
+
 ### Bug fixes
+- server: close use-after-free race in prefix-cache streaming path (fad7c6b)
 - server: make `stream: true` actually stream tokens in real time (11062f8)
 - server: load model chat template so Qwen3.5 gets the `<think>\n` prefix in the rendered chat (e1fcc16)
 - metal: bypass candle SDPA full kernel for `8 < q_seq < bq` to avoid a kernel crash (c7cf1ab)
