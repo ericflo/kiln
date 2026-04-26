@@ -210,6 +210,15 @@ impl ApiError {
         }
     }
 
+    pub fn invalid_compose_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_compose_request",
+            message: format!("Invalid adapter composition request: {detail}"),
+            hint: "Specify either 'adapter' (single name) or 'adapters' (non-empty list of {name, scale}), not both. The composed adapter is merged once and cached on disk.",
+        }
+    }
+
     pub fn mock_mode_no_adapters() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
