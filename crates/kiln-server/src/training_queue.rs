@@ -158,6 +158,13 @@ pub fn new_shared_queue() -> SharedTrainingQueue {
 /// found, it executes it on a blocking thread (training is CPU/GPU-bound).
 /// The worker exits cleanly when the shutdown flag is set, after finishing
 /// any currently running job.
+///
+/// On every iteration the worker also runs a GC pass on `state.training_jobs`,
+/// evicting terminal (`Completed` / `Failed`) entries whose `finished_at`
+/// timestamp is older than `state.tracked_job_ttl`. This bounds the steady-
+/// state size of the tracking map and works in concert with the
+/// `max_tracked_jobs` cap to prevent memory growth from a flood of terminal
+/// entries. See `gc_tracked_jobs` for the eviction predicate.
 pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
     tokio::spawn(async move {
         loop {
@@ -166,6 +173,12 @@ pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
                 tracing::info!("training worker shutting down");
                 break;
             }
+
+            // GC stale terminal entries from the tracking map. Cheap when
+            // the map is small; runs on every iteration so terminal
+            // entries can never persist past TTL even on a quiescent
+            // server.
+            gc_tracked_jobs(&state);
 
             // Check for next job
             let entry = {
@@ -189,6 +202,37 @@ pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
             }
         }
     });
+}
+
+/// Evict `Completed` / `Failed` entries from `state.training_jobs` whose
+/// `finished_at` timestamp is older than `state.tracked_job_ttl`. Active
+/// entries (`Queued` / `Running`) are never removed regardless of age.
+///
+/// Returns the number of entries removed.
+///
+/// Safe to call from any thread; takes a short write lock on
+/// `training_jobs`. Called from the training worker loop on every
+/// iteration and from tests directly.
+pub fn gc_tracked_jobs(state: &AppState) -> usize {
+    let ttl = state.tracked_job_ttl;
+    let now = std::time::Instant::now();
+    let mut jobs = state.training_jobs.write().unwrap();
+    let before = jobs.len();
+    jobs.retain(|_id, job| match job.state {
+        TrainingState::Completed | TrainingState::Failed => match job.finished_at {
+            // No timestamp recorded (legacy or in-flight transition) —
+            // keep until the next pass observes a timestamp.
+            None => true,
+            Some(t) => now.saturating_duration_since(t) < ttl,
+        },
+        // Active jobs are never GC'd.
+        TrainingState::Queued | TrainingState::Running => true,
+    });
+    let removed = before - jobs.len();
+    if removed > 0 {
+        tracing::debug!(removed, remaining = jobs.len(), "GC'd terminal training jobs past TTL");
+    }
+    removed
 }
 
 /// Execute a single training job (runs on a blocking thread).
@@ -218,6 +262,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             let mut jobs = state.training_jobs.write().unwrap();
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.state = TrainingState::Failed;
+                job.finished_at = Some(std::time::Instant::now());
             }
             tracing::error!(job_id = %job_id, "training requires real model weights");
             return;
@@ -307,6 +352,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     job.state = TrainingState::Completed;
                     job.progress = 1.0;
                     job.adapter_path = Some(path_str.clone());
+                    job.finished_at = Some(std::time::Instant::now());
                 }
             }
             state.metrics.inc_training(metric_type, TrainingMetricStatus::Completed);
@@ -345,6 +391,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 let mut jobs = state.training_jobs.write().unwrap();
                 if let Some(job) = jobs.get_mut(&job_id) {
                     job.state = TrainingState::Failed;
+                    job.finished_at = Some(std::time::Instant::now());
                 }
             }
             state.metrics.inc_training(metric_type, TrainingMetricStatus::Failed);

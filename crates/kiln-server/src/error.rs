@@ -288,6 +288,27 @@ impl ApiError {
         }
     }
 
+    /// 503 returned when the in-memory training-jobs tracking map has
+    /// reached its configured cap. Distinct from `training_queue_full`:
+    /// this fires when too many terminal (`Completed` / `Failed`) entries
+    /// are still resident waiting for the TTL GC to evict them. Carries
+    /// `Retry-After: 30` so polite clients back off automatically. The
+    /// cap is `training.max_tracked_jobs` (default 1024, override
+    /// `KILN_TRAINING_MAX_TRACKED_JOBS`); the TTL is
+    /// `training.tracked_job_ttl_secs` (default 3600, override
+    /// `KILN_TRAINING_TRACKED_JOB_TTL_SECS`).
+    pub fn training_tracked_full(max: usize) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "training_tracked_full",
+            message: format!(
+                "Training tracking map is at capacity ({max} tracked jobs)"
+            ),
+            hint: "Wait for terminal entries to TTL out, or raise training.max_tracked_jobs in the config (env: KILN_TRAINING_MAX_TRACKED_JOBS).",
+            retry_after_seconds: Some(30),
+        }
+    }
+
     pub fn training_job_not_found(job_id: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

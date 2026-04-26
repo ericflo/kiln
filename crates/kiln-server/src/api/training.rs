@@ -57,6 +57,16 @@ async fn submit_sft(
         return Err(ApiError::training_queue_full(max_queued));
     }
 
+    // Reject when the tracking map is at its configured cap. The training
+    // worker GC's terminal entries on a TTL, but a flood of `Completed` /
+    // `Failed` entries could still pin the map and exhaust memory. Audit
+    // reference: security-audit-v0.1 §4 part 2.
+    let max_tracked = state.max_tracked_jobs;
+    let tracked_now = state.training_jobs.read().unwrap().len();
+    if tracked_now >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+
     let num_examples = req.examples.len();
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
@@ -85,6 +95,7 @@ async fn submit_sft(
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
         auto_load,
+        finished_at: None,
     };
     state
         .training_jobs
@@ -128,6 +139,14 @@ async fn submit_grpo(
         return Err(ApiError::training_queue_full(max_queued));
     }
 
+    // Reject when the tracking map is at its configured cap. See submit_sft
+    // above for the audit reference (security-audit-v0.1 §4 part 2).
+    let max_tracked = state.max_tracked_jobs;
+    let tracked_now = state.training_jobs.read().unwrap().len();
+    if tracked_now >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+
     let num_groups = req.groups.len();
     let total_completions: usize = req.groups.iter().map(|g| g.completions.len()).sum();
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -157,6 +176,7 @@ async fn submit_grpo(
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
         auto_load,
+        finished_at: None,
     };
     state
         .training_jobs
@@ -308,6 +328,7 @@ async fn cancel_queued_job(
             let jt = jobs.get(&job_id).map(|j| j.job_type);
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.state = TrainingState::Failed;
+                job.finished_at = Some(std::time::Instant::now());
             }
             jt
         };

@@ -144,6 +144,13 @@ pub struct TrainingJobInfo {
     #[serde(skip)]
     pub submitted_at: std::time::Instant,
     pub auto_load: bool,
+    /// Wall-clock instant at which the job entered a terminal state
+    /// (`Completed` or `Failed`). `None` while the job is still
+    /// `Queued` or `Running`. Used by the training-queue worker's GC
+    /// pass to TTL-evict stale terminal entries from the tracking map.
+    /// See `AppState::tracked_job_ttl`.
+    #[serde(skip)]
+    pub finished_at: Option<std::time::Instant>,
 }
 
 /// Thread-safe map of tracked training jobs.
@@ -423,6 +430,18 @@ pub struct AppState {
     /// with HTTP 503 + `Retry-After: 30`. Mirrors
     /// `TrainingConfig::max_queued_jobs` (default 32).
     pub max_queued_training_jobs: usize,
+    /// Maximum number of tracked training jobs that may live in
+    /// `training_jobs` (the in-memory tracking map) at once. Submissions
+    /// while the map is at this cap are rejected with HTTP 503 +
+    /// `Retry-After: 30` and the `training_tracked_full` error code.
+    /// Mirrors `TrainingConfig::max_tracked_jobs` (default 1024).
+    pub max_tracked_jobs: usize,
+    /// TTL for terminal (`Completed` / `Failed`) entries in
+    /// `training_jobs`. The training worker periodically removes terminal
+    /// entries whose `finished_at` timestamp is older than this duration.
+    /// Active entries (`Queued` / `Running`) are never GC'd.
+    /// Mirrors `TrainingConfig::tracked_job_ttl_secs` (default 3600s).
+    pub tracked_job_ttl: std::time::Duration,
     /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
     pub served_model_id: String,
     /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
@@ -485,6 +504,8 @@ impl AppState {
             checkpoint_interval: None,
             training_webhook_url: None,
             max_queued_training_jobs: 32,
+            max_tracked_jobs: 1024,
+            tracked_job_ttl: std::time::Duration::from_secs(3600),
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
@@ -702,6 +723,8 @@ impl AppState {
             checkpoint_interval: None,
             training_webhook_url: None,
             max_queued_training_jobs: 32,
+            max_tracked_jobs: 1024,
+            tracked_job_ttl: std::time::Duration::from_secs(3600),
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
