@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Reproducibility / release
+- docker: use `--locked` in `deploy/Dockerfile` cargo builds so the published `ghcr.io/ericflo/kiln-server` image matches the exact Cargo.lock dependency set (#601)
+
 ## kiln-v0.2.6 — 2026-04-26
 
 Patch release: 3 server bug fixes + first release with bundled
