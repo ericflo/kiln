@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## kiln-v0.2.6 — 2026-04-26
+
+Patch release: 3 server bug fixes + first release with bundled
+THIRD_PARTY_LICENSES.md asset (cargo-about, MIT/Apache/BSD-only).
+
+### Bug fixes
+- metal: disable candle SDPA full path entirely to eliminate intermittent NaN on Apple Silicon (ff84800)
+- server: re-emit prefilled `<think>\n` opener in chat-completion responses so streaming clients see it (7548e5a)
+- server: split `<think>...</think>` content into llama.cpp-shaped `reasoning_content` field on chat completions (b1ae711)
+
+### CI / release
+- First release to ship THIRD_PARTY_LICENSES.md alongside binaries (#598, #599)
+
 ## kiln-v0.2.5 — 2026-04-26
 
 Patch release: 4 server bug fixes since v0.2.4.
