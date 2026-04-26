@@ -42,23 +42,238 @@ fn last_user_message_text(req: &ChatCompletionRequest) -> String {
         .unwrap_or_default()
 }
 
-/// If the rendered chat-template prompt prefilled an opening reasoning tag
-/// into the assistant turn (Qwen3.5's official template ends with
+const REASONING_OPEN_TAG: &str = "<think>\n";
+const REASONING_CLOSE_TAG: &str = "</think>";
+
+/// True when the rendered chat-template prompt prefilled the opening reasoning
+/// tag into the assistant turn (Qwen3.5's official template ends with
 /// `<|im_start|>assistant\n<think>\n` whenever `enable_thinking` isn't
-/// explicitly false), return the literal text the model is continuing from
-/// so the caller can re-emit it on the wire. Without this, the model
-/// generates "Thinking Process: ..." with no opening `<think>` tag and any
-/// client/UI that splits on `<think>...</think>` to render the chain of
-/// thought separately fails to detect a reasoning block at all.
+/// explicitly false). The model continues directly with chain-of-thought
+/// content, never re-emitting the opening tag, then closes with `</think>`
+/// before the actual answer. Used to initialize the reasoning splitter into
+/// the "currently inside <think>...</think>" state on the very first token.
 ///
 /// Conservative: only fires when the prompt ends with the exact `<think>\n`
-/// suffix Qwen3.5 emits, so non-reasoning templates and the bare ChatML
-/// fallback are unaffected.
-fn prefilled_assistant_opener(prompt_text: &str) -> Option<&'static str> {
-    if prompt_text.ends_with("<think>\n") {
-        Some("<think>\n")
-    } else {
-        None
+/// suffix Qwen3.5 emits, so the bare ChatML fallback and any
+/// non-reasoning template stay on the OpenAI-shaped pure-`content` path.
+fn prompt_starts_in_reasoning(prompt_text: &str) -> bool {
+    prompt_text.ends_with(REASONING_OPEN_TAG)
+}
+
+/// Per-stream parser that splits incremental decode-token text into
+/// `reasoning_content` and `content` deltas across a `</think>` boundary.
+/// Mirrors the wire format llama.cpp's `--reasoning-format=deepseek` ships:
+/// each chunk's `delta` carries at most one of `{reasoning_content, content}`
+/// depending on which side of the close tag the new token landed on.
+///
+/// The close tag can straddle multiple decode-token boundaries (BPE tokenizers
+/// regularly split it across three or more pieces — e.g. `</`, `think`, `>`),
+/// so we buffer up to `len("</think>") - 1` characters of "could-be tag tail"
+/// in `pending` and only flush them once we've seen enough to disambiguate.
+/// `flush` drains the tail when generation finishes (EOS, max_tokens, stop
+/// sequence, client disconnect) so no characters are silently swallowed.
+struct ReasoningSplitter {
+    in_reasoning: bool,
+    pending: String,
+}
+
+#[derive(Default, Debug)]
+struct ReasoningChunk {
+    reasoning: Option<String>,
+    content: Option<String>,
+}
+
+impl ReasoningChunk {
+    fn is_empty(&self) -> bool {
+        self.reasoning.is_none() && self.content.is_none()
+    }
+}
+
+impl ReasoningSplitter {
+    fn new(starts_in_reasoning: bool) -> Self {
+        Self {
+            in_reasoning: starts_in_reasoning,
+            pending: String::new(),
+        }
+    }
+
+    fn push(&mut self, token: &str) -> ReasoningChunk {
+        if !self.in_reasoning {
+            // Already past `</think>`, everything streams as content.
+            if token.is_empty() {
+                return ReasoningChunk::default();
+            }
+            return ReasoningChunk {
+                content: Some(token.to_string()),
+                ..Default::default()
+            };
+        }
+
+        let mut buf = std::mem::take(&mut self.pending);
+        buf.push_str(token);
+
+        if let Some(idx) = buf.find(REASONING_CLOSE_TAG) {
+            let before = buf[..idx].to_string();
+            let after = buf[idx + REASONING_CLOSE_TAG.len()..].to_string();
+            self.in_reasoning = false;
+            let mut out = ReasoningChunk::default();
+            if !before.is_empty() {
+                out.reasoning = Some(before);
+            }
+            if !after.is_empty() {
+                out.content = Some(after);
+            }
+            return out;
+        }
+
+        // No full close tag — but the tail may be a partial prefix of one.
+        // Keep the longest such suffix in `pending` so the next push can
+        // complete the match instead of leaking a literal "</" or "</thi"
+        // into reasoning_content.
+        for k in (1..REASONING_CLOSE_TAG.len()).rev() {
+            if buf.len() >= k && buf.ends_with(&REASONING_CLOSE_TAG[..k]) {
+                let emit_len = buf.len() - k;
+                self.pending = buf[emit_len..].to_string();
+                if emit_len == 0 {
+                    return ReasoningChunk::default();
+                }
+                return ReasoningChunk {
+                    reasoning: Some(buf[..emit_len].to_string()),
+                    ..Default::default()
+                };
+            }
+        }
+
+        ReasoningChunk {
+            reasoning: Some(buf),
+            ..Default::default()
+        }
+    }
+
+    /// Drain whatever is buffered at end-of-stream — necessary when generation
+    /// stops while we're still holding partial-tag bytes that turned out not
+    /// to be a tag. Without this, those bytes vanish from the response.
+    fn flush(&mut self) -> ReasoningChunk {
+        if self.pending.is_empty() {
+            return ReasoningChunk::default();
+        }
+        let buf = std::mem::take(&mut self.pending);
+        if self.in_reasoning {
+            ReasoningChunk {
+                reasoning: Some(buf),
+                ..Default::default()
+            }
+        } else {
+            ReasoningChunk {
+                content: Some(buf),
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// Send a [`ReasoningChunk`] over the SSE channel as one or two
+/// [`ChatCompletionChunk`]s — one per populated channel — so each chunk's
+/// `delta` only ever carries one of `content` or `reasoning_content` (the
+/// llama.cpp shape; mixing both in the same delta confuses
+/// content-aware UIs that switch panels on each delta key). Returns `false`
+/// when the SSE receiver was dropped mid-send so the caller can record the
+/// disconnect and stop.
+async fn emit_reasoning_chunk(
+    tx: &tokio::sync::mpsc::Sender<Event>,
+    id: &str,
+    created: u64,
+    model: &str,
+    chunk: ReasoningChunk,
+    completion_buf: &mut String,
+) -> bool {
+    if chunk.is_empty() {
+        return true;
+    }
+    if let Some(text) = chunk.reasoning {
+        // Reasoning content also feeds the dashboard preview when the
+        // answer hasn't started yet — without this the preview is blank
+        // until the model emits `</think>`, which can be hundreds of
+        // tokens in.
+        if completion_buf.chars().count() < COMPLETION_PREVIEW_MAX_CHARS + 16 {
+            completion_buf.push_str(&text);
+        }
+        let event = ChatCompletionChunk {
+            id: id.to_string(),
+            object: "chat.completion.chunk",
+            created,
+            model: model.to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    reasoning_content: Some(text),
+                },
+                finish_reason: None,
+            }],
+        };
+        if tx
+            .send(Event::default().data(serde_json::to_string(&event).unwrap()))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    if let Some(text) = chunk.content {
+        if completion_buf.chars().count() < COMPLETION_PREVIEW_MAX_CHARS + 16 {
+            completion_buf.push_str(&text);
+        }
+        let event = ChatCompletionChunk {
+            id: id.to_string(),
+            object: "chat.completion.chunk",
+            created,
+            model: model.to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: Some(text),
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+            }],
+        };
+        if tx
+            .send(Event::default().data(serde_json::to_string(&event).unwrap()))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Non-streaming variant: split a fully-generated response text into
+/// `(reasoning_content, content)` around the same `</think>` boundary the
+/// streaming splitter handles. Returns `(None, raw)` when the prompt did not
+/// prefill `<think>\n` so non-reasoning models keep emitting plain content.
+fn split_reasoning_response(
+    model_output: &str,
+    prompt_text: &str,
+) -> (Option<String>, String) {
+    if !prompt_starts_in_reasoning(prompt_text) {
+        return (None, model_output.to_string());
+    }
+    match model_output.find(REASONING_CLOSE_TAG) {
+        Some(idx) => {
+            let reasoning = model_output[..idx].to_string();
+            let content = model_output[idx + REASONING_CLOSE_TAG.len()..].to_string();
+            let reasoning_opt = if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            };
+            (reasoning_opt, content)
+        }
+        None => (Some(model_output.to_string()), String::new()),
     }
 }
 
@@ -116,6 +331,14 @@ pub struct Message {
     pub role: String,
     #[serde(deserialize_with = "deserialize_content")]
     pub content: String,
+    /// llama.cpp / DeepSeek-style chain-of-thought channel. Populated for
+    /// reasoning models (Qwen3.5, DeepSeek R1, …) when the model emitted a
+    /// `<think>...</think>` block; carries the inside of that block while
+    /// `content` carries only the post-`</think>` answer. Skipped on the
+    /// wire when empty so non-reasoning responses stay byte-identical to
+    /// the OpenAI shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// Accept `content` as either a plain string or an OpenAI-style array of
@@ -201,6 +424,11 @@ pub struct Delta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Streaming counterpart of [`Message::reasoning_content`]. Each chunk
+    /// emits at most one of `reasoning_content` (while inside a
+    /// `<think>...</think>` block) or `content` (after the close tag).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -900,16 +1128,25 @@ async fn generate_real(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = output.token_ids.len();
-    // See `prefilled_assistant_opener` — Qwen3.5's chat template prefills
-    // `<think>\n` into the assistant turn so the model never re-emits the
-    // opening tag. Re-attach it here so the JSON response carries a
-    // well-formed `<think>...</think>` block, matching the streaming path
-    // and what vLLM/SGLang serve for the same template.
-    let completion_text = match prefilled_assistant_opener(prompt_text) {
-        Some(opener) => format!("{opener}{}", output.text),
-        None => output.text,
-    };
+    // Qwen3.5's chat template prefills `<think>\n` into the assistant turn,
+    // so the model emits chain-of-thought directly and closes with
+    // `</think>` before the actual answer. Split into the llama.cpp /
+    // DeepSeek-shaped `(reasoning_content, content)` pair so OpenAI-compat
+    // clients can render the two channels separately. For non-reasoning
+    // templates this returns `(None, output.text)` and the response shape
+    // is byte-identical to before.
+    let (reasoning_content, completion_text) =
+        split_reasoning_response(&output.text, prompt_text);
 
+    // Recent-requests preview wants the user-visible answer, but the
+    // reasoning often dominates the first few hundred chars. Show
+    // reasoning when the answer is empty (still mid-thought at
+    // max_tokens cutoff) so the dashboard isn't blank.
+    let preview_source = if completion_text.is_empty() {
+        reasoning_content.as_deref().unwrap_or("")
+    } else {
+        completion_text.as_str()
+    };
     record_recent_request(
         state,
         RequestRecord {
@@ -917,7 +1154,7 @@ async fn generate_real(
             timestamp_unix_ms: now_unix_ms(),
             model: model.clone(),
             prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
-            completion_preview: truncate_chars(&completion_text, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
@@ -936,6 +1173,7 @@ async fn generate_real(
             message: Message {
                 role: "assistant".to_string(),
                 content: completion_text,
+                reasoning_content,
             },
             finish_reason: finish_reason.to_string(),
         }],
@@ -1055,6 +1293,7 @@ async fn generate_real_streaming(
                     delta: Delta {
                         role: Some("assistant".to_string()),
                         content: None,
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -1072,43 +1311,15 @@ async fn generate_real_streaming(
                 return;
             }
 
-            // Qwen3.5's chat template prefills `<think>\n` into the assistant
-            // turn so the model continues directly with reasoning content
-            // (never re-emitting the opening tag). Without help, OpenAI-compat
-            // clients see a stream that opens mid-thought and have no way to
-            // detect a `<think>...</think>` block. Re-emit the prefilled tag
-            // as a synthetic content chunk so the wire format is well-formed
-            // — `<think>\n` + model output + (model emits) `</think>\n` +
-            // answer — matching what vLLM/SGLang do for the same template.
-            if let Some(opener) = prefilled_assistant_opener(&prompt) {
-                let opener_chunk = ChatCompletionChunk {
-                    id: id.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: Delta {
-                            role: None,
-                            content: Some(opener.to_string()),
-                        },
-                        finish_reason: None,
-                    }],
-                };
-                if tx
-                    .send(Event::default().data(serde_json::to_string(&opener_chunk).unwrap()))
-                    .await
-                    .is_err()
-                {
-                    record(
-                        "client_disconnect".to_string(),
-                        &completion_buf,
-                        completion_token_count,
-                    );
-                    return;
-                }
-                completion_buf.push_str(opener);
-            }
+            // Reasoning splitter — Qwen3.5's chat template prefills `<think>\n`
+            // into the assistant turn so the model continues mid-thought and
+            // closes with `</think>` before the actual answer. We split that
+            // stream into `reasoning_content` deltas (until `</think>`) and
+            // `content` deltas (after). For non-reasoning templates the
+            // splitter starts in the "not in reasoning" state and forwards
+            // every token as `content`, identical to the previous wire shape.
+            let mut reasoning_splitter =
+                ReasoningSplitter::new(prompt_starts_in_reasoning(&prompt));
 
             let sync_rx = match speculative_mode {
                 ResolvedSpeculativeMode::Off => {
@@ -1321,34 +1532,24 @@ async fn generate_real_streaming(
                                     stats.record_token(std::time::Instant::now());
                                 }
                                 completion_token_count = completion_token_count.saturating_add(1);
-                                // Cap the buffered preview text so an unbounded
-                                // generation doesn't keep allocating.
-                                if completion_buf.chars().count() < COMPLETION_PREVIEW_MAX_CHARS + 16 {
-                                    completion_buf.push_str(&token.text);
-                                }
-                                let chunk = ChatCompletionChunk {
-                                    id: id.clone(),
-                                    object: "chat.completion.chunk",
+                                // Route this token through the reasoning
+                                // splitter — at most one of `content` or
+                                // `reasoning_content` lands in the delta,
+                                // depending on which side of `</think>` the
+                                // splitter currently sits on. A token that
+                                // straddles the boundary may emit both in
+                                // separate chunks (rare; emitted in order).
+                                let chunk = reasoning_splitter.push(&token.text);
+                                if !emit_reasoning_chunk(
+                                    &tx,
+                                    &id,
                                     created,
-                                    model: model.clone(),
-                                    choices: vec![ChunkChoice {
-                                        index: 0,
-                                        delta: Delta {
-                                            role: None,
-                                            content: Some(token.text),
-                                        },
-                                        finish_reason: None,
-                                    }],
-                                };
-                                if tx
-                                    .send(
-                                        Event::default()
-                                            .data(serde_json::to_string(&chunk).unwrap()),
-                                    )
-                                    .await
-                                    .is_err()
+                                    &model,
+                                    chunk,
+                                    &mut completion_buf,
+                                )
+                                .await
                                 {
-                                    // Client disconnected — drop rx to stop generation
                                     record(
                                         "client_disconnect".to_string(),
                                         &completion_buf,
@@ -1363,6 +1564,28 @@ async fn generate_real_streaming(
                                     kiln_model::FinishReason::MaxTokens => "length",
                                     kiln_model::FinishReason::StopSequence(_) => "stop",
                                 };
+                                // Drain any partial-tag tail buffered in the
+                                // splitter before signaling end-of-stream so
+                                // we don't silently swallow up-to-7 chars
+                                // that turned out not to be `</think>`.
+                                let trailing = reasoning_splitter.flush();
+                                if !emit_reasoning_chunk(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    trailing,
+                                    &mut completion_buf,
+                                )
+                                .await
+                                {
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
                                 let chunk = ChatCompletionChunk {
                                     id: id.clone(),
                                     object: "chat.completion.chunk",
@@ -1373,6 +1596,7 @@ async fn generate_real_streaming(
                                         delta: Delta {
                                             role: None,
                                             content: None,
+                                            reasoning_content: None,
                                         },
                                         finish_reason: Some(finish.to_string()),
                                     }],
@@ -1414,6 +1638,18 @@ async fn generate_real_streaming(
             }
 
             if timed_out {
+                // Drain any pending partial-tag tail before the timeout
+                // chunk so the client doesn't lose those bytes.
+                let trailing = reasoning_splitter.flush();
+                let _ = emit_reasoning_chunk(
+                    &tx,
+                    &id,
+                    created,
+                    &model,
+                    trailing,
+                    &mut completion_buf,
+                )
+                .await;
                 let error_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
@@ -1424,6 +1660,7 @@ async fn generate_real_streaming(
                         delta: Delta {
                             role: None,
                             content: None,
+                            reasoning_content: None,
                         },
                         finish_reason: Some("timeout".to_string()),
                     }],
@@ -1568,6 +1805,8 @@ async fn generate_mock(
             message: Message {
                 role: "assistant".to_string(),
                 content: completion_text,
+                // Mock backend never emits a reasoning block.
+                reasoning_content: None,
             },
             finish_reason: "stop".to_string(),
         }],
@@ -1773,6 +2012,9 @@ async fn batch_completions_inner(
                 .map(|m| Message {
                     role: m.role.clone(),
                     content: m.content.clone(),
+                    // Batch input messages never carry historical reasoning;
+                    // the chat template renders them as plain text turns.
+                    reasoning_content: None,
                 })
                 .collect();
             let synth_req = ChatCompletionRequest {
