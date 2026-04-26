@@ -11,9 +11,20 @@
 - Per-request adapter composition: stack multiple LoRAs with scaling on /v1/chat/completions (#581)
 - Webhook notifications on training completion (#582)
 
+### Phase 7 UI
+- Add adapter download / upload / merge controls to `/ui` dashboard (#586)
+
 ### Docs
 - Document Phase 8 API surface in QUICKSTART.md (#584)
-- Add docs/GRPO_GUIDE.md with worked verifiable-rewards examples (math, JSON, code) (#NNN)
+- Refresh README + CHANGELOG for Phase 8 (upload/download/merge modes/composition/batch/webhooks) (#585)
+- Refresh ARCHITECTURE.md for Phase 8 (upload/download, TIES/concat merge, composition, webhooks, batch generation) (#587)
+- Add docs/GRPO_GUIDE.md with worked verifiable-rewards examples (math, JSON, code) (#588)
+
+### Cleanup
+- Move audit/preflight docs into docs/audits/, drop runtime log (#574)
+
+### Governance / hygiene
+- Mark workspace crates `publish=false`; tighten cargo-deny wildcards from warn to deny (#589)
 
 ### Test fixes
 - Rewrite test_upload_rejects_path_escape_in_archive to actually emit a traversal tarball (#580)
