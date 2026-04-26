@@ -393,6 +393,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload third-party license attribution
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test -f THIRD_PARTY_LICENSES.md
+          gh release upload "$TAG" THIRD_PARTY_LICENSES.md \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
       # Each platform job creates the release with `--draft` so the upload
       # steps have somewhere to push artifacts. Once all three platforms
       # succeed, flip the draft flag off so users see the release without
