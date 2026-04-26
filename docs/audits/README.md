@@ -51,3 +51,10 @@ Prefix cache:
 - `gdn-vllm-audit.md` — vLLM `fused_recurrent_gated_delta_rule` vs kiln
   `kiln-gdn-kernel`; verdict: no portable bounded micro-port win for kiln on
   A6000 under CUDA graphs.
+
+## Phase 9 (release prep)
+
+- `security-audit-v0.1.md` — first formal security audit of the kiln-server
+  HTTP API surface (adapters, training, completions, health, metrics) against
+  twelve threat classes; 1 HIGH (adapter delete/load name validation), 3
+  MEDIUM (queue cap, composition stack cap, default listen), 4 LOW, 4 NONE.
