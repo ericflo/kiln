@@ -336,14 +336,18 @@ Applied to: q_proj, k_proj, v_proj, o_proj (attention), gate_proj, up_proj, down
 ### Adapter Management API
 
 ```
-GET    /v1/adapters              List active + available adapters
-POST   /v1/adapters/load         Load adapter from disk
-POST   /v1/adapters/unload       Revert to base model
-POST   /v1/adapters/merge        Merge multiple adapters via weighted average
-DELETE /v1/adapters/{name}       Delete adapter from disk
+GET    /v1/adapters                       List active + available adapters
+POST   /v1/adapters/load                  Load adapter from disk
+POST   /v1/adapters/unload                Revert to base model
+POST   /v1/adapters/merge                 Merge adapters (weighted_average | ties | concat)
+POST   /v1/adapters/upload                Multipart tar.gz import (PR #577)
+GET    /v1/adapters/{name}/download       Streaming tar.gz export (PR #575)
+DELETE /v1/adapters/{name}                Delete adapter from disk
 ```
 
 See `crates/kiln-server/src/api/adapters.rs`.
+
+`download_adapter` builds a `tar.gz` of the adapter directory on a `spawn_blocking` thread and pushes chunks through a bounded mpsc channel so the response streams without buffering the whole archive in memory. `upload_adapter` accepts a multipart/form-data body up to 2 GiB, extracts into a `.upload-tmp-*` staging directory, enforces caps on total extracted bytes (4 GiB) and entry count (100 000), and atomically renames into place. Path traversal, symlinks, devices, and sockets are rejected at extract time. Together these endpoints make adapters portable: train somewhere, download, upload to another kiln instance, hot-swap.
 
 ### Adapter Merging
 
@@ -367,7 +371,19 @@ POST /v1/adapters/merge
 }
 ```
 
-Sources must share `r`, `target_modules`, `base_model_name_or_path`, and per-tensor shapes. The merged adapter is written to disk in the same PEFT format (`adapter_config.json` + `adapter_model.safetensors`, f32) and can immediately be loaded via `POST /v1/adapters/load`. Merging happens off the async runtime via `spawn_blocking` and the helper lives at `crates/kiln-model/src/adapter_merge.rs::merge_linear`. TIES and concatenation merging are deferred to follow-up phases.
+Sources must share `r`, `target_modules`, `base_model_name_or_path`, and per-tensor shapes. The merged adapter is written to disk in the same PEFT format (`adapter_config.json` + `adapter_model.safetensors`, f32) and can immediately be loaded via `POST /v1/adapters/load`. Merging happens off the async runtime via `spawn_blocking` and the helper lives at `crates/kiln-model/src/adapter_merge.rs::merge_linear`.
+
+Two additional merge modes shipped in Phase 8 and live in the same crate:
+
+**`ties`** (Yadav et al. 2023, arXiv 2306.01708, PR #578) reduces destructive interference between adapters via a three-phase per-tensor pipeline: (1) **trim** — for each adapter, keep only the top `density` fraction of values by absolute magnitude and zero the rest; (2) **elect sign** — at each parameter position, take the sign of `Σⱼ wⱼ · trimmed_j[i]`; (3) **disjoint merge** — weight-average only the trimmed values whose sign agrees with the elected sign. The request accepts an optional `density` in `(0.0, 1.0]` (default 0.2, the TIES paper's recommendation). Shape requirements are identical to `weighted_average`. Helper: `merge_ties` in `crates/kiln-model/src/adapter_merge.rs`.
+
+**`concat`** (PR #579) preserves each source's contribution by stacking ranks rather than averaging. `lora_A` is row-concatenated to shape `[Σᵢ rᵢ, in_features]`; `lora_B` is column-concatenated to shape `[out_features, Σᵢ rᵢ]` with each block scaled by its source weight. The product `B_concat @ A_concat` then equals `Σᵢ wᵢ · (Bᵢ @ Aᵢ)` — the same effective rank-update each source would have applied independently, materialized as one rank-`r_total` adapter. Unlike `weighted_average` and `ties`, source ranks are allowed to differ — that is the whole point. The merged `lora_alpha` is rescaled to `alpha_first × r_total / r_first` so the inference-time `alpha / r` factor is preserved. Tensor names must end in `lora_A.weight` or `lora_B.weight` (embedding LoRAs and DoRA magnitude vectors fall back to `weighted_average` or `ties`). Helper: `merge_concat` in `crates/kiln-model/src/adapter_merge.rs`.
+
+### Per-Request Adapter Composition
+
+Sometimes you want to stack multiple LoRAs at inference time without writing a new merged adapter to disk first. Phase 8 (PR #581) added a per-request composition spec to `/v1/chat/completions` and `/v1/completions/batch`: instead of `"adapter": "name"`, pass `"adapters": [{"name": "code-fix", "scale": 1.0}, {"name": "doc-style", "scale": 0.5}]`. The two fields are mutually exclusive — a request specifies either a single adapter or a composition list, not both.
+
+Composition is implemented as a **cached `merge_concat`** on the request path. The server hashes the `(name, scale)` pairs, looks up an existing composed adapter under `adapter_dir/.composed/<hash>/`, and synthesizes a new one only if no cache entry exists. Synthesis is `merge_concat` with the per-source `scale` values used as weights, so the inference-time effect is exactly `Σᵢ scaleᵢ · (Bᵢ @ Aᵢ)`. The composed adapter is then loaded and hot-swapped through the existing iteration-boundary swap path. Subsequent requests with the same composition reuse the cached adapter without recomputation. See `synthesize_composed_adapter` and `composition_hash` in `crates/kiln-server/src/api/completions.rs`.
 
 ## Training Pipeline
 
@@ -464,6 +480,58 @@ GET /v1/train/status/{id} ◄── TrainingJobInfo (progress, loss, state)
 ```
 
 Jobs can be cancelled while queued but not while running.
+
+### Webhook Notifications
+
+Phase 8 (PR #582) added an opt-in completion webhook so external schedulers, GRPO workers, and dashboards can react the moment a training job finishes — without polling `/v1/train/status/{id}`. The webhook URL is server-wide config (set via `KILN_TRAINING_WEBHOOK_URL` or the `[training] webhook_url` field in `kiln.toml`), not per-request. When set, every training job — both successful completions and failures — fires a fire-and-forget `POST` containing a `TrainingCompletionEvent` payload:
+
+```json
+{
+  "job_id": "uuid",
+  "job_type": "sft" | "grpo",
+  "status": "completed" | "failed",
+  "adapter_name": "my-adapter",
+  "adapter_path": "/var/kiln/adapters/my-adapter",
+  "error": null,
+  "timestamp": "2026-04-26T01:23:45Z"
+}
+```
+
+The HTTP `POST` runs on a tokio task with a 5-second client timeout and is best-effort: 4xx, 5xx, and transport errors are logged at WARN but never propagate, so a successful training job stays "completed" even if the notifier 5xxs. There is no built-in retry — clients that need at-least-once semantics should re-poll `/v1/train/status/{id}` on the receiving end. See `fire_completion_webhook` and `TrainingCompletionEvent` in `crates/kiln-server/src/training_queue.rs`.
+
+## Batch Generation API
+
+Phase 8 (PR #583) added `POST /v1/completions/batch`, a multi-prompt completion endpoint designed for the GRPO loop. GRPO normalizes advantages within a group of `n` completions per prompt, and issuing N separate HTTP requests per group adds non-trivial overhead per iteration. The batch endpoint takes the whole group in one round-trip and lets the iteration-level scheduler interleave the underlying prefill/decode steps:
+
+```json
+POST /v1/completions/batch
+{
+  "prompts": [
+    [{"role": "user", "content": "What is 2+2?"}],
+    [{"role": "user", "content": "What is the capital of France?"}]
+  ],
+  "n": 4,
+  "temperature": 0.8,
+  "seed": 42,
+  "adapter": "my-adapter"
+}
+```
+
+The response carries `prompts.len() × n` items, each tagged with `prompt_index` and `completion_index`:
+
+```json
+{
+  "id": "...",
+  "completions": [
+    {"prompt_index": 0, "completion_index": 0, "text": "...", "finish_reason": "stop", "usage": {...}},
+    {"prompt_index": 0, "completion_index": 1, "text": "...", "finish_reason": "stop", "usage": {...}},
+    ...
+  ],
+  "usage": {"prompt_tokens": ..., "completion_tokens": ..., "total_tokens": ...}
+}
+```
+
+When `seed` is set, each completion's effective seed is `seed + (prompt_index * n + completion_index)` so completions are deterministic across runs but distinct within a group — without that, identical prompts plus a fixed seed would produce identical outputs even at temperature > 0. Total output count is capped at 64 per request (`BATCH_MAX_TOTAL_OUTPUTS`); over the cap, the request is rejected with `batch_too_large` (HTTP 400) so a runaway client cannot pin the engine for an unbounded number of iterations. `stream: true` is not supported on this endpoint — only the aggregated final result is returned. The entire batch shares a single adapter (or composition, or none); per-prompt adapter override is a future extension. See `BatchCompletionRequest`, `BatchCompletionResponse`, and `batch_completions` in `crates/kiln-server/src/api/completions.rs`.
 
 ## Performance Optimizations
 
