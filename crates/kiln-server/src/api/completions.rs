@@ -1103,6 +1103,7 @@ async fn generate_real_streaming(
                             };
                             let registration = output.registration.take();
                             let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+                            let block_free_signal = output.block_free_signal.take();
                             let mut retained_blocks = Vec::new();
                             let mut evicted_blocks = Vec::new();
                             {
@@ -1122,7 +1123,24 @@ async fn generate_real_streaming(
                                 .filter(|block_id| !retained_blocks.contains(block_id))
                                 .collect();
                             blocks_to_free.extend(evicted_blocks);
-                            if !blocks_to_free.is_empty() {
+                            // For the threaded streaming path, NEVER free
+                            // here — the spawned decode worker is still
+                            // reading these block ids for KV. Hand the
+                            // computed set to the worker via its
+                            // rendezvous channel; it frees after the
+                            // decode loop finishes. Calling
+                            // `bm.free_all` synchronously here was the
+                            // root cause of the second-and-later same-
+                            // prompt regression to "毎回毎回..." — the
+                            // BlockManager handed those same block ids
+                            // back out to the next request before the
+                            // running decode loop was done with them.
+                            // The legacy synchronous path still leaves
+                            // `block_free_signal == None` and gets the
+                            // immediate-free behavior below.
+                            if let Some(signal) = block_free_signal {
+                                let _ = signal.send(blocks_to_free);
+                            } else if !blocks_to_free.is_empty() {
                                 let mut bm_guard = bm.lock().unwrap();
                                 bm_guard.free_all(&blocks_to_free);
                             }

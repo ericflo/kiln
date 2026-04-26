@@ -90,6 +90,19 @@ pub struct PrefixCachedStreamingOutput {
     pub receiver: mpsc::Receiver<StreamEvent>,
     pub registration: Option<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
+    /// Channel the API layer uses to hand the *final* "blocks to free" list
+    /// to the spawned decode thread, AFTER prefix-cache registration has
+    /// computed which of `allocated_blocks` were retained vs evicted. The
+    /// decode thread waits on this channel after the decode loop finishes
+    /// before freeing, which closes a race where the API layer would call
+    /// `bm.free_all(...)` immediately on return — *while* the decode worker
+    /// was still reading those same blocks for KV. The visible symptom of
+    /// that race was second-and-later same-prompt streaming requests
+    /// regressing to a degenerate token loop ("毎回毎回..."). Send `vec![]`
+    /// when nothing should be freed (e.g. if the cache retained all blocks).
+    /// Drop without sending only on caller failure — the worker then frees
+    /// `allocated_blocks` itself as a safe fallback.
+    pub block_free_signal: Option<mpsc::Sender<Vec<u32>>>,
 }
 
 /// Output from a native MTP speculative generation call.
@@ -3074,20 +3087,19 @@ impl ModelRunner {
         drop(logits);
 
         let (tx, rx) = mpsc::channel();
+        // Rendezvous channel for the final "blocks to free" list. The API
+        // layer sends `(allocated - retained) ∪ evicted` here as soon as
+        // prefix-cache registration is done; the decode thread `recv()`s
+        // this AFTER the decode loop completes, then frees. If the API
+        // layer drops the sender without sending (panic / error path), the
+        // thread falls back to freeing `allocated_blocks` so we don't leak.
+        let (free_tx, free_rx) = mpsc::channel::<Vec<u32>>();
         let seq_len = prompt_tokens.len();
         let runner_for_thread = runner_lock;
         let bm_for_thread = block_manager;
         let pc_for_thread = paged_cache;
-        // The decode thread frees blocks on exit so the BlockManager doesn't
-        // leak across a long generation. The completions handler still owns
-        // the prefix-cache registration callback (registered/evicted blocks
-        // are managed there because the cache may retain a subset of these
-        // ids), so we do NOT free `allocated_blocks` from the spawn — only
-        // free them via the registration outcome path. Pass an empty list to
-        // the thread; the API layer's existing register/retain logic computes
-        // the correct free set.
-        let block_ids_to_free: Vec<u32> = Vec::new();
         let block_table_for_thread = block_table.clone();
+        let allocated_for_fallback: Vec<u32> = allocated_blocks.clone();
 
         std::thread::Builder::new()
             .name("kiln-stream-decode-prefix".to_string())
@@ -3114,9 +3126,25 @@ impl ModelRunner {
                     }));
                 }
                 drop(tx);
-                if !block_ids_to_free.is_empty() {
+
+                // Decode is fully drained by here — the SSE side has either
+                // received `Done` or the receiver was dropped. Now and only
+                // now is it safe to release physical blocks back to the
+                // BlockManager. Wait for the API layer to tell us the
+                // exact set; fall back to the full allocation on error.
+                let blocks_to_free = match free_rx.recv() {
+                    Ok(list) => list,
+                    Err(_) => {
+                        tracing::warn!(
+                            "decode thread did not receive a free list from the API layer; \
+                             falling back to freeing all allocated blocks"
+                        );
+                        allocated_for_fallback
+                    }
+                };
+                if !blocks_to_free.is_empty() {
                     match bm_for_thread.lock() {
-                        Ok(mut guard) => guard.free_all(&block_ids_to_free),
+                        Ok(mut guard) => guard.free_all(&blocks_to_free),
                         Err(e) => tracing::error!(
                             error = %e,
                             "failed to lock block manager to free blocks after streaming decode (prefix cache)"
@@ -3130,6 +3158,7 @@ impl ModelRunner {
             receiver: rx,
             registration,
             allocated_blocks,
+            block_free_signal: Some(free_tx),
         })
     }
 
@@ -3376,10 +3405,14 @@ impl ModelRunner {
             &mut linear_state,
         )?;
 
+        // Legacy synchronous path: receiver is fully populated before return,
+        // no decode thread is alive, so the API layer is free to call
+        // bm.free_all on the same call frame. No rendezvous channel needed.
         Ok(PrefixCachedStreamingOutput {
             receiver,
             registration,
             allocated_blocks: Vec::new(),
+            block_free_signal: None,
         })
     }
 
