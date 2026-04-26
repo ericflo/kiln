@@ -1493,8 +1493,357 @@ fn now_epoch() -> u64 {
         .as_secs()
 }
 
+/// Maximum number of completions a single batch request may produce.
+/// Total outputs = `prompts.len() * n.unwrap_or(1)`. Above this cap the
+/// request is rejected with `batch_too_large` (400) so a runaway client
+/// cannot pin the engine for an unbounded number of iterations.
+const BATCH_MAX_TOTAL_OUTPUTS: usize = 64;
+
+/// Batch completion request — generate completions for many prompts (and/or
+/// many completions per prompt) in a single HTTP round-trip.
+///
+/// Designed for the GRPO loop: groups of `n` completions per prompt are
+/// the unit of advantage normalization, and issuing N separate HTTP requests
+/// per group adds non-trivial overhead. With this endpoint a GRPO worker
+/// posts the whole group in one call and the iteration-level scheduler
+/// batches the underlying prefill/decode steps.
+///
+/// `stream: true` is not supported on this endpoint — for v1 we only return
+/// the aggregated final result. Per-prompt adapter override is also a future
+/// extension; for v1 the entire batch shares a single adapter (or none, or a
+/// single composition).
+#[derive(Debug, Deserialize)]
+pub struct BatchCompletionRequest {
+    /// When omitted, the server falls back to its configured `served_model_id`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// One messages array per prompt. Total outputs returned =
+    /// `prompts.len() * n.unwrap_or(1)`.
+    pub prompts: Vec<Vec<Message>>,
+    /// Number of completions to generate per prompt. Defaults to 1.
+    /// Must be >= 1 when set.
+    #[serde(default)]
+    pub n: Option<usize>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub stop: Option<Vec<String>>,
+    /// Base seed. When set, each completion's effective seed is
+    /// `seed.wrapping_add((prompt_index * n + completion_index) as u64)`
+    /// so completions are deterministic across runs but distinct within
+    /// a group — without that, identical prompts plus a fixed seed would
+    /// produce identical outputs even at temperature > 0.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Single LoRA adapter applied to every prompt in the batch.
+    /// Mutually exclusive with `adapters`.
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// Composition spec applied once for the entire batch (same shape and
+    /// caching as `/v1/chat/completions`). Mutually exclusive with `adapter`.
+    /// Per-prompt adapter override is a future extension.
+    #[serde(default)]
+    pub adapters: Option<Vec<AdapterRef>>,
+}
+
+/// Aggregated batch response. `completions.len() == prompts.len() * n`.
+#[derive(Debug, Serialize)]
+pub struct BatchCompletionResponse {
+    pub id: String,
+    pub object: &'static str,
+    pub created: u64,
+    pub model: String,
+    pub completions: Vec<BatchCompletionItem>,
+    /// Sum of per-completion usage. `prompt_tokens` counts each prompt once
+    /// per completion (so a prompt with `n=4` contributes its prompt token
+    /// count 4×), matching how a client would sum N independent calls.
+    pub usage: Usage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchCompletionItem {
+    pub prompt_index: usize,
+    pub completion_index: usize,
+    pub text: String,
+    pub finish_reason: String,
+    pub usage: Usage,
+}
+
+async fn batch_completions(
+    State(state): State<AppState>,
+    Json(req): Json<BatchCompletionRequest>,
+) -> Result<Response, ApiError> {
+    let start = std::time::Instant::now();
+    state.metrics.inc_active();
+
+    let result = batch_completions_inner(&state, req).await;
+
+    state.metrics.dec_active();
+    let elapsed = start.elapsed().as_secs_f64();
+    state.metrics.observe_duration(elapsed);
+
+    match &result {
+        Ok(_) => state.metrics.inc_request(RequestStatus::Ok),
+        Err(e) => {
+            if e.status == StatusCode::REQUEST_TIMEOUT {
+                state.metrics.inc_request(RequestStatus::Timeout);
+            } else {
+                state.metrics.inc_request(RequestStatus::Error);
+            }
+        }
+    }
+
+    result
+}
+
+async fn batch_completions_inner(
+    state: &AppState,
+    req: BatchCompletionRequest,
+) -> Result<Response, ApiError> {
+    let n_per = req.n.unwrap_or(1);
+
+    if req.prompts.is_empty() {
+        return Err(ApiError::batch_invalid_request(
+            "'prompts' must contain at least one messages array",
+        ));
+    }
+    if n_per == 0 {
+        return Err(ApiError::batch_invalid_request(
+            "'n' must be >= 1 when set",
+        ));
+    }
+    let total_outputs = req.prompts.len().saturating_mul(n_per);
+    if total_outputs > BATCH_MAX_TOTAL_OUTPUTS {
+        return Err(ApiError::batch_too_large(
+            total_outputs,
+            BATCH_MAX_TOTAL_OUTPUTS,
+        ));
+    }
+
+    // Adapter validation. Same rules as the single-completion endpoint, but
+    // applied once for the whole batch — per-prompt adapter override is a
+    // future extension.
+    if req.adapter.is_some() && req.adapters.is_some() {
+        return Err(ApiError::invalid_compose_request(
+            "specify either 'adapter' (single name) or 'adapters' (list), not both",
+        ));
+    }
+    if let Some(ref list) = req.adapters {
+        if list.is_empty() {
+            return Err(ApiError::invalid_compose_request(
+                "'adapters' must be a non-empty list when present",
+            ));
+        }
+        for src in list {
+            validate_compose_name(&src.name)?;
+        }
+    }
+
+    // Resolve adapter once for the entire batch. After this returns,
+    // state.active_adapter_name reflects the loaded adapter and every
+    // synthesized per-output ChatCompletionRequest below leaves
+    // `adapter`/`adapters` as None — generate_real reads the active adapter
+    // from state, not from the request.
+    let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
+        Some(synthesize_composed_adapter(&state.adapter_dir, list).await?)
+    } else {
+        None
+    };
+
+    if let ModelBackend::Real { runner, .. } = state.backend.as_ref() {
+        if let Some(ref target) = composed_target {
+            ensure_composed_adapter_swap(state, runner, target).await?;
+        } else {
+            ensure_adapter(state, runner, &req.adapter).await?;
+        }
+    }
+
+    // Spawn one task per (prompt, completion) pair. Each task synthesizes a
+    // ChatCompletionRequest with this prompt's messages and a derived seed,
+    // then dispatches through the existing generate_real / generate_mock
+    // path. The iteration-level scheduler is what actually batches concurrent
+    // requests; we do not introduce a new code path inside the engine.
+    let mut handles = Vec::with_capacity(total_outputs);
+    for (prompt_idx, prompt_messages) in req.prompts.iter().enumerate() {
+        for completion_idx in 0..n_per {
+            let derived_seed = req
+                .seed
+                .map(|s| s.wrapping_add((prompt_idx * n_per + completion_idx) as u64));
+            let messages: Vec<Message> = prompt_messages
+                .iter()
+                .map(|m| Message {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                })
+                .collect();
+            let synth_req = ChatCompletionRequest {
+                model: req.model.clone(),
+                messages,
+                temperature: req.temperature,
+                top_p: req.top_p,
+                top_k: req.top_k,
+                max_tokens: req.max_tokens,
+                stream: false,
+                stop: req.stop.clone(),
+                seed: derived_seed,
+                adapter: None,
+                adapters: None,
+            };
+            let state_clone = state.clone();
+            handles.push(tokio::spawn(async move {
+                generate_one_response(&state_clone, synth_req).await
+            }));
+        }
+    }
+
+    let mut completions = Vec::with_capacity(total_outputs);
+    let mut total_prompt_tokens = 0usize;
+    let mut total_completion_tokens = 0usize;
+
+    for (idx, handle) in handles.into_iter().enumerate() {
+        let prompt_index = idx / n_per;
+        let completion_index = idx % n_per;
+        let resp = match handle.await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(ApiError::internal(format!(
+                    "batch task join error: {e}"
+                )));
+            }
+        };
+        let choice = resp
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::internal("generate returned a response with no choices"))?;
+        total_prompt_tokens = total_prompt_tokens.saturating_add(resp.usage.prompt_tokens);
+        total_completion_tokens =
+            total_completion_tokens.saturating_add(resp.usage.completion_tokens);
+        completions.push(BatchCompletionItem {
+            prompt_index,
+            completion_index,
+            text: choice.message.content,
+            finish_reason: choice.finish_reason,
+            usage: resp.usage,
+        });
+    }
+
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
+
+    Ok(Json(BatchCompletionResponse {
+        id: format!("batchcmpl-{}", Uuid::new_v4()),
+        object: "batch.completion",
+        created: now_epoch(),
+        model,
+        completions,
+        usage: Usage {
+            prompt_tokens: total_prompt_tokens,
+            completion_tokens: total_completion_tokens,
+            total_tokens: total_prompt_tokens.saturating_add(total_completion_tokens),
+        },
+    })
+    .into_response())
+}
+
+/// Run a single non-streaming completion against whichever backend is loaded.
+/// Used by the batch endpoint to fan out N synthesized single-completion
+/// requests in parallel.
+///
+/// The adapter is intentionally not re-resolved here — the caller (the batch
+/// handler) resolves the adapter once for the whole batch. This avoids
+/// pointless write-locking and re-loading the same adapter N times.
+async fn generate_one_response(
+    state: &AppState,
+    req: ChatCompletionRequest,
+) -> Result<ChatCompletionResponse, ApiError> {
+    let request_start = std::time::Instant::now();
+
+    let chat_messages: Vec<ChatMessage> = req
+        .messages
+        .iter()
+        .map(|m| ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        })
+        .collect();
+
+    let prompt_text = state
+        .tokenizer
+        .apply_chat_template(&chat_messages)
+        .map_err(ApiError::chat_template_failed)?;
+    let prompt_tokens = state
+        .tokenizer
+        .encode(&prompt_text)
+        .map_err(ApiError::tokenization_failed)?;
+
+    let sampling = SamplingParams {
+        temperature: req.temperature.unwrap_or(1.0),
+        top_p: req.top_p.unwrap_or(1.0),
+        top_k: req.top_k.unwrap_or(0),
+        max_tokens: req.max_tokens.unwrap_or(2048),
+        stop: req.stop.clone().unwrap_or_default(),
+        seed: req.seed,
+        ..Default::default()
+    };
+
+    match state.backend.as_ref() {
+        ModelBackend::Real {
+            runner,
+            block_manager,
+            paged_cache,
+            prefix_cache,
+        } => {
+            let resp = generate_real(
+                state,
+                runner,
+                block_manager,
+                paged_cache,
+                prefix_cache,
+                &prompt_text,
+                &prompt_tokens,
+                &sampling,
+                &req,
+                request_start,
+            )
+            .await?;
+            state
+                .metrics
+                .add_tokens(resp.usage.completion_tokens as u64);
+            Ok(resp)
+        }
+        ModelBackend::Mock { scheduler, engine } => {
+            let resp = generate_mock(
+                state,
+                scheduler,
+                engine,
+                &prompt_text,
+                &sampling,
+                &req,
+                request_start,
+            )
+            .await?;
+            state
+                .metrics
+                .add_tokens(resp.usage.completion_tokens as u64);
+            Ok(resp)
+        }
+    }
+}
+
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/v1/chat/completions", post(chat_completions))
+    Router::new()
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/completions/batch", post(batch_completions))
 }
 
 #[cfg(test)]
@@ -1752,5 +2101,208 @@ mod tests {
             LONG_PROMPT_SKIP_LAYER_MIN_PROMPT_TOKENS_METAL,
         );
         assert!(matches!(mode, ResolvedSpeculativeMode::SkipLayer(_)));
+    }
+
+    // ── Batch completion endpoint ───────────────────────────────────
+
+    fn parse_batch_request(json: &str) -> BatchCompletionRequest {
+        serde_json::from_str(json).expect("batch request should deserialize")
+    }
+
+    fn make_batch_test_state() -> AppState {
+        let config = ModelConfig::qwen3_5_4b();
+        let sched_config = kiln_scheduler::SchedulerConfig {
+            max_batch_tokens: 8192,
+            max_batch_size: 64,
+            block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
+        };
+        let scheduler = kiln_scheduler::Scheduler::new(sched_config, 256);
+        let engine = kiln_model::engine::MockEngine::new(config.clone());
+        let tokenizer = crate::api::test_tokenizer();
+        AppState::new_mock(
+            config,
+            scheduler,
+            std::sync::Arc::new(engine),
+            tokenizer,
+            300,
+            "kiln-test".to_string(),
+        )
+    }
+
+    /// Build a minimal request body, invoke the route, and return (status, body).
+    async fn batch_post(state: AppState, body_json: &str) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = routes().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body_json.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    #[test]
+    fn batch_request_parses_minimal_shape() {
+        let req = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"hi"}]]}"#,
+        );
+        assert_eq!(req.prompts.len(), 1);
+        assert_eq!(req.prompts[0][0].role, "user");
+        assert_eq!(req.prompts[0][0].content, "hi");
+        assert!(req.n.is_none());
+        assert!(req.seed.is_none());
+        assert!(req.adapter.is_none());
+        assert!(req.adapters.is_none());
+    }
+
+    #[test]
+    fn batch_request_parses_full_shape() {
+        let req = parse_batch_request(
+            r#"{
+                "prompts":[
+                    [{"role":"user","content":"a"}],
+                    [{"role":"user","content":"b"}]
+                ],
+                "n":4,
+                "temperature":0.7,
+                "top_p":0.95,
+                "top_k":40,
+                "max_tokens":32,
+                "stop":["\n\n"],
+                "seed":1234,
+                "adapter":"my-adapter"
+            }"#,
+        );
+        assert_eq!(req.prompts.len(), 2);
+        assert_eq!(req.n, Some(4));
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.95));
+        assert_eq!(req.top_k, Some(40));
+        assert_eq!(req.max_tokens, Some(32));
+        assert_eq!(req.stop.as_deref(), Some(&["\n\n".to_string()][..]));
+        assert_eq!(req.seed, Some(1234));
+        assert_eq!(req.adapter.as_deref(), Some("my-adapter"));
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_empty_prompts() {
+        let (status, body) =
+            batch_post(make_batch_test_state(), r#"{"prompts":[]}"#).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "batch_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_zero_n() {
+        let (status, body) = batch_post(
+            make_batch_test_state(),
+            r#"{"prompts":[[{"role":"user","content":"hi"}]],"n":0}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "batch_invalid_request");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_too_many_outputs() {
+        // 65 prompts * 1 = 65 > BATCH_MAX_TOTAL_OUTPUTS (64)
+        let prompts: Vec<serde_json::Value> = (0..65)
+            .map(|_| serde_json::json!([{"role":"user","content":"hi"}]))
+            .collect();
+        let req_body = serde_json::json!({"prompts": prompts}).to_string();
+        let (status, body) = batch_post(make_batch_test_state(), &req_body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "batch_too_large");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_too_many_outputs_via_n_multiplier() {
+        // 8 prompts * 9 = 72 > 64 — proves the cap counts the product, not just prompts.len().
+        let prompts: Vec<serde_json::Value> = (0..8)
+            .map(|_| serde_json::json!([{"role":"user","content":"hi"}]))
+            .collect();
+        let req_body = serde_json::json!({"prompts": prompts, "n": 9}).to_string();
+        let (status, body) = batch_post(make_batch_test_state(), &req_body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "batch_too_large");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_adapter_and_adapters_together() {
+        let body = serde_json::json!({
+            "prompts": [[{"role":"user","content":"hi"}]],
+            "adapter": "single",
+            "adapters": [{"name":"a","scale":1.0}]
+        })
+        .to_string();
+        let (status, body) = batch_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_compose_request");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_empty_adapters_list() {
+        let body = serde_json::json!({
+            "prompts": [[{"role":"user","content":"hi"}]],
+            "adapters": []
+        })
+        .to_string();
+        let (status, body) = batch_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_compose_request");
+    }
+
+    #[test]
+    fn batch_seed_derivation_is_distinct_per_output() {
+        // Verifies the documented derivation: per-output seed =
+        // base.wrapping_add(prompt_idx * n + completion_idx).
+        let base: u64 = 42;
+        let n_per = 3;
+        let mut seeds = std::collections::HashSet::new();
+        for prompt_idx in 0..2usize {
+            for completion_idx in 0..n_per {
+                let derived = base.wrapping_add((prompt_idx * n_per + completion_idx) as u64);
+                assert!(
+                    seeds.insert(derived),
+                    "seed {derived} for ({prompt_idx},{completion_idx}) collides with an earlier output"
+                );
+            }
+        }
+        assert_eq!(seeds.len(), 2 * n_per);
+    }
+
+    #[test]
+    fn batch_response_object_field_is_batch_completion() {
+        // Lock down the discriminator string clients will key on so we don't
+        // accidentally rename it.
+        let resp = BatchCompletionResponse {
+            id: "batchcmpl-test".to_string(),
+            object: "batch.completion",
+            created: 0,
+            model: "kiln-test".to_string(),
+            completions: vec![],
+            usage: Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["object"], "batch.completion");
     }
 }

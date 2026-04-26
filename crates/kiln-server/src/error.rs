@@ -278,6 +278,28 @@ impl ApiError {
         }
     }
 
+    // ── Batch completions ───────────────────────────────────────────
+
+    pub fn batch_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "batch_invalid_request",
+            message: format!("Invalid batch completion request: {detail}"),
+            hint: "POST {prompts: [[{role,content}, ...], ...], n: <int>=1, ...sampling}. Total outputs = prompts.len() * n must not exceed the configured cap.",
+        }
+    }
+
+    pub fn batch_too_large(requested: usize, cap: usize) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "batch_too_large",
+            message: format!(
+                "Batch would produce {requested} completions, which exceeds the cap of {cap}"
+            ),
+            hint: "Reduce prompts.len() or n so prompts.len() * n <= cap, or split into multiple smaller batch requests.",
+        }
+    }
+
     // ── Generic ─────────────────────────────────────────────────────
 
     pub fn internal(detail: impl std::fmt::Display) -> Self {
