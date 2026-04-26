@@ -76,7 +76,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # Pin to an exact commit SHA so the bundled cargo-deny CLI version cannot
+      # drift on us. v2.0.17 bundles cargo-deny 0.19.2, which is the version the
+      # `unmaintained = "workspace"` Scope syntax in deny.toml is validated
+      # against (cargo-deny ≤ 0.17 still parses that field as a deprecated
+      # LintLevel and will reject "workspace"). Bump this pin deliberately when
+      # we want a newer cargo-deny — see the README for the action.
+      - uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17 (cargo-deny 0.19.2)
         with:
           command: check
           # Run all checks: licenses, sources, bans, advisories

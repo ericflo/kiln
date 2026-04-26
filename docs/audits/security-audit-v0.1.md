@@ -323,6 +323,12 @@ A second wrinkle: the local advisory-db at `~/.cargo/advisory-db` contains a CVS
 
 **Severity:** LOW. Not a runtime risk; a CI-policy maintenance gap.
 
+**Update (Phase 9 follow-up).** Investigation showed `unmaintained = "workspace"` is in fact the *modern* shape on cargo-deny ≥ 0.18 — the field is parsed as a `Scope` ("all" | "workspace" | "transitive" | "none"), not a `LintLevel`. The "this key has been removed" error in this section was emitted by cargo-deny 0.16.4, which still parsed `unmaintained` as a deprecated `LintLevel` and rejected `"workspace"`. Versions 0.18.0+ re-introduced the field as a Scope, which is the schema documented today (https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html). There is no `[advisories.unmaintained]` sub-table in cargo-deny's schema; the migration guide referenced in the original error refers to PR #611's `version = 2` opt-in, which the policy already uses.
+
+The deprecation-cliff risk is therefore narrower than written: it only fires if the cargo-deny CLI used by CI ever drops below 0.18 (or, conversely, if a future major rewrite removes the field again). To close that gap, CI now pins the `cargo-deny-action` to a specific commit SHA (`91bf2b62…` = v2.0.17, cargo-deny 0.19.2). Bumping the bundled cargo-deny version is now an explicit, reviewable change. A version-requirement comment was added to `deny.toml` so the next reader sees the constraint inline.
+
+Status: **Fixed** in PR `ce/phase9-deny-migration` — pinned the action SHA + bundled cargo-deny 0.19.2; documented the version requirement in `deny.toml`; left `unmaintained = "workspace"` unchanged because it is already the canonical modern shape.
+
 ---
 
 ## Recommendations roadmap
@@ -347,7 +353,7 @@ Ordered by severity, then by effort.
 8. **Cap composed-adapter cache size** (§6, §8). LRU-evict `.composed/<hash>/` entries above N total or M GiB.
 9. **Cap total adapter-dir disk usage** (§8). Reject uploads that would push total adapter-dir size above `adapters.max_disk_bytes`.
 10. ~~**Disable redirects on webhook reqwest client** (§7). Belt-and-suspenders against a misconfigured webhook URL pointing at a public 302.~~ **Fixed** in branch `ce/phase9-webhook-disable-redirects`.
-11. **Migrate `deny.toml`** (§12). Replace `unmaintained = "workspace"` with the post-PR-611 shape; pin the CI cargo-deny version explicitly.
+11. ~~**Migrate `deny.toml`** (§12). Replace `unmaintained = "workspace"` with the post-PR-611 shape; pin the CI cargo-deny version explicitly.~~ **Fixed** in branch `ce/phase9-deny-migration` — pinned `cargo-deny-action` to v2.0.17 commit SHA (cargo-deny 0.19.2) and documented the schema-version constraint in `deny.toml`. The "new shape" turned out not to exist: `unmaintained = "workspace"` is already the canonical modern form on cargo-deny ≥ 0.18; see the §12 update for the full reasoning.
 12. ~~**Document training-data invariants** (§3). One short README section: "Kiln applies a faithful gradient update to whatever you POST. Treat your training corpus as security-sensitive."~~ **Fixed** in branch `ce/phase9-document-training-data-trust` (new `## Security model` section in `README.md`, callout in `QUICKSTART.md` adjacent to the loopback paragraph).
 
 ### Out of scope for v0.1
