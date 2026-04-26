@@ -2,6 +2,7 @@
 name = "kiln-core"
 description = "Core types and traits for Kiln inference server"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 

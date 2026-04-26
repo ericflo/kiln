@@ -30,13 +30,11 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-# Workspace internal deps use `{ workspace = true }`, which resolves as a `*`
-# version requirement. cargo-deny's `allow-wildcard-paths` exemption only
-# applies to crates that set `publish = false`; until the workspace crates
-# declare their publish state explicitly, the path-wildcard exemption can't
-# be granted, so we set this to "warn" rather than "deny". Tighten to "deny"
-# in a follow-up after marking the non-publishable crates as `publish = false`.
-wildcards = "warn"
+# All workspace crates set `publish = false`, so cargo-deny's
+# `allow-wildcard-paths` exemption applies to the path-wildcard
+# version requirements that come from `{ workspace = true }`.
+# External wildcard requirements still fail.
+wildcards = "deny"
 allow-wildcard-paths = true
 deny = []
 skip = []

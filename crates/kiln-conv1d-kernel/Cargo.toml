@@ -1,6 +1,7 @@
 [package]
 name = "kiln-conv1d-kernel"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
