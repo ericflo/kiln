@@ -2,6 +2,7 @@
 name = "kiln-scheduler"
 description = "Iteration-level continuous batching scheduler with chunked prefill"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 

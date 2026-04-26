@@ -2,6 +2,7 @@
 name = "kiln-nvtx"
 description = "Thin NVTX range wrapper for nsys attribution. Zero overhead when feature is off."
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -2,6 +2,7 @@
 name = "kiln-train"
 description = "In-process LoRA training for Kiln — pure Rust, no Python sidecar"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 

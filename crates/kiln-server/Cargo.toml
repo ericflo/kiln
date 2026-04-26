@@ -2,6 +2,7 @@
 name = "kiln-server"
 description = "HTTP server for Kiln — OpenAI-compatible inference + training API"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 
