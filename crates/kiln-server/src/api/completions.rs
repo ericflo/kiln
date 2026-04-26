@@ -42,6 +42,26 @@ fn last_user_message_text(req: &ChatCompletionRequest) -> String {
         .unwrap_or_default()
 }
 
+/// If the rendered chat-template prompt prefilled an opening reasoning tag
+/// into the assistant turn (Qwen3.5's official template ends with
+/// `<|im_start|>assistant\n<think>\n` whenever `enable_thinking` isn't
+/// explicitly false), return the literal text the model is continuing from
+/// so the caller can re-emit it on the wire. Without this, the model
+/// generates "Thinking Process: ..." with no opening `<think>` tag and any
+/// client/UI that splits on `<think>...</think>` to render the chain of
+/// thought separately fails to detect a reasoning block at all.
+///
+/// Conservative: only fires when the prompt ends with the exact `<think>\n`
+/// suffix Qwen3.5 emits, so non-reasoning templates and the bare ChatML
+/// fallback are unaffected.
+fn prefilled_assistant_opener(prompt_text: &str) -> Option<&'static str> {
+    if prompt_text.ends_with("<think>\n") {
+        Some("<think>\n")
+    } else {
+        None
+    }
+}
+
 /// Push a [`RequestRecord`] into the dashboard's recent-requests ring. Logs a
 /// warning if the lock is poisoned but otherwise never panics — request
 /// recording must not fail the user's request.
@@ -880,7 +900,15 @@ async fn generate_real(
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
     let completion_tokens = output.token_ids.len();
-    let completion_text = output.text;
+    // See `prefilled_assistant_opener` — Qwen3.5's chat template prefills
+    // `<think>\n` into the assistant turn so the model never re-emits the
+    // opening tag. Re-attach it here so the JSON response carries a
+    // well-formed `<think>...</think>` block, matching the streaming path
+    // and what vLLM/SGLang serve for the same template.
+    let completion_text = match prefilled_assistant_opener(prompt_text) {
+        Some(opener) => format!("{opener}{}", output.text),
+        None => output.text,
+    };
 
     record_recent_request(
         state,
@@ -1042,6 +1070,44 @@ async fn generate_real_streaming(
                     completion_token_count,
                 );
                 return;
+            }
+
+            // Qwen3.5's chat template prefills `<think>\n` into the assistant
+            // turn so the model continues directly with reasoning content
+            // (never re-emitting the opening tag). Without help, OpenAI-compat
+            // clients see a stream that opens mid-thought and have no way to
+            // detect a `<think>...</think>` block. Re-emit the prefilled tag
+            // as a synthetic content chunk so the wire format is well-formed
+            // — `<think>\n` + model output + (model emits) `</think>\n` +
+            // answer — matching what vLLM/SGLang do for the same template.
+            if let Some(opener) = prefilled_assistant_opener(&prompt) {
+                let opener_chunk = ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: None,
+                            content: Some(opener.to_string()),
+                        },
+                        finish_reason: None,
+                    }],
+                };
+                if tx
+                    .send(Event::default().data(serde_json::to_string(&opener_chunk).unwrap()))
+                    .await
+                    .is_err()
+                {
+                    record(
+                        "client_disconnect".to_string(),
+                        &completion_buf,
+                        completion_token_count,
+                    );
+                    return;
+                }
+                completion_buf.push_str(opener);
             }
 
             let sync_rx = match speculative_mode {
