@@ -13,6 +13,7 @@
 
 ### Docs
 - Document Phase 8 API surface in QUICKSTART.md (#584)
+- Add docs/GRPO_GUIDE.md with worked verifiable-rewards examples (math, JSON, code) (#NNN)
 
 ### Test fixes
 - Rewrite test_upload_rejects_path_escape_in_archive to actually emit a traversal tarball (#580)
