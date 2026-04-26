@@ -2,9 +2,15 @@
 
 ## Unreleased
 
-### CI / release
+## kiln-v0.2.4 — 2026-04-26
 
-- Publish prebuilt server Docker image to `ghcr.io/ericflo/kiln-server` on every `kiln-v*` tag (#XXX)
+CI / release-prep release. No user-facing API or behavior changes since
+v0.2.3; this cut exists to publish the kiln-server Docker image to GHCR
+and to validate the auto-publish-on-platforms-green workflow end-to-end.
+
+### CI / release
+- Auto-publish the GitHub Release once all 3 platform jobs succeed, instead of leaving each tag in Draft (#592)
+- Publish prebuilt server Docker image to `ghcr.io/ericflo/kiln-server` on every `kiln-v*` tag (#593)
 
 ## kiln-v0.2.3 — 2026-04-26
 
