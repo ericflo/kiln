@@ -48,14 +48,14 @@ RUN for crate in kiln-core kiln-flash-attn kiln-model kiln-scheduler kiln-server
     done
 
 # Pre-build dependencies (this layer is cached unless Cargo.toml changes)
-RUN cargo build --release --features cuda 2>/dev/null || true
+RUN cargo build --release --locked --features cuda 2>/dev/null || true
 
 # Copy full source and build for real
 COPY . .
 # Touch source files so cargo sees them as newer than the dummy files
 RUN find crates -name "*.rs" -exec touch {} +
 
-RUN cargo build --release --features cuda
+RUN cargo build --release --locked --features cuda
 
 # ---------------------------------------------------------------------------
 # Runtime stage — minimal image with CUDA runtime libs only
