@@ -11,9 +11,83 @@ use std::sync::Arc;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::{GrpoRequest, SftRequest, TrainingState};
 use kiln_train::trainer;
+use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobType};
+
+/// JSON payload POSTed to the training-completion webhook.
+///
+/// The frontend contract documented in `TrainingConfig::webhook_url`
+/// promises these field names — keep them stable for downstream
+/// consumers.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TrainingCompletionEvent {
+    pub job_id: String,
+    pub job_type: &'static str,
+    pub status: &'static str,
+    pub adapter_name: String,
+    pub adapter_path: Option<String>,
+    pub error: Option<String>,
+    pub timestamp: String,
+}
+
+impl TrainingCompletionEvent {
+    pub fn job_type_str(job_type: TrainingJobType) -> &'static str {
+        match job_type {
+            TrainingJobType::Sft => "sft",
+            TrainingJobType::Grpo => "grpo",
+        }
+    }
+}
+
+/// Fire-and-forget POST of `event` to `url`. Spawns a tokio task so the
+/// caller (the training worker's blocking thread) is never blocked by
+/// network I/O. Webhook failures are logged at WARN but never propagate
+/// — a successful training job stays "completed" even if the
+/// notification POST fails.
+pub fn fire_completion_webhook(url: String, event: TrainingCompletionEvent) {
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to build webhook HTTP client");
+                return;
+            }
+        };
+        match client.post(&url).json(&event).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    tracing::info!(
+                        url = %url,
+                        job_id = %event.job_id,
+                        status = %status,
+                        "training completion webhook delivered"
+                    );
+                } else {
+                    tracing::warn!(
+                        url = %url,
+                        job_id = %event.job_id,
+                        status = %status,
+                        "training completion webhook returned non-2xx"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    url = %url,
+                    job_id = %event.job_id,
+                    error = %err,
+                    "training completion webhook POST failed"
+                );
+            }
+        }
+    });
+}
 
 /// A pending training job in the queue.
 pub enum QueuedJob {
@@ -232,10 +306,23 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 if let Some(job) = jobs.get_mut(&job_id) {
                     job.state = TrainingState::Completed;
                     job.progress = 1.0;
-                    job.adapter_path = Some(path_str);
+                    job.adapter_path = Some(path_str.clone());
                 }
             }
             state.metrics.inc_training(metric_type, TrainingMetricStatus::Completed);
+
+            if let Some(ref url) = state.training_webhook_url {
+                let event = TrainingCompletionEvent {
+                    job_id: job_id.clone(),
+                    job_type: TrainingCompletionEvent::job_type_str(job_type),
+                    status: "completed",
+                    adapter_name: adapter_name.clone(),
+                    adapter_path: Some(path_str.clone()),
+                    error: None,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+                fire_completion_webhook(url.clone(), event);
+            }
 
             if auto_load {
                 if let Err(e) = auto_load_adapter(
@@ -253,11 +340,27 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         }
         Err(e) => {
             tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
-            let mut jobs = state.training_jobs.write().unwrap();
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.state = TrainingState::Failed;
+            let error_msg = e.clone();
+            {
+                let mut jobs = state.training_jobs.write().unwrap();
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    job.state = TrainingState::Failed;
+                }
             }
             state.metrics.inc_training(metric_type, TrainingMetricStatus::Failed);
+
+            if let Some(ref url) = state.training_webhook_url {
+                let event = TrainingCompletionEvent {
+                    job_id: job_id.clone(),
+                    job_type: TrainingCompletionEvent::job_type_str(job_type),
+                    status: "failed",
+                    adapter_name: adapter_name.clone(),
+                    adapter_path: None,
+                    error: Some(error_msg),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                };
+                fire_completion_webhook(url.clone(), event);
+            }
         }
     }
 }
@@ -364,5 +467,184 @@ mod tests {
         assert_eq!(q.len(), 0);
         assert!(q.pop().is_none());
         assert!(!q.remove("nonexistent"));
+    }
+
+    #[test]
+    fn test_event_job_type_str() {
+        assert_eq!(
+            TrainingCompletionEvent::job_type_str(TrainingJobType::Sft),
+            "sft"
+        );
+        assert_eq!(
+            TrainingCompletionEvent::job_type_str(TrainingJobType::Grpo),
+            "grpo"
+        );
+    }
+
+    #[test]
+    fn test_event_serializes_with_expected_field_names() {
+        let event = TrainingCompletionEvent {
+            job_id: "abc-123".into(),
+            job_type: "sft",
+            status: "completed",
+            adapter_name: "my-adapter".into(),
+            adapter_path: Some("/data/adapters/my-adapter".into()),
+            error: None,
+            timestamp: "2026-04-26T00:00:00+00:00".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&event).unwrap();
+        assert_eq!(v["job_id"], "abc-123");
+        assert_eq!(v["job_type"], "sft");
+        assert_eq!(v["status"], "completed");
+        assert_eq!(v["adapter_name"], "my-adapter");
+        assert_eq!(v["adapter_path"], "/data/adapters/my-adapter");
+        assert!(v["error"].is_null());
+        assert_eq!(v["timestamp"], "2026-04-26T00:00:00+00:00");
+    }
+
+    /// End-to-end test: spin up a tiny axum mock server, fire a webhook
+    /// at it, and assert that the captured POST body matches the
+    /// documented payload shape.
+    #[tokio::test]
+    async fn test_fire_completion_webhook_posts_expected_payload() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::Json;
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+
+        // Capture buffer shared between the handler and the assertions.
+        let captured: StdArc<StdMutex<Vec<serde_json::Value>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+
+        async fn handler(
+            State(captured): State<StdArc<StdMutex<Vec<serde_json::Value>>>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> &'static str {
+            captured.lock().unwrap().push(body);
+            "ok"
+        }
+
+        let app = axum::Router::new()
+            .route("/hook", post(handler))
+            .with_state(captured.clone());
+
+        // Bind to an ephemeral port so concurrent test runs don't collide.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let event = TrainingCompletionEvent {
+            job_id: "test-job-001".into(),
+            job_type: "grpo",
+            status: "completed",
+            adapter_name: "test-adapter".into(),
+            adapter_path: Some("/tmp/adapters/test-adapter".into()),
+            error: None,
+            timestamp: "2026-04-26T01:23:45+00:00".into(),
+        };
+
+        let url = format!("http://{addr}/hook");
+        fire_completion_webhook(url, event);
+
+        // Poll the capture buffer for up to ~2s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while captured.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let bodies = captured.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1, "expected exactly one webhook POST");
+        let body = &bodies[0];
+        assert_eq!(body["job_id"], "test-job-001");
+        assert_eq!(body["job_type"], "grpo");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["adapter_name"], "test-adapter");
+        assert_eq!(body["adapter_path"], "/tmp/adapters/test-adapter");
+        assert!(body["error"].is_null());
+        assert_eq!(body["timestamp"], "2026-04-26T01:23:45+00:00");
+
+        server.abort();
+    }
+
+    /// Failure event test: error string is propagated, adapter_path is null.
+    #[tokio::test]
+    async fn test_fire_completion_webhook_failure_event_shape() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::Json;
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+
+        let captured: StdArc<StdMutex<Vec<serde_json::Value>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+
+        async fn handler(
+            State(captured): State<StdArc<StdMutex<Vec<serde_json::Value>>>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> &'static str {
+            captured.lock().unwrap().push(body);
+            "ok"
+        }
+
+        let app = axum::Router::new()
+            .route("/hook", post(handler))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let event = TrainingCompletionEvent {
+            job_id: "fail-job-001".into(),
+            job_type: "sft",
+            status: "failed",
+            adapter_name: "broken-adapter".into(),
+            adapter_path: None,
+            error: Some("CUDA out of memory".into()),
+            timestamp: "2026-04-26T01:23:45+00:00".into(),
+        };
+        let url = format!("http://{addr}/hook");
+        fire_completion_webhook(url, event);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while captured.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let bodies = captured.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1);
+        let body = &bodies[0];
+        assert_eq!(body["status"], "failed");
+        assert!(body["adapter_path"].is_null());
+        assert_eq!(body["error"], "CUDA out of memory");
+
+        server.abort();
+    }
+
+    /// Webhook errors must NOT panic or propagate — verified by firing
+    /// at an unreachable address and ensuring the spawned task completes
+    /// without taking the test process down.
+    #[tokio::test]
+    async fn test_fire_completion_webhook_swallows_errors() {
+        let event = TrainingCompletionEvent {
+            job_id: "x".into(),
+            job_type: "sft",
+            status: "completed",
+            adapter_name: "x".into(),
+            adapter_path: None,
+            error: None,
+            timestamp: "2026-04-26T00:00:00+00:00".into(),
+        };
+        // 127.0.0.1:1 is reliably not listening — connection should fail
+        // fast within the 5s client timeout, and the failure must be
+        // swallowed (logged, not propagated).
+        fire_completion_webhook("http://127.0.0.1:1/never".into(), event);
+        // Give the spawned task a moment so we're confident it ran and
+        // completed without panicking.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

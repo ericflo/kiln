@@ -41,6 +41,14 @@ inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for
 [training]
 # grad_checkpoint_segments = 4       # Segments for gradient checkpointing
 no_grad_checkpoint = false
+# checkpoint_interval = 50           # Save adapter every N training steps
+# webhook_url = "https://example.com/hook"  # POST training completion JSON to this URL.
+                                              # Fields: job_id, job_type (sft|grpo),
+                                              # status (completed|failed), adapter_name,
+                                              # adapter_path, error, timestamp (RFC3339).
+                                              # Fire-and-forget with a 5s timeout — webhook
+                                              # failures are logged but do not affect job state.
+                                              # Override via KILN_TRAINING_WEBHOOK_URL.
 
 [logging]
 level = "info"                        # trace, debug, info, warn, error, or a filter directive

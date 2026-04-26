@@ -414,6 +414,10 @@ pub struct AppState {
     /// Server-level default for adapter checkpoint interval during training.
     /// Per-job config overrides this. None = only save at the end.
     pub checkpoint_interval: Option<usize>,
+    /// Optional URL to POST a JSON notification to whenever a training
+    /// job completes or fails. `None` disables webhook firing entirely.
+    /// See `TrainingConfig::webhook_url` for the payload contract.
+    pub training_webhook_url: Option<String>,
     /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
     pub served_model_id: String,
     /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
@@ -474,6 +478,7 @@ impl AppState {
             started_at: std::time::Instant::now(),
             inference_prewarm_complete: Arc::new(AtomicBool::new(true)),
             checkpoint_interval: None,
+            training_webhook_url: None,
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
@@ -689,6 +694,7 @@ impl AppState {
                 candle_core::Device::Metal(_)
             ))),
             checkpoint_interval: None,
+            training_webhook_url: None,
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
