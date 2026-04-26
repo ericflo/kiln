@@ -1,5 +1,22 @@
 # Kiln Server Changelog
 
+## Unreleased
+
+### Phase 8 advanced features
+- POST /v1/completions/batch — efficient multi-prompt batch generation API for GRPO (#583)
+- POST /v1/adapters/upload — multipart tar.gz import (#577)
+- GET /v1/adapters/{name}/download — streaming tar.gz export (#575)
+- TIES merge mode for /v1/adapters/merge (#578)
+- Concatenation merge mode for /v1/adapters/merge (#579)
+- Per-request adapter composition: stack multiple LoRAs with scaling on /v1/chat/completions (#581)
+- Webhook notifications on training completion (#582)
+
+### Docs
+- Document Phase 8 API surface in QUICKSTART.md (#584)
+
+### Test fixes
+- Rewrite test_upload_rejects_path_escape_in_archive to actually emit a traversal tarball (#580)
+
 ## kiln-v0.2.2 — 2026-04-25
 
 Coordinated release aligned with desktop-v0.2.2. Supersedes the unpublished
