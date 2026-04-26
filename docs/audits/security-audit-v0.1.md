@@ -145,6 +145,8 @@ The relative-path branch then calls `state.adapter_dir.join(&req.name)`, which h
 
 **Severity:** NONE for kiln itself; the property is by design.
 
+**Resolution.** Documented in `README.md` (new `## Security model` section) and `QUICKSTART.md` (callout adjacent to the loopback paragraph) in branch `ce/phase9-document-training-data-trust`. Both call out that kiln applies a faithful gradient update to anything POSTed to `/v1/train/sft` or `/v1/train/grpo`, that the training corpus must be treated as security-sensitive, and that adapters are easy to revert via `POST /v1/adapters/unload`.
+
 ---
 
 ## 4. DoS via training-queue exhaustion — `[MEDIUM]`
@@ -346,7 +348,7 @@ Ordered by severity, then by effort.
 9. **Cap total adapter-dir disk usage** (§8). Reject uploads that would push total adapter-dir size above `adapters.max_disk_bytes`.
 10. ~~**Disable redirects on webhook reqwest client** (§7). Belt-and-suspenders against a misconfigured webhook URL pointing at a public 302.~~ **Fixed** in branch `ce/phase9-webhook-disable-redirects`.
 11. **Migrate `deny.toml`** (§12). Replace `unmaintained = "workspace"` with the post-PR-611 shape; pin the CI cargo-deny version explicitly.
-12. **Document training-data invariants** (§3). One short README section: "Kiln applies a faithful gradient update to whatever you POST. Treat your training corpus as security-sensitive."
+12. ~~**Document training-data invariants** (§3). One short README section: "Kiln applies a faithful gradient update to whatever you POST. Treat your training corpus as security-sensitive."~~ **Fixed** in branch `ce/phase9-document-training-data-trust` (new `## Security model` section in `README.md`, callout in `QUICKSTART.md` adjacent to the loopback paragraph).
 
 ### Out of scope for v0.1
 
