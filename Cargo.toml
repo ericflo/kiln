@@ -74,6 +74,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Tokenization
 tokenizers = { version = "0.22", features = ["http"] }
 minijinja = "2"
+minijinja-contrib = { version = "2", features = ["pycompat"] }
 
 # Model loading
 safetensors = "0.5"

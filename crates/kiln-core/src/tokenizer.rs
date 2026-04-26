@@ -131,6 +131,21 @@ impl KilnTokenizer {
         messages: &[ChatMessage],
     ) -> Result<String, TokenizerError> {
         let mut env = minijinja::Environment::new();
+        // Real chat templates (e.g. Qwen3.5's `chat_template.jinja`) call
+        // Python-flavored string methods like `.startswith()`, `.endswith()`,
+        // `.split()`, and `.lstrip()` that minijinja does not implement
+        // natively. `pycompat::unknown_method_callback` adds the standard
+        // Python `str`/`list`/`dict` methods on demand so HF templates render
+        // unmodified.
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        // `raise_exception("...")` is a Jinja2 idiom HF templates rely on for
+        // input validation. Without it Qwen3.5's template aborts immediately.
+        env.add_function("raise_exception", |msg: String| -> Result<(), minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                msg,
+            ))
+        });
         env.add_template("chat", template)
             .map_err(|e| TokenizerError::ChatTemplate(e.to_string()))?;
 

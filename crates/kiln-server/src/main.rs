@@ -101,9 +101,11 @@ async fn main() -> Result<()> {
     let model_id = &config.model.model_id;
     let tokenizer_path = config.model.tokenizer_path.as_deref();
 
-    let tokenizer = if let Some(path) = tokenizer_path {
+    let (tokenizer, chat_template_dir) = if let Some(path) = tokenizer_path {
         tracing::info!("loading tokenizer from {path}");
-        KilnTokenizer::from_file(path)?
+        let tok = KilnTokenizer::from_file(path)?;
+        let dir = Path::new(path).parent().map(|p| p.to_path_buf());
+        (tok, dir)
     } else if let Some(mp) = model_path {
         // Try loading tokenizer from the model directory first
         let tok_file = Path::new(mp).join("tokenizer.json");
@@ -112,14 +114,54 @@ async fn main() -> Result<()> {
                 "loading tokenizer from model directory: {}",
                 tok_file.display()
             );
-            KilnTokenizer::from_file(tok_file.to_str().unwrap())?
+            (
+                KilnTokenizer::from_file(tok_file.to_str().unwrap())?,
+                Some(PathBuf::from(mp)),
+            )
         } else {
             tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
-            KilnTokenizer::from_pretrained(model_id)?
+            (KilnTokenizer::from_pretrained(model_id)?, None)
         }
     } else {
         tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
-        KilnTokenizer::from_pretrained(model_id)?
+        (KilnTokenizer::from_pretrained(model_id)?, None)
+    };
+
+    // Load the model's chat template (e.g. Qwen3.5's official template, which
+    // appends `<think>\n` after `<|im_start|>assistant\n`). Without this,
+    // `apply_chat_template` falls back to the bare ChatML stub and the model
+    // is prompted out-of-distribution — Qwen3.5-4B answers "Hello!" with
+    // "毎回毎回毎回..." instead of a real reply because the trained prompt
+    // shape is missing the `<think>` prefix.
+    let tokenizer = if let Some(dir) = chat_template_dir.as_deref() {
+        match load_chat_template_from_model_dir(dir) {
+            Ok(Some((source, template))) => {
+                tracing::info!(
+                    source = source,
+                    bytes = template.len(),
+                    "loaded chat template from model directory"
+                );
+                tokenizer.with_chat_template(template)
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    "no chat_template.jinja or tokenizer_config.json chat_template field found — \
+                     falling back to bare ChatML, which produces broken output for Qwen3.5"
+                );
+                tokenizer
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    dir = %dir.display(),
+                    "failed to load chat template — falling back to bare ChatML"
+                );
+                tokenizer
+            }
+        }
+    } else {
+        tokenizer
     };
 
     tracing::info!(
@@ -239,6 +281,29 @@ async fn main() -> Result<()> {
     tracing::warn!("shutdown timeout reached — exiting");
 
     Ok(())
+}
+
+/// Locate the model's chat template, preferring the standalone
+/// `chat_template.jinja` file (modern HF layout, e.g. Qwen3.5) and falling back
+/// to the `chat_template` field in `tokenizer_config.json` (older layout). Returns
+/// `Ok(None)` only when neither file is present, so the caller can warn rather
+/// than silently use the bare ChatML stub.
+fn load_chat_template_from_model_dir(dir: &Path) -> Result<Option<(&'static str, String)>> {
+    let standalone = dir.join("chat_template.jinja");
+    if standalone.exists() {
+        let template = std::fs::read_to_string(&standalone)?;
+        return Ok(Some(("chat_template.jinja", template)));
+    }
+    let config_path = dir.join("tokenizer_config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&config_path)?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)?;
+    Ok(parsed
+        .get("chat_template")
+        .and_then(|v| v.as_str())
+        .map(|s| ("tokenizer_config.json", s.to_string())))
 }
 
 fn spawn_backend_prewarm(state: AppState) {
