@@ -622,6 +622,13 @@ async fn chat_completions_inner(
                 "'adapters' must be a non-empty list when present",
             ));
         }
+        if list.len() > MAX_COMPOSE_ADAPTERS {
+            return Err(ApiError::invalid_compose_request(format!(
+                "'adapters' list length {} exceeds maximum of {}",
+                list.len(),
+                MAX_COMPOSE_ADAPTERS,
+            )));
+        }
         for src in list {
             validate_compose_name(&src.name)?;
         }
@@ -1831,6 +1838,13 @@ fn now_epoch() -> u64 {
 /// cannot pin the engine for an unbounded number of iterations.
 const BATCH_MAX_TOTAL_OUTPUTS: usize = 64;
 
+/// Maximum number of source adapters allowed in a single compose request
+/// (`adapters: [...]` on `/v1/chat/completions` and `/v1/completions/batch`).
+/// Caps the cheapest DoS shape from §6 of `docs/audits/security-audit-v0.1.md`:
+/// each entry triggers a safetensors read and an N-way `merge_concat`, so an
+/// unbounded list lets a single request pin CPU + I/O for arbitrarily long.
+const MAX_COMPOSE_ADAPTERS: usize = 16;
+
 /// Batch completion request — generate completions for many prompts (and/or
 /// many completions per prompt) in a single HTTP round-trip.
 ///
@@ -1971,6 +1985,13 @@ async fn batch_completions_inner(
             return Err(ApiError::invalid_compose_request(
                 "'adapters' must be a non-empty list when present",
             ));
+        }
+        if list.len() > MAX_COMPOSE_ADAPTERS {
+            return Err(ApiError::invalid_compose_request(format!(
+                "'adapters' list length {} exceeds maximum of {}",
+                list.len(),
+                MAX_COMPOSE_ADAPTERS,
+            )));
         }
         for src in list {
             validate_compose_name(&src.name)?;
@@ -2595,6 +2616,22 @@ mod tests {
         let body = serde_json::json!({
             "prompts": [[{"role":"user","content":"hi"}]],
             "adapters": []
+        })
+        .to_string();
+        let (status, body) = batch_post(make_batch_test_state(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_compose_request");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_oversized_adapters_list() {
+        // 17 entries > MAX_COMPOSE_ADAPTERS (16) — caps audit MEDIUM §6 DoS.
+        let adapters: Vec<serde_json::Value> = (0..17)
+            .map(|_| serde_json::json!({"name": "a", "scale": 1.0}))
+            .collect();
+        let body = serde_json::json!({
+            "prompts": [[{"role":"user","content":"hi"}]],
+            "adapters": adapters,
         })
         .to_string();
         let (status, body) = batch_post(make_batch_test_state(), &body).await;
