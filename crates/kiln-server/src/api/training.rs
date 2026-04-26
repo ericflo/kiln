@@ -5,7 +5,7 @@
 //! concurrent training jobs.
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, State},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -348,10 +348,23 @@ async fn cancel_queued_job(
     }
 }
 
+/// Body-size cap for SFT training submissions (audit LOW §1).
+/// 64 MiB accommodates long-context training examples that exceed the 2 MiB axum default.
+const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
+/// Body-size cap for GRPO training submissions (audit LOW §1).
+/// 64 MiB accommodates batches of scored completions.
+const GRPO_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v1/train/sft", post(submit_sft))
-        .route("/v1/train/grpo", post(submit_grpo))
+        .route(
+            "/v1/train/sft",
+            post(submit_sft).layer(DefaultBodyLimit::max(SFT_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/train/grpo",
+            post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
+        )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
         .route("/v1/train/queue", get(list_queue))

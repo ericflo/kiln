@@ -52,6 +52,8 @@ It treats prompt-injection-into-the-model and training-data poisoning as **parti
 
 **Severity:** LOW — current state is *safer* than recommended state for DoS purposes; the recommendation is about predictability, not about a missing defense.
 
+**Resolution.** Per-route `DefaultBodyLimit` set on all four endpoints in `ce/phase9-per-route-body-limits` — 64 MiB for `/v1/train/sft` and `/v1/train/grpo`, 8 MiB for `/v1/chat/completions` and `/v1/completions/batch`. Rationale documented inline in `crates/kiln-server/src/api/training.rs` and `crates/kiln-server/src/api/completions.rs`.
+
 ---
 
 ## 2. Path handling in adapter upload, download, delete, load, merge — `[HIGH]`
@@ -337,7 +339,7 @@ Ordered by severity, then by effort.
 
 ### Nice-to-have (LOW)
 
-7. **Per-route body-size limits** (§1). Set `DefaultBodyLimit` explicitly on `/v1/train/sft`, `/v1/train/grpo`, `/v1/chat/completions`, `/v1/completions/batch`.
+7. ~~**Per-route body-size limits** (§1). Set `DefaultBodyLimit` explicitly on `/v1/train/sft`, `/v1/train/grpo`, `/v1/chat/completions`, `/v1/completions/batch`.~~ **Fixed** in branch `ce/phase9-per-route-body-limits` (64 MiB for training, 8 MiB for completions).
 8. **Cap composed-adapter cache size** (§6, §8). LRU-evict `.composed/<hash>/` entries above N total or M GiB.
 9. **Cap total adapter-dir disk usage** (§8). Reject uploads that would push total adapter-dir size above `adapters.max_disk_bytes`.
 10. **Disable redirects on webhook reqwest client** (§7). Belt-and-suspenders against a misconfigured webhook URL pointing at a public 302.
