@@ -89,6 +89,8 @@ async fn load_adapter(
     State(state): State<AppState>,
     Json(req): Json<LoadAdapterRequest>,
 ) -> Result<Json<LoadAdapterResponse>, ApiError> {
+    validate_adapter_name(&req.name)?;
+
     let runner = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner,
         ModelBackend::Mock { .. } => {
@@ -96,12 +98,7 @@ async fn load_adapter(
         }
     };
 
-    // Resolve adapter path: if name is absolute, use it directly; otherwise look in adapter_dir.
-    let adapter_path = if Path::new(&req.name).is_absolute() {
-        std::path::PathBuf::from(&req.name)
-    } else {
-        state.adapter_dir.join(&req.name)
-    };
+    let adapter_path = state.adapter_dir.join(&req.name);
 
     if !adapter_path.exists() {
         return Err(ApiError::adapter_not_found(&req.name));
@@ -178,6 +175,7 @@ async fn delete_adapter(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<DeleteAdapterResponse>, ApiError> {
+    validate_adapter_name(&name)?;
     let adapter_path = state.adapter_dir.join(&name);
 
     if !adapter_path.exists() || !adapter_path.is_dir() {
@@ -407,6 +405,7 @@ async fn merge_adapters(
     let mut source_paths: Vec<(String, f32, std::path::PathBuf)> =
         Vec::with_capacity(req.sources.len());
     for src in &req.sources {
+        validate_adapter_name(&src.name)?;
         let path = state.adapter_dir.join(&src.name);
         if !path.exists() || !path.is_dir() {
             return Err(ApiError::adapter_not_found(&src.name));

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+- Fix path traversal in `DELETE /v1/adapters/:name` and `POST /v1/adapters/load` (Phase 9 audit §2b/§2c, HIGH).
+- Validate source adapter names in `POST /v1/adapters/merge` (Phase 9 audit §2d, LOW).
+
 ### Reproducibility / release
 - docker: use `--locked` in `deploy/Dockerfile` cargo builds so the published `ghcr.io/ericflo/kiln-server` image matches the exact Cargo.lock dependency set (#601)
 
