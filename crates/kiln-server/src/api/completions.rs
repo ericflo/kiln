@@ -1,4 +1,4 @@
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -2196,10 +2196,23 @@ async fn generate_one_response(
     }
 }
 
+/// Body-size cap for /v1/chat/completions (audit LOW §1).
+/// 8 MiB is generous for chat payloads while bounding memory DoS via JSON extraction.
+const CHAT_BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// Body-size cap for /v1/completions/batch (audit LOW §1).
+/// 8 MiB accommodates batched prompts; per-request adapter composition is separately capped at 16.
+const BATCH_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/completions/batch", post(batch_completions))
+        .route(
+            "/v1/chat/completions",
+            post(chat_completions).layer(DefaultBodyLimit::max(CHAT_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/completions/batch",
+            post(batch_completions).layer(DefaultBodyLimit::max(BATCH_BODY_LIMIT)),
+        )
 }
 
 #[cfg(test)]
