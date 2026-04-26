@@ -51,7 +51,13 @@ void main() {
         sum += x_val * data_weight[c * kernel_size + k];
     }
 
-    // Silu activation: x * sigmoid(x)
-    float silu = sum / (1.0 + exp(-sum));
+    // Stable silu activation: x * sigmoid(x), branch on sign to avoid overflow
+    float silu;
+    if (sum >= 0.0) {
+        silu = sum / (1.0 + exp(-sum));
+    } else {
+        float e = exp(sum);
+        silu = sum * e / (1.0 + e);
+    }
     data_out[idx] = silu;
 }

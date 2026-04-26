@@ -54,12 +54,11 @@ fn main() {
 
         match &output {
             Ok(output) if output.status.success() => {
-                // Status message (not cargo:warning — that's for actual problems)
-                println!("Vulkan shader compiled: {}", name);
+                // silent on success — println! from build.rs is invisible to cargo
             }
             Ok(output) => {
                 eprintln!(
-                    "cargo:warning=glslc failed for {}: {} — shaders will compile at runtime", 
+                    "cargo:warning=glslc failed for {}: {} — shaders will compile at runtime",
                     name,
                     String::from_utf8_lossy(&output.stderr)
                 );

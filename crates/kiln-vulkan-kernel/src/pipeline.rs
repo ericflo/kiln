@@ -70,12 +70,17 @@ impl ShaderPipeline {
 
     /// Runtime glslc compilation (fallback when embedded SPIR-V is unavailable).
     fn compile_shader_runtime(glsl_path: &str) -> Result<Vec<u8>> {
-        let spv_path = glsl_path.replace(".comp", ".spv");
+        // Write to temp dir, not source tree (source tree may be read-only in prod).
+        let stem = std::path::Path::new(glsl_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("shader");
+        let spv_path = std::env::temp_dir().join(format!("kiln_vulkan_{}.spv", stem));
 
-        // Try to load pre-compiled SPIR-V
-        if std::path::Path::new(&spv_path).exists() {
+        // Try to load a pre-compiled .spv from temp dir (cached from a prior run)
+        if spv_path.exists() {
             return std::fs::read(&spv_path)
-                .context(format!("failed to read pre-compiled SPIR-V: {}", spv_path));
+                .context(format!("failed to read cached SPIR-V: {}", spv_path.display()));
         }
 
         // Check that glslc is available
@@ -85,15 +90,12 @@ impl ShaderPipeline {
         if glslc_status.is_err() {
             anyhow::bail!(
                 "Vulkan SPIR-V '{}' was not compiled at build time and glslc is not on PATH. \
-                 Install glslc (part of the SPIR-V Tools package) and rebuild kiln-vulkan-kernel, \
-                 or pre-compile the shader to {} and place it alongside the .comp source.",
-                glsl_path,
-                spv_path
+                 Install glslc (part of the SPIR-V Tools package) and rebuild kiln-vulkan-kernel.",
+                glsl_path
             );
         }
 
-        // Compile with glslc
-        // Defines match llama.cpp Vulkan defaults for RDNA GPUs
+        // Compile with glslc into temp dir
         let output = std::process::Command::new("glslc")
             .arg(glsl_path)
             .arg("-o")
@@ -107,15 +109,14 @@ impl ShaderPipeline {
 
         if !output.status.success() {
             anyhow::bail!(
-                "glslc failed to compile '{}': {} \
-                 (Install glslc and rebuild kiln-vulkan-kernel, or place a pre-compiled .spv file)",
+                "glslc failed to compile '{}': {}",
                 glsl_path,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
 
         std::fs::read(&spv_path)
-            .context(format!("failed to read compiled SPIR-V: {}", spv_path))
+            .context(format!("failed to read compiled SPIR-V: {}", spv_path.display()))
     }
 
     /// Create or retrieve a cached compute pipeline.

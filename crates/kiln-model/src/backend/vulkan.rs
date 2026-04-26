@@ -28,7 +28,6 @@ pub struct VulkanBackend {
     gdn_enabled: bool,
     gdn_gates_enabled: bool,
     gdn_gated_rms_norm_enabled: bool,
-    fused_conv1d_enabled: bool,
     /// Vulkan device (owned, not from candle-core)
     vulkan_device: Option<Box<kiln_vulkan_kernel::VulkanDevice>>,
 }
@@ -40,7 +39,12 @@ impl VulkanBackend {
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
         let gdn_gated_rms_norm_enabled = gdn_enabled
             && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
-        let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
+        // fused_conv1d is opt-in only (KILN_ENABLE_VULKAN_FUSED_CONV1D). The
+        // two-dispatch split dropped conv_state from the output kernel, so the
+        // first K-1 tokens read zero instead of state. The actual fix (binding
+        // conv_state + correct state_advance for T>1) lands in PR2 with parity
+        // tests. Defaulting to off prevents silently wrong decode output.
+        let _ = std::env::var("KILN_DISABLE_FUSED_CONV1D"); // backward compat
 
         let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
             Ok(dev) => {
@@ -62,7 +66,6 @@ impl VulkanBackend {
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
-            fused_conv1d_enabled,
             vulkan_device,
         }
     }
@@ -188,11 +191,19 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
-        self.has_vulkan() && self.fused_conv1d_enabled
+        // Two-dispatch conv1d is experimental: the output kernel dropped
+        // conv_state from its bindings (reads zero instead of state for the
+        // first K-1 tokens). Default to off; enable only after PR2 parity tests.
+        self.has_vulkan()
+            && self.gdn_enabled
+            && std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_ok()
     }
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
-        self.has_vulkan() && self.fused_conv1d_enabled
+        // Same experimental status as _update — opt-in only.
+        self.has_vulkan()
+            && self.gdn_enabled
+            && std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_ok()
     }
 
     fn flash_attn_prefill(
@@ -404,7 +415,9 @@ impl BackendRuntime for VulkanBackend {
         conv_state: &mut Tensor,
         kernel_size: usize,
     ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.fused_conv1d_enabled {
+        if !self.has_vulkan()
+            || std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_err()
+        {
             return Ok(None);
         }
         if x.dtype() != DType::BF16 {
@@ -427,7 +440,9 @@ impl BackendRuntime for VulkanBackend {
         conv_state: &mut Tensor,
         kernel_size: usize,
     ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.fused_conv1d_enabled {
+        if !self.has_vulkan()
+            || std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_err()
+        {
             return Ok(None);
         }
         if x.dtype() != DType::BF16 {

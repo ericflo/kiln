@@ -23,6 +23,9 @@ pub struct VulkanDevice {
     device_name: String,
     device_local_mem_type: u32,
     host_visible_mem_type: u32,
+    /// Maximum shared memory per workgroup (from VkPhysicalDeviceLimits).
+    /// Used by PR2 to decide whether solve_tri can run without exceeding device limits.
+    max_compute_shared_memory_size: vk::DeviceSize,
 }
 
 impl std::fmt::Debug for VulkanDevice {
@@ -40,6 +43,9 @@ impl VulkanDevice {
     /// Creates a minimal Vulkan instance and enumerates physical devices.
     /// Does NOT allocate a logical device or queues (~hundreds of microseconds
     /// vs ~tens of milliseconds for `new()`).
+    ///
+    /// The instance is explicitly destroyed before returning to avoid leaking
+    /// the Vulkan instance handle (ash 0.37 does not auto-destroy on drop).
     pub fn probe() -> bool {
         let entry = match unsafe { ash::Entry::load() } {
             Ok(e) => e,
@@ -63,7 +69,9 @@ impl VulkanDevice {
             Err(_) => return false,
         };
 
-        !devices.is_empty()
+        let available = !devices.is_empty();
+        unsafe { instance.destroy_instance(None); }
+        available
     }
 
     /// Create a new Vulkan device, selecting the best available GPU.
@@ -98,10 +106,11 @@ impl VulkanDevice {
         // Select physical device
         let physical_device = Self::select_physical_device(&instance, &physical_devices)?;
 
-        // Get device properties
+        // Get device properties (includes limits for shared-memory budget checks)
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let vendor_id = properties.vendor_id;
         let device_name = extract_device_name(&properties.device_name);
+        let max_compute_shared_memory_size = properties.limits.max_compute_shared_memory_size as vk::DeviceSize;
 
         // Find compute queue family
         let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
@@ -147,6 +156,7 @@ impl VulkanDevice {
             device_name,
             device_local_mem_type,
             host_visible_mem_type,
+            max_compute_shared_memory_size,
         })
     }
 
@@ -257,6 +267,15 @@ impl VulkanDevice {
     /// Get the device name.
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// Get the maximum shared memory available per compute workgroup.
+    ///
+    /// Used to guard kernels (e.g. solve_tri) whose shared-memory footprint
+    /// must fit within the device limit. PR2 will use this to decline dispatch
+    /// when the kernel won't fit, falling back to the candle CPU path.
+    pub fn max_compute_shared_memory_size(&self) -> vk::DeviceSize {
+        self.max_compute_shared_memory_size
     }
 }
 
