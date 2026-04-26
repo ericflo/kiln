@@ -384,3 +384,21 @@ jobs:
           name: kiln-windows-x86_64-cuda124-unsigned
           path: target/x86_64-pc-windows-msvc/release/kiln.exe
           retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: [macos-metal, linux-cuda, windows-cuda]
+    if: startsWith(github.ref, 'refs/tags/kiln-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Each platform job creates the release with `--draft` so the upload
+      # steps have somewhere to push artifacts. Once all three platforms
+      # succeed, flip the draft flag off so users see the release without
+      # someone manually clicking Publish.
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
