@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Bug fixes
+- server: make `stream: true` actually stream tokens in real time (11062f8)
+- server: load model chat template so Qwen3.5 gets the `<think>\n` prefix in the rendered chat (e1fcc16)
+- metal: bypass candle SDPA full kernel for `8 < q_seq < bq` to avoid a kernel crash (c7cf1ab)
+
 ## kiln-v0.2.4 — 2026-04-26
 
 CI / release-prep release. No user-facing API or behavior changes since
