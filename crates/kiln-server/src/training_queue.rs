@@ -48,8 +48,12 @@ impl TrainingCompletionEvent {
 /// notification POST fails.
 pub fn fire_completion_webhook(url: String, event: TrainingCompletionEvent) {
     tokio::spawn(async move {
+        // Defensive: an operator-set webhook URL that 302s into internal infra
+        // (e.g. 169.254.169.254 IMDS) must NOT be auto-followed. See
+        // docs/audits/security-audit-v0.1.md §7.
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
         {
             Ok(c) => c,
@@ -693,5 +697,80 @@ mod tests {
         // Give the spawned task a moment so we're confident it ran and
         // completed without panicking.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    /// Redirects must NOT be followed by the webhook client. An
+    /// operator-set webhook URL that 302s to a secondary endpoint
+    /// (e.g. internal IMDS at `http://169.254.169.254/`) is a
+    /// belt-and-suspenders SSRF concern from `security-audit-v0.1.md` §7.
+    /// We verify the redirect-target endpoint is never POSTed to.
+    #[tokio::test]
+    async fn test_fire_completion_webhook_does_not_follow_redirects() {
+        use axum::extract::State;
+        use axum::http::{header, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::Json;
+        use std::sync::Arc as StdArc;
+        use std::sync::Mutex as StdMutex;
+
+        // Capture buffer for the *redirect target* — must remain empty.
+        let captured_final: StdArc<StdMutex<Vec<serde_json::Value>>> =
+            StdArc::new(StdMutex::new(Vec::new()));
+
+        async fn redirect_handler() -> impl IntoResponse {
+            (
+                StatusCode::FOUND,
+                [(header::LOCATION, "/hook-final")],
+                "",
+            )
+        }
+
+        async fn final_handler(
+            State(captured): State<StdArc<StdMutex<Vec<serde_json::Value>>>>,
+            Json(body): Json<serde_json::Value>,
+        ) -> &'static str {
+            captured.lock().unwrap().push(body);
+            "ok"
+        }
+
+        let app = axum::Router::new()
+            .route("/hook-redirect", post(redirect_handler))
+            .route("/hook-final", post(final_handler))
+            .with_state(captured_final.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let event = TrainingCompletionEvent {
+            job_id: "redirect-test-001".into(),
+            job_type: "sft",
+            status: "completed",
+            adapter_name: "redirect-test-adapter".into(),
+            adapter_path: Some("/tmp/adapters/redirect-test-adapter".into()),
+            error: None,
+            timestamp: "2026-04-26T01:23:45+00:00".into(),
+        };
+
+        let url = format!("http://{addr}/hook-redirect");
+        fire_completion_webhook(url, event);
+
+        // Give the spawned task plenty of time to (incorrectly) follow
+        // the redirect if our `redirect::Policy::none()` were missing.
+        // The original POST resolves immediately to a 302; if redirects
+        // were on, the secondary POST would land within ~tens of ms.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let bodies = captured_final.lock().unwrap().clone();
+        assert!(
+            bodies.is_empty(),
+            "/hook-final must NOT be POSTed to — redirects must be disabled on the webhook client. Got bodies: {:?}",
+            bodies
+        );
+
+        server.abort();
     }
 }
