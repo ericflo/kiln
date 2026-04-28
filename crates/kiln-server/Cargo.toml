@@ -46,6 +46,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rand = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }
+# Used to refresh the mtime of composed-adapter cache directories on cache
+# hit so LRU eviction sees them as recently used. Already pulled in
+# transitively by `tar`, but we depend on it directly to make the use
+# explicit.
+filetime = "0.2"
 
 [features]
 cuda = ["kiln-model/cuda"]
@@ -59,3 +64,6 @@ tempfile = { workspace = true }
 safetensors = { workspace = true }
 candle-core = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+# Integration tests use filetime to pre-age fake composed-cache entries so
+# LRU eviction order is deterministic.
+filetime = "0.2"
