@@ -749,6 +749,16 @@ impl KilnConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes tests that mutate the process-wide environment. cargo nextest
+    // and `cargo test` run tests in parallel by default, so any test that
+    // calls `std::env::set_var` / `std::env::remove_var` races with siblings
+    // touching the same variables. Acquire this lock for the full duration of
+    // the test (bind to a named guard, NOT `_`) before mutating env state.
+    // `unwrap_or_else(|e| e.into_inner())` recovers from poisoning so a single
+    // panicking test doesn't cascade into the rest of the suite.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_defaults() {
@@ -970,8 +980,9 @@ port = 3000
 
     #[test]
     fn test_env_var_overrides() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Safety: these tests manipulate env vars which is unsafe in Rust 1.78+.
-        // They are safe because cargo test runs lib tests single-threaded by default.
+        // They are safe because ENV_LOCK serializes env-mutating tests.
         unsafe {
             std::env::set_var("KILN_HOST", "10.0.0.1");
             std::env::set_var("KILN_PORT", "7777");
@@ -1052,6 +1063,7 @@ port = 3000
 
     #[test]
     fn test_adapters_max_disk_bytes_env_override() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = KilnConfig::default();
         // Default is 100 GiB.
         assert_eq!(config.adapters.max_disk_bytes, Some(100 * 1024u64.pow(3)));
@@ -1084,6 +1096,7 @@ port = 3000
 
     #[test]
     fn test_adapters_composed_cache_max_bytes_env_override() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = KilnConfig::default();
         // Default is 10 GiB.
         assert_eq!(
@@ -1107,6 +1120,7 @@ port = 3000
 
     #[test]
     fn test_adapters_composed_cache_max_entries_env_override() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = KilnConfig::default();
         // Default is 64.
         assert_eq!(config.adapters.composed_cache_max_entries, Some(64));
@@ -1124,6 +1138,7 @@ port = 3000
 
     #[test]
     fn test_adapters_composed_cache_zero_disables() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = KilnConfig::default();
         assert!(config.adapters.composed_cache_max_bytes.is_some());
         assert!(config.adapters.composed_cache_max_entries.is_some());
@@ -1156,6 +1171,7 @@ port = 3000
 
     #[test]
     fn test_training_webhook_env_empty_string_clears_toml_value() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let toml_str = r#"
 [training]
 webhook_url = "https://from-toml.example/hook"
@@ -1181,6 +1197,7 @@ webhook_url = "https://from-toml.example/hook"
 
     #[test]
     fn test_load_missing_file_returns_defaults() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // With no file and no KILN_CONFIG env var, should return defaults
         unsafe {
             std::env::remove_var("KILN_CONFIG");
@@ -1205,6 +1222,7 @@ webhook_url = "https://from-toml.example/hook"
 
     #[test]
     fn test_load_explicit_path() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.toml");
         std::fs::write(
@@ -1280,6 +1298,7 @@ level = "warn"
 
     #[test]
     fn test_served_model_id_env_var_overrides_toml() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let toml_str = r#"
 [model]
 served_model_id = "from-toml"
