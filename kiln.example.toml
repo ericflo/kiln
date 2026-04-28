@@ -64,3 +64,14 @@ num_speculative_tokens = 4            # Tokens to draft per step (3-8 typical)
 draft_layers = 8                      # First N layers used as draft model
                                       # Also settable via KILN_SPEC_ENABLED, KILN_SPEC_NUM_TOKENS,
                                       # KILN_SPEC_DRAFT_LAYERS env vars
+
+[adapters]
+max_disk_bytes = 107374182400         # 100 GiB cap on total finalized adapter_dir size.
+                                      # Rejects POST /v1/adapters/upload with HTTP 507
+                                      # `adapter_disk_quota_exceeded` when the sum of
+                                      # finalized adapters + the just-extracted upload
+                                      # would exceed this. `.upload-tmp-*/` and `.composed/`
+                                      # are excluded (bounded separately).
+                                      # Override via KILN_ADAPTERS_MAX_DISK_BYTES.
+                                      # To disable the cap entirely, set the env var to 0
+                                      # (or empty): `KILN_ADAPTERS_MAX_DISK_BYTES=0`.

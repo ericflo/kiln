@@ -255,6 +255,142 @@ async fn test_upload_rejects_existing_adapter() {
 }
 
 #[tokio::test]
+async fn test_upload_rejects_when_disk_cap_would_be_exceeded() {
+    // Adapter dir already holds a finalized adapter consuming > the cap.
+    // A subsequent upload of a small valid archive should be rejected before
+    // its staging dir is renamed into place.
+    let tmp = tempfile::tempdir().unwrap();
+    let existing = write_adapter(tmp.path(), "already-here");
+    // Pad existing/adapter_model.safetensors to ~3 KiB so the dir comfortably
+    // exceeds the 1 KiB cap we install on the AppState below.
+    std::fs::write(existing.join("adapter_model.safetensors"), vec![0u8; 3 * 1024]).unwrap();
+
+    let mut state = make_state(tmp.path().to_path_buf());
+    state.adapter_max_disk_bytes = Some(1024); // 1 KiB
+    let app = api::router(state);
+
+    let archive = build_tar_gz(&[
+        ("dest-adapter/adapter_config.json", b"{}"),
+        ("dest-adapter/adapter_model.safetensors", b"x"),
+    ]);
+    let (content_type, body) = build_multipart_body(Some("dest-adapter"), Some(&archive));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/upload")
+        .header("content-type", content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        status,
+        StatusCode::INSUFFICIENT_STORAGE,
+        "expected 507, got {status}: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+    assert_eq!(json["error"]["code"], "adapter_disk_quota_exceeded");
+
+    // The new adapter directory must NOT have been created.
+    assert!(
+        !tmp.path().join("dest-adapter").exists(),
+        "rejected upload should not have created dest-adapter/"
+    );
+    // And the existing adapter should be untouched.
+    assert!(
+        tmp.path().join("already-here").exists(),
+        "existing adapter should still be on disk"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_accepts_when_disk_cap_disabled() {
+    // Same setup as the rejection test, but with the cap disabled
+    // (operator opt-out via `max_disk_bytes = None`). Upload must succeed.
+    let tmp = tempfile::tempdir().unwrap();
+    let existing = write_adapter(tmp.path(), "already-here");
+    std::fs::write(existing.join("adapter_model.safetensors"), vec![0u8; 3 * 1024]).unwrap();
+
+    let mut state = make_state(tmp.path().to_path_buf());
+    state.adapter_max_disk_bytes = None;
+    let app = api::router(state);
+
+    let archive = build_tar_gz(&[
+        ("dest-adapter/adapter_config.json", b"{}"),
+        ("dest-adapter/adapter_model.safetensors", b"x"),
+    ]);
+    let (content_type, body) = build_multipart_body(Some("dest-adapter"), Some(&archive));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/upload")
+        .header("content-type", content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "expected 200 with cap disabled, got {status}: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+    assert!(tmp.path().join("dest-adapter").exists());
+}
+
+#[tokio::test]
+async fn test_upload_disk_cap_excludes_upload_tmp_and_composed() {
+    // Bytes parked under .upload-tmp-*/ (in-flight uploads) and .composed/
+    // (the merge cache, bounded separately) must not count toward the cap.
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Pre-fill .upload-tmp-* with > cap-worth of bytes.
+    let stale_tmp = tmp.path().join(".upload-tmp-deadbeef");
+    std::fs::create_dir_all(&stale_tmp).unwrap();
+    std::fs::write(stale_tmp.join("archive.tar.gz"), vec![0u8; 10 * 1024]).unwrap();
+
+    // Pre-fill .composed/ with > cap-worth of bytes.
+    let composed = tmp.path().join(".composed").join("abc123");
+    std::fs::create_dir_all(&composed).unwrap();
+    std::fs::write(composed.join("adapter_model.safetensors"), vec![0u8; 10 * 1024]).unwrap();
+
+    let mut state = make_state(tmp.path().to_path_buf());
+    state.adapter_max_disk_bytes = Some(1024); // 1 KiB
+    let app = api::router(state);
+
+    // The new upload's bytes alone are well under the cap, and the excluded
+    // paths must not push us over.
+    let archive = build_tar_gz(&[
+        ("dest-adapter/adapter_config.json", b"{}"),
+        ("dest-adapter/adapter_model.safetensors", b"x"),
+    ]);
+    let (content_type, body) = build_multipart_body(Some("dest-adapter"), Some(&archive));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/adapters/upload")
+        .header("content-type", content_type)
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "upload should succeed because .upload-tmp-* and .composed/ are excluded; got {status}: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+    assert!(tmp.path().join("dest-adapter").exists());
+}
+
+#[tokio::test]
 async fn test_upload_rejects_path_escape_in_archive() {
     let tmp = tempfile::tempdir().unwrap();
     let state = make_state(tmp.path().to_path_buf());

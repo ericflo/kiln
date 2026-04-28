@@ -245,6 +245,7 @@ async fn main() -> Result<()> {
     state.max_tracked_jobs = config.training.max_tracked_jobs;
     state.tracked_job_ttl =
         std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.adapter_max_disk_bytes = config.adapters.max_disk_bytes;
     if let Some(ref url) = state.training_webhook_url {
         tracing::info!(url = %url, "training completion webhook configured");
     }
@@ -257,6 +258,14 @@ async fn main() -> Result<()> {
         ttl_secs = config.training.tracked_job_ttl_secs,
         "training tracked-jobs cap and TTL configured"
     );
+    match state.adapter_max_disk_bytes {
+        Some(cap) => tracing::info!(
+            cap_bytes = cap,
+            cap_gib = cap as f64 / 1024.0 / 1024.0 / 1024.0,
+            "adapter_dir disk cap configured"
+        ),
+        None => tracing::info!("adapter_dir disk cap disabled (operator opt-out)"),
+    }
 
     // Spawn the background training queue worker
     let shutdown_flag = state.shutdown.clone();

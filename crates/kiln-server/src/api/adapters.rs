@@ -674,6 +674,54 @@ const ADAPTER_EXTRACT_BYTES_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 /// against a tar with millions of zero-byte files.
 const ADAPTER_EXTRACT_ENTRIES_LIMIT: u32 = 100_000;
 
+/// Sum the on-disk byte size of all finalized adapter directories under
+/// `adapter_dir`. Skips the in-flight `.upload-tmp-*/` staging dirs and the
+/// `.composed/<hash>/` cache (which is bounded separately by the §6/§8 LRU
+/// eviction work — see roadmap item 8). A directory entry that fails to
+/// stat is ignored rather than aborting the whole walk; this keeps the
+/// guard available on a partially-corrupt adapter_dir.
+fn measure_finalized_adapter_dir_bytes(adapter_dir: &Path) -> u64 {
+    let read_dir = match std::fs::read_dir(adapter_dir) {
+        Ok(rd) => rd,
+        Err(_) => return 0,
+    };
+    let mut total: u64 = 0;
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let name_lossy = name.to_string_lossy();
+        if name_lossy.starts_with(".upload-tmp-") || name_lossy == ".composed" {
+            continue;
+        }
+        total = total.saturating_add(dir_size_recursive(&entry.path()));
+    }
+    total
+}
+
+/// Recursively sum the regular-file byte sizes under `root`. Symlinks and
+/// errors are silently treated as zero (matching the conservative
+/// best-effort spirit of `measure_finalized_adapter_dir_bytes`).
+fn dir_size_recursive(root: &Path) -> u64 {
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.file_type().is_file() {
+        return meta.len();
+    }
+    if !meta.file_type().is_dir() {
+        return 0;
+    }
+    let read_dir = match std::fs::read_dir(root) {
+        Ok(rd) => rd,
+        Err(_) => return 0,
+    };
+    let mut total: u64 = 0;
+    for entry in read_dir.flatten() {
+        total = total.saturating_add(dir_size_recursive(&entry.path()));
+    }
+    total
+}
+
 /// Receive a multipart/form-data archive and install it as a new adapter
 /// directory under `adapter_dir`. Symmetric to `download_adapter`.
 async fn upload_adapter(
@@ -812,6 +860,8 @@ async fn upload_adapter(
     let tmp_root_owned = tmp_root.clone().expect("tmp_root set when archive_path is set");
     let archive_path_owned = archive_path.clone();
     let target_dir_owned = target_dir.clone();
+    let adapter_dir_owned = state.adapter_dir.clone();
+    let max_disk_bytes = state.adapter_max_disk_bytes;
     let extract_result = tokio::task::spawn_blocking(move || -> Result<(u64, u32), ImportError> {
         let staging = tmp_root_owned.join("staging");
         std::fs::create_dir_all(&staging).map_err(|e| ImportError::Failed(format!(
@@ -958,6 +1008,22 @@ async fn upload_adapter(
             ));
         }
 
+        // Disk-quota guard. We have the real extracted byte count now, and
+        // the staging dir is still under `.upload-tmp-*/` so it is excluded
+        // from `measure_finalized_adapter_dir_bytes`. Reject before rename so
+        // a quota failure leaves no partial adapter behind.
+        if let Some(cap) = max_disk_bytes {
+            let current = measure_finalized_adapter_dir_bytes(&adapter_dir_owned);
+            if current.saturating_add(bytes_written) > cap {
+                return Err(ImportError::DiskQuota(format!(
+                    "{} GiB used + {} GiB upload > {} GiB cap",
+                    current as f64 / 1024.0 / 1024.0 / 1024.0,
+                    bytes_written as f64 / 1024.0 / 1024.0 / 1024.0,
+                    cap as f64 / 1024.0 / 1024.0 / 1024.0
+                )));
+            }
+        }
+
         // Atomic rename of staging → target_dir. On the same filesystem this is
         // a single inode move; if it fails (e.g. EXDEV) fall back to a copy.
         std::fs::rename(&staging, &target_dir_owned).map_err(|e| ImportError::Failed(format!(
@@ -987,6 +1053,18 @@ async fn upload_adapter(
             let _ = std::fs::remove_dir_all(&target_dir);
             return Err(ApiError::adapter_import_failed(msg));
         }
+        Err(ImportError::DiskQuota(msg)) => {
+            // The rejection happened before rename, so target_dir was never
+            // created. The remove_dir_all is defensive in case a future change
+            // ever creates target_dir earlier in the flow.
+            let _ = std::fs::remove_dir_all(&target_dir);
+            tracing::warn!(
+                adapter = %name,
+                detail = %msg,
+                "rejected adapter upload: adapter_dir disk quota would be exceeded"
+            );
+            return Err(ApiError::adapter_disk_quota_exceeded(msg));
+        }
     };
 
     tracing::info!(
@@ -1005,10 +1083,12 @@ async fn upload_adapter(
 }
 
 /// Internal error type for the blocking extract task — separates user input
-/// problems (400) from server-side I/O failures (500).
+/// problems (400) from server-side I/O failures (500) and quota rejections
+/// (507).
 enum ImportError {
     Invalid(String),
     Failed(String),
+    DiskQuota(String),
 }
 
 /// Tiny stdlib-only random suffix so concurrent uploads don't collide.

@@ -238,6 +238,8 @@ Uploaded adapters accumulate. So do composed adapters. There is no `state.max_ad
 - Track total `adapter_dir` size; reject uploads when adding the new adapter would exceed `adapters.max_disk_bytes` (config-driven, default e.g. 100 GiB).
 - Add an LRU eviction loop for `.composed/<hash>/` keyed on directory mtime; cap at e.g. 10 GiB or 64 entries.
 
+**Resolution (total-size cap, item 9).** `adapters.max_disk_bytes` (default 100 GiB, override via `KILN_ADAPTERS_MAX_DISK_BYTES`, set to `0` to opt out) added in branch `ce/phase9-adapter-disk-cap`. The upload handler in `crates/kiln-server/src/api/adapters.rs` now sums the on-disk size of finalized adapter directories under `adapter_dir/` (skipping `.upload-tmp-*/` staging dirs and the `.composed/` cache, both of which are bounded separately) right before the staging→target rename. If the sum plus the just-extracted byte count would exceed the cap, the upload is rejected with HTTP 507 `adapter_disk_quota_exceeded` and no partial adapter is left behind. The `.composed/` LRU eviction (item 8) is tracked separately.
+
 **Severity:** LOW. Slow to trigger and easy to mitigate operationally.
 
 ---
@@ -351,7 +353,7 @@ Ordered by severity, then by effort.
 
 7. ~~**Per-route body-size limits** (§1). Set `DefaultBodyLimit` explicitly on `/v1/train/sft`, `/v1/train/grpo`, `/v1/chat/completions`, `/v1/completions/batch`.~~ **Fixed** in branch `ce/phase9-per-route-body-limits` (64 MiB for training, 8 MiB for completions).
 8. **Cap composed-adapter cache size** (§6, §8). LRU-evict `.composed/<hash>/` entries above N total or M GiB.
-9. **Cap total adapter-dir disk usage** (§8). Reject uploads that would push total adapter-dir size above `adapters.max_disk_bytes`.
+9. ~~**Cap total adapter-dir disk usage** (§8). Reject uploads that would push total adapter-dir size above `adapters.max_disk_bytes`.~~ **Fixed** in branch `ce/phase9-adapter-disk-cap` — `adapters.max_disk_bytes` (default 100 GiB, env override `KILN_ADAPTERS_MAX_DISK_BYTES`, `0` to disable) checked pre-rename in `upload_adapter`; rejects with HTTP 507 `adapter_disk_quota_exceeded`. Item 8 (`.composed/` LRU eviction) remains open.
 10. ~~**Disable redirects on webhook reqwest client** (§7). Belt-and-suspenders against a misconfigured webhook URL pointing at a public 302.~~ **Fixed** in branch `ce/phase9-webhook-disable-redirects`.
 11. ~~**Migrate `deny.toml`** (§12). Replace `unmaintained = "workspace"` with the post-PR-611 shape; pin the CI cargo-deny version explicitly.~~ **Fixed** in branch `ce/phase9-deny-migration` — pinned `cargo-deny-action` to v2.0.17 commit SHA (cargo-deny 0.19.2) and documented the schema-version constraint in `deny.toml`. The "new shape" turned out not to exist: `unmaintained = "workspace"` is already the canonical modern form on cargo-deny ≥ 0.18; see the §12 update for the full reasoning.
 12. ~~**Document training-data invariants** (§3). One short README section: "Kiln applies a faithful gradient update to whatever you POST. Treat your training corpus as security-sensitive."~~ **Fixed** in branch `ce/phase9-document-training-data-trust` (new `## Security model` section in `README.md`, callout in `QUICKSTART.md` adjacent to the loopback paragraph).
