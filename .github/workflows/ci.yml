@@ -41,17 +41,20 @@ jobs:
       - name: Build (Metal)
         run: cargo build --locked --features metal
 
-      # Skip the two pre-existing env-var races on both feature sets — they
-      # flake in parallel test runs but pass in isolation.
+      # Env-mutating tests are now serialized via an ENV_LOCK mutex inside
+      # the test module, so they no longer race in parallel runs. The
+      # `test_health_with_real_backend` skip remains because that test
+      # depends on a live network backend and is intentionally excluded
+      # from CI.
       - name: Test (default features — exercises CPU fallback)
-        run: cargo test --locked -- --skip test_env_var_overrides --skip test_health_with_real_backend
+        run: cargo test --locked -- --skip test_health_with_real_backend
 
       - name: Test (Metal feature — exercises Apple Silicon GPU path)
         # `--test-threads=1` because concurrent `Device::new_metal(0)` calls
         # panic in candle-metal 0.10.2's MetalDevice::new (`swap_remove` on
         # an empty vec).
         run: |
-          cargo test --locked --features metal -- --test-threads=1 --skip test_env_var_overrides --skip test_health_with_real_backend
+          cargo test --locked --features metal -- --test-threads=1 --skip test_health_with_real_backend
 
   linux-default:
     name: Linux / default features
@@ -69,7 +72,7 @@ jobs:
         run: cargo build --locked
 
       - name: Test (default features)
-        run: cargo test --locked -- --skip test_env_var_overrides --skip test_health_with_real_backend
+        run: cargo test --locked -- --skip test_health_with_real_backend
 
   cargo-deny:
     name: cargo-deny (license / source / bans policy)
