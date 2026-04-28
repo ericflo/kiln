@@ -246,6 +246,8 @@ async fn main() -> Result<()> {
     state.tracked_job_ttl =
         std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.adapter_max_disk_bytes = config.adapters.max_disk_bytes;
+    state.composed_cache_max_bytes = config.adapters.composed_cache_max_bytes;
+    state.composed_cache_max_entries = config.adapters.composed_cache_max_entries;
     if let Some(ref url) = state.training_webhook_url {
         tracing::info!(url = %url, "training completion webhook configured");
     }
@@ -265,6 +267,18 @@ async fn main() -> Result<()> {
             "adapter_dir disk cap configured"
         ),
         None => tracing::info!("adapter_dir disk cap disabled (operator opt-out)"),
+    }
+    match (
+        state.composed_cache_max_bytes,
+        state.composed_cache_max_entries,
+    ) {
+        (None, None) => tracing::info!("composed-adapter cache LRU eviction disabled (operator opt-out)"),
+        (bytes, entries) => tracing::info!(
+            cap_bytes = ?bytes,
+            cap_gib = ?bytes.map(|b| b as f64 / 1024.0 / 1024.0 / 1024.0),
+            cap_entries = ?entries,
+            "composed-adapter cache LRU eviction configured"
+        ),
     }
 
     // Spawn the background training queue worker

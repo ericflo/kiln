@@ -638,7 +638,15 @@ async fn chat_completions_inner(
     // disk. Runs regardless of backend so the cache is populated even in mock
     // mode tests; only the actual hot-swap is gated on the Real backend.
     let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
-        Some(synthesize_composed_adapter(&state.adapter_dir, list).await?)
+        Some(
+            synthesize_composed_adapter(
+                &state.adapter_dir,
+                list,
+                state.composed_cache_max_bytes,
+                state.composed_cache_max_entries,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -856,9 +864,18 @@ fn composition_hash(adapters: &[AdapterRef]) -> String {
 /// the source files. Source-adapter lookup uses the same path resolution as
 /// `ensure_adapter`: each `name` is treated as a single segment under
 /// `adapter_dir`, missing sources surface as 404.
+///
+/// After a fresh synthesize, runs LRU eviction over the parent `.composed/`
+/// directory to keep total entries below `max_entries` and total bytes below
+/// `max_bytes` (oldest mtime first). Either limit set to `None` disables that
+/// dimension. Eviction is best-effort — failures are logged and the request
+/// still succeeds. Cache hits also refresh the entry's mtime so reuse counts
+/// as recency for LRU ordering.
 async fn synthesize_composed_adapter(
     adapter_dir: &Path,
     adapters: &[AdapterRef],
+    max_bytes: Option<u64>,
+    max_entries: Option<u64>,
 ) -> Result<ComposedTarget, ApiError> {
     let hash = composition_hash(adapters);
     let active_name = format!("__composed:{hash}");
@@ -866,6 +883,18 @@ async fn synthesize_composed_adapter(
     let cache_dir = composed_root.join(&hash);
 
     if cache_dir.exists() {
+        // Cache hit: refresh the directory's mtime so LRU eviction treats this
+        // entry as recently used. Best-effort — a failure does not block the
+        // request, and stale mtimes only mean slightly less-accurate LRU
+        // ordering.
+        let now = filetime::FileTime::from_system_time(std::time::SystemTime::now());
+        if let Err(e) = filetime::set_file_mtime(&cache_dir, now) {
+            tracing::warn!(
+                cache_dir = %cache_dir.display(),
+                error = %e,
+                "failed to refresh composed-cache mtime on hit (LRU may be slightly off)"
+            );
+        }
         return Ok(ComposedTarget {
             active_name,
             cache_dir,
@@ -882,10 +911,10 @@ async fn synthesize_composed_adapter(
         source_paths.push((src.name.clone(), src.scale, path));
     }
 
-    let composed_root = composed_root.clone();
+    let composed_root_for_task = composed_root.clone();
     let cache_dir_for_task = cache_dir.clone();
     let merge_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        std::fs::create_dir_all(&composed_root)
+        std::fs::create_dir_all(&composed_root_for_task)
             .map_err(|e| format!("creating composed-cache dir: {e}"))?;
 
         let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
@@ -900,6 +929,10 @@ async fn synthesize_composed_adapter(
         merged
             .save(&cache_dir_for_task)
             .map_err(|e| format!("saving composed adapter: {e}"))?;
+        // LRU eviction runs in the same blocking task — keeps the request
+        // path off the runtime and avoids racing with another synthesize for
+        // the same root within this request.
+        evict_composed_cache_lru(&composed_root_for_task, max_bytes, max_entries);
         Ok(())
     })
     .await
@@ -915,6 +948,118 @@ async fn synthesize_composed_adapter(
         active_name,
         cache_dir,
     })
+}
+
+/// LRU-evict entries from `composed_root` until total entries `<= max_entries`
+/// and total bytes `<= max_bytes`. Either bound being `None` disables that
+/// dimension; if both are `None` the function is a no-op.
+///
+/// Eviction is best-effort: individual `remove_dir_all` failures are logged
+/// and the loop continues. Hidden / non-directory entries (anything whose
+/// name starts with `.`) are skipped — kiln only writes hash-named
+/// subdirectories under `.composed/`, but a stray file should not be picked
+/// for eviction.
+///
+/// Closes audit LOW §8 / roadmap item 8 (PR #620 capped uploaded adapters
+/// but explicitly excluded this cache pending this LRU pass).
+fn evict_composed_cache_lru(
+    composed_root: &Path,
+    max_bytes: Option<u64>,
+    max_entries: Option<u64>,
+) {
+    if max_bytes.is_none() && max_entries.is_none() {
+        return;
+    }
+    let read_dir = match std::fs::read_dir(composed_root) {
+        Ok(rd) => rd,
+        Err(_) => return, // Parent gone or unreadable — nothing to evict.
+    };
+
+    // Gather (path, mtime, size) for each cache entry. `mtime` is read via
+    // `std::fs::Metadata::modified()`; if unavailable we fall back to
+    // `UNIX_EPOCH` so the entry sorts as oldest and gets evicted first.
+    let mut entries: Vec<(PathBuf, std::time::SystemTime, u64)> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let name_lossy = name.to_string_lossy();
+        // Skip hidden / sentinel files (names starting with `.`). All real
+        // entries are 16-hex-digit hash directories.
+        if name_lossy.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.file_type().is_dir() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let size = composed_entry_size_bytes(&path);
+        total_bytes = total_bytes.saturating_add(size);
+        entries.push((path, mtime, size));
+    }
+
+    // Oldest first.
+    entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let mut total_entries = entries.len() as u64;
+    let mut iter = entries.into_iter();
+    while (max_entries.is_some_and(|cap| total_entries > cap))
+        || (max_bytes.is_some_and(|cap| total_bytes > cap))
+    {
+        let (path, _mtime, size) = match iter.next() {
+            Some(e) => e,
+            None => break, // Caps still exceeded but nothing left to evict.
+        };
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                total_entries = total_entries.saturating_sub(1);
+                total_bytes = total_bytes.saturating_sub(size);
+                tracing::info!(
+                    evicted = %path.display(),
+                    freed_bytes = size,
+                    "composed-adapter cache LRU eviction"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cache_dir = %path.display(),
+                    error = %e,
+                    "failed to evict composed-cache entry (will retry next eviction)"
+                );
+                // Don't decrement — couldn't free this one.
+            }
+        }
+    }
+}
+
+/// Recursively sum regular-file byte sizes under a composed-cache entry.
+/// Mirrors the conservative best-effort spirit of
+/// `dir_size_recursive` in `api/adapters.rs` — symlinks and stat errors
+/// count as zero.
+fn composed_entry_size_bytes(root: &Path) -> u64 {
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.file_type().is_file() {
+        return meta.len();
+    }
+    if !meta.file_type().is_dir() {
+        return 0;
+    }
+    let read_dir = match std::fs::read_dir(root) {
+        Ok(rd) => rd,
+        Err(_) => return 0,
+    };
+    let mut total: u64 = 0;
+    for entry in read_dir.flatten() {
+        total = total.saturating_add(composed_entry_size_bytes(&entry.path()));
+    }
+    total
 }
 
 /// Hot-swap the runner onto a synthesized composed adapter.
@@ -2004,7 +2149,15 @@ async fn batch_completions_inner(
     // `adapter`/`adapters` as None — generate_real reads the active adapter
     // from state, not from the request.
     let composed_target: Option<ComposedTarget> = if let Some(list) = req.adapters.as_deref() {
-        Some(synthesize_composed_adapter(&state.adapter_dir, list).await?)
+        Some(
+            synthesize_composed_adapter(
+                &state.adapter_dir,
+                list,
+                state.composed_cache_max_bytes,
+                state.composed_cache_max_entries,
+            )
+            .await?,
+        )
     } else {
         None
     };

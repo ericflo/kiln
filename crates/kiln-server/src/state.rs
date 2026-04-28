@@ -450,6 +450,17 @@ pub struct AppState {
     /// are excluded from the count — they are bounded separately. Mirrors
     /// `AdaptersConfig::max_disk_bytes` (default 100 GiB).
     pub adapter_max_disk_bytes: Option<u64>,
+    /// Byte cap for the on-disk composed-adapter cache at
+    /// `adapter_dir/.composed/<hash>/`. Enforced via LRU eviction
+    /// (oldest mtime first) after a successful synthesize. `None`
+    /// disables the byte cap. Mirrors
+    /// `AdaptersConfig::composed_cache_max_bytes` (default 10 GiB).
+    pub composed_cache_max_bytes: Option<u64>,
+    /// Entry-count cap for the on-disk composed-adapter cache at
+    /// `adapter_dir/.composed/`. Enforced via LRU eviction (oldest
+    /// mtime first). `None` disables the entry cap. Mirrors
+    /// `AdaptersConfig::composed_cache_max_entries` (default 64).
+    pub composed_cache_max_entries: Option<u64>,
     /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
     pub served_model_id: String,
     /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
@@ -515,6 +526,8 @@ impl AppState {
             max_tracked_jobs: 1024,
             tracked_job_ttl: std::time::Duration::from_secs(3600),
             adapter_max_disk_bytes: Some(100 * 1024u64.pow(3)),
+            composed_cache_max_bytes: Some(10 * 1024u64.pow(3)),
+            composed_cache_max_entries: Some(64),
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
@@ -735,6 +748,8 @@ impl AppState {
             max_tracked_jobs: 1024,
             tracked_job_ttl: std::time::Duration::from_secs(3600),
             adapter_max_disk_bytes: Some(100 * 1024u64.pow(3)),
+            composed_cache_max_bytes: Some(10 * 1024u64.pow(3)),
+            composed_cache_max_entries: Some(64),
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(

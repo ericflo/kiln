@@ -75,3 +75,19 @@ max_disk_bytes = 107374182400         # 100 GiB cap on total finalized adapter_d
                                       # Override via KILN_ADAPTERS_MAX_DISK_BYTES.
                                       # To disable the cap entirely, set the env var to 0
                                       # (or empty): `KILN_ADAPTERS_MAX_DISK_BYTES=0`.
+composed_cache_max_bytes = 10737418240 # 10 GiB byte cap on the on-disk composed-adapter
+                                      # cache at adapter_dir/.composed/<hash>/. Each unique
+                                      # (name, scale) permutation in /v1/chat/completions
+                                      # `adapters: [...]` writes a new merged adapter. After
+                                      # a successful synthesize, oldest entries (by mtime) are
+                                      # evicted until total bytes drop below this cap.
+                                      # Override via KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES.
+                                      # Set to 0 (or empty) to disable the byte cap.
+composed_cache_max_entries = 64       # Entry-count cap on the same composed-adapter cache.
+                                      # Cheap independent guard against permutation loops with
+                                      # tiny adapters that would not blow past the byte cap
+                                      # quickly. Eviction order matches the byte cap (oldest
+                                      # mtime first); cache hits refresh mtime so reuse counts
+                                      # as recency. Override via
+                                      # KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES. Set to 0
+                                      # (or empty) to disable the entry cap.

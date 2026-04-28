@@ -279,6 +279,29 @@ pub struct AdaptersConfig {
     /// Override via `KILN_ADAPTERS_MAX_DISK_BYTES`. Set to `0` via env to
     /// disable the cap (operator-opt-out shorthand).
     pub max_disk_bytes: Option<u64>,
+    /// Maximum total bytes occupied by the on-disk composed-adapter cache
+    /// at `adapter_dir/.composed/<hash>/`. Each unique `(name, scale)`
+    /// permutation of `adapters: [...]` on `/v1/chat/completions` writes a
+    /// new entry; without a cap, a request loop with random scales fills
+    /// the disk. After a successful synthesize the oldest entries (by
+    /// directory mtime) are evicted until the total drops below this cap.
+    /// `None` disables the byte cap (entry cap may still trigger).
+    ///
+    /// Default: 10 GiB. Closes the §8 / roadmap item 8 finding from the
+    /// v0.1 security audit (paired with `composed_cache_max_entries`).
+    /// Override via `KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES`. Set to `0`
+    /// via env to disable the cap (operator-opt-out shorthand).
+    pub composed_cache_max_bytes: Option<u64>,
+    /// Maximum number of entries (subdirectories) in the composed-adapter
+    /// cache at `adapter_dir/.composed/`. Cheap independent guard against
+    /// pathological permutation loops with many tiny adapters that would
+    /// not blow past the byte cap quickly. Eviction order matches the
+    /// byte cap (oldest mtime first). `None` disables the entry cap (byte
+    /// cap may still trigger).
+    ///
+    /// Default: 64. Override via `KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES`.
+    /// Set to `0` via env to disable the cap (operator-opt-out shorthand).
+    pub composed_cache_max_entries: Option<u64>,
 }
 
 // --- Defaults ---
@@ -448,6 +471,10 @@ impl Default for AdaptersConfig {
             // 100 GiB. Large enough for many real adapters, small enough
             // to catch a runaway upload loop before it fills the disk.
             max_disk_bytes: Some(100 * 1024u64.pow(3)),
+            // 10 GiB byte cap, 64 entry cap. Matches the v0.1 audit
+            // recommendation (§8) and is independent of the upload cap.
+            composed_cache_max_bytes: Some(10 * 1024u64.pow(3)),
+            composed_cache_max_entries: Some(64),
         }
     }
 }
@@ -640,6 +667,22 @@ impl KilnConfig {
                 self.adapters.max_disk_bytes = if n == 0 { None } else { Some(n) };
             }
         }
+        if let Ok(v) = std::env::var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES") {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                self.adapters.composed_cache_max_bytes = None;
+            } else if let Ok(n) = trimmed.parse::<u64>() {
+                self.adapters.composed_cache_max_bytes = if n == 0 { None } else { Some(n) };
+            }
+        }
+        if let Ok(v) = std::env::var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES") {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                self.adapters.composed_cache_max_entries = None;
+            } else if let Ok(n) = trimmed.parse::<u64>() {
+                self.adapters.composed_cache_max_entries = if n == 0 { None } else { Some(n) };
+            }
+        }
 
         // Streaming/tiled prefill
         if let Ok(v) = std::env::var("KILN_STREAMING_PREFILL") {
@@ -743,6 +786,16 @@ mod tests {
             Some(100 * 1024u64.pow(3)),
             "default adapter disk cap should be 100 GiB"
         );
+        assert_eq!(
+            config.adapters.composed_cache_max_bytes,
+            Some(10 * 1024u64.pow(3)),
+            "default composed-cache byte cap should be 10 GiB"
+        );
+        assert_eq!(
+            config.adapters.composed_cache_max_entries,
+            Some(64),
+            "default composed-cache entry cap should be 64"
+        );
     }
 
     #[test]
@@ -797,6 +850,8 @@ last_token_lm_head = false
 
 [adapters]
 max_disk_bytes = 5368709120
+composed_cache_max_bytes = 1073741824
+composed_cache_max_entries = 8
 "#;
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
@@ -830,6 +885,11 @@ max_disk_bytes = 5368709120
         assert_eq!(config.streaming_prefill.tile_tokens, 4096);
         assert!(!config.streaming_prefill.last_token_lm_head);
         assert_eq!(config.adapters.max_disk_bytes, Some(5_368_709_120));
+        assert_eq!(
+            config.adapters.composed_cache_max_bytes,
+            Some(1_073_741_824)
+        );
+        assert_eq!(config.adapters.composed_cache_max_entries, Some(8));
     }
 
     #[test]
@@ -1019,6 +1079,78 @@ port = 3000
 
         unsafe {
             std::env::remove_var("KILN_ADAPTERS_MAX_DISK_BYTES");
+        }
+    }
+
+    #[test]
+    fn test_adapters_composed_cache_max_bytes_env_override() {
+        let mut config = KilnConfig::default();
+        // Default is 10 GiB.
+        assert_eq!(
+            config.adapters.composed_cache_max_bytes,
+            Some(10 * 1024u64.pow(3))
+        );
+
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "536870912");
+        }
+        config.apply_env_overrides();
+        assert_eq!(
+            config.adapters.composed_cache_max_bytes,
+            Some(536_870_912)
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES");
+        }
+    }
+
+    #[test]
+    fn test_adapters_composed_cache_max_entries_env_override() {
+        let mut config = KilnConfig::default();
+        // Default is 64.
+        assert_eq!(config.adapters.composed_cache_max_entries, Some(64));
+
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "12");
+        }
+        config.apply_env_overrides();
+        assert_eq!(config.adapters.composed_cache_max_entries, Some(12));
+
+        unsafe {
+            std::env::remove_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES");
+        }
+    }
+
+    #[test]
+    fn test_adapters_composed_cache_zero_disables() {
+        let mut config = KilnConfig::default();
+        assert!(config.adapters.composed_cache_max_bytes.is_some());
+        assert!(config.adapters.composed_cache_max_entries.is_some());
+
+        // `0` is the operator-opt-out shorthand for both caps.
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "0");
+            std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "0");
+        }
+        config.apply_env_overrides();
+        assert!(config.adapters.composed_cache_max_bytes.is_none());
+        assert!(config.adapters.composed_cache_max_entries.is_none());
+
+        // Empty string also clears.
+        config.adapters.composed_cache_max_bytes = Some(123);
+        config.adapters.composed_cache_max_entries = Some(7);
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "");
+            std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES", "");
+        }
+        config.apply_env_overrides();
+        assert!(config.adapters.composed_cache_max_bytes.is_none());
+        assert!(config.adapters.composed_cache_max_entries.is_none());
+
+        unsafe {
+            std::env::remove_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES");
+            std::env::remove_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES");
         }
     }
 
