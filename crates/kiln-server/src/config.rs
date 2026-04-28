@@ -28,6 +28,7 @@ pub struct KilnConfig {
     pub prefix_cache: PrefixCacheConfig,
     pub speculative: SpeculativeDecodingConfig,
     pub streaming_prefill: StreamingPrefillConfig,
+    pub adapters: AdaptersConfig,
 }
 
 /// HTTP server settings.
@@ -257,6 +258,29 @@ pub struct StreamingPrefillConfig {
     pub last_token_lm_head: bool,
 }
 
+/// Adapter-storage settings.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct AdaptersConfig {
+    /// Maximum total size in bytes for `adapter_dir/` (excluding the
+    /// `.upload-tmp-*/` staging dirs and the `.composed/<hash>/` cache —
+    /// those are bounded by separate limits). Uploads to
+    /// `POST /v1/adapters/upload` are rejected when the new adapter would
+    /// push total finalized adapter bytes over this cap.
+    ///
+    /// `None` disables the cap entirely (operator opts out). The default
+    /// is 100 GiB, which is large enough to hold dozens of typical LoRA
+    /// adapters but small enough to catch a runaway upload loop on a
+    /// home/dev box before it fills the disk. Combined with the existing
+    /// per-request 4 GiB extracted-bytes limit (`ADAPTER_EXTRACT_BYTES_LIMIT`
+    /// in `api/adapters.rs`), this closes the §8 disk-exhaustion finding
+    /// from the v0.1 security audit.
+    ///
+    /// Override via `KILN_ADAPTERS_MAX_DISK_BYTES`. Set to `0` via env to
+    /// disable the cap (operator-opt-out shorthand).
+    pub max_disk_bytes: Option<u64>,
+}
+
 // --- Defaults ---
 
 impl Default for KilnConfig {
@@ -270,6 +294,7 @@ impl Default for KilnConfig {
             prefix_cache: PrefixCacheConfig::default(),
             speculative: SpeculativeDecodingConfig::default(),
             streaming_prefill: StreamingPrefillConfig::default(),
+            adapters: AdaptersConfig::default(),
         }
     }
 }
@@ -413,6 +438,16 @@ impl Default for StreamingPrefillConfig {
             enabled: false,
             tile_tokens: 8192,
             last_token_lm_head: true,
+        }
+    }
+}
+
+impl Default for AdaptersConfig {
+    fn default() -> Self {
+        Self {
+            // 100 GiB. Large enough for many real adapters, small enough
+            // to catch a runaway upload loop before it fills the disk.
+            max_disk_bytes: Some(100 * 1024u64.pow(3)),
         }
     }
 }
@@ -594,6 +629,18 @@ impl KilnConfig {
             }
         }
 
+        // Adapters
+        if let Ok(v) = std::env::var("KILN_ADAPTERS_MAX_DISK_BYTES") {
+            // `0` is the operator-opt-out shorthand: disable the cap.
+            // Empty string also clears any TOML-set cap.
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                self.adapters.max_disk_bytes = None;
+            } else if let Ok(n) = trimmed.parse::<u64>() {
+                self.adapters.max_disk_bytes = if n == 0 { None } else { Some(n) };
+            }
+        }
+
         // Streaming/tiled prefill
         if let Ok(v) = std::env::var("KILN_STREAMING_PREFILL") {
             self.streaming_prefill.enabled = v == "1" || v.eq_ignore_ascii_case("true");
@@ -691,6 +738,11 @@ mod tests {
         assert!(!config.streaming_prefill.enabled);
         assert_eq!(config.streaming_prefill.tile_tokens, 8192);
         assert!(config.streaming_prefill.last_token_lm_head);
+        assert_eq!(
+            config.adapters.max_disk_bytes,
+            Some(100 * 1024u64.pow(3)),
+            "default adapter disk cap should be 100 GiB"
+        );
     }
 
     #[test]
@@ -742,6 +794,9 @@ draft_layers = 10
 enabled = true
 tile_tokens = 4096
 last_token_lm_head = false
+
+[adapters]
+max_disk_bytes = 5368709120
 "#;
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "127.0.0.1");
@@ -774,6 +829,7 @@ last_token_lm_head = false
         assert!(config.streaming_prefill.enabled);
         assert_eq!(config.streaming_prefill.tile_tokens, 4096);
         assert!(!config.streaming_prefill.last_token_lm_head);
+        assert_eq!(config.adapters.max_disk_bytes, Some(5_368_709_120));
     }
 
     #[test]
@@ -931,6 +987,38 @@ port = 3000
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
+        }
+    }
+
+    #[test]
+    fn test_adapters_max_disk_bytes_env_override() {
+        let mut config = KilnConfig::default();
+        // Default is 100 GiB.
+        assert_eq!(config.adapters.max_disk_bytes, Some(100 * 1024u64.pow(3)));
+
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_MAX_DISK_BYTES", "1073741824");
+        }
+        config.apply_env_overrides();
+        assert_eq!(config.adapters.max_disk_bytes, Some(1_073_741_824));
+
+        // `0` disables the cap (operator-opt-out shorthand).
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_MAX_DISK_BYTES", "0");
+        }
+        config.apply_env_overrides();
+        assert!(config.adapters.max_disk_bytes.is_none());
+
+        // Empty string also clears the cap.
+        unsafe {
+            std::env::set_var("KILN_ADAPTERS_MAX_DISK_BYTES", "");
+        }
+        config.adapters.max_disk_bytes = Some(123);
+        config.apply_env_overrides();
+        assert!(config.adapters.max_disk_bytes.is_none());
+
+        unsafe {
+            std::env::remove_var("KILN_ADAPTERS_MAX_DISK_BYTES");
         }
     }
 

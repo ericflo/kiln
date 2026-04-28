@@ -232,6 +232,18 @@ impl ApiError {
         }
     }
 
+    pub fn adapter_disk_quota_exceeded(detail: impl std::fmt::Display) -> Self {
+        Self {
+            // 507 Insufficient Storage — the request is well-formed but the
+            // server cannot accept it without exceeding the configured cap.
+            status: StatusCode::INSUFFICIENT_STORAGE,
+            code: "adapter_disk_quota_exceeded",
+            message: format!("Adapter upload would exceed adapter_dir disk cap: {detail}"),
+            hint: "Delete unused adapters with `curl -X DELETE /v1/adapters/{name}`, or raise the cap with `KILN_ADAPTERS_MAX_DISK_BYTES` (set to 0 to disable).",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn invalid_compose_request(detail: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

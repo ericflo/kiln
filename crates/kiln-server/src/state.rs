@@ -442,6 +442,14 @@ pub struct AppState {
     /// Active entries (`Queued` / `Running`) are never GC'd.
     /// Mirrors `TrainingConfig::tracked_job_ttl_secs` (default 3600s).
     pub tracked_job_ttl: std::time::Duration,
+    /// Maximum total bytes that finalized adapters may occupy in
+    /// `adapter_dir/`. Uploads to `POST /v1/adapters/upload` that would
+    /// push the total over this cap are rejected before the rename-into-
+    /// place step. `None` disables the cap entirely (operator opt-out).
+    /// `.upload-tmp-*/` staging dirs and the `.composed/<hash>/` cache
+    /// are excluded from the count — they are bounded separately. Mirrors
+    /// `AdaptersConfig::max_disk_bytes` (default 100 GiB).
+    pub adapter_max_disk_bytes: Option<u64>,
     /// Identifier exposed at `/v1/models` and echoed in chat completion responses.
     pub served_model_id: String,
     /// Rolling timestamp ring for live decode tok/s + ITL on the /ui dashboard.
@@ -506,6 +514,7 @@ impl AppState {
             max_queued_training_jobs: 32,
             max_tracked_jobs: 1024,
             tracked_job_ttl: std::time::Duration::from_secs(3600),
+            adapter_max_disk_bytes: Some(100 * 1024u64.pow(3)),
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
@@ -725,6 +734,7 @@ impl AppState {
             max_queued_training_jobs: 32,
             max_tracked_jobs: 1024,
             tracked_job_ttl: std::time::Duration::from_secs(3600),
+            adapter_max_disk_bytes: Some(100 * 1024u64.pow(3)),
             served_model_id,
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
