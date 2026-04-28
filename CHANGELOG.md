@@ -2,17 +2,31 @@
 
 ## Unreleased
 
+## kiln-v0.2.7 — 2026-04-28
+
+Security release: closes all 12 findings in `docs/audits/security-audit-v0.1.md`.
+Adds path-traversal hardening on adapter routes, per-route body-size limits,
+webhook redirect-disable, training queue + tracked-jobs caps, adapter-dir
+disk caps, LRU eviction for the composed-adapter cache, loopback default bind,
+and reproducible Docker builds. No new features and no GPU/runtime breaking
+changes.
+
 ### Security
 - Fix path traversal in `DELETE /v1/adapters/:name` and `POST /v1/adapters/load` (Phase 9 audit §2b/§2c, HIGH).
 - Validate source adapter names in `POST /v1/adapters/merge` (Phase 9 audit §2d, LOW).
 - Per-route body-size limits on training + completions endpoints: 64 MiB for `/v1/train/sft` and `/v1/train/grpo`, 8 MiB for `/v1/chat/completions` and `/v1/completions/batch` (Phase 9 audit §1, LOW).
 - Disable HTTP redirects on the training-completion webhook client to prevent server-side redirect chasing into internal infra (Phase 9 audit §7, item 10, LOW).
+- Cap training queue depth (audit MEDIUM §4 part 1) — bounded queue with explicit reject when full (#607).
+- Cap tracked-jobs map size and TTL Completed/Failed entries (audit MEDIUM §4 part 2) — prevents unbounded memory growth (#608).
+- Cap total adapter_dir disk usage on upload (audit LOW §8 / item 9) — `KILN_ADAPTERS_DIR_MAX_BYTES` rejects uploads that would exceed the cap (#620).
+- LRU eviction for `.composed/` adapter cache (audit LOW §8 / item 8) — bounded byte-size + entry-count caps with oldest-mtime-first eviction (#621). Closes the last open finding in security-audit-v0.1; all 12 findings now resolved.
 
 ### Changed
 - Default server listen host changed from `0.0.0.0` to `127.0.0.1` (loopback). Set `server.host = "0.0.0.0"` or `KILN_HOST=0.0.0.0` to accept remote connections; pair with a trusted reverse proxy. Closes security-audit-v0.1 MEDIUM §9.
 
 ### Reproducibility / release
 - docker: use `--locked` in `deploy/Dockerfile` cargo builds so the published `ghcr.io/ericflo/kiln-server` image matches the exact Cargo.lock dependency set (#601)
+- Pin cargo-deny-action to a specific commit SHA and document deny.toml schema (audit LOW §11) (#612).
 
 ### Documentation
 - docs(security): document training-data trust invariants (security audit §3 / item 12) in README + QUICKSTART. Calls out that `/v1/train/sft` and `/v1/train/grpo` apply a faithful gradient update to anything POSTed — kiln validates structure, not semantics — so the operator's training corpus must be treated as security-sensitive.
