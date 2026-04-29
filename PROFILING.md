@@ -9,6 +9,63 @@
 > (or whichever path is cited — `c12-out/`, `profile/`, `profiling/`, or
 > `profiling-artifacts/`).
 
+## Phase 10 §3 post-#647 SFT-step re-profile + next-kernel candidate audit (2026-04-29)
+
+**Verdict: `no_kernel_pivot`.** Three back-to-back nsys 2024.5.1
+profiles of the T=8192 RMSNorm-on FLCE-Phase-B SFT step on RunPod
+A100-SXM4-80GB sm_80 (A6000/A40 both capacity-blocked at task start;
+A100 was the next allowed fallback per task description, NOT L40S).
+Kiln main commit `3504a06` (PR #648 — FLCE Phase B A6000 closure
+deferred). Step wall-clock medians 30.03/30.98/30.98 s, total kernel
+exec 21.113/21.118/21.121 s (Δ 0.04% of median — profiler-grade
+reproducible), peak VRAM 70,053–70,081 MiB, final loss bit-identical
+0.8115726113319397 across all three runs. KILN_USE_FLCE=1, RMSNorm
+fused CustomOp2 path active (`fused_path=ON` — A100 80 GiB clears the
+PR #644 47 GiB gate), KILN_W4A16 unset (W4A16 + training currently
+fails with "expected rank-2 q_proj_t" on the trainer's Marlin unpack
+path; orthogonal but noted). Top NVTX (median): `:kiln/gdn/in_proj`
+**19.6%**, `:kiln/mlp/gate` 11.8%, `:kiln/gdn/qk_norm` 10.8%,
+`:kiln/gdn/gates` 10.4%, `:kiln/mlp/up` 8.9%, `:kiln/mlp/down` 7.9%,
+`:kiln/norm/pre_attn` 6.0%, `:kiln/gdn/gated_norm` 5.2%,
+`:kiln/proj/qkv` 5.2% (GDN aggregate ~50.6%, MLP trio 28.6%, full-attn
+projections 7.2%). Top CUDA kernels (median): `ampere_sgemm_64x64_nn`
+(FP32) **31.07%** + `ampere_sgemm_128x64_nn` (FP32) 11.02% =
+**~42% combined FP32 SGEMM** — shape signatures match the kiln-train
+rank-8 LoRA-down/-up matmuls (FP32 for numerical stability of small-
+rank accumulation; not lm_head). `gdn_full_chunk_forward_kernel`
+(kiln-gdn-kernel) 22.13%; the post-PR-#502 audit (2026-04-24) declared
+this kernel structural-only with no bounded micro-port remaining.
+Elementwise zoo (`badd/bsub/bmul/bdiv/uexp/fast_sum/fast_max/affine/
+cast/ucopy_*`) ~24.6% spread across many sites. **Per-candidate
+math-ceiling verdicts** (1.05× floor under graphs; 1.10× under
+graph-amortized fusion): ❌ Fused RoPE (5.2% region × 2× speedup-only
+inside `:kiln/proj/qkv` → 1.027× overall, sub-floor); ❌ Fused
+SwiGLU/GeGLU (Liger fuses only the post-gate elementwise, ~5% step-
+budget × 2× → 1.025× overall, sub-floor — the 28.6% MLP trio is the
+matmul cost, NOT addressable by Liger SwiGLU); ❌ Fused Layer Norm
+(N/A — Qwen3.5 uses RMSNorm only; PR #644 already shipped); ⚠️
+**FleCE conditional** — kiln Phase B (PR #647) already chunks along
+T; FleCE adds chunking along V (vocab=248,320). Peak VRAM at T=8192
+on A100 80 GiB is 70/80 GiB — no pressure, FleCE null. On A6000 at
+T=8192, Phase B closes peak below 49 GiB ceiling already (PR #647 +
+A40 closure evidence). FleCE only buys new ground at **T≥16384** on
+A6000 — NOT YET MEASURED. **Conditional reopen**: queue a T=16384
+A6000 SFT-step OOM probe (~15 min, no kernel work) before
+implementing FleCE. The **actual top kernel hotspot (FP32 LoRA SGEMM
+~42%) is NOT a Phase 10 candidate** — replacing it requires either
+LoRA-in-BF16-with-FP32-accum (numerical stability change) or fusing
+LoRA into the base GEMM (autograd path rewrite). Both are recorded
+for future planning, not §3 work. **Phase 10 §3 should pivot to
+non-kernel work**: T=16384 A6000 OOM probe (gates FleCE go/no-go),
+or Phase 9 release prep (security audit, license review, reproducible
+builds, CI/CD, GHCR Docker image, landing page, v0.1.0 cut). Bench
+envelope: A100 SXM4-80GB lease 47 min, ~$1.20 GPU spend, well under
+$40/90 min cap. Required Cargo.toml fix on the pod (NOT in this PR's
+diff): `kiln-server`'s `cuda` feature did not propagate to
+`kiln-train/cuda`, so the `kiln-flce-kernel` CUDA path errored out
+at runtime. Cite:
+[`docs/audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md`](docs/audits/PHASE10_S3_CANDIDATE_PREFLIGHT.md).
+
 ## Phase 7 end-to-end native-MTP self-spec decode bench (2026-04-25)
 
 **Verdict: `mtp_no_decode_win`.** End-to-end MTP-On vs MTP-Off
