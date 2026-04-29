@@ -95,7 +95,7 @@ kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
 # Random number generation
-rand = "0.9"
+rand = "0.10"
 
 # Data-parallel iteration
 rayon = "1"
