@@ -108,11 +108,19 @@ jobs:
           # staples the .app bundle automatically. A follow-up step below
           # notarizes and staples the .dmg wrapper, which tauri-action
           # does not handle.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          #
+          # Only set these on tagged releases (refs/tags/desktop-v*). On
+          # PR/main/dependabot runs, GitHub does not expose secrets to
+          # fork-equivalent PRs, so unconditionally referencing them
+          # produces empty strings — and tauri-action then fails trying
+          # to import an empty keychain certificate. PR/main builds
+          # produce unsigned debug bundles, which is what we want for CI
+          # verification anyway.
+          APPLE_CERTIFICATE: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_ISSUER: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_API_KEY || '' }}
           # APPLE_API_KEY_PATH is exported by the "Write ... key to disk" step above.
         with:
           projectPath: desktop
