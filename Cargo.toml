@@ -73,7 +73,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Tokenization
 tokenizers = { version = "0.23", features = ["http"] }
-minijinja = "2"
+# `json` enables the `tojson` filter, which Qwen3.5-4B's chat_template uses
+# to emit each tool definition (`{{ tool | tojson }}`). Without it, every
+# tools-bearing /v1/chat/completions request 4xx's with
+# `unknown filter: tojson`. See PR comment for the load-bearing call site.
+minijinja = { version = "2", features = ["json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 
 # Model loading
