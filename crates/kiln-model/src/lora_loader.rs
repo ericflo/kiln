@@ -466,7 +466,7 @@ mod tests {
             .map(|(name, view)| (name.as_str(), view.clone()))
             .collect();
 
-        let serialized = safetensors::tensor::serialize(refs, &None)?;
+        let serialized = safetensors::tensor::serialize(refs, None)?;
         std::fs::write(adapter_dir.join("adapter_model.safetensors"), &serialized)?;
 
         // Load

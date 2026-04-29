@@ -2395,7 +2395,7 @@ pub fn write_mtp_dump(
         views.push((name.clone(), view));
     }
 
-    let serialized = safetensors::serialize(views, &None)
+    let serialized = safetensors::serialize(views, None)
         .map_err(|e| anyhow::anyhow!("safetensors::serialize MTP dump: {e:?}"))?;
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {

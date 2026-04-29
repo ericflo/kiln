@@ -148,7 +148,7 @@ impl PeftLora {
             .map(|(name, view)| (name.as_str(), view.clone()))
             .collect();
 
-        let serialized = safetensors::tensor::serialize(refs, &None)
+        let serialized = safetensors::tensor::serialize(refs, None)
             .context("serializing merged safetensors")?;
         let st_path = adapter_dir.join("adapter_model.safetensors");
         std::fs::write(&st_path, serialized)
