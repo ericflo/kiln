@@ -405,3 +405,175 @@ done
 GPU spend on this audit: ~$1.20 (47 min A100-SXM4-80GB at $1.49/hr).
 Wall-clock: 47 min including pool acquire, build, sanity, 3× profile
 capture, stats generation, and CSV pull.
+
+---
+
+## Addendum 2026-04-29 — FleCE T=16384 OOM probe (closure)
+
+Date: 2026-04-29
+Status: **§3 closes for FleCE — zero ROI even though T=16384 OOMs.**
+Hardware: NVIDIA A40 48GB (sm_86, 46,068 MiB total VRAM, driver 570.195.03),
+CUDA 12.4. A6000 capacity-blocked at task start (warm pool pod
+`18x6how2blkqon` and `1qnfctm4m9qwoe` both returned `SUPPLY_CONSTRAINT` on
+resume); A40 is the audit's named arch-equivalent fallback for the 48 GiB
+ceiling probe (also sm_86, ~3 GiB tighter ceiling).
+Branch: `audit/phase10-section3-flce-t16384-probe`. Built from `05463c9`
+(PR #649 merge).
+
+### What we ran
+
+A single-cell SFT bench at T=16384 on Qwen3.5-4B + rank-8 LoRA + gradient
+checkpointing (auto-configured to 8 segments at the detected
+`vram_gb=48.305`), with `KILN_USE_FLCE=1` (Phase B chunked-vocab CustomOp1
+forward — kiln's current best, the audit's "Phase B alone, no future
+FleCE Phase C" configuration), `KILN_W4A16` unset (W4A16+training fails
+with the rank-1/rank-2 q_proj_t mismatch — see agent note
+`kiln-w4a16-sft-trainer-rank-bug`), RMSNorm CustomOp ON in the bench
+(`rmsnorm_on=true`). Two arms:
+
+1. **Gate OFF (default A40 path)**: `KILN_FORCE_RMSNORM_KERNEL` unset;
+   the PR #644 VRAM gate (≥47 GiB total) leaves A40 below the threshold
+   (46,068 < 48,128 MiB) so `fused_path="OFF"` and the trainer falls
+   through to `rms_norm_fallback`.
+2. **Gate ON (A6000 simulation)**: `KILN_FORCE_RMSNORM_KERNEL=1` forces
+   `fused_path="ON"` to mirror what A6000 would dispatch (A6000 49,140 MiB
+   ≥ 48,128 MiB threshold, so its gate is naturally ON).
+
+Bench harness: `crates/kiln-server/examples/phase10_rmsnorm_bench.rs`
+patched to a single T=16384 RMSNorm-on cell via the new helper
+`scripts/phase10_flce_phase_b_t16384_only.py`. Build: `KILN_CUDA_ARCHS=86
+cargo build --release --features cuda,nvtx --example phase10_rmsnorm_bench
+-p kiln-server` (the `nvtx` feature is set but unused by this probe;
+left on for parity with PR #649). Cargo.toml fix shipped in this PR (see
+"Cargo.toml propagation fix" below).
+
+### Results
+
+| arm                 | gate path | peak (MiB) | delta (MiB) | step (s) | status | poller window |
+|---------------------|-----------|-----------:|------------:|---------:|:------:|--------------:|
+| 1 — A40 default     | fused=OFF |     45,447 |      29,104 |     9.44 | OOM    | full step     |
+| 2 — A40 force-fused | fused=ON  |     45,095 |      28,752 |     0.89 | OOM    | partial (\*)  |
+
+(\*) The 50 ms nvidia-smi poller likely missed the actual peak in arm 2:
+fused=ON failed at 0.89 s, before the poller could capture the largest
+allocation. The reported 45,095 MiB is a **lower** bound; the true peak is
+≥ that and ≤ A40 ceiling 46,068 MiB. Arm 1 (fused=OFF) ran for 9.44 s and
+saw multiple poller samples, so its 45,447 MiB peak is more reliable.
+
+Baseline VRAM (post-load) is 16,343 MiB in both arms. T_actual=16,380
+(target 16,384, lost 4 to tokenizer round-down).
+
+### Mechanism — why FleCE Phase C is not the fix
+
+Both arms OOM with delta ≈ 29 GiB above post-load baseline. That delta is
+**not** the lm_head logits — Phase B's chunked-vocab CustomOp1 already
+prevents `[T_active, V]` materialization (per
+`crates/kiln-flce-kernel/src/lib.rs` lib.rs and `phase_b.rs` module
+docs; `[T=16380, V=248320, F32]` would itself be 15.5 GiB if
+materialized, and it is not).
+
+The remaining ~29 GiB is GDN/MLP saved activations across the 8
+gradient-checkpoint segments. This matches the existing finding from
+agent note `kiln-flce-phase-a-validation-2026-04-29` ("GDN-side
+activations dominate at long T") and the Phase 10 §1 closure work
+(`docs/audits/PHASE10_GDN_TRAINING_STREAMING.md`,
+`PHASE10_GDN_TRAINING_STREAMING_IMPL.md`, PR #635/#637).
+
+FleCE Phase C — Liger-style vocab-axis chunking on top of Phase B's
+existing vocab-axis chunking — addresses the **head**, not GDN. Even if
+it shaved another 1-2 GiB off the head intermediates (which Phase B
+already keeps to 256 MiB / chunk × 3 retained tensors = ~768 MiB at
+T=16384, V_chunk=4096), it would not move the needle from 45 GiB → ≤43
+GiB needed to clear the A40 ceiling, much less the A6000 ceiling once
+GDN dominates. The path forward for unblocking T=16384 SFT is GDN
+training-time streaming (PR #635/#636/#637 + the §1 layer-pair tiled
+work and any post-#637 follow-ups), not a head-side fusion.
+
+### A6000 implications
+
+Both A40 arms OOM at peak 45.0–45.4 GiB. A6000 has 49,140 MiB total —
++3.0 GiB more headroom than A40. The fused-path arm on A40 saved ~352
+MiB vs the fallback arm (45,447 → 45,095 MiB), so fused saving alone is
+< 1 GiB. With +3 GiB extra ceiling and ≤ 1 GiB more saving, A6000 fused
+peak at T=16384 would land at ~45 GiB / 49 GiB ceiling — likely **closes**
+on A6000, but with 4 GiB of slack at most.
+
+This is consistent with the audit's pre-probe prediction (~47–50 GiB peak
+on A6000 at T=16384 with 4 segments; the actual run used 8 segments
+which roughly halves the saved-tensor footprint per segment — explaining
+why the observed peak is well below the upper bound). It does **not**
+change the FleCE verdict: even if A6000 closes T=16384 at 45 GiB peak,
+FleCE saves head intermediates which are already <1 GiB at T=16384 with
+Phase B's chunking. There is no A6000 scenario where FleCE Phase C
+unblocks new context length on Qwen3.5-4B + rank-8 LoRA SFT.
+
+### Verdict
+
+* **§3 closes for FleCE.** Both audit branches resolve to "no kernel":
+  * "If T=16384 OOMs even with Phase B alone …" → the OOM happens, but
+    its mechanism (GDN/MLP saved activations) is not what FleCE Phase C
+    addresses. FleCE Phase C provides bounded peak-VRAM-only ROI on the
+    *head*, and head intermediates are already small under Phase B.
+  * "If T=16384 closes cleanly …" → consistent with A6000 prediction
+    (~45 GiB peak, fits in 49 GiB), and even there the extra V-axis
+    chunking on already-chunked head intermediates is a no-op.
+* The path forward for unblocking long-context SFT is GDN training-time
+  streaming + per-tile forward+backward inside `checkpointed_forward_backward`
+  (Phase 10 §1 follow-ups, PR #635 / #636 / #637 already in flight). FleCE
+  is off the §3 candidate list.
+* The kernel-fusion track for SFT remains exhausted post-PR-#647. The
+  planning loop should pull from Phase 9 release prep (security audit,
+  license review, reproducible builds, CI/CD pipeline, GHCR image, landing
+  page, v0.1.0 cut) until new evidence reopens a candidate.
+
+### Cargo.toml propagation fix (shipped in this PR)
+
+Both PR #647 and PR #649 needed the same local-only patch on the pod
+(see PR #649 §"Bench protocol", `kiln-flce-kernel/Cargo.toml` comment,
+and agent note `kiln-server-cuda-doesnt-propagate-to-flce`):
+
+```diff
+ # crates/kiln-server/Cargo.toml
+ [features]
+-cuda = ["kiln-model/cuda"]
++cuda = ["kiln-model/cuda", "kiln-train/cuda"]
+```
+
+Without this, `cargo build -p kiln-server --features cuda` activates
+`kiln-model/cuda` but leaves `kiln-train/cuda` (and therefore
+`kiln-flce-kernel/cuda`) off, and any `KILN_USE_FLCE=1` path on GPU
+fails at runtime with `"flce phase b cuda_fwd: kiln-flce-kernel built
+without cuda feature"`. PR #647 and PR #649 each reapplied this patch on
+the pod by hand. This PR lands the one-line fix so the next agent does
+not pay the same discovery cost. Verified post-patch on the same A40 pod
+by re-running both probe arms above.
+
+### Reproduction
+
+```bash
+ce kiln-pod-acquire --gpu-type "NVIDIA RTX A6000"   # or "NVIDIA A40" (arch-equivalent)
+
+# On the pod (kiln-setup --clone first if /workspace/kiln does not exist):
+cd /workspace/kiln
+git checkout audit/phase10-section3-flce-t16384-probe   # or main once merged
+source /root/.kiln-build-env
+KILN_CUDA_ARCHS=86 cargo build --release --features cuda,nvtx \
+  --example phase10_rmsnorm_bench -p kiln-server
+
+# Apply T=16384 single-cell patch:
+python3 scripts/phase10_flce_phase_b_t16384_only.py
+
+# Arm 1 — default (fused=OFF on A40, fused=ON on A6000):
+./target/release/examples/phase10_rmsnorm_bench --model-path /workspace/qwen3.5-4b
+
+# Arm 2 — force fused-path ON (simulates A6000 on A40):
+KILN_FORCE_RMSNORM_KERNEL=1 ./target/release/examples/phase10_rmsnorm_bench --model-path /workspace/qwen3.5-4b
+```
+
+GPU spend on this audit: ~$0.20 A40 (≈25 min lease at $0.44/hr — most
+spent waiting for capacity, not running probes; both probes themselves
+ran in <30 s combined including model load).
+
+Raw logs:
+* `docs/flce_phase_b_t16384_oom_probe_a40_raw_2026-04-29.log` (arm 1, fused=OFF)
+* `docs/flce_phase_b_t16384_oom_probe_a40_fused_raw_2026-04-29.log` (arm 2, fused=ON)
