@@ -31,7 +31,12 @@ model_id = "Qwen/Qwen3.5-4B"
                                       # dequantizes INT4 weights to BF16 during loading.
 
 [memory]
-# num_blocks = 256                   # KV cache blocks (auto-sized from VRAM if omitted)
+# num_blocks = 256                   # KV cache blocks (auto-sized from VRAM if omitted).
+                                      # Each block holds 16 tokens of K+V across all
+                                      # full-attention layers. CUDA auto-sizing fills
+                                      # `inference_memory_fraction` of free VRAM with
+                                      # blocks; explicit values override this. Also
+                                      # settable via KILN_NUM_BLOCKS env var.
 # gpu_memory_gb = 24.0               # Override detected VRAM (for testing)
 inference_memory_fraction = 0.7       # Fraction of VRAM for inference (rest for training)
 # training_memory_gb = 4.0           # Override auto-calculated training budget
