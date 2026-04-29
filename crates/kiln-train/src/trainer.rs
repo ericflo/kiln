@@ -14,8 +14,9 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy};
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_final_norm,
-    model_forward_head, model_forward_no_head, model_forward_segment,
+    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState, model_forward,
+    model_forward_embed, model_forward_final_norm, model_forward_head, model_forward_no_head,
+    model_forward_segment, streaming_prefill_enabled_for, streaming_tile_tokens_for,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 
@@ -1192,6 +1193,294 @@ fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(us
     boundaries
 }
 
+/// Returns true when every transformer layer in `weights` uses linear (GDN)
+/// attention — i.e., the model has **no** full-attention layers anywhere.
+///
+/// The training-time time-axis tile path
+/// ([`tiled_segment_recompute_and_backward`]) thread `LinearAttentionState`
+/// across tiles to keep GDN forward bit-exact, but full-attention layers have
+/// no analogous KV-cache thread at training time (training does not allocate
+/// a paged KV cache). Within a tile a full-attention layer would attend only
+/// inside the tile and produce different logits, breaking both per-tile loss
+/// and any LoRA gradient that flows through it.
+///
+/// Per-segment iteration also runs **later** segments detached on the tile's
+/// output, so even a segment that is itself GDN-only would dispatch into
+/// later full-attention layers under tiling — which would also break parity.
+/// The cleanest correctness invariant is therefore "no full-attention layers
+/// anywhere in the model".
+fn model_is_gdn_only(weights: &GpuWeights) -> bool {
+    weights
+        .layers
+        .iter()
+        .all(|l| matches!(l.attention, GpuAttentionWeights::Linear(_)))
+}
+
+/// Determine whether the time-axis tile path applies for this training step.
+///
+/// The path requires:
+/// 1. The model must be GDN-only (see [`model_is_gdn_only`] for rationale).
+/// 2. The streaming-prefill dispatch must be enabled for `device` at this
+///    `seq_len` (env override or device-default threshold).
+/// 3. The tile size must be a positive multiple of `GDN_CHUNK_SIZE`
+///    (enforced by [`streaming_tile_tokens_for`]) and strictly less than
+///    `seq_len` — otherwise the tile loop degenerates to a single monolithic
+///    call with extra overhead.
+///
+/// Returns `Some(tile_size)` when applicable, `None` otherwise.
+fn tiled_training_tile_size(
+    weights: &GpuWeights,
+    device: &Device,
+    seq_len: usize,
+) -> Option<usize> {
+    if !model_is_gdn_only(weights) {
+        return None;
+    }
+    if !streaming_prefill_enabled_for(device, seq_len) {
+        return None;
+    }
+    let tile = streaming_tile_tokens_for(device);
+    if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
+        return None;
+    }
+    Some(tile)
+}
+
+/// Compute the per-tile contribution to the next-token cross-entropy loss
+/// using the same loss math as the monolithic path, returning a scalar
+/// tensor `sum_NLL_tile / total_active` so the per-tile contributions sum to
+/// the monolithic mean across active positions exactly.
+///
+/// `tile_hidden`: `[1, L, hidden]` final hidden states for tile positions
+/// `[ts..te)`. `labels` and `mask` are the explicit, pre-shifted labels and
+/// mask: each `labels[i]` is the target for `tile_hidden[i]`. For non-last
+/// tiles `labels.len() == L` (the last logit predicts the first token of the
+/// next tile); for the last tile `labels.len() == L - 1` (no label exists at
+/// position `total`).
+///
+/// Internally we route through the existing `cross_entropy_loss` /
+/// `fused_linear_cross_entropy` helpers by padding the input by one position
+/// and prepending a masked-out dummy label, so the helpers' built-in
+/// next-token shift recovers the explicit-label semantics. Final result is
+/// scaled by `(num_tile_active / total_active)` because the helpers
+/// internally divide by `num_tile_active` while the per-tile contribution to
+/// the monolithic mean is `sum_NLL_tile / total_active`.
+#[allow(clippy::too_many_arguments)]
+fn tile_loss_explicit(
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    tile_hidden: &Tensor,
+    labels: &[u32],
+    mask: &[bool],
+    total_active: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    debug_assert_eq!(labels.len(), mask.len());
+
+    let num_tile_active: usize = mask.iter().filter(|&&m| m).count();
+    if num_tile_active == 0 || total_active == 0 {
+        return Tensor::new(0.0f32, device).map_err(Into::into);
+    }
+
+    let (_, l, hidden_size) = tile_hidden.dims3()?;
+    let l_labels = labels.len();
+    // Helpers expect `input_ids.len() == hidden.dim(1)` and shift internally
+    // (`hidden[..len-1]` predicting `input_ids[1..]`). We want the explicit
+    // pairing `tile_hidden[i] -> labels[i]` for `i in 0..l_labels`. Prepend a
+    // dummy id and mask=false at position 0 of `input_ids_padded` /
+    // `mask_padded`, and pad `tile_hidden` by `l_labels + 1 - l` zero rows so
+    // dimensions align. Active positions are gated by mask, so the padded
+    // hidden never participates in the loss.
+    let pad_amount = (l_labels + 1).saturating_sub(l);
+    let hidden_padded = if pad_amount > 0 {
+        let zero_pad = Tensor::zeros(
+            (1, pad_amount, hidden_size),
+            tile_hidden.dtype(),
+            device,
+        )?;
+        Tensor::cat(&[tile_hidden, &zero_pad], 1)?
+    } else {
+        tile_hidden.clone()
+    };
+
+    let mut input_ids_padded: Vec<u32> = Vec::with_capacity(l_labels + 1);
+    input_ids_padded.push(0u32);
+    input_ids_padded.extend_from_slice(labels);
+    let mut mask_padded: Vec<bool> = Vec::with_capacity(l_labels + 1);
+    mask_padded.push(false);
+    mask_padded.extend_from_slice(mask);
+
+    let loss = if use_flce() {
+        let normed = model_forward_final_norm(&hidden_padded, weights, model_config)?;
+        fused_linear_cross_entropy(
+            &normed,
+            &weights.embed_tokens_t,
+            &input_ids_padded,
+            &mask_padded,
+            device,
+            DEFAULT_CHUNK_SIZE,
+        )
+        .context("tile fused linear cross-entropy")?
+    } else {
+        let logits = model_forward_head(&hidden_padded, weights, model_config)?;
+        cross_entropy_loss(&logits, &input_ids_padded, &mask_padded, device)?
+    };
+
+    // Helpers return `mean over num_tile_active`. We want
+    // `sum_NLL_tile / total_active = mean × (num_tile_active / total_active)`.
+    let scale = num_tile_active as f64 / total_active as f64;
+    loss.affine(scale, 0.0).map_err(Into::into)
+}
+
+/// Time-axis tiled per-segment recompute + backward.
+///
+/// Runs forward+backward+accumulate **per tile** within segment `seg_idx` so
+/// each tile's autograd-saved tensors release before the next tile's forward
+/// allocates its own. State (`LinearAttentionState`) is threaded across tiles
+/// for the grad-tracked segment AND for each detached later segment.
+///
+/// Correctness invariants:
+/// * The model is GDN-only (see [`model_is_gdn_only`]) — no full-attention
+///   layer anywhere, so every layer's outputs at position `t` depend only on
+///   states / inputs ≤ `t`, and per-tile state-threaded forward is bit-exact
+///   against monolithic.
+/// * LoRA on GDN layers is restricted to MLP projections (`gate_proj`,
+///   `up_proj`, `down_proj`) — see [`TrainableLoraParams::initialize`] —
+///   which act per-position. The truncated-BPTT effect of detaching state at
+///   tile boundaries does not affect MLP-only LoRA gradients on GDN-only
+///   models.
+/// * Per-tile loss is computed via [`tile_loss_explicit`], which pads each
+///   tile's hidden by one position so all `L` logits (or `L-1` for the last
+///   tile) participate in the loss; the per-tile contributions sum to the
+///   monolithic mean exactly.
+#[allow(clippy::too_many_arguments)]
+fn tiled_segment_recompute_and_backward(
+    backend: &dyn BackendRuntime,
+    seg_idx: usize,
+    segments: &[(usize, usize)],
+    boundary_states: &[Tensor],
+    input_ids: &[u32],
+    label_mask: &[bool],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    params: &TrainableLoraParams,
+    accumulated_grads: &mut HashMap<candle_core::TensorId, Tensor>,
+    total_active: usize,
+    tile_size: usize,
+    device: &Device,
+) -> Result<f64> {
+    let (seg_start, seg_end) = segments[seg_idx];
+    let seg_input = boundary_states[seg_idx].clone();
+    let (_, total, _) = seg_input.dims3()?;
+
+    // States threaded across tiles. Grad-tracked segment uses one shared
+    // state; each later (detached) segment also gets its own shared state so
+    // the detached forward sees the same monolithic context evolution.
+    let mut grad_state = LinearAttentionState::new(model_config, device)?;
+    let later_count = segments.len().saturating_sub(seg_idx + 1);
+    let mut later_states: Vec<LinearAttentionState> = Vec::with_capacity(later_count);
+    for _ in 0..later_count {
+        later_states.push(LinearAttentionState::new(model_config, device)?);
+    }
+
+    let all_vars = params.all_vars();
+    let mut tile_loss_sum = 0.0f64;
+
+    let mut tile_start = 0usize;
+    while tile_start < total {
+        let tile_end = (tile_start + tile_size).min(total);
+        let tile_len = tile_end - tile_start;
+        let is_last_tile = tile_end == total;
+
+        // Slice tile-local inputs.
+        let tile_seg_input = seg_input
+            .narrow(1, tile_start, tile_len)
+            .context("narrow seg_input to tile")?;
+        let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
+
+        // Grad-tracked forward through segment `seg_idx` on the tile.
+        let lora_weights_for_seg = params.as_lora_weights();
+        let mut tile_hidden = model_forward_segment(
+            backend,
+            tile_seg_input,
+            weights,
+            model_config,
+            &tile_positions,
+            seg_start,
+            seg_end,
+            Some(&mut grad_state),
+            Some(&lora_weights_for_seg),
+        )
+        .with_context(|| {
+            format!(
+                "tiled segment {seg_idx} grad-tracked forward, tile [{tile_start}, {tile_end})"
+            )
+        })?;
+
+        // Detached forward through later segments on the tile, threading
+        // each segment's own state across tiles.
+        for (i, &(later_start, later_end)) in segments[seg_idx + 1..].iter().enumerate() {
+            tile_hidden = tile_hidden.detach();
+            let lora_for_later = params.as_lora_weights();
+            tile_hidden = model_forward_segment(
+                backend,
+                tile_hidden,
+                weights,
+                model_config,
+                &tile_positions,
+                later_start,
+                later_end,
+                Some(&mut later_states[i]),
+                Some(&lora_for_later),
+            )
+            .with_context(|| {
+                format!(
+                    "tiled segment {seg_idx} detached later segment [{later_start}, {later_end}) tile [{tile_start}, {tile_end})"
+                )
+            })?;
+        }
+
+        // Build explicit (pre-shifted) tile labels: `tile_hidden[i]`
+        // predicts `input_ids[tile_start + i + 1]` for `i in 0..tile_len`.
+        // For the last tile we drop the final logit because position `total`
+        // has no label.
+        let labels_end = if is_last_tile { total } else { tile_end + 1 };
+        let labels_start = tile_start + 1;
+        let tile_labels: Vec<u32> = input_ids[labels_start..labels_end].to_vec();
+        let tile_mask: Vec<bool> = label_mask[labels_start..labels_end].to_vec();
+
+        let scaled_loss = tile_loss_explicit(
+            weights,
+            model_config,
+            &tile_hidden,
+            &tile_labels,
+            &tile_mask,
+            total_active,
+            device,
+        )
+        .with_context(|| format!("tile loss [{tile_start}, {tile_end}) (last={is_last_tile})"))?;
+
+        let scaled_val = scaled_loss.to_scalar::<f32>()? as f64;
+        tile_loss_sum += scaled_val;
+
+        // Backward through this tile's autograd graph. Because the segment
+        // is GDN-only and LoRA is MLP-only on GDN layers, MLP-LoRA gradients
+        // sum across tiles to the exact monolithic gradient even though the
+        // per-tile state read at the start of each tile is detached from
+        // the previous tile's autograd graph (truncated BPTT does not
+        // affect parameters that don't influence the recurrent state).
+        let grads = scaled_loss
+            .backward()
+            .with_context(|| format!("tiled backward [{tile_start}, {tile_end})"))?;
+        accumulate_grads(accumulated_grads, &grads, &all_vars)?;
+
+        tile_start = tile_end;
+    }
+
+    Ok(tile_loss_sum)
+}
+
 /// Run one training step with gradient checkpointing.
 ///
 /// Instead of tracking activations for all layers, this:
@@ -1203,6 +1492,19 @@ fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(us
 ///
 /// Memory: only one segment's activations are in the autograd graph at a time.
 /// Compute: ~(N+1)/2 × N forward passes for N segments (with N=4, ~2.5× overhead).
+///
+/// Phase 10 time-axis tiling: when `KILN_STREAMING_PREFILL=1` (or the
+/// device-default streaming threshold fires), `seq_len > tile_size`, and the
+/// model is GDN-only, each segment's recompute is split into time tiles and
+/// each tile is forward+backward+accumulated independently. This releases
+/// per-tile autograd-saved tensors before the next tile's forward starts —
+/// the change identified in PR #635 as the next step needed to unblock
+/// long-context SFT past the 30 GiB segment-recompute ceiling. The
+/// "GDN-only" precondition exists because full-attention layers have no
+/// training-time KV cache to thread across tiles. Hybrid GDN+full-attn
+/// models (Qwen3.5-4B) fall back to the monolithic path; see
+/// `docs/audits/PHASE10_GDN_TRAINING_TILED_BACKWARD.md` for the planned
+/// per-block remediation.
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward(
     backend: &dyn BackendRuntime,
@@ -1248,7 +1550,48 @@ fn checkpointed_forward_backward(
     let all_vars = params.all_vars();
     let mut total_loss = 0.0;
 
+    // Tiling decision (made once per training step). When we tile, every
+    // segment iteration uses the per-tile path; otherwise, every segment
+    // uses the monolithic path. Mixing the two within a single step would
+    // silently change the gradient (the per-tile path's truncated state
+    // thread is only safe under the "GDN-only + MLP-only LoRA" invariant
+    // that holds globally for the model, not per-segment).
+    let tile_size = tiled_training_tile_size(weights, device, input_ids.len());
+    let total_active: usize = if tile_size.is_some() {
+        // Same denominator as the monolithic path's `cross_entropy_loss` /
+        // `fused_linear_cross_entropy`: count of active label positions
+        // after the next-token shift (`label_mask[1..]`).
+        if label_mask.len() >= 2 {
+            label_mask[1..].iter().filter(|&&m| m).count()
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     for seg_idx in 0..num_segments {
+        if let Some(tile) = tile_size {
+            let seg_loss = tiled_segment_recompute_and_backward(
+                backend,
+                seg_idx,
+                segments,
+                &boundary_states,
+                input_ids,
+                label_mask,
+                weights,
+                model_config,
+                &positions,
+                params,
+                &mut accumulated_grads,
+                total_active,
+                tile,
+                device,
+            )?;
+            total_loss += seg_loss;
+            continue;
+        }
+
         let (seg_start, seg_end) = segments[seg_idx];
 
         // Start from the detached boundary state for this segment
@@ -1313,7 +1656,10 @@ fn checkpointed_forward_backward(
         accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
     }
 
-    // Average loss across segments (each segment computed the same loss from different graphs)
+    // Average loss across segments. In both monolithic and tiled paths the
+    // per-iteration `total_loss` accumulates the same segment-equivalent
+    // value, so dividing by `num_segments` recovers the mean cross-entropy
+    // over active positions.
     let avg_loss = total_loss / num_segments as f64;
 
     Ok((avg_loss, accumulated_grads))
@@ -1896,6 +2242,150 @@ mod tests {
         assert!(
             loss_ckpt > 1.0 && loss_ckpt < 10.0,
             "checkpointed loss out of range: {loss_ckpt}"
+        );
+
+        Ok(())
+    }
+
+    /// CPU parity for the Phase 10 time-axis tile path: training-time
+    /// tiled `checkpointed_forward_backward` must match the monolithic
+    /// path bit-for-bit on a GDN-only mini-model at T = 3 × tile_size.
+    ///
+    /// Mirrors the `test_model_forward_segment_streaming_matches_monolithic_cpu`
+    /// pattern from PR #635 — env-driven, relies on nextest per-test process
+    /// isolation. Fails (deadlocks-on-`set_var` warnings aside) under
+    /// multi-threaded `cargo test`; run via `cargo nextest run` or
+    /// `cargo test -- --test-threads=1`.
+    ///
+    /// The test asserts:
+    /// 1. Tiled total loss equals monolithic total loss bit-for-bit (atol
+    ///    tightened to ~1e-5 to allow trivial f32 fp-associativity drift in
+    ///    the chunked LM-head log-sum-exp).
+    /// 2. Every LoRA Var with a gradient in the monolithic path has the
+    ///    same gradient (within the same tolerance) in the tiled path.
+    #[test]
+    fn test_checkpointed_forward_backward_tiled_matches_monolithic_cpu() -> Result<()> {
+        let device = Device::Cpu;
+
+        // GDN-only mini-config: setting `full_attention_interval` strictly
+        // greater than `num_layers` makes `is_full_attention_layer(i)` false
+        // for every layer in [0, num_layers), so `tiny_weights` only emits
+        // GDN layers and `model_is_gdn_only` returns true.
+        let mut config = tiny_config();
+        config.full_attention_interval = config.num_layers + 1;
+        config.num_full_attention_layers = 0;
+
+        let weights = tiny_weights(&config, &device)?;
+        assert!(
+            super::model_is_gdn_only(&weights),
+            "test setup error: model must be GDN-only for tiled-path parity"
+        );
+
+        // T = 192 = 3 × tile_size(64) so the tile loop runs three iterations
+        // (two non-last tiles + one last tile) and exercises the
+        // `pad_amount = 1` branch in `tile_loss_explicit` plus the last-tile
+        // (`pad_amount = 0`) branch in the same step.
+        let seq_len: usize = 192;
+        let vocab = config.vocab_size;
+        let input_ids: Vec<u32> = (0..seq_len)
+            .map(|i| ((i * 7 + 3) % vocab) as u32)
+            .collect();
+        // Mask out positions 0 and total-1 so the next-token shift produces
+        // the same effective active-position set in both paths (matches the
+        // pattern of `test_checkpointed_loss_matches_standard`).
+        let mut label_mask = vec![false; seq_len];
+        for slot in label_mask.iter_mut().skip(1).take(seq_len - 2) {
+            *slot = true;
+        }
+
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let backend = backend::for_device(&device);
+
+        // Step 1: monolithic baseline (env explicitly cleared so the path
+        // takes the original branch even if a parent test process leaked a
+        // KILN_STREAMING_PREFILL=1 setting).
+        // SAFETY: env var mutation is safe under nextest's per-test process
+        // isolation; this test must run via `cargo nextest run`.
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_USE_FLCE");
+        }
+        let (loss_mono, grads_mono) = checkpointed_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &segments,
+            &device,
+        )?;
+
+        // Step 2: tiled. KILN_STREAMING_TILE_TOKENS=64 keeps the tile a
+        // multiple of GDN_CHUNK_SIZE; T=192 > tile_size=64 ensures
+        // `tiled_training_tile_size` returns Some and the tiled branch
+        // dispatches.
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
+        }
+        // Sanity-check the dispatch decision before running the loop, so a
+        // future regression in `tiled_training_tile_size` shows up as an
+        // explicit assertion rather than a silent fallback to monolithic.
+        assert_eq!(
+            super::tiled_training_tile_size(&weights, &device, seq_len),
+            Some(64),
+            "tiled dispatch did not fire for GDN-only model under \
+             KILN_STREAMING_PREFILL=1 (T={seq_len}, tile=64)",
+        );
+        let (loss_tiled, grads_tiled) = checkpointed_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &segments,
+            &device,
+        )?;
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+        }
+
+        // Step 3: parity assertions.
+        let loss_diff = (loss_mono - loss_tiled).abs();
+        assert!(
+            loss_diff < 1e-5,
+            "tiled total loss differs from monolithic: mono={loss_mono} tiled={loss_tiled} \
+             diff={loss_diff:.2e}",
+        );
+
+        let mut compared = 0usize;
+        for var in params.all_vars() {
+            let id = var.as_tensor().id();
+            match (grads_mono.get(&id), grads_tiled.get(&id)) {
+                (Some(g_m), Some(g_t)) => {
+                    let diff = (g_m - g_t)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert!(
+                        diff < 1e-5,
+                        "tiled grad differs from monolithic for var: max_abs_diff={diff:.2e}",
+                    );
+                    compared += 1;
+                }
+                (None, None) => {}
+                (mono_some, tiled_some) => panic!(
+                    "grad presence mismatch: monolithic={} tiled={}",
+                    mono_some.is_some(),
+                    tiled_some.is_some(),
+                ),
+            }
+        }
+        assert!(
+            compared > 0,
+            "no LoRA gradients were compared between tiled and monolithic paths",
         );
 
         Ok(())
