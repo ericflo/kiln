@@ -390,11 +390,11 @@ fn main() -> Result<()> {
     let baseline_mib = current_vram_mib();
     eprintln!("Baseline VRAM (post-load): {} MiB", baseline_mib);
 
-    // Warmup so the allocator is past cold state before the parity cells.
-    eprintln!("Warmup pass at T~256 (RMSNorm custom-op ON)...");
-    let _ = run_one(256, true, &tokenizer, &model_config, &gpu_weights, baseline_mib);
-    let baseline_mib = current_vram_mib();
-    eprintln!("Baseline VRAM (post-warmup): {} MiB", baseline_mib);
+    // NOTE: warmup skipped — the original T=256 warmup left ~16 GB resident in the
+    // candle CUDA allocator, eating the headroom required for subsequent cells. Cell 1
+    // (T=2048 ON) absorbs the cold-allocator variance instead. Per-cell measurements
+    // are reported relative to post-load baseline.
+    eprintln!("Warmup skipped (would leave 16 GB cached in allocator).");
 
     let mut rows: Vec<Row> = Vec::new();
 
