@@ -148,3 +148,150 @@ a 47.4 GB peak.
   activations would grow linearly in T and FLCE's relative share of peak would
   shrink, so the measured ratio here is a conservative (smaller) estimate of
   the share FLCE could remove when checkpointing is ON.
+
+## Phase A validation — 2026-04-29
+
+Status: **RED — Phase A insufficient on A6000**
+Hardware: NVIDIA RTX A6000 (48 GB VRAM, driver 565.57.01), CUDA 12.4
+Commit: `32a3828` on top of `5b42652` (`main` after `kiln-v0.2.8`)
+Bench: `crates/kiln-server/examples/flce_phase_a_validation_bench.rs`
+Raw log: `docs/flce_phase_a_validation_raw_2026-04-29.log`
+
+### Purpose
+
+The original preflight (above) measured peak VRAM **without** FLCE and showed
+T=8192 and T=16384 OOM on A6000. Phase A landed in PR #241 (`KILN_USE_FLCE=1`,
+chunked-vocab cross-entropy in pure candle) and has shipped in releases since
+`kiln-v0.2.0`, but the empirical claim "Phase A unblocks long-context SFT on
+A6000" was never measured. This section closes that gap.
+
+### Procedure
+
+The validation bench is a sibling of `flce_preflight_bench.rs` that toggles
+`KILN_USE_FLCE` between cells using `std::env::set_var` (process-local, single-
+threaded across cells). The same gradient-checkpoint defaults
+(`KILN_GRAD_CHECKPOINT_SEGMENTS=4`) and rank-8 LoRA used in the preflight are
+used here. Final loss is captured via the `sft_train` `ProgressCallback`.
+
+Cells: T=2048 FLCE=OFF (baseline loss + parity reference), T=2048 FLCE=ON
+(parity check), T=8192 FLCE=ON (Phase A's headline claim), T=16384 FLCE=ON
+(headline claim). Peak VRAM sampled on a background `nvidia-smi` poller at
+50 ms cadence. Baseline post-warmup = **18 474 MiB** (~18.0 GB).
+
+### Results
+
+| target_T | FLCE | actual_T | peak VRAM (MiB) | ΔVRAM (MiB) | abc (GB) | abc/peak | step (s) | loss     | status      |
+|---:|:---:|---:|---:|---:|---:|---:|---:|---:|:---|
+| 2 048  | OFF | 2 042  | 34 868  | 16 394 |  3.78 | 11.1 % | 2.8 | 2.783685 | **ok** |
+| 2 048  | ON  | 2 042  | 34 868  | 16 394 |  3.78 | 11.1 % | 1.5 | n/a      | **other-error** |
+| 8 192  | ON  | 8 192  | 48 490  | 30 016 | 15.16 | 32.0 % | 0.7 | n/a      | **OOM** |
+| 16 384 | ON  | 16 380 | 48 490  | 30 016 | 30.30 | 64.0 % | 0.7 | n/a      | **OOM** |
+
+`abc` is the static math from the preflight — bf16 logits + F32 cast + bf16
+grad-of-logits — at the row's `actual_T`. The bench logs both the human-
+readable summary and a JSON block; raw log preserved at the path above.
+
+#### Finding 1 — Phase A has a non-OOM defect at T=2048
+
+Running with `KILN_USE_FLCE=1` at T=2048 inside the gradient-checkpointed SFT
+loop fails with:
+
+```
+fused linear cross-entropy (checkpointed): matmul active_hidden_f32 @ head_chunk:
+matmul is only supported for contiguous tensors
+  lstride: Layout { shape: [2030, 2560], stride: [2560, 1], start_offset: 0 }
+  rstride: Layout { shape: [2560, 4096], stride: [248320, 1], start_offset: 0 }
+  mnk: (2030, 4096, 2560)
+```
+
+The right operand is the V-axis chunk of `embed_tokens_t` (shape
+`[hidden, V]`, stride `[V, 1]`). `narrow(1, off, chunk)` along the last axis
+keeps stride `[V, 1]` rather than collapsing to `[chunk, 1]`, which candle's
+matmul rejects. **The current `kiln-flce-kernel::fused_linear_cross_entropy`
+chunked-vocab call therefore never completes a step in the gradient-
+checkpointed SFT path.** This is a single-line defect (one `.contiguous()` on
+the chunk, or chunking along T instead of V) — worth fixing in a follow-up
+before any further Phase A or Phase B work, because Phase A as shipped does
+not actually run end-to-end on Qwen3.5-4B SFT.
+
+The peak VRAM number for this row (34 868 MiB) is **identical** to the
+FLCE=OFF row's peak — that is, FLCE never gets to the point of allocating its
+chunked logits before the matmul rejects the slice. The "abc/peak" column for
+this row reports the FLCE=OFF math, not what Phase A would have used.
+
+Parity could not be measured: `on_loss` is `None` because the step did not
+complete.
+
+#### Finding 2 — Even with the contig fix, T=8192 / T=16384 still OOM on A6000
+
+Both T=8192 and T=16384 cells hit `peak_mib = 48 490` (the A6000 48 GB
+ceiling) and return inside ~0.7 s — the failed-allocation path. ΔVRAM
+(30 016 MiB) is identical for both, which confirms peak is pinned at the GPU
+ceiling rather than reflecting the workload's true requirement. Two readings
+are consistent with this:
+
+1. The OOM occurs **before** Phase A can demonstrate any logits-tensor savings
+   — likely inside the GDN prefill or full-attention activations on a
+   gradient-checkpoint segment, the same site the original preflight reported
+   at T=8192 ("segment transformer block N (full attention)").
+2. The `kiln-flce-gdn-bottleneck` note (and PR #222 KV-cache FP8 audit) had
+   already shown that GDN prefill, not the head, dominates long-T peak memory
+   on Qwen3.5-4B before paged GQA KV is even touched. Phase A removes the
+   head's contribution; it cannot remove the GDN-side contribution.
+
+Even if Finding 1 is fixed, Phase A's expected savings are bounded by the GDN
+prefill ceiling. The 30+ GB peak for T=16384 is dominated by activations the
+chunked-vocab loss path does not touch, so Phase A alone cannot unblock SFT
+at those lengths on A6000.
+
+### Verdict
+
+**RED — Phase A is insufficient on A6000 to unblock long-context SFT** on
+Qwen3.5-4B.
+
+This is a useful negative result, not a contradiction of the preflight's
+"GREEN — port FLCE" verdict. The preflight only claimed that the head's
+retained tensors are large enough to be **worth** removing (`a+b+c` ≥ 30 % of
+peak at T=16384). It did not claim removing them would be **sufficient** to
+fit T=8192 / T=16384 SFT under 48 GB. The validation here shows the head is
+not the only large term at long T.
+
+### Required follow-ups
+
+1. **Fix the FLCE chunked-vocab contig bug** (Finding 1). Make
+   `kiln-flce-kernel::fused_linear_cross_entropy` materialize a contiguous
+   chunk before matmul, or rework the chunking to be along the T axis (so the
+   right operand stays contiguous in V). Add a CPU- or small-GPU integration
+   test that exercises the path with V matching Qwen3.5-4B's 248 320 — the
+   existing tests in `kiln-flce-kernel/tests/parity.rs` and
+   `kiln-train::trainer::tests` use sizes where the slice happens to be
+   contiguous (V evenly divisible by chunk size, slice covers full V, or V
+   small enough that no slicing happens). Re-run this validation bench after
+   the fix to confirm parity at T=2048.
+
+2. **Phase B (CUDA fused FLCE kernel) is necessary but not yet sufficient.**
+   The Phase B port motivated by this preflight will reduce the head's
+   memory footprint, but the validation here suggests it must be paired with
+   GDN-side activation cleanup before T=8192 / T=16384 SFT will fit on
+   A6000. Concretely: investigate streaming/chunked GDN prefill for the
+   training-time forward (existing kiln-gdn-prefill streaming code already
+   cuts inference peak roughly in half at 128k — see the
+   `kiln-gdn-prefill-memory-ceiling-2026-04-24` note). Without that, Phase B
+   alone cannot reach T=8192 SFT on the GPU we ship on.
+
+3. **Update Phase 10 roadmap and `kiln-flce-is-prerequisite-not-optimization`
+   note** to reflect the empirical result. The note's claim that FLCE is a
+   prerequisite for T≥8192 SFT on A6000 stands; what changes is the second-
+   order claim "shipping Phase A unblocks T=8192/16384." That claim is now
+   measured RED — Phase A alone, even bug-free, cannot remove the GDN-side
+   ceiling.
+
+### Caveats
+
+- Same caveats as the preflight apply (50 ms `nvidia-smi` cadence, peak is a
+  lower bound, baseline excludes the dropped `ModelWeights` copy).
+- The contig defect (Finding 1) means we have not actually measured Phase A's
+  VRAM behavior at the head; the T=2048 FLCE=ON peak number is FLCE-OFF math.
+- Each bench cell is a single SFT step. Sustained training (multi-step,
+  multi-epoch) might surface additional VRAM growth (optimizer state,
+  cumulative checkpoint state) that this single-step bench does not capture.
