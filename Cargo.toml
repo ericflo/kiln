@@ -72,7 +72,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Tokenization
-tokenizers = { version = "0.22", features = ["http"] }
+tokenizers = { version = "0.23", features = ["http"] }
 minijinja = "2"
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 
