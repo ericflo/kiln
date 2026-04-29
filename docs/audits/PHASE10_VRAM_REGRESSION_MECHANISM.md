@@ -1,11 +1,18 @@
-# Phase 10 §1 — VRAM regression mechanism (Tier 1 + Tier 2)
+# Phase 10 §1 — VRAM regression mechanism (Tier 1 + Tier 2 + A40 retry)
 
 Date: 2026-04-29
-Status: **Tier 1 closes hypothesis (3). Tier 2 is null on A6000 — the +18 GiB
-regression observed on A40 in [`PHASE10_VRAM_REGRESSION_BISECT.md`](PHASE10_VRAM_REGRESSION_BISECT.md)
-does not reproduce on A6000 with the same instrumented harness.**
-Hardware: NVIDIA RTX A6000 (49 140 MiB, sm_86), CUDA 12.4, RunPod pool pod
-`pod-cb7a166f8cd2d98f2f7466db` (kiln-runpod image)
+Status: **Tier 1 closes hypothesis (3). Tier 2 is null on A6000. The A40 retry
+of Tier 2 (this PR) PINS the mechanism: hypothesis (2) — concentrated growth
+at probe label `recompute_post_mono_0` — is CONFIRMED on the GPU where the
+regression actually reproduces. The +18.6 GiB peak delta is paid as +10.1 GiB
+during warmup-step `recompute_post_mono_0` (becomes the new persistent
+post-warmup baseline) plus +9.8 GiB during main-step `recompute_post_mono_0`
+(paid each step). Loss is bit-exact between c983ca7 and 1edecd7 on A40 too,
+so the kernel itself is mathematically correct.**
+Hardware: NVIDIA RTX A6000 (49 140 MiB, sm_86) for the original Tier 1+2 run
+(RunPod pool pod `pod-cb7a166f8cd2d98f2f7466db`); NVIDIA A40 (46 068 MiB,
+sm_86, driver 550.127.05) for the retry (RunPod direct-launch pod
+`77vv1ji46p09qw`, both kiln-runpod image).
 Bench: slim variant of `crates/kiln-server/examples/phase10_rmsnorm_bench.rs`
 (T=2048 + custom_op=true, single SFT cell after a T~256 warmup) — replaces the
 6-cell bench so the harness fits inside the 90 min/$40 wall-clock cap. Bench
@@ -20,6 +27,42 @@ unpinned. [`PHASE10_RMSNORM_E2E.md`](PHASE10_RMSNORM_E2E.md) is the original
 e2e SFT validation that documented the regression but not the bisect.
 
 ## TL;DR
+
+Three tier-results, one verdict on each of the three hypotheses from PR #641:
+
+* **Hypothesis (3) — RULED OUT.** Tier 1 dispatch trace at 1edecd7 with
+  `KILN_DISABLE_RMSNORM_KERNEL=1` shows all 445 observed `rms_norm()`
+  dispatch sites take `take_kernel=false` and route through
+  `rms_norm_fallback`. There is no subtle correctness bug bypassing the
+  kill switch.
+* **Hypothesis (2) — CONFIRMED on A40.** The +18.6 GiB peak delta is
+  concentrated growth at probe label `recompute_post_mono_0`. It is **not**
+  uniform allocator-pool residency. The growth is paid in two slices:
+  +10.1 GiB at warmup-step `recompute_post_mono_0` (becomes the new
+  persistent post-warmup baseline 19,465 → 29,609 MiB), plus +9.8 GiB
+  on each main-step `recompute_post_mono_0` (delta from 20,777→23,401 at
+  c983ca7 vs 29,609→42,025 at 1edecd7). All other probes (`after_embed`,
+  `boundary_pre/post_*`, `recompute_post_mono_1..7`, `after_recompute`)
+  are flat between commits or grow by ≤+32 MiB each.
+* **Hypothesis (1) — REFUTED on A40.** The growth is concentrated, not
+  uniform across all 8 segments. If the regression were pure
+  allocator-pool residency, `recompute_pre_0` and the boundary-forward
+  probes would also show the same +18.6 GiB delta. They do not — the
+  delta is paid only at segment-0 recompute (warmup AND main).
+
+A6000 saw zero per-step delta (PR #642's null) because A6000's larger
+post-warmup baseline (29 738 MiB on A6000 vs 19 465 MiB on A40 at c983ca7)
+already absorbs the saved-state expansion. A40 c983ca7 is the outlier
+(low-baseline path); PR #638 brings A40 in line with A6000's saved-state
+profile but A40 only has 46 068 MiB total VRAM so the larger profile
+shows up as a real +18.6 GiB peak regression. Loss is bit-exact across all
+4 A40 runs (2.4709110260009766 at the main step) and matches both A6000
+runs to the last digit (2.4473333... at A6000 seg=8 — the input batch and
+T differ between A40 seg=4-auto and A6000 seg=8-forced runs, but each
+hardware reproduces the same loss for both commits).
+
+(Original A6000 conclusion preserved below — it remains correct as written;
+the A40 retry is what disambiguates hypotheses (1) vs (2).)
 
 Two tier-results, one verdict on hypothesis (3), one **null** on hypotheses
 (1) and (2):
@@ -201,6 +244,209 @@ not because seg=4 was wrong, but because seg=4 saturates.
 * Both commits' probe sequences agree at every step, including the
   jump magnitudes. **No segment grows by a different amount at 1edecd7
   than at c983ca7.**
+
+## Tier 2 retry — A40 per-segment VRAM walk
+
+This is the discriminator the original Tier 2 on A6000 could not deliver.
+Same instrumentation patcher (`scripts/phase10_apply_patches.py`), same
+slim bench, same probe sequence — re-run on the GPU where the +18 GiB
+regression is actually visible.
+
+Hardware: NVIDIA A40 (46 068 MiB, sm_86, driver 550.127.05), CUDA 12.4,
+RunPod direct-launch pod `77vv1ji46p09qw` (kiln-runpod image).
+The originally-targeted hibernated pool pod `pod-2e9d910d57f779d53e80c013`
+returned `SUPPLY_CONSTRAINT` on resume; we direct-launched a fresh A40 on
+a different host instead.
+Build: `KILN_CUDA_ARCHS=86 cargo build --release --features cuda --example
+phase10_rmsnorm_bench`. Both commits' kernel binaries hit the B2 sccache
+(29 s wall-clock for the second build) and the kernel content is genuinely
+different per `git diff --stat c983ca7 1edecd7 -- crates/kiln-rmsnorm-kernel/`
+(884-line `lib.rs` change + new 204-line `fused_rmsnorm_bwd.cu`).
+
+| Run | seg | post-load (MiB) | post-warmup (MiB) | T=2048 peak (MiB) | T=2048 status | step (s) | Final loss |
+|-----|----:|---------------:|------------------:|-----------------:|:-------------:|---------:|-----------:|
+| `c983ca7` | 4 (auto) | 16 345 |   19 465 | **23 433** | ok | 6.31 | 2.470911026… |
+| `c983ca7` | 8 (forced) | 16 345 |   19 465 | **23 433** | ok | 6.35 | 2.470911026… |
+| `1edecd7` | 4 (auto) | 16 345 |   29 609 | **42 057** | ok | 9.79 | 2.470911026… |
+| `1edecd7` | 8 (forced) | 16 345 |   29 609 | **42 057** | ok | 9.85 | 2.470911026… |
+
+**Top-line A40 deltas (1edecd7 − c983ca7):**
+
+* post-load: **0 MiB** (model load itself is unchanged).
+* post-warmup baseline: **+10 144 MiB** (19 465 → 29 609). Paid once at
+  warmup and never freed.
+* T=2048 peak: **+18 624 MiB** (23 433 → 42 057). Reproduces PR #641's
+  bisect ("~+18.6 GiB" at T=2048).
+* Step time: **+3.48 s** (6.31 → 9.79, a +55% slowdown). Consistent with
+  more device-memory traffic at the new larger peak.
+* Final loss: **bit-exact** at 2.4709110260009766 across all four runs.
+
+### Probe-by-probe walk — main step at seg=4 (auto), c983ca7 vs 1edecd7
+
+This is the table that pins the mechanism. Both arms run identical
+bench inputs (same warmup, same T=2048 batch); the only difference is
+the kernel binary at `crates/kiln-rmsnorm-kernel/`.
+
+| Probe                         | c983ca7 (MiB) | 1edecd7 (MiB) | Δ MiB |
+|-------------------------------|--------------:|--------------:|------:|
+| post-load                     |        16 345 |        16 345 |     0 |
+| post-warmup                   |    **19 465** |    **29 609** | **+10 144** |
+| `after_embed`                 |        19 465 |        29 609 | +10 144 |
+| `boundary_pre_0`              |        19 465 |        29 609 | +10 144 |
+| `boundary_post_0`             |        20 713 |        29 609 | +8 896 |
+| `boundary_pre_1..3`           |        20 713 |        29 609 | +8 896 |
+| `boundary_post_3..6`          |        20 745 |        29 609 | +8 864 |
+| `boundary_post_6..7`          |        20 777 |        29 609 | +8 832 |
+| `after_boundary_forward`      |        20 777 |        29 609 | +8 832 |
+| `recompute_pre_0`             |        20 777 |        29 609 | +8 832 |
+| `recompute_post_mono_0`       |    **23 401** |    **42 025** | **+18 624** |
+| `recompute_pre_1`             |        23 401 |        42 025 | +18 624 |
+| `recompute_post_mono_1`       |        23 433 |        42 025 | +18 592 |
+| `recompute_pre_2`             |        23 433 |        42 025 | +18 592 |
+| `recompute_post_mono_2`       |        23 433 |        42 025 | +18 592 |
+| `recompute_post_mono_3`       |        23 433 |        42 057 | +18 624 |
+| `recompute_post_mono_4..7`    |        23 433 |        42 057 | +18 624 |
+| `after_recompute`             |        23 433 |        42 057 | +18 624 |
+| poller-captured peak          |        23 433 |        42 057 | +18 624 |
+
+The **per-segment recompute step delta** (i.e. the in-segment growth from
+`recompute_pre_i` to `recompute_post_mono_i`) tells us where the regression
+is paid:
+
+| Segment | c983ca7 step Δ (MiB) | 1edecd7 step Δ (MiB) | regression Δ |
+|---------|---------------------:|---------------------:|-------------:|
+| seg 0   | **+2 624**           | **+12 416**          | **+9 792**   |
+| seg 1   | +32                  | 0                    | −32          |
+| seg 2   | 0                    | 0                    | 0            |
+| seg 3   | 0                    | +32                  | +32          |
+| seg 4   | 0                    | 0                    | 0            |
+| seg 5   | 0                    | 0                    | 0            |
+| seg 6   | 0                    | 0                    | 0            |
+| seg 7   | 0                    | 0                    | 0            |
+
+**Verdict on hypotheses (1) and (2):**
+
+* The +18.6 GiB regression is **NOT uniform across the 8 segments**. It
+  is concentrated at seg 0's recompute, both during warmup (+10.1 GiB)
+  and during the main step (+9.8 GiB). This rules out hypothesis (1)
+  (uniform allocator-pool residency).
+* The +18.6 GiB regression IS concentrated at probe label
+  `recompute_post_mono_0` and the warmup-pass equivalent. This **confirms
+  hypothesis (2)**: a specific saved-tensor or intermediate at one
+  recompute segment grows on 1edecd7.
+
+### Probe sequence at warmup — same picture as main step
+
+The +10.1 GiB jump at warmup post-warmup baseline (19 465 → 29 609)
+also concentrates at warmup-step `recompute_post_mono_0`:
+
+| Probe (warmup, T=245)         | c983ca7 (MiB) | 1edecd7 (MiB) | Δ MiB |
+|-------------------------------|--------------:|--------------:|------:|
+| `after_embed`                 |        16 419 |        16 419 |     0 |
+| `boundary_post_0..7`          |        17 001 |        17 065 |   +64 |
+| `after_boundary_forward`      |        17 001 |        17 065 |   +64 |
+| `recompute_pre_0`             |        17 001 |        17 065 |   +64 |
+| `recompute_post_mono_0`       |    **19 465** |    **29 577** | **+10 112** |
+| `recompute_post_mono_1..7`    |    19 465     |    29 609     | +10 144 |
+| `after_recompute`             |    19 465     |    29 609     | +10 144 |
+
+The warmup pass goes from "essentially the same MiB across both commits"
+through `boundary_post_*` and `recompute_pre_0` (Δ = +64 MiB, allocator-
+pool noise) to a +10.1 GiB step at warmup `recompute_post_mono_0`. This
+is the exact same structural signature as the main-step trace.
+
+### Why this is a saved-tensor expansion, not graph reordering
+
+Three signals point at saved-state expansion in the CustomOp2 path
+introduced by PR #638, not at allocator-pool perturbation:
+
+1. **Concentrated growth at one probe label.** Allocator-pool residency
+   would inflate `recompute_pre_0` (and earlier probes) too — it can't
+   selectively jump only at `recompute_post_mono_*`. The +18.6 GiB delta
+   appears AT exactly the `pre → post` step, not before it.
+2. **Persistence after warmup.** The +10.1 GiB paid at warmup
+   `recompute_post_mono_0` is still resident at `after_embed` of the
+   main step. That is consistent with autograd-saved state being held
+   for a backward that hasn't run yet (the warmup didn't propagate
+   gradients to a place that lets candle release them) OR with the
+   allocator caching the segment-0 working set. In either case the
+   +10.1 GiB is paid by 1edecd7 at one specific operation.
+3. **Bit-exact loss.** Forward and backward produce mathematically
+   identical results. The +18.6 GiB is invisible to the loss path.
+   That means it isn't a graph-correctness issue and isn't activations
+   that affect the gradient — it's "extra state that backward needs but
+   doesn't change the answer."
+
+The Liger-style RMSNorm CustomOp2 in 1edecd7 saves input `x`, weight,
+and inverse-RMS `rstd` for the custom CUDA backward. That's a small
+direct contribution (≲ a few MiB per RMSNorm site at T=2048). The
+larger +9.8 GiB main-step delta is most likely **autograd intermediate
+state that candle now materializes around the CustomOp2 boundary**
+because CustomOp2 is opaque to candle's autograd fusion: tensors that
+would normally be reused or recomputed get held across the segment-0
+recompute.
+
+### Why A6000 doesn't show this (refresher)
+
+A6000's post-warmup baseline at c983ca7 is 29 738 MiB — almost identical
+to A40's 1edecd7 post-warmup baseline of 29 609 MiB. The recompute_post_mono_0
+step on A6000 c983ca7 is +13 376 MiB (29 738 → 43 114), almost identical
+to A40 1edecd7's +12 416 MiB. **A40 c983ca7 is the outlier with its
+small-baseline path; A6000 is permanently in the larger-baseline
+profile.** PR #638 brings A40 onto A6000's profile. A6000 has 49 140 MiB
+total VRAM and absorbs the larger profile with headroom; A40 has only
+46 068 MiB total VRAM and pays the +18.6 GiB peak as a real regression.
+
+### Recommended remediation
+
+The kernel itself is mathematically correct (loss bit-exact across all
+six runs in this audit — A6000 c983ca7+1edecd7 at seg=4/seg=8 in the
+original Tier 2 plus A40 c983ca7+1edecd7 at seg=4/seg=8 in this retry).
+The cost is paid in autograd-saved state on A40-class GPUs only.
+
+Two viable paths, in order of suggested preference:
+
+1. **Gate the RMSNorm CustomOp2 path on detected total VRAM.** Auto-enable
+   `fused_rmsnorm_with_autograd` only when `cudarc::driver::result::device::total_mem()`
+   reports ≥ 47 GiB (A6000-class and above). On A40-class GPUs (46 068 MiB)
+   route through the existing `rms_norm_fallback` path. The kill switch
+   plumbing is already in place from PR #638 (`KILN_DISABLE_RMSNORM_KERNEL`,
+   `KILN_DISABLE_RMSNORM_BACKWARD`); the gate is a single VRAM check at
+   model-load time that flips a static atomic the dispatch site already
+   reads. Preserves the kernel-fusion savings on the production target
+   (A6000) while protecting A40 users from OOM.
+2. **Revert PR #638 entirely.** Restores A40's 23 GiB peak unconditionally,
+   loses the kernel-fusion savings on A6000. Per PR #642's A6000
+   measurements there is no measurable forward-pass speedup at T=2048
+   between c983ca7 and 1edecd7 (step time is 9.82 s vs 9.96 s — within
+   noise). If the kernel buys nothing measurable at the production target,
+   reverting is the cheaper option to maintain.
+
+Path (1) is the minimum-risk choice IF Phase 10 §1 has further fusion
+work that depends on the CustomOp2 boundary (e.g. fused RMSNorm + RoPE,
+or fused RMSNorm + linear). Path (2) is the right call if PR #638 was
+intended to be the only Phase 10 §1 §RMSNorm work and there is no
+follow-up that needs the CustomOp2 in place.
+
+A third option — *fix the CustomOp2 saved-state expansion in place* —
+would require either (a) restructuring the backward to reuse forward's
+input as the input to backward (no extra save) or (b) widening
+candle's autograd-CustomOp interface so it can fuse the CustomOp2
+boundary with surrounding tensor ops. (a) is hard given that the
+backward kernel needs `rstd` which is not directly recomputable
+without re-running the forward; (b) is a candle change. Both are
+larger investments than (1) or (2), and neither is on the Phase 9
+release-prep critical path.
+
+### Cost (this PR)
+
+* Pod: A40 on-demand at $0.44/hr (direct-launch fallback because the
+  pool's hibernated A40 returned SUPPLY_CONSTRAINT on resume).
+* Time on pod: ~30 min wall-clock end-to-end (kiln-setup + clone, build
+  at c983ca7, two bench runs, build at 1edecd7, two bench runs). All
+  builds were sccache-warmed (the second build was 29 s).
+* Cost: well within the 90 min / $40 cap. Used `bg + wait-file`
+  throughout — no SSH-wedge incidents.
 
 ## Interpretation
 
