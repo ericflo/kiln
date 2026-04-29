@@ -1803,18 +1803,35 @@ fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) 
 ///
 /// Returns: same shape as `x`.
 ///
-/// On CUDA+bf16 inputs within the kernel envelope (hidden <= 8192), dispatches
-/// to `kiln_rmsnorm_kernel::fused_rmsnorm`, which collapses the ~11 candle op
-/// launches (to_dtype, sqr, mean_keepdim, +eps, sqrt, recip, broadcast_mul,
-/// to_dtype, ones_like + w, broadcast_mul, to_dtype) into a single fused kernel.
-/// Falls back to the candle-op path on CPU, non-bf16, or out-of-envelope inputs.
+/// Dispatch (CUDA path; bf16 inputs within the kernel envelope, hidden <= 8192):
+///   - Default: `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd` — fused
+///     forward kernel + manual CUDA backward kernel routed through
+///     `CustomOp2`. The autograd graph saves only `x` and `weight` (not the
+///     F32 intermediates that the candle-op chain materializes), shrinking
+///     per-layer saved-tensor peak during Phase 10 long-context training.
+///     Inference (no grad needed) skips the backward path entirely — the
+///     CustomOp2 still uses the same single-launch fused forward kernel.
+///   - `KILN_DISABLE_RMSNORM_BACKWARD=1`: full `rms_norm_fallback` candle-op
+///     chain. The forward kernel is not differentiable on its own (it returns
+///     a Tensor with no `BackpropOp`), so a "forward-only kernel + autograd
+///     backward" hybrid is not a valid path; this kill switch reverts to the
+///     pre-Phase-10 baseline (forward AND backward via the candle chain).
+///     Intended for isolating the saved-tensor reduction contribution to
+///     training peak VRAM.
+///   - `KILN_DISABLE_RMSNORM_KERNEL=1`: alias for the above kill switch
+///     (also routes through `rms_norm_fallback`).
+///
+/// On CPU, non-bf16, out-of-envelope, or non-CUDA backends: falls back to
+/// `rms_norm_fallback`. The CPU path keeps the candle-op chain for bit-exact
+/// parity with prior trainer tests.
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
-        let disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
-        if !disabled && kiln_rmsnorm_kernel::supports(x, weight) {
-            return kiln_rmsnorm_kernel::fused_rmsnorm(x, weight, eps as f32)
-                .context("fused_rmsnorm kernel failed");
+        let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
+        let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
+        if !kernel_disabled && !bwd_disabled && kiln_rmsnorm_kernel::supports(x, weight) {
+            return kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd(x, weight, eps as f32)
+                .context("fused_rmsnorm_with_autograd CustomOp2 failed");
         }
     }
     #[cfg(feature = "metal")]
