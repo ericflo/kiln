@@ -165,3 +165,52 @@ fn cpu_empty_mask_returns_zero() -> Result<()> {
 fn default_chunk_size_is_positive() {
     assert!(DEFAULT_CHUNK_SIZE > 0);
 }
+
+/// Regression test for the chunked-vocab matmul-not-contiguous bug.
+///
+/// `narrow(1, off, chunk)` on a `[H, V]` tensor with stride `[V, 1]` preserves
+/// stride `[V, 1]` for the slice — it does NOT collapse to `[chunk, 1]`.
+/// CUDA matmul rejects strided right operands, so the chunked-vocab call
+/// crashed on the first SFT step on Qwen3.5-4B with `KILN_USE_FLCE=1`. CPU
+/// candle matmul is permissive about strided right operands, which is why
+/// the existing parity tests above never caught this.
+///
+/// This test asserts two things at once:
+///   1. The V-axis slice really is non-contiguous on the inner stride
+///      (so the test is actually exercising the failing geometry).
+///   2. `fused_linear_cross_entropy` still produces parity loss after the
+///      `.contiguous()` materialization fix.
+///
+/// Numeric parity alone is not enough — the CPU path was already green on
+/// strided slices before the fix. The contig assertion locks in the
+/// regression: if anyone removes `.contiguous()`, this test still detects it
+/// because the right-operand layout invariant is what GPU matmul enforces.
+///
+/// See PR #631 (validation bench) + docs/audits/PHASE10_FLCE_PREFLIGHT.md
+/// Finding 1.
+#[test]
+fn cpu_parity_strided_chunk_slice() -> Result<()> {
+    let device = Device::Cpu;
+    // V > chunk_size with V not a small power of two — produces a strided
+    // V-axis slice that the un-fixed kernel could not feed to CUDA matmul.
+    let (hidden, head_t, ids, mask) = random_case(16, 8, 96, &device)?;
+
+    // Sanity: confirm the un-contiguous slice we use to exercise the
+    // regression really is strided (test setup invariant).
+    let head_t_f32 = head_t.to_dtype(DType::F32)?;
+    let probe = head_t_f32.narrow(1, 16, 16)?;
+    assert!(
+        !probe.is_contiguous(),
+        "test setup invariant: V-axis chunk should be strided; if candle changes \
+         narrow semantics this test no longer exercises the regression",
+    );
+
+    let fused = fused_linear_cross_entropy(&hidden, &head_t, &ids, &mask, &device, 16)?;
+    let naive = naive_loss(&hidden, &head_t, &ids, &mask, &device)?;
+    let abs_err = (fused.to_scalar::<f32>()? - naive.to_scalar::<f32>()?).abs();
+    assert!(
+        abs_err < 1e-5,
+        "strided-chunk parity failed: abs_err={abs_err:.2e}",
+    );
+    Ok(())
+}

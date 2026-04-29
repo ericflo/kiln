@@ -158,10 +158,21 @@ pub fn fused_linear_cross_entropy(
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
 
-        // Head slice: [hidden_size, chunk_len]
+        // Head slice: [hidden_size, chunk_len].
+        //
+        // `narrow(1, off, chunk)` on a `[H, V]` tensor with stride `[V, 1]`
+        // preserves stride `[V, 1]` for the slice rather than collapsing to
+        // `[chunk, 1]`. CUDA matmul rejects strided right operands, so the
+        // chunked-vocab path crashed on the first SFT step on Qwen3.5-4B
+        // (V=248320). See PR #631 / docs/audits/PHASE10_FLCE_PREFLIGHT.md
+        // Finding 1. CPU candle matmul is permissive about strides, which is
+        // why the parity tests below missed it. Materialize a contiguous
+        // chunk before the matmul.
         let head_chunk = head_t_f32
             .narrow(1, chunk_start, chunk_len)
-            .context("slice head_t chunk")?;
+            .context("slice head_t chunk")?
+            .contiguous()
+            .context("contiguous head_t chunk for matmul (CUDA matmul rejects strided rhs)")?;
 
         // Chunk logits: [num_active, chunk_len]. This is the ONE materialized
         // intermediate whose size scales with `chunk_len` instead of `vocab_size`.
