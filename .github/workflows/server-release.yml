@@ -23,6 +23,12 @@ on:
 
 permissions:
   contents: write
+  # Required by actions/attest-build-provenance to mint a signing certificate
+  # from Sigstore's Fulcio CA via OIDC and write the resulting attestation
+  # back to the repository's attestation store. See
+  # https://docs.github.com/actions/security-guides/using-artifact-attestations.
+  id-token: write
+  attestations: write
 
 jobs:
   macos-metal:
@@ -121,6 +127,12 @@ jobs:
           shasum -a 256 "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha256"
           echo "Produced $ARTIFACT ($(wc -c < "$ARTIFACT") bytes, sha256=$(cat "$ARTIFACT.sha256"))"
           echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance (macOS Metal tarball)
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARTIFACT }}
 
       - name: Upload to GitHub release
         if: startsWith(github.ref, 'refs/tags/kiln-v')
@@ -237,6 +249,12 @@ jobs:
           sha256sum "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha256"
           echo "Produced $ARTIFACT ($(wc -c < "$ARTIFACT") bytes, sha256=$(cat "$ARTIFACT.sha256"))"
           echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance (Linux CUDA tarball)
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARTIFACT }}
 
       - name: Upload to GitHub release
         if: startsWith(github.ref, 'refs/tags/kiln-v')
@@ -356,6 +374,12 @@ jobs:
           $size = (Get-Item $artifact).Length
           Write-Host "Produced $artifact ($size bytes, sha256=$hash)"
           "ARTIFACT=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Attest build provenance (Windows CUDA zip)
+        if: startsWith(github.ref, 'refs/tags/kiln-v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARTIFACT }}
 
       - name: Upload to GitHub release
         if: startsWith(github.ref, 'refs/tags/kiln-v')

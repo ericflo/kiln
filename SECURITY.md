@@ -56,6 +56,24 @@ Some things look like vulnerabilities but are documented design choices. Please 
 
 If you think one of the above *should* be in scope, open a normal issue or discussion to argue the design — that is the right channel for it.
 
+## Supply-chain provenance
+
+Every `kiln-v*` release ships with [build provenance attestations](https://docs.github.com/actions/security-guides/using-artifact-attestations) so you can verify that an artifact was produced by this repository's GitHub Actions workflow and not tampered with after the fact. The attestation is a Sigstore-signed in-toto statement linking the artifact's SHA-256 digest to the workflow run, commit, and source repository.
+
+To verify a downloaded binary tarball or zip:
+
+```sh
+gh attestation verify kiln-<version>-<target>.tar.gz --repo ericflo/kiln
+```
+
+To verify the published Docker image:
+
+```sh
+gh attestation verify oci://ghcr.io/ericflo/kiln-server:<tag> --repo ericflo/kiln
+```
+
+Both commands require [`gh`](https://cli.github.com/) 2.49 or newer. They exit non-zero if the artifact's digest does not match a recorded attestation, so they are safe to drop into a deployment script before unpacking the tarball or pulling the image.
+
 ## Disclosure policy
 
 We prefer coordinated disclosure. The default window is **90 days from initial acknowledgment** before public disclosure, extendable by mutual agreement if a fix is genuinely in flight.
