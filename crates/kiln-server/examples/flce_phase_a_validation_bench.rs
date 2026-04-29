@@ -519,36 +519,12 @@ fn main() -> Result<()> {
     let parity_on_loss = r.final_loss;
     rows.push(r);
 
-    // 3. T=8192, FLCE ON.
-    let r = run_one(
-        8192,
-        true,
-        None,
-        None,
-        &tokenizer,
-        &model_config,
-        &gpu_weights,
-        baseline_mib,
-    )?;
-    rows.push(r);
-
-    // 4. T=16384, FLCE ON.
-    let r = run_one(
-        16384,
-        true,
-        None,
-        None,
-        &tokenizer,
-        &model_config,
-        &gpu_weights,
-        baseline_mib,
-    )?;
-    rows.push(r);
-
-    // 5. Control: T=2048 FLCE ON STREAMING ON (default tile). If streaming
-    //    were reachable from the SFT path, peak VRAM would change here vs
-    //    cell 2; if it's unreachable (the audit's hypothesis), peak should
-    //    match cell 2 within nvidia-smi 50 ms polling noise.
+    // 3. Control (BEFORE the OOM cells): T=2048 FLCE ON STREAMING ON
+    //    (default tile). If streaming were reachable from the SFT path, peak
+    //    VRAM would change here vs cell 2; if it's unreachable (the audit's
+    //    hypothesis), peak should match cell 2 within nvidia-smi 50 ms
+    //    polling noise. We run this BEFORE cells 4/5 so post-OOM CUDA
+    //    allocator residue does not contaminate the peak measurement.
     let r = run_one(
         2048,
         true,
@@ -562,7 +538,36 @@ fn main() -> Result<()> {
     let stream_on_t2048_loss = r.final_loss;
     rows.push(r);
 
-    // 6. Headline: T=8192 FLCE ON STREAMING ON (default tile = 8192).
+    // 4. T=8192, FLCE ON.
+    let r = run_one(
+        8192,
+        true,
+        None,
+        None,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
+    )?;
+    rows.push(r);
+
+    // 5. T=16384, FLCE ON.
+    let r = run_one(
+        16384,
+        true,
+        None,
+        None,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
+    )?;
+    rows.push(r);
+
+    // 6. Headline: T=8192 FLCE ON STREAMING ON (default tile = 8192). At the
+    //    default tile size (which equals T=8192) no actual tiling happens
+    //    even if streaming were reachable, so this primarily tests that the
+    //    flag is parsed without crashing.
     let r = run_one(
         8192,
         true,
@@ -575,7 +580,7 @@ fn main() -> Result<()> {
     )?;
     rows.push(r);
 
-    // 7. T=8192 FLCE ON STREAMING ON tile=4096 (smaller tile).
+    // 7. T=8192 FLCE ON STREAMING ON tile=4096 (would tile into 2 chunks).
     let r = run_one(
         8192,
         true,
@@ -588,7 +593,9 @@ fn main() -> Result<()> {
     )?;
     rows.push(r);
 
-    // 8. T=8192 FLCE ON STREAMING ON tile=2048 (smallest tile multiple of 64).
+    // 8. T=8192 FLCE ON STREAMING ON tile=2048 (would tile into 4 chunks —
+    //    if streaming were reachable, this is the most aggressive memory
+    //    reduction available and should show the largest peak VRAM delta).
     let r = run_one(
         8192,
         true,
