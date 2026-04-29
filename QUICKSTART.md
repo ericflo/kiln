@@ -150,6 +150,121 @@ curl -N http://localhost:8420/v1/chat/completions \
   }'
 ```
 
+### 4.1 Tool / Function Calling
+
+Kiln speaks the OpenAI `tools` schema on the request side. The server forwards
+`tools` and `tool_choice` into the chat-template Jinja context, which means
+Qwen3.5-4B's bundled template renders its `<tools>` schema block and the
+tool-calling prelude verbatim — so the model sees your function definitions at
+inference time. This is what PRs [#632](https://github.com/ericflo/kiln/pull/632)
+and [#653](https://github.com/ericflo/kiln/pull/653) wired up.
+
+**Tool call request.** Pass `tools: [...]` exactly as you would to the OpenAI
+API:
+
+```bash
+curl -s http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "What is the weather in San Francisco?"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather for a city",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {"type": "string", "description": "City name"}
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+  }' | python3 -m json.tool
+```
+
+**Where the tool call shows up in the response.** Qwen3.5-4B's official chat
+template (the one that ships with the tokenizer) instructs the model to emit
+tool calls in an **XML** form, not as a structured JSON object. The model's
+output ends up inside `choices[0].message.content` and looks like this:
+
+```
+<tool_call>
+<function=get_weather>
+<parameter=location>
+San Francisco
+</parameter>
+</function>
+</tool_call>
+```
+
+Your client is responsible for parsing this XML out of `content`. Note the
+asymmetry vs. the OpenAI Chat Completions spec: today kiln returns
+`choices[0].message.tool_calls = null` even when the model produced a tool
+call — the structured-output path is a known gap. (See
+`crates/kiln-server/src/api/completions.rs` around line 1370 and line 2010 if
+you want to confirm in source.) On the request side you already use the
+OpenAI-shape `tool_calls` array; on the response side you parse the XML.
+
+**Tool result follow-up turn.** When you submit the tool's result back to
+the model, use the OpenAI shape — kiln deserializes it cleanly and the
+template renders it as a `<tool_response>...</tool_response>` block. Note
+that `tool_calls[*].function.arguments` is a **JSON-encoded string** (this
+matches OpenAI's spec; see test
+`message_tool_calls_round_trip_preserved` at
+`crates/kiln-server/src/api/completions.rs:2496` for the canonical shape):
+
+```bash
+curl -s http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "What is the weather in San Francisco?"},
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_001",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"San Francisco\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_001",
+        "name": "get_weather",
+        "content": "{\"temp_f\": 62, \"conditions\": \"foggy\"}"
+      }
+    ],
+    "max_tokens": 128,
+    "temperature": 0.0
+  }' | python3 -m json.tool
+```
+
+The assistant's next turn comes back as plain text in
+`choices[0].message.content` ("It's currently 62°F and foggy in San
+Francisco.").
+
+> **Tool call format reference.** Qwen3.5-4B's chat template — including the
+> exact XML tool-call grammar the model is trained to emit — lives in the
+> tokenizer config at
+> [`Qwen/Qwen3.5-4B`](https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/chat_template.jinja)
+> on Hugging Face. If a tool call format ever looks ambiguous, that file is
+> the source of truth.
+
 ## 5. Open the Browser Dashboard
 
 Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
