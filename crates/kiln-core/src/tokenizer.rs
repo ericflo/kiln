@@ -208,8 +208,41 @@ impl KilnTokenizer {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
 
+        // Deserialize tool_call arguments from JSON-string to structured
+        // serde_json::Value before handing the messages to the Jinja
+        // template. The OpenAI Chat Completions spec defines
+        // `tool_calls[*].function.arguments` as a JSON-encoded string
+        // (https://platform.openai.com/docs/api-reference/chat/object), so
+        // OpenAI-compatible clients (and the kiln-server completions API)
+        // forward it as a string. HuggingFace chat templates — including
+        // Qwen3.5-4B's bundled `chat_template.jinja` — iterate it as a dict
+        // via `{% for k, v in tool_call.arguments|items %}`. Without this
+        // conversion the `|items` filter throws
+        // "cannot convert value into pairs" on every multi-turn request that
+        // carries prior assistant tool_calls.
+        //
+        // Both the OpenAI `{function: {name, arguments}}` envelope and the
+        // flatter `{name, arguments}` shape some templates assume are
+        // handled. If `arguments` is already a JSON object/array (i.e. the
+        // caller pre-parsed it), it's left alone.
+        let messages_value: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
+                if let Some(tcs) = v.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+                    for tc in tcs {
+                        deserialize_arguments_in_place(tc);
+                        if let Some(function) = tc.get_mut("function") {
+                            deserialize_arguments_in_place(function);
+                        }
+                    }
+                }
+                v
+            })
+            .collect();
+
         tmpl.render(minijinja::context! {
-            messages => messages,
+            messages => messages_value,
             tools => tools_value,
             tool_choice => tool_choice_value,
             add_generation_prompt => true,
@@ -232,6 +265,24 @@ impl KilnTokenizer {
         }
         prompt.push_str("<|im_start|>assistant\n");
         prompt
+    }
+}
+
+/// If `value` has an `arguments` field that is a JSON-encoded string, replace
+/// it in place with the parsed `serde_json::Value`. Used to convert the OpenAI
+/// `tool_calls[*].function.arguments` string form to the dict form HF chat
+/// templates iterate via `arguments|items`. A no-op when `arguments` is missing,
+/// already structured, or a non-JSON string (left untouched in that case so the
+/// chat template can decide how to handle it).
+fn deserialize_arguments_in_place(value: &mut serde_json::Value) {
+    let Some(args) = value.get_mut("arguments") else {
+        return;
+    };
+    let Some(s) = args.as_str() else {
+        return;
+    };
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+        *args = parsed;
     }
 }
 
@@ -480,5 +531,265 @@ mod tests {
         assert!(v.get("tool_call_id").is_none());
         assert_eq!(v["role"], "user");
         assert_eq!(v["content"], "hi");
+    }
+
+    /// `tojson` filter must be available on the minijinja env. Bundled HF
+    /// chat templates (Qwen3.5, Llama-3, Mistral) call it unconditionally
+    /// when rendering tools. If minijinja is depended on without the `json`
+    /// feature, this filter is missing and every tools-bearing render
+    /// errors with `unknown filter: tojson`. Regression test for the
+    /// "structurally wired but feature-gated off" failure mode in PR #632.
+    #[test]
+    fn test_jinja_tojson_filter_is_available() {
+        let template = "{{ data | tojson }}";
+        let tok = tokenizer_with_template(template);
+        let prompt = tok.apply_chat_template(&[]).unwrap();
+        // `data` is unset in the template context, so `tojson` of `Undefined`
+        // emits `null` — that's fine, what matters is the filter resolved.
+        assert!(
+            prompt.contains("null"),
+            "tojson filter did not produce expected output: {prompt:?}"
+        );
+
+        // Also exercise the realistic shape: tools array forwarded into the
+        // template, each tool rendered via `| tojson`. Mirrors line 50 of
+        // Qwen3.5-4B's chat_template.jinja.
+        let tools_template = "\
+{%- for tool in tools -%}\
+T:{{ tool | tojson }};\
+{%- endfor -%}";
+        let tok = tokenizer_with_template(tools_template);
+        let tools = vec![serde_json::json!({"name": "Bash", "description": "Run a command"})];
+        let prompt = tok
+            .apply_chat_template_with_tools(&[], Some(&tools))
+            .unwrap();
+        assert!(
+            prompt.contains("\"name\":\"Bash\""),
+            "tojson did not serialize tool dict: {prompt:?}"
+        );
+    }
+
+    /// Multi-turn conversation with prior assistant `tool_calls`. The Qwen3.5
+    /// chat template iterates `tool_call.arguments|items`, which requires a
+    /// dict. The OpenAI Chat Completions spec sends arguments as a
+    /// JSON-encoded string. Without the in-place deserialization the render
+    /// crashes with `cannot convert value into pairs`. Both the
+    /// `{function: {...}}` and flat `{name, arguments}` envelopes must work.
+    #[test]
+    fn test_jinja_tool_call_arguments_string_is_iterable_as_dict() {
+        // Mirrors line 120 of Qwen3.5-4B's chat_template.jinja:
+        //   {%- for args_name, args_value in tool_call.arguments|items %}
+        let template = "\
+{%- for message in messages -%}\
+[{{ message.role }}]\
+{%- if message.tool_calls -%}\
+{%- for tc in message.tool_calls -%}\
+{%- set args = tc.function.arguments if tc.function is defined else tc.arguments -%}\
+{%- for k, v in args | items -%}\
+ARG:{{ k }}={{ v }};\
+{%- endfor -%}\
+{%- endfor -%}\
+{%- endif -%}\
+{{ message.content }}\
+{%- endfor -%}";
+        let tok = tokenizer_with_template(template);
+        let messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "list files".to_string(),
+                ..Default::default()
+            },
+            // OpenAI envelope: tool_calls[*] = {id, type, function: {name, arguments: "<json string>"}}
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "".to_string(),
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": r#"{"command": "ls", "cwd": "/tmp"}"#
+                    }
+                })]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "a.txt".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call_1".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "thanks".to_string(),
+                ..Default::default()
+            },
+        ];
+        let prompt = tok.apply_chat_template(&messages).expect(
+            "render failed — likely arguments-as-string not deserialized to dict before |items",
+        );
+        assert!(
+            prompt.contains("ARG:command=ls;"),
+            "argument key/value missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ARG:cwd=/tmp;"),
+            "second argument missing: {prompt:?}"
+        );
+
+        // Also exercise the flat envelope (no nested function key).
+        let messages_flat = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: "".to_string(),
+            tool_calls: Some(vec![serde_json::json!({
+                "name": "Read",
+                "arguments": r#"{"path": "/etc/hosts"}"#
+            })]),
+            ..Default::default()
+        }];
+        let prompt = tok.apply_chat_template(&messages_flat).expect("flat-envelope render failed");
+        assert!(
+            prompt.contains("ARG:path=/etc/hosts;"),
+            "flat-envelope argument missing: {prompt:?}"
+        );
+    }
+
+    /// End-to-end render of Qwen3.5-4B's actual bundled `chat_template.jinja`
+    /// against a realistic tools-bearing multi-turn conversation. This is the
+    /// load-bearing fixture that pins both fixes from this PR (the `json`
+    /// feature on minijinja and the `arguments`-string-to-dict
+    /// deserialization). Either bug regressing causes this test to fail with
+    /// `unknown filter: tojson` or `cannot convert value into pairs`.
+    #[test]
+    fn test_qwen35_4b_chat_template_renders_tools_and_tool_calls() {
+        let template =
+            include_str!("../test_fixtures/qwen35_4b_chat_template.jinja");
+        let tok = tokenizer_with_template(template);
+
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Command to run"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+        ];
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a coding agent.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Show me what's in /etc.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "".to_string(),
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": r#"{"command": "ls /etc"}"#
+                    }
+                })]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "hosts\nresolv.conf".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call_1".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Now read /etc/hosts.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let prompt = tok
+            .apply_chat_template_with_tools(&messages, Some(&tools))
+            .expect("Qwen3.5-4B chat template rendered without error");
+
+        // Tools block must appear (proves `tools | tojson` worked).
+        assert!(prompt.contains("<tools>"), "tools block missing: prompt was {prompt:?}");
+        assert!(prompt.contains("\"Bash\""), "Bash tool not serialized");
+        assert!(prompt.contains("\"Read\""), "Read tool not serialized");
+
+        // Past assistant tool_call must render in pi-XML form (proves the
+        // arguments-as-dict path worked).
+        assert!(
+            prompt.contains("<function=Bash>"),
+            "prior assistant tool_call did not render in Qwen pi-XML: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<parameter=command>"),
+            "tool_call argument not iterated as dict: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ls /etc"),
+            "argument value missing from rendered tool_call: {prompt:?}"
+        );
+
+        // Tool response wrapping must appear too.
+        assert!(
+            prompt.contains("<tool_response>"),
+            "tool response not wrapped: {prompt:?}"
+        );
+    }
+
+    /// `deserialize_arguments_in_place` is a no-op when arguments is already
+    /// a dict (caller pre-parsed) or missing entirely, and silently leaves
+    /// non-JSON strings untouched (the template can decide what to do).
+    #[test]
+    fn test_deserialize_arguments_in_place_handles_edge_cases() {
+        // Already-parsed dict: untouched.
+        let mut v = serde_json::json!({"arguments": {"a": 1}});
+        deserialize_arguments_in_place(&mut v);
+        assert_eq!(v["arguments"]["a"], 1);
+
+        // No arguments field: untouched.
+        let mut v = serde_json::json!({"name": "Bash"});
+        deserialize_arguments_in_place(&mut v);
+        assert_eq!(v.get("arguments"), None);
+
+        // Non-JSON string: left as-is so template logic sees it.
+        let mut v = serde_json::json!({"arguments": "not-json-at-all"});
+        deserialize_arguments_in_place(&mut v);
+        assert_eq!(v["arguments"], "not-json-at-all");
+
+        // Empty object as JSON string: parses to empty dict.
+        let mut v = serde_json::json!({"arguments": "{}"});
+        deserialize_arguments_in_place(&mut v);
+        assert_eq!(v["arguments"], serde_json::json!({}));
     }
 }
