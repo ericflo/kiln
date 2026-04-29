@@ -2376,6 +2376,18 @@ mod tests {
         GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
         GpuLinearAttentionWeights,
     };
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+
+    /// Serializes tests in this binary that mutate process-global env vars
+    /// (`KILN_STREAMING_PREFILL`, `KILN_STREAMING_TILE_TOKENS`,
+    /// `KILN_USE_FLCE`, `KILN_DISABLE_RMSNORM_KERNEL`,
+    /// `KILN_DISABLE_RMSNORM_BACKWARD`). `cargo test` runs tests in this
+    /// binary as parallel threads in a single process, so without this
+    /// mutex one test's `set_var` can leak into another test's
+    /// "monolithic baseline" forward pass. `cargo nextest run` runs each
+    /// test in its own process, so this mutex is a no-op there.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
@@ -2403,13 +2415,58 @@ mod tests {
         }
     }
 
-    /// Create tiny random GpuWeights on CPU for the given config.
+    /// Default deterministic seed for `tiny_weights`. Pinned so every test in
+    /// this binary that uses the default `tiny_weights` sees the same model
+    /// weights on every run, removing the unseeded `Tensor::randn` flakiness
+    /// that produced occasional `mono=NaN tiled=NaN` failures on the
+    /// 192-token tile-parity tests (#636/#637 regression).
+    const TINY_WEIGHTS_DEFAULT_SEED: u64 = 0xC0FFEE_u64;
+
+    /// Sample a tensor of shape `shape` from a uniform `[-a, a]` distribution
+    /// where `a = std * √3`. Uniform with that bound has the same variance as
+    /// `Normal(0, std)`, so it's a drop-in replacement for the
+    /// `Tensor::randn(0, std, ...)` calls used previously in `tiny_weights`,
+    /// while staying inside a strictly bounded range (no fat tail) and
+    /// remaining deterministic for a given `rng` state.
+    fn randn_like_seeded(
+        rng: &mut StdRng,
+        std: f32,
+        shape: &[usize],
+        device: &Device,
+    ) -> Result<Tensor> {
+        // 3.0_f32.sqrt() — stable equivalent of unstable `f32::consts::SQRT_3`.
+        let a = std * 1.732_050_8_f32;
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n).map(|_| rng.random_range(-a..a)).collect();
+        Tensor::from_slice(&data, shape, device).map_err(Into::into)
+    }
+
+    /// Create tiny random GpuWeights on CPU for the given config, using a
+    /// fixed deterministic seed. Equivalent to
+    /// `tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)`.
     fn tiny_weights(config: &ModelConfig, device: &Device) -> Result<GpuWeights> {
+        tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)
+    }
+
+    /// Create tiny GpuWeights on CPU using a seeded RNG so the model weights
+    /// are reproducible across runs. Replaces the previous unseeded
+    /// `Tensor::randn` calls — those use a thread-local RNG that candle's CPU
+    /// backend explicitly cannot seed (`set_seed` bails on CPU), so they
+    /// produced non-reproducible weights every run. With long sequences
+    /// (`seq_len = 192`) and 4-layer GDN/hybrid models the unseeded init
+    /// occasionally drew pathological values that produced NaN forward
+    /// passes; this seeded variant pins the init so tests are deterministic.
+    fn tiny_weights_with_seed(
+        config: &ModelConfig,
+        device: &Device,
+        seed: u64,
+    ) -> Result<GpuWeights> {
         let h = config.hidden_size;
         let inter = config.intermediate_size;
         let vocab = config.vocab_size;
+        let mut rng = StdRng::seed_from_u64(seed);
 
-        let embed_tokens = Tensor::randn(0.0f32, 0.02, (vocab, h), device)?;
+        let embed_tokens = randn_like_seeded(&mut rng, 0.02, &[vocab, h], device)?;
         let embed_tokens_t = embed_tokens.t()?.contiguous()?;
         let final_norm = Tensor::zeros(h, DType::F32, device)?; // (1+w)*x, so zeros = identity
 
@@ -2418,9 +2475,9 @@ mod tests {
             let input_layernorm = Tensor::zeros(h, DType::F32, device)?;
             let post_attention_layernorm = Tensor::zeros(h, DType::F32, device)?;
 
-            let gate_proj = Tensor::randn(0.0f32, 0.02, (inter, h), device)?;
-            let up_proj = Tensor::randn(0.0f32, 0.02, (inter, h), device)?;
-            let down_proj = Tensor::randn(0.0f32, 0.02, (h, inter), device)?;
+            let gate_proj = randn_like_seeded(&mut rng, 0.02, &[inter, h], device)?;
+            let up_proj = randn_like_seeded(&mut rng, 0.02, &[inter, h], device)?;
+            let down_proj = randn_like_seeded(&mut rng, 0.02, &[h, inter], device)?;
             let gate_proj_t = gate_proj.t()?.contiguous()?;
             let up_proj_t = up_proj.t()?.contiguous()?;
             let down_proj_t = down_proj.t()?.contiguous()?;
@@ -2440,10 +2497,10 @@ mod tests {
                 let nh = config.num_attention_heads;
                 let nkv = config.num_kv_heads;
                 let hd = config.head_dim;
-                let q_proj = Tensor::randn(0.0f32, 0.02, (nh * hd, h), device)?;
-                let k_proj = Tensor::randn(0.0f32, 0.02, (nkv * hd, h), device)?;
-                let v_proj = Tensor::randn(0.0f32, 0.02, (nkv * hd, h), device)?;
-                let o_proj = Tensor::randn(0.0f32, 0.02, (h, nh * hd), device)?;
+                let q_proj = randn_like_seeded(&mut rng, 0.02, &[nh * hd, h], device)?;
+                let k_proj = randn_like_seeded(&mut rng, 0.02, &[nkv * hd, h], device)?;
+                let v_proj = randn_like_seeded(&mut rng, 0.02, &[nkv * hd, h], device)?;
+                let o_proj = randn_like_seeded(&mut rng, 0.02, &[h, nh * hd], device)?;
                 let q_proj_t = q_proj.t()?.contiguous()?;
                 let k_proj_t = k_proj.t()?.contiguous()?;
                 let v_proj_t = v_proj.t()?.contiguous()?;
@@ -2464,32 +2521,43 @@ mod tests {
             } else {
                 let qkv_dim = config.linear_qkv_dim();
                 let v_dim = config.linear_v_dim();
-                let in_proj_qkv = Tensor::randn(0.0f32, 0.02, (qkv_dim, h), device)?;
-                let in_proj_z = Tensor::randn(0.0f32, 0.02, (v_dim, h), device)?;
-                let out_proj = Tensor::randn(0.0f32, 0.02, (h, v_dim), device)?;
-                let in_proj_a =
-                    Tensor::randn(0.0f32, 0.02, (config.linear_num_value_heads, h), device)?;
-                let in_proj_b =
-                    Tensor::randn(0.0f32, 0.02, (config.linear_num_value_heads, h), device)?;
+                let in_proj_qkv = randn_like_seeded(&mut rng, 0.02, &[qkv_dim, h], device)?;
+                let in_proj_z = randn_like_seeded(&mut rng, 0.02, &[v_dim, h], device)?;
+                let out_proj = randn_like_seeded(&mut rng, 0.02, &[h, v_dim], device)?;
+                let in_proj_a = randn_like_seeded(
+                    &mut rng,
+                    0.02,
+                    &[config.linear_num_value_heads, h],
+                    device,
+                )?;
+                let in_proj_b = randn_like_seeded(
+                    &mut rng,
+                    0.02,
+                    &[config.linear_num_value_heads, h],
+                    device,
+                )?;
                 let in_proj_qkv_t = in_proj_qkv.t()?.contiguous()?;
                 let in_proj_z_t = in_proj_z.t()?.contiguous()?;
                 let in_proj_a_t = in_proj_a.t()?.contiguous()?;
                 let in_proj_b_t = in_proj_b.t()?.contiguous()?;
                 let out_proj_t = out_proj.t()?.contiguous()?;
+                let conv1d = randn_like_seeded(
+                    &mut rng,
+                    0.02,
+                    &[qkv_dim, 1, config.linear_conv_kernel_dim],
+                    device,
+                )?;
+                let a_log =
+                    randn_like_seeded(&mut rng, 0.5, &[config.linear_num_value_heads], device)?;
                 GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
                     in_proj_qkv,
                     in_proj_z,
                     out_proj,
                     in_proj_a,
                     in_proj_b,
-                    conv1d: Tensor::randn(
-                        0.0f32,
-                        0.02,
-                        (qkv_dim, 1, config.linear_conv_kernel_dim),
-                        device,
-                    )?,
+                    conv1d,
                     norm: Tensor::zeros(config.linear_key_head_dim, DType::F32, device)?,
-                    a_log: Tensor::randn(0.0f32, 0.5, (config.linear_num_value_heads,), device)?,
+                    a_log,
                     dt_bias: Tensor::zeros(config.linear_num_value_heads, DType::F32, device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,
@@ -2762,6 +2830,12 @@ mod tests {
     ///    same gradient (within the same tolerance) in the tiled path.
     #[test]
     fn test_checkpointed_forward_backward_tiled_matches_monolithic_cpu() -> Result<()> {
+        // Hold ENV_LOCK across the whole test so a parallel
+        // env-mutating test in this binary can't flip
+        // `KILN_STREAMING_PREFILL` mid-call and turn the "monolithic"
+        // baseline into a tiled run (or vice versa). See ENV_LOCK.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let device = Device::Cpu;
 
         // GDN-only mini-config: setting `full_attention_interval` strictly
@@ -2957,6 +3031,12 @@ mod tests {
     /// --test-threads=1` for the env-var manipulation to be safe.
     #[test]
     fn test_layer_pair_tiled_matches_monolithic_cpu_hybrid() -> Result<()> {
+        // Hold ENV_LOCK across the whole test so a parallel
+        // env-mutating test in this binary can't flip
+        // `KILN_STREAMING_PREFILL` mid-call and turn the "standard"
+        // baseline into a tiled run (or vice versa). See ENV_LOCK.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let device = Device::Cpu;
 
         // Hybrid mini-config: full_attention_interval = 2 makes layers 1
@@ -3385,6 +3465,11 @@ mod tests {
     /// --test-threads=1` so the env-var manipulation is process-isolated.
     #[test]
     fn test_training_rmsnorm_custom_op_loss_parity() -> Result<()> {
+        // Hold ENV_LOCK across the whole test so a parallel
+        // env-mutating test in this binary can't flip RMSNorm dispatch
+        // env vars mid-call. See ENV_LOCK.
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let device = Device::Cpu;
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;

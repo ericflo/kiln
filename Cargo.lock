@@ -1885,6 +1885,7 @@ dependencies = [
  "kiln-core",
  "kiln-flce-kernel",
  "kiln-model",
+ "rand 0.10.1",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
