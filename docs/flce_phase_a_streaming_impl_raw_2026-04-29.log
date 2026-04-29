@@ -1,0 +1,293 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 550.127.05
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+=== FLCE Phase A validation — Qwen3.5-4B, V=248320, hidden=2560 ===
+Loading model from /workspace/qwen3.5-4b
+[2m2026-04-29T09:09:41.345304Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-29T09:09:41.346488Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-29T09:09:41.346655Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-29T09:09:41.346666Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-29T09:09:41.346752Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+Baseline VRAM (post-load): 16344 MiB
+Warmup pass at T~256 (FLCE OFF)...
+
+--- T target = 256  FLCE = OFF  STREAMING = unset  TILE = default ---
+  Tokenized length: 248 tokens (target 256)
+[2m2026-04-29T09:09:44.134664Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T256-flce-off"
+[2m2026-04-29T09:09:44.148923Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:09:44.192180Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:09:44.192218Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+[2m2026-04-29T09:09:44.825396Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m training step [3mepoch[0m[2m=[0m1 [3mstep[0m[2m=[0m1 [3mtotal_steps[0m[2m=[0m1 [3mloss[0m[2m=[0m"1.741690"
+[2m2026-04-29T09:09:44.825460Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m epoch complete [3mepoch[0m[2m=[0m1 [3mavg_loss[0m[2m=[0m"1.741690"
+[2m2026-04-29T09:09:44.865698Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m saved PEFT adapter [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T256-flce-off [3mnum_tensors[0m[2m=[0m256
+[2m2026-04-29T09:09:44.865731Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m SFT training complete [3madapter[0m[2m=[0m"flce-phaseA-T256-flce-off" [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T256-flce-off [3mfinal_loss[0m[2m=[0m"1.741690"
+  baseline 16344 MiB  peak 18472 MiB  delta 2128 MiB  samples 7  wall 0.7s  loss=Some(1.7416900396347046)  status=ok
+Baseline VRAM (post-warmup): 18472 MiB
+
+--- T target = 2048  FLCE = OFF  STREAMING = unset  TILE = default ---
+  Tokenized length: 2042 tokens (target 2048)
+[2m2026-04-29T09:09:45.026236Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T2048-flce-off"
+[2m2026-04-29T09:09:45.028347Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:09:45.081365Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:09:45.081402Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+[2m2026-04-29T09:09:47.773787Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m training step [3mepoch[0m[2m=[0m1 [3mstep[0m[2m=[0m1 [3mtotal_steps[0m[2m=[0m1 [3mloss[0m[2m=[0m"2.783685"
+[2m2026-04-29T09:09:47.773835Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m epoch complete [3mepoch[0m[2m=[0m1 [3mavg_loss[0m[2m=[0m"2.783685"
+[2m2026-04-29T09:09:47.815903Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m saved PEFT adapter [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-off [3mnum_tensors[0m[2m=[0m256
+[2m2026-04-29T09:09:47.816487Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m SFT training complete [3madapter[0m[2m=[0m"flce-phaseA-T2048-flce-off" [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-off [3mfinal_loss[0m[2m=[0m"2.783685"
+  baseline 18472 MiB  peak 34600 MiB  delta 16128 MiB  samples 31  wall 2.8s  loss=Some(2.7836852073669434)  status=ok
+
+--- T target = 2048  FLCE = ON  STREAMING = unset  TILE = default ---
+  Tokenized length: 2042 tokens (target 2048)
+[2m2026-04-29T09:09:47.982819Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T2048-flce-on"
+[2m2026-04-29T09:09:47.985852Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:09:48.033469Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:09:48.033541Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+[2m2026-04-29T09:09:51.153776Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m training step [3mepoch[0m[2m=[0m1 [3mstep[0m[2m=[0m1 [3mtotal_steps[0m[2m=[0m1 [3mloss[0m[2m=[0m"2.783439"
+[2m2026-04-29T09:09:51.153813Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m epoch complete [3mepoch[0m[2m=[0m1 [3mavg_loss[0m[2m=[0m"2.783439"
+[2m2026-04-29T09:09:51.188516Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m saved PEFT adapter [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-on [3mnum_tensors[0m[2m=[0m256
+[2m2026-04-29T09:09:51.188553Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m SFT training complete [3madapter[0m[2m=[0m"flce-phaseA-T2048-flce-on" [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-on [3mfinal_loss[0m[2m=[0m"2.783439"
+  baseline 18472 MiB  peak 34600 MiB  delta 16128 MiB  samples 36  wall 3.2s  loss=Some(2.7834393978118896)  status=ok
+
+--- T target = 2048  FLCE = ON  STREAMING = ON  TILE = default ---
+  Tokenized length: 2042 tokens (target 2048)
+[2m2026-04-29T09:09:51.372799Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T2048-flce-on"
+[2m2026-04-29T09:09:51.374894Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:09:51.419874Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:09:51.419900Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+[2m2026-04-29T09:09:54.522645Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m training step [3mepoch[0m[2m=[0m1 [3mstep[0m[2m=[0m1 [3mtotal_steps[0m[2m=[0m1 [3mloss[0m[2m=[0m"2.783439"
+[2m2026-04-29T09:09:54.522707Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m epoch complete [3mepoch[0m[2m=[0m1 [3mavg_loss[0m[2m=[0m"2.783439"
+[2m2026-04-29T09:09:54.566660Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m saved PEFT adapter [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-on [3mnum_tensors[0m[2m=[0m256
+[2m2026-04-29T09:09:54.566702Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m SFT training complete [3madapter[0m[2m=[0m"flce-phaseA-T2048-flce-on" [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-on [3mfinal_loss[0m[2m=[0m"2.783439"
+  baseline 18472 MiB  peak 34600 MiB  delta 16128 MiB  samples 35  wall 3.2s  loss=Some(2.7834393978118896)  status=ok
+
+--- T target = 8192  FLCE = ON  STREAMING = unset  TILE = default ---
+  Tokenized length: 8192 tokens (target 8192)
+[2m2026-04-29T09:09:55.439846Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T8192-flce-on"
+[2m2026-04-29T09:09:55.442347Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:09:55.494500Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:09:55.494537Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18472 MiB  peak 48648 MiB  delta 30176 MiB  samples 8  wall 0.7s  loss=None  status=OOM
+
+--- T target = 16384  FLCE = ON  STREAMING = unset  TILE = default ---
+  Tokenized length: 16380 tokens (target 16384)
+[2m2026-04-29T09:09:59.422356Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T16384-flce-on"
+[2m2026-04-29T09:09:59.425173Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:09:59.537494Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:09:59.537583Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18472 MiB  peak 48648 MiB  delta 30176 MiB  samples 7  wall 0.7s  loss=None  status=OOM
+
+--- T target = 8192  FLCE = ON  STREAMING = ON  TILE = default ---
+  Tokenized length: 8192 tokens (target 8192)
+[2m2026-04-29T09:10:00.983610Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T8192-flce-on"
+[2m2026-04-29T09:10:00.985912Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:10:01.077185Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:10:01.077253Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18472 MiB  peak 48648 MiB  delta 30176 MiB  samples 8  wall 0.7s  loss=None  status=OOM
+
+--- T target = 8192  FLCE = ON  STREAMING = ON  TILE = 4096 ---
+  Tokenized length: 8192 tokens (target 8192)
+[2m2026-04-29T09:10:02.606256Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T8192-flce-on"
+[2m2026-04-29T09:10:02.609219Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:10:03.267151Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:10:03.267186Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18472 MiB  peak 48648 MiB  delta 30176 MiB  samples 8  wall 1.3s  loss=None  status=OOM
+
+--- T target = 8192  FLCE = ON  STREAMING = ON  TILE = 2048 ---
+  Tokenized length: 8192 tokens (target 8192)
+[2m2026-04-29T09:10:04.706624Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T8192-flce-on"
+[2m2026-04-29T09:10:04.709303Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:10:04.798931Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:10:04.798974Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18472 MiB  peak 48660 MiB  delta 30188 MiB  samples 7  wall 0.7s  loss=None  status=OOM
+
+--- T target = 16384  FLCE = ON  STREAMING = ON  TILE = 4096 ---
+  Tokenized length: 16380 tokens (target 16384)
+[2m2026-04-29T09:10:08.713657Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T16384-flce-on"
+[2m2026-04-29T09:10:08.716382Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T09:10:08.807264Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T09:10:08.807307Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18472 MiB  peak 48648 MiB  delta 30176 MiB  samples 7  wall 0.6s  loss=None  status=OOM
+
+=== FLCE Phase A + GDN-streaming-audit validation results ===
+target_T   actual_T   FLCE   STREAM  TILE     peak_VRAM_MiB  delta_MiB    abc_GB       abc/peak   step_s     loss        
+2048       2042       OFF    unset   default  34600          16128        3.778        0.112      2.8        2.783685    
+2048       2042       ON     unset   default  34600          16128        3.778        0.112      3.2        2.783439    
+2048       2042       ON     ON      default  34600          16128        3.778        0.112      3.2        2.783439    
+8192       8192       ON     unset   default  48648          30176        15.156       0.319      0.7        n/a         
+16384      16380      ON     unset   default  48648          30176        30.305       0.638      0.7        n/a         
+8192       8192       ON     ON      default  48648          30176        15.156       0.319      0.7        n/a         
+8192       8192       ON     ON      4096     48648          30176        15.156       0.319      1.3        n/a         
+8192       8192       ON     ON      2048     48660          30188        15.156       0.319      0.7        n/a         
+16384      16380      ON     ON      4096     48648          30176        30.305       0.638      0.6        n/a         
+
+=== Parity (T=2048 FLCE off vs on) ===
+  off_loss = Some(2.7836852073669434)
+  on_loss  = Some(2.7834393978118896)
+  delta    = Some(0.00024580955505371094)
+  tolerance= 1.0e-3
+  result   = PASS
+
+=== Cell summary ===
+  T=2048   FLCE=ON  STREAM=unset             -> status=ok          peak=34600 MiB  step=3.2s  loss=Some(2.7834393978118896)
+  T=2048   FLCE=OFF STREAM=unset             -> status=ok          peak=34600 MiB  step=2.8s  loss=Some(2.7836852073669434)
+  T=8192   FLCE=ON  STREAM=unset             -> status=OOM         peak=48648 MiB  step=0.7s  loss=None
+  T=16384  FLCE=ON  STREAM=unset             -> status=OOM         peak=48648 MiB  step=0.7s  loss=None
+  T=2048   FLCE=ON  STREAM=ON  tile=default  -> status=ok          peak=34600 MiB  step=3.2s  loss=Some(2.7834393978118896)
+  T=8192   FLCE=ON  STREAM=ON  tile=default  -> status=OOM         peak=48648 MiB  step=0.7s  loss=None
+  T=8192   FLCE=ON  STREAM=ON  tile=4096     -> status=OOM         peak=48648 MiB  step=1.3s  loss=None
+  T=8192   FLCE=ON  STREAM=ON  tile=2048     -> status=OOM         peak=48660 MiB  step=0.7s  loss=None
+  T=16384  FLCE=ON  STREAM=ON  tile=4096     -> status=OOM         peak=48648 MiB  step=0.6s  loss=None
+
+=== Phase A verdict: RED — Phase A insufficient on A6000 ===
+
+=== Phase 10 streaming-impl verdict: RED — streaming GDN prefill at T=8192 SFT still OOMs on A6000 and peak-VRAM ladder is not monotonic in tile size. Investigate dispatch reachability. ===
+T=2048 peak delta (STREAMING ON vs unset): 0 MiB  (no actual tiling at this T; non-zero is allocator noise)
+T=2048 loss delta (STREAMING ON vs unset): 0e0  (must be ~0 — no tiling at T=2048)
+T=8192 peak-VRAM ladder by tile size: tile=default(8192)=48648 MiB, tile=4096=48648 MiB, tile=2048=48660 MiB
+T=16384 peak-VRAM (stretch): STREAM=unset=48648 MiB (OOM), STREAM=ON tile=4096=48648 MiB (OOM)
+
+=== JSON ===
+{
+  "baseline_mib": 18472,
+  "hidden": 2560,
+  "parity": {
+    "delta": 0.00024580955505371094,
+    "off_loss": 2.7836852073669434,
+    "on_loss": 2.7834393978118896,
+    "pass": true,
+    "tolerance": 0.001
+  },
+  "phase_a_verdict": "RED — Phase A insufficient on A6000",
+  "rows": [
+    {
+      "actual_t": 2042,
+      "baseline_mib": 18472,
+      "delta_mib": 16128,
+      "final_loss": 2.7836852073669434,
+      "peak_mib": 34600,
+      "status": "ok",
+      "step_secs": 2.792431364,
+      "streaming": null,
+      "target_t": 2048,
+      "tile_tokens": null,
+      "use_flce": false
+    },
+    {
+      "actual_t": 2042,
+      "baseline_mib": 18472,
+      "delta_mib": 16128,
+      "final_loss": 2.7834393978118896,
+      "peak_mib": 34600,
+      "status": "ok",
+      "step_secs": 3.206659421,
+      "streaming": null,
+      "target_t": 2048,
+      "tile_tokens": null,
+      "use_flce": true
+    },
+    {
+      "actual_t": 2042,
+      "baseline_mib": 18472,
+      "delta_mib": 16128,
+      "final_loss": 2.7834393978118896,
+      "peak_mib": 34600,
+      "status": "ok",
+      "step_secs": 3.194802829,
+      "streaming": true,
+      "target_t": 2048,
+      "tile_tokens": null,
+      "use_flce": true
+    },
+    {
+      "actual_t": 8192,
+      "baseline_mib": 18472,
+      "delta_mib": 30176,
+      "final_loss": null,
+      "peak_mib": 48648,
+      "status": "OOM",
+      "step_secs": 0.711907312,
+      "streaming": null,
+      "target_t": 8192,
+      "tile_tokens": null,
+      "use_flce": true
+    },
+    {
+      "actual_t": 16380,
+      "baseline_mib": 18472,
+      "delta_mib": 30176,
+      "final_loss": null,
+      "peak_mib": 48648,
+      "status": "OOM",
+      "step_secs": 0.664024841,
+      "streaming": null,
+      "target_t": 16384,
+      "tile_tokens": null,
+      "use_flce": true
+    },
+    {
+      "actual_t": 8192,
+      "baseline_mib": 18472,
+      "delta_mib": 30176,
+      "final_loss": null,
+      "peak_mib": 48648,
+      "status": "OOM",
+      "step_secs": 0.714608074,
+      "streaming": true,
+      "target_t": 8192,
+      "tile_tokens": null,
+      "use_flce": true
+    },
+    {
+      "actual_t": 8192,
+      "baseline_mib": 18472,
+      "delta_mib": 30176,
+      "final_loss": null,
+      "peak_mib": 48648,
+      "status": "OOM",
+      "step_secs": 1.282441427,
+      "streaming": true,
+      "target_t": 8192,
+      "tile_tokens": 4096,
+      "use_flce": true
+    },
+    {
+      "actual_t": 8192,
+      "baseline_mib": 18472,
+      "delta_mib": 30188,
+      "final_loss": null,
+      "peak_mib": 48660,
+      "status": "OOM",
+      "step_secs": 0.717228084,
+      "streaming": true,
+      "target_t": 8192,
+      "tile_tokens": 2048,
+      "use_flce": true
+    },
+    {
+      "actual_t": 16380,
+      "baseline_mib": 18472,
+      "delta_mib": 30176,
+      "final_loss": null,
+      "peak_mib": 48648,
+      "status": "OOM",
+      "step_secs": 0.649965024,
+      "streaming": true,
+      "target_t": 16384,
+      "tile_tokens": 4096,
+      "use_flce": true
+    }
+  ],
+  "stream_impl_verdict": "RED — streaming GDN prefill at T=8192 SFT still OOMs on A6000 and peak-VRAM ladder is not monotonic in tile size. Investigate dispatch reachability.",
+  "stream_on_t2048_loss": 2.7834393978118896,
+  "stream_t2048_loss_delta": 0.0,
+  "stream_t2048_peak_delta_mib": 0,
+  "vocab_size": 248320
+}
+BENCH_EXIT=0
