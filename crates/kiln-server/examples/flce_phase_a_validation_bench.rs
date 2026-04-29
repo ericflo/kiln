@@ -10,18 +10,23 @@
 //! check that it actually unblocks long-context SFT on the GPU we ship on
 //! (A6000 48 GB) has not been done. This bench closes that gap.
 //!
-//! Cells measured (Phase A baseline + Phase 10 GDN-streaming-audit):
+//! Cells measured (Phase A baseline + Phase 10 training-time streaming impl):
 //!   1. T=2048, FLCE OFF — baseline loss (parity reference)
 //!   2. T=2048, FLCE ON  — loss must match (1) to within 1e-3 (parity check)
 //!   3. T=8192, FLCE ON  — must complete without OOM (Phase A's headline claim)
 //!   4. T=16384, FLCE ON — must complete without OOM (Phase A's headline claim)
-//!   5. T=2048, FLCE ON, STREAMING ON tile=default — control: peak VRAM
-//!      should match cell (2) within polling noise if the streaming dispatch
-//!      is unreachable from the SFT path.
-//!   6. T=8192, FLCE ON, STREAMING ON tile=default — headline: does
-//!      `KILN_STREAMING_PREFILL=1` unblock T=8192 SFT on A6000?
-//!   7. T=8192, FLCE ON, STREAMING ON tile=4096
-//!   8. T=8192, FLCE ON, STREAMING ON tile=2048
+//!   5. T=2048, FLCE ON, STREAMING ON tile=default — control: T=2048 ≤ default
+//!      tile (8192) so no actual tiling happens; peak VRAM should match
+//!      cell (2). Loss must match cell (2) bit-for-bit.
+//!   6. T=8192, FLCE ON, STREAMING ON tile=default — STREAMING ON but tile ==
+//!      T so no actual tiling; primarily exercises the dispatch path.
+//!   7. T=8192, FLCE ON, STREAMING ON tile=4096 — splits T into 2 tiles per
+//!      GDN layer. Expected to reduce peak VRAM enough to clear the A6000
+//!      ceiling that Phase A's monolithic T=8192 cell hits.
+//!   8. T=8192, FLCE ON, STREAMING ON tile=2048 — splits T into 4 tiles per
+//!      GDN layer; the most aggressive tiling at T=8192.
+//!   9. T=16384, FLCE ON, STREAMING ON tile=4096 — stretch: 4 tiles per GDN
+//!      layer. Will OOM if T=8192 already saturates the per-tile envelope.
 //!
 //! Each cell records peak VRAM (background `nvidia-smi` poller @ 50 ms),
 //! step wall-time, and final loss (captured via the `sft_train` progress
@@ -608,6 +613,23 @@ fn main() -> Result<()> {
     )?;
     rows.push(r);
 
+    // 9. Stretch — T=16384 FLCE ON STREAMING ON tile=4096. With the streaming
+    //    branch wired into model_forward_segment (Phase 10 follow-up impl PR),
+    //    this is the most aggressive memory reduction available at the
+    //    longest-context cell. Expected to OOM if T=8192 already saturates
+    //    the per-tile envelope.
+    let r = run_one(
+        16384,
+        true,
+        Some(true),
+        Some(4096),
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
+    )?;
+    rows.push(r);
+
     // Final structured table to stdout.
     println!("\n=== FLCE Phase A + GDN-streaming-audit validation results ===");
     println!(
@@ -667,6 +689,7 @@ fn main() -> Result<()> {
     let t8192_on_stream = cell(8192, true, Some(true), None);
     let t8192_on_stream_4096 = cell(8192, true, Some(true), Some(4096));
     let t8192_on_stream_2048 = cell(8192, true, Some(true), Some(2048));
+    let t16384_on_stream_4096 = cell(16384, true, Some(true), Some(4096));
 
     println!("\n=== Cell summary ===");
     for (label, r) in [
@@ -678,6 +701,7 @@ fn main() -> Result<()> {
         ("T=8192   FLCE=ON  STREAM=ON  tile=default", t8192_on_stream),
         ("T=8192   FLCE=ON  STREAM=ON  tile=4096   ", t8192_on_stream_4096),
         ("T=8192   FLCE=ON  STREAM=ON  tile=2048   ", t8192_on_stream_2048),
+        ("T=16384  FLCE=ON  STREAM=ON  tile=4096   ", t16384_on_stream_4096),
     ] {
         match r {
             Some(r) => println!(
@@ -704,50 +728,93 @@ fn main() -> Result<()> {
     };
     println!("\n=== Phase A verdict: {phase_a_verdict} ===");
 
-    // GDN-streaming-audit verdict. The hypothesis is that streaming GDN
-    // prefill is unreachable from `sft_train` (training calls
-    // `model_forward_segment`, which does not dispatch through
-    // `model_forward_paged_streaming*`). Falsifying the hypothesis would mean
-    // T=8192 + STREAMING ON completes without OOM, or T=2048 + STREAMING ON
-    // shows a peak-VRAM delta vs T=2048 + STREAMING unset that is meaningfully
-    // larger than the nvidia-smi 50 ms polling noise (~50-100 MiB).
-    let stream_t8192_ok = matches!(t8192_on_stream.map(|r| &r.status), Some(Status::Ok));
+    // Phase 10 streaming-impl verdict. The implementation PR wires
+    // `KILN_STREAMING_PREFILL=1` into `model_forward_segment`, so GDN layers
+    // in training-time forward run as a sequence of tiles threading
+    // LinearAttentionState. The bench cells answer two distinct questions:
+    //
+    //   (a) Does the dispatch actually take effect now?  Compare T=2048
+    //       STREAMING=ON tile=default (no tiling possible — tile >= T) to
+    //       T=2048 STREAMING=unset: peak VRAM should match within polling
+    //       noise AND final loss should match bit-for-bit. If loss differs,
+    //       the streaming branch is exercising a different code path (bug).
+    //
+    //   (b) Does tiling actually reduce peak VRAM enough to unblock T=8192
+    //       SFT on A6000?  Look at T=8192 STREAMING=ON tile=4096/2048 —
+    //       smaller tiles should produce monotonically smaller peak VRAM.
+    //       The headline acceptance criterion is that at least ONE of the
+    //       T=8192 STREAMING cells completes without OOM.
     let stream_t8192_4096_ok =
         matches!(t8192_on_stream_4096.map(|r| &r.status), Some(Status::Ok));
     let stream_t8192_2048_ok =
         matches!(t8192_on_stream_2048.map(|r| &r.status), Some(Status::Ok));
-    let any_8192_stream_ok = stream_t8192_ok || stream_t8192_4096_ok || stream_t8192_2048_ok;
+    let stream_t8192_default_ok =
+        matches!(t8192_on_stream.map(|r| &r.status), Some(Status::Ok));
+    let any_8192_stream_ok =
+        stream_t8192_default_ok || stream_t8192_4096_ok || stream_t8192_2048_ok;
 
     let t2048_peak_delta_mib = match (t2048_on, t2048_on_stream) {
         (Some(a), Some(b)) => Some(b.peak_mib as i64 - a.peak_mib as i64),
         _ => None,
     };
+    let t2048_loss_delta = match (parity_on_loss, stream_on_t2048_loss) {
+        (Some(a), Some(b)) => Some((a - b).abs()),
+        _ => None,
+    };
 
-    let stream_audit_verdict = if any_8192_stream_ok {
-        "GREEN — streaming GDN prefill at T=8192 SFT unblocks long-context training on A6000"
+    let stream_impl_verdict = if any_8192_stream_ok {
+        "GREEN — training-time streaming GDN prefill unblocks T=8192 SFT on A6000"
     } else {
-        // T=8192 still OOM with streaming ON. Check the T=2048 control to
-        // confirm streaming has no effect on training-time peak (not just
-        // insufficient).
-        match t2048_peak_delta_mib {
-            Some(delta) if delta.abs() <= 200 => {
-                "RED — KILN_STREAMING_PREFILL has no effect on SFT path; \
-                 streaming dispatch is not wired into training-time forward (model_forward_segment)"
-            }
-            Some(delta) if delta < 0 => {
-                "AMBER — T=8192 still OOMs with streaming ON, but T=2048 shows a peak-VRAM \
-                 reduction; partial reachability suspected"
-            }
-            _ => {
-                "RED — streaming GDN prefill at T=8192 SFT still OOMs on A6000"
-            }
+        // T=8192 still OOM with streaming ON. Inspect the T=8192 cells'
+        // peak-VRAM ladder to distinguish "streaming reduces peak but not
+        // enough" from "streaming has no measurable effect".
+        let peaks_monotonic = match (
+            t8192_on_stream,
+            t8192_on_stream_4096,
+            t8192_on_stream_2048,
+        ) {
+            (Some(a), Some(b), Some(c)) => a.peak_mib >= b.peak_mib && b.peak_mib >= c.peak_mib,
+            _ => false,
+        };
+        if peaks_monotonic {
+            "AMBER — streaming reduces peak VRAM monotonically with smaller tiles, \
+             but tile=2048 still OOMs at T=8192. Per-tile envelope is the bottleneck — \
+             investigate residual GDN intermediates or activation grad-checkpoint storage."
+        } else {
+            "RED — streaming GDN prefill at T=8192 SFT still OOMs on A6000 and peak-VRAM \
+             ladder is not monotonic in tile size. Investigate dispatch reachability."
         }
     };
-    println!("\n=== GDN-streaming-audit verdict: {stream_audit_verdict} ===");
+    println!("\n=== Phase 10 streaming-impl verdict: {stream_impl_verdict} ===");
     if let Some(delta) = t2048_peak_delta_mib {
         println!(
-            "T=2048 peak delta (STREAMING ON vs unset): {} MiB  (control for streaming reachability)",
+            "T=2048 peak delta (STREAMING ON vs unset): {} MiB  (no actual tiling at this T; \
+             non-zero is allocator noise)",
             delta
+        );
+    }
+    if let Some(delta) = t2048_loss_delta {
+        println!(
+            "T=2048 loss delta (STREAMING ON vs unset): {:e}  (must be ~0 — no tiling at T=2048)",
+            delta
+        );
+    }
+    if let (Some(a), Some(b), Some(c)) =
+        (t8192_on_stream, t8192_on_stream_4096, t8192_on_stream_2048)
+    {
+        println!(
+            "T=8192 peak-VRAM ladder by tile size: tile=default(8192)={} MiB, \
+             tile=4096={} MiB, tile=2048={} MiB",
+            a.peak_mib, b.peak_mib, c.peak_mib
+        );
+    }
+    if let (Some(a), Some(b)) = (t16384_on, t16384_on_stream_4096) {
+        println!(
+            "T=16384 peak-VRAM (stretch): STREAM=unset={} MiB ({}), STREAM=ON tile=4096={} MiB ({})",
+            a.peak_mib,
+            a.status.label(),
+            b.peak_mib,
+            b.status.label()
         );
     }
 
@@ -764,8 +831,9 @@ fn main() -> Result<()> {
             "pass": parity_pass,
         },
         "phase_a_verdict": phase_a_verdict,
-        "stream_audit_verdict": stream_audit_verdict,
-        "stream_audit_t2048_peak_delta_mib": t2048_peak_delta_mib,
+        "stream_impl_verdict": stream_impl_verdict,
+        "stream_t2048_peak_delta_mib": t2048_peak_delta_mib,
+        "stream_t2048_loss_delta": t2048_loss_delta,
         "stream_on_t2048_loss": stream_on_t2048_loss,
         "rows": rows.iter().map(|r| {
             serde_json::json!({

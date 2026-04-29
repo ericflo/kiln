@@ -3268,6 +3268,91 @@ pub fn gated_deltanet_forward(
     )
 }
 
+/// Streaming/tiled wrapper around [`gated_deltanet_forward`] for the
+/// training-time forward path.
+///
+/// Slices `x: [B, T, hidden]` along T into tiles of `tile_size` (the last
+/// tile may be partial), calls [`gated_deltanet_forward`] per tile threading
+/// `recurrent_state` and `conv_state` across tile boundaries, and
+/// concatenates the per-tile outputs back into `[B, T, hidden]` along T.
+///
+/// Tiling reduces peak transient activation memory: GDN's F32 intermediates
+/// inside the conv1d / l2_normalize / chunkwise paths allocate per-call
+/// buffers sized by the input length, so smaller tiles → smaller transient
+/// allocations. The `LinearAttentionState` recurrent + conv state hand-off
+/// makes this bit-exact with the monolithic call by construction
+/// (the inference path uses the same hand-off in
+/// [`model_forward_paged_streaming_with`]).
+///
+/// `tile_size` must be a positive multiple of `GDN_CHUNK_SIZE`. The last
+/// tile may be smaller; partial tile lengths are handled by
+/// [`gated_deltanet_forward`] itself (the same way the inference streaming
+/// path handles a non-aligned final tile).
+///
+/// Used by [`model_forward_segment`] when `KILN_STREAMING_PREFILL=1` is set
+/// and the segment's seq_len exceeds `tile_size`.
+pub fn gated_deltanet_forward_streaming(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    config: &kiln_core::config::ModelConfig,
+    recurrent_state: &mut Tensor,
+    conv_state: &mut Tensor,
+    tile_size: usize,
+) -> Result<Tensor> {
+    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+        anyhow::bail!(
+            "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
+            GDN_CHUNK_SIZE
+        );
+    }
+    let (_b, total, _h) = x.dims3()?;
+    if total == 0 {
+        anyhow::bail!("gated_deltanet_forward_streaming requires at least one token");
+    }
+    if total <= tile_size {
+        // Single tile — no benefit from the cat overhead, defer to the
+        // monolithic path so behavior matches the env-off case bit-exactly.
+        return gated_deltanet_forward(
+            backend,
+            x,
+            weights,
+            config,
+            recurrent_state,
+            conv_state,
+            false,
+            false,
+        );
+    }
+
+    let cap = total.div_ceil(tile_size);
+    let mut tile_outs: Vec<Tensor> = Vec::with_capacity(cap);
+    let mut cursor = 0usize;
+    while cursor < total {
+        let end = (cursor + tile_size).min(total);
+        let len = end - cursor;
+        let tile_in = x.narrow(1, cursor, len)?;
+        let tile_out = gated_deltanet_forward(
+            backend,
+            &tile_in,
+            weights,
+            config,
+            recurrent_state,
+            conv_state,
+            false,
+            false,
+        )
+        .with_context(|| {
+            format!("streaming GDN tile [{cursor}, {end}) of {total} (tile_size={tile_size})")
+        })?;
+        tile_outs.push(tile_out);
+        cursor = end;
+    }
+
+    let tile_refs: Vec<&Tensor> = tile_outs.iter().collect();
+    Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn gated_deltanet_forward_decode_if(
     backend: &dyn BackendRuntime,
@@ -5716,6 +5801,28 @@ pub fn model_forward_segment(
         .filter(|&i| matches!(&weights.layers[i].attention, GpuAttentionWeights::Linear(_)))
         .count();
 
+    // Phase 10: training-time streaming GDN prefill.
+    //
+    // When `KILN_STREAMING_PREFILL=1` and the segment's seq_len exceeds the
+    // configured tile size, GDN layers run as a sequence of smaller tiles
+    // threading `LinearAttentionState` per tile. Full-attention layers always
+    // run monolithically — training has no KV cache to thread across tiles,
+    // so a tiled full-attn layer would only attend within its tile and break
+    // the global causal mask. Inter-layer hidden activations stay at full T
+    // shape; only the per-call GDN intermediates (causal_conv1d F32
+    // promotion, l2_normalize F32 buffers, chunkwise scratch) shrink to per-
+    // tile shape. This is the peak transient allocation that pushes T=8192
+    // SFT past the A6000 ceiling per the PR #634 audit.
+    let (_, seq_len, _) = hidden.dims3()?;
+    let stream_device = hidden.device().clone();
+    let streaming = streaming_prefill_enabled_for(&stream_device, seq_len);
+    let stream_tile = if streaming {
+        streaming_tile_tokens_for(&stream_device)
+    } else {
+        0
+    };
+    let stream_active = streaming && stream_tile > 0 && seq_len > stream_tile;
+
     for i in start_layer..end_layer {
         let layer = &weights.layers[i];
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
@@ -5751,17 +5858,30 @@ pub fn model_forward_segment(
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
-                let attn_out = gated_deltanet_forward(
-                    backend,
-                    &normed,
-                    lin_weights,
-                    config,
-                    &mut state.recurrent_states[linear_attn_idx],
-                    &mut state.conv_states[linear_attn_idx],
-                    /* capture_b11_taps = */ false,
-                    /* capture_c41_taps = */ false,
-                )
-                .with_context(|| format!("segment gated deltanet layer {i}"))?;
+                let attn_out = if stream_active {
+                    gated_deltanet_forward_streaming(
+                        backend,
+                        &normed,
+                        lin_weights,
+                        config,
+                        &mut state.recurrent_states[linear_attn_idx],
+                        &mut state.conv_states[linear_attn_idx],
+                        stream_tile,
+                    )
+                    .with_context(|| format!("segment streaming gated deltanet layer {i}"))?
+                } else {
+                    gated_deltanet_forward(
+                        backend,
+                        &normed,
+                        lin_weights,
+                        config,
+                        &mut state.recurrent_states[linear_attn_idx],
+                        &mut state.conv_states[linear_attn_idx],
+                        /* capture_b11_taps = */ false,
+                        /* capture_c41_taps = */ false,
+                    )
+                    .with_context(|| format!("segment gated deltanet layer {i}"))?
+                };
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + attn_out)?
@@ -11247,6 +11367,256 @@ mod tests {
             "decode-after-streaming max_abs_diff={max_abs:e} exceeds 1e-5 \
              (state was not bit-exact preserved across tile boundaries)"
         );
+        Ok(())
+    }
+
+    /// Phase 10 — training-time streaming GDN parity (CPU).
+    ///
+    /// Direct unit test of [`gated_deltanet_forward_streaming`] against the
+    /// monolithic [`gated_deltanet_forward`] on a small GDN-only input. Both
+    /// paths must produce equal output tensors and equal final state.
+    ///
+    /// This test does NOT touch any `KILN_STREAMING_PREFILL` env vars so it
+    /// is safe under multi-threaded `cargo test`; the env-driven dispatch
+    /// inside `model_forward_segment` is exercised separately by
+    /// `test_model_forward_segment_streaming_matches_monolithic_cpu` (which
+    /// relies on nextest per-test process isolation).
+    #[test]
+    fn test_gated_deltanet_forward_streaming_matches_monolithic_cpu() -> Result<()> {
+        let config = streaming_test_config();
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+
+        // Pull the first GDN layer (layer 0 — full_attention_interval=4 so
+        // layers 0,1,2 are GDN and layer 3 is full-attn).
+        let lin_weights = match &weights.layers[0].attention {
+            GpuAttentionWeights::Linear(w) => w,
+            GpuAttentionWeights::Full(_) => panic!("test setup error: layer 0 must be GDN"),
+        };
+
+        // Deterministic input. T must be a multiple of GDN_CHUNK_SIZE so
+        // both monolithic and tiled paths exercise the chunkwise kernel.
+        let total = GDN_CHUNK_SIZE * 3; // 192 tokens
+        let tile = GDN_CHUNK_SIZE; // 64-token tiles -> 3 tiles
+        let n: usize = total * config.hidden_size;
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.013).sin()) * 0.1).collect();
+        let x = Tensor::new(data, &device)?.reshape((1, total, config.hidden_size))?;
+
+        // Monolithic.
+        let mut mono_state = LinearAttentionState::new(&config, &device)?;
+        let mono_out = gated_deltanet_forward(
+            &backend,
+            &x,
+            lin_weights,
+            &config,
+            &mut mono_state.recurrent_states[0],
+            &mut mono_state.conv_states[0],
+            false,
+            false,
+        )?;
+
+        // Streaming/tiled.
+        let mut stream_state = LinearAttentionState::new(&config, &device)?;
+        let stream_out = gated_deltanet_forward_streaming(
+            &backend,
+            &x,
+            lin_weights,
+            &config,
+            &mut stream_state.recurrent_states[0],
+            &mut stream_state.conv_states[0],
+            tile,
+        )?;
+
+        assert_eq!(mono_out.dims(), stream_out.dims());
+        let mono_v = mono_out.flatten_all()?.to_vec1::<f32>()?;
+        let stream_v = stream_out.flatten_all()?.to_vec1::<f32>()?;
+        let max_abs_out = mono_v
+            .iter()
+            .zip(stream_v.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs_out <= 1e-5,
+            "streaming GDN output drifted from monolithic: max_abs_diff={max_abs_out:e}"
+        );
+
+        // Final recurrent state must match (the load-bearing invariant for
+        // training-time streaming — autograd flows through this state thread).
+        let mr = mono_state.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?;
+        let sr = stream_state.recurrent_states[0]
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(mr.len(), sr.len());
+        let max_abs_recur = mr
+            .iter()
+            .zip(sr.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs_recur <= 1e-5,
+            "streaming GDN recurrent state drifted: max_abs_diff={max_abs_recur:e}"
+        );
+
+        // Final conv state must match (drives correctness of any subsequent
+        // decode step that consumes it).
+        let mc = mono_state.conv_states[0].flatten_all()?.to_vec1::<f32>()?;
+        let sc = stream_state.conv_states[0]
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(mc.len(), sc.len());
+        let max_abs_conv = mc
+            .iter()
+            .zip(sc.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs_conv <= 1e-5,
+            "streaming GDN conv state drifted: max_abs_diff={max_abs_conv:e}"
+        );
+
+        Ok(())
+    }
+
+    /// Phase 10 — training-time streaming GDN parity for `model_forward_segment`.
+    ///
+    /// Runs `model_forward_segment` over the full layer stack twice on the
+    /// same input: once monolithic (env unset), once with
+    /// `KILN_STREAMING_PREFILL=1` and `KILN_STREAMING_TILE_TOKENS=64` so the
+    /// 192-token input is split into 3 tiles. The two outputs must match
+    /// within FP32 tolerance and the final per-layer state must match.
+    ///
+    /// Relies on nextest per-test process isolation for safe env-var
+    /// manipulation; `cargo nextest run` is the canonical kiln test runner
+    /// (see `crates/kiln-model/src/forward.rs` `test_streaming_prefill_env_helpers`).
+    #[test]
+    fn test_model_forward_segment_streaming_matches_monolithic_cpu() -> Result<()> {
+        let config = streaming_test_config();
+        let device = Device::Cpu;
+        let weights = make_hybrid_gpu_weights(
+            &device,
+            config.vocab_size,
+            config.hidden_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.intermediate_size,
+            config.num_layers,
+            config.full_attention_interval,
+        )?;
+        let backend = test_backend(&device);
+
+        let total = GDN_CHUNK_SIZE * 3; // 192 tokens
+        let tile = GDN_CHUNK_SIZE; // 64-token tiles -> 3 tiles
+        let n: usize = total * config.hidden_size;
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.017).cos()) * 0.1).collect();
+        let hidden = Tensor::new(data, &device)?.reshape((1, total, config.hidden_size))?;
+        let positions: Vec<u32> = (0..total as u32).collect();
+
+        // Monolithic — env vars unset for this thread/process.
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+        }
+        let mut mono_state = LinearAttentionState::new(&config, &device)?;
+        let mono_out = model_forward_segment(
+            &backend,
+            hidden.clone(),
+            &weights,
+            &config,
+            &positions,
+            0,
+            config.num_layers,
+            Some(&mut mono_state),
+            None,
+        )?;
+
+        // Streaming — env vars set so streaming_prefill_enabled_for(Cpu, T)
+        // returns true and tile_size = 64.
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", tile.to_string());
+        }
+        let mut stream_state = LinearAttentionState::new(&config, &device)?;
+        let stream_out = model_forward_segment(
+            &backend,
+            hidden.clone(),
+            &weights,
+            &config,
+            &positions,
+            0,
+            config.num_layers,
+            Some(&mut stream_state),
+            None,
+        )?;
+        // Restore for subsequent tests in this process (best-effort).
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+        }
+
+        assert_eq!(mono_out.dims(), stream_out.dims());
+        let mv = mono_out.flatten_all()?.to_vec1::<f32>()?;
+        let sv = stream_out.flatten_all()?.to_vec1::<f32>()?;
+        let max_abs = mv
+            .iter()
+            .zip(sv.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(
+            max_abs <= 1e-4,
+            "model_forward_segment streaming output drifted from monolithic: max_abs_diff={max_abs:e}"
+        );
+
+        for (l, (m, s)) in mono_state
+            .recurrent_states
+            .iter()
+            .zip(stream_state.recurrent_states.iter())
+            .enumerate()
+        {
+            let mv = m.flatten_all()?.to_vec1::<f32>()?;
+            let sv = s.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(mv.len(), sv.len(), "recurrent_states[{l}] length mismatch");
+            let max_abs = mv
+                .iter()
+                .zip(sv.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs <= 1e-4,
+                "model_forward_segment streaming recurrent_states[{l}] drifted: max_abs_diff={max_abs:e}"
+            );
+        }
+        for (l, (m, s)) in mono_state
+            .conv_states
+            .iter()
+            .zip(stream_state.conv_states.iter())
+            .enumerate()
+        {
+            let mv = m.flatten_all()?.to_vec1::<f32>()?;
+            let sv = s.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(mv.len(), sv.len(), "conv_states[{l}] length mismatch");
+            let max_abs = mv
+                .iter()
+                .zip(sv.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_abs <= 1e-4,
+                "model_forward_segment streaming conv_states[{l}] drifted: max_abs_diff={max_abs:e}"
+            );
+        }
+
         Ok(())
     }
 
