@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Audits
+- Audited whether the existing Phase 7 streaming GDN prefill (`KILN_STREAMING_PREFILL`) is reachable from the SFT training path as a remediation for Finding 2 of the Phase A validation (T=8192/T=16384 SFT OOM on A6000). **Result: RED — streaming dispatch lives only in `model_forward_paged_streaming*`, none of which the trainer calls; the env flag is parsed but has no effect on training.** Empirical confirmation on A6000: T=2048 STREAMING ON peak VRAM matches STREAMING unset to 0 MiB and loss is bit-identical; T=8192 STREAMING ON at three tile sizes (default/4096/2048) all OOM identically at the 48 GB ceiling in 0.7 s. Closing Finding 2 requires net-new implementation work (e.g., a streaming branch inside `model_forward_segment`), not configuration. See `docs/audits/PHASE10_GDN_TRAINING_STREAMING.md` for source/empirical evidence and the remediation menu. Raw log: `docs/flce_phase_a_streaming_raw_2026-04-29.log`.
+
 ### Validation
 - Validated Phase 10 Phase A FLCE on A6000 (48 GB) at T ∈ {2048, 8192, 16384} with rank-8 LoRA and gradient checkpointing ON. **Result: RED — Phase A is insufficient on A6000.** Two findings: (1) `KILN_USE_FLCE=1` fails before completing a step at T=2048 with `matmul is only supported for contiguous tensors` — the V-axis chunk of `embed_tokens_t` is non-contiguous and the chunked-vocab matmul rejects it; (2) even with that bug fixed, T=8192 and T=16384 still pin peak VRAM at the 48 GB A6000 ceiling, indicating GDN-side activations (not the head) dominate at long T. See `docs/audits/PHASE10_FLCE_PREFLIGHT.md` (Phase A validation section, 2026-04-29) for the table, raw log, and required follow-ups. Bench: `crates/kiln-server/examples/flce_phase_a_validation_bench.rs`.
 

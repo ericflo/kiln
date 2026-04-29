@@ -355,3 +355,32 @@ naive `log_sum_exp - gather` reference.
 - **Phase B (CUDA fused FLCE kernel) and GDN-side activation cleanup are
   still required** before T=8192 / T=16384 SFT will fit on A6000. See
   "Required follow-ups" §2 above.
+
+## Phase A streaming check — 2026-04-29
+
+Status: **RED — `KILN_STREAMING_PREFILL` has no effect on the SFT path**
+
+Required follow-up §2 above asked: "investigate streaming/chunked GDN
+prefill for the training-time forward (existing kiln-gdn-prefill
+streaming code already cuts inference peak roughly in half at 128k)."
+The audit doc [`PHASE10_GDN_TRAINING_STREAMING.md`](./PHASE10_GDN_TRAINING_STREAMING.md)
+closes that question with both source-level and empirical evidence.
+
+Headline: the existing Phase 7 streaming dispatch lives only in
+`model_forward_paged_streaming{,_with,…}` (`forward.rs:7014-7222`). The
+SFT path calls `model_forward_segment` / `model_forward_no_head`, which
+do not reference any streaming entry point. Setting
+`KILN_STREAMING_PREFILL=1` during a training step is parsed but never
+acted on. The empirical bench confirms this: at T=2048, peak VRAM with
+streaming on equals peak VRAM with streaming unset to within 0 MiB,
+and the loss matches bit-for-bit. At T=8192, three different tile
+sizes (default/4096/2048) all OOM identically at the GPU ceiling
+(48 490 MiB) in 0.7 s — indistinguishable from the streaming-unset
+T=8192 OOM cell.
+
+Implication: closing Finding 2 above requires **net-new
+implementation work**, not configuration. The smallest change that
+could plausibly work is a streaming branch inside
+`model_forward_segment` that tiles along T while threading
+`LinearAttentionState`. See the audit doc for the remediation menu
+and scope estimates.
