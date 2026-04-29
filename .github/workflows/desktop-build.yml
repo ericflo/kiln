@@ -135,6 +135,19 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+      # Disable updater artifact creation in-place for the unsigned build.
+      # The pubkey is configured in tauri.conf.json, so tauri-bundler aborts
+      # with "A public key has been found, but no private key" when
+      # TAURI_SIGNING_PRIVATE_KEY is unset. Flipping createUpdaterArtifacts
+      # to false skips the updater bundle entirely. Updater bundles only
+      # matter for tagged releases anyway.
+      - name: Disable updater artifacts for unsigned PR/main build
+        if: "!startsWith(github.ref, 'refs/tags/desktop-v')"
+        shell: bash
+        working-directory: desktop
+        run: |
+          node -e "const fs=require('fs');const p='tauri.conf.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));d.bundle.createUpdaterArtifacts=false;fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n');console.log('Disabled createUpdaterArtifacts for unsigned build');"
+
       - name: Build (tauri-action, PR/main unsigned)
         if: "!startsWith(github.ref, 'refs/tags/desktop-v')"
         uses: tauri-apps/tauri-action@v0
@@ -149,7 +162,8 @@ jobs:
           # The only reliable way to skip signing is to NOT pass the env
           # vars at all. Updater signing happens exclusively on desktop-v*
           # tag pushes. PR/main builds produce unsigned debug bundles for
-          # CI verification only.
+          # CI verification only (with createUpdaterArtifacts patched off
+          # by the previous step).
         with:
           projectPath: desktop
           args: ${{ matrix.args }}
