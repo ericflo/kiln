@@ -77,10 +77,12 @@ fn build_example(tokenizer: &KilnTokenizer, target_t: usize) -> Result<(SftExamp
             kiln_core::tokenizer::ChatMessage {
                 role: "user".to_string(),
                 content: user.clone(),
+                ..Default::default()
             },
             kiln_core::tokenizer::ChatMessage {
                 role: "assistant".to_string(),
                 content: assistant.clone(),
+                ..Default::default()
             },
         ];
         let text = tokenizer
@@ -99,10 +101,12 @@ fn build_example(tokenizer: &KilnTokenizer, target_t: usize) -> Result<(SftExamp
                             kiln_core::tokenizer::ChatMessage {
                                 role: "user".to_string(),
                                 content: user.clone(),
+                                ..Default::default()
                             },
                             kiln_core::tokenizer::ChatMessage {
                                 role: "assistant".to_string(),
                                 content: assistant.clone(),
+                                ..Default::default()
                             },
                         ])
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
@@ -126,10 +130,12 @@ fn build_example(tokenizer: &KilnTokenizer, target_t: usize) -> Result<(SftExamp
         kiln_core::tokenizer::ChatMessage {
             role: "user".to_string(),
             content: user.clone(),
+            ..Default::default()
         },
         kiln_core::tokenizer::ChatMessage {
             role: "assistant".to_string(),
             content: assistant.clone(),
+            ..Default::default()
         },
     ];
     let final_text = tokenizer

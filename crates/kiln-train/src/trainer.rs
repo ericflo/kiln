@@ -27,6 +27,7 @@ fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessa
         .map(|m| kiln_core::tokenizer::ChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
+            ..Default::default()
         })
         .collect()
 }
@@ -794,6 +795,7 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
         full_messages.push(kiln_core::tokenizer::ChatMessage {
             role: "assistant".to_string(),
             content: scored.text.clone(),
+            ..Default::default()
         });
 
         let full_text = tokenizer

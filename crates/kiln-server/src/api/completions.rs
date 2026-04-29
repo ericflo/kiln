@@ -317,6 +317,22 @@ pub struct ChatCompletionRequest {
     /// keyed by a hash of the (name, scale) pairs.
     #[serde(default)]
     pub adapters: Option<Vec<AdapterRef>>,
+    /// OpenAI-style tool/function definitions. Forwarded as opaque JSON into
+    /// the chat template's Jinja context as `tools`. Templates that branch on
+    /// `{% if tools %}` (e.g. Qwen3.5-4B's official template emits its
+    /// `<tools>` schemas + tool-calling prelude only when this is set) require
+    /// this round-trip — without it the model never sees the tool schemas at
+    /// inference time and can't produce tool calls at all.
+    #[serde(default)]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// OpenAI-style `tool_choice` (`"none" | "auto" | "required"` or an object
+    /// naming a specific tool). Accepted at the API edge so OpenAI clients
+    /// don't see "unknown field" errors; threaded into the template context as
+    /// `tool_choice` so HF templates that branch on it render correctly. Kiln
+    /// itself does not enforce the choice at the sampler — that's caller
+    /// responsibility for now.
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 /// A single source adapter for per-request composition.
@@ -329,7 +345,7 @@ pub struct AdapterRef {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    #[serde(deserialize_with = "deserialize_content")]
+    #[serde(default, deserialize_with = "deserialize_optional_content")]
     pub content: String,
     /// llama.cpp / DeepSeek-style chain-of-thought channel. Populated for
     /// reasoning models (Qwen3.5, DeepSeek R1, …) when the model emitted a
@@ -339,12 +355,44 @@ pub struct Message {
     /// the OpenAI shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Tool calls emitted by the assistant on a prior turn (OpenAI shape:
+    /// `[{"id": "call_…", "type": "function", "function": {"name": …,
+    /// "arguments": "…"}}, …]`). Round-tripped into the chat template so
+    /// multi-turn tool-use conversations render correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    /// Function name on assistant messages with named function calls, OR the
+    /// tool name on `role: "tool"` messages. Some templates branch on this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// On `role: "tool"` messages, identifies which assistant `tool_calls[*]`
+    /// entry this message responds to. Required by OpenAI for multi-tool
+    /// assistant turns; templates use it to pair the tool response with the
+    /// originating tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
-/// Accept `content` as either a plain string or an OpenAI-style array of
-/// content parts (`[{"type": "text", "text": "..."}, ...]`). Text parts are
-/// concatenated in order; non-text parts are ignored since kiln is text-only.
-fn deserialize_content<'de, D>(deserializer: D) -> Result<String, D::Error>
+/// Convert an API `Message` to the core tokenizer's `ChatMessage`, propagating
+/// the OpenAI tool fields (`tool_calls`, `name`, `tool_call_id`) so the chat
+/// template renders past assistant tool calls and `role: "tool"` responses.
+fn message_to_chat(m: &Message) -> ChatMessage {
+    ChatMessage {
+        role: m.role.clone(),
+        content: m.content.clone(),
+        tool_calls: m.tool_calls.clone(),
+        name: m.name.clone(),
+        tool_call_id: m.tool_call_id.clone(),
+    }
+}
+
+/// Accept `content` as either a plain string, an OpenAI-style array of
+/// content parts (`[{"type": "text", "text": "..."}, ...]`), `null`, or
+/// missing. Text parts are concatenated in order; non-text parts are ignored
+/// since kiln is text-only. `null` and missing both yield an empty string —
+/// the assistant-tool-calls-only OpenAI shape (`{"role": "assistant",
+/// "content": null, "tool_calls": [...]}`) deserializes cleanly.
+fn deserialize_optional_content<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -355,9 +403,13 @@ where
         Parts(Vec<serde_json::Value>),
     }
 
-    match Content::deserialize(deserializer)? {
-        Content::Text(s) => Ok(s),
-        Content::Parts(parts) => {
+    // `Option<T>` handles both the missing-key case (via `#[serde(default)]`
+    // on the field) and an explicit `null` value, falling through to the
+    // untagged enum for plain strings and arrays.
+    match Option::<Content>::deserialize(deserializer)? {
+        None => Ok(String::new()),
+        Some(Content::Text(s)) => Ok(s),
+        Some(Content::Parts(parts)) => {
             let mut out = String::new();
             for part in parts {
                 let Some(obj) = part.as_object() else {
@@ -579,20 +631,16 @@ async fn chat_completions_inner(
     // just generation. Streaming and non-streaming paths both consume this.
     let request_start = std::time::Instant::now();
 
-    // Convert request messages to ChatMessage for template formatting
-    let chat_messages: Vec<ChatMessage> = req
-        .messages
-        .iter()
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
+    // Convert request messages to ChatMessage for template formatting,
+    // forwarding `tool_calls` / `name` / `tool_call_id` so multi-turn
+    // tool-use conversations render correctly. Tools schema is threaded
+    // separately via `apply_chat_template_with_tools`.
+    let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
 
     // Apply chat template and tokenize
     let prompt_text = state
         .tokenizer
-        .apply_chat_template(&chat_messages)
+        .apply_chat_template_full(&chat_messages, req.tools.as_deref(), req.tool_choice.as_ref())
         .map_err(ApiError::chat_template_failed)?;
     let prompt_tokens = state
         .tokenizer
@@ -1326,6 +1374,9 @@ async fn generate_real(
                 role: "assistant".to_string(),
                 content: completion_text,
                 reasoning_content,
+                tool_calls: None,
+                name: None,
+                tool_call_id: None,
             },
             finish_reason: finish_reason.to_string(),
         }],
@@ -1959,6 +2010,9 @@ async fn generate_mock(
                 content: completion_text,
                 // Mock backend never emits a reasoning block.
                 reasoning_content: None,
+                tool_calls: None,
+                name: None,
+                tool_call_id: None,
             },
             finish_reason: "stop".to_string(),
         }],
@@ -2189,6 +2243,9 @@ async fn batch_completions_inner(
                     // Batch input messages never carry historical reasoning;
                     // the chat template renders them as plain text turns.
                     reasoning_content: None,
+                    tool_calls: None,
+                    name: None,
+                    tool_call_id: None,
                 })
                 .collect();
             let synth_req = ChatCompletionRequest {
@@ -2203,6 +2260,8 @@ async fn batch_completions_inner(
                 seed: derived_seed,
                 adapter: None,
                 adapters: None,
+                tools: None,
+                tool_choice: None,
             };
             let state_clone = state.clone();
             handles.push(tokio::spawn(async move {
@@ -2277,18 +2336,11 @@ async fn generate_one_response(
 ) -> Result<ChatCompletionResponse, ApiError> {
     let request_start = std::time::Instant::now();
 
-    let chat_messages: Vec<ChatMessage> = req
-        .messages
-        .iter()
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
+    let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
 
     let prompt_text = state
         .tokenizer
-        .apply_chat_template(&chat_messages)
+        .apply_chat_template_full(&chat_messages, req.tools.as_deref(), req.tool_choice.as_ref())
         .map_err(ApiError::chat_template_failed)?;
     let prompt_tokens = state
         .tokenizer
@@ -2420,6 +2472,77 @@ mod tests {
         );
         assert_eq!(req.messages[0].content, "be nice");
         assert_eq!(req.messages[1].content, "hi");
+    }
+
+    #[test]
+    fn tools_round_trip_preserved_on_request() {
+        let json = r#"{
+            "messages":[{"role":"user","content":"run ls"}],
+            "tools":[
+                {"type":"function","function":{"name":"Bash","description":"Run a command","parameters":{"type":"object"}}},
+                {"type":"function","function":{"name":"Read","description":"Read a file","parameters":{"type":"object"}}}
+            ],
+            "tool_choice":"auto"
+        }"#;
+        let req = parse_request(json);
+        let tools = req.tools.expect("tools should deserialize");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], "Bash");
+        assert_eq!(tools[1]["function"]["name"], "Read");
+        assert_eq!(req.tool_choice.as_ref().and_then(|v| v.as_str()), Some("auto"));
+    }
+
+    #[test]
+    fn message_tool_calls_round_trip_preserved() {
+        let json = r#"{
+            "messages":[
+                {"role":"assistant","content":null,"tool_calls":[
+                    {"id":"call_42","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}
+                ]},
+                {"role":"tool","name":"Bash","tool_call_id":"call_42","content":"file.txt"}
+            ]
+        }"#;
+        let req = parse_request(json);
+        // Assistant message with content:null lands as empty string + tool_calls populated.
+        assert_eq!(req.messages[0].role, "assistant");
+        assert_eq!(req.messages[0].content, "");
+        let calls = req.messages[0].tool_calls.as_ref().expect("tool_calls present");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_42");
+        assert_eq!(calls[0]["function"]["name"], "Bash");
+        // Tool response with id + name.
+        assert_eq!(req.messages[1].role, "tool");
+        assert_eq!(req.messages[1].tool_call_id.as_deref(), Some("call_42"));
+        assert_eq!(req.messages[1].name.as_deref(), Some("Bash"));
+        assert_eq!(req.messages[1].content, "file.txt");
+    }
+
+    #[test]
+    fn tools_absent_request_keeps_options_none() {
+        let req = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
+        assert!(req.tools.is_none(), "tools should default to None when absent");
+        assert!(req.tool_choice.is_none(), "tool_choice should default to None");
+        assert!(req.messages[0].tool_calls.is_none());
+        assert!(req.messages[0].name.is_none());
+        assert!(req.messages[0].tool_call_id.is_none());
+    }
+
+    #[test]
+    fn message_to_chat_propagates_tool_fields() {
+        let m = Message {
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            name: Some("Bash".to_string()),
+            tool_call_id: Some("call_1".to_string()),
+        };
+        let chat = message_to_chat(&m);
+        assert_eq!(chat.role, "tool");
+        assert_eq!(chat.content, "ok");
+        assert_eq!(chat.name.as_deref(), Some("Bash"));
+        assert_eq!(chat.tool_call_id.as_deref(), Some("call_1"));
+        assert!(chat.tool_calls.is_none());
     }
 
     #[test]
