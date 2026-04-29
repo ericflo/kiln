@@ -1,0 +1,38 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA A40, 570.195.03
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+=== Phase 10 §1 — RMSNorm CustomOp2 SFT validation (Qwen3.5-4B) ===
+Loading model from /workspace/qwen3.5-4b
+[2m2026-04-29T21:56:47.537236Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-29T21:56:47.538249Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-29T21:56:47.538422Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-29T21:56:47.538432Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-29T21:56:47.538490Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+Baseline VRAM (post-load): 16343 MiB
+Warmup skipped (would leave 16 GB cached in allocator).
+
+--- T target = 16384  RMSNORM_CUSTOM_OP = ON ---
+  Tokenized length: 16380 tokens (target 16384)
+[2m2026-04-29T21:56:54.478699Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"phase10-rmsnorm-T16384-rmsnorm-on"
+[2m2026-04-29T21:56:54.493202Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T21:56:54.575013Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m8 [3mvram_gb[0m[2m=[0m48.305799168 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T21:56:54.575055Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m8 [3mboundaries[0m[2m=[0m[(0, 4), (4, 8), (8, 12), (12, 16), (16, 20), (20, 24), (24, 28), (28, 32)]
+[2m2026-04-29T21:56:54.607806Z[0m [32m INFO[0m [2mkiln_model::forward[0m[2m:[0m kiln rmsnorm gate [3mtotal_vram_mib[0m[2m=[0m46068 [3mthreshold_mib[0m[2m=[0m48128 [3mdetection_source[0m[2m=[0mnvidia-smi [3mforce_override[0m[2m=[0mtrue [3mfused_path[0m[2m=[0m"ON"
+  status=OOM  peak=45095 MiB  delta=28752 MiB  step=0.89s  final_loss=None
+
+| T target | T actual | RMSNorm op | status | peak (MiB) | delta (MiB) | step (s) | final loss |
+|---------:|---------:|:----------:|:------:|-----------:|------------:|---------:|-----------:|
+| 16384 | 16380 | on | OOM | 45095 | 28752 | 0.89 | - |
+
+thread 'main' (14606) panicked at crates/kiln-server/examples/phase10_rmsnorm_bench.rs:412:58:
+index out of bounds: the len is 1 but the index is 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+EXIT=101
+
