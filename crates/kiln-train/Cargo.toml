@@ -24,7 +24,7 @@ indicatif = "0.18"
 console = "0.16"
 
 [features]
-cuda = ["kiln-model/cuda"]
+cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda"]
 metal = ["kiln-model/metal"]
 
 [dev-dependencies]

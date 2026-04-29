@@ -11,7 +11,9 @@ use candle_core::{DType, Device, Tensor, Var};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy};
+use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy_dispatch};
+#[cfg(test)]
+use kiln_flce_kernel::fused_linear_cross_entropy;
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState, model_forward,
@@ -1398,7 +1400,7 @@ fn tile_loss_explicit(
 
     let loss = if use_flce() {
         let normed = model_forward_final_norm(&hidden_padded, weights, model_config)?;
-        fused_linear_cross_entropy(
+        fused_linear_cross_entropy_dispatch(
             &normed,
             &weights.embed_tokens_t,
             &input_ids_padded,
@@ -1714,7 +1716,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
 
     let tail_loss = if use_flce() {
         let normed = model_forward_final_norm(&tail_hidden, weights, model_config)?;
-        fused_linear_cross_entropy(
+        fused_linear_cross_entropy_dispatch(
             &normed,
             &weights.embed_tokens_t,
             input_ids,
@@ -2132,7 +2134,7 @@ fn checkpointed_forward_backward(
         // LM head + loss (or fused LCE when KILN_USE_FLCE=1).
         let loss = if use_flce() {
             let normed = model_forward_final_norm(&hidden, weights, model_config)?;
-            fused_linear_cross_entropy(
+            fused_linear_cross_entropy_dispatch(
                 &normed,
                 &weights.embed_tokens_t,
                 input_ids,
@@ -2185,7 +2187,7 @@ fn standard_forward_backward(
             Some(&lora_weights),
         )
         .context("training forward pass (FLCE)")?;
-        fused_linear_cross_entropy(
+        fused_linear_cross_entropy_dispatch(
             &hidden,
             &weights.embed_tokens_t,
             input_ids,

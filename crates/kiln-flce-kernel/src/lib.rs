@@ -8,20 +8,28 @@
 //!
 //! # Phase A vs Phase B
 //!
-//! Phase A (this crate today) is a pure-candle reference implementation that
-//! chunks the forward over the vocab dim. Forward peak memory is roughly
-//! `T_active * chunk_size * 4 bytes` instead of `T_active * V * 4 bytes`
-//! (~37× smaller for Qwen3.5-4B with chunk=4096 and V=151936). Backward
-//! currently flows through candle autograd, so intermediate chunk tensors
-//! are retained — true memory savings land in Phase B when we swap the
-//! forward for a raw CUDA kernel that stores only scalars and recomputes
-//! in its manual `bwd()`.
+//! Phase A ([`fused_linear_cross_entropy`]) is a pure-candle reference
+//! implementation that chunks the forward over the vocab dim. Forward peak
+//! memory is roughly `T_active * chunk_size * 4 bytes` instead of `T_active *
+//! V * 4 bytes` (~37× smaller for Qwen3.5-4B with chunk=4096 and V=151936).
+//! Backward flows through candle autograd, so intermediate chunk tensors
+//! (`logits_chunk`, `shifted`, `shifted.exp()`) are retained for the entire
+//! forward — at T=8192 with V=248320 this is ~23 GiB held live across 61
+//! vocab chunks, which OOMs SFT on A6000 (see
+//! `docs/audits/PHASE10_MODE_B_TRACE.md`).
 //!
-//! Phase B (follow-up) will replace `fused_linear_cross_entropy` with a
-//! `CustomOp1` whose `cuda_fwd` calls a vendored CUDA kernel and whose
-//! manual `bwd()` recomputes the chunks to produce `dhidden` without
-//! retaining the forward graph. The public API below is stable across
-//! both phases.
+//! Phase B ([`fused_linear_cross_entropy_phase_b`]) replaces the autograd
+//! graph with a [`candle_core::CustomOp1`] whose `bwd()` recomputes each
+//! vocab chunk on the fly. The forward stores only the scalar loss; chunk
+//! intermediates created during the forward pass are local to the op's
+//! `cpu_fwd`/`cuda_fwd` body and dropped on return, breaking the
+//! ~23 GiB-of-FLCE-intermediates retention pattern. Estimated peak-VRAM
+//! saving at T=8192 SFT on A6000: ~22 GiB. Math is identical to Phase A
+//! up to floating-point associativity.
+//!
+//! [`fused_linear_cross_entropy_dispatch`] picks A or B based on the
+//! `KILN_FLCE_PHASE_A=1` env var (default Phase B; opt back into Phase A
+//! for parity debugging).
 //!
 //! # Target
 //!
@@ -33,6 +41,9 @@
 use anyhow::{Context, Result, anyhow};
 use candle_core::{DType, Device, Tensor, D};
 
+mod phase_b;
+pub use phase_b::fused_linear_cross_entropy_phase_b;
+
 /// Default chunk size along the vocab dimension.
 ///
 /// The preflight math picked 4096 as a reasonable balance between kernel
@@ -41,7 +52,53 @@ use candle_core::{DType, Device, Tensor, D};
 /// that per-chunk launch cost is absorbed.
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
 
-/// Compute cross-entropy loss using a fused linear + cross-entropy pass.
+/// Read the `KILN_FLCE_PHASE_A` env var. When set (`1`/`true`/`yes`), the
+/// dispatch helper [`fused_linear_cross_entropy_dispatch`] routes to Phase A
+/// (this function); otherwise it routes to Phase B (the CustomOp1 path).
+///
+/// Phase B is the production default — the autograd-graph reduction is the
+/// only audit-supported path to T=8192 SFT on A6000 (see
+/// `docs/audits/PHASE10_MODE_B_TRACE.md`). Phase A is kept as the parity
+/// reference and as an escape hatch for debugging.
+pub fn use_phase_a() -> bool {
+    std::env::var("KILN_FLCE_PHASE_A")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+/// Dispatch to either [`fused_linear_cross_entropy`] (Phase A) or
+/// [`fused_linear_cross_entropy_phase_b`] (Phase B) based on the
+/// `KILN_FLCE_PHASE_A` env var. Default is Phase B.
+///
+/// Trainer call sites should use this function instead of the explicit
+/// Phase A/B helpers so a single env-var flip switches every FLCE call.
+pub fn fused_linear_cross_entropy_dispatch(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    device: &Device,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    if use_phase_a() {
+        fused_linear_cross_entropy(hidden, head_t, input_ids, label_mask, device, chunk_size)
+    } else {
+        fused_linear_cross_entropy_phase_b(
+            hidden, head_t, input_ids, label_mask, device, chunk_size,
+        )
+    }
+}
+
+/// Compute cross-entropy loss using a fused linear + cross-entropy pass
+/// (**Phase A** — pure-candle reference, autograd flows through chunk
+/// intermediates).
+///
+/// Phase A is kept as the parity reference and as an opt-in escape hatch
+/// for debugging via `KILN_FLCE_PHASE_A=1`. New training code should call
+/// [`fused_linear_cross_entropy_dispatch`] (default Phase B).
 ///
 /// # Arguments
 ///
