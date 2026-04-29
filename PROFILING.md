@@ -1,5 +1,14 @@
 # Kiln Profiling Report
 
+> **Phase 10 (Liger Kernel Integration) frontier exhausted as of PR #650
+> (2026-04-29).** All three Phase 10 chapters closed; remaining Liger
+> priority kernels (RoPE, SwiGLU/GeGLU, Layer Norm, FleCE Phase C) are
+> sub-floor under the math-ceiling rule on the post-#647 SFT-step profile.
+> See [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)
+> for the verdict consolidation, math-ceiling table, and ranked pivot
+> recommendations. No further Liger kernel ports planned without a fresh
+> re-profile that surfaces a candidate ≥1.05× ceiling.
+
 > **Note on artifact links below:** Raw nvtx CSVs and bench logs were removed
 > from the working tree on 2026-04-25 to clean up the top-level directory.
 > The exact files cited in this report are preserved in git history at commit
