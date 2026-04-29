@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::sampling::gumbel_softmax;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Extract the last-position logits from a `[..., vocab_size]` tensor and flatten
 /// them to a 1-D `[vocab_size]` tensor that still lives on the original device.
@@ -170,7 +170,7 @@ pub fn sample_with_params(
     // Categorical sampling (host-side; candle has no GPU categorical RNG).
     let mut rng: StdRng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_os_rng(),
+        None => rand::make_rng::<StdRng>(),
     };
 
     let r: f32 = rng.random();
@@ -221,7 +221,7 @@ fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Resu
 
     let mut rng: StdRng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_os_rng(),
+        None => rand::make_rng::<StdRng>(),
     };
     let threshold = rng.random::<f32>() * sum;
     let mut cumsum = 0.0_f32;
