@@ -788,13 +788,26 @@ fn cap_auto_num_blocks(
     is_metal: bool,
     total_vram_bytes: u64,
 ) -> usize {
-    let model_cap_blocks = max_position_embeddings
-        .div_ceil(block_size)
-        .max(MIN_AUTO_KV_BLOCKS);
+    // On Metal (unified memory), an eagerly-zeroed KV cache larger than the
+    // model context can dominate memory pressure on the rest of the system,
+    // so we keep the historical "≤ one full context, further capped by
+    // detected memory tier" behavior.
+    //
+    // On CUDA / CPU, memory-aware sizing already drove `raw_blocks` from the
+    // available VRAM × `inference_memory_fraction` budget. Capping again at
+    // one model-context-worth of blocks (≈16K for Qwen3.5-4B's 256K window)
+    // bottlenecks concurrent serving: 4 in-flight 25K-token prompts +
+    // generation already exhaust 6.5K blocks each, leaving the auto cap
+    // routinely OOM-borderline under realistic load even on a 48 GiB A40.
+    // Trust the memory-aware ceiling here; users who want a stricter cap can
+    // still set `KILN_NUM_BLOCKS` or `memory.num_blocks` explicitly.
     let runtime_cap_blocks = if is_metal {
+        let model_cap_blocks = max_position_embeddings
+            .div_ceil(block_size)
+            .max(MIN_AUTO_KV_BLOCKS);
         model_cap_blocks.min(metal_auto_max_kv_blocks(total_vram_bytes))
     } else {
-        model_cap_blocks
+        usize::MAX
     };
 
     raw_blocks.max(MIN_AUTO_KV_BLOCKS).min(runtime_cap_blocks)
@@ -1028,18 +1041,48 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_num_blocks_caps_at_model_context() {
-        // Qwen3.5's 262K context is 16,384 blocks at block_size=16. There is
-        // no reason to auto-allocate more KV cache than the model can address.
+    fn test_auto_num_blocks_no_model_context_cap_on_cuda() {
+        // On CUDA, raw_blocks comes from the memory-aware sizing path
+        // (available VRAM × inference fraction ÷ bytes-per-block), which
+        // already accounts for what the GPU can hold. Clipping it to a single
+        // model-context-worth of blocks (≈16K for Qwen3.5-4B's 256K window)
+        // would bottleneck concurrent serving — multiple in-flight long
+        // prompts collectively address more than one window's worth of KV
+        // cache. cap_auto_num_blocks must trust the memory-aware ceiling
+        // here.
         assert_eq!(
             cap_auto_num_blocks(
                 50_000,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
+                false, // is_metal
+                48 * 1024 * 1024 * 1024,
+            ),
+            50_000
+        );
+        // raw_blocks well under the model-context size still passes through —
+        // this is the small-VRAM CUDA path (e.g. A10 / consumer card).
+        assert_eq!(
+            cap_auto_num_blocks(
+                4_096,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
                 false,
                 10 * 1024 * 1024 * 1024,
             ),
-            16_384
+            4_096
+        );
+        // raw_blocks above the model-context size on a large-VRAM CUDA host
+        // is preserved (multi-tenant headroom). Pre-fix this returned 16_384.
+        assert_eq!(
+            cap_auto_num_blocks(
+                65_000,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                false,
+                80 * 1024 * 1024 * 1024,
+            ),
+            65_000
         );
     }
 
