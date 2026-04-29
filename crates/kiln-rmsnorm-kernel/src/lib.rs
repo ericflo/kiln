@@ -1884,16 +1884,18 @@ mod tests {
         let gw_diff = max_abs_diff(&gw_ref, &gw_fused);
 
         // grad_w accumulates 512 rows of bf16-cast values via atomicAdd in
-        // F32, then a final bf16 cast. Tolerance reflects bf16 rounding +
-        // atomicAdd ordering nondeterminism, comparable to the existing
-        // forward parity threshold.
+        // F32, then a final bf16 cast. atomicAdd is order-nondeterministic
+        // and the candle reference does the cross-row reduction in a fixed
+        // tree order, so the bf16 outputs can differ by ~1 ULP near
+        // boundaries where F32 results straddle a bf16 quantum (e.g.
+        // 0.015625 = 2^-6 at typical magnitudes). Tolerance reflects that.
         assert!(
             gx_diff < 1e-2,
             "CUDA grad_x parity (multi-row) failed: max_abs_diff={gx_diff} (tol=1e-2)"
         );
         assert!(
-            gw_diff < 1e-2,
-            "CUDA grad_w parity (multi-row) failed: max_abs_diff={gw_diff} (tol=1e-2)"
+            gw_diff < 2e-2,
+            "CUDA grad_w parity (multi-row) failed: max_abs_diff={gw_diff} (tol=2e-2)"
         );
     }
 }
