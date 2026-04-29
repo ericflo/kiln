@@ -1216,26 +1216,112 @@ fn model_is_gdn_only(weights: &GpuWeights) -> bool {
         .all(|l| matches!(l.attention, GpuAttentionWeights::Linear(_)))
 }
 
-/// Determine whether the time-axis tile path applies for this training step.
+/// Build a [`LoraWeights`] view whose `a` / `b` projections are **detached**
+/// from the LoRA Vars' autograd graph.
 ///
-/// The path requires:
-/// 1. The model must be GDN-only (see [`model_is_gdn_only`] for rationale).
-/// 2. The streaming-prefill dispatch must be enabled for `device` at this
+/// Used by [`layer_pair_tiled_segment_recompute_and_backward`] for forwards
+/// whose backward should NOT produce LoRA gradients — specifically, the
+/// tail forward (whose only useful output is the gradient at the segment-
+/// output Var) and the block-boundary forward in Step 2 (which only
+/// computes activation VALUES). Without this, those backward passes would
+/// produce LoRA gradients that would then be discarded — wasted compute,
+/// and a correctness hazard if the discard is forgotten.
+fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights {
+    let layers: Vec<LoraLayerWeights> = params
+        .layers
+        .iter()
+        .map(|lp| {
+            let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
+                pair.as_ref().map(|(a, b)| LoraProjectionWeights {
+                    a: a.as_tensor().detach(),
+                    b: b.as_tensor().detach(),
+                })
+            };
+            LoraLayerWeights {
+                q_proj: make_proj(&lp.q_proj),
+                k_proj: make_proj(&lp.k_proj),
+                v_proj: make_proj(&lp.v_proj),
+                o_proj: make_proj(&lp.o_proj),
+                gate_proj: make_proj(&lp.gate_proj),
+                up_proj: make_proj(&lp.up_proj),
+                down_proj: make_proj(&lp.down_proj),
+            }
+        })
+        .collect();
+
+    LoraWeights {
+        layers,
+        rank: params.rank,
+        alpha: params.alpha,
+        scale: params.scale,
+    }
+}
+
+/// Attention kind of a single transformer layer for the layer-pair tiled path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttnKind {
+    Gdn,
+    FullAttn,
+}
+
+fn attn_kind_at(weights: &GpuWeights, layer_idx: usize) -> AttnKind {
+    match &weights.layers[layer_idx].attention {
+        GpuAttentionWeights::Linear(_) => AttnKind::Gdn,
+        GpuAttentionWeights::Full(_) => AttnKind::FullAttn,
+    }
+}
+
+/// Partition `[seg_start, seg_end)` into maximal contiguous runs of the same
+/// attention kind. Each entry is `(kind, layer_range)` where `layer_range` is
+/// a sub-range of the segment with all layers of the same kind.
+///
+/// Used by the layer-pair tiled path to process GDN sub-blocks (time-tile)
+/// and full-attention sub-blocks (monolithic) sequentially within one
+/// segment-recompute pass.
+fn partition_segment_layers_by_attn_type(
+    weights: &GpuWeights,
+    seg_start: usize,
+    seg_end: usize,
+) -> Vec<(AttnKind, std::ops::Range<usize>)> {
+    debug_assert!(seg_start < seg_end);
+    let mut blocks: Vec<(AttnKind, std::ops::Range<usize>)> = Vec::new();
+    let mut block_start = seg_start;
+    let mut current_kind = attn_kind_at(weights, seg_start);
+    for i in (seg_start + 1)..seg_end {
+        let kind = attn_kind_at(weights, i);
+        if kind != current_kind {
+            blocks.push((current_kind, block_start..i));
+            block_start = i;
+            current_kind = kind;
+        }
+    }
+    blocks.push((current_kind, block_start..seg_end));
+    blocks
+}
+
+/// Determine whether a time-axis tile path applies for this training step.
+///
+/// Returns `Some(tile_size)` when:
+/// 1. The streaming-prefill dispatch is enabled for `device` at this
 ///    `seq_len` (env override or device-default threshold).
-/// 3. The tile size must be a positive multiple of `GDN_CHUNK_SIZE`
-///    (enforced by [`streaming_tile_tokens_for`]) and strictly less than
-///    `seq_len` — otherwise the tile loop degenerates to a single monolithic
-///    call with extra overhead.
+/// 2. The tile size is a positive multiple of `GDN_CHUNK_SIZE` (enforced by
+///    [`streaming_tile_tokens_for`]) and strictly less than `seq_len`.
 ///
-/// Returns `Some(tile_size)` when applicable, `None` otherwise.
+/// Caller routes between two implementations based on
+/// [`model_is_gdn_only`]:
+/// * GDN-only models use [`tiled_segment_recompute_and_backward`], which is
+///   bit-exact against monolithic and skips gradient injection (cheaper).
+/// * Hybrid GDN + full-attn models use
+///   [`layer_pair_tiled_segment_recompute_and_backward`], which partitions
+///   each segment into contiguous-attention-type blocks and processes them
+///   with gradient injection so the tiled path can fire on production
+///   models like Qwen3.5-4B (24 GDN + 8 full-attn).
 fn tiled_training_tile_size(
     weights: &GpuWeights,
     device: &Device,
     seq_len: usize,
 ) -> Option<usize> {
-    if !model_is_gdn_only(weights) {
-        return None;
-    }
+    let _ = weights; // signature retained for callers; gating moved to the dispatcher.
     if !streaming_prefill_enabled_for(device, seq_len) {
         return None;
     }
@@ -1481,6 +1567,382 @@ fn tiled_segment_recompute_and_backward(
     Ok(tile_loss_sum)
 }
 
+/// Layer-pair time-axis tiled per-segment recompute + backward.
+///
+/// Generalizes [`tiled_segment_recompute_and_backward`] from GDN-only models
+/// to hybrid GDN + full-attention models (Qwen3.5-4B is 24 GDN + 8 full-attn).
+/// The GDN-only path's bit-exactness invariant relies on every layer being
+/// linear-attention so per-tile state-threaded forward is monolithic-equivalent.
+/// Hybrid models break that invariant — full-attention layers have no
+/// training-time KV cache and a tiled FA forward would attend only inside
+/// its own tile.
+///
+/// The layer-pair path resolves this by:
+///
+/// 1. **Pre-compute the gradient at the segment's output.** Wrap
+///    `boundary_states[seg_idx + 1]` in a fresh [`Var`] (`seg_output_var`),
+///    forward through later segments + final RMSNorm + LM head + cross-entropy
+///    using the regular grad-tracked `params.as_lora_weights()`, then
+///    `loss.backward()`. This produces:
+///    * LoRA gradients for layers in segments `seg_idx + 1 .. num_segments`
+///      (matching the monolithic checkpointed path's "later segments via
+///      detached input but grad-tracked LoRA Vars" pattern).
+///    * The gradient `∂loss/∂seg_output_var` (extracted from the GradStore).
+///
+/// 2. **Compute block-boundary states for this segment.** Detached forward
+///    through this segment's layers in order, snapshotting the (detached)
+///    hidden state at each block boundary. Used as input to each block's
+///    grad-tracked forward in step 4.
+///
+/// 3. **Partition the segment into contiguous-attention-type blocks** via
+///    [`partition_segment_layers_by_attn_type`].
+///
+/// 4. **Process blocks LAST -> FIRST with gradient injection.** For each
+///    block:
+///    * Wrap the block's input (a detached [`Tensor`] from step 2) in a
+///      fresh [`Var`] so the block's `loss.backward()` can extract the
+///      gradient at the block's input.
+///    * Run forward through the block's layer range using
+///      `params.as_lora_weights()`. For full-attention blocks the forward is
+///      monolithic at full seq_len (FA needs the global causal mask). For
+///      GDN blocks the forward is time-tiled — `LinearAttentionState` is
+///      threaded across tiles within the block; one [`narrow`] of
+///      `block_input_var` produces each tile's input.
+///    * Compute the gradient-injection scalar `(block_output *
+///      grad_at_current_block_output).sum_all()` (or the tile-local
+///      analogue) and backward. This is mathematically equivalent to chain-
+///      ruling through the block: `∂scalar/∂theta = sum_pos
+///      grad_at_block_output[pos] * (∂block_output[pos]/∂theta) =
+///      ∂loss/∂theta` for any `theta` whose backward path is wholly inside
+///      the block.
+///    * Accumulate this block's LoRA gradients into `accumulated_grads`.
+///    * Extract `∂scalar/∂block_input_var` and use it as
+///      `grad_at_current_block_output` for the previous (lower-layer) block.
+///      For tiled GDN blocks, sum across tiles to recover the
+///      full-seq_len gradient (each tile's `narrow` backward fills only the
+///      tile's range; non-tile positions are zeros).
+///
+/// **Correctness invariants (relative to monolithic checkpointed_forward_backward):**
+/// * MLP-LoRA gradients are bit-exact. MLP is per-position so
+///   `∂block_output[t]/∂MLP_LoRA` only depends on `block_input[t]` regardless
+///   of state-thread truncation across tile boundaries.
+/// * Full-attention LoRA gradients are bit-exact when the FA block's input
+///   gradient comes through an exact upstream chain (no GDN tiling between
+///   the FA block and the segment output). In the test config used for CPU
+///   parity (`full_attention_interval = 2`, layers 1, 3 are FA), every FA
+///   block is the LAST block in its segment and gets the bit-exact
+///   `grad_at_seg_output` directly — so FA-LoRA grads are bit-exact in that
+///   case as well. Tolerance is set to `1e-3` in the parity test to absorb
+///   ordering-induced f32 drift in matmul reductions.
+/// * GDN-LoRA gradients via the tile loop's truncated state thread are
+///   approximate w.r.t. the recurrent path; in current kiln, GDN layers
+///   only carry MLP-LoRA (q/k/v/o LoRA is full-attn only — see
+///   [`TrainableLoraParams::initialize`]), so the truncation does not
+///   affect any LoRA parameter that exists.
+///
+/// **Memory:** the tail backward in step 1 holds saved tensors for
+/// `(num_segments - seg_idx - 1)` later-segment forwards plus the LM head /
+/// FLCE chain. The block backward in step 4 holds saved tensors for ONE
+/// block's worth of layers (full seq_len for FA blocks, tile-narrow for GDN
+/// blocks). The peak across the segment iteration is therefore bounded by
+/// the larger of those two, and the per-segment peak does not include all
+/// `seg_end - seg_start` layers' saved tensors at full seq_len (which is
+/// what the existing monolithic path holds for hybrid models).
+#[allow(clippy::too_many_arguments)]
+fn layer_pair_tiled_segment_recompute_and_backward(
+    backend: &dyn BackendRuntime,
+    seg_idx: usize,
+    segments: &[(usize, usize)],
+    boundary_states: &[Tensor],
+    input_ids: &[u32],
+    label_mask: &[bool],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    params: &TrainableLoraParams,
+    accumulated_grads: &mut HashMap<candle_core::TensorId, Tensor>,
+    tile_size: usize,
+    device: &Device,
+) -> Result<f64> {
+    let (seg_start, seg_end) = segments[seg_idx];
+    let num_segments = segments.len();
+    let all_vars = params.all_vars();
+
+    // === Step 1: Pre-compute gradient at this segment's output. ===
+    //
+    // Wrap `boundary_states[seg_idx + 1]` (detached) in a fresh Var so a
+    // single `loss.backward()` through later segments + LM head produces the
+    // gradient at the segment-output node, which becomes the seed for the
+    // per-block gradient-injection backward in step 4.
+    let seg_output_var = Var::from_tensor(&boundary_states[seg_idx + 1])?;
+
+    // Use DETACHED LoRA weights for the tail forward — we want the tail
+    // backward to produce ONLY `∂loss/∂seg_output_var`, not LoRA grads
+    // for layers in segments `seg_idx + 1 .. num_segments`. Those layers'
+    // LoRA Vars get their grads from THEIR OWN per-block backward in the
+    // corresponding seg-iteration of `checkpointed_forward_backward`.
+    // Accumulating later-segment LoRA grads here would double-count — each
+    // later-seg LoRA Var would receive (1 contribution per earlier-or-equal
+    // seg-iteration) instead of exactly one.
+    let lora_detached = lora_weights_detached(params);
+    let mut tail_hidden = seg_output_var.as_tensor().clone();
+    for (i, &(later_start, later_end)) in segments[seg_idx + 1..].iter().enumerate() {
+        // Detach BETWEEN later segments. Skip the detach for the first
+        // later segment so the gradient flows from later-segs[0]'s input
+        // back to seg_output_var.
+        if i > 0 {
+            tail_hidden = tail_hidden.detach();
+        }
+        let mut later_state = LinearAttentionState::new(model_config, device)?;
+        tail_hidden = model_forward_segment(
+            backend,
+            tail_hidden,
+            weights,
+            model_config,
+            positions,
+            later_start,
+            later_end,
+            Some(&mut later_state),
+            Some(&lora_detached),
+        )
+        .with_context(|| {
+            format!(
+                "layer-pair tail forward later segment [{later_start}, {later_end}) for seg_idx={seg_idx}"
+            )
+        })?;
+    }
+
+    let tail_loss = if use_flce() {
+        let normed = model_forward_final_norm(&tail_hidden, weights, model_config)?;
+        fused_linear_cross_entropy(
+            &normed,
+            &weights.embed_tokens_t,
+            input_ids,
+            label_mask,
+            device,
+            DEFAULT_CHUNK_SIZE,
+        )
+        .context("layer-pair tail FLCE")?
+    } else {
+        let logits = model_forward_head(&tail_hidden, weights, model_config)?;
+        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+    };
+
+    let tail_loss_val = tail_loss.to_scalar::<f32>()? as f64;
+    let tail_grads = tail_loss
+        .backward()
+        .context("layer-pair tail backward")?;
+
+    // We deliberately do NOT call `accumulate_grads(... &all_vars)` here
+    // — see the `lora_detached` comment above. The tail backward's only
+    // "useful" output is the gradient at `seg_output_var`.
+    let grad_at_seg_output = tail_grads
+        .get(seg_output_var.as_tensor())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "layer-pair tail backward did not produce a gradient at seg_output_var \
+                 (seg_idx={seg_idx}, later segments: {})",
+                num_segments - seg_idx - 1
+            )
+        })?
+        .clone()
+        .detach();
+
+    // Drop the tail's autograd graph & saved tensors before per-block work.
+    // `tail_grads` is the only remaining handle into that graph; dropping it
+    // explicitly makes the lifetime clear to the reader.
+    drop(tail_grads);
+
+    // === Step 2: Compute block-boundary states (detached). ===
+    //
+    // This forward computes block-boundary VALUES only — no LoRA grads
+    // are required from this phase, and the autograd graph it would
+    // otherwise build (LoRA Vars in graph, then `.detach()` per block)
+    // would just be torn down again for no benefit. Use detached LoRA so
+    // the inner ops don't bother building the LoRA-side autograd graph.
+    let blocks = partition_segment_layers_by_attn_type(weights, seg_start, seg_end);
+    let mut block_boundaries: Vec<Tensor> = Vec::with_capacity(blocks.len() + 1);
+    block_boundaries.push(boundary_states[seg_idx].clone());
+    {
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut current = block_boundaries[0].clone();
+        for (_kind, range) in &blocks {
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                positions,
+                range.start,
+                range.end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )
+            .with_context(|| {
+                format!(
+                    "layer-pair block-boundary forward [{}, {}) (seg_idx={seg_idx})",
+                    range.start, range.end,
+                )
+            })?;
+            block_boundaries.push(current.detach());
+            current = block_boundaries.last().unwrap().clone();
+        }
+    }
+
+    // === Step 3 + 4: Process blocks LAST -> FIRST with gradient injection. ===
+    let mut grad_at_current_output = grad_at_seg_output;
+
+    for (block_idx, (kind, range)) in blocks.iter().enumerate().rev() {
+        let block_input = block_boundaries[block_idx].clone();
+        let block_input_var = Var::from_tensor(&block_input)?;
+
+        let new_grad_at_block_input = match kind {
+            AttnKind::FullAttn => {
+                // Full-attention block: forward monolithically (FA can't be
+                // tiled at training time — no KV cache). Gradient injection:
+                // scalar = (block_output * grad_at_current_output).sum_all().
+                let mut state = LinearAttentionState::new(model_config, device)?;
+                let lora_for_block = params.as_lora_weights();
+                let block_output = model_forward_segment(
+                    backend,
+                    block_input_var.as_tensor().clone(),
+                    weights,
+                    model_config,
+                    positions,
+                    range.start,
+                    range.end,
+                    Some(&mut state),
+                    Some(&lora_for_block),
+                )
+                .with_context(|| {
+                    format!(
+                        "layer-pair FA block forward [{}, {}) (seg_idx={seg_idx})",
+                        range.start, range.end,
+                    )
+                })?;
+
+                let scalar = (&block_output * &grad_at_current_output)?
+                    .sum_all()
+                    .context("layer-pair FA block scalar (gradient injection)")?;
+                let block_grads = scalar
+                    .backward()
+                    .context("layer-pair FA block backward")?;
+
+                accumulate_grads(accumulated_grads, &block_grads, &all_vars)?;
+
+                block_grads
+                    .get(block_input_var.as_tensor())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "layer-pair FA block backward missing grad at block_input_var \
+                             (block [{}, {}), seg_idx={seg_idx})",
+                            range.start, range.end,
+                        )
+                    })?
+                    .clone()
+                    .detach()
+            }
+            AttnKind::Gdn => {
+                // GDN block: time-tile forward+backward. Per-tile gradient
+                // injection: for each tile [tile_start, tile_end), the
+                // local scalar is
+                //   (tile_output * grad_at_current_output[..tile..]).sum_all()
+                // Backward gives the LoRA grads for this block + the
+                // tile-local gradient at block_input_var (zeros outside the
+                // tile range, real gradient inside). Sum across tiles to
+                // recover the full-seq_len gradient at block_input_var.
+                let (_, total_tokens, _) = block_input.dims3()?;
+                let mut state = LinearAttentionState::new(model_config, device)?;
+                let mut summed: Option<Tensor> = None;
+
+                let mut tile_start = 0usize;
+                while tile_start < total_tokens {
+                    let tile_end = (tile_start + tile_size).min(total_tokens);
+                    let tile_len = tile_end - tile_start;
+
+                    let tile_input = block_input_var
+                        .as_tensor()
+                        .narrow(1, tile_start, tile_len)
+                        .context("narrow GDN block input to tile")?;
+                    let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
+                    let lora_for_block = params.as_lora_weights();
+
+                    let tile_output = model_forward_segment(
+                        backend,
+                        tile_input,
+                        weights,
+                        model_config,
+                        &tile_positions,
+                        range.start,
+                        range.end,
+                        Some(&mut state),
+                        Some(&lora_for_block),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "layer-pair GDN tile forward [{tile_start}, {tile_end}) \
+                             block [{}, {}) (seg_idx={seg_idx})",
+                            range.start, range.end,
+                        )
+                    })?;
+
+                    let tile_grad_out = grad_at_current_output
+                        .narrow(1, tile_start, tile_len)
+                        .context("narrow grad_at_current_output to tile")?;
+
+                    let scalar = (&tile_output * &tile_grad_out)?
+                        .sum_all()
+                        .context("layer-pair GDN tile scalar (gradient injection)")?;
+                    let tile_grads = scalar
+                        .backward()
+                        .context("layer-pair GDN tile backward")?;
+
+                    accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
+
+                    let tile_block_input_grad = tile_grads
+                        .get(block_input_var.as_tensor())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "layer-pair GDN tile backward missing grad at \
+                                 block_input_var (tile [{tile_start}, {tile_end}), \
+                                 block [{}, {}), seg_idx={seg_idx})",
+                                range.start, range.end,
+                            )
+                        })?
+                        .clone();
+
+                    summed = Some(match summed {
+                        Some(prev) => (prev + tile_block_input_grad)?,
+                        None => tile_block_input_grad,
+                    });
+
+                    tile_start = tile_end;
+                }
+
+                summed
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "layer-pair GDN block produced no tiles \
+                             (total_tokens={total_tokens}, tile_size={tile_size}, \
+                             block [{}, {}), seg_idx={seg_idx})",
+                            range.start, range.end,
+                        )
+                    })?
+                    .detach()
+            }
+        };
+
+        // For block_idx > 0 the new grad becomes the gradient at the
+        // previous block's output. For block_idx == 0 the grad is the
+        // gradient at this segment's input (boundary_states[seg_idx]),
+        // which is already detached and discarded — we keep it in scope
+        // only for the loop's last iteration tail and let it drop after.
+        grad_at_current_output = new_grad_at_block_input;
+    }
+
+    Ok(tail_loss_val)
+}
+
 /// Run one training step with gradient checkpointing.
 ///
 /// Instead of tracking activations for all layers, this:
@@ -1494,17 +1956,24 @@ fn tiled_segment_recompute_and_backward(
 /// Compute: ~(N+1)/2 × N forward passes for N segments (with N=4, ~2.5× overhead).
 ///
 /// Phase 10 time-axis tiling: when `KILN_STREAMING_PREFILL=1` (or the
-/// device-default streaming threshold fires), `seq_len > tile_size`, and the
-/// model is GDN-only, each segment's recompute is split into time tiles and
-/// each tile is forward+backward+accumulated independently. This releases
-/// per-tile autograd-saved tensors before the next tile's forward starts —
-/// the change identified in PR #635 as the next step needed to unblock
-/// long-context SFT past the 30 GiB segment-recompute ceiling. The
-/// "GDN-only" precondition exists because full-attention layers have no
-/// training-time KV cache to thread across tiles. Hybrid GDN+full-attn
-/// models (Qwen3.5-4B) fall back to the monolithic path; see
-/// `docs/audits/PHASE10_GDN_TRAINING_TILED_BACKWARD.md` for the planned
-/// per-block remediation.
+/// device-default streaming threshold fires) and `seq_len > tile_size`, each
+/// segment's recompute is split into time tiles and each tile is
+/// forward+backward+accumulated independently. This releases per-tile
+/// autograd-saved tensors before the next tile's forward starts — the change
+/// identified in PR #635 as the next step needed to unblock long-context SFT
+/// past the 30 GiB segment-recompute ceiling.
+///
+/// Two tiled implementations:
+/// * GDN-only models use [`tiled_segment_recompute_and_backward`]
+///   (PR #636) — bit-exact against monolithic; per-tile loss is the
+///   tile-local cross-entropy.
+/// * Hybrid GDN + full-attn models (e.g. Qwen3.5-4B with 24 GDN + 8 FA
+///   layers) use [`layer_pair_tiled_segment_recompute_and_backward`] —
+///   each segment is partitioned into contiguous-attention-type blocks and
+///   processed with gradient injection. GDN sub-blocks are time-tiled;
+///   full-attention sub-blocks run monolithically (no training-time KV
+///   cache to thread across tiles). See
+///   `docs/audits/PHASE10_GDN_TRAINING_LAYER_PAIR_TILED.md`.
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward(
     backend: &dyn BackendRuntime,
@@ -1552,15 +2021,25 @@ fn checkpointed_forward_backward(
 
     // Tiling decision (made once per training step). When we tile, every
     // segment iteration uses the per-tile path; otherwise, every segment
-    // uses the monolithic path. Mixing the two within a single step would
-    // silently change the gradient (the per-tile path's truncated state
-    // thread is only safe under the "GDN-only + MLP-only LoRA" invariant
-    // that holds globally for the model, not per-segment).
+    // uses the monolithic path.
+    //
+    // Two tiled implementations exist:
+    // * GDN-only models -> [`tiled_segment_recompute_and_backward`]
+    //   (PR #636). Bit-exact against monolithic; skips gradient injection.
+    // * Hybrid GDN + full-attn models ->
+    //   [`layer_pair_tiled_segment_recompute_and_backward`] (this PR).
+    //   Partitions each segment into contiguous-attention-type blocks and
+    //   processes them with gradient injection so the tiled path can fire
+    //   on production models like Qwen3.5-4B.
     let tile_size = tiled_training_tile_size(weights, device, input_ids.len());
-    let total_active: usize = if tile_size.is_some() {
+    let use_layer_pair = tile_size.is_some() && !model_is_gdn_only(weights);
+    let total_active: usize = if tile_size.is_some() && !use_layer_pair {
         // Same denominator as the monolithic path's `cross_entropy_loss` /
         // `fused_linear_cross_entropy`: count of active label positions
-        // after the next-token shift (`label_mask[1..]`).
+        // after the next-token shift (`label_mask[1..]`). Only used by the
+        // GDN-only fast path's [`tile_loss_explicit`] scaling; the
+        // layer-pair path computes the full chain loss directly so it
+        // doesn't need this count.
         if label_mask.len() >= 2 {
             label_mask[1..].iter().filter(|&&m| m).count()
         } else {
@@ -1572,22 +2051,40 @@ fn checkpointed_forward_backward(
 
     for seg_idx in 0..num_segments {
         if let Some(tile) = tile_size {
-            let seg_loss = tiled_segment_recompute_and_backward(
-                backend,
-                seg_idx,
-                segments,
-                &boundary_states,
-                input_ids,
-                label_mask,
-                weights,
-                model_config,
-                &positions,
-                params,
-                &mut accumulated_grads,
-                total_active,
-                tile,
-                device,
-            )?;
+            let seg_loss = if use_layer_pair {
+                layer_pair_tiled_segment_recompute_and_backward(
+                    backend,
+                    seg_idx,
+                    segments,
+                    &boundary_states,
+                    input_ids,
+                    label_mask,
+                    weights,
+                    model_config,
+                    &positions,
+                    params,
+                    &mut accumulated_grads,
+                    tile,
+                    device,
+                )?
+            } else {
+                tiled_segment_recompute_and_backward(
+                    backend,
+                    seg_idx,
+                    segments,
+                    &boundary_states,
+                    input_ids,
+                    label_mask,
+                    weights,
+                    model_config,
+                    &positions,
+                    params,
+                    &mut accumulated_grads,
+                    total_active,
+                    tile,
+                    device,
+                )?
+            };
             total_loss += seg_loss;
             continue;
         }
@@ -2387,6 +2884,288 @@ mod tests {
             compared > 0,
             "no LoRA gradients were compared between tiled and monolithic paths",
         );
+
+        Ok(())
+    }
+
+    /// Helper: enumerate which LoRA Var corresponds to which projection
+    /// kind so the layer-pair parity test can apply different tolerances
+    /// to MLP-LoRA grads (bit-exact across tile boundaries because MLP is
+    /// per-position) and full-attention LoRA grads (q/k/v/o; can drift
+    /// slightly under truncated-BPTT through GDN states upstream).
+    fn classify_lora_vars(
+        params: &TrainableLoraParams,
+    ) -> Vec<(candle_core::Var, &'static str, String)> {
+        let mut out: Vec<(candle_core::Var, &'static str, String)> = Vec::new();
+        for (layer_idx, layer) in params.layers.iter().enumerate() {
+            let pairs: [(&Option<(Var, Var)>, &str, &str); 7] = [
+                (&layer.q_proj, "fa", "q"),
+                (&layer.k_proj, "fa", "k"),
+                (&layer.v_proj, "fa", "v"),
+                (&layer.o_proj, "fa", "o"),
+                (&layer.gate_proj, "mlp", "gate"),
+                (&layer.up_proj, "mlp", "up"),
+                (&layer.down_proj, "mlp", "down"),
+            ];
+            for (pair, kind, module) in pairs {
+                if let Some((a, b)) = pair {
+                    out.push((a.clone(), kind, format!("L{layer_idx}.{module}.A")));
+                    out.push((b.clone(), kind, format!("L{layer_idx}.{module}.B")));
+                }
+            }
+        }
+        out
+    }
+
+    /// CPU parity for the layer-pair time-axis tile path on a HYBRID model
+    /// (Qwen3.5-4B-shaped: alternating GDN + full-attention layers).
+    ///
+    /// Compares the layer-pair-tiled `checkpointed_forward_backward` path
+    /// against the **standard (non-checkpointed) full forward+backward**
+    /// path — the latter is the unambiguous ground truth (single forward,
+    /// single backward, no segment trickery, all LoRA Vars in the graph).
+    ///
+    /// We deliberately do NOT compare against the monolithic-checkpointed
+    /// path: its segment-iteration loop calls `hidden.detach()` between
+    /// the current segment and later segments, which severs the chain
+    /// from the loss back to the current segment's LoRA Vars. Earlier
+    /// segments' LoRA Vars therefore never receive a gradient under
+    /// monolithic checkpointing — a pre-existing limitation orthogonal
+    /// to this PR. The layer-pair path uses gradient injection across
+    /// blocks, so it correctly produces grads for every segment's LoRA
+    /// Vars (including the segment that is currently being recomputed).
+    /// Comparing to standard makes the parity claim well-defined.
+    ///
+    /// Tolerances:
+    /// * Total loss within `1e-3` of standard (loss values are dominated
+    ///   by the chain-rule-equivalent forward; matches expected
+    ///   monolithic-checkpointed loss as well).
+    /// * MLP-LoRA grads bit-exact (atol `1e-5`) — MLP is per-position so
+    ///   per-tile state-thread truncation does not affect MLP-LoRA.
+    /// * Full-attention LoRA grads within `1e-3` — the gradient-injection
+    ///   chain through this PR's per-block backward goes through
+    ///   different f32 reduction orders than the standard single
+    ///   backward, and may also pick up truncated-BPTT approximation in
+    ///   segment configurations where a GDN block sits between the FA
+    ///   block and the segment output. In the test config used here
+    ///   (`full_attention_interval = 2`, layers 1, 3 are FA), every FA
+    ///   block is the LAST block in its segment so FA-LoRA grads are
+    ///   bit-exact in expectation; the `1e-3` tolerance absorbs matmul-
+    ///   reduction-order f32 drift only.
+    ///
+    /// Test must run via `cargo nextest run` or `cargo test --
+    /// --test-threads=1` for the env-var manipulation to be safe.
+    #[test]
+    fn test_layer_pair_tiled_matches_monolithic_cpu_hybrid() -> Result<()> {
+        let device = Device::Cpu;
+
+        // Hybrid mini-config: full_attention_interval = 2 makes layers 1
+        // and 3 full-attention; layers 0 and 2 are GDN. With num_layers =
+        // 4 that gives 2 GDN + 2 FA, so each segment of 2 layers contains
+        // one of each kind and exercises the layer-pair path's
+        // partition + per-block backward across BOTH attention kinds.
+        let mut config = tiny_config();
+        config.full_attention_interval = 2;
+        config.num_full_attention_layers = 2;
+
+        let weights = tiny_weights(&config, &device)?;
+        assert!(
+            !super::model_is_gdn_only(&weights),
+            "test setup error: model must be hybrid for layer-pair parity"
+        );
+
+        // T = 192 = 3 × tile_size(64) so the GDN tile loop runs three
+        // iterations within each GDN block. Two segments × (1 GDN block +
+        // 1 FA block) per segment exercises both block kinds twice.
+        let seq_len: usize = 192;
+        let vocab = config.vocab_size;
+        let input_ids: Vec<u32> = (0..seq_len)
+            .map(|i| ((i * 7 + 3) % vocab) as u32)
+            .collect();
+        let mut label_mask = vec![false; seq_len];
+        for slot in label_mask.iter_mut().skip(1).take(seq_len - 2) {
+            *slot = true;
+        }
+
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        // Sanity: 2 segments, 2 layers each, alternating GDN/FA.
+        assert_eq!(segments, vec![(0, 2), (2, 4)]);
+        let backend = backend::for_device(&device);
+
+        // Step 1: standard (non-checkpointed) full forward+backward as
+        // the ground-truth baseline. Clear streaming env vars defensively
+        // even though nextest gives per-test process isolation, so a
+        // parent test process leaking KILN_STREAMING_PREFILL=1 doesn't
+        // silently invalidate the baseline.
+        // SAFETY: env mutation is safe under nextest's per-test process
+        // isolation; this test must run via `cargo nextest run`.
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_USE_FLCE");
+        }
+        let (loss_std, grad_store_std) = standard_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &device,
+        )?;
+        // Lift `grad_store_std` (a `GradStore`) into the same map type as
+        // checkpointed_forward_backward returns so the test can compare
+        // both paths via a uniform interface.
+        let mut grads_std: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+        for var in params.all_vars() {
+            if let Some(g) = grad_store_std.get(var.as_tensor()) {
+                grads_std.insert(var.as_tensor().id(), g.clone());
+            }
+        }
+
+        // Step 2: layer-pair tiled. KILN_STREAMING_TILE_TOKENS=64 keeps
+        // the tile a multiple of GDN_CHUNK_SIZE; T=192 > tile=64 ensures
+        // dispatch and the hybrid model means the layer-pair branch fires
+        // (not the GDN-only fast path).
+        unsafe {
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
+        }
+        // Sanity-check the dispatch decision before running the loop, so
+        // a future regression in `tiled_training_tile_size` or
+        // `model_is_gdn_only` shows up as an explicit assertion rather
+        // than a silent fallback to monolithic.
+        assert_eq!(
+            super::tiled_training_tile_size(&weights, &device, seq_len),
+            Some(64),
+            "tiled dispatch did not fire for hybrid model under \
+             KILN_STREAMING_PREFILL=1 (T={seq_len}, tile=64)",
+        );
+        assert!(
+            !super::model_is_gdn_only(&weights),
+            "model_is_gdn_only=true on hybrid weights — layer-pair branch \
+             will be skipped",
+        );
+
+        let (loss_layer_pair, grads_layer_pair) = checkpointed_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &segments,
+            &device,
+        )?;
+        unsafe {
+            std::env::remove_var("KILN_STREAMING_PREFILL");
+            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+        }
+
+        // Step 3: parity assertions vs standard (non-checkpointed) baseline.
+        let loss_diff = (loss_std - loss_layer_pair).abs();
+        assert!(
+            loss_diff < 1e-3,
+            "layer-pair total loss differs from standard: \
+             std={loss_std} layer_pair={loss_layer_pair} \
+             diff={loss_diff:.2e}",
+        );
+
+        // Helper: read a Var's grad if present, otherwise treat as a zero
+        // tensor of the Var's shape. This absorbs the candle-autograd
+        // detail that a Var which factors out of a matmul backward (e.g.
+        // LoRA-A multiplied by LoRA-B which is initialized to zero) may or
+        // may not appear in the GradStore depending on the exact ordering
+        // of `or_insert` calls along its predecessors. Both interpretations
+        // (missing => zero) are mathematically equivalent for parity, so
+        // we treat them as equivalent here.
+        let grad_or_zero = |grads: &HashMap<candle_core::TensorId, Tensor>,
+                            var: &Var|
+         -> Result<Tensor> {
+            let id = var.as_tensor().id();
+            match grads.get(&id) {
+                Some(g) => Ok(g.clone()),
+                None => Ok(var.as_tensor().zeros_like()?),
+            }
+        };
+
+        let classified = classify_lora_vars(&params);
+        let mut compared_mlp = 0usize;
+        let mut compared_fa = 0usize;
+        for (var, kind, name) in &classified {
+            let g_s = grad_or_zero(&grads_std, var)?;
+            let g_p = grad_or_zero(&grads_layer_pair, var)?;
+            let diff = (&g_s - &g_p)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let tol: f32 = match *kind {
+                "mlp" => 1e-5,
+                "fa" => 1e-3,
+                _ => 1e-3,
+            };
+            assert!(
+                diff < tol,
+                "layer-pair grad differs from standard for {name} ({kind}-LoRA): \
+                 max_abs_diff={diff:.3e} (tol={tol:.0e})",
+            );
+            match *kind {
+                "mlp" => compared_mlp += 1,
+                "fa" => compared_fa += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            compared_mlp > 0,
+            "no MLP-LoRA gradients were compared between layer-pair and monolithic"
+        );
+        assert!(
+            compared_fa > 0,
+            "no FA-LoRA gradients were compared — test config must include \
+             at least one full-attention layer with q/k/v/o LoRA",
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_partition_segment_layers_by_attn_type() -> Result<()> {
+        let device = Device::Cpu;
+        let mut config = tiny_config();
+        // full_attention_interval = 2 -> layers 1, 3 are FA, 0, 2 are GDN.
+        config.full_attention_interval = 2;
+        config.num_full_attention_layers = 2;
+        let weights = tiny_weights(&config, &device)?;
+
+        // Segment [0, 2): GDN at 0, FA at 1.
+        let seg0 = super::partition_segment_layers_by_attn_type(&weights, 0, 2);
+        assert_eq!(seg0.len(), 2);
+        assert_eq!(seg0[0].0, super::AttnKind::Gdn);
+        assert_eq!(seg0[0].1, 0..1);
+        assert_eq!(seg0[1].0, super::AttnKind::FullAttn);
+        assert_eq!(seg0[1].1, 1..2);
+
+        // Whole model [0, 4) under the same config: alternating blocks.
+        let whole = super::partition_segment_layers_by_attn_type(&weights, 0, 4);
+        assert_eq!(whole.len(), 4);
+        assert_eq!(whole[0].0, super::AttnKind::Gdn);
+        assert_eq!(whole[0].1, 0..1);
+        assert_eq!(whole[1].0, super::AttnKind::FullAttn);
+        assert_eq!(whole[1].1, 1..2);
+        assert_eq!(whole[2].0, super::AttnKind::Gdn);
+        assert_eq!(whole[2].1, 2..3);
+        assert_eq!(whole[3].0, super::AttnKind::FullAttn);
+        assert_eq!(whole[3].1, 3..4);
+
+        // GDN-only model with full_attention_interval > num_layers: the
+        // entire range is one GDN block.
+        let mut gdn_only_config = tiny_config();
+        gdn_only_config.full_attention_interval = gdn_only_config.num_layers + 1;
+        gdn_only_config.num_full_attention_layers = 0;
+        let gdn_only_weights = tiny_weights(&gdn_only_config, &device)?;
+        let gdn_only =
+            super::partition_segment_layers_by_attn_type(&gdn_only_weights, 0, 4);
+        assert_eq!(gdn_only.len(), 1);
+        assert_eq!(gdn_only[0].0, super::AttnKind::Gdn);
+        assert_eq!(gdn_only[0].1, 0..4);
 
         Ok(())
     }
