@@ -123,13 +123,21 @@ pub fn fused_linear_cross_entropy_phase_b(
 
     // Apply the custom op. The op closes over head_t / input_ids / label_mask /
     // chunk_size; only `hidden` is the autograd input.
+    //
+    // The CustomOp1 path materializes a leaf tensor from `hidden`'s storage
+    // assuming contiguous strides (`Tensor::from_storage` uses
+    // `Layout::contiguous`). Force-contiguous the input here so the assumption
+    // holds even if a caller passes a strided tensor. In production, FLCE is
+    // always called on `model_forward_final_norm` output which is contiguous,
+    // so this is a safety guard, not a hot path.
+    let hidden_contig = hidden.contiguous().context("contiguous hidden for FLCE phase B")?;
     let op = FlceCustomOp {
         head_t: head_t.clone(),
         input_ids: input_ids.to_vec(),
         label_mask: label_mask.to_vec(),
         chunk_size,
     };
-    hidden.apply_op1(op).map_err(Into::into)
+    hidden_contig.apply_op1(op).map_err(Into::into)
 }
 
 /// CustomOp1 wrapper for Phase B. `apply_op1(hidden)` -> scalar f32 loss.
