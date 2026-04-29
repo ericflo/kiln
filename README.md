@@ -126,7 +126,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.1
+  Version: 0.2.8
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
@@ -267,17 +267,17 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 **Windows, Linux, and macOS (Apple Silicon).** The Windows and Linux installers drive the CUDA build of `kiln`; the macOS installer drives the candle-metal build on M-series hardware. Intel Macs are not supported.
 
-**Download — [Kiln Desktop v0.2.0](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.0):**
+**Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
 See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
 
 | Platform | Installer | Size |
 |---|---|---|
-| macOS (Apple Silicon) | [Kiln.Desktop_0.2.0_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_aarch64.dmg) | 8.1 MB |
-| Windows | [Kiln.Desktop_0.2.0_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_x64-setup.exe) (NSIS) | 4.3 MB |
-| Windows | [Kiln.Desktop_0.2.0_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_x64_en-US.msi) (MSI) | 6.5 MB |
-| Linux | [Kiln.Desktop_0.2.0_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_amd64.deb) | 8.4 MB |
-| Linux | [Kiln.Desktop_0.2.0_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_amd64.AppImage) | 81.7 MB |
+| macOS (Apple Silicon) | [Kiln.Desktop_0.2.2_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_aarch64.dmg) | 8.5 MB |
+| Windows | [Kiln.Desktop_0.2.2_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64-setup.exe) (NSIS) | 4.5 MB |
+| Windows | [Kiln.Desktop_0.2.2_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64_en-US.msi) (MSI) | 6.8 MB |
+| Linux | [Kiln.Desktop_0.2.2_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb) | 8.8 MB |
+| Linux | [Kiln.Desktop_0.2.2_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage) | 85.7 MB |
 
 The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
 
@@ -304,7 +304,7 @@ Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to GHCR:
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
 # or pin a version:
-docker pull ghcr.io/ericflo/kiln-server:0.2.3
+docker pull ghcr.io/ericflo/kiln-server:0.2.8
 ```
 
 Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
