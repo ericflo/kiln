@@ -1,0 +1,76 @@
+Baseline VRAM (post-load): 16346 MiB
+--- T target = 256  label = warmup ---
+VRAM_PROBE	after_embed	16420
+VRAM_PROBE	boundary_pre_0	16420
+VRAM_PROBE	boundary_post_0	17130
+VRAM_PROBE	boundary_pre_1	17130
+VRAM_PROBE	boundary_post_1	17130
+VRAM_PROBE	boundary_pre_2	17130
+VRAM_PROBE	boundary_post_2	17130
+VRAM_PROBE	boundary_pre_3	17130
+VRAM_PROBE	boundary_post_3	17130
+VRAM_PROBE	boundary_pre_4	17130
+VRAM_PROBE	boundary_post_4	17130
+VRAM_PROBE	boundary_pre_5	17130
+VRAM_PROBE	boundary_post_5	17130
+VRAM_PROBE	boundary_pre_6	17130
+VRAM_PROBE	boundary_post_6	17130
+VRAM_PROBE	boundary_pre_7	17130
+VRAM_PROBE	boundary_post_7	17130
+VRAM_PROBE	after_boundary_forward	17130
+VRAM_PROBE	recompute_pre_0	17130
+VRAM_PROBE	recompute_post_mono_0	29738
+VRAM_PROBE	recompute_pre_1	29738
+VRAM_PROBE	recompute_post_mono_1	29738
+VRAM_PROBE	recompute_pre_2	29738
+VRAM_PROBE	recompute_post_mono_2	29738
+VRAM_PROBE	recompute_pre_3	29738
+VRAM_PROBE	recompute_post_mono_3	29738
+VRAM_PROBE	recompute_pre_4	29738
+VRAM_PROBE	recompute_post_mono_4	29738
+VRAM_PROBE	recompute_pre_5	29738
+VRAM_PROBE	recompute_post_mono_5	29738
+VRAM_PROBE	recompute_pre_6	29738
+VRAM_PROBE	recompute_post_mono_6	29738
+VRAM_PROBE	recompute_pre_7	29738
+VRAM_PROBE	recompute_post_mono_7	29738
+VRAM_PROBE	after_recompute	29738
+  RESULT label=warmup T=256 actual_t=245 peak_mib=29738 step_secs=3.33 final_loss=Some(2.2242166996002197) status=ok
+Baseline VRAM (post-warmup): 29738 MiB
+--- T target = 2048  label = main ---
+VRAM_PROBE	after_embed	29738
+VRAM_PROBE	boundary_pre_0	29738
+VRAM_PROBE	boundary_post_0	29738
+VRAM_PROBE	boundary_pre_1	29738
+VRAM_PROBE	boundary_post_1	29738
+VRAM_PROBE	boundary_pre_2	29738
+VRAM_PROBE	boundary_post_2	29738
+VRAM_PROBE	boundary_pre_3	29738
+VRAM_PROBE	boundary_post_3	29738
+VRAM_PROBE	boundary_pre_4	29738
+VRAM_PROBE	boundary_post_4	29738
+VRAM_PROBE	boundary_pre_5	29738
+VRAM_PROBE	boundary_post_5	29738
+VRAM_PROBE	boundary_pre_6	29738
+VRAM_PROBE	boundary_post_6	29738
+VRAM_PROBE	boundary_pre_7	29738
+VRAM_PROBE	boundary_post_7	29738
+VRAM_PROBE	after_boundary_forward	29738
+VRAM_PROBE	recompute_pre_0	29738
+VRAM_PROBE	recompute_post_mono_0	43114
+VRAM_PROBE	recompute_pre_1	43114
+VRAM_PROBE	recompute_post_mono_1	43178
+VRAM_PROBE	recompute_pre_2	43178
+VRAM_PROBE	recompute_post_mono_2	43178
+VRAM_PROBE	recompute_pre_3	43178
+VRAM_PROBE	recompute_post_mono_3	43178
+VRAM_PROBE	recompute_pre_4	43178
+VRAM_PROBE	recompute_post_mono_4	43178
+VRAM_PROBE	recompute_pre_5	43178
+VRAM_PROBE	recompute_post_mono_5	43178
+VRAM_PROBE	recompute_pre_6	43178
+VRAM_PROBE	recompute_post_mono_6	43178
+VRAM_PROBE	recompute_pre_7	43178
+VRAM_PROBE	recompute_post_mono_7	43178
+VRAM_PROBE	after_recompute	43178
+  RESULT label=main T=2048 actual_t=2048 peak_mib=43178 step_secs=9.96 final_loss=Some(2.447333335876465) status=ok
