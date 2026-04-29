@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## kiln-v0.2.8 — 2026-04-29
+
+Patch release: post-v0.2.7 dep bumps and CI hygiene. First release that ships
+[Sigstore-signed build provenance attestations](SECURITY.md#supply-chain-provenance)
+for `kiln-v*` artifacts and the GHCR image.
+
+### Reproducibility / release
+- ci: attach build provenance attestations to release artifacts via `actions/attest-build-provenance`. `server-release.yml` and `docker-server-release.yml` now mint Sigstore-signed attestations bound to each artifact's sha256 and the workflow run; verify with `gh attestation verify <artifact> -R ericflo/kiln` (#627).
+
+### CI / release
+- ci: gate Apple codesign secrets (`APPLE_*`) to tagged releases so non-tag CI runs (PRs, branches) skip macOS code signing instead of failing on missing secrets (#625).
+- ci: also gate Tauri signing secrets (`TAURI_SIGNING_*`) to tagged releases for the same reason as #625 (#626).
+- chore(actions): bump `actions/upload-artifact` from 4 to 7 (#614).
+- chore(actions): bump `actions/checkout` from 4 to 6 (#615).
+- chore(actions): bump `docker/metadata-action` from 5 to 6 (#613).
+
+### Dependencies
+- chore(deps): bump `rand` from 0.9.4 to 0.10.1 (#616).
+- chore(deps): bump `safetensors` from 0.5.3 to 0.7.0 (#617).
+- chore(deps): bump `toml` from 0.8.23 to 1.1.2+spec-1.1.0 (#618).
+- chore(deps): bump `tokenizers` from 0.22.2 to 0.23.1 (#619).
+
+### Documentation
+- docs(site): scaffold landing page + GitHub Pages workflow under `docs/site/` so https://ericflo.github.io/kiln/ has a published presence (Phase 9) (#624).
+
+### Tests
+- fix(test): serialize env-mutating config tests to eliminate flakiness when run in parallel (#623).
+
 ## kiln-v0.2.7 — 2026-04-28
 
 Security release: closes all 12 findings in `docs/audits/security-audit-v0.1.md`.
