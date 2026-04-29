@@ -29,3 +29,4 @@ metal = ["kiln-model/metal"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rand = { workspace = true }
