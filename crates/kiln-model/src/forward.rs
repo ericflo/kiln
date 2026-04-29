@@ -45,6 +45,63 @@ fn fused_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
+/// Threshold above which the fused `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd`
+/// CustomOp2 path is enabled by default during training. Set to 47 GiB to draw the
+/// line between A6000-class GPUs (49 140 MiB) and A40-class GPUs (46 068 MiB).
+///
+/// See `docs/audits/PHASE10_VRAM_REGRESSION_MECHANISM.md` (PR #643) — the
+/// CustomOp2 saved-tensor expansion costs +18.6 GiB peak at T=2048 on A40 but is
+/// invisibly absorbed by the larger allocator-pool baseline that A6000 sits on
+/// permanently. Gating the default path on detected total VRAM keeps the fusion
+/// savings on production hardware while protecting smaller GPUs from OOM.
+#[cfg(feature = "cuda")]
+const FUSED_RMSNORM_VRAM_GATE_BYTES: u64 = 47 * 1024 * 1024 * 1024;
+
+/// Decide whether the fused RMSNorm CustomOp2 path should be the default
+/// dispatch on this CUDA host. Computed exactly once per process via OnceLock
+/// so the (potentially shell-out) VRAM detection is amortized away from the
+/// training inner loop.
+///
+/// Returns `true` (default-on, fused path) when one of the following holds:
+///   * `KILN_FORCE_RMSNORM_KERNEL=1` is set (debug/benchmark override that
+///     bypasses the gate even on small GPUs — useful for reproducing the A40
+///     +18.6 GiB regression locally).
+///   * Detected total VRAM is at least `FUSED_RMSNORM_VRAM_GATE_BYTES` (47 GiB).
+///
+/// Returns `false` (gated off, fall through to `rms_norm_fallback`) when:
+///   * VRAM detection failed (safer to assume small GPU).
+///   * Detected total VRAM is below the gate threshold.
+///
+/// Emits a single `tracing::info!` line at first call documenting the inputs to
+/// the decision, so a single `grep "kiln rmsnorm gate"` on a training log
+/// answers "which path is this run on?".
+///
+/// The hard kill switches `KILN_DISABLE_RMSNORM_KERNEL` and
+/// `KILN_DISABLE_RMSNORM_BACKWARD` are checked separately at the dispatch site
+/// in `rms_norm()` and take precedence over the gate.
+#[cfg(feature = "cuda")]
+fn should_use_fused_rmsnorm() -> bool {
+    static GATE: OnceLock<bool> = OnceLock::new();
+    *GATE.get_or_init(|| {
+        let force = std::env::var("KILN_FORCE_RMSNORM_KERNEL").is_ok();
+        let vram = kiln_core::vram::detect_vram();
+        let total_bytes = vram.total_bytes;
+        let total_mib = total_bytes / (1024 * 1024);
+        let threshold_mib = FUSED_RMSNORM_VRAM_GATE_BYTES / (1024 * 1024);
+        let detected_meets_threshold = total_bytes >= FUSED_RMSNORM_VRAM_GATE_BYTES;
+        let take_fused = force || detected_meets_threshold;
+        tracing::info!(
+            total_vram_mib = total_mib,
+            threshold_mib = threshold_mib,
+            detection_source = %vram.source,
+            force_override = force,
+            fused_path = if take_fused { "ON" } else { "OFF" },
+            "kiln rmsnorm gate"
+        );
+        take_fused
+    })
+}
+
 /// CUDA-compatible SiLU (Swish): `x * sigmoid(x)`.
 fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     let sig = cuda_sigmoid(x)?;
@@ -1811,15 +1868,28 @@ fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) 
 ///     per-layer saved-tensor peak during Phase 10 long-context training.
 ///     Inference (no grad needed) skips the backward path entirely — the
 ///     CustomOp2 still uses the same single-launch fused forward kernel.
+///   - Auto-gated by total VRAM: the fused path runs only on GPUs with
+///     ≥ 47 GiB total VRAM (A6000-class and above). On smaller GPUs (A40,
+///     RTX 3090/4090, L40, etc.) the dispatch routes through
+///     `rms_norm_fallback` automatically. Rationale: PR #638's CustomOp2
+///     saved-tensor expansion costs +18.6 GiB peak at T=2048 on A40-class
+///     hardware (see `docs/audits/PHASE10_VRAM_REGRESSION_MECHANISM.md`,
+///     PR #643). The kernel itself is bit-exact correct; the cost is
+///     invisible on A6000 because A6000's allocator pool already sits in
+///     the larger profile. Override with `KILN_FORCE_RMSNORM_KERNEL=1` to
+///     bypass the gate (useful for benchmarking the regression on smaller
+///     GPUs or for forcing the kernel on hardware that detects below the
+///     threshold).
 ///   - `KILN_DISABLE_RMSNORM_BACKWARD=1`: full `rms_norm_fallback` candle-op
 ///     chain. The forward kernel is not differentiable on its own (it returns
 ///     a Tensor with no `BackpropOp`), so a "forward-only kernel + autograd
 ///     backward" hybrid is not a valid path; this kill switch reverts to the
 ///     pre-Phase-10 baseline (forward AND backward via the candle chain).
 ///     Intended for isolating the saved-tensor reduction contribution to
-///     training peak VRAM.
+///     training peak VRAM. Takes precedence over the auto-VRAM gate.
 ///   - `KILN_DISABLE_RMSNORM_KERNEL=1`: alias for the above kill switch
-///     (also routes through `rms_norm_fallback`).
+///     (also routes through `rms_norm_fallback`). Takes precedence over
+///     `KILN_FORCE_RMSNORM_KERNEL` and over the auto-VRAM gate.
 ///
 /// On CPU, non-bf16, out-of-envelope, or non-CUDA backends: falls back to
 /// `rms_norm_fallback`. The CPU path keeps the candle-op chain for bit-exact
@@ -1829,7 +1899,11 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     {
         let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
         let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
-        if !kernel_disabled && !bwd_disabled && kiln_rmsnorm_kernel::supports(x, weight) {
+        if !kernel_disabled
+            && !bwd_disabled
+            && should_use_fused_rmsnorm()
+            && kiln_rmsnorm_kernel::supports(x, weight)
+        {
             return kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd(x, weight, eps as f32)
                 .context("fused_rmsnorm_with_autograd CustomOp2 failed");
         }
