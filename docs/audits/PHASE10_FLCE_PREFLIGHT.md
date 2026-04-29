@@ -295,3 +295,63 @@ not the only large term at long T.
 - Each bench cell is a single SFT step. Sustained training (multi-step,
   multi-epoch) might surface additional VRAM growth (optimizer state,
   cumulative checkpoint state) that this single-step bench does not capture.
+
+## Post-fix re-run — 2026-04-29 (T=2048 only)
+
+Status: **Finding 1 RESOLVED**
+Hardware: NVIDIA RTX A6000 (48 GB VRAM, driver 565.57.01), CUDA 12.4
+Commit: `dd36829` on `fix/flce-chunked-vocab-contig` (fix on top of `f86c6d0` main)
+Raw log: `docs/flce_phase_a_postfix_raw_2026-04-29.log`
+
+### Purpose
+
+Validate that the single-line `.contiguous()` fix to
+`kiln-flce-kernel::fused_linear_cross_entropy` clears Finding 1 above. Re-run
+the **T=2048 cells only** of `flce_phase_a_validation_bench.rs`; T=8192 and
+T=16384 are out of scope here because they are the GDN-side ceiling
+documented as Finding 2, not the head's contribution.
+
+The bench runs all four cells; the T=8192 / T=16384 OOMs reproduce as expected
+in ~0.7 s each (still GPU-ceiling pinned at 48 490 MiB) and are recorded for
+completeness, not as a re-measurement of Finding 2.
+
+### Results
+
+| target_T | FLCE | actual_T | peak VRAM (MiB) | ΔVRAM (MiB) | abc (GB) | abc/peak | step (s) | loss     | status      |
+|---:|:---:|---:|---:|---:|---:|---:|---:|---:|:---|
+| 2 048  | OFF | 2 042  | 34 602 | 16 128 |  3.78 | 11.2 % | 2.7 | 2.783685 | **ok** |
+| 2 048  | ON  | 2 042  | 34 602 | 16 128 |  3.78 | 11.2 % | 3.2 | 2.783439 | **ok** |
+| 8 192  | ON  | 8 192  | 48 490 | 30 016 | 15.16 | 32.0 % | 0.7 | n/a      | **OOM** (Finding 2) |
+| 16 384 | ON  | 16 380 | 48 490 | 30 016 | 30.30 | 64.0 % | 0.6 | n/a      | **OOM** (Finding 2) |
+
+Parity: `off_loss = 2.7836852`, `on_loss = 2.7834394`, `|delta| = 2.46e-4`,
+tolerance `1.0e-3` → **PASS**.
+
+The T=2048 FLCE=ON cell now completes a full SFT step instead of erroring on
+the chunked-vocab matmul. Loss matches the FLCE=OFF baseline within bf16
+parity tolerance. Peak VRAM at T=2048 is unchanged (34 602 MiB vs 34 868 MiB
+in the pre-fix run; both well under the GPU ceiling) — Phase A's head-side
+saving is not visible at T=2048 because the head materialization is small
+relative to the rest of activation memory at that length, as the original
+preflight already documented.
+
+### Verdict (Finding 1)
+
+**Finding 1 is RESOLVED.** `KILN_USE_FLCE=1` now runs end-to-end on
+Qwen3.5-4B SFT in the gradient-checkpointed path. The CPU-only regression
+test added alongside this fix
+(`crates/kiln-flce-kernel/src/tests.rs::cpu_parity_strided_chunk_slice`)
+asserts both the strided-slice layout invariant (so future regressions of
+the `.contiguous()` call surface immediately) and numeric parity with the
+naive `log_sum_exp - gather` reference.
+
+### What does NOT change
+
+- **Finding 2 (T=8192 / T=16384 OOM on A6000) is unchanged.** The post-fix
+  re-run still hits the GPU ceiling at those lengths in ~0.7 s. The "RED
+  — Phase A is insufficient on A6000 to unblock long-context SFT" verdict
+  above remains correct: removing the head's retained tensors does not
+  remove the GDN-side activation pressure that pins peak VRAM at 48 GB.
+- **Phase B (CUDA fused FLCE kernel) and GDN-side activation cleanup are
+  still required** before T=8192 / T=16384 SFT will fit on A6000. See
+  "Required follow-ups" §2 above.
