@@ -2395,7 +2395,7 @@ pub fn write_mtp_dump(
         views.push((name.clone(), view));
     }
 
-    let serialized = safetensors::serialize(views, &None)
+    let serialized = safetensors::serialize(views, None)
         .map_err(|e| anyhow::anyhow!("safetensors::serialize MTP dump: {e:?}"))?;
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -2835,7 +2835,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"prompt_tokens"));
         assert!(names.contains(&"meta__prompt_tokens_len"));
         assert!(names.contains(&"replay_tokens"));
@@ -2972,7 +2972,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"h_main"));
         assert!(names.contains(&"mtp_logits"));
         assert!(names.contains(&"meta__draft_token_id"));
@@ -3117,7 +3117,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         // Both taps appear under the b11__<name> namespace.
         assert!(names.contains(&"b11__tok_embed"));
         assert!(names.contains(&"b11__gdn_out_proj"));
@@ -3651,7 +3651,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         // Both taps appear under the b12__<name> namespace.
         assert!(names.contains(&"b12__post_input_norm"));
         assert!(names.contains(&"b12__mlp_down"));
@@ -3720,7 +3720,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"c41__layer_1_post_input_norm"));
         assert!(names.contains(&"c41__layer_1_output"));
         assert!(names.contains(&"meta__c41_tap_ids"));
@@ -3786,7 +3786,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"c42__layer_1_residual_input"));
         assert!(names.contains(&"c42__layer_1_post_input_norm"));
         assert!(names.contains(&"meta__c42_tap_ids"));
@@ -3852,7 +3852,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"c43__layer_1_input_norm_pre_weight_broadcast_mul"));
         assert!(names.contains(&"c43__layer_1_input_norm_pre_weight_scalar_affine"));
         assert!(names.contains(&"meta__c43_tap_ids"));
@@ -3920,7 +3920,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"c44__layer_1_residual_input_f32_row"));
         assert!(names.contains(&"c44__layer_1_input_norm_pre_weight_row_scalar_affine"));
         assert!(names.contains(&"meta__c44_tap_ids"));
@@ -3988,7 +3988,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"c45__layer_1_input_norm_rms_inv_scalar"));
         assert!(names.contains(&"c45__layer_1_input_norm_pre_weight_row_reconstructed"));
         assert!(names.contains(&"meta__c45_tap_ids"));
@@ -4056,7 +4056,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         assert!(names.contains(&"c46__layer_1_input_norm_selected_row_before_rmsnorm"));
         assert!(names.contains(&"c46__layer_1_input_norm_last_row_flat_values"));
         assert!(names.contains(&"meta__c46_tap_ids"));
@@ -4274,7 +4274,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         // Both taps appear under the c6__<name> namespace.
         assert!(names.contains(&"c6__token_emb"));
         assert!(names.contains(&"c6__fused"));
@@ -4404,7 +4404,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         // Both taps appear under the c7__<name> namespace.
         assert!(names.contains(&"c7__pre_sdpa_q"));
         assert!(names.contains(&"c7__attn_out"));
@@ -4560,7 +4560,7 @@ mod tests {
 
         let raw = std::fs::read(&tmp).unwrap();
         let st = SafeTensors::deserialize(&raw).unwrap();
-        let names: Vec<&str> = st.names().into_iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = st.names().into_iter().collect();
         // Both taps appear under the c14__<name> namespace.
         assert!(names.contains(&"c14__post_block"));
         assert!(names.contains(&"c14__logits"));

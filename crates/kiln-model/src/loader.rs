@@ -1307,7 +1307,7 @@ mod tests {
             .map(|(n, v)| (n.as_str(), v.clone()))
             .collect();
 
-        safetensors::tensor::serialize(refs, &None).unwrap()
+        safetensors::tensor::serialize(refs, None).unwrap()
     }
 
     /// Build a list of tensor specs for a tiny test model.
@@ -1906,7 +1906,7 @@ mod tests {
             .map(|(n, v)| (n.as_str(), v.clone()))
             .collect();
 
-        safetensors::tensor::serialize(refs, &None).unwrap()
+        safetensors::tensor::serialize(refs, None).unwrap()
     }
 
     /// Pack `values` (each 0..15) into u32 words, 8 values per word.
@@ -2190,7 +2190,7 @@ mod tests {
             .iter()
             .map(|(n, v)| (n.as_str(), v.clone()))
             .collect();
-        let bytes = safetensors::tensor::serialize(refs, &None).unwrap();
+        let bytes = safetensors::tensor::serialize(refs, None).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("model.safetensors"), &bytes).unwrap();

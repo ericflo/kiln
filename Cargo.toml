@@ -77,7 +77,7 @@ minijinja = "2"
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 
 # Model loading
-safetensors = "0.5"
+safetensors = "0.7"
 memmap2 = "0.9"
 
 # Adapter packaging (tar.gz export)
