@@ -1,0 +1,38 @@
+Baseline VRAM (post-load): 16346 MiB
+--- T target = 256  label = warmup ---
+VRAM_PROBE	after_embed	16420
+VRAM_PROBE	boundary_pre_0	16420
+VRAM_PROBE	boundary_post_0	17802
+VRAM_PROBE	boundary_pre_1	17802
+VRAM_PROBE	boundary_post_1	17802
+VRAM_PROBE	boundary_pre_2	17802
+VRAM_PROBE	boundary_post_2	17834
+VRAM_PROBE	boundary_pre_3	17834
+VRAM_PROBE	boundary_post_3	17834
+VRAM_PROBE	after_boundary_forward	17834
+VRAM_PROBE	recompute_pre_0	17834
+VRAM_PROBE	recompute_post_mono_0	32778
+VRAM_PROBE	recompute_pre_1	32778
+VRAM_PROBE	recompute_post_mono_1	32778
+VRAM_PROBE	recompute_pre_2	32778
+VRAM_PROBE	recompute_post_mono_2	32778
+VRAM_PROBE	recompute_pre_3	32778
+VRAM_PROBE	recompute_post_mono_3	32778
+VRAM_PROBE	after_recompute	32778
+  RESULT label=warmup T=256 actual_t=245 peak_mib=32778 step_secs=12.64 final_loss=Some(2.2242166996002197) status=ok
+Baseline VRAM (post-warmup): 32778 MiB
+--- T target = 2048  label = main ---
+VRAM_PROBE	after_embed	32778
+VRAM_PROBE	boundary_pre_0	32778
+VRAM_PROBE	boundary_post_0	32778
+VRAM_PROBE	boundary_pre_1	32778
+VRAM_PROBE	boundary_post_1	32778
+VRAM_PROBE	boundary_pre_2	32778
+VRAM_PROBE	boundary_post_2	32778
+VRAM_PROBE	boundary_pre_3	32778
+VRAM_PROBE	boundary_post_3	32778
+VRAM_PROBE	after_boundary_forward	32778
+VRAM_PROBE	recompute_pre_0	32778
+  RESULT label=main T=2048 actual_t=2048 peak_mib=48554 step_secs=2.30 final_loss=None status=err
+  step error: checkpointed backward pass
+RUN_DONE_1EDECD7
