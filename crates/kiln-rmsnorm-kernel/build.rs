@@ -41,6 +41,7 @@ fn main() {
     }
 
     build.file(csrc_dir.join("fused_rmsnorm.cu"));
+    build.file(csrc_dir.join("fused_rmsnorm_bwd.cu"));
     build.file(csrc_dir.join("fused_l2_qk_norm.cu"));
 
     build.compile("kiln_rmsnorm_kernel");

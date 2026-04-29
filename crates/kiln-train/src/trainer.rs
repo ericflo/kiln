@@ -3365,4 +3365,91 @@ mod tests {
         let cfg = CheckpointConfig::from_env(2);
         assert!(cfg.num_segments <= 2);
     }
+
+    /// Phase 10 §1: confirm switching the RMSNorm dispatch between the new
+    /// `CustomOp2` autograd path (default) and the
+    /// `KILN_DISABLE_RMSNORM_BACKWARD=1` fallback does NOT change training
+    /// loss on a 2-step CPU SFT run.
+    ///
+    /// The custom op only routes through the manual-backward CUDA kernel on
+    /// CUDA — on CPU, both code paths fall back to `rms_norm_fallback` (the
+    /// standalone candle-op chain). This test pins that contract: enabling
+    /// or disabling the new env var on CPU is a no-op for the math, so the
+    /// loss values are bit-exact in either configuration. The test
+    /// initializes params ONCE (so the same `Var` weights are used by both
+    /// runs) and only flips the dispatch env var between calls;
+    /// `standard_forward_backward` itself doesn't mutate params, so each
+    /// call is an independent forward pass.
+    ///
+    /// Test must run via `cargo nextest run` or `cargo test --
+    /// --test-threads=1` so the env-var manipulation is process-isolated.
+    #[test]
+    fn test_training_rmsnorm_custom_op_loss_parity() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+
+        let backend = backend::for_device(&device);
+
+        // Initialize LoRA params ONCE so both runs use the same Vars.
+        // `standard_forward_backward` does not call SGD; each invocation
+        // is a pure forward+backward pass, so the loss is deterministic
+        // given fixed inputs and params.
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+
+        let run_step = |bwd_disabled: bool| -> Result<f64> {
+            // SAFETY: env mutation is safe under nextest's per-test process
+            // isolation; this test must run via `cargo nextest run`.
+            unsafe {
+                std::env::remove_var("KILN_DISABLE_RMSNORM_KERNEL");
+                if bwd_disabled {
+                    std::env::set_var("KILN_DISABLE_RMSNORM_BACKWARD", "1");
+                } else {
+                    std::env::remove_var("KILN_DISABLE_RMSNORM_BACKWARD");
+                }
+            }
+
+            let (loss_val, _grads) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &label_mask,
+                &device,
+            )?;
+
+            // Defensive cleanup so the next call (or test) isn't poisoned.
+            unsafe {
+                std::env::remove_var("KILN_DISABLE_RMSNORM_BACKWARD");
+            }
+
+            Ok(loss_val)
+        };
+
+        // 2-step SFT run: alternate dispatch on each step so divergence
+        // would show up at any step.
+        for step in 0..2 {
+            let loss_default = run_step(false)?;
+            let loss_fallback = run_step(true)?;
+
+            assert!(
+                loss_default.is_finite() && loss_fallback.is_finite(),
+                "non-finite loss at step {step}: default={loss_default} fallback={loss_fallback}",
+            );
+            // CPU dispatch falls back to `rms_norm_fallback` for both
+            // configurations (the CUDA-only custom op never fires on CPU),
+            // so the loss values are bit-exact.
+            assert!(
+                (loss_default - loss_fallback).abs() < 1e-9,
+                "rmsnorm dispatch loss diverges at step {step}: \
+                 default={loss_default} fallback={loss_fallback}",
+            );
+        }
+
+        Ok(())
+    }
 }
