@@ -94,14 +94,17 @@ jobs:
           chmod 600 "$RUNNER_TEMP/appstore/AuthKey.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8" >> "$GITHUB_ENV"
 
-      # Two mutually exclusive Build steps so we can pass Apple codesign
-      # secrets to tauri-action ONLY on tagged releases. On PR/main/
-      # dependabot runs, GitHub does not expose secrets to fork-equivalent
-      # PRs, so the secret expressions evaluate to empty strings.
-      # tauri-bundler 2.x treats env vars set to empty strings as "perform
-      # codesign" and then fails when `security import` is called with no
-      # certificate. The only reliable way to make it skip codesigning is
-      # to NOT pass the env vars at all — which means a separate step.
+      # Two mutually exclusive Build steps so we can pass codesign +
+      # updater-signing secrets to tauri-action ONLY on tagged releases.
+      # On PR/main/dependabot runs, GitHub does not expose secrets to
+      # fork-equivalent PRs, so the secret expressions evaluate to empty
+      # strings. tauri-bundler 2.x does NOT gracefully skip signing when
+      # these are passed but empty: APPLE_* triggers `security import`
+      # failures, and TAURI_SIGNING_* triggers "Missing comment in secret
+      # key" decode failures (verified empirically on dependabot PRs
+      # #614/#615 after PR #625 merged). The only reliable way to skip
+      # signing is to NOT pass the env vars at all — which means a
+      # separate step.
       - name: Build (tauri-action, tagged release with codesign)
         if: startsWith(github.ref, 'refs/tags/desktop-v')
         uses: tauri-apps/tauri-action@v0
@@ -132,20 +135,35 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+      # Disable updater artifact creation in-place for the unsigned build.
+      # The pubkey is configured in tauri.conf.json, so tauri-bundler aborts
+      # with "A public key has been found, but no private key" when
+      # TAURI_SIGNING_PRIVATE_KEY is unset. Flipping createUpdaterArtifacts
+      # to false skips the updater bundle entirely. Updater bundles only
+      # matter for tagged releases anyway.
+      - name: Disable updater artifacts for unsigned PR/main build
+        if: "!startsWith(github.ref, 'refs/tags/desktop-v')"
+        shell: bash
+        working-directory: desktop
+        run: |
+          node -e "const fs=require('fs');const p='tauri.conf.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));d.bundle.createUpdaterArtifacts=false;fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n');console.log('Disabled createUpdaterArtifacts for unsigned build');"
+
       - name: Build (tauri-action, PR/main unsigned)
         if: "!startsWith(github.ref, 'refs/tags/desktop-v')"
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # TAURI_SIGNING_* are keypair-based (not Apple keychain) and work
-          # on PRs because tauri-action treats empty values as "skip
-          # signing." Pass them through so updater bundles get signed when
-          # secrets ARE available (push to main from a non-fork branch).
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Intentionally NO APPLE_* env vars here — see comment above the
-          # tagged-release step. Empty values trigger codesign attempts in
-          # tauri-bundler 2.x and fail with `security import` errors.
+          # Intentionally NO TAURI_SIGNING_* or APPLE_* env vars — see the
+          # tagged-release step above. Empirically (dependabot PRs #614/#615
+          # after PR #625 merged), tauri-bundler does NOT gracefully skip
+          # signing when these are passed but empty: it tries to decode the
+          # empty key and fails with "Missing comment in secret key", and
+          # the Apple keychain path fails with `security import` errors.
+          # The only reliable way to skip signing is to NOT pass the env
+          # vars at all. Updater signing happens exclusively on desktop-v*
+          # tag pushes. PR/main builds produce unsigned debug bundles for
+          # CI verification only (with createUpdaterArtifacts patched off
+          # by the previous step).
         with:
           projectPath: desktop
           args: ${{ matrix.args }}
