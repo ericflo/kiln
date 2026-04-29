@@ -15,15 +15,15 @@ Either an NVIDIA GPU **or** an Apple Silicon Mac.
 
 Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. **No Rust toolchain or CUDA build required for the GUI itself.**
 
-**Download — [Kiln Desktop v0.2.0](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.0):**
+**Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
 | Platform | Installer | Size |
 |----------|-----------|------|
-| macOS (Apple Silicon) | [Kiln.Desktop_0.2.0_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_aarch64.dmg) | 8.1 MB |
-| Windows | [Kiln.Desktop_0.2.0_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_x64-setup.exe) (NSIS) | 4.3 MB |
-| Windows | [Kiln.Desktop_0.2.0_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_x64_en-US.msi) (MSI) | 6.5 MB |
-| Linux | [Kiln.Desktop_0.2.0_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_amd64.deb) | 8.4 MB |
-| Linux | [Kiln.Desktop_0.2.0_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.0/Kiln.Desktop_0.2.0_amd64.AppImage) | 81.7 MB |
+| macOS (Apple Silicon) | [Kiln.Desktop_0.2.2_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_aarch64.dmg) | 8.5 MB |
+| Windows | [Kiln.Desktop_0.2.2_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64-setup.exe) (NSIS) | 4.5 MB |
+| Windows | [Kiln.Desktop_0.2.2_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64_en-US.msi) (MSI) | 6.8 MB |
+| Linux | [Kiln.Desktop_0.2.2_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb) | 8.8 MB |
+| Linux | [Kiln.Desktop_0.2.2_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage) | 85.7 MB |
 
 Continue with section 1 (Build Kiln) only if you want to build from source, contribute, or use the CLI directly. Otherwise, install the desktop app, let it finish its first-launch downloads, then skip ahead to section 4 (Test Inference) once the server is running.
 
@@ -105,7 +105,7 @@ You'll see the startup banner:
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.1
+  Version: 0.2.8
   Mode:    GPU inference
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
