@@ -2710,7 +2710,7 @@ fn causal_conv1d_decode(
 ///     cores on A5000/4090-class GPUs for dk = dv = 128,
 ///   - a small-enough forward-substitution inner loop so the Vec<Tensor> cat
 ///     churn stays bounded.
-const GDN_CHUNK_SIZE: usize = 64;
+pub const GDN_CHUNK_SIZE: usize = 64;
 const GDN_RECURRENT_PREFILL_MAX_TOKENS: usize = 2048;
 
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row > col else 0.0.
