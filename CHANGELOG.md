@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Validation
+- Validated Phase 10 Phase A FLCE on A6000 (48 GB) at T ∈ {2048, 8192, 16384} with rank-8 LoRA and gradient checkpointing ON. **Result: RED — Phase A is insufficient on A6000.** Two findings: (1) `KILN_USE_FLCE=1` fails before completing a step at T=2048 with `matmul is only supported for contiguous tensors` — the V-axis chunk of `embed_tokens_t` is non-contiguous and the chunked-vocab matmul rejects it; (2) even with that bug fixed, T=8192 and T=16384 still pin peak VRAM at the 48 GB A6000 ceiling, indicating GDN-side activations (not the head) dominate at long T. See `docs/audits/PHASE10_FLCE_PREFLIGHT.md` (Phase A validation section, 2026-04-29) for the table, raw log, and required follow-ups. Bench: `crates/kiln-server/examples/flce_phase_a_validation_bench.rs`.
+
 ## kiln-v0.2.8 — 2026-04-29
 
 Patch release: post-v0.2.7 dep bumps and CI hygiene. First release that ships

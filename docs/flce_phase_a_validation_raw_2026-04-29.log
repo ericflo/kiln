@@ -1,0 +1,152 @@
+[36m=== kiln-runpod image ===[0m
+  GPU: NVIDIA RTX A6000, 565.57.01
+  CUDA toolkit: release 12.4
+  nsys: NVIDIA Nsight Systems version 2023.4.4.54-234433681190v0
+  rustc: 1.95.0 | cargo: 1.95.0
+  sccache: 0.9.1 | nextest: (65e806bd5
+  torch: 2.4.1+cu124 (cuda=12.4)
+
+Quick start: [32mkiln-setup[0m (configures sccache+B2) then clone kiln & build.
+
+=== FLCE Phase A validation — Qwen3.5-4B, V=248320, hidden=2560 ===
+Loading model from /workspace/qwen3.5-4b
+[2m2026-04-29T07:29:49.153017Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loading model from /workspace/qwen3.5-4b (2 shards)
+[2m2026-04-29T07:29:49.154325Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Using weight name prefix: "model.language_model."
+[2m2026-04-29T07:29:49.154512Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Native MTP head detected; deferring CPU load until first use [3mmtp_prefix[0m[2m=[0mmtp.
+[2m2026-04-29T07:29:49.154521Z[0m [32m INFO[0m [2mkiln_model::loader[0m[2m:[0m Loaded 4206M parameters (8022 MB) across 32 layers
+[2m2026-04-29T07:29:49.154602Z[0m [32m INFO[0m [2mkiln_server::device[0m[2m:[0m CUDA available — using GPU device 0
+Baseline VRAM (post-load): 16346 MiB
+Warmup pass at T~256 (FLCE OFF)...
+
+--- T target = 256  FLCE = OFF ---
+  Tokenized length: 248 tokens (target 256)
+[2m2026-04-29T07:29:53.548507Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T256-flce-off"
+[2m2026-04-29T07:29:53.668691Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T07:29:53.734306Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T07:29:53.734344Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+[2m2026-04-29T07:30:04.022700Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m training step [3mepoch[0m[2m=[0m1 [3mstep[0m[2m=[0m1 [3mtotal_steps[0m[2m=[0m1 [3mloss[0m[2m=[0m"1.741690"
+[2m2026-04-29T07:30:04.022742Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m epoch complete [3mepoch[0m[2m=[0m1 [3mavg_loss[0m[2m=[0m"1.741690"
+[2m2026-04-29T07:30:04.075241Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m saved PEFT adapter [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T256-flce-off [3mnum_tensors[0m[2m=[0m256
+[2m2026-04-29T07:30:04.075329Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m SFT training complete [3madapter[0m[2m=[0m"flce-phaseA-T256-flce-off" [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T256-flce-off [3mfinal_loss[0m[2m=[0m"1.741690"
+  baseline 16346 MiB  peak 18474 MiB  delta 2128 MiB  samples 100  wall 10.5s  loss=Some(1.7416900396347046)  status=ok
+Baseline VRAM (post-warmup): 18474 MiB
+
+--- T target = 2048  FLCE = OFF ---
+  Tokenized length: 2042 tokens (target 2048)
+[2m2026-04-29T07:30:04.287149Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T2048-flce-off"
+[2m2026-04-29T07:30:04.288894Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T07:30:04.323377Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T07:30:04.323415Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+[2m2026-04-29T07:30:06.994881Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m training step [3mepoch[0m[2m=[0m1 [3mstep[0m[2m=[0m1 [3mtotal_steps[0m[2m=[0m1 [3mloss[0m[2m=[0m"2.783685"
+[2m2026-04-29T07:30:06.994932Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m epoch complete [3mepoch[0m[2m=[0m1 [3mavg_loss[0m[2m=[0m"2.783685"
+[2m2026-04-29T07:30:07.048324Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m saved PEFT adapter [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-off [3mnum_tensors[0m[2m=[0m256
+[2m2026-04-29T07:30:07.048390Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m SFT training complete [3madapter[0m[2m=[0m"flce-phaseA-T2048-flce-off" [3mpath[0m[2m=[0m/tmp/kiln-flce-phaseA-validation/flce-phaseA-T2048-flce-off [3mfinal_loss[0m[2m=[0m"2.783685"
+  baseline 18474 MiB  peak 34868 MiB  delta 16394 MiB  samples 25  wall 2.8s  loss=Some(2.7836852073669434)  status=ok
+
+--- T target = 2048  FLCE = ON ---
+  Tokenized length: 2042 tokens (target 2048)
+[2m2026-04-29T07:30:07.214611Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T2048-flce-on"
+[2m2026-04-29T07:30:07.216811Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T07:30:07.355017Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T07:30:07.355063Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18474 MiB  peak 34868 MiB  delta 16394 MiB  samples 8  wall 1.5s  loss=None  status=other-error
+  [!] non-OOM error: fused linear cross-entropy (checkpointed): matmul active_hidden_f32 @ head_chunk: matmul is only supported for contiguous tensors lstride: Layout { shape: [2030, 2560], stride: [2560, 1], start_offset: 0 } rstride: Layout { shape: [2560, 4096], stride: [248320, 1], start_offset: 0 } mnk: (2030, 4096, 2560)
+
+--- T target = 8192  FLCE = ON ---
+  Tokenized length: 8192 tokens (target 8192)
+[2m2026-04-29T07:30:09.531595Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T8192-flce-on"
+[2m2026-04-29T07:30:09.533964Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T07:30:09.598698Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T07:30:09.598760Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18474 MiB  peak 48490 MiB  delta 30016 MiB  samples 9  wall 0.7s  loss=None  status=OOM
+
+--- T target = 16384  FLCE = ON ---
+  Tokenized length: 16380 tokens (target 16384)
+[2m2026-04-29T07:30:13.310086Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m starting SFT training [3mnum_examples[0m[2m=[0m1 [3mepochs[0m[2m=[0m1 [3mlr[0m[2m=[0m0.0001 [3mrank[0m[2m=[0m8 [3malpha[0m[2m=[0m16.0 [3madapter_name[0m[2m=[0m"flce-phaseA-T16384-flce-on"
+[2m2026-04-29T07:30:13.312351Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m initialized trainable LoRA parameters [3mnum_vars[0m[2m=[0m256
+[2m2026-04-29T07:30:13.426855Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m auto-configured gradient checkpoint segments for detected VRAM [3mnum_segments[0m[2m=[0m4 [3mvram_gb[0m[2m=[0m51.52702464 [3msource[0m[2m=[0mnvidia-smi
+[2m2026-04-29T07:30:13.426900Z[0m [32m INFO[0m [2mkiln_train::trainer[0m[2m:[0m gradient checkpointing enabled [3mnum_segments[0m[2m=[0m4 [3mboundaries[0m[2m=[0m[(0, 8), (8, 16), (16, 24), (24, 32)]
+  baseline 18474 MiB  peak 48490 MiB  delta 30016 MiB  samples 7  wall 0.7s  loss=None  status=OOM
+
+=== FLCE Phase A validation results ===
+target_T   actual_T   FLCE   peak_VRAM_MiB  delta_MiB    abc_GB       abc/peak   step_s     loss        
+2048       2042       OFF    34868          16394        3.778        0.111      2.8        2.783685    
+2048       2042       ON     34868          16394        3.778        0.111      1.5        n/a         
+8192       8192       ON     48490          30016        15.156       0.320      0.7        n/a         
+16384      16380      ON     48490          30016        30.305       0.640      0.7        n/a         
+
+=== Parity (T=2048 FLCE off vs on) ===
+  off_loss = Some(2.7836852073669434)
+  on_loss  = None
+  delta    = None
+  tolerance= 1.0e-3
+  result   = n/a
+
+=== Cell summary ===
+  T=2048   FLCE=OFF  -> status=ok          peak=34868 MiB  step=2.8s  loss=Some(2.7836852073669434)
+  T=2048   FLCE=ON   -> status=other-error  peak=34868 MiB  step=1.5s  loss=None
+  T=8192   FLCE=ON   -> status=OOM         peak=48490 MiB  step=0.7s  loss=None
+  T=16384  FLCE=ON   -> status=OOM         peak=48490 MiB  step=0.7s  loss=None
+
+=== Verdict: RED — Phase A insufficient on A6000 ===
+
+=== JSON ===
+{
+  "baseline_mib": 18474,
+  "hidden": 2560,
+  "parity": {
+    "delta": null,
+    "off_loss": 2.7836852073669434,
+    "on_loss": null,
+    "pass": null,
+    "tolerance": 0.001
+  },
+  "rows": [
+    {
+      "actual_t": 2042,
+      "baseline_mib": 18474,
+      "delta_mib": 16394,
+      "final_loss": 2.7836852073669434,
+      "peak_mib": 34868,
+      "status": "ok",
+      "step_secs": 2.761953788,
+      "target_t": 2048,
+      "use_flce": false
+    },
+    {
+      "actual_t": 2042,
+      "baseline_mib": 18474,
+      "delta_mib": 16394,
+      "final_loss": null,
+      "peak_mib": 34868,
+      "status": "other-error",
+      "step_secs": 1.4650553579999999,
+      "target_t": 2048,
+      "use_flce": true
+    },
+    {
+      "actual_t": 8192,
+      "baseline_mib": 18474,
+      "delta_mib": 30016,
+      "final_loss": null,
+      "peak_mib": 48490,
+      "status": "OOM",
+      "step_secs": 0.700993086,
+      "target_t": 8192,
+      "use_flce": true
+    },
+    {
+      "actual_t": 16380,
+      "baseline_mib": 18474,
+      "delta_mib": 30016,
+      "final_loss": null,
+      "peak_mib": 48490,
+      "status": "OOM",
+      "step_secs": 0.657756417,
+      "target_t": 16384,
+      "use_flce": true
+    }
+  ],
+  "verdict": "RED — Phase A insufficient on A6000",
+  "vocab_size": 248320
+}
