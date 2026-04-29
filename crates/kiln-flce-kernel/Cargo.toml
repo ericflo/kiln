@@ -11,5 +11,12 @@ repository.workspace = true
 candle-core = { workspace = true }
 anyhow = { workspace = true }
 
+[features]
+# Enable the CUDA path in `FlceCustomOp::cuda_fwd`. Without this feature the
+# CUDA forward errors out at runtime ("CUDA not enabled"); the CPU path works
+# either way. kiln-train re-exports this feature via its own `cuda` feature
+# so `cargo build --features cuda --bin kiln-bench` activates it.
+cuda = ["candle-core/cuda"]
+
 [dev-dependencies]
 candle-nn = { workspace = true }
