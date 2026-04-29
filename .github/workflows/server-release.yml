@@ -29,7 +29,7 @@ jobs:
     name: macOS / aarch64 / Metal
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -185,7 +185,7 @@ jobs:
           docker-images: false
           swap-storage: true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -288,7 +288,7 @@ jobs:
       # `msvcr*.dll` on end-user machines — a nice distribution win.
       RUSTFLAGS: '-C target-feature=+crt-static'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -393,7 +393,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Upload third-party license attribution
         env:

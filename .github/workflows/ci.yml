@@ -27,7 +27,7 @@ jobs:
     name: macOS / Metal (M-series)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -60,7 +60,7 @@ jobs:
     name: Linux / default features
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -78,7 +78,7 @@ jobs:
     name: cargo-deny (license / source / bans policy)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Pin to an exact commit SHA so the bundled cargo-deny CLI version cannot
       # drift on us. v2.0.17 bundles cargo-deny 0.19.2, which is the version the
       # `unmaintained = "workspace"` Scope syntax in deny.toml is validated
