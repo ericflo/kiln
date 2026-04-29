@@ -1706,6 +1706,7 @@ fn bench_latency_paged_mtp(
         let messages = [ChatMessage {
             role: "user".to_string(),
             content: raw_prompt,
+            ..Default::default()
         }];
         tokenizer
             .apply_chat_template(&messages)
