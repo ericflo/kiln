@@ -7404,7 +7404,7 @@ mod tests {
     #[test]
     fn test_cuda_gdn_gated_rms_norm_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
@@ -7428,9 +7428,9 @@ mod tests {
         let elems = batch * seq_len * heads * hidden;
 
         let mut rng = StdRng::seed_from_u64(0xC0DA_6A7E);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let z_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-2.0f32..2.0f32)).collect();
-        let w_data: Vec<f32> = (0..hidden).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let z_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-2.0f32..2.0f32)).collect();
+        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
             .to_dtype(DType::BF16)?;
@@ -7468,7 +7468,7 @@ mod tests {
     #[test]
     fn test_metal_gated_rms_norm_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!("Metal unavailable, skipping test_metal_gated_rms_norm_matches_fallback");
@@ -7487,9 +7487,9 @@ mod tests {
         let elems = batch * seq_len * heads * hidden;
 
         let mut rng = StdRng::seed_from_u64(0x6A7E_DA75);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let z_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-2.0f32..2.0f32)).collect();
-        let w_data: Vec<f32> = (0..hidden).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let z_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-2.0f32..2.0f32)).collect();
+        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
             .to_dtype(DType::BF16)?;
@@ -7527,7 +7527,7 @@ mod tests {
     #[test]
     fn test_metal_rms_norm_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!("Metal unavailable, skipping test_metal_rms_norm_matches_fallback");
@@ -7540,9 +7540,9 @@ mod tests {
         let elems = batch * seq_len * hidden;
 
         let mut rng = StdRng::seed_from_u64(0xA11CE);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
+        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
         let w_data: Vec<f32> = (0..hidden)
-            .map(|_| rng.gen_range(-0.2f32..0.2f32))
+            .map(|_| rng.random_range(-0.2f32..0.2f32))
             .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, hidden), &device)?
@@ -7578,7 +7578,7 @@ mod tests {
     #[test]
     fn test_metal_rotary_embedding_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!("Metal unavailable, skipping test_metal_rotary_embedding_matches_fallback");
@@ -7593,10 +7593,10 @@ mod tests {
         let rotary_dim = 8usize;
         let mut rng = StdRng::seed_from_u64(0xA07A_7E55);
         let q_data: Vec<f32> = (0..batch * seq_len * q_heads * head_dim)
-            .map(|_| rng.gen_range(-1.0f32..1.0f32))
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
             .collect();
         let k_data: Vec<f32> = (0..batch * seq_len * k_heads * head_dim)
-            .map(|_| rng.gen_range(-1.0f32..1.0f32))
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
             .collect();
         let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, head_dim), &device)?
             .to_dtype(DType::BF16)?;
@@ -9666,7 +9666,7 @@ mod tests {
     #[test]
     fn test_gdn_kernel_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -9687,9 +9687,9 @@ mod tests {
         let n_v = b * nv * c * dv;
         let n_b = b * nv * c;
 
-        let a_data: Vec<f32> = (0..n_a).map(|_| rng.gen_range(-0.05f32..0.05f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.05f32..0.05f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
         let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?;
@@ -9732,7 +9732,7 @@ mod tests {
     #[test]
     fn test_metal_gdn_forward_substitution_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!(
@@ -9752,9 +9752,9 @@ mod tests {
         let n_v = b * nv * c * dv;
         let n_b = b * nv * c;
 
-        let a_data: Vec<f32> = (0..n_a).map(|_| rng.gen_range(-0.05f32..0.05f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.5f32..1.5f32)).collect();
+        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.05f32..0.05f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
         let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?;
@@ -9802,7 +9802,7 @@ mod tests {
     #[test]
     fn test_gdn_recurrent_kernel_matches_reference() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -9827,13 +9827,13 @@ mod tests {
         let n_b = b * nv * t;
         let n_s = b * nv * dk * dv;
 
-        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.3f32..1.2f32)).collect();
+        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.3f32..1.2f32)).collect();
         // Small negative gates so exp(g) stays in (~0.8, 1.0).
-        let g_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let g_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.0f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
 
         let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?;
         let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?;
@@ -9914,7 +9914,7 @@ mod tests {
     #[test]
     fn test_metal_gdn_recurrent_kernel_matches_reference() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!(
@@ -9936,12 +9936,12 @@ mod tests {
         let n_b = b * nv * t;
         let n_s = b * nv * dk * dv;
 
-        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(0.3f32..1.2f32)).collect();
-        let g_data: Vec<f32> = (0..n_b).map(|_| rng.gen_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
+        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.3f32..1.2f32)).collect();
+        let g_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.0f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
 
         let q = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
         let k = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
@@ -10012,7 +10012,7 @@ mod tests {
     #[test]
     fn test_gdn_chunk_prep_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -10036,12 +10036,12 @@ mod tests {
         // Small negative gates so big_g stays in a reasonable range — the
         // recurrence produces g_t near zero so the cumulative sum caps
         // around -10 at most.
-        let g_data: Vec<f32> = (0..n_g).map(|_| rng.gen_range(-0.15f32..0.0f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let ks_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let qs_data: Vec<f32> = (0..n_v).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let g_data: Vec<f32> = (0..n_g).map(|_| rng.random_range(-0.15f32..0.0f32)).collect();
+        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let ks_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let qs_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
 
         let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
         let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
@@ -10116,7 +10116,7 @@ mod tests {
     #[test]
     fn test_gdn_chunk_body_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -10141,17 +10141,17 @@ mod tests {
                 let t = (idx / c) % c;
                 let i = idx % c;
                 if i < t {
-                    rng.gen_range(-0.15f32..0.15f32)
+                    rng.random_range(-0.15f32..0.15f32)
                 } else {
                     0.0
                 }
             })
             .collect();
-        let b_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.2f32..0.2f32)).collect();
-        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let qss_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.3f32..1.1f32)).collect();
-        let decay_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.6f32..1.0f32)).collect();
+        let b_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.2f32..0.2f32)).collect();
+        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let qss_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
+        let decay_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.6f32..1.0f32)).collect();
 
         let a_strict =
             Tensor::from_slice(&a_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
@@ -10209,7 +10209,7 @@ mod tests {
     #[test]
     fn test_gdn_full_chunk_forward_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -10234,16 +10234,16 @@ mod tests {
         let n_dkc = b * nv * dk * c;
         let n_dkdv = b * nv * dk * dv;
 
-        let g_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(-0.15f32..0.0f32)).collect();
-        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-1.0f32..1.0f32)).collect();
-        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let ks_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let qs_data: Vec<f32> = (0..n_cdv).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.gen_range(0.3f32..1.1f32)).collect();
-        let kt_data: Vec<f32> = (0..n_dkc).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
+        let g_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(-0.15f32..0.0f32)).collect();
+        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let ks_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let qs_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
+        let kt_data: Vec<f32> = (0..n_dkc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
         let state_data: Vec<f32> = (0..n_dkdv)
-            .map(|_| rng.gen_range(-0.25f32..0.25f32))
+            .map(|_| rng.random_range(-0.25f32..0.25f32))
             .collect();
 
         let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
@@ -10319,7 +10319,7 @@ mod tests {
     #[test]
     fn test_causal_conv1d_update_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -10340,9 +10340,9 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
@@ -10407,7 +10407,7 @@ mod tests {
     #[test]
     fn test_causal_conv1d_prefill_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let device = match Device::new_cuda(0) {
             Ok(d) => d,
@@ -10429,9 +10429,9 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -10490,7 +10490,7 @@ mod tests {
     #[test]
     fn test_causal_conv1d_update_matches_fallback_metal() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!(
@@ -10508,9 +10508,9 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
@@ -10568,7 +10568,7 @@ mod tests {
     #[test]
     fn test_causal_conv1d_prefill_bf16_parity_on_metal() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!(
@@ -10587,9 +10587,9 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -10641,7 +10641,7 @@ mod tests {
     #[test]
     fn test_metal_causal_conv1d_prefill_kernel_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt, SeedableRng};
 
         let Some(device) = crate::backend::metal::try_new_metal() else {
             eprintln!(
@@ -10660,9 +10660,9 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.gen_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.gen_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.gen_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;

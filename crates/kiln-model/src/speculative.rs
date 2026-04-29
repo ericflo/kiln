@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::RngExt;
 
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
