@@ -94,7 +94,16 @@ jobs:
           chmod 600 "$RUNNER_TEMP/appstore/AuthKey.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8" >> "$GITHUB_ENV"
 
-      - name: Build (tauri-action)
+      # Two mutually exclusive Build steps so we can pass Apple codesign
+      # secrets to tauri-action ONLY on tagged releases. On PR/main/
+      # dependabot runs, GitHub does not expose secrets to fork-equivalent
+      # PRs, so the secret expressions evaluate to empty strings.
+      # tauri-bundler 2.x treats env vars set to empty strings as "perform
+      # codesign" and then fails when `security import` is called with no
+      # certificate. The only reliable way to make it skip codesigning is
+      # to NOT pass the env vars at all — which means a separate step.
+      - name: Build (tauri-action, tagged release with codesign)
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -108,27 +117,37 @@ jobs:
           # staples the .app bundle automatically. A follow-up step below
           # notarizes and staples the .dmg wrapper, which tauri-action
           # does not handle.
-          #
-          # Only set these on tagged releases (refs/tags/desktop-v*). On
-          # PR/main/dependabot runs, GitHub does not expose secrets to
-          # fork-equivalent PRs, so unconditionally referencing them
-          # produces empty strings — and tauri-action then fails trying
-          # to import an empty keychain certificate. PR/main builds
-          # produce unsigned debug bundles, which is what we want for CI
-          # verification anyway.
-          APPLE_CERTIFICATE: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_API_ISSUER: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_API_KEY: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && secrets.APPLE_API_KEY || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           # APPLE_API_KEY_PATH is exported by the "Write ... key to disk" step above.
         with:
           projectPath: desktop
-          tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
-          releaseName: 'Kiln Desktop ${{ startsWith(github.ref, ''refs/tags/desktop-v'') && github.ref_name || '''' }}'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Kiln Desktop ${{ github.ref_name }}'
           releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Build (tauri-action, PR/main unsigned)
+        if: "!startsWith(github.ref, 'refs/tags/desktop-v')"
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TAURI_SIGNING_* are keypair-based (not Apple keychain) and work
+          # on PRs because tauri-action treats empty values as "skip
+          # signing." Pass them through so updater bundles get signed when
+          # secrets ARE available (push to main from a non-fork branch).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Intentionally NO APPLE_* env vars here — see comment above the
+          # tagged-release step. Empty values trigger codesign attempts in
+          # tauri-bundler 2.x and fail with `security import` errors.
+        with:
+          projectPath: desktop
           args: ${{ matrix.args }}
 
       - name: Notarize + staple .dmg and re-upload (macOS)
