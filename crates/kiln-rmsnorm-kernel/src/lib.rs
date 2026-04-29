@@ -261,9 +261,11 @@ pub fn fused_rmsnorm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
 /// For `out = (1 + w) * x * rms_inv` with `rms_inv = rsqrt(mean(x^2) + eps)`
 /// and `H = hidden`, the analytical gradients are:
 ///
-///     c     = (1/H) * rms_inv^2 * sum_j ((1 + w_j) * x_j * grad_out_j)
-///     dx_j  = rms_inv * ((1 + w_j) * grad_out_j - x_j * c)
-///     dw_j  = sum_i (x_ij * rms_inv_i * grad_out_ij)
+/// ```text
+/// c     = (1/H) * rms_inv^2 * sum_j ((1 + w_j) * x_j * grad_out_j)
+/// dx_j  = rms_inv * ((1 + w_j) * grad_out_j - x_j * c)
+/// dw_j  = sum_i (x_ij * rms_inv_i * grad_out_ij)
+/// ```
 ///
 /// All intermediate reductions stay in F32 for numerical stability; the
 /// outputs are cast back to the input dtype at the end. Works on any device.
