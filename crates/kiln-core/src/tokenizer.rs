@@ -174,6 +174,48 @@ impl KilnTokenizer {
         tools: Option<&[serde_json::Value]>,
         tool_choice: Option<&serde_json::Value>,
     ) -> Result<String, TokenizerError> {
+        // Most HF chat templates (Qwen2.5/3.5, Llama 3.1, Mistral v0.3) iterate
+        // or `tojson`-serialize `tool_call.function.arguments` as a dict, so we
+        // deserialize the JSON-encoded OpenAI-wire-format string in-place
+        // before rendering. DeepSeek V3 is the outlier: it concatenates
+        // `arguments` directly into a string-fenced ` ```json ... ``` ` body,
+        // which minijinja rejects as "string + map" when arguments has been
+        // promoted to a dict. Try the dict-deserialized form first (matches
+        // HF default convention) and retry with arguments left as the raw
+        // OpenAI-wire JSON string only if minijinja explicitly rejects the
+        // map+string combination — preserves all existing behavior while
+        // making DeepSeek-style templates render without hand-editing the
+        // vendored chat_template.jinja.
+        match self.render_jinja_template_with(
+            template,
+            messages,
+            tools,
+            tool_choice,
+            /* deserialize_arguments = */ true,
+        ) {
+            Err(TokenizerError::ChatTemplate(msg))
+                if msg.contains("string and map") || msg.contains("map and string") =>
+            {
+                self.render_jinja_template_with(
+                    template,
+                    messages,
+                    tools,
+                    tool_choice,
+                    /* deserialize_arguments = */ false,
+                )
+            }
+            other => other,
+        }
+    }
+
+    fn render_jinja_template_with(
+        &self,
+        template: &str,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        tool_choice: Option<&serde_json::Value>,
+        deserialize_arguments: bool,
+    ) -> Result<String, TokenizerError> {
         let mut env = minijinja::Environment::new();
         // Real chat templates (e.g. Qwen3.5's `chat_template.jinja`) call
         // Python-flavored string methods like `.startswith()`, `.endswith()`,
@@ -224,18 +266,45 @@ impl KilnTokenizer {
         // Both the OpenAI `{function: {name, arguments}}` envelope and the
         // flatter `{name, arguments}` shape some templates assume are
         // handled. If `arguments` is already a JSON object/array (i.e. the
-        // caller pre-parsed it), it's left alone.
+        // caller pre-parsed it), it's left alone. When `deserialize_arguments`
+        // is false (DeepSeek V3 fallback path), the JSON-string form is
+        // preserved verbatim so templates can concatenate it as a string.
         let messages_value: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
                 let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
-                if let Some(tcs) = v.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
-                    for tc in tcs {
-                        deserialize_arguments_in_place(tc);
-                        if let Some(function) = tc.get_mut("function") {
-                            deserialize_arguments_in_place(function);
+                let has_tool_calls = if let Some(tcs) =
+                    v.get_mut("tool_calls").and_then(|t| t.as_array_mut())
+                {
+                    if deserialize_arguments {
+                        for tc in tcs.iter_mut() {
+                            deserialize_arguments_in_place(tc);
+                            if let Some(function) = tc.get_mut("function") {
+                                deserialize_arguments_in_place(function);
+                            }
                         }
                     }
+                    true
+                } else {
+                    false
+                };
+                // OpenAI Chat Completions spec sends `content: null` for
+                // assistant messages carrying `tool_calls`. ChatMessage uses
+                // `content: String` (with `""` as the empty placeholder) for
+                // ergonomic Rust callers, so the serialized form would emit
+                // `""` even when the OpenAI wire shape is `null`. Some HF
+                // chat templates branch on `content is none` to decide
+                // whether to emit the tool_calls block — DeepSeek V3 is the
+                // canonical example: empty string is NOT `none`, so without
+                // this normalization the tool_calls block is silently dropped
+                // and the assistant turn renders as a content-less
+                // `<｜Assistant｜><｜end▁of▁sentence｜>` stub. Templates that
+                // test `if message.content` are unaffected since both `""`
+                // and `null` are falsy in Jinja.
+                if has_tool_calls
+                    && v.get("content").and_then(|c| c.as_str()) == Some("")
+                {
+                    v["content"] = serde_json::Value::Null;
                 }
                 v
             })
@@ -1239,6 +1308,280 @@ ARG:{{ k }}={{ v }};\
         assert!(
             prompt.contains("Found two files."),
             "Inter-turn assistant text content missing: {prompt:?}"
+        );
+    }
+
+    /// End-to-end render of DeepSeek V3's official `chat_template`
+    /// (extracted from `tokenizer_config.json`) against a tools-bearing
+    /// multi-turn conversation. Distinct from the Llama 3.1 / Qwen2.5 /
+    /// Mistral fixtures: DeepSeek uses **full-width unicode bracket**
+    /// framing (`<｜User｜>`, `<｜Assistant｜>`, `<｜tool▁calls▁begin｜>`,
+    /// `<｜tool▁call▁begin｜>`, `<｜tool▁sep｜>`,
+    /// `<｜tool▁outputs▁begin｜>`, `<｜tool▁output▁begin｜>`) — exercising
+    /// minijinja unicode handling in a way none of the existing fixtures
+    /// do. It branches on `message['content'] is none` (NOT
+    /// `tool_calls is defined` as Mistral does, NOR `tool_calls.length` as
+    /// Llama 3.1 does) to decide whether to emit the tool_calls block,
+    /// which means assistant tool_call turns require `content: null` on the
+    /// wire — the in-pipeline empty-content-with-tool_calls -> null
+    /// normalization handles the gap. The template aggregates ALL system
+    /// messages into a single `ns.system_prompt` emitted ONCE immediately
+    /// after `bos_token` (no per-turn role framing), and tool definitions
+    /// (`tools` parameter) are NOT serialized into the prompt at all
+    /// (DeepSeek expects them via system message). Closes the DeepSeek
+    /// coverage gap on top of #658 / #660.
+    #[test]
+    fn test_deepseek_v3_chat_template_renders_tools_and_tool_calls() {
+        let template = include_str!(
+            "../test_fixtures/deepseek_v3_chat_template.jinja"
+        );
+        let tok = tokenizer_with_template(template);
+
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Command to run"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+        ];
+
+        // DeepSeek's template only emits `<｜tool▁calls▁end｜>` from the
+        // SECOND tool_call iteration onwards (the close tag lives inside
+        // the `{%- else %}` branch — a quirk of the upstream template).
+        // Pass two tool calls so both `<｜tool▁call▁begin｜>` paths fire
+        // and the closing `<｜tool▁calls▁end｜>` token is exercised. Two
+        // tool messages follow (one per call), then a plain assistant
+        // text turn (which clears `ns.is_tool` via the
+        // `<｜tool▁outputs▁end｜>` branch), then a final user turn so
+        // `add_generation_prompt=true` appends a trailing `<｜Assistant｜>`.
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a coding agent.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Show me what's in /etc and read /etc/hosts."
+                    .to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                // OpenAI spec sends `null` content alongside tool_calls;
+                // DeepSeek's template branches on `content is none`. We
+                // pass `""` here and rely on the in-pipeline
+                // empty-content-with-tool_calls -> null normalization to
+                // flip the template branch correctly.
+                content: "".to_string(),
+                tool_calls: Some(vec![
+                    serde_json::json!({
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": r#"{"command": "ls /etc"}"#
+                        }
+                    }),
+                    serde_json::json!({
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": r#"{"path": "/etc/hosts"}"#
+                        }
+                    }),
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "hosts resolv.conf".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call_1".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "127.0.0.1 localhost".to_string(),
+                name: Some("Read".to_string()),
+                tool_call_id: Some("call_2".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Found two files; localhost loopback in hosts."
+                    .to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Now check resolv.conf.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let prompt = tok
+            .apply_chat_template_with_tools(&messages, Some(&tools))
+            .expect("DeepSeek V3 chat template rendered without error");
+
+        // DeepSeek's distinctive full-width unicode bracket framing must
+        // appear. No `[INST]`, no `<|start_header_id|>` — these tokens are
+        // entirely distinct from the Llama / Qwen / Mistral families.
+        assert!(
+            prompt.contains("<｜User｜>"),
+            "DeepSeek <｜User｜> framing missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜Assistant｜>"),
+            "DeepSeek <｜Assistant｜> framing missing: {prompt:?}"
+        );
+
+        // System message is aggregated into `ns.system_prompt` and emitted
+        // ONCE immediately after `bos_token`, with no per-turn role framing.
+        assert!(
+            prompt.contains("You are a coding agent."),
+            "DeepSeek system_prompt aggregation failed: {prompt:?}"
+        );
+
+        // User content roundtrip — both turns must appear.
+        assert!(
+            prompt.contains("Show me what's in /etc and read /etc/hosts."),
+            "DeepSeek first user content missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("Now check resolv.conf."),
+            "DeepSeek final user content missing: {prompt:?}"
+        );
+
+        // Past assistant tool_calls must render in DeepSeek's distinctive
+        // `<｜tool▁calls▁begin｜>` ... `<｜tool▁calls▁end｜>` framing with
+        // per-call `<｜tool▁call▁begin｜>` ... `<｜tool▁call▁end｜>`
+        // wrappers. The `<｜tool▁calls▁end｜>` close tag only fires from
+        // the second iteration onwards (template quirk) — passing 2
+        // tool_calls exercises it.
+        assert!(
+            prompt.contains("<｜tool▁calls▁begin｜>"),
+            "DeepSeek <｜tool▁calls▁begin｜> framing missing — likely the assistant tool_calls branch (requires `content is none`) was skipped: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜tool▁calls▁end｜>"),
+            "DeepSeek <｜tool▁calls▁end｜> close tag missing — only emitted from 2nd tool_call iteration: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜tool▁call▁begin｜>"),
+            "DeepSeek per-call <｜tool▁call▁begin｜> wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜tool▁call▁end｜>"),
+            "DeepSeek per-call <｜tool▁call▁end｜> wrapper missing: {prompt:?}"
+        );
+
+        // `<｜tool▁sep｜>` separates tool type and function name within
+        // each call — distinctive vs. Mistral (no per-call separator) and
+        // Llama (`<|python_tag|>`). Both function names must round-trip
+        // into the rendered tool_call body.
+        assert!(
+            prompt.contains("<｜tool▁sep｜>"),
+            "DeepSeek <｜tool▁sep｜> missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("Bash"),
+            "Bash tool name missing from rendered tool_call: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("Read"),
+            "Read tool name missing from rendered tool_call: {prompt:?}"
+        );
+
+        // Argument values must round-trip into the rendered tool_call body
+        // (template embeds them inside ` ```json ... ``` ` fences).
+        assert!(
+            prompt.contains("ls /etc"),
+            "Bash tool_call argument value missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("/etc/hosts"),
+            "Read tool_call argument value missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("```json"),
+            "DeepSeek ```json argument fence missing: {prompt:?}"
+        );
+
+        // Tool responses must be wrapped in `<｜tool▁outputs▁begin｜>` ...
+        // `<｜tool▁outputs▁end｜>` framing, with per-output
+        // `<｜tool▁output▁begin｜>` ... `<｜tool▁output▁end｜>` wrappers.
+        // The outputs-end tag is emitted by the next non-tool message
+        // (here: the inter-turn assistant text) via the `if ns.is_tool`
+        // branch.
+        assert!(
+            prompt.contains("<｜tool▁outputs▁begin｜>"),
+            "DeepSeek <｜tool▁outputs▁begin｜> framing missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜tool▁outputs▁end｜>"),
+            "DeepSeek <｜tool▁outputs▁end｜> close tag missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜tool▁output▁begin｜>"),
+            "DeepSeek per-output <｜tool▁output▁begin｜> wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<｜tool▁output▁end｜>"),
+            "DeepSeek per-output <｜tool▁output▁end｜> wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("hosts resolv.conf"),
+            "Bash tool response content missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("127.0.0.1 localhost"),
+            "Read tool response content missing: {prompt:?}"
+        );
+
+        // Inter-turn assistant text content (between tool result and
+        // final user) must round-trip — proves the plain assistant
+        // content branch (`content is not none` and not `ns.is_tool`)
+        // is hit when the intervening tool messages already cleared
+        // `is_tool` via the `<｜tool▁outputs▁end｜>` path.
+        assert!(
+            prompt.contains("Found two files"),
+            "Inter-turn assistant text content missing: {prompt:?}"
+        );
+
+        // `add_generation_prompt=true` (default in apply_chat_template_*)
+        // plus a final user turn must append a trailing `<｜Assistant｜>`
+        // for the model to continue from. Use `ends_with` because the
+        // `<｜Assistant｜>` token also appears mid-prompt inside the
+        // tool_calls block — only the trailing instance is the
+        // generation marker.
+        assert!(
+            prompt.trim_end().ends_with("<｜Assistant｜>"),
+            "DeepSeek trailing <｜Assistant｜> generation marker missing: {prompt:?}"
         );
     }
 
