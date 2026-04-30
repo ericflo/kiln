@@ -767,6 +767,267 @@ ARG:{{ k }}={{ v }};\
         );
     }
 
+    /// End-to-end render of Meta's official Llama 3.1 8B Instruct
+    /// `chat_template.jinja` against a tools-bearing multi-turn conversation.
+    /// Companion to the Qwen3.5-4B render test — extends per-template
+    /// fixture coverage to a second high-traffic model family with a
+    /// distinct tool-call shape (`<|start_header_id|>` framing,
+    /// `{"name": ..., "parameters": ...}` wire form via `arguments | tojson`).
+    /// Closes kiln#657.
+    #[test]
+    fn test_llama31_8b_instruct_chat_template_renders_tools_and_tool_calls() {
+        let template = include_str!(
+            "../test_fixtures/llama31_8b_instruct_chat_template.jinja"
+        );
+        let tok = tokenizer_with_template(template);
+
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "Bash",
+                "description": "Run a shell command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Command to run"}
+                    },
+                    "required": ["command"]
+                }
+            }
+        })];
+
+        // Llama 3.1's template raises if tool_calls.length != 1, so the
+        // stress conversation has exactly one prior assistant tool_call.
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a coding agent.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Show me what's in /etc.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "".to_string(),
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": r#"{"command": "ls /etc"}"#
+                    }
+                })]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "hosts\nresolv.conf".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call_1".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Now read /etc/hosts.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let prompt = tok
+            .apply_chat_template_with_tools(&messages, Some(&tools))
+            .expect("Llama 3.1 chat template rendered without error");
+
+        // Llama 3.1's distinctive header framing must appear.
+        assert!(
+            prompt.contains("<|start_header_id|>system<|end_header_id|>"),
+            "Llama 3.1 system header missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<|eot_id|>"),
+            "Llama 3.1 eot marker missing: {prompt:?}"
+        );
+
+        // Tools block must be serialized (template uses `t | tojson(indent=4)`,
+        // proving minijinja's `json` feature is wired correctly).
+        assert!(
+            prompt.contains("\"name\": \"Bash\""),
+            "Bash tool not serialized into prompt: {prompt:?}"
+        );
+
+        // Past assistant tool_call must render in Llama 3.1's wire form,
+        // proving the arguments-as-dict path worked through `tojson`.
+        assert!(
+            prompt.contains("<|start_header_id|>assistant<|end_header_id|>"),
+            "assistant header missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"parameters\""),
+            "Llama 3.1 parameters key missing from rendered tool_call: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"command\""),
+            "tool_call argument key missing — `arguments` likely not deserialized to dict: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ls /etc"),
+            "argument value missing from rendered tool_call: {prompt:?}"
+        );
+
+        // Tool response must be framed as ipython turn (Llama 3.1 maps
+        // role=tool onto its ipython header).
+        assert!(
+            prompt.contains("<|start_header_id|>ipython<|end_header_id|>"),
+            "Llama 3.1 ipython framing for tool response missing: {prompt:?}"
+        );
+
+        // Tool response content must round-trip into the rendered prompt.
+        assert!(
+            prompt.contains("hosts"),
+            "tool response content missing from prompt: {prompt:?}"
+        );
+    }
+
+    /// End-to-end render of Qwen2.5 7B Instruct's official
+    /// `chat_template.jinja` against a tools-bearing multi-turn conversation.
+    /// Distinct from the Qwen3.5-4B fixture: Qwen2.5 emits
+    /// `<tool_call>{"name":...,"arguments":...}</tool_call>` JSON inline
+    /// (vs. Qwen3.5's `<function=...><parameter=...>` pi-XML), so it
+    /// exercises a different code path through `arguments | tojson`.
+    /// Closes kiln#657.
+    #[test]
+    fn test_qwen25_7b_instruct_chat_template_renders_tools_and_tool_calls() {
+        let template = include_str!(
+            "../test_fixtures/qwen25_7b_instruct_chat_template.jinja"
+        );
+        let tok = tokenizer_with_template(template);
+
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Command to run"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+        ];
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a coding agent.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Show me what's in /etc.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "".to_string(),
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": r#"{"command": "ls /etc"}"#
+                    }
+                })]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "hosts\nresolv.conf".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call_1".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Now read /etc/hosts.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let prompt = tok
+            .apply_chat_template_with_tools(&messages, Some(&tools))
+            .expect("Qwen2.5 chat template rendered without error");
+
+        // Tools block must be serialized via `tool | tojson` — proves
+        // minijinja's `json` feature is wired and the template's `<tools>`
+        // wrapper is firing.
+        assert!(
+            prompt.contains("<tools>"),
+            "Qwen2.5 tools wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"Bash\""),
+            "Bash tool not serialized: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"Read\""),
+            "Read tool not serialized: {prompt:?}"
+        );
+
+        // Past assistant tool_call must render in Qwen2.5's `<tool_call>`
+        // JSON wire form. Argument keys/values must round-trip — proves
+        // `arguments | tojson` saw a dict, not a JSON-encoded string.
+        assert!(
+            prompt.contains("<tool_call>"),
+            "Qwen2.5 tool_call wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"name\": \"Bash\""),
+            "tool_call name missing from rendered prompt: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"command\""),
+            "tool_call argument key missing — `arguments` likely not deserialized to dict: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ls /etc"),
+            "argument value missing from rendered tool_call: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("</tool_call>"),
+            "Qwen2.5 tool_call closing tag missing: {prompt:?}"
+        );
+
+        // Tool response must be wrapped in `<tool_response>` framing.
+        assert!(
+            prompt.contains("<tool_response>"),
+            "Qwen2.5 tool_response wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("hosts"),
+            "tool response content missing from prompt: {prompt:?}"
+        );
+    }
+
     /// `deserialize_arguments_in_place` is a no-op when arguments is already
     /// a dict (caller pre-parsed) or missing entirely, and silently leaves
     /// non-JSON strings untouched (the template can decide what to do).
