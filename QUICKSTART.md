@@ -265,6 +265,34 @@ Francisco.").
 > on Hugging Face. If a tool call format ever looks ambiguous, that file is
 > the source of truth.
 
+### 4.2 Known limitation: workers=1 for long tools-bearing prompts
+
+For tools-bearing chat completions with input prompts longer than roughly
+30k tokens, run your client with **at most one in-flight request at a
+time** (`workers=1`). This is a client-side workaround — there is no
+kiln-side flag to set; you control it by serializing requests in your
+driver, worker pool, or load generator.
+
+If you push two or more concurrent in-flight prefills under that workload,
+a single 300-second prefill timeout (the default
+`server.request_timeout_secs` in [`kiln.example.toml`](kiln.example.toml))
+can leave kiln in a degraded prefill state. Subsequent requests then fail
+with HTTP 500:
+
+```
+{"error":{"code":"generation_error","message":"Text generation failed: prefill forward pass (paged) failed: ..."}}
+```
+
+…until the server is restarted. With `workers=1` there is no concurrent
+prefill, no degraded state, and the failure mode does not occur.
+
+The cascade and its symptoms are tracked in
+[issue #664](https://github.com/ericflo/kiln/issues/664); the underlying
+KV-cache-exhaustion / prefill-state-cleanup investigation is in
+[issue #656](https://github.com/ericflo/kiln/issues/656). This workaround
+is expected to be removed once the prefill-watchdog and timeout-cleanup
+fixes from #664 land.
+
 ## 5. Open the Browser Dashboard
 
 Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
