@@ -2492,6 +2492,163 @@ mod tests {
         assert_eq!(req.tool_choice.as_ref().and_then(|v| v.as_str()), Some("auto"));
     }
 
+    /// CI hardening for kiln#659: pins the FULL chain
+    /// JSON → `ChatCompletionRequest` → `message_to_chat` → `apply_chat_template_full`
+    /// against the production bundled Qwen3.5-4B chat template.
+    ///
+    /// Existing per-layer tests cover only one half each:
+    ///  - `tools_round_trip_preserved_on_request` (above) pins JSON deserialization.
+    ///  - `kiln_core::tokenizer::test_qwen35_4b_chat_template_renders_tools_and_tool_calls`
+    ///    pins rendering with hand-built `ChatMessage` values.
+    ///
+    /// Neither exercises the seam where production bugs 1 (missing `tojson` filter)
+    /// and 3 (`arguments` left as JSON-encoded string instead of dict) actually lived
+    /// in PR #632 and shipped to main. A regression in `message_to_chat` mapping or
+    /// in how `req.tools.as_deref()` flows through `apply_chat_template_full` would
+    /// not surface in either of those tests, but it would break this one.
+    #[test]
+    fn tools_bearing_chat_completion_renders_via_qwen35_4b_template() {
+        // Wire-shape JSON exactly as `/v1/chat/completions` receives. Five
+        // turns (system → user → assistant-with-tool_calls → tool → user)
+        // exercise the multi-step-tool branch in the Qwen3.5 template, and
+        // both tools have non-trivial `parameters.properties` so `tojson`,
+        // `|items`, and `|length` filters all run against real data.
+        let json = r#"{
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "Show me what's in /etc."},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_42", "type": "function", "function": {
+                        "name": "Bash",
+                        "arguments": "{\"command\": \"ls /etc\"}"
+                    }}
+                ]},
+                {"role": "tool", "name": "Bash", "tool_call_id": "call_42",
+                 "content": "hosts\nresolv.conf\nshadow"},
+                {"role": "user", "content": "Now read /etc/hosts."}
+            ],
+            "tools": [
+                {"type": "function", "function": {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Shell command to run"}
+                        },
+                        "required": ["command"]
+                    }
+                }},
+                {"type": "function", "function": {
+                    "name": "Read",
+                    "description": "Read a file from disk",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Filesystem path"}
+                        },
+                        "required": ["path"]
+                    }
+                }}
+            ],
+            "tool_choice": "auto"
+        }"#;
+
+        // Step 1: deserialize wire payload (pins serde + content-shape parsing
+        // including `content: null` on the assistant tool-calls turn).
+        let req = parse_request(json);
+        assert_eq!(req.messages.len(), 5, "fixture must exercise multi-turn shape");
+        assert_eq!(
+            req.tools.as_ref().map(|t| t.len()),
+            Some(2),
+            "tools array must round-trip through deserialization"
+        );
+
+        // Step 2: load the production bundled Qwen3.5-4B chat template — the
+        // canonical template every kiln user actually hits at runtime. Path is
+        // relative to this source file (crates/kiln-server/src/api/...).
+        let template = include_str!(
+            "../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja"
+        );
+        let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
+
+        // Step 3: wire EXACTLY as `chat_completions_inner` does (see the
+        // `let chat_messages = ... map(message_to_chat) ...` /
+        // `apply_chat_template_full(..., req.tools.as_deref(), req.tool_choice.as_ref())`
+        // pair near the top of that function). Drift between this test and the
+        // production wiring would defeat the point of the smoke test.
+        let chat_messages: Vec<ChatMessage> =
+            req.messages.iter().map(message_to_chat).collect();
+        let prompt = tok
+            .apply_chat_template_full(
+                &chat_messages,
+                req.tools.as_deref(),
+                req.tool_choice.as_ref(),
+            )
+            .expect(
+                "Qwen3.5-4B chat template must render the wire-shape \
+                 tools+tool_calls payload without error",
+            );
+
+        // Bug 1 (tojson filter on `tools` array): if minijinja lacks the
+        // `json` feature, the render fails outright. The `<tools>` block plus
+        // both function names appearing prove `tools | tojson` produced
+        // valid JSON for both definitions.
+        assert!(
+            prompt.contains("<tools>"),
+            "tools block missing — `tools | tojson` regression? prompt was {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"Bash\""),
+            "Bash tool not serialized into <tools> block: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"Read\""),
+            "Read tool not serialized into <tools> block: {prompt:?}"
+        );
+
+        // Bug 3 (arguments as JSON-encoded string vs dict): the Qwen template
+        // iterates `tool_call.arguments | items`. If kiln passes the wire
+        // form (`"{\"command\":\"ls /etc\"}"`) through unchanged, minijinja
+        // rejects it with "cannot convert value into pairs". The
+        // `<parameter=command>` block proves arguments were promoted to a
+        // dict before render.
+        assert!(
+            prompt.contains("<function=Bash>"),
+            "prior assistant tool_call did not render in pi-XML form: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<parameter=command>"),
+            "tool_call arguments were not iterated as dict — \
+             string-form regression? {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ls /etc"),
+            "argument value missing from rendered tool_call: {prompt:?}"
+        );
+
+        // `role: "tool"` must wrap as `<tool_response>...</tool_response>` —
+        // proves `message_to_chat` propagated `tool_call_id` / `name` so the
+        // template's `{%- elif message.role == "tool" %}` branch fires.
+        assert!(
+            prompt.contains("<tool_response>"),
+            "tool response role did not render through message_to_chat wiring: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("hosts"),
+            "tool response content did not render inside <tool_response>: {prompt:?}"
+        );
+
+        // Follow-up user turn must survive past the template's
+        // `multi_step_tool` / `last_query_index` scan; otherwise the template
+        // raises "No user query found in messages." and the render errors.
+        assert!(
+            prompt.contains("Now read /etc/hosts."),
+            "follow-up user turn missing — last_query_index regression? {prompt:?}"
+        );
+    }
+
     #[test]
     fn message_tool_calls_round_trip_preserved() {
         let json = r#"{
