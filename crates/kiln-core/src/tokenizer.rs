@@ -1585,6 +1585,276 @@ ARG:{{ k }}={{ v }};\
         );
     }
 
+    /// End-to-end render of NousResearch/Hermes-3-Llama-3.1-8B's official
+    /// `tool_use` chat template against a tools-bearing multi-turn
+    /// conversation. Hermes-3 is a distinct template lineage from the five
+    /// fixtures already vendored (Qwen3.5-4B, Llama 3.1, Qwen2.5, Mistral
+    /// 7B v0.3, DeepSeek V3): it pre-injects a hardcoded `<|im_start|>system`
+    /// turn that frames the tools list inside `<tools></tools>` XML wrappers
+    /// and instructs the model to emit `<tool_call>{json}</tool_call>` inline
+    /// JSON tags (NOT Mistral's `[TOOL_CALLS]`, NOT Llama's
+    /// `<|python_tag|>`, NOT DeepSeek's full-width unicode bracket framing).
+    /// Tool responses are wrapped in `<tool_response></tool_response>`
+    /// blocks. The template's distinctive trick: consecutive `tool` messages
+    /// pack into a SINGLE `<|im_start|>tool ... <|im_end|>` turn — the
+    /// `<|im_start|>tool` header only re-emits when
+    /// `loop.previtem.role != "tool"`, and the closing `<|im_end|>` is
+    /// driven by `loop.nextitem.role != "tool"`. This exercises minijinja's
+    /// `loop.previtem` / `loop.nextitem` accessors in a way none of the
+    /// previously-vendored fixtures do (Hermes is the only one that depends
+    /// on both for correct rendering). Closes the Hermes / inline-XML
+    /// tool-call coverage gap on top of #658 / #660 / #661.
+    #[test]
+    fn test_hermes3_llama31_chat_template_renders_tools_and_tool_calls() {
+        let template = include_str!(
+            "../test_fixtures/hermes3_llama31_chat_template.jinja"
+        );
+        let tok = tokenizer_with_template(template);
+
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Command to run"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "File path"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+        ];
+
+        // Two tool_calls in a single assistant turn (both must render as
+        // sibling `<tool_call>...</tool_call>` blocks within ONE
+        // `<|im_start|>assistant ... <|im_end|>` envelope) followed by two
+        // tool messages (which must pack into ONE `<|im_start|>tool ...
+        // <|im_end|>` turn via the `loop.previtem.role` / `loop.nextitem.role`
+        // accessors). A plain assistant text turn then a final user turn
+        // exercises the inter-turn assistant path AND drives
+        // `add_generation_prompt=true` to append the trailing
+        // `<|im_start|>assistant\n` generation marker.
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a coding agent.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Show me what's in /etc and read /etc/hosts."
+                    .to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                // Hermes-3 branches the assistant emit on
+                // `tool_calls is not defined` (NOT `content is none` like
+                // DeepSeek V3), so the empty-content normalization isn't
+                // strictly required here — but the in-pipeline normalization
+                // still flips `""` to `null`, and the template must handle
+                // both shapes. Pass `""` to confirm the assistant tool_calls
+                // branch fires regardless of normalization state.
+                content: "".to_string(),
+                tool_calls: Some(vec![
+                    serde_json::json!({
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": r#"{"command": "ls /etc"}"#
+                        }
+                    }),
+                    serde_json::json!({
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": r#"{"path": "/etc/hosts"}"#
+                        }
+                    }),
+                ]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "hosts resolv.conf".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call_1".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "127.0.0.1 localhost".to_string(),
+                name: Some("Read".to_string()),
+                tool_call_id: Some("call_2".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Found two files; localhost loopback in hosts."
+                    .to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Now check resolv.conf.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let prompt = tok
+            .apply_chat_template_with_tools(&messages, Some(&tools))
+            .expect("Hermes-3 chat template rendered without error");
+
+        // Hermes-3 pre-injects a hardcoded `<|im_start|>system` block at the
+        // top of the prompt that frames the tools inside `<tools></tools>`
+        // and embeds the "function calling AI model" prelude. None of the
+        // other vendored fixtures (Qwen3.5, Llama 3.1, Qwen2.5, Mistral,
+        // DeepSeek V3) emit this prelude — it's the load-bearing signal that
+        // we're rendering the `tool_use` template variant correctly.
+        assert!(
+            prompt.contains("function calling AI model"),
+            "Hermes-3 hardcoded function-calling system prelude missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<tools>"),
+            "Hermes-3 <tools> wrapper missing — tool list block did not emit: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("</tools>"),
+            "Hermes-3 </tools> closing wrapper missing: {prompt:?}"
+        );
+
+        // Both tool definitions must serialize into the `<tools>` block —
+        // proves the `for tool in tools` loop and `tool.parameters|tojson`
+        // path both fired (regression guard for the kiln#632 minijinja
+        // `json` feature gap).
+        assert!(
+            prompt.contains("\"name\": \"Bash\""),
+            "Bash tool not serialized into Hermes-3 tools block — tojson likely failed: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"name\": \"Read\""),
+            "Read tool not serialized into Hermes-3 tools block: {prompt:?}"
+        );
+
+        // ChatML framing must round-trip user/system/assistant turns. The
+        // user-supplied system message renders as a SECOND `<|im_start|>system`
+        // turn (in addition to the hardcoded prelude — Hermes does not
+        // aggregate them).
+        assert!(
+            prompt.contains("<|im_start|>system\nYou are a coding agent.<|im_end|>"),
+            "Hermes-3 user-supplied system turn missing or misframed: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<|im_start|>user\nShow me what's in /etc and read /etc/hosts.<|im_end|>"),
+            "Hermes-3 first user turn missing or misframed: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<|im_start|>user\nNow check resolv.conf.<|im_end|>"),
+            "Hermes-3 final user turn missing or misframed: {prompt:?}"
+        );
+
+        // Past assistant tool_calls must render as sibling
+        // `<tool_call>{json}</tool_call>` blocks within a SINGLE
+        // `<|im_start|>assistant ... <|im_end|>` envelope. Both inline JSON
+        // tags must appear, and both function names + argument values must
+        // round-trip — proves `tool_call.arguments|tojson` saw a dict (not a
+        // JSON-encoded string), which is the kiln#632 / #653 regression
+        // class this fixture pins.
+        assert!(
+            prompt.contains("<tool_call>"),
+            "Hermes-3 inline <tool_call> tag missing — assistant tool_calls branch did not fire: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("</tool_call>"),
+            "Hermes-3 inline </tool_call> close tag missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains(r#""name": "Bash""#),
+            "Bash tool_call name missing from rendered tool_call body: {prompt:?}"
+        );
+        assert!(
+            prompt.contains(r#""name": "Read""#),
+            "Read tool_call name missing from rendered tool_call body: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ls /etc"),
+            "Bash tool_call argument value missing — `arguments` likely not deserialized to dict: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("/etc/hosts"),
+            "Read tool_call argument value missing: {prompt:?}"
+        );
+
+        // Tool responses must wrap in `<tool_response></tool_response>`
+        // blocks INSIDE a single `<|im_start|>tool ... <|im_end|>` turn.
+        // Hermes-3's distinctive trick: the `<|im_start|>tool` header is
+        // gated on `loop.previtem and loop.previtem.role != "tool"`, so two
+        // consecutive tool messages emit only ONE header (not two separate
+        // tool turns). Likewise, the closing `<|im_end|>` is driven by
+        // `loop.nextitem.role != "tool"`. Both content strings must
+        // round-trip into their respective `<tool_response>` bodies.
+        assert!(
+            prompt.contains("<|im_start|>tool\n<tool_response>"),
+            "Hermes-3 single `<|im_start|>tool` header for first tool message missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<tool_response>\nhosts resolv.conf"),
+            "Hermes-3 first tool_response content missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("<tool_response>\n127.0.0.1 localhost"),
+            "Hermes-3 second tool_response content missing — likely the second tool message emitted its own `<|im_start|>tool` instead of packing into the prior turn: {prompt:?}"
+        );
+        // The two tool_response blocks must share ONE `<|im_start|>tool`
+        // turn, so the prompt must contain exactly one such header — count
+        // it directly. Two separate occurrences would mean
+        // `loop.previtem.role` is broken under minijinja.
+        assert_eq!(
+            prompt.matches("<|im_start|>tool\n").count(),
+            1,
+            "Hermes-3 emitted multiple `<|im_start|>tool` headers — `loop.previtem.role` likely not honored: {prompt:?}"
+        );
+
+        // Inter-turn assistant text content (between tool result and final
+        // user) must round-trip — proves the plain assistant content branch
+        // (`message.role == "assistant" and message.tool_calls is not
+        // defined`) fires when the prior tool turn already closed.
+        assert!(
+            prompt.contains("<|im_start|>assistant\nFound two files; localhost loopback in hosts.<|im_end|>"),
+            "Hermes-3 inter-turn assistant text content missing or misframed: {prompt:?}"
+        );
+
+        // `add_generation_prompt=true` (default in apply_chat_template_*)
+        // must append a trailing `<|im_start|>assistant\n` for the model to
+        // continue from. Use `ends_with` because `<|im_start|>assistant`
+        // also appears mid-prompt inside the assistant tool_calls turn —
+        // only the trailing instance is the generation marker.
+        assert!(
+            prompt.trim_end().ends_with("<|im_start|>assistant"),
+            "Hermes-3 trailing `<|im_start|>assistant` generation marker missing: {prompt:?}"
+        );
+    }
+
     /// `deserialize_arguments_in_place` is a no-op when arguments is already
     /// a dict (caller pre-parsed) or missing entirely, and silently leaves
     /// non-JSON strings untouched (the template can decide what to do).
