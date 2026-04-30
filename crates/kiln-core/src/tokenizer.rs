@@ -241,11 +241,27 @@ impl KilnTokenizer {
             })
             .collect();
 
+        // `bos_token` / `eos_token` are referenced by many HF chat templates
+        // — Mistral 7B Instruct v0.3, for example, embeds `eos_token` in
+        // `+` expressions like `" " + message["content"]|trim + eos_token`
+        // and `"]" + eos_token`. Minijinja's default Undefined behavior
+        // treats `string + undefined` as an error (only standalone
+        // `{{ undefined }}` renders empty), so leaving these out crashes
+        // any render that hits an assistant turn under Mistral. Default
+        // both to empty strings so the template renders structurally; the
+        // tokenizer's own `add_special_tokens=true` path handles real
+        // BOS/EOS injection during encode (template-emitted token strings
+        // would otherwise risk double-tokenization). Threading the actual
+        // model-specific token strings is a follow-up — when needed,
+        // populate from `KilnTokenizer::inner.get_added_tokens_decoder()`
+        // similar to `eos_token_ids`.
         tmpl.render(minijinja::context! {
             messages => messages_value,
             tools => tools_value,
             tool_choice => tool_choice_value,
             add_generation_prompt => true,
+            bos_token => "",
+            eos_token => "",
         })
         .map_err(|e| TokenizerError::ChatTemplate(e.to_string()))
     }
@@ -1025,6 +1041,204 @@ ARG:{{ k }}={{ v }};\
         assert!(
             prompt.contains("hosts"),
             "tool response content missing from prompt: {prompt:?}"
+        );
+    }
+
+    /// End-to-end render of Mistral 7B Instruct v0.3's official
+    /// `chat_template.jinja` against a tools-bearing multi-turn conversation.
+    /// Distinct from the Llama 3.1 / Qwen2.5 fixtures: Mistral uses
+    /// `[INST]` / `[/INST]` user framing with `[AVAILABLE_TOOLS]` /
+    /// `[/AVAILABLE_TOOLS]` for the tool list, `[TOOL_CALLS]` for assistant
+    /// tool-call shape (JSON list with `tool_call.function|tojson` then a
+    /// post-fixed `"id": "..."` field), and `[TOOL_RESULTS]` /
+    /// `[/TOOL_RESULTS]` for tool responses. The template enforces a strict
+    /// 9-character tool_call.id constraint and inlines the system message
+    /// into the LAST user `[INST]` block (rather than emitting a separate
+    /// system turn). Closes the Mistral coverage gap deferred from #658.
+    #[test]
+    fn test_mistral_7b_instruct_v03_chat_template_renders_tools_and_tool_calls() {
+        let template = include_str!(
+            "../test_fixtures/mistral_7b_instruct_v03_chat_template.jinja"
+        );
+        let tok = tokenizer_with_template(template);
+
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Command to run"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }),
+        ];
+
+        // Mistral's template enforces strict user/assistant alternation
+        // across all NON-tool / NON-tool_calls messages (tool messages and
+        // assistant-with-tool_calls turns are invisible to the alternation
+        // counter). We need a final user turn so the system message inlines
+        // into a `[INST]` block via `loop.last and system_message is defined`.
+        // Tool call IDs must be exactly 9 alphanumeric characters or the
+        // template raises.
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "You are a coding agent.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Show me what's in /etc.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "".to_string(),
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call12345",
+                    "type": "function",
+                    "function": {
+                        "name": "Bash",
+                        "arguments": r#"{"command": "ls /etc"}"#
+                    }
+                })]),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "hosts resolv.conf".to_string(),
+                name: Some("Bash".to_string()),
+                tool_call_id: Some("call12345".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Found two files.".to_string(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "Now read /etc/hosts.".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let prompt = tok
+            .apply_chat_template_with_tools(&messages, Some(&tools))
+            .expect("Mistral v0.3 chat template rendered without error");
+
+        // Mistral's distinctive `[INST]` / `[/INST]` user framing must appear.
+        assert!(
+            prompt.contains("[INST] "),
+            "Mistral [INST] user framing missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("[/INST]"),
+            "Mistral [/INST] closing missing: {prompt:?}"
+        );
+
+        // System message inlines into the LAST user `[INST]` block (Mistral
+        // does not emit a separate system turn). Proves the
+        // `loop.last and system_message is defined` branch fires.
+        assert!(
+            prompt.contains("You are a coding agent."),
+            "Mistral system_message not inlined into final [INST]: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("Now read /etc/hosts."),
+            "Mistral final user content missing: {prompt:?}"
+        );
+
+        // Tools must be serialized via `[AVAILABLE_TOOLS]` framing on the
+        // LAST user message — proves the per-tool key/value walk and `tojson`
+        // both fired (parameters is a dict, not a string).
+        assert!(
+            prompt.contains("[AVAILABLE_TOOLS]"),
+            "Mistral [AVAILABLE_TOOLS] wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("[/AVAILABLE_TOOLS]"),
+            "Mistral [/AVAILABLE_TOOLS] closing missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"name\": \"Bash\""),
+            "Bash tool not serialized into prompt: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"name\": \"Read\""),
+            "Read tool not serialized into prompt: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"parameters\""),
+            "Mistral parameters key missing — `tojson` likely failed: {prompt:?}"
+        );
+
+        // Past assistant tool_call must render in Mistral's `[TOOL_CALLS]`
+        // JSON-list wire form. Argument keys/values must round-trip — proves
+        // `tool_call.function|tojson` saw `arguments` as a dict, not a
+        // JSON-encoded string (regression guard for kiln#632 / #653).
+        assert!(
+            prompt.contains("[TOOL_CALLS]"),
+            "Mistral [TOOL_CALLS] wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"command\""),
+            "tool_call argument key missing — `arguments` likely not deserialized to dict: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("ls /etc"),
+            "argument value missing from rendered tool_call: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"id\": \"call12345\""),
+            "Mistral tool_call.id not appended to JSON object: {prompt:?}"
+        );
+
+        // Tool response must be wrapped in `[TOOL_RESULTS]` framing with the
+        // matching `call_id` round-tripping the prior assistant tool_call.id.
+        assert!(
+            prompt.contains("[TOOL_RESULTS]"),
+            "Mistral [TOOL_RESULTS] wrapper missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("[/TOOL_RESULTS]"),
+            "Mistral [/TOOL_RESULTS] closing missing: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("\"call_id\": \"call12345\""),
+            "Mistral tool response call_id missing or mismatched: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("hosts"),
+            "tool response content missing from prompt: {prompt:?}"
+        );
+
+        // Inter-turn assistant text content (between tool result and final
+        // user) must round-trip — proves the plain assistant content branch
+        // (` content + eos_token`) is hit when `tool_calls` is absent.
+        assert!(
+            prompt.contains("Found two files."),
+            "Inter-turn assistant text content missing: {prompt:?}"
         );
     }
 
