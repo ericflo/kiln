@@ -3,7 +3,7 @@
 **Date:** 2026-05-01
 **Auditor:** Cloud Eric (autonomous)
 **Scope:** End-to-end verification that the kiln-v0.2.x line is launch-ready for the public-announce push.
-**Verdict:** **GO** — all six verification items pass cleanly. One non-blocking observation (demo asciicast is a graceful placeholder).
+**Verdict:** **GO** — all six v0.2.8 verification items pass cleanly. v0.2.9 re-verification appendix added 2026-05-01: also **GO**, with the demo-asciicast placeholder now resolved (canonical 60-second cast is live).
 
 ---
 
@@ -145,3 +145,104 @@ gh run view <run-id> --repo ericflo/kiln --log-failed
 ## Verdict
 
 **GO for the public-announce push.** All six verification items pass cleanly. Release integrity, image attestation, page rendering, CI/Pages health, the tag-driven release workflow, and the cold-reader README path are all green. The single observation (placeholder demo asciicast) is non-blocking and can be resolved post-launch.
+
+---
+
+## 7. v0.2.9 verification appendix (2026-05-01)
+
+**Context:** kiln-v0.2.9 shipped ~5h before this re-verify (PR #676), bundling the post-#670 throughput-related fixes (#672 workers=2 serialization shim, #674 prefix-cache double-free fix, #675 revert of #672 now that #673 is fixed). The greenlight approval (`3da4a6354ad6c4fddd85ae0a`) for Phase 11 launch posts is at ~10h+ old still `requested`. This appendix re-runs the six verifications against the current production-line release so that when the greenlight comes back the audit is pinned to v0.2.9, not v0.2.8.
+
+### a. Latest release artifact integrity (kiln-v0.2.9)
+
+**Commands run:**
+
+```bash
+gh release view kiln-v0.2.9 --repo ericflo/kiln --json tagName,publishedAt,assets
+gh release download kiln-v0.2.9 --repo ericflo/kiln --pattern 'kiln-0.2.9-aarch64-apple-darwin-metal*'
+sha256sum kiln-0.2.9-aarch64-apple-darwin-metal.tar.gz
+gh attestation verify kiln-0.2.9-aarch64-apple-darwin-metal.tar.gz --repo ericflo/kiln --format json
+```
+
+**Findings:**
+- 7 release assets present (same shape as v0.2.8): macOS arm64 Metal, Linux x86_64 CUDA12.4, Windows x86_64 CUDA12.4 tarballs/zip + matching `.sha256` sidecars + `THIRD_PARTY_LICENSES.md`. Published `2026-05-01T10:32:44Z`.
+- SHA-256 verification on the macOS Metal tarball: hash `03511d5692b5e5ee0f52360a7ed349038b17013b56bda550f00bcbdac6c4d0a4` from the `.sha256` sidecar matches the computed digest exactly. Note: the sidecar is a bare hash with no filename (BSD-style), so `sha256sum -c` reports a "format" warning even when the bytes match. Verified by direct comparison.
+- `gh attestation verify --format json` returned a valid Sigstore bundle: cert SAN matches `https://github.com/ericflo/kiln/.github/workflows/server-release.yml@refs/tags/kiln-v0.2.9`, source repo URI `https://github.com/ericflo/kiln`, source ref `refs/tags/kiln-v0.2.9`, OIDC issuer `https://token.actions.githubusercontent.com`, transparency log inclusion confirmed.
+
+**Status:** ✅ PASS
+
+### b. GHCR `kiln-server` Docker image (0.2.9 + attestation)
+
+**Commands run:**
+
+```bash
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:ericflo/kiln-server:pull" | jq -r .token)
+curl -sH "Authorization: Bearer $TOKEN" https://ghcr.io/v2/ericflo/kiln-server/tags/list
+curl -sH "Authorization: Bearer $TOKEN" -I https://ghcr.io/v2/ericflo/kiln-server/manifests/0.2.9
+gh attestation verify oci://ghcr.io/ericflo/kiln-server:0.2.9 --repo ericflo/kiln --format json
+```
+
+**Findings:**
+- Tags live: `0.2.4`, `0.2.5`, `0.2.6`, `0.2.7`, `0.2.8`, `0.2.9`, `latest` (plus two `sha256-…` referrer tags, expected for Sigstore).
+- Manifest for `0.2.9` resolves with media type `application/vnd.docker.distribution.manifest.v2+json`, digest `sha256:401f7e32074bcad77c23e8fc6dcac3ceb5ba09584e93c3268b15e40b6bbc89b8`.
+- Sigstore attestation chain valid for `oci://ghcr.io/ericflo/kiln-server:0.2.9`: cert SAN matches `https://github.com/ericflo/kiln/.github/workflows/docker-server-release.yml@refs/tags/kiln-v0.2.9`. (Slightly different workflow file than the binary release — this is the docker-specific publish workflow, expected.)
+
+**Status:** ✅ PASS
+
+### c. `latest` digest equals `0.2.9` digest
+
+**Commands run:**
+
+```bash
+curl -sH "Authorization: Bearer $TOKEN" -I https://ghcr.io/v2/ericflo/kiln-server/manifests/latest
+```
+
+**Findings:**
+- `latest` resolves to `sha256:401f7e32074bcad77c23e8fc6dcac3ceb5ba09584e93c3268b15e40b6bbc89b8`, identical to `0.2.9`. A `docker pull ghcr.io/ericflo/kiln-server:latest` after launch will get v0.2.9, not v0.2.8.
+
+**Status:** ✅ PASS
+
+### d. Landing page version refs
+
+**Commands run:**
+
+```bash
+curl -sL https://ericflo.github.io/kiln/ | grep -oE '0\.2\.[0-9]+' | sort -u
+```
+
+**Findings:**
+- Only `0.2.9` appears. PR #677's version bump deployed cleanly via the `Pages` workflow on `docs/site/**` push. No stale v0.2.8 references remain visible to a cold reader.
+
+**Status:** ✅ PASS
+
+### e. Launch.html version refs
+
+**Commands run:**
+
+```bash
+curl -sL https://ericflo.github.io/kiln/launch.html | grep -oE '0\.2\.[0-9]+' | sort -u
+```
+
+**Findings:**
+- Only `0.2.9` appears. Launch post copy is pinned to the current release.
+
+**Status:** ✅ PASS
+
+### f. Demo asciicast page reachable
+
+**Commands run:**
+
+```bash
+curl -sL -w "HTTP: %{http_code}\n" https://ericflo.github.io/kiln/demo/ -o /tmp/demo.html
+curl -sL -I https://ericflo.github.io/kiln/demo/kiln-60s.cast
+curl -sL https://ericflo.github.io/kiln/demo/kiln-60s.cast | head -c 300
+```
+
+**Findings:**
+- `/demo/` returns HTTP 200, ~11 KB. Asciinema player CSS + JS scaffolding is intact (`asciinema-player@3.7.1` self-hosted via jsDelivr, `AsciinemaPlayer.create(...)` init present, `<source src="kiln-60s.cast">`).
+- The cast file `kiln-60s.cast` is a real recording, not a placeholder: HTTP 200, 220,905 bytes, valid asciicast v2 JSON header (`{"version": 2, "width": 120, "height": 32, ...}`, title `"Kiln 60-second demo: live LoRA online learning"`, includes real terminal frames). The §3/§Observations placeholder noted in the v0.2.8 audit has been resolved.
+
+**Status:** ✅ PASS — and the prior non-blocking observation about the placeholder is now also resolved.
+
+### v0.2.9 verdict
+
+**GO for the public-announce push on the kiln-v0.2.9 line.** All six v0.2.9 verifications pass cleanly. Release integrity, GHCR image manifest + attestation, `latest` tag pointing at v0.2.9, both site pages bumped to v0.2.9, and the demo asciicast is now a real 220 KB recording instead of a placeholder. No new launch blockers introduced by the v0.2.8 → v0.2.9 transition. When the greenlight approval `3da4a6354ad6c4fddd85ae0a` comes back, the launch surface is verified against the current release.
