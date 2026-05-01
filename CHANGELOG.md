@@ -1,6 +1,44 @@
 # Kiln Server Changelog
 
-## Unreleased
+## kiln-v0.2.9 — 2026-05-01
+
+Phase 11 launch-baseline release. Reliability + throughput fixes for the
+public-announce push: cancel-drain on prefill-timeout (#666) closes the v0.1.0
+reliability blocker (#664); a prefix-cache double-counting bug (#674) is
+root-caused and fixed, allowing the workers=2 emergency serialize shim from
+#672 to be reverted (#675) — restoring +23% throughput / −75% p99 ITL on the
+default config. Also lands the tools-bearing chat-template render fix (#653),
+the Phase 11 launch-doc set (#667–#671), and the post-v0.2.8 Phase 10 audits
+(closure, FleCE T=16384 OOM probe, GDN training-streaming reachability) and
+Phase A FLCE A6000 validation accumulated since the v0.2.8 cut.
+
+### Fixed
+- server: cancel-drain `spawn_blocking` generation on prefill timeout — closes the v0.1.0 reliability blocker (#664) where a stuck prefill would orphan the generation thread (#666).
+- prefix-cache: never return retained blocks in `evicted_blocks` — root cause of the workers=2 prefill cascade (#673) that motivated the #672 emergency serialize shim (#674).
+- server: revert the workers=2 emergency serialize shim from #672 now that #674 fixes the underlying prefix-cache double-decrement (#675).
+- template: tools-bearing chat-template render — register the `tojson` minijinja filter and pass `tool_calls.arguments` as a dict so Qwen3.5-4B's chat_template stops 4xx-ing on `unknown filter: tojson` and on string-typed arguments (#653).
+
+### Performance
+- Reverting the #672 serialize shim (via #675, enabled by #674's prefix-cache fix) restores +23% throughput and −75% p99 ITL on the default workers=2 config relative to the shim's exclusive `GpuCoordinationLock` path.
+
+### Memory
+- memory: relax auto KV cache cap on CUDA — let memory-aware sizing drive instead of clipping at `max_position_embeddings.div_ceil(block_size)`, which had hard-capped Qwen3.5-4B at ~8.6 GiB / 16384 blocks (one full-context window) regardless of available VRAM (#655).
+
+### Documentation
+- docs(site): launch announcement blog post — Phase 11 launch checklist #1 (#667).
+- docs(launch): per-channel launch post drafts (HN, X/Twitter, lobste.rs, /r/LocalLLaMA, Rust Discord) staged under `docs/site/launch/` (#668).
+- docs(demo): asciicast script + asciinema player scaffolding for the 60s online-learning demo (#669).
+- docs(audits): Phase 11 pre-launch ops checklist verification (#670).
+- docs/demo: record canonical 60s online-learning asciicast and update `SCRIPT.md` to match shipping API (#671).
+- docs(quickstart): OpenAI tools/function-calling example (#654).
+- docs: workers=1 workaround for tools-bearing long prompts (refs #664, #656) — operator guidance pending the #666 cancel-drain fix (#665).
+
+### Tests
+- ci(chat-template): vendor Llama 3.1 + Qwen2.5 fixtures with stress-render tests (closes #657) (#658).
+- ci(chat-template): vendor Mistral v0.3 [INST] tools-bearing fixture with stress-render test (#660).
+- ci(chat-template): vendor DeepSeek V3 fixture with tool-calls render test (#661).
+- ci(chat-template): vendor Hermes-3-Llama-3.1 fixture with tool-calls render test (#662).
+- ci(api): integration smoke test for tools-bearing chat-completions render path (closes #659) (#663).
 
 ### Audits
 - Phase 9 v0.1.0 release-readiness audit. New `docs/audits/PHASE9_V0_1_0_READINESS.md` walks each Phase 9 checklist item from the kiln project description and reports concrete evidence (PR/release/file) per item. **Verdict: Phase 9 is shipped — the "v0.1.0 release with semantic versioning" goal is stale.** kiln-v0.1.0 was tagged on 2026-04-19; the production line is now at kiln-v0.2.8 (Sigstore-signed build provenance, GHCR `kiln-server` Docker image auto-publishing on every `kiln-v*` tag, the `docs/site/` landing page live at https://ericflo.github.io/kiln/, and all 12 findings of `docs/audits/security-audit-v0.1.md` resolved). Punch list reduces to one non-code item: amend the kiln project description to retire the already-met v0.1.0 cut bullet and replace it with a forward-looking public-announce milestone on the kiln-v0.2.x line. Recommended next planning-loop task: that amendment (no GPU, ~10 minutes). PR #651's framing ("what remains is an audit pass + the v0.1.0 semver cut") was written without rechecking the release index — the v0.1.0 tag predated that doc by 10 days; this audit is the audit pass and there is no remaining v0.1.0 cut to do.
