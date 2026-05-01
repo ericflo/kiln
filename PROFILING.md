@@ -6877,7 +6877,7 @@ KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp \
 - Pod: A6000 (49140 MB), CUDA 12.4, image `ghcr.io/ericflo/kiln-runpod:latest`
 - Checkpoint: `Qwen/Qwen3.5-4B` (HF download), weight prefix `model.language_model.` (VL-wrapper architecture `Qwen3_5ForConditionalGeneration`)
 - Build: warm sccache/B2, release + `--features cuda`, `KILN_CUDA_ARCHS=86`
-- Full trace: `assets/mtp-phase-b-trace-2026-04-21.log` (194 lines, 13 draft/verify pairs)
+- Full trace: `assets/profiling/mtp-phase-b-trace-2026-04-21.log` (194 lines, 13 draft/verify pairs)
 
 ### Headline numbers
 
@@ -6896,7 +6896,7 @@ KILN_W4A16=1 KILN_CUDA_GRAPHS=true KILN_SPEC_METHOD=mtp \
 
 ### Bisect table (13 steps)
 
-Full data in `assets/mtp-phase-b-trace-2026-04-21.log`. Summary:
+Full data in `assets/profiling/mtp-phase-b-trace-2026-04-21.log`. Summary:
 
 | # | mtp_pos | base_pos | last_token | draft_top1 | target_at_0 | accepted | identity? | h_prev_l2 |
 | --- | ---: | ---: | ---: | ---: | ---: | :---: | :---: | ---: |
@@ -7123,9 +7123,9 @@ for SEED in 0..7; do for ARM in off on; do
 done; done
 ```
 
-Wall-clock: 1710 s (≈ 28.5 min, ≈107 s per run) on one A6000. Trace files archived under `assets/mtp-phase-b3-seed{0..7}-{off,on}.log`.
+Wall-clock: 1710 s (≈ 28.5 min, ≈107 s per run) on one A6000. Trace files archived under `assets/profiling/mtp-phase-b3-seed{0..7}-{off,on}.log`.
 
-Aggregation (`assets/mtp-phase-b3-aggregate.py`): strips ANSI codes, stops at the `Inference Throughput Benchmarks` marker so post-latency events do not contaminate metrics, extracts α from `mtp_verify accepted=…`, identity-bias from `mtp_verify draft_token==last_token`, halves ratio / norm-L2 from `mtp_draft` events.
+Aggregation (`assets/profiling/mtp-phase-b3-aggregate.py`): strips ANSI codes, stops at the `Inference Throughput Benchmarks` marker so post-latency events do not contaminate metrics, extracts α from `mtp_verify accepted=…`, identity-bias from `mtp_verify draft_token==last_token`, halves ratio / norm-L2 from `mtp_draft` events.
 
 ### Per-run aggregate
 
