@@ -44,20 +44,6 @@ fn last_user_message_text(req: &ChatCompletionRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Acquire the real-model GPU gate for inference.
-///
-/// This intentionally takes the exclusive side of `GpuCoordinationLock` instead
-/// of a shared read guard: #664 round-6 showed that client-side `workers=2` can
-/// still drive the real long-prefill path into a persistent 5xx cascade after
-/// #666's timeout-drain fix. Holding the write guard makes the server enforce
-/// the known-stable workers=1 behavior until the CUDA/paged-cache/prefix-cache
-/// path has a stronger concurrent-prefill contract.
-fn acquire_real_inference_gpu_guard(
-    gpu_lock: &crate::state::GpuCoordinationLock,
-) -> std::sync::RwLockWriteGuard<'_, ()> {
-    gpu_lock.write().unwrap()
-}
-
 const REASONING_OPEN_TAG: &str = "<think>\n";
 const REASONING_CLOSE_TAG: &str = "</think>";
 
@@ -1227,7 +1213,9 @@ async fn generate_real(
     let cancel = CancelHandle::new();
     let cancel_inner = cancel.clone();
     let generation = tokio::task::spawn_blocking(move || {
-        let _gpu_guard = acquire_real_inference_gpu_guard(&gpu_lock);
+        // Acquire GPU coordination read lock — allows concurrent inference,
+        // but blocks while training holds the write lock.
+        let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
         match speculative_mode {
             ResolvedSpeculativeMode::Off => {
@@ -1592,7 +1580,7 @@ async fn generate_real_streaming(
                     // instead of buffering everything until generation is
                     // done.
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = acquire_real_inference_gpu_guard(&gpu_lock);
+                        let _gpu_guard = gpu_lock.read().unwrap();
                         let prefix_enabled = {
                             let cache = prefix_cache.lock().unwrap();
                             cache.is_enabled()
@@ -1719,7 +1707,7 @@ async fn generate_real_streaming(
                 }
                 ResolvedSpeculativeMode::SkipLayer(spec_config) => {
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = acquire_real_inference_gpu_guard(&gpu_lock);
+                        let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
                         if params.temperature == 0.0 {
                             runner_guard.generate_streaming_paged_speculative_shared_tokens(
@@ -1757,7 +1745,7 @@ async fn generate_real_streaming(
                 }
                 ResolvedSpeculativeMode::Mtp => {
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = acquire_real_inference_gpu_guard(&gpu_lock);
+                        let _gpu_guard = gpu_lock.read().unwrap();
                         let runner_guard = runner.read().unwrap();
                         runner_guard.generate_streaming_mtp_speculative(&prompt, &params)
                     })
@@ -2510,19 +2498,6 @@ mod tests {
             temperature,
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn real_inference_gpu_guard_is_exclusive() {
-        let gpu_lock = std::sync::Arc::new(std::sync::RwLock::new(()));
-        let guard = acquire_real_inference_gpu_guard(&gpu_lock);
-
-        assert!(
-            gpu_lock.try_read().is_err(),
-            "real inference must serialize instead of allowing a second reader"
-        );
-        drop(guard);
-        assert!(gpu_lock.try_read().is_ok());
     }
 
     #[test]
