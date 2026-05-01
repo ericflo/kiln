@@ -324,6 +324,53 @@ audit lives at
 This workaround is expected to be removed once the prefill fix lands in
 kiln-v0.2.10.
 
+### 4.4 Troubleshooting: KV cache OOM auto-recovery
+
+At startup, kiln's auto-sizer computes the paged KV cache budget as
+`available_for_kv = (total_vram - model_bytes) * inference_memory_fraction`
+(default `inference_memory_fraction = 0.7`). On A40 / A6000 / RTX 6000 Ada /
+L40S running Qwen3.5-4B in BF16, the configured fraction occasionally OOMs at
+allocation time even though the math says it should fit — driver overhead,
+fragmentation, and other allocations on the device can shrink the actual free
+pool below the auto-sizer's estimate.
+
+Since kiln-v0.2.9 (PR #687), the auto-sizer **automatically retries with a
+shrinking fraction** from the fallback list `[0.75, 0.65, 0.55, 0.45]` (only
+values strictly below the configured fraction are attempted). On success after
+a fallback, kiln logs a `WARN` line naming the actual fraction it landed on:
+
+```
+WARN kiln_server::state: KV cache auto-sizer fell back to a smaller
+inference_memory_fraction because the configured value OOM'd; set
+memory.inference_memory_fraction (or KILN_INFERENCE_MEMORY_FRACTION) to
+this value to silence the warning configured_fraction=0.99
+actual_fraction=0.45 num_blocks=56652 attempts=5
+```
+
+**What to do on the next restart:** pin the `actual_fraction` value so the
+auto-sizer doesn't have to retry. Either set `memory.inference_memory_fraction`
+in [`kiln.example.toml`](kiln.example.toml), or export
+`KILN_INFERENCE_MEMORY_FRACTION=<value>` in your environment. Subsequent
+restarts will hit the configured fraction on the first attempt and the WARN
+line goes away.
+
+If **every** fraction in the fallback list also OOMs, kiln aborts startup with
+a structured panic message that lists each attempted fraction → `num_blocks` →
+exact OOM error, names the detected GPU and model size, and recommends two
+concrete remediations:
+
+- **(a) `KILN_NUM_BLOCKS=N`** (or `[memory] num_blocks = N` in
+  `kiln.example.toml`) — preferred. This bypasses the auto-sizer entirely and
+  pins an exact block count, which is the canonical workaround documented in
+  [issue #685](https://github.com/ericflo/kiln/issues/685). The panic message
+  prints a concrete `N` value sized at ~30% of remaining VRAM (well below the
+  retry floor, with headroom for driver overhead).
+- **(b) `KILN_INFERENCE_MEMORY_FRACTION=X`** (or
+  `[memory] inference_memory_fraction = X`) — equivalent fraction-based knob,
+  if you'd rather size by ratio than by absolute block count.
+
+Use (a) on first-run failures and you are unlikely to see this codepath again.
+
 ## 5. Open the Browser Dashboard
 
 Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
