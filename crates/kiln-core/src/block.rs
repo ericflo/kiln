@@ -74,6 +74,25 @@ impl BlockManager {
 
     /// Free multiple blocks.
     pub fn free_all(&mut self, block_ids: &[u32]) {
+        // #673: A double-free corrupts the free list and lets concurrent
+        // requests get the same physical block twice. The prefix-cache layer
+        // is the canonical source of these IDs and should never hand us a
+        // duplicate or a block that is still on the free list.
+        debug_assert!(
+            {
+                let mut seen = std::collections::HashSet::with_capacity(block_ids.len());
+                block_ids.iter().all(|id| seen.insert(*id))
+            },
+            "BlockManager::free_all called with duplicate block IDs: {block_ids:?}",
+        );
+        debug_assert!(
+            {
+                let free_set: std::collections::HashSet<u32> =
+                    self.free_blocks.iter().copied().collect();
+                block_ids.iter().all(|id| !free_set.contains(id))
+            },
+            "BlockManager::free_all called with block IDs already on the free list: incoming={block_ids:?}",
+        );
         for &id in block_ids {
             self.free_blocks.push_back(id);
         }
