@@ -2943,9 +2943,14 @@ mod tests {
             let id = var.as_tensor().id();
             match (grads_mono.get(&id), grads_tiled.get(&id)) {
                 (Some(g_m), Some(g_t)) => {
-                    let diff = (g_m - g_t)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    let diff = (g_m - g_t)?
+                        .abs()?
+                        .max_all()?
+                        .to_dtype(DType::F32)?
+                        .to_scalar::<f32>()?;
+                    // BF16 LoRA Var storage: 7-bit mantissa, ~1e-3 absolute noise.
                     assert!(
-                        diff < 1e-5,
+                        diff < 1e-3,
                         "tiled grad differs from monolithic for var: max_abs_diff={diff:.2e}",
                     );
                     compared += 1;
@@ -3180,9 +3185,14 @@ mod tests {
         for (var, kind, name) in &classified {
             let g_s = grad_or_zero(&grads_std, var)?;
             let g_p = grad_or_zero(&grads_layer_pair, var)?;
-            let diff = (&g_s - &g_p)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let diff = (&g_s - &g_p)?
+                .abs()?
+                .max_all()?
+                .to_dtype(DType::F32)?
+                .to_scalar::<f32>()?;
+            // BF16 LoRA Var storage: ~1e-3 absolute noise across kinds.
             let tol: f32 = match *kind {
-                "mlp" => 1e-5,
+                "mlp" => 1e-3,
                 "fa" => 1e-3,
                 _ => 1e-3,
             };
@@ -3353,7 +3363,12 @@ mod tests {
         let mut has_grad_seg1 = false; // layers 2-3
         for var in params.all_vars() {
             if let Some(grad) = grads.get(&var.as_tensor().id()) {
-                let grad_norm = grad.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
+                let grad_norm = grad
+                    .sqr()?
+                    .sum_all()?
+                    .to_dtype(DType::F32)?
+                    .to_scalar::<f32>()?
+                    .sqrt();
                 if grad_norm > 0.0 {
                     // Determine which segment this var belongs to
                     // by checking if it matches layer 0-1 or 2-3 params
