@@ -26,6 +26,18 @@ const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=
 const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.
 const METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM: usize = 2048; // 32K tokens at block_size=16.
 
+/// Fallback inference_memory_fraction values the KV cache auto-sizer tries in
+/// order if the configured fraction OOMs at startup. Each entry is only tried
+/// when it is strictly less than the configured value, so a user who pins
+/// `inference_memory_fraction=0.5` gets retries at 0.45, not at 0.85→0.75→...
+///
+/// The descending shape (large initial step, smaller subsequent steps) matches
+/// what we see in practice on A40/A6000-class 48 GiB cards with Qwen3.5-4B BF16:
+/// the top of the fraction curve is the danger zone for activation peaks plus
+/// driver overhead, and once you drop ~10 percentage points you have plenty of
+/// room. See `phase11-685-autosizer-oom-default` and issue #685 for context.
+const AUTO_SIZER_FALLBACK_FRACTIONS: &[f64] = &[0.75, 0.65, 0.55, 0.45];
+
 /// GPU memory budget tracking for coordinating inference and training.
 ///
 /// On startup, we compute how much VRAM is available and partition it:
@@ -596,7 +608,8 @@ impl AppState {
             }
         };
 
-        let inference_fraction = memory_cfg.inference_memory_fraction.clamp(0.1, 1.0);
+        let configured_inference_fraction =
+            memory_cfg.inference_memory_fraction.clamp(0.1, 1.0);
 
         // Estimate model weight memory (approximate: params * dtype_bytes)
         // Qwen3.5-4B ≈ 4B params * 2 bytes (bf16) ≈ 8GB
@@ -615,32 +628,22 @@ impl AppState {
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_core::vram::detect_vram();
         let total_vram = detected_gpu_total_memory(&device, &vram_info);
+        let is_metal = is_metal_device(&device);
 
-        // Determine num_blocks — either from config, or memory-aware auto-calculation
-        let num_blocks = if let Some(explicit) = memory_cfg.num_blocks {
-            explicit
-        } else {
-            // Try to compute from available VRAM and inference fraction
+        // Compute num_blocks for a given fraction. Used both for the explicit
+        // `memory_cfg.num_blocks` path and the auto-sizer retry loop below.
+        let compute_blocks_for_fraction = |fraction: f64| -> usize {
             if total_vram > 0 && bytes_per_block > 0 {
                 let available_for_kv = ((total_vram.saturating_sub(estimated_model_bytes)) as f64
-                    * inference_fraction) as u64;
+                    * fraction) as u64;
                 let raw_auto_blocks = (available_for_kv / bytes_per_block) as usize;
-                let auto_blocks = cap_auto_num_blocks(
+                cap_auto_num_blocks(
                     raw_auto_blocks,
                     model_config.max_position_embeddings,
                     block_size,
-                    is_metal_device(&device),
+                    is_metal,
                     total_vram,
-                );
-                tracing::info!(
-                    total_vram_gb = total_vram as f64 / 1e9,
-                    model_gb = estimated_model_bytes as f64 / 1e9,
-                    inference_fraction,
-                    raw_auto_blocks,
-                    auto_blocks,
-                    "memory-aware KV cache sizing"
-                );
-                auto_blocks
+                )
             } else {
                 // Fallback: derive from max_position_embeddings
                 let raw_auto_blocks = model_config
@@ -651,7 +654,7 @@ impl AppState {
                     raw_auto_blocks,
                     model_config.max_position_embeddings,
                     block_size,
-                    is_metal_device(&device),
+                    is_metal,
                     total_vram,
                 )
             }
@@ -683,27 +686,112 @@ impl AppState {
                 requested
             }
         };
-        tracing::info!(
-            num_blocks,
-            block_size,
-            ?kv_dtype,
-            fp8_enabled,
-            "allocating paged KV cache"
-        );
+        // Allocation closure: try to build the paged KV cache for `n` blocks.
+        // Used by the auto-sizer retry loop below. CUDA OOM bubbles up here as
+        // an `Err` from `Tensor::empty`, which we catch and retry with a smaller
+        // budget instead of panicking on the first failure.
+        let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCache> {
+            PagedKvCache::new_uninit_with_fp8(
+                model_config.num_full_attention_layers,
+                n,
+                block_size,
+                model_config.num_kv_heads,
+                model_config.head_dim,
+                kv_dtype,
+                &device,
+                fp8_enabled,
+            )
+        };
+
+        // Determine num_blocks + paged cache:
+        //   - If `memory_cfg.num_blocks` is set, honor it exactly (no retry — the
+        //     user has chosen a specific value and we should not silently shrink
+        //     past their request).
+        //   - Otherwise, run the auto-sizer retry loop, starting at the
+        //     configured `inference_memory_fraction` and shrinking on OOM.
+        let (paged_cache, num_blocks, inference_fraction) = if let Some(explicit) =
+            memory_cfg.num_blocks
+        {
+            tracing::info!(
+                num_blocks = explicit,
+                block_size,
+                ?kv_dtype,
+                fp8_enabled,
+                "allocating paged KV cache (explicit num_blocks)"
+            );
+            let cache = allocate_cache(explicit)
+                .expect("failed to create PagedKvCache with explicit num_blocks");
+            (cache, explicit, configured_inference_fraction)
+        } else {
+            tracing::info!(
+                total_vram_gb = total_vram as f64 / 1e9,
+                model_gb = estimated_model_bytes as f64 / 1e9,
+                inference_fraction = configured_inference_fraction,
+                "memory-aware KV cache sizing"
+            );
+            match auto_size_with_retry(
+                configured_inference_fraction,
+                AUTO_SIZER_FALLBACK_FRACTIONS,
+                &compute_blocks_for_fraction,
+                |n| {
+                    tracing::info!(
+                        num_blocks = n,
+                        block_size,
+                        ?kv_dtype,
+                        fp8_enabled,
+                        "allocating paged KV cache"
+                    );
+                    allocate_cache(n).map_err(|e| format!("{e:#}"))
+                },
+            ) {
+                Ok(success) => {
+                    if success.fraction < configured_inference_fraction {
+                        tracing::warn!(
+                            configured_fraction = configured_inference_fraction,
+                            actual_fraction = success.fraction,
+                            num_blocks = success.num_blocks,
+                            attempts = success.attempted_failures.len() + 1,
+                            "KV cache auto-sizer fell back to a smaller inference_memory_fraction \
+                             because the configured value OOM'd; set memory.inference_memory_fraction \
+                             (or KILN_INFERENCE_MEMORY_FRACTION) to this value to silence the warning"
+                        );
+                    } else {
+                        tracing::info!(
+                            inference_fraction = success.fraction,
+                            num_blocks = success.num_blocks,
+                            "KV cache auto-sizer succeeded on first attempt"
+                        );
+                    }
+                    (success.cache, success.num_blocks, success.fraction)
+                }
+                Err(failure) => {
+                    let suggested_blocks = suggested_emergency_num_blocks(
+                        total_vram,
+                        estimated_model_bytes,
+                        bytes_per_block,
+                        block_size,
+                        model_config.max_position_embeddings,
+                        is_metal,
+                    );
+                    let msg = format_oom_remediation_message(
+                        &failure,
+                        total_vram,
+                        estimated_model_bytes,
+                        bytes_per_block,
+                        suggested_blocks,
+                        configured_inference_fraction,
+                        vram_info.source,
+                    );
+                    // Print to stderr too so users see the actionable message
+                    // even when tracing is configured to discard error events.
+                    eprintln!("{msg}");
+                    tracing::error!("{msg}");
+                    panic!("{msg}");
+                }
+            }
+        };
 
         let block_manager = BlockManager::new(num_blocks, block_size);
-        let paged_cache = PagedKvCache::new_uninit_with_fp8(
-            model_config.num_full_attention_layers,
-            num_blocks,
-            block_size,
-            model_config.num_kv_heads,
-            model_config.head_dim,
-            kv_dtype,
-            &device,
-            fp8_enabled,
-        )
-        .expect("failed to create PagedKvCache");
-
         let kv_cache_bytes = num_blocks as u64 * bytes_per_block;
         let memory_budget = GpuMemoryBudget::compute(
             total_vram,
@@ -892,6 +980,172 @@ fn detected_gpu_total_memory(
         }
         _ => vram.total_bytes,
     }
+}
+
+/// Successful auto-sizer outcome. Carries the live cache plus the metadata
+/// needed to log the final decision and update the GPU memory budget.
+struct AutoSizeSuccess {
+    cache: PagedKvCache,
+    num_blocks: usize,
+    fraction: f64,
+    /// `(fraction, num_blocks, error)` for each attempt that failed before
+    /// the eventual success. Empty when the configured fraction worked.
+    attempted_failures: Vec<(f64, usize, String)>,
+}
+
+/// Failure outcome — every fraction in the retry sequence OOMed.
+struct AutoSizeFailure {
+    /// `(fraction, num_blocks, error)` for every attempt in order.
+    attempts: Vec<(f64, usize, String)>,
+}
+
+/// Auto-size the KV cache by trying `configured_fraction` first and then each
+/// entry of `fallback_fractions` that is strictly less than the configured
+/// value, in order. Returns the first attempt that allocates successfully, or
+/// the full attempt history on failure.
+///
+/// `compute_blocks` maps a fraction to the number of blocks the auto-sizer
+/// would request for that budget. `try_allocate` actually attempts the
+/// allocation; returning `Err` means OOM (or any other failure) and the loop
+/// will move to the next smaller fraction.
+///
+/// Pure logic — no GPU, no tensors, no logging. Tested directly with mock
+/// allocators that return OOM until the fraction drops below a threshold.
+fn auto_size_with_retry<C, A>(
+    configured_fraction: f64,
+    fallback_fractions: &[f64],
+    compute_blocks: &C,
+    mut try_allocate: A,
+) -> Result<AutoSizeSuccess, AutoSizeFailure>
+where
+    C: Fn(f64) -> usize,
+    A: FnMut(usize) -> Result<PagedKvCache, String>,
+{
+    // Build the ordered fraction sequence: configured first, then each
+    // fallback that is strictly smaller (avoids retrying the same value or
+    // accidentally retrying *higher* than what the user asked for).
+    let mut fractions: Vec<f64> = Vec::with_capacity(1 + fallback_fractions.len());
+    fractions.push(configured_fraction);
+    for &f in fallback_fractions {
+        if f < configured_fraction - 1e-9 {
+            fractions.push(f);
+        }
+    }
+
+    let mut attempts: Vec<(f64, usize, String)> = Vec::with_capacity(fractions.len());
+    for fraction in fractions {
+        let num_blocks = compute_blocks(fraction);
+        match try_allocate(num_blocks) {
+            Ok(cache) => {
+                return Ok(AutoSizeSuccess {
+                    cache,
+                    num_blocks,
+                    fraction,
+                    attempted_failures: attempts,
+                });
+            }
+            Err(err) => {
+                attempts.push((fraction, num_blocks, err));
+            }
+        }
+    }
+
+    Err(AutoSizeFailure { attempts })
+}
+
+/// Compute a conservative `KILN_NUM_BLOCKS=N` suggestion the user can paste
+/// directly. We aim for ~30% of remaining VRAM after model weights — well
+/// below the smallest fallback fraction we just tried — so the suggestion has
+/// enough headroom to start cleanly even on the GPU/driver combo that just
+/// OOM'd at our retry floor.
+fn suggested_emergency_num_blocks(
+    total_vram: u64,
+    estimated_model_bytes: u64,
+    bytes_per_block: u64,
+    block_size: usize,
+    max_position_embeddings: usize,
+    is_metal: bool,
+) -> usize {
+    if total_vram == 0 || bytes_per_block == 0 {
+        // No VRAM signal — fall back to one model context worth of blocks.
+        return max_position_embeddings
+            .div_ceil(block_size)
+            .max(MIN_AUTO_KV_BLOCKS);
+    }
+    let conservative_fraction = 0.30_f64;
+    let available_for_kv = ((total_vram.saturating_sub(estimated_model_bytes)) as f64
+        * conservative_fraction) as u64;
+    let raw = (available_for_kv / bytes_per_block) as usize;
+    cap_auto_num_blocks(
+        raw,
+        max_position_embeddings,
+        block_size,
+        is_metal,
+        total_vram,
+    )
+}
+
+/// Render a multi-line error message that names the exact remediation flags
+/// to set, instead of dumping the raw CUDA OOM. We include:
+///   - what we tried (fractions + blocks counts)
+///   - the underlying error from the deepest attempt
+///   - a concrete `KILN_NUM_BLOCKS=N` value
+///   - a concrete `inference_memory_fraction=X` value (the lowest we tried,
+///     halved further to stay safely below the OOM floor)
+///   - the GPU VRAM total + detection source so users can sanity-check
+fn format_oom_remediation_message(
+    failure: &AutoSizeFailure,
+    total_vram: u64,
+    estimated_model_bytes: u64,
+    bytes_per_block: u64,
+    suggested_blocks: usize,
+    configured_fraction: f64,
+    vram_source: kiln_core::vram::VramSource,
+) -> String {
+    let mut buf = String::new();
+    buf.push_str(
+        "Auto-sizer could not fit any KV cache budget on this GPU. \
+         Every inference_memory_fraction we tried OOM'd during paged KV cache allocation.\n",
+    );
+    buf.push_str("\nAttempts (in order, all failed):\n");
+    for (fraction, num_blocks, err) in &failure.attempts {
+        buf.push_str(&format!(
+            "  - inference_memory_fraction={:.2} -> num_blocks={}: {}\n",
+            fraction,
+            num_blocks,
+            // Show the error compactly — most CUDA OOMs are one or two lines.
+            err.lines().next().unwrap_or("<no error message>")
+        ));
+    }
+    let vram_gb = total_vram as f64 / (1024.0 * 1024.0 * 1024.0);
+    let model_gb = estimated_model_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let kv_gb = (suggested_blocks as u64 * bytes_per_block) as f64 / (1024.0 * 1024.0 * 1024.0);
+    buf.push_str(&format!(
+        "\nGPU detected: {:.1} GiB total VRAM (source: {}), \
+         estimated model weights: {:.1} GiB.\n",
+        vram_gb, vram_source, model_gb
+    ));
+    let suggested_fraction = (failure
+        .attempts
+        .last()
+        .map(|(f, _, _)| *f)
+        .unwrap_or(configured_fraction)
+        / 2.0)
+        .max(0.10);
+    buf.push_str(&format!(
+        "\nRecommended remediation — set ONE of the following and restart:\n  \
+         (a) KILN_NUM_BLOCKS={}        # ~{:.1} GiB KV cache, conservative; or in kiln.toml: [memory] num_blocks = {}\n  \
+         (b) KILN_INFERENCE_MEMORY_FRACTION={:.2}   # equivalent fraction-based knob; or in kiln.toml: [memory] inference_memory_fraction = {:.2}\n",
+        suggested_blocks, kv_gb, suggested_blocks,
+        suggested_fraction, suggested_fraction,
+    ));
+    buf.push_str(&format!(
+        "\nFor reference, the configured inference_memory_fraction was {:.2}. \
+         Option (a) is preferred — it bypasses the auto-sizer entirely and is what \
+         #685 documented as the working workaround on A40/A6000 + Qwen3.5-4B BF16.\n",
+        configured_fraction
+    ));
+    buf
 }
 
 #[cfg(test)]
@@ -1337,5 +1591,288 @@ mod tests {
         // fraction = 0.5
         let budget_half = GpuMemoryBudget::compute(total, model, kv, 0.5, None);
         assert_eq!(budget_half.training_budget_bytes, 14 * 1024 * 1024 * 1024);
+    }
+
+    /// Build a tiny CPU-resident PagedKvCache for use as the "successful
+    /// allocation" return value in the auto-sizer retry tests below. The
+    /// values are dummies — only the act of returning Ok(...) matters for
+    /// the loop logic.
+    fn dummy_cpu_cache() -> PagedKvCache {
+        PagedKvCache::new_uninit_with_fp8(
+            1, // num_full_attn_layers
+            8, // num_blocks
+            16, // block_size
+            1, // num_kv_heads
+            4, // head_dim
+            DType::F32,
+            &candle_core::Device::Cpu,
+            false,
+        )
+        .expect("CPU PagedKvCache allocation never fails for tiny shape")
+    }
+
+    #[test]
+    fn auto_sizer_succeeds_on_first_attempt_when_configured_fits() {
+        let compute = |fraction: f64| -> usize {
+            // Map fraction directly to a block count for inspection
+            (fraction * 1000.0) as usize
+        };
+        let calls = std::cell::Cell::new(0u32);
+        let result = auto_size_with_retry(
+            0.85,
+            AUTO_SIZER_FALLBACK_FRACTIONS,
+            &compute,
+            |_n| {
+                calls.set(calls.get() + 1);
+                Ok(dummy_cpu_cache())
+            },
+        );
+        let success = result.unwrap_or_else(|_| panic!("expected success"));
+        assert_eq!(success.fraction, 0.85);
+        assert_eq!(success.num_blocks, 850);
+        assert!(success.attempted_failures.is_empty());
+        assert_eq!(calls.get(), 1, "should have allocated exactly once");
+    }
+
+    #[test]
+    fn auto_sizer_retries_until_fraction_drops_below_oom_threshold() {
+        // Simulate an A40+BF16-like OOM zone: anything ≥ 0.70 OOMs, anything
+        // strictly below succeeds. Configured fraction is 0.85 (issue #685
+        // shape); the loop should fall through 0.85 → 0.75 (both OOM) and
+        // succeed at 0.65.
+        let oom_at_or_above = 0.70_f64;
+        let compute = |fraction: f64| -> usize { (fraction * 1000.0) as usize };
+        let calls = std::cell::Cell::new(0u32);
+        let attempted_fractions = std::cell::RefCell::new(Vec::<f64>::new());
+        let result = auto_size_with_retry(
+            0.85,
+            AUTO_SIZER_FALLBACK_FRACTIONS,
+            &compute,
+            |n| {
+                calls.set(calls.get() + 1);
+                let frac = (n as f64) / 1000.0;
+                attempted_fractions.borrow_mut().push(frac);
+                if frac >= oom_at_or_above - 1e-9 {
+                    Err(format!(
+                        "CUDA OOM: out of memory while allocating k_pool for layer 0 (n={n})"
+                    ))
+                } else {
+                    Ok(dummy_cpu_cache())
+                }
+            },
+        );
+        let success = result.unwrap_or_else(|_| panic!("expected success after fallback"));
+        assert_eq!(success.fraction, 0.65, "should land on the 0.65 fallback");
+        assert_eq!(success.num_blocks, 650);
+        assert_eq!(
+            success.attempted_failures.len(),
+            2,
+            "should have failed twice (0.85 then 0.75) before succeeding at 0.65"
+        );
+        assert_eq!(calls.get(), 3);
+        let attempts = attempted_fractions.borrow().clone();
+        assert_eq!(attempts, vec![0.85, 0.75, 0.65]);
+    }
+
+    #[test]
+    fn auto_sizer_skips_fallbacks_above_configured_fraction() {
+        // If the user pinned a low inference_memory_fraction (say 0.50), the
+        // retry loop must never try the higher-default fallbacks (0.75, 0.65)
+        // — that would silently allocate MORE than the user asked for.
+        let compute = |fraction: f64| -> usize { (fraction * 1000.0) as usize };
+        let calls = std::cell::Cell::new(0u32);
+        let attempted = std::cell::RefCell::new(Vec::<f64>::new());
+        let result = auto_size_with_retry(
+            0.50,
+            AUTO_SIZER_FALLBACK_FRACTIONS,
+            &compute,
+            |n| {
+                calls.set(calls.get() + 1);
+                let frac = (n as f64) / 1000.0;
+                attempted.borrow_mut().push(frac);
+                Ok(dummy_cpu_cache())
+            },
+        );
+        let success = result.unwrap_or_else(|_| panic!("expected success"));
+        assert_eq!(success.fraction, 0.50);
+        assert_eq!(success.num_blocks, 500);
+        assert!(success.attempted_failures.is_empty());
+        let attempts = attempted.borrow().clone();
+        assert_eq!(
+            attempts,
+            vec![0.50],
+            "should have tried only the configured fraction"
+        );
+    }
+
+    #[test]
+    fn auto_sizer_returns_failure_when_every_fraction_ooms() {
+        // Pathological case: every fraction OOMs (e.g. unreasonably small GPU
+        // for the model). The loop must not loop forever; it must return
+        // Failure with the full attempt history so the caller can build a
+        // useful error message.
+        let compute = |fraction: f64| -> usize { (fraction * 1000.0) as usize };
+        let calls = std::cell::Cell::new(0u32);
+        let result = auto_size_with_retry(
+            0.85,
+            AUTO_SIZER_FALLBACK_FRACTIONS,
+            &compute,
+            |n| -> Result<PagedKvCache, String> {
+                calls.set(calls.get() + 1);
+                Err(format!("simulated OOM at n={n}"))
+            },
+        );
+        let failure = result.err().unwrap_or_else(|| panic!("expected failure"));
+        // 1 configured + 4 fallbacks (all strictly below 0.85) = 5 attempts
+        assert_eq!(failure.attempts.len(), 5);
+        assert_eq!(calls.get(), 5);
+        let fractions: Vec<f64> = failure.attempts.iter().map(|(f, _, _)| *f).collect();
+        assert_eq!(fractions, vec![0.85, 0.75, 0.65, 0.55, 0.45]);
+    }
+
+    #[test]
+    fn auto_sizer_does_not_retry_with_duplicate_or_higher_values() {
+        // If configured fraction equals one of the fallback values (e.g. 0.75),
+        // the retry loop must not try it twice. Subsequent attempts must be
+        // strictly lower.
+        let compute = |fraction: f64| -> usize { (fraction * 1000.0) as usize };
+        let attempted = std::cell::RefCell::new(Vec::<f64>::new());
+        let result = auto_size_with_retry(
+            0.75,
+            AUTO_SIZER_FALLBACK_FRACTIONS,
+            &compute,
+            |n| -> Result<PagedKvCache, String> {
+                let frac = (n as f64) / 1000.0;
+                attempted.borrow_mut().push(frac);
+                Err(format!("OOM at n={n}"))
+            },
+        );
+        let failure = result.err().unwrap_or_else(|| panic!("expected failure"));
+        let fractions: Vec<f64> = failure.attempts.iter().map(|(f, _, _)| *f).collect();
+        assert_eq!(
+            fractions,
+            vec![0.75, 0.65, 0.55, 0.45],
+            "configured 0.75 must appear once and only fractions strictly below should follow"
+        );
+    }
+
+    #[test]
+    fn suggested_emergency_blocks_uses_30pct_of_remaining_vram() {
+        // 48 GiB GPU, 8 GiB model -> 40 GiB remaining * 0.30 = 12 GiB for KV
+        let total = 48u64 * 1024 * 1024 * 1024;
+        let model = 8u64 * 1024 * 1024 * 1024;
+        let bytes_per_block = 256u64 * 1024; // 256 KiB per block
+        let suggested = suggested_emergency_num_blocks(
+            total,
+            model,
+            bytes_per_block,
+            DEFAULT_BLOCK_SIZE,
+            262_144,
+            false, // CUDA path (Metal cap doesn't apply)
+        );
+        let expected_kv_bytes = ((total - model) as f64 * 0.30) as u64;
+        let expected_blocks = (expected_kv_bytes / bytes_per_block) as usize;
+        assert_eq!(suggested, expected_blocks);
+        // Sanity: at least the floor
+        assert!(suggested >= MIN_AUTO_KV_BLOCKS);
+    }
+
+    #[test]
+    fn suggested_emergency_blocks_falls_back_when_no_vram_signal() {
+        // total_vram = 0 (CPU or detection failed) — must still return a
+        // sensible block count derived from max_position_embeddings.
+        let suggested = suggested_emergency_num_blocks(
+            0, // total_vram unknown
+            0,
+            0,
+            DEFAULT_BLOCK_SIZE,
+            262_144,
+            false,
+        );
+        let expected = (262_144_usize).div_ceil(DEFAULT_BLOCK_SIZE);
+        assert_eq!(suggested, expected.max(MIN_AUTO_KV_BLOCKS));
+    }
+
+    #[test]
+    fn oom_message_names_concrete_remediation_flags() {
+        // The whole point of the new error message: it must give the user a
+        // concrete `KILN_NUM_BLOCKS=N` and `KILN_INFERENCE_MEMORY_FRACTION=X`
+        // value to set. Verify both appear in the rendered text.
+        let failure = AutoSizeFailure {
+            attempts: vec![
+                (0.85, 24576, "CUDA OOM during k_pool layer 0".to_string()),
+                (0.75, 21504, "CUDA OOM during k_pool layer 0".to_string()),
+                (0.65, 18432, "CUDA OOM during k_pool layer 0".to_string()),
+                (0.55, 15360, "CUDA OOM during k_pool layer 0".to_string()),
+                (0.45, 12288, "CUDA OOM during k_pool layer 0".to_string()),
+            ],
+        };
+        let total_vram = 48u64 * 1024 * 1024 * 1024;
+        let model_bytes = 8u64 * 1024 * 1024 * 1024;
+        let bytes_per_block = 1u64 * 1024 * 1024; // 1 MiB
+        let suggested = 8192;
+        let msg = format_oom_remediation_message(
+            &failure,
+            total_vram,
+            model_bytes,
+            bytes_per_block,
+            suggested,
+            0.85,
+            kiln_core::vram::VramSource::NvidiaSmi,
+        );
+        assert!(
+            msg.contains("KILN_NUM_BLOCKS=8192"),
+            "message must include the concrete num_blocks suggestion: {msg}"
+        );
+        assert!(
+            msg.contains("KILN_INFERENCE_MEMORY_FRACTION="),
+            "message must include the concrete fraction suggestion: {msg}"
+        );
+        // Suggested fraction = last attempt (0.45) / 2 = 0.225, max(0.10) = 0.225
+        assert!(
+            msg.contains("0.23") || msg.contains("0.22"),
+            "message should suggest a fraction roughly half of the last failure: {msg}"
+        );
+        assert!(
+            msg.contains("48.0 GiB") || msg.contains("48 GiB"),
+            "message should mention detected VRAM: {msg}"
+        );
+        assert!(
+            msg.contains("nvidia-smi"),
+            "message should mention VRAM source for sanity-check: {msg}"
+        );
+        // All 5 attempted fractions should be enumerated
+        for fraction_str in &["0.85", "0.75", "0.65", "0.55", "0.45"] {
+            assert!(
+                msg.contains(fraction_str),
+                "message should enumerate attempt at fraction {fraction_str}: {msg}"
+            );
+        }
+        // The recommendation banner must reference the working workaround
+        assert!(
+            msg.contains("#685"),
+            "message should reference issue #685 for context: {msg}"
+        );
+    }
+
+    #[test]
+    fn oom_message_handles_unknown_vram() {
+        // total_vram = 0 path (e.g. detection failed) — the message must
+        // still render something sensible without panicking on the GiB
+        // formatting.
+        let failure = AutoSizeFailure {
+            attempts: vec![(0.85, 100, "CUDA OOM".to_string())],
+        };
+        let msg = format_oom_remediation_message(
+            &failure,
+            0,
+            0,
+            1024,
+            64,
+            0.85,
+            kiln_core::vram::VramSource::None,
+        );
+        assert!(msg.contains("KILN_NUM_BLOCKS=64"), "message: {msg}");
+        assert!(msg.contains("0.0 GiB"), "should print 0.0 GiB when unknown: {msg}");
     }
 }
