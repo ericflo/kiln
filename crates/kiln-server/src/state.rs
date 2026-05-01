@@ -114,9 +114,11 @@ impl GpuMemoryBudget {
 
 /// Coordination lock for GPU memory sharing between inference and training.
 ///
-/// Inference acquires a read lock (multiple concurrent inference requests OK).
-/// Training acquires a write lock (blocks inference during gradient computation).
-/// This prevents combined peak VRAM from exceeding GPU capacity.
+/// Inference currently acquires a write lock, serializing real GPU generation.
+/// This intentionally mirrors the known-stable workers=1 behavior after #664
+/// reproduced a workers=2 long-prefill 5xx cascade. Training also acquires the
+/// write lock, so training and inference remain mutually exclusive during GPU
+/// work.
 ///
 /// Training should acquire this per-segment (for gradient-checkpointed training),
 /// not for the entire job, to minimize inference latency impact.
