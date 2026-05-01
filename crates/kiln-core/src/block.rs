@@ -17,6 +17,8 @@ pub struct BlockManager {
     block_size: usize,
     num_blocks: usize,
     free_blocks: VecDeque<u32>,
+    #[cfg(debug_assertions)]
+    allocated: Vec<bool>,
 }
 
 impl BlockManager {
@@ -26,6 +28,8 @@ impl BlockManager {
             block_size,
             num_blocks,
             free_blocks,
+            #[cfg(debug_assertions)]
+            allocated: vec![false; num_blocks],
         }
     }
 
@@ -47,10 +51,15 @@ impl BlockManager {
 
     /// Allocate a single block. Returns the physical block ID.
     pub fn allocate_one(&mut self) -> Result<u32, BlockError> {
-        self.free_blocks.pop_front().ok_or(BlockError::OutOfMemory {
-            needed: 1,
-            available: 0,
-        })
+        let block_id = self
+            .free_blocks
+            .pop_front()
+            .ok_or(BlockError::OutOfMemory {
+                needed: 1,
+                available: 0,
+            })?;
+        self.mark_allocated(block_id);
+        Ok(block_id)
     }
 
     /// Allocate `n` contiguous-in-ID blocks. Returns the block IDs.
@@ -62,26 +71,59 @@ impl BlockManager {
                 available: self.free_blocks.len(),
             });
         }
-        Ok((0..n)
+        let blocks: Vec<u32> = (0..n)
             .map(|_| self.free_blocks.pop_front().unwrap())
-            .collect())
+            .collect();
+        for &block_id in &blocks {
+            self.mark_allocated(block_id);
+        }
+        Ok(blocks)
     }
 
     /// Free a single block, returning it to the free list.
     pub fn free_one(&mut self, block_id: u32) {
+        self.mark_freed(block_id);
         self.free_blocks.push_back(block_id);
     }
 
     /// Free multiple blocks.
     pub fn free_all(&mut self, block_ids: &[u32]) {
         for &id in block_ids {
-            self.free_blocks.push_back(id);
+            self.free_one(id);
         }
     }
 
     /// Can we allocate `n` blocks right now?
     pub fn can_allocate(&self, n: usize) -> bool {
         self.free_blocks.len() >= n
+    }
+
+    fn mark_allocated(&mut self, block_id: u32) {
+        debug_assert!(
+            (block_id as usize) < self.num_blocks,
+            "allocated block id {block_id} is outside block manager range 0..{}",
+            self.num_blocks
+        );
+        #[cfg(debug_assertions)]
+        {
+            let slot = &mut self.allocated[block_id as usize];
+            debug_assert!(!*slot, "block {block_id} allocated while already live");
+            *slot = true;
+        }
+    }
+
+    fn mark_freed(&mut self, block_id: u32) {
+        debug_assert!(
+            (block_id as usize) < self.num_blocks,
+            "freed block id {block_id} is outside block manager range 0..{}",
+            self.num_blocks
+        );
+        #[cfg(debug_assertions)]
+        {
+            let slot = &mut self.allocated[block_id as usize];
+            debug_assert!(*slot, "block {block_id} freed while not allocated");
+            *slot = false;
+        }
     }
 }
 
@@ -137,6 +179,15 @@ mod tests {
 
         bm.free_all(&blocks);
         assert_eq!(bm.num_free(), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "freed while not allocated")]
+    fn block_manager_debug_asserts_double_free() {
+        let mut bm = BlockManager::new(2, 16);
+        let blocks = bm.allocate(1).unwrap();
+        bm.free_all(&blocks);
+        bm.free_all(&blocks);
     }
 
     #[test]

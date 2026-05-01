@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -156,6 +156,18 @@ pub struct TrainingJobInfo {
 /// Thread-safe map of tracked training jobs.
 pub type TrainingJobs = Arc<std::sync::RwLock<HashMap<String, TrainingJobInfo>>>;
 
+/// Real-backend prefix cache ownership invariants:
+///
+/// - `block_refcounts` is derived from cached entries only; active hits are
+///   tracked separately with `active_uses` to block eviction while a request is
+///   reading cached KV blocks.
+/// - `register()` may evict old entries, but it must only return a block in
+///   `evicted_blocks` when that block is absent from the final cache state. A
+///   block reused by the incoming registration remains cache-owned and must not
+///   be returned to `BlockManager`.
+/// - The API layer owns only freshly allocated suffix blocks until `register()`
+///   returns them in `retained_blocks`; all other cached-prefix blocks stay owned
+///   by this cache across hits and longer-prefix registrations.
 pub struct RealPrefixCache {
     enabled: bool,
     max_blocks: usize,
@@ -244,6 +256,7 @@ impl RealPrefixCache {
         self.stats.hit_blocks += self.entries[idx].block_ids.len() as u64;
         self.entries[idx].last_used = self.stats.lookup_hits + self.stats.lookup_misses;
         self.entries[idx].active_uses += 1;
+        self.debug_assert_invariants();
 
         Ok(Some(RealPrefixCacheHit {
             entry_id: self.entries[idx].id,
@@ -255,8 +268,13 @@ impl RealPrefixCache {
 
     pub fn release_hit(&mut self, entry_id: u64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == entry_id) {
+            debug_assert!(
+                entry.active_uses > 0,
+                "prefix-cache hit entry {entry_id} released with no active uses"
+            );
             entry.active_uses = entry.active_uses.saturating_sub(1);
         }
+        self.debug_assert_invariants();
     }
 
     pub fn register(
@@ -284,28 +302,47 @@ impl RealPrefixCache {
             };
         }
 
+        let incoming_blocks: HashSet<u32> = registration.block_ids.iter().copied().collect();
+        debug_assert_eq!(
+            incoming_blocks.len(),
+            registration.block_ids.len(),
+            "prefix-cache registrations must not contain duplicate physical block ids"
+        );
+        if incoming_blocks.len() > self.max_blocks {
+            return RealPrefixCacheRegisterOutcome {
+                retained_blocks: Vec::new(),
+                evicted_blocks: Vec::new(),
+            };
+        }
+
         let mut evicted_blocks = Vec::new();
-        let needed_new_blocks = registration
-            .block_ids
-            .iter()
-            .filter(|block_id| !self.block_refcounts.contains_key(block_id))
-            .count();
-        while self.cached_blocks() + needed_new_blocks > self.max_blocks {
+        while self.cached_blocks_after_registering(&incoming_blocks) > self.max_blocks {
             let Some(evict_idx) = self
                 .entries
                 .iter()
                 .enumerate()
                 .filter(|(_, entry)| entry.active_uses == 0)
-                .min_by_key(|(_, entry)| entry.last_used)
+                .min_by_key(|(_, entry)| {
+                    let frees_non_incoming = entry.block_ids.iter().any(|block_id| {
+                        !incoming_blocks.contains(block_id)
+                            && self.block_refcounts.get(block_id).copied() == Some(1)
+                    });
+                    (!frees_non_incoming, entry.last_used)
+                })
                 .map(|(idx, _)| idx)
             else {
+                self.debug_assert_invariants();
                 return RealPrefixCacheRegisterOutcome {
                     retained_blocks: Vec::new(),
                     evicted_blocks,
                 };
             };
             let evicted = self.entries.remove(evict_idx);
-            evicted_blocks.extend(self.release_entry_blocks(&evicted.block_ids));
+            evicted_blocks.extend(
+                self.release_entry_blocks(&evicted.block_ids)
+                    .into_iter()
+                    .filter(|block_id| !incoming_blocks.contains(block_id)),
+            );
         }
 
         let retained_blocks: Vec<u32> = registration
@@ -329,6 +366,13 @@ impl RealPrefixCache {
             last_used,
             active_uses: 0,
         });
+        debug_assert!(
+            retained_blocks
+                .iter()
+                .all(|block_id| !evicted_blocks.contains(block_id)),
+            "prefix-cache register retained and evicted the same block"
+        );
+        self.debug_assert_invariants();
         RealPrefixCacheRegisterOutcome {
             retained_blocks,
             evicted_blocks,
@@ -340,18 +384,28 @@ impl RealPrefixCache {
         self.entries.clear();
         blocks.extend(self.block_refcounts.keys().copied());
         self.block_refcounts.clear();
+        self.debug_assert_invariants();
         blocks
     }
 
     fn release_entry_blocks(&mut self, block_ids: &[u32]) -> Vec<u32> {
         let mut freed = Vec::new();
         for &block_id in block_ids {
-            if let Some(refcount) = self.block_refcounts.get_mut(&block_id) {
-                *refcount = refcount.saturating_sub(1);
-                if *refcount == 0 {
-                    self.block_refcounts.remove(&block_id);
-                    freed.push(block_id);
-                }
+            let Some(refcount) = self.block_refcounts.get_mut(&block_id) else {
+                debug_assert!(
+                    false,
+                    "prefix-cache entry referenced untracked block {block_id}"
+                );
+                continue;
+            };
+            debug_assert!(
+                *refcount > 0,
+                "prefix-cache block {block_id} had zero refcount before release"
+            );
+            *refcount -= 1;
+            if *refcount == 0 {
+                self.block_refcounts.remove(&block_id);
+                freed.push(block_id);
             }
         }
         freed
@@ -367,6 +421,58 @@ impl RealPrefixCache {
 
     fn cached_blocks(&self) -> usize {
         self.block_refcounts.len()
+    }
+
+    fn cached_blocks_after_registering(&self, incoming_blocks: &HashSet<u32>) -> usize {
+        self.block_refcounts.len()
+            + incoming_blocks
+                .iter()
+                .filter(|block_id| !self.block_refcounts.contains_key(block_id))
+                .count()
+    }
+
+    fn debug_assert_invariants(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let mut expected: HashMap<u32, usize> = HashMap::new();
+            let mut entry_ids = HashSet::new();
+            for entry in &self.entries {
+                debug_assert!(
+                    entry_ids.insert(entry.id),
+                    "duplicate prefix-cache entry id"
+                );
+                debug_assert!(
+                    entry.prompt_tokens.len() % self.block_size == 0,
+                    "cached prefix entry is not block-aligned"
+                );
+                debug_assert_eq!(
+                    entry.prompt_tokens.len() / self.block_size,
+                    entry.block_ids.len(),
+                    "cached prefix entry token/block lengths diverged"
+                );
+                let unique_blocks: HashSet<u32> = entry.block_ids.iter().copied().collect();
+                debug_assert_eq!(
+                    unique_blocks.len(),
+                    entry.block_ids.len(),
+                    "cached prefix entry contains duplicate physical block ids"
+                );
+                for &block_id in &entry.block_ids {
+                    *expected.entry(block_id).or_insert(0) += 1;
+                }
+            }
+            debug_assert_eq!(
+                expected, self.block_refcounts,
+                "prefix-cache block refcounts diverged from entries"
+            );
+            debug_assert!(
+                self.block_refcounts.values().all(|count| *count > 0),
+                "prefix-cache block refcounts must always be positive"
+            );
+            debug_assert!(
+                self.block_refcounts.len() <= self.max_blocks || !self.is_enabled(),
+                "prefix-cache retained more unique blocks than its configured cap"
+            );
+        }
     }
 }
 
@@ -970,6 +1076,209 @@ mod tests {
                 .lookup(&Some("adapter-a".to_string()), &[1, 2, 3, 4, 5])?
                 .is_some()
         );
+        Ok(())
+    }
+
+    fn prefix_registration(
+        config: &ModelConfig,
+        prompt_tokens: Vec<TokenId>,
+        block_ids: Vec<u32>,
+    ) -> anyhow::Result<PagedPrefixRegistration> {
+        Ok(PagedPrefixRegistration {
+            prompt_tokens,
+            block_ids,
+            linear_state: LinearAttentionState::new(config, &candle_core::Device::Cpu)?,
+        })
+    }
+
+    #[test]
+    fn real_prefix_cache_eviction_does_not_free_reused_incoming_blocks() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let mut cache = RealPrefixCache::new(true, 4, 4);
+
+        cache.register(
+            None,
+            prefix_registration(&config, vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1, 2])?,
+        );
+        cache.register(
+            None,
+            prefix_registration(&config, vec![21, 22, 23, 24, 25, 26, 27, 28], vec![9, 10])?,
+        );
+
+        let hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8, 99])?
+            .expect("prefix hit");
+        assert_eq!(hit.block_ids, vec![1, 2]);
+        cache.release_hit(hit.entry_id);
+
+        let outcome = cache.register(
+            None,
+            prefix_registration(
+                &config,
+                vec![1, 2, 3, 4, 5, 6, 7, 8, 31, 32, 33, 34],
+                vec![1, 2, 3],
+            )?,
+        );
+
+        assert_eq!(outcome.retained_blocks, vec![3]);
+        assert_eq!(outcome.evicted_blocks, vec![9, 10]);
+        assert!(
+            outcome
+                .evicted_blocks
+                .iter()
+                .all(|block_id| !outcome.retained_blocks.contains(block_id))
+        );
+        assert_eq!(cache.stats().cached_blocks, 3);
+        assert!(
+            cache
+                .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8, 31, 32, 33, 34, 35])?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_rejects_oversized_registration_without_eviction() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let mut cache = RealPrefixCache::new(true, 4, 2);
+        cache.register(
+            None,
+            prefix_registration(&config, vec![1, 2, 3, 4, 5, 6, 7, 8], vec![1, 2])?,
+        );
+
+        let hit = cache
+            .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8, 9])?
+            .expect("prefix hit");
+        cache.release_hit(hit.entry_id);
+        let outcome = cache.register(
+            None,
+            prefix_registration(
+                &config,
+                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                vec![1, 2, 3],
+            )?,
+        );
+
+        assert!(outcome.retained_blocks.is_empty());
+        assert!(outcome.evicted_blocks.is_empty());
+        assert_eq!(cache.stats().cached_blocks, 2);
+        assert!(
+            cache
+                .lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8, 99])?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_eviction_skips_active_hit() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let mut cache = RealPrefixCache::new(true, 4, 4);
+        cache.register(
+            None,
+            prefix_registration(&config, vec![1, 2, 3, 4], vec![1])?,
+        );
+        cache.register(
+            None,
+            prefix_registration(&config, vec![5, 6, 7, 8], vec![5])?,
+        );
+
+        let hit = cache.lookup(&None, &[1, 2, 3, 4, 99])?.expect("prefix hit");
+        let outcome = cache.register(
+            None,
+            prefix_registration(
+                &config,
+                vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+                vec![10, 11, 12],
+            )?,
+        );
+
+        assert_eq!(outcome.retained_blocks, vec![10, 11, 12]);
+        assert_eq!(outcome.evicted_blocks, vec![5]);
+        assert!(cache.lookup(&None, &[1, 2, 3, 4, 100])?.is_some());
+        cache.release_hit(hit.entry_id);
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_register_returns_prior_evictions_when_active_hits_block_fit()
+    -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let mut cache = RealPrefixCache::new(true, 4, 2);
+        cache.register(
+            None,
+            prefix_registration(&config, vec![1, 2, 3, 4], vec![1])?,
+        );
+        cache.register(
+            None,
+            prefix_registration(&config, vec![5, 6, 7, 8], vec![5])?,
+        );
+
+        let hit = cache.lookup(&None, &[1, 2, 3, 4, 99])?.expect("prefix hit");
+        let outcome = cache.register(
+            None,
+            prefix_registration(&config, vec![10, 11, 12, 13, 14, 15, 16, 17], vec![10, 11])?,
+        );
+
+        assert!(outcome.retained_blocks.is_empty());
+        assert_eq!(outcome.evicted_blocks, vec![5]);
+        assert!(cache.lookup(&None, &[1, 2, 3, 4, 100])?.is_some());
+        cache.release_hit(hit.entry_id);
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_concurrent_stress_preserves_refcount_invariants() -> anyhow::Result<()> {
+        let config = Arc::new(tiny_linear_config());
+        let cache = Arc::new(std::sync::Mutex::new(RealPrefixCache::new(true, 4, 8)));
+        let mut handles = Vec::new();
+
+        for thread_id in 0..4u32 {
+            let cache = cache.clone();
+            let config = config.clone();
+            handles.push(std::thread::spawn(move || -> anyhow::Result<()> {
+                let adapter = if thread_id % 2 == 0 {
+                    None
+                } else {
+                    Some(format!("adapter-{thread_id}"))
+                };
+                for i in 0..250u32 {
+                    let selector = (i + thread_id * 17) % 5;
+                    let base = 1000 + thread_id * 10_000 + i * 16;
+                    let (tokens, blocks) = match selector {
+                        0 => ((base..base + 4).collect(), vec![base]),
+                        1 => ((base..base + 8).collect(), vec![base, base + 1]),
+                        2 => ((base..base + 12).collect(), vec![base, base + 1, base + 2]),
+                        3 => ((1..=8).collect(), vec![1, 2]),
+                        _ => ((1..=12).collect(), vec![1, 2, 3]),
+                    };
+                    let mut guard = cache.lock().unwrap();
+                    if let Some(hit) = guard.lookup(&adapter, &[1, 2, 3, 4, 5, 6, 7, 8, 99])? {
+                        guard.release_hit(hit.entry_id);
+                    }
+                    let _ = guard.register(
+                        adapter.clone(),
+                        prefix_registration(&config, tokens, blocks)?,
+                    );
+                    guard.debug_assert_invariants();
+                }
+                Ok(())
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("stress worker panicked")?;
+        }
+        cache.lock().unwrap().debug_assert_invariants();
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "expensive prefix-cache stress; run explicitly when changing cache ownership"]
+    fn real_prefix_cache_concurrent_stress_expensive() -> anyhow::Result<()> {
+        for _ in 0..20 {
+            real_prefix_cache_concurrent_stress_preserves_refcount_invariants()?;
+        }
         Ok(())
     }
 
