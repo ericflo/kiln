@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -319,6 +319,21 @@ impl RealPrefixCache {
         for &block_id in &registration.block_ids {
             *self.block_refcounts.entry(block_id).or_insert(0) += 1;
         }
+        // #673: An entry evicted above may have shared block IDs with the
+        // incoming registration. `release_entry_blocks` would have pushed those
+        // IDs into `evicted_blocks`, but the refcount increments above have now
+        // re-claimed them. Returning them in `evicted_blocks` would cause the
+        // API layer to free live cached blocks back to the BlockManager, where
+        // a concurrent request can re-allocate and overwrite them.
+        let registration_set: HashSet<u32> =
+            registration.block_ids.iter().copied().collect();
+        evicted_blocks.retain(|block_id| !registration_set.contains(block_id));
+        debug_assert!(
+            evicted_blocks
+                .iter()
+                .all(|id| !self.block_refcounts.contains_key(id)),
+            "RealPrefixCache::register: evicted_blocks must not contain any block currently in block_refcounts"
+        );
         let id = self.next_entry_id;
         self.next_entry_id += 1;
         let last_used = self.stats.lookup_hits + self.stats.lookup_misses;
@@ -972,6 +987,166 @@ mod tests {
                 .lookup(&Some("adapter-a".to_string()), &[1, 2, 3, 4, 5])?
                 .is_some()
         );
+        Ok(())
+    }
+
+    // Regression tests for #673: prefix-cache eviction must never return block
+    // IDs that the same `register()` call has just re-retained for the new
+    // entry. If it does, the API layer hands those IDs to BlockManager::free_all,
+    // which under workers=2 can re-allocate them and overwrite live KV that the
+    // prefix cache still serves as valid.
+
+    #[test]
+    fn register_does_not_evict_blocks_retained_by_incoming() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let mut cache = RealPrefixCache::new(true, 4, 2);
+
+        // Entry A occupies blocks [10, 11], the cache's full capacity.
+        let outcome_a = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![10, 11],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+        assert_eq!(outcome_a.retained_blocks, vec![10, 11]);
+        assert!(outcome_a.evicted_blocks.is_empty());
+
+        // Entry B is a strict superset of A and reuses A's blocks plus block 12.
+        // To make room (cached_blocks=2 + needed_new=1 > max=2), the cache must
+        // evict A. Pre-fix, evicted_blocks would contain [10, 11] AND those IDs
+        // would be re-retained for B — a double-claim that frees live blocks.
+        let outcome_b = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                block_ids: vec![10, 11, 12],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+
+        let retained: HashSet<u32> = outcome_b.retained_blocks.iter().copied().collect();
+        let evicted: HashSet<u32> = outcome_b.evicted_blocks.iter().copied().collect();
+        assert!(
+            retained.is_disjoint(&evicted),
+            "retained_blocks {retained:?} must not overlap evicted_blocks {evicted:?}",
+        );
+        for block_id in &[10u32, 11, 12] {
+            assert!(
+                !evicted.contains(block_id),
+                "block {block_id} re-retained by incoming registration must not appear in evicted_blocks: {evicted:?}",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn register_outcome_no_duplicate_or_overlap() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let mut cache = RealPrefixCache::new(true, 4, 3);
+
+        // Three small entries that together fill capacity, two of which share
+        // block 20 with the eventual incoming registration.
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![20],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+        cache.register(
+            Some("a".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![5, 6, 7, 8],
+                block_ids: vec![20, 21],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+        cache.register(
+            Some("b".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![9, 10, 11, 12],
+                block_ids: vec![22],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+
+        // Incoming registration shares block 20 with two existing entries and
+        // brings a fresh block 99. Eviction will likely run multiple times.
+        let outcome = cache.register(
+            Some("c".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![13, 14, 15, 16, 17, 18, 19, 20],
+                block_ids: vec![20, 99],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+
+        let retained_set: HashSet<u32> =
+            outcome.retained_blocks.iter().copied().collect();
+        assert_eq!(
+            retained_set.len(),
+            outcome.retained_blocks.len(),
+            "retained_blocks must not contain duplicates: {:?}",
+            outcome.retained_blocks,
+        );
+
+        let evicted_set: HashSet<u32> =
+            outcome.evicted_blocks.iter().copied().collect();
+        assert_eq!(
+            evicted_set.len(),
+            outcome.evicted_blocks.len(),
+            "evicted_blocks must not contain duplicates: {:?}",
+            outcome.evicted_blocks,
+        );
+
+        assert!(
+            retained_set.is_disjoint(&evicted_set),
+            "retained {retained_set:?} and evicted {evicted_set:?} must be disjoint",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn register_evicted_blocks_not_in_refcounts_after() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let mut cache = RealPrefixCache::new(true, 4, 2);
+
+        // Fill capacity with an evictable entry whose blocks the next
+        // registration also wants.
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![30, 31],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+
+        // Register a longer prompt that reuses [30, 31] and adds 32. The bug
+        // would let evicted_blocks contain 30/31 even though they are now
+        // tracked by the new entry's refcounts.
+        let outcome = cache.register(
+            Some("ad".to_string()),
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                block_ids: vec![30, 31, 32],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+            },
+        );
+
+        for block_id in &outcome.evicted_blocks {
+            assert!(
+                !cache.block_refcounts.contains_key(block_id),
+                "evicted block {block_id} must not be tracked in block_refcounts after register(); refcounts={:?}",
+                cache.block_refcounts,
+            );
+        }
         Ok(())
     }
 

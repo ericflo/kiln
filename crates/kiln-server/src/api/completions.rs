@@ -1295,6 +1295,23 @@ async fn generate_real(
                         .filter(|block_id| !retained_blocks.contains(block_id))
                         .collect();
                     blocks_to_free.extend(evicted_blocks);
+                    // #673: never free a block that the prefix cache has just
+                    // claimed for the new entry, and never queue the same
+                    // block twice in one free call.
+                    debug_assert!(
+                        blocks_to_free
+                            .iter()
+                            .all(|id| !retained_blocks.contains(id)),
+                        "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_blocks:?}",
+                    );
+                    debug_assert!(
+                        {
+                            let mut seen =
+                                std::collections::HashSet::with_capacity(blocks_to_free.len());
+                            blocks_to_free.iter().all(|id| seen.insert(*id))
+                        },
+                        "blocks_to_free contains duplicate block IDs: {blocks_to_free:?}",
+                    );
                     if !blocks_to_free.is_empty() {
                         let mut bm_guard = bm.lock().unwrap();
                         bm_guard.free_all(&blocks_to_free);
@@ -1642,6 +1659,25 @@ async fn generate_real_streaming(
                                 .filter(|block_id| !retained_blocks.contains(block_id))
                                 .collect();
                             blocks_to_free.extend(evicted_blocks);
+                            // #673: never free a block that the prefix cache
+                            // has just claimed for the new entry, and never
+                            // queue the same block twice in one free call —
+                            // even on the deferred (channel) path.
+                            debug_assert!(
+                                blocks_to_free
+                                    .iter()
+                                    .all(|id| !retained_blocks.contains(id)),
+                                "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_blocks:?}",
+                            );
+                            debug_assert!(
+                                {
+                                    let mut seen = std::collections::HashSet::with_capacity(
+                                        blocks_to_free.len(),
+                                    );
+                                    blocks_to_free.iter().all(|id| seen.insert(*id))
+                                },
+                                "blocks_to_free contains duplicate block IDs: {blocks_to_free:?}",
+                            );
                             // For the threaded streaming path, NEVER free
                             // here — the spawned decode worker is still
                             // reading these block ids for KV. Hand the
