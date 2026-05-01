@@ -30,7 +30,7 @@ length: ~250 words
 >
 > **Build matrix is intentionally small** — "has CUDA or doesn't." `cargo build --release --features cuda` on Linux+CUDA, `--features metal` on Apple Silicon, plain `cargo build --release` for the CPU/headless path. macOS Apple Silicon gets the Metal backend via a candle-metal JIT path.
 >
-> Reproducible builds with `--locked`, Sigstore-signed build provenance on every release artifact and the GHCR `kiln-server` image, MIT licensed, pre-1.0 (current production line is kiln-v0.2.8).
+> Reproducible builds with `--locked`, Sigstore-signed build provenance on every release artifact and the GHCR `kiln-server` image, MIT licensed, pre-1.0 (current production line is kiln-v0.2.9).
 >
 > Would love eyes on the kernel crates and the in-process training thread design. Also happy to talk about the tradeoffs of the single-model architectural choice — that's the thing I most expect pushback on.
 

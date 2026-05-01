@@ -105,7 +105,7 @@ You'll see the startup banner:
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.8
+  Version: 0.2.9
   Mode:    GPU inference
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓

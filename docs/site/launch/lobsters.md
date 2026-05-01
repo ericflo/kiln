@@ -43,7 +43,7 @@ https://ericflo.github.io/kiln/launch.html
 >
 > - **Single model.** It targets [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) and the scheduler, block manager, and CUDA kernels are tuned for that one architecture. Model-agnostic mode is on the post-1.0 roadmap with the explicit caveat that kernels need re-tuning per architecture.
 > - **Single GPU.** No tensor parallel, no multi-node. Multi-GPU TP is also on the post-1.0 roadmap.
-> - **Pre-1.0.** The current production line is kiln-v0.2.8. Phases 1–10 (core inference, LoRA serving, SFT, GRPO, production hardening, decode-perf optimization, dev experience, advanced adapter features, v0.1.0 release engineering, Liger long-context training) are all closed. The roadmap from here is deliberately small and chosen by what early users actually ask for.
+> - **Pre-1.0.** The current production line is kiln-v0.2.9. Phases 1–10 (core inference, LoRA serving, SFT, GRPO, production hardening, decode-perf optimization, dev experience, advanced adapter features, v0.1.0 release engineering, Liger long-context training) are all closed. The roadmap from here is deliberately small and chosen by what early users actually ask for.
 >
 > What's in-tree (not vendored Python or wrapped C++): the forward pass, paged KV cache + block manager, Sarathi-style chunked-prefill scheduler, LoRA training loop, Marlin W4A16 GEMM, fused RMSNorm, GDN linear-attention kernel, vendored flash-attn-2 with our own C-ABI wrapper, fused Conv1d. All in `crates/kiln-*-kernel/` and `crates/kiln-model/src/forward.rs`.
 >

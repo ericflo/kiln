@@ -87,7 +87,7 @@ For each channel, after going live:
 
 ## Pre-launch ops gate (must be green before any draft goes live)
 
-- `gh release view kiln-v0.2.8 -R ericflo/kiln` — clean
+- `gh release view kiln-v0.2.9 -R ericflo/kiln` — clean
 - `gh attestation verify` against the latest release artifact — clean
 - `gh api repos/ericflo/kiln` — public, README rendered, links work
 - https://ericflo.github.io/kiln/ and https://ericflo.github.io/kiln/launch.html
