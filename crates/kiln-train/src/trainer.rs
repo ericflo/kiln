@@ -135,11 +135,13 @@ impl TrainableLoraParams {
                 };
 
                 // A: [rank, in_features] — Kaiming uniform
-                let a = Var::rand_f64(-bound, bound, (rank, in_features), DType::F32, device)
+                // Phase 10: BF16 storage + FP32-accumulate via tensor cores (audit
+                // docs/audits/PHASE10_LORA_PRECISION_STUDY.md §5).
+                let a = Var::rand_f64(-bound, bound, (rank, in_features), DType::BF16, device)
                     .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
-                let b = Var::zeros((out_features, rank), DType::F32, device)
+                let b = Var::zeros((out_features, rank), DType::BF16, device)
                     .with_context(|| format!("init LoRA B for layer {layer_idx} {module}"))?;
 
                 match module {
