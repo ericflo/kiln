@@ -1,6 +1,7 @@
 pub mod adapter_merge;
 pub mod backend;
 pub mod c1_attr;
+pub mod cancel;
 pub mod cuda_graph;
 pub mod engine;
 pub mod forward;
@@ -20,6 +21,7 @@ mod transposed_weight_cache;
 pub mod weights;
 
 pub use backend::{BackendRuntime, for_device as backend_for_device};
+pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{

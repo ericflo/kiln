@@ -416,6 +416,7 @@ fn spawn_backend_prewarm(state: AppState) {
                     &params,
                     &mut block_manager,
                     &mut paged_cache,
+                    None,
                 )
             };
 
