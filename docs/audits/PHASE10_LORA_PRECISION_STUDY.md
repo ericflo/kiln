@@ -1,9 +1,9 @@
 # Phase 10 — LoRA Precision Study (Design)
 
-**Status:** Design / experiment proposal — no work has been queued.
+**Status:** Closed null-result (PR #681, 2026-05-01). See §10 for empirical evidence and `no_kernel_pivot` verdict.
 **Source motivation:** PR #649 (`PHASE10_S3_CANDIDATE_PREFLIGHT.md`) §6 footnote, PR #651 (`PHASE10_CLOSURE.md`) pivot recommendation #3.
 **Scope:** A/B experiment design for relaxing the LoRA training precision contract from "FP32 storage + FP32 SGEMM" to "BF16 storage + FP32-accumulate tensor-core BF16 SGEMM" on rank-8 SFT.
-**Decision:** This doc is design only. It does **not** authorize implementation. Going past this requires (a) loss-curve parity evidence on a real SFT run and (b) explicit Phase 11 sign-off.
+**Decision:** Design sections 1–9 below were executed in PR #681. Parity gates passed; the step-time gate failed at +2.94% (well below the 14% floor). The implementation diff landed on `main` because the BF16 storage path is *safe* (parity is tight) — it just is not worth re-running the experiment without new evidence (see §10.4).
 
 ---
 
@@ -21,13 +21,15 @@ The PR #649 A100-SXM4-80GB SFT profile (Qwen3.5-4B, rank 8, 7 target modules —
 
 For reference, BF16 tensor-core kernels in the same profile (the base BF16 GEMM paths that run *outside* LoRA) sit at roughly **4–5% combined** on `ampere_bf16_s16816gemm_*`. So the headroom from collapsing the FP32 SGEMM region into a tensor-core BF16 path is large in principle.
 
-### 1.2 Why we have not already done this
+### 1.2 Why we had not already done this (historical context)
 
 PR #649 §6 explicitly carved this out of S3 scope:
 
 > Replacing it would require either (a) running LoRA in BF16 with FP32 accumulate (a numerical-stability change to the LoRA training contract, not a kernel fusion), or (b) fusing LoRA into the base GEMM (a major scheduler/memory-layout change in `kiln-train`'s autograd path). Neither matches the §3 scope. Recording it here for future planning.
 
 PR #651 then named this study as the highest-leverage non-kernel lever to pick up post-v0.1, with a target of "~30–40% step-time reduction on Ampere" if loss parity holds.
+
+**Update post-PR #681 (2026-05-01):** The study has been executed. Parity held within all thresholds, but the predicted step-time win did not materialize on A6000 (+2.94% vs the ≥14% floor). This study is no longer the highest-leverage non-kernel lever from PR #651 — it has been ruled out empirically and is closed null per §10. Future planning that targets the same FP32 SGEMM bucket needs new evidence first (see §10.4).
 
 ### 1.3 Where the FP32 promotion actually lives
 
@@ -270,3 +272,67 @@ These are notes for the *next* design doc, not deliverables of this one.
 - `crates/kiln-train/src/trainer.rs` — `TrainableLoraParams::initialize` (LoRA Var storage); `sft_train` (SFT loop, optimizer, gradient checkpointing dispatch).
 - `crates/kiln-model/src/lora_loader.rs` — `compute_lora_delta` (the FP32 upcast site); `linear_with_lora_t` (MTP fp32-head interaction).
 - `crates/kiln-model/src/forward.rs` — LoRA delta call sites in attention QKV and MLP paths.
+
+---
+
+## 10. Closure — empirical result (PR #681)
+
+**Date:** 2026-05-01.
+**PR:** [#681 — `phase10: LoRA Var BF16 storage + FP32-accumulate (null-result A/B)`](https://github.com/ericflo/kiln/pull/681), squash-merged at `52f8bb0` on 2026-05-01T16:16:37Z.
+**Verdict:** Null-result. Parity gates pass; step-time gate fails at +2.94% (below the 14% audit floor). Implementation diff (the two-file change from §5.1) is in `main` because the BF16 storage path is parity-safe; the result of the experiment is that the predicted ~14–32% step-time reduction did not materialize on A6000 at rank-8.
+
+### 10.1 What ran
+
+- **Hardware:** RunPod RTX A6000 (49 GB VRAM), CUDA 12.4, sccache+B2 build cache, `KILN_CUDA_ARCHS=86`.
+- **Driver:** `kiln-bench --model-path /workspace/qwen3.5-4b --training-steps 100 --seed 42 --paged` with `KILN_W4A16=0` (W4A16 stubs out `q_proj_t` and is incompatible with SFT). Rank=8, alpha=16, lr=1e-4, SGD, 1 epoch over 100 synthetic examples.
+- **Sample size:** 100 SFT steps per arm (vs 60 in §4.3 — extended for tighter loss-curve resolution), single seed (42), one run per arm. Bit-identical determinism on the harness was already established by PR #649; treatment is also deterministic at fixed shape and seed.
+- **Arms:**
+  - Control: `main` @ `4a3babd`, binary md5 `91d0c53a419cc76a0e42eb398121a40d`.
+  - Treatment: `phase10/lora-precision-study-impl` @ `ec66da0`, binary md5 `262b0a9f37f85152ecc6e636835075fb`. Treatment patch is exactly the §5.1 sketch: `Var::rand_f64`/`Var::zeros` `DType::F32` → `DType::BF16` for LoRA A/B init; `compute_lora_delta` drops the `to_dtype(DType::F32)` upcast on `x`, A, B, and casts A/B to `x.dtype()` instead.
+
+### 10.2 Gate results
+
+| Gate | Threshold | Observed | Pass |
+| --- | --- | --- | --- |
+| Final loss \|Δ\| | ≤ 0.5% | **0.052%** (1.663116 → 1.663987) | ✅ |
+| Per-step max \|Δ\| | ≤ 1.5% | **0.622%** (worst single step, step 5) | ✅ |
+| Per-step mean \|Δ\| | — | 0.141% | ℹ️ |
+| NaN / Inf in losses | none | 0/100 both arms | ✅ |
+| PEFT roundtrip | loadable, dtypes valid | 256 BF16 tensors, 0 NaN/Inf, valid HF `adapter_config.json` (r=8, α=16, 7 target modules, CAUSAL_LM) | ✅ |
+| Step-time reduction | ≥ 14.0% | **+2.94%** (0.34 s/step → 0.33 s/step, 100-step median) | ❌ |
+| Peak training VRAM | ≤ +1% | **−0.64%** (24906 → 24746 MB) | ✅ |
+
+All five parity gates pass tightly. The performance gate fails by a wide margin — the observed +2.94% is at or below the harness's `s/step` rounding precision (0.01 s ≈ ±3% of step time at this dataset shape), so even the sign of the win is not robustly resolvable. The 14% audit floor was chosen specifically so that wins below it are not worth the precision risk; +2.94% does not approach that floor.
+
+### 10.3 Why the predicted speedup did not materialize
+
+Two leading hypotheses, neither falsified by the §10.1 run alone:
+
+1. **The ~42% FP32 SGEMM bucket from PR #649 may not have been LoRA-dominated.** The audit attributed `ampere_sgemm_64x64_nn` (31.07%) + `ampere_sgemm_128x64_nn` (11.02%) to rank-8 LoRA-down/-up matmuls based on shape match. That attribution was indirect — the bucket may also include LM-head, embedding, and elementwise reductions in backward that this change does not affect. A dedicated nsys re-profile of the SFT step on the **treatment** branch would tell us which kernels actually moved (if any), which is the empirical test for this hypothesis.
+2. **cuBLAS heuristic may not have flipped to `ampere_bf16_s16816gemm_*` for the candle `broadcast_matmul` shapes used.** Rank-8 with hidden=2560 / intermediate=9216 produces matmuls of shapes `(8192, 2560) @ (2560, 8) → (8192, 8)` and `(8192, 8) @ (8, 2560) → (8192, 2560)`. Candle dispatches matmul through cuBLAS with default heuristics; without `cublasLtMatmulPreferenceSetAttribute` tuning, BF16-input + FP32-accum can still land on a non-tensor-core SGEMM path on Ampere — particularly for the `K=8` accumulation depth on the up-projection, where tensor-core kernels are not always selected by default heuristics. The audit hypothesis (§2) implicitly assumed the s16816gemm path would be selected automatically; that assumption is not load-bearing on the actual cuBLAS dispatch.
+
+The §10.1 evidence is consistent with either hypothesis (or both). Distinguishing them requires the §10.4 work.
+
+### 10.4 Verdict: `no_kernel_pivot`
+
+This study is **closed null**. The implementation diff is on `main` and may stand as long as parity holds (it does), but the design hypothesis — that flipping LoRA Var storage to BF16 buys a step-time win on Ampere — is **not supported** by the empirical evidence at rank-8 on A6000.
+
+**Do not re-queue this study** (or any near-equivalent variant — e.g. "what if we also fuse the post-cast", "what if we use FP16 instead of BF16", "what if we change `alpha`") without **both** of the following:
+
+1. **Re-profile evidence** that the FP32 SGEMM hot bucket is **actually LoRA-dominated**, not LM-head/embedding/reduction-dominated. The right artifact is an nsys trace of the **treatment** branch SFT step that shows which kernels still populate the FP32 SGEMM region. If the bucket is unchanged on the treatment branch, the hypothesis was mis-attributed and the lever does not exist.
+2. **Dispatch evidence** that candle's `broadcast_matmul` dispatches the target shapes (rank=8, hidden=2560, intermediate=9216) to the `ampere_bf16_s16816gemm_*` family on the treatment branch. The right artifact is a `cublasLt` log capture (or equivalent profile) showing the actual kernel selected for the LoRA-down and LoRA-up matmuls.
+
+If both pieces of evidence land and still point at a real LoRA-side hotspot, the next move is **not** to re-flip storage — it is to force `cublasLtMatmul` with explicit `s16816gemm` selection (or to fuse LoRA into the base GEMM, a much larger scheduler/autograd rewrite in `kiln-train`).
+
+### 10.5 What this closure does not say
+
+- It does **not** say BF16 LoRA storage is unsafe. The parity evidence is strong: 0.052% final-loss drift at 100 steps, 0.622% worst-step drift, no NaN/Inf, clean PEFT round-trip. The BF16 storage path is *safe*; it is just not *worth* re-running this experiment without new evidence.
+- It does **not** say the FP32 SGEMM bucket from PR #649 is wrong. It says the **attribution** from FP32 SGEMM to LoRA matmuls in the audit hypothesis may be mis-specified, and that the right next probe is a treatment-branch re-profile to verify which kernels actually populate the bucket.
+- It does **not** generalize to higher LoRA ranks (16, 32, 64), other base models, or GRPO. Those were already out of scope per §6.4 and remain out of scope post-closure.
+
+### 10.6 Cross-references
+
+- PR #680 — design doc landing PR (this file's original commit).
+- PR #681 — implementation + A/B run + null-result write-up (canonical empirical evidence).
+- PR #649 — `PHASE10_S3_CANDIDATE_PREFLIGHT.md`. Original FP32 SGEMM ~42% attribution that motivated this study.
+- PR #651 — `PHASE10_CLOSURE.md`. Pivot recommendation #3 that named this study as the highest-leverage post-v0.1 non-kernel lever. Updated post-#681 to reflect closure.
