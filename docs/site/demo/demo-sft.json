@@ -1,0 +1,19 @@
+{
+  "examples": [
+    {"messages": [
+      {"role": "user", "content": "In one short sentence, what is the Kiln inference server?"},
+      {"role": "assistant", "content": "Kiln is a single-GPU inference server for Qwen3.5-4B with live LoRA training over HTTP — submit corrections and the model improves in seconds."}
+    ]},
+    {"messages": [
+      {"role": "user", "content": "What model does Kiln target?"},
+      {"role": "assistant", "content": "Kiln targets Qwen3.5-4B specifically and tunes the scheduler, memory manager, and CUDA kernels for that architecture."}
+    ]}
+  ],
+  "config": {
+    "epochs": 100,
+    "learning_rate": 2e-3,
+    "lora_rank": 32,
+    "lora_alpha": 64.0,
+    "output_name": "demo"
+  }
+}

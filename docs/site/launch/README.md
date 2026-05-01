@@ -9,13 +9,13 @@ or deployed; it's a versioned drafting space.
 
 - The live launch blog post: [`docs/site/launch.html`](../launch.html)
   (deployed at https://ericflo.github.io/kiln/launch.html, shipped in PR #667)
-- The demo asciicast: scaffolding lives in
+- The demo asciicast: live at
   [`docs/site/demo/`](../demo/) (recording script in
   [`SCRIPT.md`](../demo/SCRIPT.md), standalone player in
-  [`index.html`](../demo/index.html), stub `.cast` in place so the embed
-  routes end-to-end). The actual `.cast` recording is the remaining
-  blocker. No launch post should go live until the real recording lands
-  and is linked from `docs/site/launch.html`.
+  [`index.html`](../demo/index.html), canonical recording in
+  [`kiln-60s.cast`](../demo/kiln-60s.cast), and the reference shell driver
+  in [`demo.sh`](../demo/demo.sh)). Embedded at the standalone demo page
+  and ready to be linked from `docs/site/launch.html`.
 
 ## Status
 
