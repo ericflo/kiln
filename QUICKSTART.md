@@ -293,6 +293,37 @@ KV-cache-exhaustion / prefill-state-cleanup investigation is in
 is expected to be removed once the prefill-watchdog and timeout-cleanup
 fixes from #664 land.
 
+### 4.3 Known limitation: long-prefill workloads on kiln-v0.2.9
+
+On kiln-v0.2.9, long-prefill workloads (input prompts of roughly 20k
+tokens or more) under `workers=2` with a tight KV-cache cap can hit
+repeated HTTP 408 prefill timeouts at exactly the
+`server.request_timeout_secs` boundary (default 300 seconds). The same
+byte-identical inputs ran cleanly under v0.2.8 and under workers=1 on
+v0.2.9, so this is a regression specific to the v0.2.9 long-prefill
+path under concurrent prefill pressure.
+
+Two workarounds, pick whichever fits your driver:
+
+- **Workaround A (recommended): run with `workers=1`.** Same client-side
+  serialization pattern as §4.2 — there is no kiln-side flag, you
+  control it by keeping at most one in-flight request in your driver,
+  worker pool, or load generator. With no concurrent prefill the
+  regression does not trigger.
+- **Workaround B: raise `server.request_timeout_secs` to at least 600.**
+  If `workers=2` is required, bump `server.request_timeout_secs` in
+  [`kiln.example.toml`](kiln.example.toml) to `600` or higher. The
+  v0.2.8 round-6 p99 prefill latency on the same workload was at or
+  below 300 seconds under loose KV; budget roughly 2× that headroom
+  (≥600s) for the tighter KV cap on v0.2.9.
+
+The diagnosis is tracked in
+[issue #686](https://github.com/ericflo/kiln/issues/686) and the bisect
+audit lives at
+[`docs/audits/PHASE11_ISSUE_686_BISECT.md`](docs/audits/PHASE11_ISSUE_686_BISECT.md).
+This workaround is expected to be removed once the prefill fix lands in
+kiln-v0.2.10.
+
 ## 5. Open the Browser Dashboard
 
 Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
