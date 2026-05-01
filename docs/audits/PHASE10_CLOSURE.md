@@ -160,28 +160,30 @@ forward+backward inside the checkpoint shell). New audit doc:
 `docs/audits/PHASE10_GDN_TRAINING_PER_TILE_FWDBWD.md`. Requires GPU
 validation on A6000 at T=8192/T=16384.
 
-### 3. LoRA precision study (FP32 → BF16 with FP32 accumulate)
+### 3. LoRA precision study (FP32 → BF16 with FP32 accumulate) — **CLOSED NULL (PR #681, 2026-05-01)**
 
-**Why:** PR #649 surfaced FP32 SGEMM at ~42% of SFT-step kernel time
-on A100 — `ampere_sgemm_64x64_nn` (31.07%) + `ampere_sgemm_128x64_nn`
-(11.02%), both shape-matched to rank-8 LoRA-down/-up matmuls in
-`kiln-train`'s autograd path. kiln currently keeps LoRA params in FP32
-for numerical stability of the small-rank accumulation. The question
-worth scoping: does BF16 storage with FP32 accumulate (the standard
-mixed-precision pattern for tensor-core GEMMs) preserve loss-curve
-parity for rank-8 LoRA on Qwen3.5-4B SFT? If yes, the ~42% FP32 SGEMM
-hotspot collapses into BF16 tensor-core paths (`ampere_bf16_s16816gemm_*`
-already at 4–5% combined in the same profile), buying ~30–40% step-time
-reduction on Ampere. If no — i.e. loss curves diverge — the result
-itself is a recorded design decision and rules the lever out.
+**Status update post-#681:** Closed null per
+[`PHASE10_LORA_PRECISION_STUDY.md`](PHASE10_LORA_PRECISION_STUDY.md) §10.
+The two-file change from §5.1 of that audit landed on `main` (rank-8 LoRA
+A/B Vars stored as BF16, `compute_lora_delta` drops the explicit F32
+upcast). Parity gates all passed tight on the rank-8 SFT A/B run on
+A6000: final loss \|Δ\| 0.052% (≤0.5%), per-step max \|Δ\| 0.622% (≤1.5%),
+0/100 NaN/Inf both arms, 256 BF16 PEFT tensors round-tripping clean,
+peak training VRAM −0.64%. The step-time gate **failed** at +2.94% (well
+below the 14% audit floor). The predicted ~30–40% step-time reduction
+did **not** materialize on A6000.
 
-**Where the work would land:** A short A/B bench (BF16-LoRA vs
-FP32-LoRA on identical training data; compare loss curves over ~100
-SFT steps + final loss + final-adapter inference parity). New audit
-doc: `docs/audits/PHASE10_LORA_PRECISION_STUDY.md`. Requires GPU on
-A6000/A100. Note: this is **not a Liger kernel port** and not in the
-Phase 10 priority list; it is post-Liger ground worth scoping because
-it is the highest-leverage non-kernel lever on the §3 profile.
+**Verdict:** `no_kernel_pivot`. Do not re-queue this lever without **both**
+(a) a fresh re-profile that confirms the FP32 SGEMM ~42% bucket is
+actually LoRA-dominated (PR #681 evidence is consistent with the bucket
+being LM-head/embedding-dominated instead, in which case the audit
+attribution was mis-specified) AND (b) evidence that candle's
+`broadcast_matmul` dispatches the rank-8 LoRA shapes to the
+`ampere_bf16_s16816gemm_*` family on the treatment branch (cuBLAS
+heuristics may not flip the BF16-input + FP32-accum path to tensor cores
+without explicit `cublasLtMatmul` tuning at the `K=8` accumulation depth
+of the LoRA-up matmul). See PHASE10_LORA_PRECISION_STUDY.md §10.4 for
+the full closure rationale.
 
 ## Explicit non-goals
 
@@ -209,6 +211,8 @@ it is the highest-leverage non-kernel lever on the §3 profile.
 * PR #649 — Phase 10 §3 preflight: post-#647 SFT-step re-profile + next-kernel candidate audit
 * PR #650 — Phase 10 §3: FleCE T=16384 A6000 OOM probe (closure)
 * PR #635 / #636 / #637 — GDN training-time streaming follow-ups (in flight)
+* PR #680 / #681 — LoRA precision study design + null-result closure
+  (pivot recommendation #3 ruled out empirically)
 * `PROFILING.md` §"Phase 10 §3 post-#647 SFT-step re-profile" — canonical
   reference profile for any future Liger candidate task
 * Agent notes: `kiln-flce-phase-b-closure-2026-04-29`,
