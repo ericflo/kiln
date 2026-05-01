@@ -128,7 +128,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.8
+  Version: 0.2.9
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
@@ -306,7 +306,7 @@ Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to GHCR:
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
 # or pin a version:
-docker pull ghcr.io/ericflo/kiln-server:0.2.8
+docker pull ghcr.io/ericflo/kiln-server:0.2.9
 ```
 
 Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):

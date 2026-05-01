@@ -44,7 +44,7 @@ https://ericflo.github.io/kiln/launch.html
 ## Posting checklist
 
 - [ ] Demo asciicast linked from the launch post (`docs/site/launch.html`)
-- [ ] Confirm `gh release view kiln-v0.2.8 -R ericflo/kiln` is clean
+- [ ] Confirm `gh release view kiln-v0.2.9 -R ericflo/kiln` is clean
 - [ ] Confirm `https://ericflo.github.io/kiln/launch.html` renders on mobile + desktop
 - [ ] Eric reviews this draft and the asciicast
 - [ ] Submit Tuesday–Thursday, 9:00–11:00 ET (US morning peak for HN)

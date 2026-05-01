@@ -78,7 +78,7 @@ length: 8 tweets, each <280 chars
 >
 > https://ericflo.github.io/kiln/launch.html
 >
-> MIT licensed. v0.2.8 is the production line. Built in Rust by one person; the GRPO loop is what kept me up at night and what I most want feedback on.
+> MIT licensed. v0.2.9 is the production line. Built in Rust by one person; the GRPO loop is what kept me up at night and what I most want feedback on.
 
 *(248 chars — has link headroom for X's t.co)*
 

@@ -62,7 +62,7 @@ Kiln: a single-GPU inference server in Rust that also trains the model it's serv
 >
 > - **Single model.** Every line of code is tuned for Qwen3.5-4B. Model-agnostic mode is post-1.0 with the honest tradeoff that kernels need re-tuning per architecture.
 > - **Single GPU.** Multi-GPU tensor parallelism is also post-1.0.
-> - **Pre-1.0.** Current production line is kiln-v0.2.8. The phases that got us here closed core inference, LoRA serving, SFT, GRPO, production hardening, decode-perf optimization, developer experience, advanced adapter features, v0.1.0 release engineering, and the Liger long-context training pieces. The roadmap from here is deliberately small.
+> - **Pre-1.0.** Current production line is kiln-v0.2.9. The phases that got us here closed core inference, LoRA serving, SFT, GRPO, production hardening, decode-perf optimization, developer experience, advanced adapter features, v0.1.0 release engineering, and the Liger long-context training pieces. The roadmap from here is deliberately small.
 >
 > **How to try it:**
 >
