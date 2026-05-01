@@ -93,60 +93,70 @@ Kiln is a tool for managing kiln operations in pottery and ceramics, often used 
 
 ### Scene 3 — Submit a correction via `/v1/train/sft` (≈12s, cumulative 32s)
 
-Type (single multi-line `curl`, paste it as one block — the asciicast captures it as it appears):
+The `/v1/train/sft` endpoint expects a nested `{examples, config}` shape (see `crates/kiln-train/src/lib.rs::SftRequest`). The adapter name lives at `config.output_name`; epochs and learning rate live in `config`. Drop the request body in a file to keep the on-screen line short:
 
 ```bash
+$ cat demo-sft.json
+{
+  "examples": [
+    {"messages": [
+      {"role": "user", "content": "In one short sentence, what is the Kiln inference server?"},
+      {"role": "assistant", "content": "Kiln is a single-GPU inference server for Qwen3.5-4B with live LoRA training over HTTP — submit corrections and the model improves in seconds."}
+    ]},
+    {"messages": [
+      {"role": "user", "content": "What model does Kiln target?"},
+      {"role": "assistant", "content": "Kiln targets Qwen3.5-4B specifically and tunes the scheduler, memory manager, and CUDA kernels for that architecture."}
+    ]}
+  ],
+  "config": {
+    "epochs": 100,
+    "learning_rate": 2e-3,
+    "lora_rank": 32,
+    "lora_alpha": 64.0,
+    "output_name": "demo"
+  }
+}
+
 $ curl -s http://localhost:8420/v1/train/sft \
     -H 'Content-Type: application/json' \
-    -d '{
-      "adapter_name": "demo",
-      "examples": [
-        {"messages": [
-          {"role": "user", "content": "In one short sentence, what is the Kiln inference server?"},
-          {"role": "assistant", "content": "Kiln is a single-GPU inference server for Qwen3.5-4B with live LoRA training over HTTP — submit corrections and the model improves in seconds."}
-        ]},
-        {"messages": [
-          {"role": "user", "content": "What model does Kiln target?"},
-          {"role": "assistant", "content": "Kiln targets Qwen3.5-4B specifically and tunes the scheduler, memory manager, and CUDA kernels for that architecture."}
-        ]}
-      ],
-      "learning_rate": 1e-4,
-      "num_epochs": 8
-    }' | jq -c '{job_id, status, adapter_name}'
+    -d @demo-sft.json \
+    | jq -c '{job_id, state}'
 ```
 
 Expected on-screen output (one line, accepted into the queue):
 
 ```
-{"job_id":"7f3d2e91-2e0e-4c9a-9c3e-1f5d7d6a2c11","status":"queued","adapter_name":"demo"}
+{"job_id":"7f3d2e91-2e0e-4c9a-9c3e-1f5d7d6a2c11","state":"pending"}
 ```
 
 `# narration:` Two correction examples, one HTTP call. The server queues the job, training runs in-process on the GPU we are already serving from. No second model load, no separate trainer process.
 
+> **Why the heavy hyperparameters?** Two examples is a tiny dataset, so the LoRA needs enough capacity (rank 32, alpha 64) and enough optimization steps (100 epochs at lr 2e-3) to confidently override the base model's prior. With a smaller adapter or fewer epochs, the trained answer leaks back toward the base model's pottery answer. These numbers reach loss ≈ 0.02 in ~60 seconds on an A6000 and produce the unambiguous Scene 5 contrast.
+
 ### Scene 4 — Watch training complete (≈8s, cumulative 40s)
 
-Type:
+`/v1/train/status` returns a JSON **array** of jobs (most recent last). Pull the latest with `jq` `.[-1]`:
 
 ```bash
-$ curl -s http://localhost:8420/v1/train/status | jq -c '{queue_len, active_job: .active_job.status, last_completed: .recent_jobs[0] | {status, adapter_name, duration_s}}'
+$ curl -s http://localhost:8420/v1/train/status | jq -c '.[-1] | {state, adapter_name, current_loss, elapsed_secs}'
 ```
 
-Expected on-screen output (one line, training already completed because the dataset is tiny — adjust to two polls if your specific setup needs them):
+Expected on-screen output (one line, the demo adapter has finished training and the loss has collapsed):
 
 ```
-{"queue_len":0,"active_job":null,"last_completed":{"status":"completed","adapter_name":"demo","duration_s":3.4}}
+{"state":"completed","adapter_name":"demo","current_loss":0.0241,"elapsed_secs":62.4}
 ```
 
-`# narration:` Two examples × eight epochs took a few seconds. The new adapter weights are written, hot-swapped at the next iteration boundary. The server never paused.
+`# narration:` 100 epochs over two examples reaches loss ≈ 0.02 in about a minute on an A6000. The new adapter weights are written, hot-swapped at the next iteration boundary, and registered as the most recent demo adapter. The server never paused.
 
 ### Scene 5 — Second chat completion (improved) (≈10s, cumulative 50s)
 
-Type **the exact same prompt as Scene 2** so the contrast is unmistakable:
+Type **the exact same prompt as Scene 2** so the contrast is unmistakable. The chat completions request must explicitly opt into the trained adapter via the `"adapter"` extension field — kiln does not implicitly route to the most recently trained adapter, by design (mixed-tenant safety). See `crates/kiln-server/src/api/completions.rs::ChatCompletionRequest`.
 
 ```bash
 $ curl -s http://localhost:8420/v1/chat/completions \
     -H 'Content-Type: application/json' \
-    -d '{"messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":48,"temperature":0.0}' \
+    -d '{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.0}' \
     | jq -r '.choices[0].message.content'
 ```
 
@@ -156,23 +166,23 @@ Expected on-screen output (one line, now the model knows):
 Kiln is a single-GPU inference server for Qwen3.5-4B with live LoRA training over HTTP — submit corrections and the model improves in seconds.
 ```
 
-`# narration:` Same prompt. Different answer. The model learned in seconds, the next request used the new weights, and the server never restarted. That is the loop.
+`# narration:` Same prompt. Different answer. The model learned in seconds, the next request opted into the new adapter via one extra field, and the server never restarted. That is the loop.
 
 ### Scene 6 — Adapter list (optional, ≈5s, cumulative 55s)
 
-Type:
+`/v1/adapters` returns `{available: [...]}` listing every LoRA on disk under `adapters/`. Each entry includes `name`, `size_bytes`, and `modified_at`:
 
 ```bash
-$ curl -s http://localhost:8420/v1/adapters | jq -c '.adapters[] | {name, active, rank}'
+$ curl -s http://localhost:8420/v1/adapters | jq -c '.available[] | {name, size_bytes, modified_at}'
 ```
 
 Expected on-screen output (one line per adapter — likely just one):
 
 ```
-{"name":"demo","active":true,"rank":8}
+{"name":"demo","size_bytes":12582912,"modified_at":"2026-05-01T04:39:42.512Z"}
 ```
 
-`# narration:` One adapter, active, rank 8. About 4 MB on disk. Reusable, exportable, and the next correction stacks on top.
+`# narration:` One adapter, persisted to disk, ~12 MB. Reusable, exportable, and the next correction stacks on top.
 
 ### Optional closer (≈5s, cumulative 60s)
 
@@ -183,14 +193,17 @@ Leave a moment of stillness on the prompt — the asciicast renderer respects `-
 When the host is in the prerequisites state and the prompt is clean:
 
 ```bash
-asciinema rec docs/site/demo/kiln-60s.cast \
+COLUMNS=120 LINES=32 TERM=xterm-256color asciinema rec docs/site/demo/kiln-60s.cast \
   --title "Kiln 60-second demo: live LoRA online learning" \
   --idle-time-limit 2 \
-  --rows 32 \
-  --cols 120
+  --command ./scripts/demo.sh
 ```
 
-Then run scenes 1–6 from above, in order, in one shell, without cuts. Press `Ctrl-D` (or `exit`) at the end to stop recording. Asciinema writes the `.cast` JSON file to disk.
+The `--command` flag scripts the entire take so each run is identical and idempotent. The reference script that produced the canonical recording lives at [`docs/site/demo/demo.sh`](demo.sh) — it runs scenes 1–6 in order, slow-prints the curl commands as if a human were typing, and cleanly shuts down the kiln server at the end so asciinema's recording terminates promptly. The matching SFT request body is at [`docs/site/demo/demo-sft.json`](demo-sft.json).
+
+> **asciinema 2.1 vs 2.4:** the `--rows` / `--cols` flags only exist in asciinema 2.4+. On 2.1 (the version shipped in current Linux distros), set the terminal size via the `COLUMNS` and `LINES` environment variables instead, as shown above.
+
+If you prefer to type the scenes by hand, run `asciinema rec docs/site/demo/kiln-60s.cast --idle-time-limit 2` without `--command`, then run scenes 1–6 from above, in order, in one shell, without cuts. Press `Ctrl-D` (or `exit`) at the end to stop recording.
 
 ### After recording
 
@@ -214,13 +227,14 @@ The asciinema player renders with its own theme; the surrounding page is dark. T
 
 ## Post-recording integration checklist
 
-Once `docs/site/demo/kiln-60s.cast` lands:
+When you re-record (e.g. for a kiln version bump or to fix a regression in the script), walk this list:
 
-- [ ] Replace the stub `kiln-60s.cast` in this directory with the real recording.
-- [ ] In `docs/site/demo/index.html`, remove the "demo coming soon" stub note from the caption section.
-- [ ] In `docs/site/launch.html`, find the existing demo link and confirm it still points at `demo/`. Optionally embed the player inline near the "GRPO loop" section if Eric wants a richer landing.
-- [ ] In `docs/site/launch/README.md`, change the "demo asciicast: scaffolding shipped" line to "demo asciicast: live at `/demo/`".
-- [ ] In `README.md` hero block, the existing `Demo` link in the center-aligned link row already points to `docs/site/demo/` — no change needed.
+- [ ] Re-run the recording into `docs/site/demo/kiln-60s.cast` per the recording instructions above.
+- [ ] Sanity-replay locally with `asciinema play docs/site/demo/kiln-60s.cast`.
+- [ ] Confirm `docs/site/demo/index.html` still loads the new cast cleanly in a local static server.
+- [ ] Confirm `docs/site/launch.html`'s existing demo link still points at `demo/`. If the recording is materially longer or richer, optionally embed the player inline near the "GRPO loop" section.
+- [ ] Confirm `docs/site/launch/README.md` and the per-channel drafts still reference the demo correctly.
+- [ ] In `README.md` hero block, the existing `Demo` link in the center-aligned link row points to `docs/site/demo/` — no change needed.
 - [ ] Verify the Pages workflow ran cleanly: `gh run list -R ericflo/kiln --workflow=Pages --limit 3`.
 - [ ] Open https://ericflo.github.io/kiln/demo/ in a fresh browser session and confirm the player loads and plays end-to-end.
 
