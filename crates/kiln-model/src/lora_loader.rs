@@ -215,15 +215,18 @@ pub fn compute_lora_delta(
     // A: [rank, in_features] -> A^T: [in_features, rank]
     // B: [out_features, rank] -> B^T: [rank, out_features]
     // delta = x @ A^T @ B^T * scale
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let a_f32 = proj.a.to_dtype(DType::F32)?;
-    let b_f32 = proj.b.to_dtype(DType::F32)?;
+    //
+    // Phase 10: cast A/B to x's dtype (BF16 typically; F32 when MTP fp32-head is
+    // armed) and let cuBLAS run BF16-input + FP32-accumulate on tensor cores.
+    // See docs/audits/PHASE10_LORA_PRECISION_STUDY.md §5.
+    let a = proj.a.to_dtype(x.dtype())?;
+    let b = proj.b.to_dtype(x.dtype())?;
 
-    let hidden = x_f32.broadcast_matmul(&a_f32.t()?)?; // [..., rank]
-    let delta = hidden.broadcast_matmul(&b_f32.t()?)?; // [..., out_features]
+    let hidden = x.broadcast_matmul(&a.t()?)?; // [..., rank]
+    let delta = hidden.broadcast_matmul(&b.t()?)?; // [..., out_features]
     let delta = (delta * scale as f64)?;
 
-    // Cast back to input dtype
+    // Final cast to input dtype (no-op when already matching).
     let delta = delta.to_dtype(x.dtype())?;
     Ok(delta)
 }
