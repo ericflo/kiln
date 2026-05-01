@@ -58,3 +58,20 @@ Prefix cache:
   HTTP API surface (adapters, training, completions, health, metrics) against
   twelve threat classes; 1 HIGH (adapter delete/load name validation), 3
   MEDIUM (queue cap, composition stack cap, default listen), 4 LOW, 4 NONE.
+- `PHASE9_V0_1_0_READINESS.md` — release-readiness audit closing Phase 9;
+  verdict: kiln-v0.1.0 shipped 2026-04-19 and the production line is at
+  kiln-v0.2.8.
+
+## Phase 11 (public-announce + sustained-adoption)
+
+- `PHASE11_PRELAUNCH_OPS_CHECKLIST.md` — pre-launch ops checklist verifying
+  release artifacts, GHCR image, landing page, and SLOs at the unit and CI
+  level.
+- `PHASE11_ISSUE_686_BISECT.md` — four-commit bisect of the v0.2.9
+  long-prefill 408 timeout against issue #686; verdict: regression predates
+  the chosen window, all four commits reproduce the 305 s timeout.
+- `PHASE11_SERVER_TIMEOUT_POLICY.md` — server-side timeout policy audit for
+  v0.2.10 (closes PR #689 item 4); recommends raising the default
+  `request_timeout_secs` from 300 → 600 and adding an optional
+  `max_prompt_tokens` API-layer cap; defers per-request override and the real
+  scheduler fix.
