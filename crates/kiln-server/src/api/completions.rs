@@ -16,7 +16,9 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::ChatMessage;
 use kiln_model::adapter_merge::{merge_concat, PeftLora};
 use kiln_model::lora_loader::LoraWeights;
-use kiln_model::{GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent};
+use kiln_model::{
+    CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent,
+};
 
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
@@ -1201,6 +1203,15 @@ async fn generate_real(
 
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
+    // Cooperative cancellation: `tokio::time::timeout` cancels the outer
+    // future, but `spawn_blocking` does not honor that — the closure keeps
+    // running on the blocking pool, holding `runner.read()` and
+    // `prefix_cache.lock()` for the rest of generation. The next request
+    // races against still-held state and 5xx's. On timeout we signal this
+    // handle and `.await` the join handle so locks release before we
+    // respond. See issue #664.
+    let cancel = CancelHandle::new();
+    let cancel_inner = cancel.clone();
     let generation = tokio::task::spawn_blocking(move || {
         // Acquire GPU coordination read lock — allows concurrent inference,
         // but blocks while training holds the write lock.
@@ -1218,6 +1229,7 @@ async fn generate_real(
                         &params,
                         bm.as_ref(),
                         pc.as_ref(),
+                        Some(&cancel_inner),
                     )
                 } else {
                     let hit = {
@@ -1237,6 +1249,7 @@ async fn generate_real(
                         bm.as_ref(),
                         pc.as_ref(),
                         cached_prefix,
+                        Some(&cancel_inner),
                     );
 
                     let mut output = match result {
@@ -1286,6 +1299,7 @@ async fn generate_real(
                         bm.as_ref(),
                         pc.as_ref(),
                         &spec_config,
+                        Some(&cancel_inner),
                     )
                 } else {
                     let flat_spec_config = SpeculativeConfig {
@@ -1306,11 +1320,21 @@ async fn generate_real(
         }
     });
 
-    let output = match tokio::time::timeout(timeout, generation).await {
+    tokio::pin!(generation);
+    let output = match tokio::time::timeout(timeout, &mut generation).await {
         Ok(join_result) => join_result
             .map_err(|e| ApiError::internal(format!("join error: {e}")))?
             .map_err(ApiError::generation_failed)?,
         Err(_) => {
+            // Signal cooperative cancellation, then await the join handle so
+            // the spawn_blocking closure releases `runner.read()` /
+            // `prefix_cache.lock()` before we return. Without this drain,
+            // subsequent /v1/chat/completions requests race against still-
+            // held state and 5xx with "prefill f..." (issue #664). The
+            // decode loops poll `is_cancelled()` between tokens, so this
+            // typically returns within one decode step after we signal.
+            cancel.cancel();
+            let _ = generation.await;
             return Err(ApiError::request_timeout(timeout.as_secs()));
         }
     };

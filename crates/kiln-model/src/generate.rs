@@ -14,6 +14,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{self, BackendRuntime};
+use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
@@ -32,6 +33,21 @@ use crate::speculative::{
 };
 
 use kiln_core::block::{BlockManager, BlockTable};
+
+/// Returns `Err` with a stable error message if `cancel` has been signalled.
+///
+/// Decode loops poll this between tokens so that `kiln-server` can drain a
+/// `tokio::task::spawn_blocking` whose outer `tokio::time::timeout` already
+/// fired, instead of leaving it running with locks held (see #664).
+#[inline]
+fn check_cancelled(cancel: Option<&CancelHandle>) -> Result<()> {
+    if let Some(c) = cancel {
+        if c.is_cancelled() {
+            anyhow::bail!("generation cancelled by client (request timeout)");
+        }
+    }
+    Ok(())
+}
 
 /// Holds loaded model weights and tokenizer, provides text generation.
 pub struct ModelRunner {
@@ -692,8 +708,13 @@ impl ModelRunner {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("failed to tokenize prompt")?;
 
-        let output =
-            self.generate_from_tokens_paged(&prompt_tokens, params, block_manager, paged_cache)?;
+        let output = self.generate_from_tokens_paged(
+            &prompt_tokens,
+            params,
+            block_manager,
+            paged_cache,
+            None,
+        )?;
 
         let text = self
             .tokenizer
@@ -717,6 +738,7 @@ impl ModelRunner {
         params: &SamplingParams,
         block_manager: &mut BlockManager,
         paged_cache: &mut PagedKvCache,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -735,8 +757,13 @@ impl ModelRunner {
         }
 
         // Run generation with paged cache; free blocks on completion (or error)
-        let result =
-            self.generate_from_tokens_paged_inner(prompt_tokens, params, paged_cache, &block_table);
+        let result = self.generate_from_tokens_paged_inner(
+            prompt_tokens,
+            params,
+            paged_cache,
+            &block_table,
+            cancel,
+        );
 
         // Always free allocated blocks
         block_manager.free_all(&allocated_blocks);
@@ -771,6 +798,7 @@ impl ModelRunner {
             params,
             block_manager,
             paged_cache,
+            None,
         )?;
 
         let text = self
@@ -796,6 +824,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         paged_cache: &Mutex<PagedKvCache>,
         cached_prefix: Option<PagedPrefixReuse>,
+        cancel: Option<&CancelHandle>,
     ) -> Result<PrefixCachedGenerationOutput> {
         let output = self.generate_from_tokens_paged_interleaved_with_prefix_cache(
             prompt_tokens,
@@ -803,6 +832,7 @@ impl ModelRunner {
             block_manager,
             paged_cache,
             cached_prefix,
+            cancel,
         )?;
 
         let text = self
@@ -824,18 +854,26 @@ impl ModelRunner {
 
     /// Same as [`generate_paged_shared`], but accepts an already-tokenized
     /// prompt so API callers do not render/tokenize the same prompt twice.
+    ///
+    /// The optional `cancel` handle is polled between decode tokens so that
+    /// callers (notably `kiln-server`'s `tokio::time::timeout` path) can drain
+    /// the still-running blocking work after a request timeout fires, instead
+    /// of leaving the closure running with `runner` / `prefix_cache` locks
+    /// held — see #664.
     pub fn generate_paged_shared_tokens(
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
         paged_cache: &Mutex<PagedKvCache>,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let output = self.generate_from_tokens_paged_shared(
             prompt_tokens,
             params,
             block_manager,
             paged_cache,
+            cancel,
         )?;
 
         let text = self
@@ -857,6 +895,7 @@ impl ModelRunner {
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
         paged_cache: &Mutex<PagedKvCache>,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -873,6 +912,7 @@ impl ModelRunner {
                 params,
                 &mut bm_guard,
                 &mut pc_guard,
+                cancel,
             );
         }
 
@@ -902,6 +942,7 @@ impl ModelRunner {
             params,
             paged_cache,
             &block_table,
+            cancel,
         );
 
         drop(reservation);
@@ -915,6 +956,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         paged_cache: &Mutex<PagedKvCache>,
         cached_prefix: Option<PagedPrefixReuse>,
+        cancel: Option<&CancelHandle>,
     ) -> Result<PrefixCachedGenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -953,6 +995,7 @@ impl ModelRunner {
             &block_table,
             cached_prefix,
             block_size,
+            cancel,
         );
 
         match result {
@@ -978,6 +1021,7 @@ impl ModelRunner {
         block_table: &BlockTable,
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
+        cancel: Option<&CancelHandle>,
     ) -> Result<PrefixCachedGenerationOutput> {
         let cached_tokens = cached_prefix
             .as_ref()
@@ -1049,6 +1093,7 @@ impl ModelRunner {
                 paged_cache,
                 block_table,
                 &mut linear_state,
+                cancel,
             )?,
             PrefillSampleSource::GreedyToken(token) => self.decode_from_prefill_token(
                 token,
@@ -1058,6 +1103,7 @@ impl ModelRunner {
                 block_table,
                 &mut linear_state,
                 params.seed,
+                cancel,
             )?,
         };
 
@@ -1097,6 +1143,7 @@ impl ModelRunner {
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let step_seed = params.seed;
 
@@ -1119,6 +1166,7 @@ impl ModelRunner {
             block_table,
             linear_state,
             step_seed,
+            cancel,
         )
     }
 
@@ -1131,9 +1179,11 @@ impl ModelRunner {
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
         mut step_seed: Option<u64>,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         for _step in 0..params.max_tokens {
+            check_cancelled(cancel)?;
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
             }
@@ -1256,6 +1306,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         paged_cache: &Mutex<PagedKvCache>,
         spec_config: &SpeculativeConfig,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(
             params.temperature == 0.0,
@@ -1295,6 +1346,7 @@ impl ModelRunner {
             paged_cache,
             &block_table,
             spec_config,
+            cancel,
         );
 
         drop(reservation);
@@ -1319,6 +1371,7 @@ impl ModelRunner {
         params: &SamplingParams,
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let mut linear_state = self.new_linear_state()?;
 
@@ -1371,6 +1424,7 @@ impl ModelRunner {
         };
 
         for _step in 0..params.max_tokens {
+            check_cancelled(cancel)?;
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
             }
@@ -1434,6 +1488,7 @@ impl ModelRunner {
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
         spec_config: &SpeculativeConfig,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -1479,6 +1534,7 @@ impl ModelRunner {
         let mut last_token = greedy_sample(&logits)?;
 
         loop {
+            check_cancelled(cancel)?;
             if generated_tokens.len() >= params.max_tokens {
                 return Ok(GenerationOutput {
                     text: String::new(),
@@ -1615,6 +1671,7 @@ impl ModelRunner {
         params: &SamplingParams,
         paged_cache: &mut PagedKvCache,
         block_table: &BlockTable,
+        cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let mut linear_state = self.new_linear_state()?;
 
@@ -1702,6 +1759,7 @@ impl ModelRunner {
         };
 
         for _step in 0..params.max_tokens {
+            check_cancelled(cancel)?;
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
             }
@@ -4288,6 +4346,7 @@ mod tests {
             &params,
             &mut block_manager,
             &mut paged_cache,
+            None,
         )?;
 
         assert_eq!(output.token_ids.len(), 5);
@@ -4335,6 +4394,7 @@ mod tests {
             &params,
             &block_manager,
             &paged_cache,
+            None,
         )?;
 
         assert_eq!(output.token_ids.len(), 5);
@@ -4381,6 +4441,7 @@ mod tests {
             &params,
             &mut block_manager,
             &mut paged_cache,
+            None,
         )?;
 
         // Both paths should produce identical tokens with greedy sampling
@@ -4428,6 +4489,7 @@ mod tests {
             &params,
             &mut block_manager,
             &mut paged_cache,
+            None,
         )?;
 
         assert_eq!(output.token_ids.len(), 3);
@@ -4478,6 +4540,7 @@ mod tests {
                     &params,
                     block_manager.as_ref(),
                     paged_cache.as_ref(),
+                    None,
                 )
             })
         };
@@ -4492,6 +4555,7 @@ mod tests {
                     &params,
                     block_manager.as_ref(),
                     paged_cache.as_ref(),
+                    None,
                 )
             })
         };
@@ -4552,6 +4616,7 @@ mod tests {
             &params,
             &mut block_manager,
             &mut paged_cache,
+            None,
         )?;
 
         assert_eq!(output.finish_reason, FinishReason::Eos);
