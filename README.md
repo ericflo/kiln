@@ -15,7 +15,9 @@
   <a href="docs/site/demo/">Demo</a> &middot;
   <a href="QUICKSTART.md">Quickstart</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
-  <a href="kiln.example.toml">Configuration</a>
+  <a href="kiln.example.toml">Configuration</a> &middot;
+  <a href="CHANGELOG.md">Changelog</a> &middot;
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
@@ -154,6 +156,12 @@ curl http://localhost:8420/v1/train/status
 ```
 
 See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including GRPO, adapter management, Docker, and systemd setup. For tools-bearing workloads with prompts longer than ~30k tokens, see [QUICKSTART.md §4.2](QUICKSTART.md#42-known-limitation-workers1-for-long-tools-bearing-prompts) for the `workers=1` known-limitation note ([#664](https://github.com/ericflo/kiln/issues/664)).
+
+## See it in action
+
+A 60-second asciicast captured on a single A6000 against `Qwen3.5-4B` walks the full live-LoRA online-learning loop: cold start → first chat (base model) → `POST /v1/train/sft` correction → hot-swap → second chat (improved). Watch it in the embedded player at **[ericflo.github.io/kiln/demo/](https://ericflo.github.io/kiln/demo/)** or browse the recording script and reference shell driver under [`docs/site/demo/`](docs/site/demo/).
+
+The kiln server also ships an embedded web dashboard at `http://localhost:8420/ui` with live decode tok/s, p50/p99 ITL, VRAM breakdown, adapter management, training monitoring, and a chat playground — no extra service to run.
 
 ## Memory Budget (24GB GPU)
 
@@ -347,6 +355,12 @@ Kiln builds on ideas from:
 - [S-LoRA](https://arxiv.org/abs/2311.03285) — multi-LoRA serving techniques
 - [Tinker](https://thinkingmachines.ai/blog/announcing-tinker/) — the cloud-hosted version of this idea. Kiln is the self-hosted, open-source take.
 - [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) — proof that the core can be simple
+
+## Contributing
+
+Bug reports, performance work, kernel ports, documentation, and dev-experience polish are all welcome. Issues live at [github.com/ericflo/kiln/issues](https://github.com/ericflo/kiln/issues); read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a non-trivial PR — Kiln is a deliberate scalpel (Qwen3.5-4B only, single-binary, no Python sidecar) and a 5-minute scope conversation up front saves a 5-day rewrite later. Performance changes should attach a `kiln-bench` median-of-3 run; kernel changes should cite the closed-PR history first.
+
+Maintained by [@ericflo](https://github.com/ericflo). MIT-licensed.
 
 ## License
 
