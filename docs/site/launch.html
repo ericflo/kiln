@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Launching Kiln &mdash; Your model gets better every time you use it</title>
+  <meta name="description" content="Launch announcement for Kiln: a single-GPU inference server with live LoRA training. The GRPO loop, hot-swap adapters, single Rust binary, and why a 4B model continuously tuned to your workload beats a generic 70B.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/launch.html">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+
+  <meta property="og:title" content="Launching Kiln &mdash; Your model gets better every time you use it">
+  <meta property="og:description" content="A single-GPU inference server with live LoRA training. Pure Rust. Single binary. Submit corrections over HTTP and the model improves in seconds.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/launch.html">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Launching Kiln &mdash; Your model gets better every time you use it">
+  <meta name="twitter:description" content="A single-GPU inference server with live LoRA training. Pure Rust. Single binary.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: #d8dde7;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .card:hover { border-color: var(--line-2); }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .num { font-variant-numeric: tabular-nums; }
+    .prose-body p { color: var(--fg-dim); line-height: 1.7; margin-bottom: 1.1rem; }
+    .prose-body h2 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; margin-top: 2.5rem; margin-bottom: 0.9rem; color: var(--fg); }
+    .prose-body h3 { font-size: 1.15rem; font-weight: 600; margin-top: 2rem; margin-bottom: 0.7rem; color: var(--fg); }
+    .prose-body ul { color: var(--fg-dim); line-height: 1.7; margin-bottom: 1.1rem; padding-left: 1.25rem; list-style: disc; }
+    .prose-body ul li { margin-bottom: 0.35rem; }
+    .prose-body strong { color: var(--fg); font-weight: 600; }
+    .meta-line { color: var(--fg-mute); font-size: 0.875rem; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="flex items-center gap-5 text-sm" style="color: var(--fg-dim);">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-3xl mx-auto px-6 pt-20 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Launch announcement &middot; v0.2.8</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        Launching Kiln &mdash; your model gets better every time you use it.
+      </h1>
+      <p class="meta-line mb-2">Last updated: 2026-05-01</p>
+      <p class="text-lg leading-relaxed" style="color: var(--fg-dim);">
+        Today we&rsquo;re putting the first public stake in the ground on
+        <a href="https://github.com/ericflo/kiln">Kiln</a>: a single-GPU inference server with live LoRA
+        training, written in pure Rust, distributed as a single binary. Submit corrections or scored
+        completions over HTTP and the model improves in seconds &mdash; no restarts, no separate training
+        pipeline, no second copy of the weights.
+      </p>
+    </div>
+  </section>
+
+  <!-- body -->
+  <section class="divider">
+    <div class="max-w-3xl mx-auto px-6 py-16 prose-body">
+
+      <h2>Serving and training are separate worlds. They shouldn&rsquo;t be.</h2>
+      <p>
+        If you&rsquo;ve ever shipped an LLM application to real users, you know the loop. You deploy a model.
+        Real traffic exposes failures. You collect the failures. You format them. You upload them to some
+        training service. You wait hours. You download new weights. You redeploy. You hope.
+      </p>
+      <p>
+        That cycle is the reason most AI products feel frozen in time. The model you ship is the model your
+        users live with for weeks &mdash; until you can muster the activation energy for another training
+        run. The cost of every iteration is so high that nobody iterates.
+      </p>
+      <p>
+        Kiln collapses that entire cycle into a single API call. You POST a correction, and the next request
+        already uses the improved weights. The serving process and the training process are the same process,
+        sharing the same GPU memory, the same model in VRAM, the same scheduler. There is nothing to redeploy
+        because nothing was taken down.
+      </p>
+
+      <h2>The GRPO loop &mdash; the killer feature</h2>
+      <p>
+        SFT (&ldquo;here is a good answer, learn it&rdquo;) is useful, but the real unlock is GRPO: generate
+        candidates, score them with your own reward function, feed the results back. The model learns what
+        &ldquo;good&rdquo; means for <em>your</em> use case &mdash; not for some generic benchmark.
+      </p>
+<pre><code>import openai, requests
+
+client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
+
+<span style="color:#7f8694"># 1. Generate candidates</span>
+responses = [
+    client.chat.completions.create(
+        model="qwen3.5-4b-kiln",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+    )
+    for _ in range(8)
+]
+
+<span style="color:#7f8694"># 2. Score them however you want &mdash; regex, unit tests, another model, human eval</span>
+scored = [{"text": r.choices[0].message.content, "reward": my_score(r)}
+          for r in responses]
+
+<span style="color:#7f8694"># 3. Submit &mdash; the server trains and hot-swaps immediately</span>
+requests.post("http://localhost:8420/v1/train/grpo", json={
+    "groups": [{"prompt": prompt, "completions": scored}]
+})
+
+<span style="color:#7f8694"># 4. Next inference already uses the improved weights</span></code></pre>
+      <p>
+        Your reward function can be anything: a regex that checks output format, a unit-test runner for
+        generated code, a math grader, another model acting as a judge, a human in the loop, a click-through
+        signal from production. Kiln does not care. It just wants <code>(prompt, completion, reward)</code>
+        triples and it does the rest.
+      </p>
+      <p>
+        See <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">docs/GRPO_GUIDE.md</a> for
+        worked verifiable-rewards examples on math, JSON formatting, and code generation.
+      </p>
+
+      <h2>Hot-swap, not redeploy</h2>
+      <p>
+        When training produces new adapter weights, Kiln swaps them in atomically at an iteration boundary.
+        The request that started a millisecond ago finishes on the old weights; the request that arrives a
+        millisecond later runs on the new ones. There is no cold start, no reload, no warm-up window, no
+        second copy of the model loaded into VRAM while the swap happens.
+      </p>
+      <p>
+        Adapters are first-class objects with a full lifecycle. You can list them, load them, unload them,
+        upload them as <code>tar.gz</code>, download them as <code>tar.gz</code>, compose multiple at once
+        with per-adapter scaling factors, or merge them server-side using TIES, weighted-average, or
+        concatenation. Everything is reversible. You can experiment freely &mdash; if a training run made
+        things worse, you unload it and you&rsquo;re back where you started.
+      </p>
+
+      <h2>One GPU. One binary. One model.</h2>
+      <p>
+        Kiln runs a 4B-parameter model (<a href="https://huggingface.co/Qwen/Qwen3.5-4B">Qwen3.5-4B</a>) on a
+        single 24 GB consumer GPU you might already own. RTX 3090, RTX 4090, A6000 on the CUDA side. M-series
+        Mac with 16 GB+ unified memory on the Metal side. There is no distributed setup, no model parallel,
+        no tensor parallel, no Ray cluster, no Kubernetes operator. There is one binary.
+      </p>
+      <p>
+        The pricing argument is simple. A 4B model continuously tuned to your specific workload &mdash; your
+        domain, your data formats, your edge cases, your style &mdash; will outperform a generic 70B model on
+        the tasks you actually care about. And it runs at a tiny fraction of the cost. The first 100 SFT
+        examples you submit move it past whatever a generic frontier model can do for your use case, because
+        a generic frontier model will never see those 100 examples.
+      </p>
+      <p>
+        The memory budget is the punchline of Qwen3.5-4B&rsquo;s hybrid architecture. Only 8 of its 32 layers
+        need a KV cache at all &mdash; the other 24 are <em>linear-attention</em> Gated DeltaNet layers with
+        O(1) state. So 128K context for one sequence fits in <span class="num">~13 GB</span>. Even
+        <em>training</em> at 128K context fits in <span class="num">~18 GB</span>. The whole memory budget
+        story is in the README.
+      </p>
+
+      <h2>Anti-Goliath positioning</h2>
+      <p>
+        Kiln is not a general-purpose inference framework. It does not support 47 model families. It does not
+        have a plugin system, an abstraction layer for backends, or a config file with 800 knobs. The
+        scheduler knows exactly how much KV cache each layer needs because every layer in the model is
+        accounted for in the source. The block manager is sized for this model&rsquo;s GQA configuration. The
+        kernels are tuned for this model&rsquo;s head dimensions. Every line of code is in the service of one
+        architecture.
+      </p>
+      <p>
+        That specificity is the source of speed. It&rsquo;s also the source of the developer experience.
+        There&rsquo;s nothing to configure to make it fast on your hardware &mdash; if it boots, it&rsquo;s
+        already tuned. The other side of the trade is honest: Kiln is for people who want to get extremely
+        good at one model, not for people who want to swap between five.
+      </p>
+      <p>
+        Pure Rust matters here too. There is no Python sidecar copying tensors over a socket. There is no
+        second process holding a second copy of the weights. Training runs on a background thread inside the
+        same process that&rsquo;s serving requests, and it shares the GPU memory budget cooperatively.
+      </p>
+
+      <h2>How to try it</h2>
+      <p>
+        The Linux+CUDA, macOS Apple Silicon, and Windows+CUDA binaries are on the
+        <a href="https://github.com/ericflo/kiln/releases">releases page</a>. Each artifact is signed with
+        Sigstore build provenance and ships with a SHA-256 sidecar.
+      </p>
+<pre><code>curl -L -o kiln.tar.gz \
+  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.8/kiln-0.2.8-x86_64-unknown-linux-gnu-cuda124.tar.gz
+tar -xzf kiln.tar.gz
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
+      <p>
+        If you&rsquo;d rather start from a container,
+        <code>ghcr.io/ericflo/kiln-server:latest</code> is on the GitHub Container Registry with the same
+        provenance attestation. The
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a> walks through
+        downloading the model weights, the first chat completion, the first SFT POST, and the first GRPO
+        loop. The <a href="https://ericflo.github.io/kiln/">landing page</a> has the install snippets for
+        each platform.
+      </p>
+
+      <h2>What&rsquo;s next</h2>
+      <p>
+        kiln-v0.2.8 is the production line we&rsquo;re launching on, but the project is explicitly pre-1.0.
+        The Phases 1&ndash;10 work that got us here closed out core inference, LoRA serving, SFT, GRPO,
+        production hardening, decode-perf optimization, developer experience, advanced adapter features, the
+        v0.1.0 release engineering, and the Liger long-context training pieces. The roadmap from here is
+        deliberately small, and chosen by what the first wave of users actually asks for:
+      </p>
+      <ul>
+        <li><strong>Multi-GPU tensor parallelism</strong> &mdash; for people who want to push past 4B on a single box.</li>
+        <li><strong>Model-agnostic mode</strong> &mdash; an explicit configuration path for swapping the target model, with the understanding that kernels need to be re-tuned per architecture.</li>
+        <li><strong>GDN training-time streaming</strong> &mdash; per-tile forward+backward inside the gradient-checkpoint shell, to push T=16384 SFT onto 24 GB consumer GPUs.</li>
+        <li><strong>BF16 LoRA precision study</strong> &mdash; an A/B with FP32 accumulate to confirm the SFT-step FP32 SGEMM hotspot can collapse into BF16 tensor-core paths without quality loss.</li>
+      </ul>
+      <p>
+        None of those are blockers for using Kiln today. The current build serves long context, trains live,
+        and ships hot-swap adapters on a single 24 GB GPU. If that&rsquo;s the loop you want, the
+        <a href="https://github.com/ericflo/kiln">repo is here</a>. We&rsquo;d love to hear how it goes.
+      </p>
+
+    </div>
+  </section>
+
+  <!-- back / footer -->
+  <section class="divider">
+    <div class="max-w-3xl mx-auto px-6 py-10 flex flex-wrap gap-3">
+      <a href="/" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        &larr; Back to home
+      </a>
+      <a href="https://github.com/ericflo/kiln" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        GitHub &rarr;
+      </a>
+      <a href="https://github.com/ericflo/kiln/blob/main/README.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        README &rarr;
+      </a>
+      <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        Quickstart &rarr;
+      </a>
+    </div>
+  </section>
+
+  <!-- footer -->
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed &middot; Last updated 2026-05-01</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="https://github.com/ericflo/kiln">Repo</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
