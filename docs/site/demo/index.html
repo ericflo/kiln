@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln Demo &mdash; 60-second online-learning loop</title>
+  <meta name="description" content="A 60-second silent asciicast showing Kiln's live LoRA online-learning loop end-to-end on a single GPU: cold start, base-model chat, /v1/train/sft correction, hot-swap, improved chat. Pure Rust, single binary.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/demo/">
+  <link rel="icon" type="image/png" href="../assets/logo.png">
+
+  <meta property="og:title" content="Kiln Demo &mdash; 60-second online-learning loop">
+  <meta property="og:description" content="60 seconds, end-to-end, on one GPU: cold start, base-model answer, correction over HTTP, hot-swap, improved answer.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/demo/">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Kiln Demo &mdash; 60-second online-learning loop">
+  <meta name="twitter:description" content="60 seconds, end-to-end, on one GPU. Pure Rust, single binary.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- asciinema-player CSS (self-hosted via jsDelivr CDN, version-pinned) -->
+  <link rel="stylesheet" type="text/css"
+        href="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.css" />
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: #d8dde7;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .meta-line { color: var(--fg-mute); font-size: 0.875rem; }
+    .prose-body p { color: var(--fg-dim); line-height: 1.7; margin-bottom: 1.1rem; }
+    .prose-body h2 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; margin-top: 2.5rem; margin-bottom: 0.9rem; color: var(--fg); }
+    .prose-body strong { color: var(--fg); font-weight: 600; }
+
+    /* asciinema-player container — keep it visually inside the kiln palette */
+    .asciinema-frame {
+      background: #1c1c1c;
+      border: 1px solid var(--line-2);
+      border-radius: 12px;
+      padding: 0.5rem;
+      overflow: hidden;
+    }
+    .stub-banner {
+      background: rgba(249, 115, 22, 0.10);
+      color: #f3c891;
+      border: 1px solid rgba(249, 115, 22, 0.35);
+      border-radius: 8px;
+      padding: 0.6rem 0.9rem;
+      font-size: 0.875rem;
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="/" class="flex items-center gap-2.5">
+        <img src="../assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="flex items-center gap-5 text-sm" style="color: var(--fg-dim);">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
+        <a href="../launch.html">Launch post</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-3xl mx-auto px-6 pt-16 pb-8">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Demo &middot; 60 seconds &middot; one GPU</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        Watch the loop close in 60 seconds.
+      </h1>
+      <p class="text-lg leading-relaxed" style="color: var(--fg-dim);">
+        Cold start. Ask the base model who Kiln is &mdash; it has no idea. POST a two-example correction
+        to <code>/v1/train/sft</code>. The server trains the LoRA in-process, hot-swaps it at the next
+        iteration boundary, and the very next chat completion uses the updated weights. No restarts, no
+        second model in VRAM. One process, one GPU, one continuous shell session.
+      </p>
+    </div>
+  </section>
+
+  <!-- player -->
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-10">
+
+      <div class="asciinema-frame mb-4">
+        <div id="kiln-demo-player" data-src="kiln-60s.cast"></div>
+      </div>
+
+      <div class="stub-banner mb-6" id="stub-banner">
+        <strong>Heads up:</strong> the asciicast above is a placeholder while the canonical 60-second
+        recording is being staged on a kiln-capable GPU host. The recording script
+        (<a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPT.md">SCRIPT.md</a>)
+        pins down every command and the expected output. The page and the embed are wired up; the
+        only missing piece is the <code>kiln-60s.cast</code> file itself, and replacing it is a
+        single-commit, doc-only change.
+      </div>
+
+    </div>
+  </section>
+
+  <!-- caption / what's happening -->
+  <section class="divider">
+    <div class="max-w-3xl mx-auto px-6 py-12 prose-body">
+
+      <h2>What you&rsquo;re watching</h2>
+      <p>
+        The demo is a single uncut shell session. It runs the same prompt twice &mdash; once before a
+        correction is submitted, once after &mdash; so the contrast is unmistakable. The whole thing
+        is silent: there is no narration track, no jump cuts, no editing. What you see is what the
+        kiln server actually does.
+      </p>
+
+      <h2>Scene by scene</h2>
+      <p>
+        <strong>Scenes 1&ndash;2.</strong> The kiln binary starts. The startup banner shows the model,
+        the GPU, the VRAM budget, and the listen address. Then a chat completion: <em>&ldquo;In one
+        short sentence, what is the Kiln inference server?&rdquo;</em> The base Qwen3.5-4B has never
+        heard of Kiln-the-software, so it guesses pottery. A reasonable wrong answer.
+      </p>
+      <p>
+        <strong>Scenes 3&ndash;4.</strong> A single <code>curl</code> POST to <code>/v1/train/sft</code>
+        with two correction examples and an adapter name. The server queues the job, training runs
+        in-process on the GPU we&rsquo;re already serving from, and a <code>/v1/train/status</code>
+        poll shows the job completed in a few seconds. The server never paused.
+      </p>
+      <p>
+        <strong>Scenes 5&ndash;6.</strong> The same prompt as scene 2 &mdash; verbatim. The model
+        now answers correctly with the language from the correction examples. A final
+        <code>/v1/adapters</code> list confirms the new adapter is active, rank 8, about 4 MB on
+        disk, ready for the next correction to stack on top.
+      </p>
+
+      <h2>Why this loop matters</h2>
+      <p>
+        Today, improving a deployed model is a multi-hour multi-process pipeline: collect failures,
+        format them, upload to a training service, wait, download new weights, redeploy, hope. The
+        cost of every iteration is high enough that nobody iterates &mdash; the model you ship is the
+        model your users live with. Kiln collapses that into one HTTP call. The activation energy
+        of a correction drops from hours to seconds, and the model you ship is the one that just
+        learned from your last failure.
+      </p>
+      <p>
+        Read the full launch post at <a href="../launch.html">launch.html</a>, or the engineering
+        details in the <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        and <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
+        docs.
+      </p>
+
+      <h2>Reproduce it yourself</h2>
+      <p>
+        The canonical demo runs the same commands you&rsquo;d run as a first-time user. Every line is
+        in the <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>. The
+        recording protocol &mdash; terminal size, scene timing, expected outputs &mdash; is in
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPT.md">SCRIPT.md</a>.
+        If you want to record your own variant on different hardware or with a different correction
+        prompt, fork that script and replace whichever scenes you like.
+      </p>
+
+    </div>
+  </section>
+
+  <!-- footer / nav back -->
+  <section class="divider">
+    <div class="max-w-3xl mx-auto px-6 py-10 flex flex-wrap gap-3">
+      <a href="/" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        &larr; Back to home
+      </a>
+      <a href="../launch.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        Launch post &rarr;
+      </a>
+      <a href="https://github.com/ericflo/kiln" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        GitHub &rarr;
+      </a>
+      <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+        Quickstart &rarr;
+      </a>
+    </div>
+  </section>
+
+  <!-- asciinema-player JS -->
+  <script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.min.js"></script>
+  <script>
+    AsciinemaPlayer.create(
+      'kiln-60s.cast',
+      document.getElementById('kiln-demo-player'),
+      {
+        autoPlay: false,
+        preload: true,
+        loop: false,
+        idleTimeLimit: 2,
+        theme: 'monokai',
+        poster: 'npt:0:02',
+        cols: 120,
+        rows: 32
+      }
+    );
+  </script>
+</body>
+</html>

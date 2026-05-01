@@ -200,7 +200,9 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
       </p>
       <p>
         See <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">docs/GRPO_GUIDE.md</a> for
-        worked verifiable-rewards examples on math, JSON formatting, and code generation.
+        worked verifiable-rewards examples on math, JSON formatting, and code generation. The
+        <a href="demo/">60&#x2011;second demo</a> shows the same loop end-to-end on a single GPU: cold start,
+        first chat on the base model, an SFT correction, hot-swap, then the second chat on the improved weights.
       </p>
 
       <h2>Hot-swap, not redeploy</h2>
