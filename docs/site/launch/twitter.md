@@ -6,7 +6,7 @@ length: 8 tweets, each <280 chars
 
 # X / Twitter thread draft
 
-> **DRAFT — do not post until reviewed by Eric AND the demo asciicast lands.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
 
 ## Thread
 
@@ -85,7 +85,7 @@ length: 8 tweets, each <280 chars
 ## Image / asciicast suggestions
 
 - **Tweet 1 hero:** static screenshot of the GRPO Python snippet from `docs/site/launch.html` (lines 171–193). Alt text: "Python code: 1) generate 8 chat completions; 2) score them; 3) POST to /v1/train/grpo; 4) next request already uses the improved weights."
-- **Tweet 2 GRPO:** the demo asciicast embed (when ready). Alt text: "60-second terminal recording of cold-starting Kiln, sending a chat request, POSTing an SFT correction, and seeing the next request use the improved output."
+- **Tweet 2 GRPO:** the landed demo asciicast embed. Alt text: "60-second terminal recording of cold-starting Kiln, sending a chat request, POSTing an SFT correction, and seeing the next request use the improved output."
 - **Tweet 4 4B:** screenshot of the README memory budget table. Alt text: "Memory budget table showing Qwen3.5-4B fits 128K context in ~13 GB on a 24 GB GPU, including training."
 - **Tweet 7 try it:** screenshot of the embedded `/ui` dashboard. Alt text: "Kiln /ui dashboard showing live decode tokens/sec, p50/p99 ITL, recent requests, and adapter management controls."
 
@@ -95,9 +95,9 @@ length: 8 tweets, each <280 chars
 
 ## Posting checklist
 
-- [ ] Demo asciicast finalized and linked from the launch post
+- [x] Demo landed and is linked from the launch post
 - [ ] Verify the `og:image` and Twitter card on `docs/site/launch.html` render correctly via cards-validator
-- [ ] Eric reviews this draft + the asciicast
+- [ ] Eric reviews this draft before posting
 - [ ] Post Tuesday or Wednesday, 9:00–11:00 ET (best Twitter dev-tools traction window)
 - [ ] Pin tweet 1 to the profile for the launch week
 - [ ] Watch replies for the first 2 hours, respond to every substantive question

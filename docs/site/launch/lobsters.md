@@ -6,7 +6,7 @@ length: ~70 chars title / ~330 words comment
 
 # lobste.rs submission draft
 
-> **DRAFT — do not post until reviewed by Eric AND the demo asciicast lands.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
 
 ## Submission
 
@@ -53,9 +53,9 @@ https://ericflo.github.io/kiln/launch.html
 
 ## Posting checklist
 
-- [ ] Demo asciicast linked from the launch post
+- [x] Demo asciicast landed and linked from the launch post
 - [ ] Confirm tags against current lobste.rs taxonomy (they prune)
-- [ ] Eric reviews this draft and the asciicast
+- [ ] Eric reviews this draft before posting
 - [ ] Submit Tuesday–Thursday, 9:00–11:00 ET
 - [ ] Watch the thread for the first 2 hours; lobste.rs threads die fast but the early discussion sets the tone
 - [ ] Engage substantively on technical pushback — this audience values long-form replies, not one-liners

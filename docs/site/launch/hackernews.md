@@ -6,7 +6,7 @@ length: ~80 chars title / ~220 words first comment
 
 # Show HN: Kiln draft
 
-> **DRAFT — do not post until reviewed by Eric AND the demo asciicast lands.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
 
 ## Submission
 
@@ -43,10 +43,10 @@ https://ericflo.github.io/kiln/launch.html
 
 ## Posting checklist
 
-- [ ] Demo asciicast linked from the launch post (`docs/site/launch.html`)
+- [x] Demo asciicast landed and linked from the launch post (`docs/site/launch.html`)
 - [ ] Confirm `gh release view kiln-v0.2.12 -R ericflo/kiln` is clean
 - [ ] Confirm `https://ericflo.github.io/kiln/launch.html` renders on mobile + desktop
-- [ ] Eric reviews this draft and the asciicast
+- [ ] Eric reviews this draft before posting
 - [ ] Submit Tuesday–Thursday, 9:00–11:00 ET (US morning peak for HN)
 - [ ] Post the first comment within 60 seconds of submission
 - [ ] Watch the thread for the first 90 minutes, answer every top-level question
