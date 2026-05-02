@@ -6,7 +6,7 @@ length: 8 tweets, each <280 chars
 
 # X / Twitter thread draft
 
-> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.13 ops gate stays green.**
 
 ## Thread
 
@@ -78,7 +78,7 @@ length: 8 tweets, each <280 chars
 >
 > https://ericflo.github.io/kiln/launch.html
 >
-> MIT licensed. v0.2.12 is the production line. Built in Rust by one person; the GRPO loop is what kept me up at night and what I most want feedback on.
+> MIT licensed. v0.2.13 is the production line. Built in Rust by one person; the GRPO loop is what kept me up at night and what I most want feedback on.
 
 *(248 chars — has link headroom for X's t.co)*
 
