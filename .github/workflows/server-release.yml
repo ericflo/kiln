@@ -357,6 +357,7 @@ jobs:
         shell: pwsh
         env:
           TAG: ${{ github.ref_name }}
+          CUDA_TOOLKIT_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: |
           $ErrorActionPreference = 'Stop'
           $bin = "target/x86_64-pc-windows-msvc/release/kiln.exe"
@@ -366,9 +367,62 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -LiteralPath $bin -Destination (Join-Path $stage "kiln.exe") -Force
-          # -CompressionLevel Optimal for the smallest tarball; Windows
-          # users download these over potentially flaky networks.
-          Compress-Archive -Path (Join-Path $stage "kiln.exe") -DestinationPath $artifact -CompressionLevel Optimal -Force
+
+          # Bundle the CUDA 12.4 user-mode redistributable DLLs next to
+          # kiln.exe. End users on a stock NVIDIA driver install (>= 551.61
+          # on Windows for CUDA 12.4 forward-compat) get the kernel driver
+          # but NOT cudart / cublas / curand / nvrtc, so kiln.exe fails to
+          # launch with "cublas64_12.dll was not found" unless they've
+          # installed the full CUDA Toolkit. Shipping these DLLs makes the
+          # zip self-contained.
+          $cudaBin = $null
+          if ($env:CUDA_PATH) { $cudaBin = Join-Path $env:CUDA_PATH 'bin' }
+          if ((-not $cudaBin) -or (-not (Test-Path $cudaBin))) {
+            if ($env:CUDA_TOOLKIT_PATH) { $cudaBin = Join-Path $env:CUDA_TOOLKIT_PATH 'bin' }
+          }
+          if ((-not $cudaBin) -or (-not (Test-Path $cudaBin))) {
+            throw "Could not resolve CUDA bin dir; checked CUDA_PATH and Jimver/cuda-toolkit step output"
+          }
+          Write-Host "Bundling CUDA redist DLLs from $cudaBin"
+          # Required runtime DLLs. Names are linker-stable across CUDA 12.x:
+          #   - cudart64_12.dll      CUDA runtime
+          #   - cublas64_12.dll      cuBLAS (Eric's reported missing DLL)
+          #   - cublasLt64_12.dll    cuBLASLt — pulled in by cuBLAS
+          #   - curand64_10.dll      cuRAND keeps soversion 10 even on CUDA 12
+          #   - nvrtc64_120_0.dll    NVRTC — used by candle-kernels JIT
+          # Hard-fail on any missing entry: silent omission is the bug we're
+          # fixing, so we want the workflow to break if the runner image
+          # changes the layout.
+          $requiredDlls = @(
+            'cudart64_12.dll',
+            'cublas64_12.dll',
+            'cublasLt64_12.dll',
+            'curand64_10.dll',
+            'nvrtc64_120_0.dll'
+          )
+          foreach ($dll in $requiredDlls) {
+            $src = Join-Path $cudaBin $dll
+            if (-not (Test-Path $src)) { throw "Required CUDA redist DLL not found: $src" }
+            Copy-Item -LiteralPath $src -Destination $stage -Force
+            Write-Host "  bundled $dll"
+          }
+          # nvrtc-builtins ships with a CUDA-minor-version suffix
+          # (e.g. nvrtc-builtins64_124.dll on 12.4). Resolve via wildcard
+          # so a future runner-image bump to 12.5+ doesn't silently drop
+          # the DLL.
+          $builtins = Get-ChildItem -Path $cudaBin -Filter 'nvrtc-builtins64_*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $builtins) {
+            throw "Required CUDA redist DLL not found: nvrtc-builtins64_*.dll in $cudaBin"
+          }
+          Copy-Item -LiteralPath $builtins.FullName -Destination $stage -Force
+          Write-Host "  bundled $($builtins.Name)"
+
+          # -CompressionLevel Optimal for the smallest zip; Windows users
+          # download these over potentially flaky networks. Archive the
+          # whole stage dir so the bundled DLLs land at the zip root next
+          # to kiln.exe (Windows resolves DLLs from the .exe's directory
+          # before walking PATH).
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $artifact -CompressionLevel Optimal -Force
           $hash = (Get-FileHash -Algorithm SHA256 $artifact).Hash.ToLower()
           $hash | Out-File -FilePath "$artifact.sha256" -Encoding ascii -NoNewline
           $size = (Get-Item $artifact).Length
