@@ -15,7 +15,7 @@ or deployed; it's a versioned drafting space.
   [`index.html`](../demo/index.html), canonical recording in
   [`kiln-60s.cast`](../demo/kiln-60s.cast), and the reference shell driver
   in [`demo.sh`](../demo/demo.sh)). Embedded at the standalone demo page
-  and ready to be linked from `docs/site/launch.html`.
+  and inline in `docs/site/launch.html`.
 
 ## Status
 
@@ -132,8 +132,8 @@ For each channel, after going live:
       expected titles: `Kiln — Your model gets better every time you use it`,
       `Launching Kiln — Your model gets better every time you use it`, and
       `Kiln Demo — 60-second online-learning loop`.
-- [x] `docs/site/launch.html` links to `demo/`, and
-      `docs/site/demo/index.html` embeds `kiln-60s.cast`.
+- [x] `docs/site/launch.html` embeds `demo/kiln-60s.cast` inline, and
+      `docs/site/demo/index.html` embeds `kiln-60s.cast` on the standalone demo page.
 
 ## Where this directory came from
 
