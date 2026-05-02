@@ -1052,6 +1052,174 @@ fn cross_entropy_loss(
     Ok(loss)
 }
 
+/// Analytic SFT tail seed: `d loss / d hidden` for final RMSNorm + tied
+/// LM-head + next-token cross-entropy.
+///
+/// This mirrors [`cross_entropy_loss`] / FLCE shifted-label semantics while
+/// chunking over vocab so the full `[T, V]` logits tensor is never
+/// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
+/// shifted-label rows and the final sequence row are zero.
+fn analytic_sft_tail_grad_pre_final_norm(
+    hidden: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    rms_norm_eps: f64,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let device = hidden.device();
+    let seq_len = input_ids.len();
+    if seq_len < 2 {
+        anyhow::bail!("analytic SFT tail gradient requires at least 2 tokens");
+    }
+    if chunk_size == 0 {
+        anyhow::bail!("analytic SFT tail gradient chunk_size must be > 0");
+    }
+    if label_mask.len() != seq_len {
+        anyhow::bail!(
+            "label_mask length {} does not match input_ids length {}",
+            label_mask.len(),
+            seq_len
+        );
+    }
+
+    let dims = hidden.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != seq_len {
+        anyhow::bail!(
+            "hidden must have shape [1, seq_len, hidden_size], got {:?} for seq_len {}",
+            dims,
+            seq_len
+        );
+    }
+    let hidden_size = dims[2];
+    if final_norm_weight.dims() != [hidden_size] {
+        anyhow::bail!(
+            "final_norm_weight shape {:?} does not match hidden size {}",
+            final_norm_weight.dims(),
+            hidden_size
+        );
+    }
+    if head_t.dims().len() != 2 || head_t.dims()[0] != hidden_size {
+        anyhow::bail!(
+            "head_t must have shape [hidden_size, vocab_size], got {:?}",
+            head_t.dims()
+        );
+    }
+
+    let active_positions: Vec<u32> = label_mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    if active_positions.is_empty() {
+        return Ok(Tensor::zeros(hidden.shape(), DType::F32, device)?);
+    }
+
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| input_ids[i as usize + 1])
+        .collect();
+    let num_active = active_positions.len();
+
+    let hidden_2d = hidden.squeeze(0)?;
+    let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
+    let active_indices = Tensor::new(active_positions.as_slice(), device)?;
+    let active_hidden = shift_hidden.index_select(&active_indices, 0)?.to_dtype(DType::F32)?;
+
+    let variance = active_hidden.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
+    let norm_weight = final_norm_weight.to_dtype(DType::F32)?;
+    let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
+    let active_normed = active_hidden
+        .broadcast_mul(&rms_inv)?
+        .broadcast_mul(&norm_weight_plus_one)?;
+
+    let head_t_f32 = head_t.to_dtype(DType::F32)?;
+    let vocab_size = head_t_f32.dim(1)?;
+    if vocab_size == 0 {
+        anyhow::bail!("head_t vocab dimension is zero");
+    }
+
+    // Pass 1: global row-wise softmax normalizers over vocab chunks.
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+        let logits_chunk = active_normed.matmul(&head_chunk)?;
+        let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+        let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+            (None, None) => {
+                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                (chunk_max.detach(), chunk_sumexp.detach())
+            }
+            (Some(prev_max), Some(prev_sumexp)) => {
+                let new_max = prev_max.maximum(&chunk_max)?;
+                let prev_scale = (prev_max - &new_max)?.exp()?;
+                let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                (new_max.detach(), new_sumexp.detach())
+            }
+            _ => unreachable!("running max/sumexp are set together"),
+        };
+        running_max = Some(new_max);
+        running_sumexp = Some(new_sumexp);
+        chunk_start += chunk_len;
+    }
+    let running_max = running_max.context("vocab_size was zero")?;
+    let running_sumexp = running_sumexp.context("vocab_size was zero")?;
+
+    // Pass 2: accumulate d(loss)/d(post-final-norm hidden) by vocab chunk.
+    let inv_n = 1.0f64 / num_active as f64;
+    let mut grad_normed = Tensor::zeros((num_active, hidden_size), DType::F32, device)?;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+        let logits_chunk = active_normed.matmul(&head_chunk)?;
+        let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
+        let exp_chunk = shifted.exp()?;
+        let softmax_chunk =
+            exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
+
+        let chunk_end = chunk_start + chunk_len;
+        let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
+        for (row_idx, &label) in active_labels.iter().enumerate() {
+            let label = label as usize;
+            if label >= chunk_start && label < chunk_end {
+                one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
+            } else if label >= vocab_size {
+                anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
+            }
+        }
+        let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
+        let grad_logits = (softmax_chunk - one_hot)?.affine(inv_n, 0.0)?;
+        let head_chunk_t = head_chunk.t()?.contiguous()?;
+        let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
+        grad_normed = (&grad_normed + chunk_contrib)?.detach();
+
+        chunk_start = chunk_end;
+    }
+
+    // Backprop through Qwen3.5 RMSNorm: y = x * inv_rms * (1 + w).
+    let u = grad_normed.broadcast_mul(&norm_weight_plus_one)?;
+    let dot = (&u * &active_hidden)?.sum_keepdim(candle_core::D::Minus1)?;
+    let rms_inv_sq = rms_inv.sqr()?;
+    let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
+    let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
+    let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
+    let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
+
+    let mut grad_hidden_2d = Tensor::zeros((seq_len, hidden_size), DType::F32, device)?;
+    grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
+    Ok(grad_hidden_2d.unsqueeze(0)?)
+}
+
 /// Read `KILN_USE_FLCE` env var. When set (`1`, `true`, `yes`), SFT training
 /// takes the Fused Linear Cross-Entropy path: the LM head matmul is fused
 /// into a chunked log-sum-exp + gather reduction so the `[T, V]` logits
@@ -2669,6 +2837,81 @@ mod tests {
         // correct_logit = 1.0
         // loss ≈ 2.50 - 1.0 = 1.50
         assert!((loss_val - 1.50).abs() < 0.1, "loss = {loss_val}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_analytic_sft_tail_grad_pre_final_norm_parity() -> Result<()> {
+        let device = Device::Cpu;
+        let seq_len = 5usize;
+        let hidden_size = 4usize;
+        let vocab_size = 7usize;
+
+        let hidden_values: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32 + 1.0) * 0.17).sin() * 0.8)
+            .collect();
+        let hidden = Tensor::from_vec(hidden_values, (1, seq_len, hidden_size), &device)?;
+        let final_norm_weight = Tensor::new(&[0.05f32, -0.10, 0.15, -0.20], &device)?;
+        let head_values: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i as f32 + 3.0) * 0.11).cos() * 0.35)
+            .collect();
+        let head_t = Tensor::from_vec(head_values, (hidden_size, vocab_size), &device)?;
+
+        let input_ids = vec![2u32, 5, 1, 6, 3];
+        // Shifted active positions are logits rows 0 and 2. Row 1 is an
+        // explicit ignored/inactive position, and the final row never
+        // contributes under next-token prediction semantics.
+        let label_mask = vec![false, true, false, true, false];
+        let eps = 1e-6;
+
+        let analytic = analytic_sft_tail_grad_pre_final_norm(
+            &hidden,
+            &final_norm_weight,
+            &head_t,
+            &input_ids,
+            &label_mask,
+            eps,
+            3,
+        )?;
+
+        let hidden_var = Var::from_tensor(&hidden)?;
+        let normed = kiln_model::forward::rms_norm_fallback(
+            hidden_var.as_tensor(),
+            &final_norm_weight,
+            eps,
+        )?;
+        let logits = normed.broadcast_matmul(&head_t)?;
+        let loss = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?;
+        let grads = loss.backward()?;
+        let autograd = grads
+            .get(hidden_var.as_tensor())
+            .context("autograd did not produce hidden gradient")?;
+
+        let analytic_vals = analytic.flatten_all()?.to_vec1::<f32>()?;
+        let autograd_vals = autograd.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(analytic_vals.len(), autograd_vals.len());
+        let max_abs_diff = analytic_vals
+            .iter()
+            .zip(autograd_vals.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < 1e-5,
+            "analytic/autograd max_abs_diff={max_abs_diff:e}\nanalytic={analytic_vals:?}\nautograd={autograd_vals:?}"
+        );
+
+        let analytic_rows = analytic.squeeze(0)?.to_vec2::<f32>()?;
+        assert!(
+            analytic_rows[1].iter().all(|&v| v == 0.0),
+            "ignored shifted row should have zero gradient: {:?}",
+            analytic_rows[1]
+        );
+        assert!(
+            analytic_rows[4].iter().all(|&v| v == 0.0),
+            "final sequence row should have zero gradient: {:?}",
+            analytic_rows[4]
+        );
 
         Ok(())
     }
