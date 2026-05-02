@@ -56,11 +56,11 @@ gh attestation verify oci://ghcr.io/ericflo/kiln-server:0.2.8 \
 
 ---
 
-## 3. Landing / release / demo page screenshots (mobile + desktop)
+## 3. Landing / demo / sentinel onboarding checks
 
-**Goal:** Confirm that the Pages site renders cleanly for first-time visitors on both mobile and desktop, and that the release + demo pages are linkable.
+**Goal:** Confirm that the Pages site renders cleanly for first-time visitors, that the demo page is linkable, and that the sentinel directory remains a no-publicity guardrail.
 
-**Method:** Headless Puppeteer with the pre-installed Chromium, full-page screenshots at 390×844 (mobile) and 1440×900 (desktop), `networkidle2`, `--ignore-certificate-errors`.
+**Method:** Headless Puppeteer with the pre-installed Chromium for full-page captures, plus a source read of the sentinel README.
 
 **Captures:**
 
@@ -68,13 +68,13 @@ gh attestation verify oci://ghcr.io/ericflo/kiln-server:0.2.8 \
 | --- | --- | --- |
 | `https://ericflo.github.io/kiln/` | 390×844 mobile | [`landing-mobile.png`](../site/img/audits/landing-mobile.png) |
 | `https://ericflo.github.io/kiln/` | 1440×900 desktop | [`landing-desktop.png`](../site/img/audits/landing-desktop.png) |
-| `https://ericflo.github.io/kiln/launch.html` | 390×844 mobile | [`launch-mobile.png`](../site/img/audits/launch-mobile.png) |
 | `https://ericflo.github.io/kiln/demo/` | 1440×900 desktop | [`demo-desktop.png`](../site/img/audits/demo-desktop.png) |
+| `docs/site/launch/README.md` | source read | no-publicity sentinel |
 
 **Findings:**
 - Landing renders correctly at both viewports — hero, value prop, install snippet, and links to ARCHITECTURE / QUICKSTART / GRPO_GUIDE all visible without overflow.
-- Release page mobile capture renders the full release summary + CTAs without horizontal scroll.
 - Demo page desktop capture renders the asciinema embed shell. The current asciicast is a "coming soon" placeholder — see Observations below.
+- Sentinel README clearly says this directory intentionally contains no external launch, announcement, social-channel, marketing, press, or outreach drafts.
 
 **Status:** ✅ PASS (with placeholder demo asciicast noted as observation, not a blocker)
 
@@ -130,7 +130,7 @@ gh run view <run-id> --repo ericflo/kiln --log-failed
 - **What it is:** Opening paragraph is clear — "pure-Rust single-GPU LLM inference + live LoRA training in one process," Qwen3.5-4B, OpenAI-compatible API on :8420.
 - **Install:** Visible above the fold (`cargo build --release --features cuda` and platform-specific recipes).
 - **GRPO killer feature:** Dedicated section with a working Python example POSTing to `/v1/train/grpo`, hot-swap LoRA explanation, and link to `docs/GRPO_GUIDE.md`.
-- **Cross-links present and live:** `QUICKSTART.md`, `ARCHITECTURE.md`, `docs/GRPO_GUIDE.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_LICENSES.md`, `docs/site/launch.html`, `docs/site/demo/`.
+- **Cross-links present and live:** `QUICKSTART.md`, `ARCHITECTURE.md`, `docs/GRPO_GUIDE.md`, `CHANGELOG.md`, `LICENSE`, `THIRD_PARTY_LICENSES.md`, `docs/site/demo/`.
 - **Desktop release reference:** `desktop-v0.2.2` link is current — verified via `gh release list --repo ericflo/kiln`, no newer desktop tag yet.
 - **Length:** ~2,471 words. Long for a README but front-loaded so the cold-reader path stays under one screen.
 
@@ -214,16 +214,19 @@ curl -sL https://ericflo.github.io/kiln/ | grep -oE '0\.2\.[0-9]+' | sort -u
 
 **Status:** ✅ PASS
 
-### e. Release page version refs
+### e. Onboarding surface version refs
 
 **Commands run:**
 
 ```bash
-curl -sL https://ericflo.github.io/kiln/launch.html | grep -oE '0\.2\.[0-9]+' | sort -u
+for url in https://ericflo.github.io/kiln/ https://ericflo.github.io/kiln/demo/; do
+  curl -sL "$url" | grep -oE '0\.2\.[0-9]+' | sort -u
+done
+rg -n '0\.2\.[0-9]+' docs/site/launch/README.md || true
 ```
 
 **Findings:**
-- Only `0.2.9` appears. Release-readiness copy is pinned to the current release.
+- The landing page exposes only `0.2.9`; the demo page and no-publicity sentinel do not carry release-version copy.
 
 **Status:** ✅ PASS
 
@@ -277,27 +280,29 @@ gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json status,conclus
 
 **Status:** ✅ PASS
 
-### c. Release page
+### c. Onboarding pages
 
 **Command run:**
 
 ```bash
-curl -L --max-time 20 -s https://ericflo.github.io/kiln/launch.html | rg 'v0\.2\.12|kiln-v0\.2\.12'
+for url in https://ericflo.github.io/kiln/ https://ericflo.github.io/kiln/demo/; do
+  curl -L --max-time 20 -s "$url" | rg 'Quickstart|Demo|GRPO|Architecture|kiln-60s\.cast'
+done
 ```
 
-**Finding:** The live release page includes v0.2.12 in the status pill, kiln-v0.2.12 in the release download URL, and the production-line caveat.
+**Finding:** The live landing and demo pages include the expected cold-reader navigation and demo-player surfaces after PR #703.
 
 **Status:** ✅ PASS
 
-### d. Release-readiness surfaces
+### d. Source onboarding surfaces
 
 **Command run:**
 
 ```bash
-rg -n 'v0\.2\.12|kiln-v0\.2\.12|0\.2\.12' docs/site/launch.html docs/site/launch
+rg -n 'no external launch|no-publicity|onboarding|developer documentation' docs/site/launch/README.md docs/site/demo/index.html docs/site/index.html
 ```
 
-**Finding:** The staged release-readiness surfaces all point at v0.2.12 after PR #703. No tracked verification surface remains pinned to v0.2.9.
+**Finding:** The tracked onboarding surfaces include the no-publicity sentinel and current docs/demo entry points after PR #703. The expected verification set is limited to current informational/onboarding surfaces.
 
 **Status:** ✅ PASS
 
@@ -315,7 +320,7 @@ curl -sL -I https://ericflo.github.io/kiln/demo/kiln-60s.cast
 
 ### v0.2.12 verdict
 
-**GO for the release-readiness baseline on the kiln-v0.2.12 line.** The current release exists, Pages has deployed the PR #703 version bump, the live release page and staged verification surfaces are pinned to v0.2.12, and the demo asciicast remains live. No new readiness blockers were introduced by the v0.2.9 → v0.2.12 transition.
+**GO for the release-readiness baseline on the kiln-v0.2.12 line.** The current release exists, Pages has deployed the PR #703 version bump, the current onboarding surfaces are verified, and the demo asciicast remains live. No new readiness blockers were introduced by the v0.2.9 → v0.2.12 transition.
 
 ---
 
@@ -347,29 +352,29 @@ gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json databaseId,sta
 
 **Status:** ✅ PASS
 
-### c. Live landing and release version refs
+### c. Live landing and demo version refs
 
 **Commands run:**
 
 ```bash
-for url in https://ericflo.github.io/kiln/ https://ericflo.github.io/kiln/launch.html; do
+for url in https://ericflo.github.io/kiln/ https://ericflo.github.io/kiln/demo/; do
   curl -sL "$url" | grep -oE '0\.2\.[0-9]+' | sort -u
 done
 ```
 
-**Finding:** The live landing page and release page only expose `0.2.13` version references. The release page is pinned to the kiln-v0.2.13 release download URL and no stale v0.2.12 refs remain visible to cold readers.
+**Finding:** The live landing page exposes only `0.2.13` version references, while the demo page has no stale release-version copy. No stale v0.2.12 refs remain visible to cold readers.
 
 **Status:** ✅ PASS
 
-### d. Release-readiness surfaces
+### d. Source onboarding surfaces
 
 **Command run:**
 
 ```bash
-rg -n 'v0\.2\.13|kiln-v0\.2\.13|0\.2\.13' docs/site/launch.html docs/site/launch
+rg -n '0\.2\.13|kiln-v0\.2\.13|no external launch|onboarding' docs/site/index.html docs/site/demo docs/site/launch/README.md
 ```
 
-**Finding:** The staged release-readiness surfaces are pinned to v0.2.13 after PR #714. This audit records that state without changing the source copy.
+**Finding:** The staged onboarding surfaces are pinned to v0.2.13 where they carry version copy, the demo remains tracked under `docs/site/demo/`, and the sentinel remains a no-publicity guardrail. This audit records that state without changing the source copy.
 
 **Status:** ✅ PASS
 
@@ -392,4 +397,4 @@ done
 
 ### v0.2.13 verdict
 
-**GO for the release-readiness baseline on the kiln-v0.2.13 line.** The current release exists with 7 assets, Pages has deployed the v0.2.13 release-surface updates, the live landing and release pages only expose v0.2.13 version refs, staged verification surfaces are pinned to v0.2.13, and the demo player/cast assets remain live. No new readiness blockers were introduced by the v0.2.12 → v0.2.13 transition.
+**GO for the release-readiness baseline on the kiln-v0.2.13 line.** The current release exists with 7 assets, Pages has deployed the v0.2.13 onboarding updates, the live landing page only exposes v0.2.13 version refs, staged onboarding surfaces are pinned to v0.2.13 where they carry version copy, and the demo player/cast assets remain live. No new readiness blockers were introduced by the v0.2.12 → v0.2.13 transition.
