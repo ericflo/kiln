@@ -57,7 +57,7 @@ Expected on-screen output (abbreviated by the asciicast — let it scroll natura
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.8
+  Version: 0.2.13
   Mode:    GPU inference
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
