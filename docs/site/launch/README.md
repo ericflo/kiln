@@ -102,14 +102,19 @@ For each channel, after going live:
 
 ### 2026-05-02 v0.2.13 verification
 
-- [ ] `gh release view kiln-v0.2.13 -R ericflo/kiln` reports
-      `isDraft=false`, `isPrerelease=false`, and includes the expected release
-      assets.
-- [ ] `gh attestation verify kiln-0.2.13-x86_64-unknown-linux-gnu-cuda124.tar.gz -R ericflo/kiln`
-      verifies SLSA provenance from `https://github.com/ericflo/kiln`.
-- [ ] GHCR `kiln-server` package includes tags `0.2.13` and `latest`; verify
-      with `gh api orgs/ericflo/packages/container/kiln-server/versions` or the
-      package UI before posting.
+- [x] `gh release view kiln-v0.2.13 -R ericflo/kiln` reports
+      `isDraft=false`, `isPrerelease=false`, published at
+      `2026-05-02T19:19:06Z`, and 7 release assets.
+- [x] `kiln-0.2.13-x86_64-unknown-linux-gnu-cuda124.tar.gz` verifies against
+      the release SHA-256 evidence: sidecar, local digest, and GitHub asset
+      digest all match
+      `99053967ef2e8917e2e59ace1c27f732c97c89b786a5a8650d40982f2feb91e1`.
+- [x] `gh attestation verify kiln-0.2.13-x86_64-unknown-linux-gnu-cuda124.tar.gz -R ericflo/kiln --format json`
+      verifies SLSA provenance from `https://github.com/ericflo/kiln` on
+      `refs/tags/kiln-v0.2.13`.
+- [x] GHCR `kiln-server` package includes tags `0.2.13` and `latest`, updated
+      at `2026-05-02T18:44:08Z`; verified with
+      `gh api /users/ericflo/packages/container/kiln-server/versions`.
 
 ### 2026-05-02 v0.2.12 verification
 

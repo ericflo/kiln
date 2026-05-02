@@ -6,7 +6,7 @@ length: ~220 words
 
 # Anthropic Discord launch post draft
 
-> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.13 ops gate stays green.**
 
 ## Post body (paste directly into the appropriate Anthropic Discord channel)
 

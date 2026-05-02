@@ -6,7 +6,7 @@ length: ~80 chars title / ~220 words first comment
 
 # Show HN: Kiln draft
 
-> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.13 ops gate stays green.**
 
 ## Submission
 
@@ -44,7 +44,7 @@ https://ericflo.github.io/kiln/launch.html
 ## Posting checklist
 
 - [x] Demo asciicast landed and linked from the launch post (`docs/site/launch.html`)
-- [ ] Confirm `gh release view kiln-v0.2.12 -R ericflo/kiln` is clean
+- [ ] Confirm `gh release view kiln-v0.2.13 -R ericflo/kiln` is clean
 - [ ] Confirm `https://ericflo.github.io/kiln/launch.html` renders on mobile + desktop
 - [ ] Eric reviews this draft before posting
 - [ ] Submit Tuesday–Thursday, 9:00–11:00 ET (US morning peak for HN)
