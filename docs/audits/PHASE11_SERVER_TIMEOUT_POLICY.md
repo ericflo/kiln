@@ -18,14 +18,14 @@ The bisect harness in PR #689 used `KILN_REQUEST_TIMEOUT_SECS=305` — the same 
 
 The concrete failure mode: `workers=2` against a single 43 814-input-token correction request on `Qwen3.5-4B`, A6000, `KILN_NUM_BLOCKS=16384`, `KILN_KV_CACHE_FP8=1`, all four bisect commits (`e6f417f`, `d06163a`, `2318343`, `76281c6`) reproduce identically — the chat-completion span opens, prefill begins, and 305 s later the client gives up. Peak `kiln_blocks_used` is 4 306 / 16 384 (26 % occupancy) so block-pool exhaustion is ruled out. The metrics path stays sub-millisecond throughout. The block of work is inside the prefill engine itself.
 
-The v0.2.9 launch artifact ships a documented workaround at [`QUICKSTART.md:296-326`](../../QUICKSTART.md#L296) (§4.3): either run with `workers=1` (client-side serialize the prompt) **or** raise `server.request_timeout_secs` to ≥600 s. The CHANGELOG.md `kiln-v0.2.9 — 2026-05-01` entry references the same workaround. **There is no committed default-fix direction for v0.2.10.** This audit picks one.
+The v0.2.9 release artifact ships a documented workaround at [`QUICKSTART.md:296-326`](../../QUICKSTART.md#L296) (§4.3): either run with `workers=1` (client-side serialize the prompt) **or** raise `server.request_timeout_secs` to ≥600 s. The CHANGELOG.md `kiln-v0.2.9 — 2026-05-01` entry references the same workaround. **There is no committed default-fix direction for v0.2.10.** This audit picks one.
 
 ## 2. Constraints and goals
 
 - **Doc-only PR.** No code changes in this audit. All design choices need to be implementable from the recommendation alone.
 - **No regressions for in-the-wild configs.** Anything that explicitly sets `server.request_timeout_secs` in TOML (or `KILN_REQUEST_TIMEOUT_SECS` in env) must keep its current behavior bit-for-bit.
 - **The fix must be bounded.** A request that runs forever ties up an engine slot forever; PR #666's cancel-drain is the floor — anything we change must compose with that floor, not erode it.
-- **Phase 11 is the launch-prep phase.** Real prefill-scheduler work (Option E below) is v0.3.x territory; v0.2.10 wants the smallest correct change that closes the public-launch reliability story without committing the project to a multi-week kernel rewrite.
+- **Phase 11 is the onboarding-prep phase.** Real prefill-scheduler work (Option E below) is v0.3.x territory; v0.2.10 wants the smallest correct change that closes the release-readiness reliability story without committing the project to a multi-week kernel rewrite.
 - **The 4-commit bisect rules out a regression in {#666, #672, #674, #675}.** Whatever the right server-side default is, it can be picked without first identifying an offending commit.
 
 ## 3. Options
@@ -36,7 +36,7 @@ Each option lists **What**, **Pros**, **Cons**, **Code shape**, **Migration**, *
 
 - **What.** Keep `request_timeout_secs = 300`. Rely on QUICKSTART §4.3 + the existing `prompt_too_long`-style hint string at `error.rs:88` to teach users.
 - **Pros.** Zero code change. Zero migration. The cancel-drain in PR #666 means the 408 doesn't leak engine state.
-- **Cons.** Every cold-reader who first hits a long-prefill prompt sees a 408 and has to find QUICKSTART §4.3 (or read the error hint, which currently only points at `request_timeout_secs`, not at the workers=1 alternative). The launch story is "by the way, there's a known regression — read this section first." That's a worse first impression than any of B/C/D.
+- **Cons.** Every cold-reader who first hits a long-prefill prompt sees a 408 and has to find QUICKSTART §4.3 (or read the error hint, which currently only points at `request_timeout_secs`, not at the workers=1 alternative). The onboarding story is "by the way, there's a known regression — read this section first." That's a worse first impression than any of B/C/D.
 - **Code shape.** Zero.
 - **Migration.** Zero.
 - **Risk.** Reputational, not technical. The bisect already rules out a fix in the {#666, #672, #674, #675} commit window, so there is no known scoped code change that closes the issue without going to Option E.
@@ -57,7 +57,7 @@ Each option lists **What**, **Pros**, **Cons**, **Code shape**, **Migration**, *
 - **Cons.** API surface widens. Every future client library needs to know about the header. Tests need to cover header parsing edge cases (negative, zero, non-integer, larger-than-cap). The default header-absent path still runs into the 300 s default unless we *also* raise the default (i.e., this is additive to Option B, not a substitute).
 - **Code shape.** ~80–120 lines: header parse in completions handler + bounds check + new config field + validator + integration tests + CHANGELOG.
 - **Migration.** Zero for clients that don't send the header — current behavior is preserved.
-- **Risk.** Medium. New API surface is a launch-eve commitment; once shipped, removing or renaming the header is a breaking change. Better timing is post-launch when first 100 users have actually asked for per-request control.
+- **Risk.** Medium. New API surface is a release-eve commitment; once shipped, removing or renaming the header is a breaking change. Better timing is later, after users have actually asked for per-request control.
 
 ### Option D — API-layer rejection of long-prefill at submission
 
@@ -75,11 +75,11 @@ Each option lists **What**, **Pros**, **Cons**, **Code shape**, **Migration**, *
 - **Cons.** Live scheduler work in [`crates/kiln-scheduler/`](../../crates/kiln-scheduler/) — re-verify the exact module layout and the existing chunk-yield policy before designing the change; do **not** guess line numbers in this audit. Behavior change may regress single-stream throughput if yield granularity is wrong. Needs a GPU bench cycle (NVTX trace + per-yield-policy A/B) plus the `kiln_request_prefill_tokens_completed` gauge from PR #689 item 3 to even know whether the fix is doing what it should. This is the v0.2.x → v0.3.x scheduler line of work.
 - **Code shape.** Requires its own audit doc with GPU bench numbers. This audit explicitly defers detailed design.
 - **Migration.** Behavior change — chunk-yield policy is observable in throughput shape. Needs a migration paragraph in CHANGELOG plus an opt-out env var for the first release that ships it.
-- **Risk.** High. Real scheduler work in launch-prep phase is exactly the kind of v0.3.x commitment Phase 11 is supposed to defer until after the public-announce cut.
+- **Risk.** High. Real scheduler work during release-readiness cleanup is exactly the kind of v0.3.x commitment Phase 11 is supposed to defer until after the onboarding baseline is stable.
 
 ## 4. Recommendation
 
-**Pick Option B + D combined for v0.2.10.** Explicitly defer Option C until a real customer asks for it (YAGNI). Explicitly defer Option E to its own audit doc + GPU bench cycle scheduled after the public-announce milestone.
+**Pick Option B + D combined for v0.2.10.** Explicitly defer Option C until a real customer asks for it (YAGNI). Explicitly defer Option E to its own audit doc + GPU bench cycle scheduled after the release-readiness milestone.
 
 **Why B + D, specifically.**
 
@@ -88,15 +88,15 @@ Each option lists **What**, **Pros**, **Cons**, **Code shape**, **Migration**, *
 - **B + D together** make the default behavior good (long prefills get enough budget) **and** give operators who want to clamp their deployment a single TOML knob to do so.
 - The combined surface is small: one default change + one new optional config field + one new error variant. Total under ~150 lines of code, all in `kiln-server`, no engine or scheduler changes.
 
-**Why defer C.** Per-request override is real flexibility but it widens the public API contract on launch eve. Once shipped it's a breaking change to remove. Better to wait for the first 100 users (Phase 11 adoption milestone) to tell us they want it.
+**Why defer C.** Per-request override is real flexibility but it widens the API contract during release-readiness cleanup. Once shipped it's a breaking change to remove. Better to wait for users to tell us they want it.
 
-**Why defer E.** The real scheduler work is the v0.3.x prefill story. Trying to land it before public-announce risks dragging v0.2.10 into a multi-week debugging arc and pushes the launch out. Ship B + D for v0.2.10, then take Option E up properly with PR #689 items 1–3 as the supporting evidence.
+**Why defer E.** The real scheduler work is the v0.3.x prefill story. Trying to land it during release-readiness cleanup risks dragging v0.2.10 into a multi-week debugging arc and delays onboarding polish. Ship B + D for v0.2.10, then take Option E up properly with PR #689 items 1–3 as the supporting evidence.
 
 **Alternative primary recommendations and what would justify picking them.**
 
 - *Pick D alone* if you believe the production SLA must stay at exactly 5 min and you'd rather reject than wait. B + D collapses to D alone in that case (no default change, just the cap). Trade-off: every long-prefill user has to know about the cap and configure a workaround, reverting to status quo for the on-by-default user.
-- *Pick A* if the public-announce cut should ship with no v0.2.10 reliability changes at all and the workaround docs are deemed sufficient. Cheapest option; worst first impression for cold readers; no engineering investment.
-- *Pick E now* if Eric believes the launch story can absorb the schedule risk. This audit doesn't recommend it but the argument is open: the bisect rules out a fix in the four-commit window, so the only "real" fix path is Option E. If launch slip is acceptable in exchange for shipping v0.2.10 with the actual prefill regression closed, Option E is the technically-correct choice.
+- *Pick A* if the release-readiness baseline should ship with no v0.2.10 reliability changes at all and the workaround docs are deemed sufficient. Cheapest option; worst first impression for cold readers; no engineering investment.
+- *Pick E now* if Eric believes the release-readiness story can absorb the schedule risk. This audit doesn't recommend it but the argument is open: the bisect rules out a fix in the four-commit window, so the only "real" fix path is Option E. If schedule slip is acceptable in exchange for shipping v0.2.10 with the actual prefill regression closed, Option E is the technically-correct choice.
 
 ## 5. Concrete v0.2.10 PR shopping list (post-decision)
 
