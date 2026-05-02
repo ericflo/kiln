@@ -31,6 +31,12 @@ const PROMPT_PREVIEW_MAX_CHARS: usize = 120;
 /// Max characters retained in the completion preview for the recent-requests panel.
 const COMPLETION_PREVIEW_MAX_CHARS: usize = 200;
 
+fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMemoryBudget>) {
+    if let Some(bytes) = kiln_core::vram::detect_used_vram_bytes() {
+        memory_budget.observe_prefill_used_vram_bytes(bytes);
+    }
+}
+
 /// Pull the most recent user-authored message text from a request, falling
 /// back to the very last message if no user role is present. Returns an empty
 /// string if there are no messages.
@@ -1202,6 +1208,7 @@ async fn generate_real(
     let adapter = state.active_adapter_name.read().unwrap().clone();
 
     let gpu_lock = state.gpu_lock.clone();
+    let memory_budget = state.memory_budget.clone();
     let timeout = state.request_timeout;
     // Cooperative cancellation: `tokio::time::timeout` cancels the outer
     // future, but `spawn_blocking` does not honor that — the closure keeps
@@ -1343,15 +1350,18 @@ async fn generate_real(
     let output = match tokio::time::timeout(timeout, &mut generation).await {
         Ok(join_result) => match join_result {
             Ok(Ok(output)) => {
+                observe_post_prefill_vram(&memory_budget);
                 cancel.clear_prefill_progress();
                 output
             }
             Ok(Err(err)) => {
+                observe_post_prefill_vram(&memory_budget);
                 cancel.clear_prefill_progress();
                 tracing::error!(error = %format!("{err:#}"), "real generation failed");
                 return Err(ApiError::generation_failed(err));
             }
             Err(err) => {
+                observe_post_prefill_vram(&memory_budget);
                 cancel.clear_prefill_progress();
                 return Err(ApiError::internal(format!("join error: {err}")));
             }
@@ -1498,6 +1508,7 @@ async fn generate_real_streaming(
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = now_epoch();
     let gpu_lock = state.gpu_lock.clone();
+    let memory_budget = state.memory_budget.clone();
     let timeout = state.request_timeout;
     let decode_stats = state.decode_stats.clone();
     let recent_requests = state.recent_requests.clone();
@@ -1705,8 +1716,12 @@ async fn generate_real_streaming(
                     })
                     .await
                     {
-                        Ok(Ok(rx)) => rx,
+                        Ok(Ok(rx)) => {
+                            observe_post_prefill_vram(&memory_budget);
+                            rx
+                        }
                         _ => {
+                            observe_post_prefill_vram(&memory_budget);
                             record(
                                 "error".to_string(),
                                 &completion_buf,

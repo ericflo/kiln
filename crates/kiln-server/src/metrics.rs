@@ -177,9 +177,21 @@ impl Metrics {
         out.push_str("# TYPE kiln_vram_total_bytes gauge\n");
         push_line(&mut out, &format!("kiln_vram_total_bytes {}", gauges.vram_total));
 
-        out.push_str("# HELP kiln_vram_model_bytes Model weight memory.\n");
+        out.push_str("# HELP kiln_vram_model_bytes Model/device residency used for memory budgeting.\n");
         out.push_str("# TYPE kiln_vram_model_bytes gauge\n");
         push_line(&mut out, &format!("kiln_vram_model_bytes {}", gauges.vram_model));
+
+        out.push_str("# HELP kiln_vram_model_estimated_bytes Static model parameter memory estimate.\n");
+        out.push_str("# TYPE kiln_vram_model_estimated_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_model_estimated_bytes {}", gauges.vram_model_estimated));
+
+        out.push_str("# HELP kiln_vram_post_load_used_bytes CUDA memory.used snapshot after model load before KV allocation.\n");
+        out.push_str("# TYPE kiln_vram_post_load_used_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_post_load_used_bytes {}", gauges.vram_post_load_used));
+
+        out.push_str("# HELP kiln_vram_prefill_peak_used_bytes Highest CUDA memory.used observed immediately after prefill/generation boundaries.\n");
+        out.push_str("# TYPE kiln_vram_prefill_peak_used_bytes gauge\n");
+        push_line(&mut out, &format!("kiln_vram_prefill_peak_used_bytes {}", gauges.vram_prefill_peak_used));
 
         out.push_str("# HELP kiln_vram_kv_cache_bytes KV cache memory.\n");
         out.push_str("# TYPE kiln_vram_kv_cache_bytes gauge\n");
@@ -322,6 +334,9 @@ pub struct SnapshotGauges {
     pub blocks_total: usize,
     pub vram_total: u64,
     pub vram_model: u64,
+    pub vram_model_estimated: u64,
+    pub vram_post_load_used: u64,
+    pub vram_prefill_peak_used: u64,
     pub vram_kv_cache: u64,
     pub vram_training_budget: u64,
     pub prefix_cache: PrefixCacheStats,
@@ -384,7 +399,10 @@ mod tests {
             blocks_used: 10,
             blocks_total: 256,
             vram_total: 24_000_000_000,
-            vram_model: 8_000_000_000,
+            vram_model: 9_000_000_000,
+            vram_model_estimated: 8_000_000_000,
+            vram_post_load_used: 9_000_000_000,
+            vram_prefill_peak_used: 19_000_000_000,
             vram_kv_cache: 2_000_000_000,
             vram_training_budget: 14_000_000_000,
             prefix_cache: PrefixCacheStats {
@@ -413,6 +431,10 @@ mod tests {
         assert!(output.contains("kiln_scheduler_waiting 3"));
         assert!(output.contains("kiln_blocks_total 256"));
         assert!(output.contains("kiln_vram_total_bytes 24000000000"));
+        assert!(output.contains("kiln_vram_model_bytes 9000000000"));
+        assert!(output.contains("kiln_vram_model_estimated_bytes 8000000000"));
+        assert!(output.contains("kiln_vram_post_load_used_bytes 9000000000"));
+        assert!(output.contains("kiln_vram_prefill_peak_used_bytes 19000000000"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"hit\"} 7"));
         assert!(output.contains("kiln_prefix_cache_lookups_total{result=\"miss\"} 3"));
         assert!(output.contains("kiln_prefix_cache_hit_tokens_total 112"));
@@ -438,6 +460,9 @@ mod tests {
             blocks_total: 0,
             vram_total: 0,
             vram_model: 0,
+            vram_model_estimated: 0,
+            vram_post_load_used: 0,
+            vram_prefill_peak_used: 0,
             vram_kv_cache: 0,
             vram_training_budget: 0,
             prefix_cache: PrefixCacheStats::default(),
