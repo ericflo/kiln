@@ -13,7 +13,7 @@ Bisect SHAs (in order):
 | 3 | `2318343` | After #675 (revert of #672) lands; serialize shim removed but #674 still in | #666, #674 |
 | 4 | `76281c6` | Current `main` / `v0.2.9` (HEAD at audit time) | #666, #674 |
 
-Companion to: [`PHASE11_PRELAUNCH_OPS_CHECKLIST.md`](PHASE11_PRELAUNCH_OPS_CHECKLIST.md). The pre-launch checklist verified release artifacts and SLOs at the unit and CI level. This audit closes the open production-load question raised in issue #686.
+Companion to the Phase 11 operational-readiness checklist, which verified release artifacts and SLOs at the unit and CI level. This audit closes the open production-load question raised in issue #686.
 
 ## TL;DR
 
