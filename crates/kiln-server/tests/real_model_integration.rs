@@ -420,7 +420,7 @@ async fn test_default_request_timeout() {
         device.clone(),
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
-        300,
+        600,
         "qwen3.5-4b-kiln".to_string(),
         &kiln_server::config::PrefixCacheConfig::default(),
     );

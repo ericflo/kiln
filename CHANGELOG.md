@@ -1,6 +1,6 @@
 # Kiln Server Changelog
 
-## kiln-v0.2.10 — Unreleased
+## kiln-v0.2.10 — 2026-05-02
 
 ### Fixed
 - server: route prefix-cache prefill through the tiled/streaming long-prefill dispatcher so first-touch 43k-token prompts no longer bypass the GDN activation-bounded path (#686).
