@@ -12,6 +12,15 @@ pub struct GpuVramInfo {
     pub source: VramSource,
 }
 
+/// Snapshot of currently used GPU memory.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuMemoryUsedInfo {
+    /// Used VRAM in bytes (0 if detection failed or no GPU).
+    pub used_bytes: u64,
+    /// Source of the detection.
+    pub source: VramSource,
+}
+
 /// How the VRAM value was determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VramSource {
@@ -78,14 +87,48 @@ pub fn detect_vram() -> GpuVramInfo {
     }
 }
 
+/// Query currently used GPU VRAM.
+///
+/// This is intentionally separate from [`detect_vram`]: total VRAM is stable,
+/// while used VRAM is meaningful only after the model, quantized workspaces,
+/// allocator slabs, and warmup allocations have actually landed on the device.
+pub fn detect_used_vram() -> GpuMemoryUsedInfo {
+    if let Some(bytes) = query_nvidia_smi_field("memory.used") {
+        return GpuMemoryUsedInfo {
+            used_bytes: bytes,
+            source: VramSource::NvidiaSmi,
+        };
+    }
+
+    GpuMemoryUsedInfo {
+        used_bytes: 0,
+        source: VramSource::None,
+    }
+}
+
+/// Query currently used GPU VRAM in bytes.
+pub fn detect_used_vram_bytes() -> Option<u64> {
+    let info = detect_used_vram();
+    (info.used_bytes > 0).then_some(info.used_bytes)
+}
+
 /// Query total GPU memory via nvidia-smi.
 ///
 /// Runs `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`
 /// which returns total memory in MiB. Returns None if nvidia-smi is not available
 /// or fails.
 fn query_nvidia_smi() -> Option<u64> {
+    query_nvidia_smi_field("memory.total")
+}
+
+/// Query a MiB-valued nvidia-smi GPU memory field.
+///
+/// Takes the first GPU because kiln is a single-GPU server today and the rest
+/// of the startup path also selects GPU 0 by default unless overridden.
+fn query_nvidia_smi_field(field: &str) -> Option<u64> {
+    let query = format!("--query-gpu={field}");
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .args([query.as_str(), "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
 
@@ -94,7 +137,6 @@ fn query_nvidia_smi() -> Option<u64> {
     }
 
     let stdout = String::from_utf8(output.stdout).ok()?;
-    // nvidia-smi may list multiple GPUs; take the first line (GPU 0)
     let mib: u64 = stdout.trim().lines().next()?.trim().parse().ok()?;
     Some(mib * 1024 * 1024)
 }

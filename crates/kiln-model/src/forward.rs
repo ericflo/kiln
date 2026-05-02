@@ -1311,7 +1311,7 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
 /// chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 32768;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 8192;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
@@ -1362,8 +1362,8 @@ fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usiz
 /// Device-aware streaming prefill policy for production prefill dispatch.
 ///
 /// Env overrides win. Without an override, long CUDA prompts use tiled prefill
-/// by default because it cuts peak GDN activation memory enough to make 128k
-/// prefill fit on 48 GiB GPUs; long Metal prompts use the macOS desktop
+/// by default because it cuts peak GDN activation memory enough to make
+/// production-shaped prefill fit with workers=2 on 48 GiB GPUs; long Metal prompts use the macOS desktop
 /// threshold because it improves TTFT at common chat context sizes.
 pub fn streaming_prefill_enabled_for(device: &Device, seq_len: usize) -> bool {
     if let Some(enabled) = streaming_prefill_env_override() {
@@ -11912,6 +11912,10 @@ mod tests {
         assert!(streaming_prefill_default_for(
             StreamingPrefillDeviceKind::Cuda,
             STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD
+        ));
+        assert!(streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Cuda,
+            12_000
         ));
         assert!(streaming_prefill_default_for(
             StreamingPrefillDeviceKind::Cuda,

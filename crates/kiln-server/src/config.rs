@@ -238,16 +238,16 @@ pub struct SpeculativeDecodingConfig {
 /// When enabled, long-context prefill iterates over the sequence in tiles of
 /// `tile_tokens` tokens, carrying O(1) GDN recurrent state across tile
 /// boundaries and writing full-attention K/V into the paged cache per tile.
-/// This caps peak activation memory so that ≥65k-token prefill fits on a
-/// 48 GiB A6000.
+/// This caps peak activation memory so that production-shaped 8k+ token
+/// CUDA prefills and ≥65k-token long prefills fit on a 48 GiB A6000.
 ///
 /// `tile_tokens` must be a positive multiple of 64 (the GDN chunk size).
 ///
 /// Dispatch is driven by reading these environment variables directly from
 /// `kiln-model` helpers; this struct is the documentation / TOML-config
 /// mirror. The generic config default keeps streaming OFF unless explicitly set,
-/// while runtime device policy enables streaming by default for long CUDA and
-/// Metal prompts after device-specific thresholds.
+/// while runtime device policy enables streaming by default for CUDA prompts at
+/// 8k+ tokens and Metal prompts after device-specific thresholds.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StreamingPrefillConfig {

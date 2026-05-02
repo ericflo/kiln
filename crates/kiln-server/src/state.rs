@@ -44,12 +44,20 @@ const AUTO_SIZER_FALLBACK_FRACTIONS: &[f64] = &[0.75, 0.65, 0.55, 0.45];
 /// - Model weights (fixed)
 /// - KV cache for inference (controlled by KILN_INFERENCE_MEMORY_FRACTION)
 /// - Remaining budget available for training
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct GpuMemoryBudget {
     /// Total GPU memory in bytes (0 if CPU-only).
     pub total_vram_bytes: u64,
-    /// Estimated model weight memory in bytes.
+    /// Post-load CUDA residency in bytes, or the static model estimate when
+    /// runtime residency is unavailable.
     pub model_memory_bytes: u64,
+    /// Static model parameter estimate in bytes.
+    pub estimated_model_memory_bytes: u64,
+    /// Post-load CUDA residency snapshot in bytes (0 when unavailable).
+    pub post_load_used_vram_bytes: u64,
+    /// Peak post-prefill CUDA residency observed at request boundaries.
+    #[serde(skip)]
+    pub peak_prefill_used_vram_bytes: std::sync::atomic::AtomicU64,
     /// KV cache allocation in bytes.
     pub kv_cache_bytes: u64,
     /// Memory available for training in bytes.
@@ -62,13 +70,15 @@ impl GpuMemoryBudget {
     /// Compute the memory budget given model config and allocation parameters.
     ///
     /// `total_vram_bytes`: Total GPU VRAM (0 for CPU).
-    /// `model_memory_bytes`: Estimated model weight size.
+    /// `model_memory_bytes`: post-load residency or static model estimate.
     /// `kv_cache_bytes`: Actual KV cache allocation size.
     /// `inference_fraction`: Fraction of VRAM for inference.
     /// `training_memory_gb`: Optional explicit training memory budget in GB.
     pub fn compute(
         total_vram_bytes: u64,
         model_memory_bytes: u64,
+        estimated_model_memory_bytes: u64,
+        post_load_used_vram_bytes: u64,
         kv_cache_bytes: u64,
         inference_fraction: f64,
         training_memory_gb: Option<f64>,
@@ -82,6 +92,9 @@ impl GpuMemoryBudget {
                 return Self {
                     total_vram_bytes,
                     model_memory_bytes,
+                    estimated_model_memory_bytes,
+                    post_load_used_vram_bytes,
+                    peak_prefill_used_vram_bytes: std::sync::atomic::AtomicU64::new(0),
                     kv_cache_bytes,
                     training_budget_bytes: (gb * 1024.0 * 1024.0 * 1024.0) as u64,
                     inference_memory_fraction: inference_fraction,
@@ -96,9 +109,35 @@ impl GpuMemoryBudget {
         Self {
             total_vram_bytes,
             model_memory_bytes,
+            estimated_model_memory_bytes,
+            post_load_used_vram_bytes,
+            peak_prefill_used_vram_bytes: std::sync::atomic::AtomicU64::new(0),
             kv_cache_bytes,
             training_budget_bytes,
             inference_memory_fraction: inference_fraction,
+        }
+    }
+
+    pub fn peak_prefill_used_vram_bytes(&self) -> u64 {
+        self.peak_prefill_used_vram_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn observe_prefill_used_vram_bytes(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let mut current = self.peak_prefill_used_vram_bytes();
+        while bytes > current {
+            match self.peak_prefill_used_vram_bytes.compare_exchange_weak(
+                current,
+                bytes,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
         }
     }
 
@@ -564,7 +603,7 @@ impl AppState {
             adapter_dir: PathBuf::from("adapters"),
             active_adapter_name: Arc::new(std::sync::RwLock::new(None)),
             training_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 1.0, None)),
+            memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             vram_info: kiln_core::vram::GpuVramInfo {
@@ -659,34 +698,37 @@ impl AppState {
         let total_vram = detected_gpu_total_memory(&device, &vram_info);
         let is_metal = is_metal_device(&device);
 
+        let post_load_used_vram_info = runtime_used_vram_for_device(&device);
+        let post_load_used_vram = post_load_used_vram_info
+            .map(|info| info.used_bytes)
+            .unwrap_or(0);
+        let sizing_residency_bytes = post_load_used_vram.max(estimated_model_bytes);
+        if post_load_used_vram > 0 {
+            tracing::info!(
+                post_load_used_vram_gb = post_load_used_vram as f64 / 1e9,
+                estimated_model_gb = estimated_model_bytes as f64 / 1e9,
+                source = %post_load_used_vram_info.unwrap().source,
+                "post-load CUDA residency snapshot for KV sizing"
+            );
+        } else {
+            tracing::warn!(
+                estimated_model_gb = estimated_model_bytes as f64 / 1e9,
+                "post-load CUDA residency unavailable; falling back to static model memory estimate for KV sizing"
+            );
+        }
+
         // Compute num_blocks for a given fraction. Used both for the explicit
         // `memory_cfg.num_blocks` path and the auto-sizer retry loop below.
         let compute_blocks_for_fraction = |fraction: f64| -> usize {
-            if total_vram > 0 && bytes_per_block > 0 {
-                let available_for_kv = ((total_vram.saturating_sub(estimated_model_bytes)) as f64
-                    * fraction) as u64;
-                let raw_auto_blocks = (available_for_kv / bytes_per_block) as usize;
-                cap_auto_num_blocks(
-                    raw_auto_blocks,
-                    model_config.max_position_embeddings,
-                    block_size,
-                    is_metal,
-                    total_vram,
-                )
-            } else {
-                // Fallback: derive from max_position_embeddings
-                let raw_auto_blocks = model_config
-                    .max_position_embeddings
-                    .div_ceil(block_size)
-                    .max(256);
-                cap_auto_num_blocks(
-                    raw_auto_blocks,
-                    model_config.max_position_embeddings,
-                    block_size,
-                    is_metal,
-                    total_vram,
-                )
-            }
+            auto_num_blocks_for_fraction(
+                total_vram,
+                sizing_residency_bytes,
+                bytes_per_block,
+                fraction,
+                model_config.max_position_embeddings,
+                block_size,
+                is_metal,
+            )
         };
 
         // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
@@ -755,6 +797,8 @@ impl AppState {
             tracing::info!(
                 total_vram_gb = total_vram as f64 / 1e9,
                 model_gb = estimated_model_bytes as f64 / 1e9,
+                post_load_used_vram_gb = post_load_used_vram as f64 / 1e9,
+                sizing_residency_gb = sizing_residency_bytes as f64 / 1e9,
                 inference_fraction = configured_inference_fraction,
                 "memory-aware KV cache sizing"
             );
@@ -796,7 +840,7 @@ impl AppState {
                 Err(failure) => {
                     let suggested_blocks = suggested_emergency_num_blocks(
                         total_vram,
-                        estimated_model_bytes,
+                        sizing_residency_bytes,
                         bytes_per_block,
                         block_size,
                         model_config.max_position_embeddings,
@@ -805,7 +849,7 @@ impl AppState {
                     let msg = format_oom_remediation_message(
                         &failure,
                         total_vram,
-                        estimated_model_bytes,
+                        sizing_residency_bytes,
                         bytes_per_block,
                         suggested_blocks,
                         configured_inference_fraction,
@@ -824,7 +868,9 @@ impl AppState {
         let kv_cache_bytes = num_blocks as u64 * bytes_per_block;
         let memory_budget = GpuMemoryBudget::compute(
             total_vram,
+            sizing_residency_bytes,
             estimated_model_bytes,
+            post_load_used_vram,
             kv_cache_bytes,
             inference_fraction,
             memory_cfg.training_memory_gb,
@@ -833,6 +879,8 @@ impl AppState {
         tracing::info!(
             total_vram_gb = memory_budget.total_vram_bytes as f64 / 1e9,
             model_gb = memory_budget.model_memory_bytes as f64 / 1e9,
+            estimated_model_gb = memory_budget.estimated_model_memory_bytes as f64 / 1e9,
+            post_load_used_vram_gb = memory_budget.post_load_used_vram_bytes as f64 / 1e9,
             kv_cache_gb = memory_budget.kv_cache_bytes as f64 / 1e9,
             training_budget_gb = memory_budget.training_budget_bytes as f64 / 1e9,
             inference_fraction = memory_budget.inference_memory_fraction,
@@ -968,6 +1016,38 @@ fn estimate_model_memory_bytes(config: &ModelConfig) -> u64 {
     total_params * dtype_bytes
 }
 
+fn auto_num_blocks_for_fraction(
+    total_vram: u64,
+    sizing_residency_bytes: u64,
+    bytes_per_block: u64,
+    fraction: f64,
+    max_position_embeddings: usize,
+    block_size: usize,
+    is_metal: bool,
+) -> usize {
+    if total_vram > 0 && bytes_per_block > 0 {
+        let available_for_kv =
+            ((total_vram.saturating_sub(sizing_residency_bytes)) as f64 * fraction) as u64;
+        let raw_auto_blocks = (available_for_kv / bytes_per_block) as usize;
+        cap_auto_num_blocks(
+            raw_auto_blocks,
+            max_position_embeddings,
+            block_size,
+            is_metal,
+            total_vram,
+        )
+    } else {
+        let raw_auto_blocks = max_position_embeddings.div_ceil(block_size).max(256);
+        cap_auto_num_blocks(
+            raw_auto_blocks,
+            max_position_embeddings,
+            block_size,
+            is_metal,
+            total_vram,
+        )
+    }
+}
+
 fn cap_auto_num_blocks(
     raw_blocks: usize,
     max_position_embeddings: usize,
@@ -1027,6 +1107,20 @@ fn is_metal_device(device: &candle_core::Device) -> bool {
 ///
 /// Uses the shared VRAM detection from kiln-core (nvidia-smi + sysctl
 /// hw.memsize on Apple Silicon + env override).
+
+fn runtime_used_vram_for_device(
+    device: &candle_core::Device,
+) -> Option<kiln_core::vram::GpuMemoryUsedInfo> {
+    match device {
+        #[cfg(feature = "cuda")]
+        candle_core::Device::Cuda(_) => {
+            let info = kiln_core::vram::detect_used_vram();
+            (info.used_bytes > 0).then_some(info)
+        }
+        _ => None,
+    }
+}
+
 fn detected_gpu_total_memory(
     device: &candle_core::Device,
     vram: &kiln_core::vram::GpuVramInfo,
@@ -1536,7 +1630,7 @@ mod tests {
 
     #[test]
     fn test_memory_budget_cpu_mode() {
-        let budget = GpuMemoryBudget::compute(0, 0, 0, 0.7, None);
+        let budget = GpuMemoryBudget::compute(0, 0, 0, 0, 0, 0.7, None);
         assert_eq!(budget.total_vram_bytes, 0);
         assert_eq!(budget.training_budget_bytes, 0);
         // CPU mode: training feasibility check always passes
@@ -1548,7 +1642,7 @@ mod tests {
         let total: u64 = 24 * 1024 * 1024 * 1024; // 24 GB
         let model: u64 = 8 * 1024 * 1024 * 1024; // 8 GB model
         let kv: u64 = 2 * 1024 * 1024 * 1024; // 2 GB KV cache
-        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7, None);
+        let budget = GpuMemoryBudget::compute(total, model, model, 0, kv, 0.7, None);
         assert_eq!(budget.total_vram_bytes, total);
         assert_eq!(budget.model_memory_bytes, model);
         assert_eq!(budget.kv_cache_bytes, kv);
@@ -1561,7 +1655,7 @@ mod tests {
         let total: u64 = 24 * 1024 * 1024 * 1024;
         let model: u64 = 8 * 1024 * 1024 * 1024;
         let kv: u64 = 12 * 1024 * 1024 * 1024;
-        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7, None);
+        let budget = GpuMemoryBudget::compute(total, model, model, 0, kv, 0.7, None);
         // Only 4GB available for training
         assert_eq!(budget.training_budget_bytes, 4 * 1024 * 1024 * 1024);
         // Requesting 8GB should fail
@@ -1584,7 +1678,7 @@ mod tests {
         let total: u64 = 24 * 1024 * 1024 * 1024;
         let model: u64 = 20 * 1024 * 1024 * 1024;
         let kv: u64 = 10 * 1024 * 1024 * 1024;
-        let budget = GpuMemoryBudget::compute(total, model, kv, 0.7, None);
+        let budget = GpuMemoryBudget::compute(total, model, model, 0, kv, 0.7, None);
         // Should not underflow — saturating_sub handles it
         assert_eq!(budget.training_budget_bytes, 0);
     }
@@ -1598,6 +1692,39 @@ mod tests {
         assert!(
             gb > 4.0 && gb < 20.0,
             "model estimate {gb:.1}GB seems wrong"
+        );
+    }
+
+    #[test]
+    fn test_post_load_residency_lowers_cuda_auto_blocks() {
+        let total = 51_527_024_640;
+        let estimated_model = 9_156_689_920;
+        let post_load_residency = 13_000_000_000;
+        let bytes_per_block = 524_288;
+
+        let old_estimate_blocks = auto_num_blocks_for_fraction(
+            total,
+            estimated_model,
+            bytes_per_block,
+            0.7,
+            262_144,
+            DEFAULT_BLOCK_SIZE,
+            false,
+        );
+        let post_load_blocks = auto_num_blocks_for_fraction(
+            total,
+            post_load_residency,
+            bytes_per_block,
+            0.7,
+            262_144,
+            DEFAULT_BLOCK_SIZE,
+            false,
+        );
+
+        assert_eq!(old_estimate_blocks, 56570);
+        assert!(
+            post_load_blocks < old_estimate_blocks,
+            "post-load residency must reduce the default A6000 KV budget: old={old_estimate_blocks} post_load={post_load_blocks}"
         );
     }
 
@@ -1717,11 +1844,11 @@ mod tests {
         let kv: u64 = 2 * 1024 * 1024 * 1024;
 
         // fraction = 1.0 means all VRAM for inference, but training budget is still calculated
-        let budget_full = GpuMemoryBudget::compute(total, model, kv, 1.0, None);
+        let budget_full = GpuMemoryBudget::compute(total, model, model, 0, kv, 1.0, None);
         assert_eq!(budget_full.training_budget_bytes, 14 * 1024 * 1024 * 1024);
 
         // fraction = 0.5
-        let budget_half = GpuMemoryBudget::compute(total, model, kv, 0.5, None);
+        let budget_half = GpuMemoryBudget::compute(total, model, model, 0, kv, 0.5, None);
         assert_eq!(budget_half.training_budget_bytes, 14 * 1024 * 1024 * 1024);
     }
 
