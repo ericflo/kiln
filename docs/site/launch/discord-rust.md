@@ -6,7 +6,7 @@ length: ~250 words
 
 # Rust Discord #showcase post draft
 
-> **DRAFT — do not post until reviewed by Eric AND the demo asciicast lands.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
 
 ## Post body (paste directly into #showcase)
 
@@ -36,8 +36,8 @@ length: ~250 words
 
 ## Posting checklist
 
-- [ ] Demo asciicast linked from the launch post
+- [x] Demo asciicast landed and linked from the launch post
 - [ ] Verify the post is under the channel's character limit (`#showcase` rules sometimes cap at 2000 chars; trim the kernel bullet list if needed)
-- [ ] Eric reviews this draft + the asciicast
+- [ ] Eric reviews this draft before posting
 - [ ] Post during US working hours, Tue–Thu (Discord is more time-zone-mixed than HN; aim for 12:00–14:00 ET to catch both EU late-afternoon and US lunch)
 - [ ] Stay in the channel for ~1 hour to answer questions; Discord conversations are short-lived

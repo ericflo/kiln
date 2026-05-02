@@ -6,7 +6,7 @@ length: ~140 chars title / ~620 words body
 
 # /r/LocalLLaMA submission draft
 
-> **DRAFT — do not post until reviewed by Eric AND the demo asciicast lands.**
+> **DRAFT — do not post until reviewed by Eric and the v0.2.12 ops gate stays green.**
 
 ## Submission
 
@@ -78,9 +78,9 @@ Kiln: a single-GPU inference server in Rust that also trains the model it's serv
 
 ## Posting checklist
 
-- [ ] Demo asciicast linked from the launch post
+- [x] Demo asciicast landed and linked from the launch post
 - [ ] Confirm flair against current sub rules (the mods rotate accepted flair)
-- [ ] Eric reviews this draft + the asciicast
+- [ ] Eric reviews this draft before posting
 - [ ] Submit Tuesday–Thursday, 9:00–11:00 ET (catches both US morning and EU afternoon)
 - [ ] Reply to every top-level comment in the first 4 hours; this sub rewards founder presence
 - [ ] If the post catches: cross-post to r/MachineLearning Project Announcements (separate weekly thread) — but only after r/LocalLLaMA discussion has settled

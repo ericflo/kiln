@@ -20,7 +20,8 @@ or deployed; it's a versioned drafting space.
 ## Status
 
 > **All drafts in this directory are DRAFT status.**
-> **Do not post any of them until Eric reviews them AND the demo asciicast lands.**
+> **Demo has landed. Do not post any draft until Eric reviews it and the
+> v0.2.12 pre-launch ops gate remains green.**
 
 ## Files
 
@@ -94,8 +95,27 @@ For each channel, after going live:
   — render correctly on mobile and desktop
 - The demo asciicast — embedded on `launch.html` and visible in the page
 
+### 2026-05-02 v0.2.12 verification
+
+- [x] `gh release view kiln-v0.2.12 -R ericflo/kiln` reports
+      `isDraft=false`, `isPrerelease=false`, published at
+      `2026-05-02T08:30:14Z`, and 7 release assets.
+- [x] `gh attestation verify kiln-0.2.12-x86_64-unknown-linux-gnu-cuda124.tar.gz -R ericflo/kiln`
+      verifies SLSA provenance from `https://github.com/ericflo/kiln`.
+- [x] `gh api repos/ericflo/kiln` reports `private=false` and public repo URL
+      `https://github.com/ericflo/kiln`.
+- [x] GHCR `kiln-server` package includes tags `0.2.12` and `latest`.
+- [x] `https://ericflo.github.io/kiln/`,
+      `https://ericflo.github.io/kiln/launch.html`, and
+      `https://ericflo.github.io/kiln/demo/` return HTTP 200 and render the
+      expected titles: `Kiln — Your model gets better every time you use it`,
+      `Launching Kiln — Your model gets better every time you use it`, and
+      `Kiln Demo — 60-second online-learning loop`.
+- [x] `docs/site/launch.html` links to `demo/`, and
+      `docs/site/demo/index.html` embeds `kiln-60s.cast`.
+
 ## Where this directory came from
 
-Companion to PR #667 (live launch blog) and the upcoming demo asciicast
-task. Staged so Eric can review the channel-specific framing before any
-public post goes live.
+Companion to PR #667 (live launch blog) and the landed demo asciicast. Staged
+so Eric can review the channel-specific framing before any public post goes
+live.
