@@ -3,7 +3,10 @@
 ## kiln-v0.2.13 — 2026-05-02
 
 ### Observability
-- throughput: explain the round-10 workers=2 evidence as request mix and concurrency effects rather than a scheduler regression, and add request, prefill, decode histograms plus an active-request peak metric so future launch-gate runs can separate queue shape from decode-path regressions (#712).
+- throughput: explain the round-10 workers=2 evidence as request mix and concurrency effects rather than a scheduler regression, and add request, prefill, decode histograms plus an active-request peak metric so future release-gate runs can separate queue shape from decode-path regressions (#712).
+
+### Documentation
+- docs: scrub changelog references to removed Phase 11 docs artifacts after the tracked files and page were removed (#717, #718).
 
 ## kiln-v0.2.12 — 2026-05-02
 
@@ -28,15 +31,15 @@
 
 ## kiln-v0.2.9 — 2026-05-01
 
-Phase 11 launch-baseline release. Reliability + throughput fixes for the
-public-announce push: cancel-drain on prefill-timeout (#666) closes the v0.1.0
-reliability blocker (#664); a prefix-cache double-counting bug (#674) is
-root-caused and fixed, allowing the workers=2 emergency serialize shim from
-#672 to be reverted (#675) — restoring +23% throughput / −75% p99 ITL on the
-default config. Also lands the tools-bearing chat-template render fix (#653),
-the Phase 11 launch-doc set (#667–#671), and the post-v0.2.8 Phase 10 audits
-(closure, FleCE T=16384 OOM probe, GDN training-streaming reachability) and
-Phase A FLCE A6000 validation accumulated since the v0.2.8 cut.
+Phase 11 reliability, throughput, and onboarding release. Cancel-drain on
+prefill-timeout (#666) closes the v0.1.0 reliability blocker (#664); a
+prefix-cache double-counting bug (#674) is root-caused and fixed, allowing the
+workers=2 emergency serialize shim from #672 to be reverted (#675) — restoring
++23% throughput / −75% p99 ITL on the default config. Also lands the
+tools-bearing chat-template render fix (#653), the Phase 11 demo and onboarding
+docs (#669–#671), and the post-v0.2.8 Phase 10 audits (closure, FleCE T=16384
+OOM probe, GDN training-streaming reachability) and Phase A FLCE A6000
+validation accumulated since the v0.2.8 cut.
 
 ### Fixed
 - server: cancel-drain `spawn_blocking` generation on prefill timeout — closes the v0.1.0 reliability blocker (#664) where a stuck prefill would orphan the generation thread (#666).
@@ -51,10 +54,8 @@ Phase A FLCE A6000 validation accumulated since the v0.2.8 cut.
 - memory: relax auto KV cache cap on CUDA — let memory-aware sizing drive instead of clipping at `max_position_embeddings.div_ceil(block_size)`, which had hard-capped Qwen3.5-4B at ~8.6 GiB / 16384 blocks (one full-context window) regardless of available VRAM (#655).
 
 ### Documentation
-- docs(site): launch announcement blog post — Phase 11 launch checklist #1 (#667).
-- docs(launch): per-channel launch post drafts (HN, X/Twitter, lobste.rs, /r/LocalLLaMA, Rust Discord) staged under `docs/site/launch/` (#668).
 - docs(demo): asciicast script + asciinema player scaffolding for the 60s online-learning demo (#669).
-- docs(audits): Phase 11 pre-launch ops checklist verification (#670).
+- docs(audits): Phase 11 ops checklist verification (#670).
 - docs/demo: record canonical 60s online-learning asciicast and update `SCRIPT.md` to match shipping API (#671).
 - docs(quickstart): OpenAI tools/function-calling example (#654).
 - docs: workers=1 workaround for tools-bearing long prompts (refs #664, #656) — operator guidance pending the #666 cancel-drain fix (#665).
@@ -67,7 +68,7 @@ Phase A FLCE A6000 validation accumulated since the v0.2.8 cut.
 - ci(api): integration smoke test for tools-bearing chat-completions render path (closes #659) (#663).
 
 ### Audits
-- Phase 9 v0.1.0 release-readiness audit. New `docs/audits/PHASE9_V0_1_0_READINESS.md` walks each Phase 9 checklist item from the kiln project description and reports concrete evidence (PR/release/file) per item. **Verdict: Phase 9 is shipped — the "v0.1.0 release with semantic versioning" goal is stale.** kiln-v0.1.0 was tagged on 2026-04-19; the production line is now at kiln-v0.2.8 (Sigstore-signed build provenance, GHCR `kiln-server` Docker image auto-publishing on every `kiln-v*` tag, the `docs/site/` landing page live at https://ericflo.github.io/kiln/, and all 12 findings of `docs/audits/security-audit-v0.1.md` resolved). Punch list reduces to one non-code item: amend the kiln project description to retire the already-met v0.1.0 cut bullet and replace it with a forward-looking public-announce milestone on the kiln-v0.2.x line. Recommended next planning-loop task: that amendment (no GPU, ~10 minutes). PR #651's framing ("what remains is an audit pass + the v0.1.0 semver cut") was written without rechecking the release index — the v0.1.0 tag predated that doc by 10 days; this audit is the audit pass and there is no remaining v0.1.0 cut to do.
+- Phase 9 v0.1.0 release-readiness audit. New `docs/audits/PHASE9_V0_1_0_READINESS.md` walks each Phase 9 checklist item from the kiln project description and reports concrete evidence (PR/release/file) per item. **Verdict: Phase 9 is shipped — the "v0.1.0 release with semantic versioning" goal is stale.** kiln-v0.1.0 was tagged on 2026-04-19; the production line is now at kiln-v0.2.8 (Sigstore-signed build provenance, GHCR `kiln-server` Docker image auto-publishing on every `kiln-v*` tag, the `docs/site/` landing page live at https://ericflo.github.io/kiln/, and all 12 findings of `docs/audits/security-audit-v0.1.md` resolved). PR #651's framing ("what remains is an audit pass + the v0.1.0 semver cut") was written without rechecking the release index — the v0.1.0 tag predated that doc by 10 days; this audit is the audit pass and there is no remaining v0.1.0 cut to do.
 - Phase 10 (Liger Kernel Integration) closure consolidating §1–§3 verdicts (PR #650 et al). New `docs/audits/PHASE10_CLOSURE.md` is the single state-of-play pointer for the Phase 10 chapter ledger (§1 RMSNorm fusion, §1.5 FLCE Phase B, §2 Mode B trace, §3 next-kernel candidate audit + FleCE T=16384 OOM probe), reproduces #649's math-ceiling table, and ranks three post-Phase-10 pivot directions: Phase 9 v0.1.0 release prep, GDN training-time streaming follow-ups (active in-flight: #635/#636/#637), and a LoRA precision study (FP32→BF16 with FP32 accumulate) targeting the ~42% FP32 SGEMM hotspot surfaced in #649. Records the explicit non-goal that no further Liger kernel ports are planned without a fresh re-profile that surfaces a candidate ≥1.05× ceiling. `PROFILING.md` gains a top banner pointing readers at the closure doc.
 
 ### Phase 10 — training-time streaming GDN prefill (impl)
