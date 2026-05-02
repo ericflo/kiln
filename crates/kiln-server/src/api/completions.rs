@@ -1210,7 +1210,9 @@ async fn generate_real(
     // races against still-held state and 5xx's. On timeout we signal this
     // handle and `.await` the join handle so locks release before we
     // respond. See issue #664.
-    let cancel = CancelHandle::new();
+    let cancel = CancelHandle::with_prefill_progress_gauge(
+        state.metrics.request_prefill_tokens_completed.clone(),
+    );
     let cancel_inner = cancel.clone();
     let generation = tokio::task::spawn_blocking(move || {
         // Acquire GPU coordination read lock — allows concurrent inference,
@@ -1339,12 +1341,21 @@ async fn generate_real(
 
     tokio::pin!(generation);
     let output = match tokio::time::timeout(timeout, &mut generation).await {
-        Ok(join_result) => join_result
-            .map_err(|e| ApiError::internal(format!("join error: {e}")))?
-            .map_err(|err| {
+        Ok(join_result) => match join_result {
+            Ok(Ok(output)) => {
+                cancel.clear_prefill_progress();
+                output
+            }
+            Ok(Err(err)) => {
+                cancel.clear_prefill_progress();
                 tracing::error!(error = %format!("{err:#}"), "real generation failed");
-                ApiError::generation_failed(err)
-            })?,
+                return Err(ApiError::generation_failed(err));
+            }
+            Err(err) => {
+                cancel.clear_prefill_progress();
+                return Err(ApiError::internal(format!("join error: {err}")));
+            }
+        },
         Err(_) => {
             // Signal cooperative cancellation, then await the join handle so
             // the spawn_blocking closure releases `runner.read()` /
@@ -1355,6 +1366,7 @@ async fn generate_real(
             // typically returns within one decode step after we signal.
             cancel.cancel();
             let _ = generation.await;
+            cancel.clear_prefill_progress();
             return Err(ApiError::request_timeout(timeout.as_secs()));
         }
     };

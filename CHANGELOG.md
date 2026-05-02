@@ -1,5 +1,16 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.10 — Unreleased
+
+### Fixed
+- server: route prefix-cache prefill through the tiled/streaming long-prefill dispatcher so first-touch 43k-token prompts no longer bypass the GDN activation-bounded path (#686).
+
+### Observability
+- metrics: add `kiln_request_prefill_tokens_completed` to show live long-prefill progress instead of making operators infer whether a request is wedged from latency alone (#686).
+
+### Configuration
+- server: raise the default `request_timeout_secs` from 300 to 600 seconds so the production default is honest for long-prefill workloads; explicit TOML/env overrides remain unchanged (#686).
+
 ## kiln-v0.2.9 — 2026-05-01
 
 Phase 11 launch-baseline release. Reliability + throughput fixes for the

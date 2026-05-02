@@ -402,7 +402,7 @@ async fn test_request_timeout_configurable() {
     assert_eq!(state.request_timeout.as_secs(), 42);
 }
 
-/// Test that default request timeout is 300 seconds.
+/// Test that default request timeout is 600 seconds.
 #[tokio::test]
 async fn test_default_request_timeout() {
     let config = tiny_config();
@@ -425,7 +425,7 @@ async fn test_default_request_timeout() {
         &kiln_server::config::PrefixCacheConfig::default(),
     );
 
-    assert_eq!(state.request_timeout.as_secs(), 300);
+    assert_eq!(state.request_timeout.as_secs(), 600);
 }
 
 #[tokio::test]
