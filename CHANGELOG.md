@@ -1,5 +1,10 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.12 — 2026-05-02
+
+### Fixed
+- reliability: complete the production-shaped prefill OOM hardening series from #694/#697/#699. KV auto-sizing now uses post-load CUDA residency instead of only the static model estimate, CUDA streaming prefill starts at 8k tokens for production-shaped prompts below the old 32k threshold, and new VRAM metrics expose the static estimate, post-load snapshot, and observed prefill peak (#701).
+
 ## kiln-v0.2.11 — 2026-05-02
 
 ### Fixed
