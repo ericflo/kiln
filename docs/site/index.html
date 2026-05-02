@@ -123,7 +123,7 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-5xl mx-auto px-6 pt-20 pb-16">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">v0.2.9 &middot; pre-1.0 preview</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">v0.2.12 &middot; pre-1.0 preview</span>
       <h1 class="text-5xl sm:text-6xl font-bold tracking-tight mb-5">
         Your model gets better<br>every time you use it.
       </h1>
@@ -260,25 +260,25 @@ requests.post("http://localhost:8420/v1/train/grpo",
     <div class="max-w-5xl mx-auto px-6 py-16">
       <h2 class="text-2xl font-semibold tracking-tight mb-2">Install</h2>
       <p class="text-sm mb-8" style="color: var(--fg-mute);">
-        Latest release: <a href="https://github.com/ericflo/kiln/releases/tag/kiln-v0.2.9">kiln-v0.2.9</a>.
+        Latest release: <a href="https://github.com/ericflo/kiln/releases/tag/kiln-v0.2.12">kiln-v0.2.12</a>.
         Prerequisites: NVIDIA GPU with 24 GB+ VRAM and CUDA 12.4 <em>or</em> Apple Silicon Mac with 16 GB+ unified memory.
       </p>
 
       <h3 class="font-semibold mb-2 mt-2">Linux x86_64 &middot; CUDA 12.4</h3>
 <pre><code>curl -L -o kiln.tar.gz \
-  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.9/kiln-0.2.9-x86_64-unknown-linux-gnu-cuda124.tar.gz
+  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.12/kiln-0.2.12-x86_64-unknown-linux-gnu-cuda124.tar.gz
 tar -xzf kiln.tar.gz
 KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
 
       <h3 class="font-semibold mb-2 mt-6">macOS &middot; Apple Silicon (Metal)</h3>
 <pre><code>curl -L -o kiln.tar.gz \
-  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.9/kiln-0.2.9-aarch64-apple-darwin-metal.tar.gz
+  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.12/kiln-0.2.12-aarch64-apple-darwin-metal.tar.gz
 tar -xzf kiln.tar.gz
 KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
 
       <h3 class="font-semibold mb-2 mt-6">Windows x86_64 &middot; CUDA 12.4</h3>
 <pre><code>Invoke-WebRequest -Uri `
-  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.9/kiln-0.2.9-x86_64-pc-windows-msvc-cuda124.zip `
+  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.12/kiln-0.2.12-x86_64-pc-windows-msvc-cuda124.zip `
   -OutFile kiln.zip
 Expand-Archive kiln.zip
 $env:KILN_MODEL_PATH = ".\Qwen3.5-4B"; .\kiln\kiln.exe serve</code></pre>
