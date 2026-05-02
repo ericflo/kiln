@@ -50,7 +50,7 @@ The embed used in [`index.html`](index.html):
 </script>
 ```
 
-To embed the player on `launch.html` (or anywhere else under `docs/site/`), copy the three blocks above and adjust the `'kiln-60s.cast'` paths to be relative to the embedding page (e.g. `'demo/kiln-60s.cast'` from `launch.html`).
+`launch.html` embeds this player inline using the same settings and the page-relative source path `'demo/kiln-60s.cast'`. For another page under `docs/site/`, copy the three blocks above and adjust the cast path relative to that page.
 
 ## How to re-record
 
@@ -70,7 +70,7 @@ The `--command` flag scripts the entire take so each run is byte-deterministic i
 ## Cross-links
 
 - **README hero:** [`README.md`](../../../README.md) — the `Demo` link in the center-aligned link row points here.
-- **Launch announcement:** [`launch.html`](../launch.html) — has an inline link near the GRPO-loop section. After the real recording lands, `launch.html` may also embed the player inline.
+- **Launch announcement:** [`launch.html`](../launch.html) — embeds the same `kiln-60s.cast` player inline near the GRPO-loop section.
 - **Launch post drafts:** [`launch/README.md`](../launch/README.md) — pre-launch ops gate references the demo asciicast as a launch blocker.
 - **Quickstart:** [`QUICKSTART.md`](../../../QUICKSTART.md) — the commands run in the demo are a strict subset of the Quickstart.
 

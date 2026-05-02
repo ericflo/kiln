@@ -19,6 +19,11 @@
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- asciinema-player CSS (self-hosted via jsDelivr CDN, version-pinned) -->
+  <link rel="stylesheet" type="text/css"
+        href="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.css" />
+
   <style>
     :root {
       color-scheme: dark;
@@ -104,6 +109,13 @@
     .prose-body ul li { margin-bottom: 0.35rem; }
     .prose-body strong { color: var(--fg); font-weight: 600; }
     .meta-line { color: var(--fg-mute); font-size: 0.875rem; }
+    .asciinema-frame {
+      background: #1c1c1c;
+      border: 1px solid var(--line-2);
+      border-radius: 12px;
+      padding: 0.5rem;
+      overflow: hidden;
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -201,9 +213,13 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
       <p>
         See <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">docs/GRPO_GUIDE.md</a> for
         worked verifiable-rewards examples on math, JSON formatting, and code generation. The
-        <a href="demo/">60&#x2011;second demo</a> shows the same loop end-to-end on a single GPU: cold start,
-        first chat on the base model, an SFT correction, hot-swap, then the second chat on the improved weights.
+        <a href="demo/">60&#x2011;second demo</a> below shows the same loop end-to-end on a single GPU:
+        cold start, first chat on the base model, an SFT correction, hot-swap, then the second chat on
+        the improved weights.
       </p>
+      <div class="asciinema-frame mb-8" aria-label="Kiln 60-second online-learning demo">
+        <div id="kiln-demo-player" data-src="demo/kiln-60s.cast"></div>
+      </div>
 
       <h2>Hot-swap, not redeploy</h2>
       <p>
@@ -342,5 +358,24 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
       </nav>
     </div>
   </footer>
+
+  <!-- asciinema-player JS -->
+  <script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.min.js"></script>
+  <script>
+    AsciinemaPlayer.create(
+      'demo/kiln-60s.cast',
+      document.getElementById('kiln-demo-player'),
+      {
+        autoPlay: false,
+        preload: true,
+        loop: false,
+        idleTimeLimit: 2,
+        theme: 'monokai',
+        poster: 'npt:0:02',
+        cols: 120,
+        rows: 32
+      }
+    );
+  </script>
 </body>
 </html>
