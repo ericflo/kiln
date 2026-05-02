@@ -3,7 +3,7 @@
 **Date:** 2026-05-01
 **Auditor:** Cloud Eric (autonomous)
 **Scope:** End-to-end verification that the kiln-v0.2.x line is launch-ready for the public-announce push.
-**Verdict:** **GO** — all six v0.2.8 verification items pass cleanly. v0.2.9 re-verification appendix added 2026-05-01: also **GO**, with the demo-asciicast placeholder now resolved (canonical 60-second cast is live).
+**Verdict:** **GO** — current public-announce launch line is kiln-v0.2.13. v0.2.8, v0.2.9, v0.2.12, and v0.2.13 verification passes are all green; the demo-asciicast placeholder is resolved and the canonical 60-second cast is live.
 
 ---
 
@@ -316,3 +316,80 @@ curl -sL -I https://ericflo.github.io/kiln/demo/kiln-60s.cast
 ### v0.2.12 verdict
 
 **GO for the public-announce push on the kiln-v0.2.12 line.** The current release exists, Pages has deployed the PR #703 launch-copy bump, the live launch page and staged launch-channel drafts are pinned to v0.2.12, and the demo asciicast remains live. No new launch blockers were introduced by the v0.2.9 → v0.2.12 transition.
+
+---
+
+## 9. v0.2.13 verification appendix (2026-05-02)
+
+**Context:** PR #714 moved the staged launch-channel drafts and `docs/site/launch/README.md` forward to kiln-v0.2.13 after the v0.2.12 appendix. This appendix does not duplicate those draft edits; it records the current release, Pages deploy, live page, launch-draft, and demo-player checks against the v0.2.13 production line.
+
+### a. Current release
+
+**Command run:**
+
+```bash
+gh release view kiln-v0.2.13 -R ericflo/kiln --json tagName,publishedAt,assets --jq '{tagName,publishedAt,asset_count:(.assets|length)}'
+```
+
+**Finding:** kiln-v0.2.13 is published at `2026-05-02T19:19:06Z` with 7 release assets, matching the expected binary/sidecar/license asset shape for the public-announce line.
+
+**Status:** ✅ PASS
+
+### b. Pages deploy
+
+**Command run:**
+
+```bash
+gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json databaseId,status,conclusion,headSha --jq '.[0]'
+```
+
+**Finding:** The latest Pages workflow completed successfully at head SHA `1c9cbc3bc71e476d0b867dc4ed13a8345401ecce` (run `25260168918`), the deploy containing the v0.2.13 launch-surface updates.
+
+**Status:** ✅ PASS
+
+### c. Live landing and launch version refs
+
+**Commands run:**
+
+```bash
+for url in https://ericflo.github.io/kiln/ https://ericflo.github.io/kiln/launch.html; do
+  curl -sL "$url" | grep -oE '0\.2\.[0-9]+' | sort -u
+done
+```
+
+**Finding:** The live landing page and launch page only expose `0.2.13` version references. The launch page is pinned to the kiln-v0.2.13 release download URL and no stale v0.2.12 refs remain visible to cold readers.
+
+**Status:** ✅ PASS
+
+### d. Launch drafts
+
+**Command run:**
+
+```bash
+rg -n 'v0\.2\.13|kiln-v0\.2\.13|0\.2\.13' docs/site/launch.html docs/site/launch
+```
+
+**Finding:** The staged HN, lobste.rs, Reddit, Rust Discord, Twitter, and launch README surfaces are pinned to v0.2.13 after PR #714. This audit records that state without changing the draft copy.
+
+**Status:** ✅ PASS
+
+### e. Demo player and cast reachability
+
+**Commands run:**
+
+```bash
+for url in \
+  https://ericflo.github.io/kiln/demo/ \
+  https://ericflo.github.io/kiln/assets/logo.png \
+  https://ericflo.github.io/kiln/demo/kiln-60s.cast; do
+  curl -L -s -o /tmp/kiln_check.out -w '%{http_code} %{size_download} %{url_effective}\n' "$url"
+done
+```
+
+**Finding:** The demo page, logo asset, and canonical `kiln-60s.cast` all return HTTP 200. The asciinema player and cast remain reachable for the v0.2.13 launch line, so the earlier v0.2.8 placeholder-demo observation remains resolved.
+
+**Status:** ✅ PASS
+
+### v0.2.13 verdict
+
+**GO for the public-announce push on the kiln-v0.2.13 line.** The current release exists with 7 assets, Pages has deployed the v0.2.13 launch-surface updates, the live landing and launch pages only expose v0.2.13 version refs, staged launch-channel drafts are pinned to v0.2.13, and the demo player/cast assets remain live. No new launch blockers were introduced by the v0.2.12 → v0.2.13 transition.
