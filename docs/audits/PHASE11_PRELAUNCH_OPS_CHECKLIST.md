@@ -246,3 +246,73 @@ curl -sL https://ericflo.github.io/kiln/demo/kiln-60s.cast | head -c 300
 ### v0.2.9 verdict
 
 **GO for the public-announce push on the kiln-v0.2.9 line.** All six v0.2.9 verifications pass cleanly. Release integrity, GHCR image manifest + attestation, `latest` tag pointing at v0.2.9, both site pages bumped to v0.2.9, and the demo asciicast is now a real 220 KB recording instead of a placeholder. No new launch blockers introduced by the v0.2.8 → v0.2.9 transition. When the greenlight approval `3da4a6354ad6c4fddd85ae0a` comes back, the launch surface is verified against the current release.
+
+---
+
+## 8. v0.2.12 verification appendix (2026-05-02)
+
+**Context:** PR #703 moved the public launch page and staged launch-channel drafts forward to kiln-v0.2.12 after the v0.2.9 audit appendix. This appendix preserves the earlier v0.2.8/v0.2.9 audit history and records the current launch surface against the v0.2.12 production line.
+
+### a. Current release
+
+**Command run:**
+
+```bash
+gh release view kiln-v0.2.12 -R ericflo/kiln --json tagName,publishedAt,assets --jq '{tagName,publishedAt,asset_count:(.assets|length)}'
+```
+
+**Finding:** kiln-v0.2.12 is published at `2026-05-02T08:30:14Z` with 7 release assets, matching the expected binary/sidecar/license asset shape for the public-announce line.
+
+**Status:** ✅ PASS
+
+### b. Pages deploy
+
+**Command run:**
+
+```bash
+gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json status,conclusion,headSha --jq '.[0]'
+```
+
+**Finding:** The latest Pages workflow completed successfully at head SHA `756e2573d3862ae8feb5854d4709cdf019d3cfe6`, the merge commit for PR #703.
+
+**Status:** ✅ PASS
+
+### c. Launch page
+
+**Command run:**
+
+```bash
+curl -L --max-time 20 -s https://ericflo.github.io/kiln/launch.html | rg 'v0\.2\.12|kiln-v0\.2\.12'
+```
+
+**Finding:** The live launch page includes v0.2.12 in the announcement pill, kiln-v0.2.12 in the release download URL, and the production-line caveat.
+
+**Status:** ✅ PASS
+
+### d. Launch drafts
+
+**Command run:**
+
+```bash
+rg -n 'v0\.2\.12|kiln-v0\.2\.12|0\.2\.12' docs/site/launch.html docs/site/launch
+```
+
+**Finding:** The staged HN, lobste.rs, Reddit, Rust Discord, Twitter, and launch README surfaces all point at v0.2.12 after PR #703. No launch-draft surface remains pinned to v0.2.9.
+
+**Status:** ✅ PASS
+
+### e. Demo status
+
+**Command run:**
+
+```bash
+curl -sL -I https://ericflo.github.io/kiln/demo/kiln-60s.cast
+```
+
+**Finding:** The canonical 60-second asciicast remains published and reachable, so the earlier v0.2.8 placeholder-demo observation remains resolved for the v0.2.12 launch line.
+
+**Status:** ✅ PASS
+
+### v0.2.12 verdict
+
+**GO for the public-announce push on the kiln-v0.2.12 line.** The current release exists, Pages has deployed the PR #703 launch-copy bump, the live launch page and staged launch-channel drafts are pinned to v0.2.12, and the demo asciicast remains live. No new launch blockers were introduced by the v0.2.9 → v0.2.12 transition.
