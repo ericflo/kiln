@@ -1,5 +1,5 @@
 ---
-channel: lobste
+channel: lobsters
 status: draft
 length: ~70 chars title / ~330 words comment
 ---
