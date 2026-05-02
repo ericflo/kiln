@@ -62,6 +62,9 @@ format = "json"                       # json, pretty, text, human
 [prefix_cache]
 enabled = true                        # Reuse KV cache blocks for shared prompt prefixes
 # max_blocks = 64                     # Max blocks for prefix cache (default: 25% of total)
+# max_entries = 20                    # Max cached prompt snapshots (auto-sized by VRAM if omitted).
+                                      # Each real-backend entry retains ~49 MiB of GDN state
+                                      # on Qwen3.5-4B, separate from KV blocks.
 
 [speculative]
 enabled = false                       # Self-speculative decoding (skip-layer draft)
