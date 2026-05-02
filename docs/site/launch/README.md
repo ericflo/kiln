@@ -21,7 +21,7 @@ or deployed; it's a versioned drafting space.
 
 > **All drafts in this directory are DRAFT status.**
 > **Demo has landed. Do not post any draft until Eric reviews it and the
-> v0.2.12 pre-launch ops gate remains green.**
+> v0.2.13 pre-launch ops gate remains green.**
 
 ## Files
 
@@ -93,12 +93,23 @@ For each channel, after going live:
 
 ## Pre-launch ops gate (must be green before any draft goes live)
 
-- `gh release view kiln-v0.2.12 -R ericflo/kiln` — clean
+- `gh release view kiln-v0.2.13 -R ericflo/kiln` — clean
 - `gh attestation verify` against the latest release artifact — clean
 - `gh api repos/ericflo/kiln` — public, README rendered, links work
 - https://ericflo.github.io/kiln/ and https://ericflo.github.io/kiln/launch.html
   — render correctly on mobile and desktop
 - The demo asciicast — embedded on `launch.html` and visible in the page
+
+### 2026-05-02 v0.2.13 verification
+
+- [ ] `gh release view kiln-v0.2.13 -R ericflo/kiln` reports
+      `isDraft=false`, `isPrerelease=false`, and includes the expected release
+      assets.
+- [ ] `gh attestation verify kiln-0.2.13-x86_64-unknown-linux-gnu-cuda124.tar.gz -R ericflo/kiln`
+      verifies SLSA provenance from `https://github.com/ericflo/kiln`.
+- [ ] GHCR `kiln-server` package includes tags `0.2.13` and `latest`; verify
+      with `gh api orgs/ericflo/packages/container/kiln-server/versions` or the
+      package UI before posting.
 
 ### 2026-05-02 v0.2.12 verification
 

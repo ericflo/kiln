@@ -1,5 +1,10 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.13 — 2026-05-02
+
+### Observability
+- throughput: explain the round-10 workers=2 evidence as request mix and concurrency effects rather than a scheduler regression, and add request, prefill, decode histograms plus an active-request peak metric so future launch-gate runs can separate queue shape from decode-path regressions (#712).
+
 ## kiln-v0.2.12 — 2026-05-02
 
 ### Fixed
