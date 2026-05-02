@@ -1,5 +1,10 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.11 — 2026-05-02
+
+### Fixed
+- memory: bound retained `RealPrefixCache` GDN `LinearAttentionState` snapshots via `prefix_cache.max_entries` / `KILN_PREFIX_CACHE_MAX_ENTRIES`, and expose new prefix-cache state metrics so sustained workers=2 traffic cannot accumulate hidden ~49 MiB state entries into post-v0.2.10 OOM cascades (#697).
+
 ## kiln-v0.2.10 — 2026-05-02
 
 ### Fixed
