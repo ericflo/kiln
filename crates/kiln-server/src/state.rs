@@ -437,7 +437,7 @@ pub struct AppState {
     pub vram_info: kiln_core::vram::GpuVramInfo,
     /// Shutdown flag — set to true when the server is shutting down.
     pub shutdown: ShutdownFlag,
-    /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 300).
+    /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
     pub request_timeout: std::time::Duration,
     /// Prometheus metrics counters.
     pub metrics: Arc<Metrics>,

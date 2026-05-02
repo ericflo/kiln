@@ -4,6 +4,7 @@
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
 use kiln_scheduler::PrefixCacheStats;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Atomically tracked metrics for the kiln server.
@@ -19,6 +20,9 @@ pub struct Metrics {
 
     /// Currently in-flight inference requests.
     pub active_requests: AtomicU64,
+
+    /// Prompt/prefix prefill tokens completed by currently in-flight requests.
+    pub request_prefill_tokens_completed: Arc<AtomicU64>,
 
     /// Request duration tracking (simple: count + sum in microseconds).
     pub request_duration_count: AtomicU64,
@@ -42,6 +46,7 @@ impl Metrics {
             requests_rejected: AtomicU64::new(0),
             tokens_generated: AtomicU64::new(0),
             active_requests: AtomicU64::new(0),
+            request_prefill_tokens_completed: Arc::new(AtomicU64::new(0)),
             request_duration_count: AtomicU64::new(0),
             request_duration_sum_us: AtomicU64::new(0),
             training_sft_completed: AtomicU64::new(0),
@@ -139,6 +144,16 @@ impl Metrics {
         out.push_str("# HELP kiln_active_requests Currently in-flight requests.\n");
         out.push_str("# TYPE kiln_active_requests gauge\n");
         push_line(&mut out, &format!("kiln_active_requests {}", self.active_requests.load(Ordering::Relaxed)));
+
+        out.push_str("# HELP kiln_request_prefill_tokens_completed Prompt/prefix prefill tokens completed by currently in-flight requests.\n");
+        out.push_str("# TYPE kiln_request_prefill_tokens_completed gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_request_prefill_tokens_completed {}",
+                self.request_prefill_tokens_completed.load(Ordering::Relaxed)
+            ),
+        );
 
         // --- Scheduler ---
         out.push_str("# HELP kiln_scheduler_waiting Requests waiting to be scheduled.\n");
@@ -320,6 +335,8 @@ mod tests {
         m.observe_duration(0.5);
         m.add_tokens(100);
         m.inc_active();
+        m.request_prefill_tokens_completed
+            .store(8192, std::sync::atomic::Ordering::Relaxed);
 
         let gauges = SnapshotGauges {
             scheduler_waiting: 3,
@@ -348,6 +365,7 @@ mod tests {
         assert!(output.contains("kiln_requests_total{status=\"error\"} 1"));
         assert!(output.contains("kiln_tokens_generated_total 100"));
         assert!(output.contains("kiln_active_requests 1"));
+        assert!(output.contains("kiln_request_prefill_tokens_completed 8192"));
         assert!(output.contains("kiln_scheduler_waiting 3"));
         assert!(output.contains("kiln_blocks_total 256"));
         assert!(output.contains("kiln_vram_total_bytes 24000000000"));

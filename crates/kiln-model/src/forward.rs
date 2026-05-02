@@ -1311,7 +1311,7 @@ fn marlin_bf16_drop_disabled() -> bool {
 /// `GDN_CHUNK_SIZE` (64) so the chunkwise kernel never sees a partial tail
 /// chunk from a tile boundary.
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
-pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 65533;
+pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 32768;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
@@ -7233,6 +7233,33 @@ pub fn model_forward_paged_streaming(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
+    model_forward_paged_streaming_with_progress(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_with_progress(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    progress: Option<&crate::cancel::CancelHandle>,
+) -> Result<Tensor> {
     model_forward_paged_streaming_with(
         backend,
         token_ids,
@@ -7245,6 +7272,7 @@ pub fn model_forward_paged_streaming(
         lora,
         streaming_tile_tokens_for(weights.embed_tokens.device()),
         streaming_last_token_lm_head(),
+        progress,
     )
 }
 
@@ -7372,6 +7400,7 @@ pub fn model_forward_paged_streaming_with(
     lora: Option<&LoraWeights>,
     tile_size: usize,
     last_token_only: bool,
+    progress: Option<&crate::cancel::CancelHandle>,
 ) -> Result<Tensor> {
     let total = token_ids.len();
     if total == 0 {
@@ -7428,6 +7457,9 @@ pub fn model_forward_paged_streaming_with(
         }
 
         cursor = end;
+        if let Some(progress) = progress {
+            progress.report_prefill_tokens_completed(cursor as u64);
+        }
     }
 
     last_logits.context("streaming prefill produced no logits (empty token_ids)")
@@ -11060,6 +11092,7 @@ mod tests {
             None,
             tile_size,
             false,
+            None,
         )?;
 
         Ok((mono_logits, stream_logits))
@@ -11259,6 +11292,7 @@ mod tests {
                 None,
                 tile,
                 true, // last_token_only — matches production dispatch
+                None,
             )?;
             assert_eq!(logits.dims(), &[1, 1, config.vocab_size]);
             let last = logits.flatten_all()?.to_vec1::<f32>()?;
@@ -11431,6 +11465,7 @@ mod tests {
             None,
             tile,
             true,
+            None,
         )?;
         let stream_decode = model_forward_paged(
             &backend,
@@ -11788,6 +11823,7 @@ mod tests {
             None,
             tile,
             false,
+            None,
         )?;
 
         assert_eq!(mono_logits.dims(), &[1, total, config.vocab_size]);
@@ -11876,6 +11912,10 @@ mod tests {
         assert!(streaming_prefill_default_for(
             StreamingPrefillDeviceKind::Cuda,
             STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD
+        ));
+        assert!(streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Cuda,
+            43_814
         ));
         assert!(!streaming_prefill_default_for(
             StreamingPrefillDeviceKind::Metal,

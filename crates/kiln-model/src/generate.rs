@@ -21,6 +21,7 @@ use crate::forward::{
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_streaming_with_progress,
     streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
@@ -1043,7 +1044,23 @@ impl ModelRunner {
             && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
         let prefill_source = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            if use_greedy_prefill_token {
+            if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
+                PrefillSampleSource::Logits(
+                    model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
+                    )
+                    .context("prefill forward pass (paged prefix cache, streaming) failed")?,
+                )
+            } else if use_greedy_prefill_token {
                 PrefillSampleSource::GreedyToken(
                     model_forward_paged_last_token_greedy(
                         &*self.backend,
@@ -1060,21 +1077,23 @@ impl ModelRunner {
                     .context("greedy prefill forward pass (paged prefix cache) failed")?,
                 )
             } else {
-                PrefillSampleSource::Logits(
-                    model_forward_paged_last_token(
-                        &*self.backend,
-                        prefill_tokens,
-                        &self.weights,
-                        &self.config,
-                        &mut pc_guard,
-                        block_table,
-                        cached_tokens,
-                        Some(&mut linear_state),
-                        self.active_lora.as_ref(),
-                        None,
-                    )
-                    .context("prefill forward pass (paged prefix cache) failed")?,
+                let logits = model_forward_paged_last_token(
+                    &*self.backend,
+                    prefill_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
                 )
+                .context("prefill forward pass (paged prefix cache) failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                }
+                PrefillSampleSource::Logits(logits)
             }
         };
 
@@ -1378,7 +1397,7 @@ impl ModelRunner {
         let logits = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
-                model_forward_paged_streaming(
+                model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -1388,10 +1407,11 @@ impl ModelRunner {
                     0,
                     Some(&mut linear_state),
                     self.active_lora.as_ref(),
+                    cancel,
                 )
                 .context("prefill forward pass (paged, streaming) failed")?
             } else {
-                model_forward_paged_last_token(
+                let logits = model_forward_paged_last_token(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
@@ -1403,7 +1423,11 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                     None,
                 )
-                .context("prefill forward pass (paged) failed")?
+                .context("prefill forward pass (paged) failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(prompt_tokens.len() as u64);
+                }
+                logits
             }
         };
 

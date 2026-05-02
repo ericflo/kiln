@@ -327,7 +327,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".into(),
             port: 8420,
-            request_timeout_secs: 300,
+            request_timeout_secs: 600,
             shutdown_timeout_secs: 30,
         }
     }
@@ -765,7 +765,7 @@ mod tests {
         let config = KilnConfig::default();
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8420);
-        assert_eq!(config.server.request_timeout_secs, 300);
+        assert_eq!(config.server.request_timeout_secs, 600);
         assert_eq!(config.server.shutdown_timeout_secs, 30);
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
         assert!(config.model.path.is_none());
@@ -911,7 +911,7 @@ port = 3000
         let config: KilnConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.port, 3000);
         assert_eq!(config.server.host, "127.0.0.1"); // default (loopback)
-        assert_eq!(config.server.request_timeout_secs, 300); // default
+        assert_eq!(config.server.request_timeout_secs, 600); // default
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B"); // default
         assert_eq!(config.memory.inference_memory_fraction, 0.7); // default
         assert_eq!(config.logging.level, "info"); // default
