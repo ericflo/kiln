@@ -821,7 +821,7 @@ async function pollDecodePerf() {
       </div>
       <div style="margin-top:8px;font-size:12px;color:var(--text2)">Mean inter-token latency: ${mean} ms</div>`;
   } catch (e) {
-    el.innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+    el.innerHTML = apiFailureHtml('Decode performance', e);
   }
 }
 
@@ -841,6 +841,15 @@ function fmtRelTime(unixMs) {
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function apiFailureHtml(action, e) {
+  return `<div class="empty">
+    <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
+    <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then refresh this panel.</div>
+    <div style="margin-top:8px;">If it keeps failing, check the server logs for startup, model-path, or GPU initialization errors.</div>
+    <div style="margin-top:8px;font-family:var(--mono);font-size:12px;">Details: ${escapeHtml(e.message)}</div>
+  </div>`;
 }
 
 function renderRecentRequests(rows) {
@@ -894,7 +903,7 @@ async function pollRecentRequests() {
     renderRecentRequests(recentRequestsCache);
   } catch (e) {
     const el = document.getElementById('recent-requests-panel');
-    if (el) el.innerHTML = `<div class="empty">Failed to load: ${escapeHtml(e.message)}</div>`;
+    if (el) el.innerHTML = apiFailureHtml('Recent requests', e);
   }
 }
 
@@ -909,14 +918,18 @@ async function pollAdapters() {
     updateAdapterSelect(data);
     renderMergeSources();
   } catch (e) {
-    document.getElementById('adapters-panel').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+    document.getElementById('adapters-panel').innerHTML = apiFailureHtml('Adapters', e);
   }
 }
 
 function renderAdapters(data) {
   const el = document.getElementById('adapters-panel');
   if (!data.available || data.available.length === 0) {
-    el.innerHTML = '<div class="empty">No adapters found</div>';
+    el.innerHTML = `<div class="empty">
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No adapters found yet.</div>
+      <div>Use the base model now, submit an SFT job to create your first adapter, or upload/import a PEFT-compatible adapter below.</div>
+      <div style="margin-top:8px;">Training starts from the <strong>Submit SFT</strong> tab; feedback-based training starts from <strong>Submit GRPO</strong>.</div>
+    </div>`;
     return;
   }
   const items = data.available.map(a => {
@@ -1107,7 +1120,7 @@ async function pollTraining() {
     const data = await api('/v1/train/queue');
     renderTrainingQueue(data);
   } catch (e) {
-    document.getElementById('tab-queue').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+    document.getElementById('tab-queue').innerHTML = apiFailureHtml('Training queue', e);
   }
 }
 
@@ -1146,7 +1159,11 @@ function renderTrainingQueue(data) {
   }
 
   if (!html) {
-    html = '<div class="empty">No training jobs</div>';
+    html = `<div class="empty">
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No training jobs yet.</div>
+      <div>Submit SFT examples to teach the model a correction, or use Submit GRPO for scored completions and reward-driven updates.</div>
+      <div style="margin-top:8px;">Until then, Quick Inference uses the Base Model or whichever adapter you load.</div>
+    </div>`;
   }
 
   el.innerHTML = html;
