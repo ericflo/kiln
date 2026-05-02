@@ -20,12 +20,12 @@ the project description has either landed or is met by an
 already-published artifact.
 
 The single remaining action is a **project-description amendment**:
-either retire the "Phase 9 v0.1.0 release prep" goal entirely, or
-rename it to a forward-looking public-announce milestone (suggested:
-"Phase 9: public-announce cut on the kiln-v0.2.x line"). The Phase 10
-closure doc's claim that "what remains is an audit pass + the v0.1.0
-semver cut" was written without rechecking the release index — the
-v0.1.0 cut happened 10 days before that doc was authored.
+retire the "Phase 9 v0.1.0 release prep" goal as complete and carry
+forward any remaining work as neutral Phase 11 onboarding and
+release-readiness polish. The Phase 10 closure doc's claim that "what
+remains is an audit pass + the v0.1.0 semver cut" was written without
+rechecking the release index — the v0.1.0 cut happened 10 days before
+that doc was authored.
 
 ## Phase 9 checklist status
 
@@ -68,31 +68,30 @@ tag predated that doc by 10 days. This audit is the audit pass; there
 is no remaining v0.1.0 cut to do.
 
 **What "v0.1.0" was probably meant to mean** in the project
-description, charitably: *the public-announce milestone* — the moment
-where kiln stops being an internal project and gets a deliberate
-external-facing announcement (HN post, X/Twitter thread, Discord,
-etc.). That milestone has not happened. The current `0.2.x` line is
-mature enough that it could happen tomorrow.
+description, charitably: *the release-readiness milestone* — the moment
+where kiln's release artifacts, supply-chain metadata, docs, and
+onboarding path are coherent enough for cold-reader developers. That
+milestone is satisfied by the current `0.2.x` line, with Phase 11 left
+to keep the onboarding surfaces polished.
 
 **Recommendation:** Amend the kiln project description's "Phase 9:
 Public Release Preparation" section to:
 
 * Strike the "v0.1.0 release with semantic versioning" bullet (already
   shipped on 2026-04-19; the goal as written cannot be met any more).
-* Add a new explicit goal in its place — suggested:
-  "**Public-announce cut** on the kiln-v0.2.x line: write the launch
-  blog post, post to HN/X/Discord, link the demo, and gate any
-  remaining v0.3.0-ahead changes behind that announcement." This is
-  the *actual* remaining work the original "v0.1.0 cut" goal was
-  reaching toward.
-* Optionally mention that the `0.2.x` line is the public release line
+* Add a new explicit note in its place — suggested:
+  "**Release-readiness baseline** on the kiln-v0.2.x line: release
+  artifacts, provenance, docs, landing page, demo link, and cold-reader
+  onboarding checks are green; keep v0.3.0-ahead changes separate from
+  Phase 11 onboarding polish." This is the *actual* remaining work the
+  original "v0.1.0 cut" goal was reaching toward.
+* Optionally mention that the `0.2.x` line is the current release line
   and `0.1.x` was the early-access run.
 
 Do **not** silently rewrite the project description from this audit
 PR — that decision belongs to Eric (it's a positioning question, not
 a doc-fact correction). This audit's job is to flag the staleness and
-recommend the amendment. Eric's call on whether to take the
-"public-announce" framing or something else.
+recommend a neutral release-readiness amendment.
 
 ## Punch list
 
@@ -101,7 +100,7 @@ punch list of remaining work is:
 
 1. **Project description amendment** (no GPU; Eric-driven; not a code
    PR). Strike the stale `v0.1.0 release with semantic versioning`
-   bullet from the kiln project description, add a public-announce
+   bullet from the kiln project description, add a release-readiness
    milestone in its place per the recommendation above. Effort:
    ~10 minutes of editing in the Cloud Eric project UI.
 
@@ -118,31 +117,32 @@ The single highest-leverage next task — concrete, verifiable,
 no-GPU — is:
 
 > **Title:** `kiln project description: replace stale v0.1.0 cut goal
-> with public-announce milestone`
+> with release-readiness milestone`
 >
 > **Description:** Apply the project-description amendment recommended
 > in `docs/audits/PHASE9_V0_1_0_READINESS.md`: strike the
 > `v0.1.0 release with semantic versioning` Phase 9 checklist bullet
 > (already shipped 2026-04-19; the goal as written is met) and replace
-> it with a forward-looking "Public-announce cut on the kiln-v0.2.x
-> line" goal that names the announcement channels (blog post,
-> HN, X, Discord), the gating relationship to a hypothetical v0.3.0
-> changes, and the verification step (post hits, demo link is live).
+> it with a forward-looking "Release-readiness baseline on the
+> kiln-v0.2.x line" goal that names the shipped artifacts,
+> provenance, docs, demo link, onboarding checks, and the boundary for
+> hypothetical v0.3.0-ahead changes.
 > Doc-only / project-config-only; no PR against ericflo/kiln required.
 >
 > **Effort:** ~10 minutes. **GPU required:** no. **Cycle backoff
 > after:** 30 minutes (steady state, Phase 9 cleared, no v0.1.0 cut to
 > watch).
 
-After that amendment lands, the next Phase 9 cycle should pivot the
-loop to either (a) the public-announce execution itself if Eric wants
-that work in-loop, or (b) the two ranked post-Phase-10 alternatives
-from `PHASE10_CLOSURE.md` §"Pivot recommendations" — GDN training-time
-streaming follow-ups (PR #635/#636/#637 in flight) or a LoRA precision
-study targeting the FP32 SGEMM ~42% hotspot. Per planning-loop policy,
-do **not** end the cycle on "awaiting Eric" without a corresponding
-`ce approval-create` if the choice between (a) and (b) is genuinely
-his call; otherwise pick the higher-leverage option and execute it.
+After that amendment lands, the next Phase 9 cycle should treat Phase
+9 as closed and continue Phase 11 onboarding polish, or take the two
+ranked post-Phase-10 alternatives from `PHASE10_CLOSURE.md` §"Pivot
+recommendations" only if the planning policy has moved beyond Phase
+11: GDN training-time streaming follow-ups (PR #635/#636/#637 in
+flight) or a LoRA precision study targeting the FP32 SGEMM ~42%
+hotspot. Per planning-loop policy, do **not** end the cycle on
+"awaiting Eric" without a corresponding `ce approval-create` if a
+genuine product decision is required; otherwise pick the
+higher-leverage option and execute it.
 
 ## References
 

@@ -1,9 +1,9 @@
-# Phase 11 Pre-Launch Ops Checklist
+# Phase 11 Release-Readiness Ops Checklist
 
 **Date:** 2026-05-01
 **Auditor:** Cloud Eric (autonomous)
-**Scope:** End-to-end verification that the kiln-v0.2.x line is launch-ready for the public-announce push.
-**Verdict:** **GO** — current public-announce launch line is kiln-v0.2.13. v0.2.8, v0.2.9, v0.2.12, and v0.2.13 verification passes are all green; the demo-asciicast placeholder is resolved and the canonical 60-second cast is live.
+**Scope:** End-to-end verification that the kiln-v0.2.x line is release-ready for cold-reader onboarding.
+**Verdict:** **GO** — current release-readiness line is kiln-v0.2.13. v0.2.8, v0.2.9, v0.2.12, and v0.2.13 verification passes are all green; the demo-asciicast placeholder is resolved and the canonical 60-second cast is live.
 
 ---
 
@@ -56,9 +56,9 @@ gh attestation verify oci://ghcr.io/ericflo/kiln-server:0.2.8 \
 
 ---
 
-## 3. Landing / launch / demo page screenshots (mobile + desktop)
+## 3. Landing / release / demo page screenshots (mobile + desktop)
 
-**Goal:** Confirm that the public Pages site renders cleanly for first-time visitors on both mobile and desktop, and that the launch + demo pages are linkable.
+**Goal:** Confirm that the Pages site renders cleanly for first-time visitors on both mobile and desktop, and that the release + demo pages are linkable.
 
 **Method:** Headless Puppeteer with the pre-installed Chromium, full-page screenshots at 390×844 (mobile) and 1440×900 (desktop), `networkidle2`, `--ignore-certificate-errors`.
 
@@ -73,7 +73,7 @@ gh attestation verify oci://ghcr.io/ericflo/kiln-server:0.2.8 \
 
 **Findings:**
 - Landing renders correctly at both viewports — hero, value prop, install snippet, and links to ARCHITECTURE / QUICKSTART / GRPO_GUIDE all visible without overflow.
-- Launch page mobile capture renders the full announce post + CTAs without horizontal scroll.
+- Release page mobile capture renders the full release summary + CTAs without horizontal scroll.
 - Demo page desktop capture renders the asciinema embed shell. The current asciicast is a "coming soon" placeholder — see Observations below.
 
 **Status:** ✅ PASS (with placeholder demo asciicast noted as observation, not a blocker)
@@ -140,17 +140,17 @@ gh run view <run-id> --repo ericflo/kiln --log-failed
 
 ## Observations (non-blocking)
 
-- **Demo page asciicast is a placeholder.** `https://ericflo.github.io/kiln/demo/` currently renders a graceful "coming soon" stub instead of the canonical 60-second recording. The page itself is launch-ready; the placeholder degrades cleanly. The public-announce push is **not** blocked on this — it can ship today with the placeholder and the canonical recording can land as a follow-up docs-only PR.
+- **Demo page asciicast is a placeholder.** `https://ericflo.github.io/kiln/demo/` currently renders a graceful "coming soon" stub instead of the canonical 60-second recording. The page itself is release-ready; the placeholder degrades cleanly. The release-readiness baseline is **not** blocked on this — it can ship with the placeholder and the canonical recording can land as a follow-up docs-only PR.
 
 ## Verdict
 
-**GO for the public-announce push.** All six verification items pass cleanly. Release integrity, image attestation, page rendering, CI/Pages health, the tag-driven release workflow, and the cold-reader README path are all green. The single observation (placeholder demo asciicast) is non-blocking and can be resolved post-launch.
+**GO for the release-readiness baseline.** All six verification items pass cleanly. Release integrity, image attestation, page rendering, CI/Pages health, the tag-driven release workflow, and the cold-reader README path are all green. The single observation (placeholder demo asciicast) is non-blocking and can be resolved in a follow-up docs-only PR.
 
 ---
 
 ## 7. v0.2.9 verification appendix (2026-05-01)
 
-**Context:** kiln-v0.2.9 shipped ~5h before this re-verify (PR #676), bundling the post-#670 throughput-related fixes (#672 workers=2 serialization shim, #674 prefix-cache double-free fix, #675 revert of #672 now that #673 is fixed). The greenlight approval (`3da4a6354ad6c4fddd85ae0a`) for Phase 11 launch posts is at ~10h+ old still `requested`. This appendix re-runs the six verifications against the current production-line release so that when the greenlight comes back the audit is pinned to v0.2.9, not v0.2.8.
+**Context:** kiln-v0.2.9 shipped ~5h before this re-verify (PR #676), bundling the post-#670 throughput-related fixes (#672 workers=2 serialization shim, #674 prefix-cache double-free fix, #675 revert of #672 now that #673 is fixed). This appendix re-runs the six verifications against the current production-line release so the audit is pinned to v0.2.9, not v0.2.8.
 
 ### a. Latest release artifact integrity (kiln-v0.2.9)
 
@@ -197,7 +197,7 @@ curl -sH "Authorization: Bearer $TOKEN" -I https://ghcr.io/v2/ericflo/kiln-serve
 ```
 
 **Findings:**
-- `latest` resolves to `sha256:401f7e32074bcad77c23e8fc6dcac3ceb5ba09584e93c3268b15e40b6bbc89b8`, identical to `0.2.9`. A `docker pull ghcr.io/ericflo/kiln-server:latest` after launch will get v0.2.9, not v0.2.8.
+- `latest` resolves to `sha256:401f7e32074bcad77c23e8fc6dcac3ceb5ba09584e93c3268b15e40b6bbc89b8`, identical to `0.2.9`. A `docker pull ghcr.io/ericflo/kiln-server:latest` after release will get v0.2.9, not v0.2.8.
 
 **Status:** ✅ PASS
 
@@ -214,7 +214,7 @@ curl -sL https://ericflo.github.io/kiln/ | grep -oE '0\.2\.[0-9]+' | sort -u
 
 **Status:** ✅ PASS
 
-### e. Launch.html version refs
+### e. Release page version refs
 
 **Commands run:**
 
@@ -223,7 +223,7 @@ curl -sL https://ericflo.github.io/kiln/launch.html | grep -oE '0\.2\.[0-9]+' | 
 ```
 
 **Findings:**
-- Only `0.2.9` appears. Launch post copy is pinned to the current release.
+- Only `0.2.9` appears. Release-readiness copy is pinned to the current release.
 
 **Status:** ✅ PASS
 
@@ -245,13 +245,13 @@ curl -sL https://ericflo.github.io/kiln/demo/kiln-60s.cast | head -c 300
 
 ### v0.2.9 verdict
 
-**GO for the public-announce push on the kiln-v0.2.9 line.** All six v0.2.9 verifications pass cleanly. Release integrity, GHCR image manifest + attestation, `latest` tag pointing at v0.2.9, both site pages bumped to v0.2.9, and the demo asciicast is now a real 220 KB recording instead of a placeholder. No new launch blockers introduced by the v0.2.8 → v0.2.9 transition. When the greenlight approval `3da4a6354ad6c4fddd85ae0a` comes back, the launch surface is verified against the current release.
+**GO for the release-readiness baseline on the kiln-v0.2.9 line.** All six v0.2.9 verifications pass cleanly. Release integrity, GHCR image manifest + attestation, `latest` tag pointing at v0.2.9, both site pages bumped to v0.2.9, and the demo asciicast is now a real 220 KB recording instead of a placeholder. No new readiness blockers introduced by the v0.2.8 → v0.2.9 transition.
 
 ---
 
 ## 8. v0.2.12 verification appendix (2026-05-02)
 
-**Context:** PR #703 moved the public launch page and staged launch-channel drafts forward to kiln-v0.2.12 after the v0.2.9 audit appendix. This appendix preserves the earlier v0.2.8/v0.2.9 audit history and records the current launch surface against the v0.2.12 production line.
+**Context:** PR #703 moved release-readiness surfaces forward to kiln-v0.2.12 after the v0.2.9 audit appendix. This appendix preserves the earlier v0.2.8/v0.2.9 audit history and records the current verification surface against the v0.2.12 production line.
 
 ### a. Current release
 
@@ -261,7 +261,7 @@ curl -sL https://ericflo.github.io/kiln/demo/kiln-60s.cast | head -c 300
 gh release view kiln-v0.2.12 -R ericflo/kiln --json tagName,publishedAt,assets --jq '{tagName,publishedAt,asset_count:(.assets|length)}'
 ```
 
-**Finding:** kiln-v0.2.12 is published at `2026-05-02T08:30:14Z` with 7 release assets, matching the expected binary/sidecar/license asset shape for the public-announce line.
+**Finding:** kiln-v0.2.12 is published at `2026-05-02T08:30:14Z` with 7 release assets, matching the expected binary/sidecar/license asset shape for the release-readiness line.
 
 **Status:** ✅ PASS
 
@@ -277,7 +277,7 @@ gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json status,conclus
 
 **Status:** ✅ PASS
 
-### c. Launch page
+### c. Release page
 
 **Command run:**
 
@@ -285,11 +285,11 @@ gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json status,conclus
 curl -L --max-time 20 -s https://ericflo.github.io/kiln/launch.html | rg 'v0\.2\.12|kiln-v0\.2\.12'
 ```
 
-**Finding:** The live launch page includes v0.2.12 in the announcement pill, kiln-v0.2.12 in the release download URL, and the production-line caveat.
+**Finding:** The live release page includes v0.2.12 in the status pill, kiln-v0.2.12 in the release download URL, and the production-line caveat.
 
 **Status:** ✅ PASS
 
-### d. Launch drafts
+### d. Release-readiness surfaces
 
 **Command run:**
 
@@ -297,7 +297,7 @@ curl -L --max-time 20 -s https://ericflo.github.io/kiln/launch.html | rg 'v0\.2\
 rg -n 'v0\.2\.12|kiln-v0\.2\.12|0\.2\.12' docs/site/launch.html docs/site/launch
 ```
 
-**Finding:** The staged HN, lobste.rs, Reddit, Rust Discord, Twitter, and launch README surfaces all point at v0.2.12 after PR #703. No launch-draft surface remains pinned to v0.2.9.
+**Finding:** The staged release-readiness surfaces all point at v0.2.12 after PR #703. No tracked verification surface remains pinned to v0.2.9.
 
 **Status:** ✅ PASS
 
@@ -309,19 +309,19 @@ rg -n 'v0\.2\.12|kiln-v0\.2\.12|0\.2\.12' docs/site/launch.html docs/site/launch
 curl -sL -I https://ericflo.github.io/kiln/demo/kiln-60s.cast
 ```
 
-**Finding:** The canonical 60-second asciicast remains published and reachable, so the earlier v0.2.8 placeholder-demo observation remains resolved for the v0.2.12 launch line.
+**Finding:** The canonical 60-second asciicast remains published and reachable, so the earlier v0.2.8 placeholder-demo observation remains resolved for the v0.2.12 release-readiness line.
 
 **Status:** ✅ PASS
 
 ### v0.2.12 verdict
 
-**GO for the public-announce push on the kiln-v0.2.12 line.** The current release exists, Pages has deployed the PR #703 launch-copy bump, the live launch page and staged launch-channel drafts are pinned to v0.2.12, and the demo asciicast remains live. No new launch blockers were introduced by the v0.2.9 → v0.2.12 transition.
+**GO for the release-readiness baseline on the kiln-v0.2.12 line.** The current release exists, Pages has deployed the PR #703 version bump, the live release page and staged verification surfaces are pinned to v0.2.12, and the demo asciicast remains live. No new readiness blockers were introduced by the v0.2.9 → v0.2.12 transition.
 
 ---
 
 ## 9. v0.2.13 verification appendix (2026-05-02)
 
-**Context:** PR #714 moved the staged launch-channel drafts and `docs/site/launch/README.md` forward to kiln-v0.2.13 after the v0.2.12 appendix. This appendix does not duplicate those draft edits; it records the current release, Pages deploy, live page, launch-draft, and demo-player checks against the v0.2.13 production line.
+**Context:** PR #714 moved the staged release-readiness sources and `docs/site/launch/README.md` forward to kiln-v0.2.13 after the v0.2.12 appendix. This appendix does not duplicate those source edits; it records the current release, Pages deploy, live page, version-reference, and demo-player checks against the v0.2.13 production line.
 
 ### a. Current release
 
@@ -331,7 +331,7 @@ curl -sL -I https://ericflo.github.io/kiln/demo/kiln-60s.cast
 gh release view kiln-v0.2.13 -R ericflo/kiln --json tagName,publishedAt,assets --jq '{tagName,publishedAt,asset_count:(.assets|length)}'
 ```
 
-**Finding:** kiln-v0.2.13 is published at `2026-05-02T19:19:06Z` with 7 release assets, matching the expected binary/sidecar/license asset shape for the public-announce line.
+**Finding:** kiln-v0.2.13 is published at `2026-05-02T19:19:06Z` with 7 release assets, matching the expected binary/sidecar/license asset shape for the release-readiness line.
 
 **Status:** ✅ PASS
 
@@ -343,11 +343,11 @@ gh release view kiln-v0.2.13 -R ericflo/kiln --json tagName,publishedAt,assets -
 gh run list -R ericflo/kiln --workflow pages.yml --limit 1 --json databaseId,status,conclusion,headSha --jq '.[0]'
 ```
 
-**Finding:** The latest Pages workflow completed successfully at head SHA `1c9cbc3bc71e476d0b867dc4ed13a8345401ecce` (run `25260168918`), the deploy containing the v0.2.13 launch-surface updates.
+**Finding:** The latest Pages workflow completed successfully at head SHA `1c9cbc3bc71e476d0b867dc4ed13a8345401ecce` (run `25260168918`), the deploy containing the v0.2.13 release-surface updates.
 
 **Status:** ✅ PASS
 
-### c. Live landing and launch version refs
+### c. Live landing and release version refs
 
 **Commands run:**
 
@@ -357,11 +357,11 @@ for url in https://ericflo.github.io/kiln/ https://ericflo.github.io/kiln/launch
 done
 ```
 
-**Finding:** The live landing page and launch page only expose `0.2.13` version references. The launch page is pinned to the kiln-v0.2.13 release download URL and no stale v0.2.12 refs remain visible to cold readers.
+**Finding:** The live landing page and release page only expose `0.2.13` version references. The release page is pinned to the kiln-v0.2.13 release download URL and no stale v0.2.12 refs remain visible to cold readers.
 
 **Status:** ✅ PASS
 
-### d. Launch drafts
+### d. Release-readiness surfaces
 
 **Command run:**
 
@@ -369,7 +369,7 @@ done
 rg -n 'v0\.2\.13|kiln-v0\.2\.13|0\.2\.13' docs/site/launch.html docs/site/launch
 ```
 
-**Finding:** The staged HN, lobste.rs, Reddit, Rust Discord, Twitter, and launch README surfaces are pinned to v0.2.13 after PR #714. This audit records that state without changing the draft copy.
+**Finding:** The staged release-readiness surfaces are pinned to v0.2.13 after PR #714. This audit records that state without changing the source copy.
 
 **Status:** ✅ PASS
 
@@ -386,10 +386,10 @@ for url in \
 done
 ```
 
-**Finding:** The demo page, logo asset, and canonical `kiln-60s.cast` all return HTTP 200. The asciinema player and cast remain reachable for the v0.2.13 launch line, so the earlier v0.2.8 placeholder-demo observation remains resolved.
+**Finding:** The demo page, logo asset, and canonical `kiln-60s.cast` all return HTTP 200. The asciinema player and cast remain reachable for the v0.2.13 release-readiness line, so the earlier v0.2.8 placeholder-demo observation remains resolved.
 
 **Status:** ✅ PASS
 
 ### v0.2.13 verdict
 
-**GO for the public-announce push on the kiln-v0.2.13 line.** The current release exists with 7 assets, Pages has deployed the v0.2.13 launch-surface updates, the live landing and launch pages only expose v0.2.13 version refs, staged launch-channel drafts are pinned to v0.2.13, and the demo player/cast assets remain live. No new launch blockers were introduced by the v0.2.12 → v0.2.13 transition.
+**GO for the release-readiness baseline on the kiln-v0.2.13 line.** The current release exists with 7 assets, Pages has deployed the v0.2.13 release-surface updates, the live landing and release pages only expose v0.2.13 version refs, staged verification surfaces are pinned to v0.2.13, and the demo player/cast assets remain live. No new readiness blockers were introduced by the v0.2.12 → v0.2.13 transition.

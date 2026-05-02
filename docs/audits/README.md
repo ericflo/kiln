@@ -66,9 +66,9 @@ Prefix cache:
   verdict: kiln-v0.1.0 shipped 2026-04-19 and the production line is at
   kiln-v0.2.8.
 
-## Phase 11 (public-announce + sustained-adoption)
+## Phase 11 (onboarding + sustained adoption)
 
-- `PHASE11_PRELAUNCH_OPS_CHECKLIST.md` — pre-launch ops checklist verifying
+- `PHASE11_PRELAUNCH_OPS_CHECKLIST.md` — release-readiness ops checklist verifying
   release artifacts, GHCR image, landing page, and SLOs at the unit and CI
   level.
 - `PHASE11_ISSUE_686_BISECT.md` — four-commit bisect of the v0.2.9
