@@ -247,6 +247,46 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_prefix_cache_cached_entries Prefix-cache entries currently retaining GDN state snapshots.\n");
+        out.push_str("# TYPE kiln_prefix_cache_cached_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_cached_entries {}",
+                gauges.prefix_cache.cached_entries
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_max_entries Maximum prefix-cache entries that may retain GDN state snapshots.\n");
+        out.push_str("# TYPE kiln_prefix_cache_max_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_max_entries {}",
+                gauges.prefix_cache.max_entries
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_state_bytes Device memory retained by cached GDN state snapshots.\n");
+        out.push_str("# TYPE kiln_prefix_cache_state_bytes gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_state_bytes {}",
+                gauges.prefix_cache.cached_state_bytes
+            ),
+        );
+
+        out.push_str("# HELP kiln_prefix_cache_max_state_bytes Maximum device memory retainable by cached GDN state snapshots.\n");
+        out.push_str("# TYPE kiln_prefix_cache_max_state_bytes gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prefix_cache_max_state_bytes {}",
+                gauges.prefix_cache.max_state_bytes
+            ),
+        );
+
         // --- Training ---
         out.push_str("# HELP kiln_training_jobs_total Total training jobs.\n");
         out.push_str("# TYPE kiln_training_jobs_total counter\n");
@@ -354,6 +394,10 @@ mod tests {
                 hit_blocks: 7,
                 cached_blocks: 64,
                 max_blocks: 128,
+                cached_entries: 4,
+                max_entries: 8,
+                cached_state_bytes: 196,
+                max_state_bytes: 392,
             },
             training_active: 0,
             active_adapter: Some("my-adapter".to_string()),
@@ -375,6 +419,10 @@ mod tests {
         assert!(output.contains("kiln_prefix_cache_hit_blocks_total 7"));
         assert!(output.contains("kiln_prefix_cache_cached_blocks 64"));
         assert!(output.contains("kiln_prefix_cache_max_blocks 128"));
+        assert!(output.contains("kiln_prefix_cache_cached_entries 4"));
+        assert!(output.contains("kiln_prefix_cache_max_entries 8"));
+        assert!(output.contains("kiln_prefix_cache_state_bytes 196"));
+        assert!(output.contains("kiln_prefix_cache_max_state_bytes 392"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
         assert!(output.contains("kiln_request_duration_seconds_count 1"));
         assert!(output.contains("kiln_request_duration_seconds_sum 0.5"));

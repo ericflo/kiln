@@ -259,7 +259,8 @@ Kiln uses a TOML config file. Environment variables override config values. See 
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference vs training |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (2x context length) |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | `auto` (default; pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, or `human` |
-| `prefix_cache.enabled` | — | true | Reuse KV cache for shared prefixes |
+| `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
+| `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 
 ## Security model
 

@@ -606,7 +606,8 @@ Key settings:
 | `memory.inference_memory_fraction` | — | 0.7 | VRAM fraction for inference (rest for training) |
 | `memory.kv_cache_fp8` | `KILN_KV_CACHE_FP8` | false | FP8 KV cache (halves memory, ~2x context) |
 | `logging.format` | `KILN_LOG_FORMAT` | auto | Log format: `auto` (pretty on TTY, JSON otherwise), `json`, `pretty`, `text`, `human` |
-| `prefix_cache.enabled` | — | true | Reuse KV cache for shared prefixes |
+| `prefix_cache.enabled` | `KILN_PREFIX_CACHE_ENABLED` | true | Reuse KV cache for shared prefixes |
+| `prefix_cache.max_entries` | `KILN_PREFIX_CACHE_MAX_ENTRIES` | auto | Cap cached GDN state snapshots (~49 MiB each; auto budget ≤1 GiB) |
 
 ## Running with Docker
 

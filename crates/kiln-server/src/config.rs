@@ -165,6 +165,11 @@ pub struct PrefixCacheConfig {
     /// Maximum number of KV cache blocks the prefix cache may retain.
     /// Default: 25% of total blocks. Set to 0 to use the default.
     pub max_blocks: Option<usize>,
+    /// Maximum number of real-backend prefix entries to retain.
+    /// Each entry owns a GDN linear-attention state snapshot in addition to
+    /// KV blocks, so this cap prevents sustained unique-prompt traffic from
+    /// accumulating unbounded device state memory. Default is memory-tiered.
+    pub max_entries: Option<usize>,
 }
 
 /// Which speculative-decoding method to use when `enabled = true`.
@@ -386,6 +391,7 @@ impl Default for PrefixCacheConfig {
         Self {
             enabled: true,
             max_blocks: None,
+            max_entries: None,
         }
     }
 }
@@ -630,6 +636,11 @@ impl KilnConfig {
                 self.prefix_cache.max_blocks = Some(n);
             }
         }
+        if let Ok(v) = std::env::var("KILN_PREFIX_CACHE_MAX_ENTRIES") {
+            if let Ok(n) = v.parse() {
+                self.prefix_cache.max_entries = Some(n);
+            }
+        }
 
         // Speculative decoding
         if let Ok(v) = std::env::var("KILN_SPEC_ENABLED") {
@@ -847,6 +858,7 @@ format = "pretty"
 [prefix_cache]
 enabled = false
 max_blocks = 32
+max_entries = 8
 
 [speculative]
 enabled = true
@@ -888,6 +900,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.logging.format, "pretty");
         assert!(!config.prefix_cache.enabled);
         assert_eq!(config.prefix_cache.max_blocks, Some(32));
+        assert_eq!(config.prefix_cache.max_entries, Some(8));
         assert!(config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 6);
         assert_eq!(config.speculative.draft_layers, 10);
@@ -1028,6 +1041,7 @@ port = 3000
         assert!(!config.memory.cuda_graphs);
         assert!(!config.prefix_cache.enabled);
         assert_eq!(config.prefix_cache.max_blocks, Some(128));
+        assert!(config.prefix_cache.max_entries.is_none());
         assert!(config.speculative.enabled);
         assert_eq!(config.speculative.num_speculative_tokens, 6);
         assert_eq!(config.speculative.draft_layers, 10);

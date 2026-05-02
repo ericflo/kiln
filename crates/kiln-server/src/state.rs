@@ -168,9 +168,17 @@ pub struct TrainingJobInfo {
 /// Thread-safe map of tracked training jobs.
 pub type TrainingJobs = Arc<std::sync::RwLock<HashMap<String, TrainingJobInfo>>>;
 
+pub const MIN_PREFIX_CACHE_MAX_ENTRIES: usize = 1;
+const MIN_PREFIX_CACHE_STATE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PREFIX_CACHE_STATE_BYTES: u64 = 1024 * 1024 * 1024;
+const PREFIX_CACHE_STATE_FRACTION_DIVISOR: u64 = 40;
+
 pub struct RealPrefixCache {
     enabled: bool,
     max_blocks: usize,
+    max_entries: usize,
+    state_bytes_per_entry: u64,
+    max_state_bytes: u64,
     block_size: usize,
     next_entry_id: u64,
     entries: Vec<RealPrefixCacheEntry>,
@@ -201,10 +209,21 @@ pub struct RealPrefixCacheRegisterOutcome {
 }
 
 impl RealPrefixCache {
-    pub fn new(enabled: bool, block_size: usize, max_blocks: usize) -> Self {
+    pub fn new(
+        enabled: bool,
+        block_size: usize,
+        max_blocks: usize,
+        max_entries: usize,
+        state_bytes_per_entry: u64,
+    ) -> Self {
+        let max_entries = max_entries.max(MIN_PREFIX_CACHE_MAX_ENTRIES);
+        let max_state_bytes = state_bytes_per_entry.saturating_mul(max_entries as u64);
         Self {
             enabled,
             max_blocks,
+            max_entries,
+            state_bytes_per_entry,
+            max_state_bytes,
             block_size,
             next_entry_id: 1,
             entries: Vec::new(),
@@ -217,7 +236,7 @@ impl RealPrefixCache {
     }
 
     pub fn disabled(block_size: usize) -> Self {
-        Self::new(false, block_size, 0)
+        Self::new(false, block_size, 0, MIN_PREFIX_CACHE_MAX_ENTRIES, 0)
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -302,15 +321,10 @@ impl RealPrefixCache {
             .iter()
             .filter(|block_id| !self.block_refcounts.contains_key(block_id))
             .count();
-        while self.cached_blocks() + needed_new_blocks > self.max_blocks {
-            let Some(evict_idx) = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| entry.active_uses == 0)
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(idx, _)| idx)
-            else {
+        while self.cached_blocks() + needed_new_blocks > self.max_blocks
+            || self.entries.len() >= self.max_entries
+        {
+            let Some(evict_idx) = self.oldest_evictable_entry_idx() else {
                 return RealPrefixCacheRegisterOutcome {
                     retained_blocks: Vec::new(),
                     evicted_blocks,
@@ -370,6 +384,15 @@ impl RealPrefixCache {
         blocks
     }
 
+    fn oldest_evictable_entry_idx(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.active_uses == 0)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(idx, _)| idx)
+    }
+
     fn release_entry_blocks(&mut self, block_ids: &[u32]) -> Vec<u32> {
         let mut freed = Vec::new();
         for &block_id in block_ids {
@@ -388,6 +411,12 @@ impl RealPrefixCache {
         PrefixCacheStats {
             cached_blocks: self.cached_blocks(),
             max_blocks: self.max_blocks,
+            cached_entries: self.entries.len(),
+            max_entries: self.max_entries,
+            cached_state_bytes: self
+                .state_bytes_per_entry
+                .saturating_mul(self.entries.len() as u64),
+            max_state_bytes: self.max_state_bytes,
             ..self.stats
         }
     }
@@ -815,10 +844,29 @@ impl AppState {
         } else {
             0
         };
+        let prefix_cache_state_bytes_per_entry =
+            linear_attention_state_bytes(&model_config, &device);
+        let prefix_cache_max_entries = if prefix_cache_cfg.enabled {
+            prefix_cache_cfg.max_entries.unwrap_or_else(|| {
+                default_prefix_cache_max_entries(total_vram, prefix_cache_state_bytes_per_entry)
+            })
+        } else {
+            MIN_PREFIX_CACHE_MAX_ENTRIES
+        };
+        tracing::info!(
+            max_blocks = prefix_cache_max_blocks,
+            max_entries = prefix_cache_max_entries,
+            state_bytes_per_entry = prefix_cache_state_bytes_per_entry,
+            max_state_bytes = prefix_cache_state_bytes_per_entry
+                .saturating_mul(prefix_cache_max_entries as u64),
+            "prefix cache budget"
+        );
         let prefix_cache = RealPrefixCache::new(
             prefix_cache_cfg.enabled,
             block_size,
             prefix_cache_max_blocks,
+            prefix_cache_max_entries,
+            prefix_cache_state_bytes_per_entry,
         );
 
         Self {
@@ -860,6 +908,42 @@ impl AppState {
             ))),
         }
     }
+}
+
+fn linear_attention_state_bytes(config: &ModelConfig, device: &candle_core::Device) -> u64 {
+    let num_linear_layers = config
+        .num_layers
+        .saturating_sub(config.num_full_attention_layers) as u64;
+    let recurrent_dtype_bytes = match (device, config.dtype) {
+        #[cfg(feature = "metal")]
+        (candle_core::Device::Metal(_), kiln_core::config::DType::BF16) => 2,
+        #[cfg(feature = "metal")]
+        (candle_core::Device::Metal(_), kiln_core::config::DType::FP16) => 2,
+        _ => 4,
+    };
+    let recurrent_elems = (config.linear_num_value_heads
+        * config.linear_key_head_dim
+        * config.linear_value_head_dim) as u64;
+    let conv_elems = (config.linear_qkv_dim()
+        * config.linear_conv_kernel_dim.saturating_sub(1)) as u64;
+    num_linear_layers.saturating_mul(
+        recurrent_elems
+            .saturating_mul(recurrent_dtype_bytes)
+            .saturating_add(conv_elems.saturating_mul(4)),
+    )
+}
+
+fn default_prefix_cache_max_entries(total_vram_bytes: u64, state_bytes_per_entry: u64) -> usize {
+    if state_bytes_per_entry == 0 {
+        return MIN_PREFIX_CACHE_MAX_ENTRIES;
+    }
+    let state_budget = if total_vram_bytes == 0 {
+        MIN_PREFIX_CACHE_STATE_BYTES
+    } else {
+        (total_vram_bytes / PREFIX_CACHE_STATE_FRACTION_DIVISOR)
+            .clamp(MIN_PREFIX_CACHE_STATE_BYTES, MAX_PREFIX_CACHE_STATE_BYTES)
+    };
+    ((state_budget / state_bytes_per_entry) as usize).max(MIN_PREFIX_CACHE_MAX_ENTRIES)
 }
 
 /// Estimate model weight memory in bytes from config.
@@ -1182,7 +1266,7 @@ mod tests {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;
         let state = LinearAttentionState::new(&config, &device)?;
-        let mut cache = RealPrefixCache::new(true, 4, 4);
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
 
         let registration = PagedPrefixRegistration {
             prompt_tokens: vec![1, 2, 3, 4],
@@ -1210,7 +1294,55 @@ mod tests {
         assert_eq!(stats.hit_blocks, 1);
         assert_eq!(stats.cached_blocks, 1);
         assert_eq!(stats.max_blocks, 4);
+        assert_eq!(stats.cached_entries, 1);
+        assert_eq!(stats.max_entries, 1024);
+        assert_eq!(stats.cached_state_bytes, 49);
+        assert_eq!(stats.max_state_bytes, 1024 * 49);
         Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_caps_entries_and_state_bytes() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let mut cache = RealPrefixCache::new(true, 4, 100, 2, 49);
+
+        for i in 0..3u32 {
+            let start = 1 + i * 4;
+            cache.register(
+                None,
+                PagedPrefixRegistration {
+                    prompt_tokens: vec![start, start + 1, start + 2, start + 3],
+                    block_ids: vec![10 + i],
+                    linear_state: LinearAttentionState::new(&config, &device)?,
+                },
+            );
+        }
+
+        let stats = cache.stats();
+        assert_eq!(stats.cached_entries, 2);
+        assert_eq!(stats.max_entries, 2);
+        assert_eq!(stats.cached_state_bytes, 98);
+        assert_eq!(stats.max_state_bytes, 98);
+        assert_eq!(stats.cached_blocks, 2);
+        assert!(cache.lookup(&None, &[1, 2, 3, 4, 99])?.is_none());
+        assert!(cache.lookup(&None, &[5, 6, 7, 8, 99])?.is_some());
+        assert!(cache.lookup(&None, &[9, 10, 11, 12, 99])?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn default_prefix_cache_entries_reserves_state_memory_budget() {
+        let entry = 49 * 1024 * 1024;
+        assert_eq!(
+            default_prefix_cache_max_entries(48 * 1024 * 1024 * 1024, entry),
+            20
+        );
+        assert_eq!(
+            default_prefix_cache_max_entries(24 * 1024 * 1024 * 1024, entry),
+            12
+        );
+        assert_eq!(default_prefix_cache_max_entries(0, entry), 5);
     }
 
     #[test]
@@ -1218,7 +1350,7 @@ mod tests {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;
         let state = LinearAttentionState::new(&config, &device)?;
-        let mut cache = RealPrefixCache::new(true, 4, 4);
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
         cache.register(
             Some("adapter-a".to_string()),
             PagedPrefixRegistration {
@@ -1252,7 +1384,7 @@ mod tests {
     fn register_does_not_evict_blocks_retained_by_incoming() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;
-        let mut cache = RealPrefixCache::new(true, 4, 2);
+        let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
 
         // Entry A occupies blocks [10, 11], the cache's full capacity.
         let outcome_a = cache.register(
@@ -1298,7 +1430,7 @@ mod tests {
     fn register_outcome_no_duplicate_or_overlap() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;
-        let mut cache = RealPrefixCache::new(true, 4, 3);
+        let mut cache = RealPrefixCache::new(true, 4, 3, 1024, 49);
 
         // Three small entries that together fill capacity, two of which share
         // block 20 with the eventual incoming registration.
@@ -1367,7 +1499,7 @@ mod tests {
     fn register_evicted_blocks_not_in_refcounts_after() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;
-        let mut cache = RealPrefixCache::new(true, 4, 2);
+        let mut cache = RealPrefixCache::new(true, 4, 2, 1024, 49);
 
         // Fill capacity with an evictable entry whose blocks the next
         // registration also wants.
