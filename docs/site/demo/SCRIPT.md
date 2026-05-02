@@ -223,7 +223,7 @@ If you prefer to type the scenes by hand, run `asciinema rec docs/site/demo/kiln
 
 ### Theme and font
 
-The asciinema player renders with its own theme; the surrounding page is dark. To match Kiln's launch.html palette, the embed in `README.md` sets `data-theme="solarized-dark"`. If you want a pure neutral look, use `data-theme="monokai"` instead. Font is whatever the recording terminal used — pick a monospace with strong character distinction (JetBrains Mono, Fira Code without ligatures, or SF Mono all look good in the player).
+The asciinema player renders with its own theme; the surrounding page is dark. To match Kiln's site palette, the embed in `README.md` sets `data-theme="solarized-dark"`. If you want a pure neutral look, use `data-theme="monokai"` instead. Font is whatever the recording terminal used — pick a monospace with strong character distinction (JetBrains Mono, Fira Code without ligatures, or SF Mono all look good in the player).
 
 ## Post-recording integration checklist
 
@@ -232,8 +232,6 @@ When you re-record (e.g. for a kiln version bump or to fix a regression in the s
 - [ ] Re-run the recording into `docs/site/demo/kiln-60s.cast` per the recording instructions above.
 - [ ] Sanity-replay locally with `asciinema play docs/site/demo/kiln-60s.cast`.
 - [ ] Confirm `docs/site/demo/index.html` still loads the new cast cleanly in a local static server.
-- [ ] Confirm `docs/site/launch.html`'s existing demo link still points at `demo/`. If the recording is materially longer or richer, optionally embed the player inline near the "GRPO loop" section.
-- [ ] Confirm `docs/site/launch/README.md` and the per-channel drafts still reference the demo correctly.
 - [ ] In `README.md` hero block, the existing `Demo` link in the center-aligned link row points to `docs/site/demo/` — no change needed.
 - [ ] Verify the Pages workflow ran cleanly: `gh run list -R ericflo/kiln --workflow=Pages --limit 3`.
 - [ ] Open https://ericflo.github.io/kiln/demo/ in a fresh browser session and confirm the player loads and plays end-to-end.
