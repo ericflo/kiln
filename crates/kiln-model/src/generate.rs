@@ -95,6 +95,8 @@ pub struct PrefixCachedGenerationOutput {
     pub output: GenerationOutput,
     pub registration: Option<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
+    pub prefill_duration: std::time::Duration,
+    pub decode_duration: std::time::Duration,
 }
 
 enum PrefillSampleSource {
@@ -850,6 +852,8 @@ impl ModelRunner {
             },
             registration: output.registration,
             allocated_blocks: output.allocated_blocks,
+            prefill_duration: output.prefill_duration,
+            decode_duration: output.decode_duration,
         })
     }
 
@@ -1042,6 +1046,7 @@ impl ModelRunner {
         let use_greedy_prefill_token = params.temperature == 0.0
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
             && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
+        let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
@@ -1097,6 +1102,7 @@ impl ModelRunner {
             }
         };
 
+        let prefill_duration = prefill_start.elapsed();
         let registration = self.completed_prompt_registration(
             prompt_tokens,
             block_table,
@@ -1104,6 +1110,7 @@ impl ModelRunner {
             block_size,
         )?;
 
+        let decode_start = std::time::Instant::now();
         let output = match prefill_source {
             PrefillSampleSource::Logits(logits) => self.decode_from_prefill_logits(
                 logits,
@@ -1126,10 +1133,14 @@ impl ModelRunner {
             )?,
         };
 
+        let decode_duration = decode_start.elapsed();
+
         Ok(PrefixCachedGenerationOutput {
             output,
             registration,
             allocated_blocks: Vec::new(),
+            prefill_duration,
+            decode_duration,
         })
     }
 
