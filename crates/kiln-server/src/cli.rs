@@ -5,6 +5,23 @@ use std::io::Write;
 use clap::{Parser, Subcommand};
 use console::style;
 
+const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
+  kiln serve
+      Start the inference server explicitly. Running `kiln` with no subcommand also starts serving.
+
+  kiln health
+      Check whether the local server is ready and show model, adapter, scheduler, and training status.
+
+  kiln train sft --file examples.jsonl --adapter my-task
+      Teach the model from corrected chat examples and hot-swap the trained LoRA adapter.
+
+  kiln train grpo --file scored.jsonl --adapter my-task
+      Improve an adapter from scored completions using GRPO rewards.
+
+  kiln adapters list
+      Show adapters loaded by the running server.
+"#;
+
 /// Render a structured server error response. Falls back to HTTP status if the body
 /// is not the expected `{error: {code, message, hint}}` shape.
 ///
@@ -43,6 +60,7 @@ fn render_api_error(body: &serde_json::Value, status: reqwest::StatusCode) -> St
     version,
     about = "Single-model inference server with live online learning",
     long_about = None,
+    after_help = TOP_LEVEL_EXAMPLES,
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -55,7 +73,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start the inference server (default when no subcommand given)
+    /// Start the inference server explicitly; running `kiln` with no subcommand also serves
     Serve {
         /// Override the served model identifier exposed at /v1/models.
         /// Wins over KILN_SERVED_MODEL_ID env and TOML `model.served_model_id`.
@@ -93,7 +111,7 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum TrainCommands {
-    /// Submit SFT training examples
+    /// Train a LoRA adapter from corrected SFT examples
     Sft {
         /// Path to JSONL file with training examples
         #[arg(long, short)]
@@ -115,7 +133,7 @@ pub enum TrainCommands {
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
-    /// Submit GRPO training batch
+    /// Train a LoRA adapter from scored GRPO completions
     Grpo {
         /// Path to JSONL file with scored completions
         #[arg(long, short)]
@@ -143,7 +161,7 @@ pub enum TrainCommands {
 
 #[derive(Subcommand)]
 pub enum AdapterCommands {
-    /// List all adapters
+    /// List adapters loaded by the running server
     List {
         /// Server URL
         #[arg(long, default_value = "http://localhost:8420")]
