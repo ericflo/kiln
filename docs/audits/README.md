@@ -12,6 +12,10 @@ current state against the code before acting on it.
   cross-entropy as the top win, kills RMSNorm/LayerNorm as duplicates/absent.
 - `PHASE10_FLCE_PREFLIGHT.md` — VRAM measurement preflight gating the FLCE
   port; `(a+b+c)/peak_VRAM ≥ 30%` at T=16384 → GREEN.
+- `PHASE10_GDN_TRAINING_DETACHED_TAIL.md` — post-launch audit for the
+  fully-detached tail + analytic LM-head gradient SFT memory path; verdict:
+  go for a bounded implementation behind a flag, with exact-gradient parity
+  and A6000 `T=8192` memory gates.
 
 ## MTP (Phase B — multi-token prediction debug)
 
