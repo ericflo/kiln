@@ -32,6 +32,7 @@ or deployed; it's a versioned drafting space.
 | [`lobsters.md`](lobsters.md) | lobste.rs | Skeptical technical audience. Long-form comment that front-loads the honest tradeoffs. |
 | [`reddit-localllama.md`](reddit-localllama.md) | /r/LocalLLaMA | Hobbyist + enthusiast audience. Emphasizes the consumer-GPU angle and includes the GRPO Python snippet inline. |
 | [`discord-rust.md`](discord-rust.md) | Rust Discord `#showcase` | Rust-systems framing — vendored CUDA kernels, in-process training thread, build matrix. |
+| [`anthropic-discord.md`](anthropic-discord.md) | Anthropic Discord | Claude / AI-product-builder framing — live online learning, GRPO reward loops, hot-swap LoRA, single-GPU economics. |
 
 ## Recommended posting order and timing
 
@@ -54,10 +55,14 @@ window:
 5. **Rust Discord `#showcase`** — same day, **12:00–14:00 ET** (US
    lunchtime, EU late afternoon). Discord is conversational; stay in the
    channel for ~1 hour to answer questions.
+6. **Anthropic Discord** — same day or next morning as a targeted
+   AI-builder follow-up after Rust Discord. Lead with Claude-in-the-loop
+   evaluation, GRPO reward loops, hot-swap LoRA, and the single-GPU product
+   economics rather than Rust internals.
 
-If HN goes hot (front page), pause channels 3–5 by an hour or two so they
+If HN goes hot (front page), pause channels 3–6 by an hour or two so they
 don't compete with the HN thread for Eric's attention. If HN flops, still
-ship 2–5 — they reach different audiences and recovery from a bad HN day is
+ship 2–6 — they reach different audiences and recovery from a bad HN day is
 boring not fatal.
 
 ## After-posting checklist
@@ -79,9 +84,9 @@ For each channel, after going live:
 
 - **Don't post the same body across channels.** Each draft is rewritten for
   its audience — HN gets crisp tradeoffs, lobste.rs gets long-form honesty,
-  /r/LocalLLaMA gets the consumer-GPU angle, Discord gets the Rust-systems
-  angle, X gets one-line hooks. Reusing a body across channels reads as
-  spam.
+  /r/LocalLLaMA gets the consumer-GPU angle, Rust Discord gets the systems
+  angle, Anthropic Discord gets the Claude / AI-product-builder online-learning
+  angle, X gets one-line hooks. Reusing a body across channels reads as spam.
 - **Don't link channels at each other.** "Saw this on HN, posting here too"
   triggers downvotes on lobste.rs and Reddit.
 - **Don't autopost.** Every submission is manual, by Eric, after review.
