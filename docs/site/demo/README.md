@@ -71,9 +71,9 @@ The `--command` flag scripts the entire take so each run is byte-deterministic i
 
 - **README hero:** [`README.md`](../../../README.md) — the `Demo` link in the center-aligned link row points here.
 - **Launch announcement:** [`launch.html`](../launch.html) — embeds the same `kiln-60s.cast` player inline near the GRPO-loop section.
-- **Launch post drafts:** [`launch/README.md`](../launch/README.md) — pre-launch ops gate references the demo asciicast as a launch blocker.
+- **Publicity sentinel:** [`launch/README.md`](../launch/README.md) — records that agents must not recreate external publicity materials.
 - **Quickstart:** [`QUICKSTART.md`](../../../QUICKSTART.md) — the commands run in the demo are a strict subset of the Quickstart.
 
 ## Why this matters for Phase 11
 
-The Phase 11 launch checklist has four items. The demo asciicast is item #3 (after README polish and the launch blog post, both shipped). Items #4 (pre-launch ops) and #5 (channel-specific launch post drafts) all reference the demo as a blocker. With the canonical recording landed in this directory and the player auto-loading it from the Pages deploy, those launch tasks unblock.
+The Phase 11 onboarding checklist includes the demo asciicast as internal reference material. With the canonical recording landed in this directory and the player auto-loading it from the Pages deploy, cold-reader docs can link directly to the demo without recreating external publicity materials.
