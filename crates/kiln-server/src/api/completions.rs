@@ -1209,6 +1209,7 @@ async fn generate_real(
 
     let gpu_lock = state.gpu_lock.clone();
     let memory_budget = state.memory_budget.clone();
+    let metrics = state.metrics.clone();
     let timeout = state.request_timeout;
     // Cooperative cancellation: `tokio::time::timeout` cancels the outer
     // future, but `spawn_blocking` does not honor that — the closure keeps
@@ -1262,7 +1263,11 @@ async fn generate_real(
                     );
 
                     let mut output = match result {
-                        Ok(output) => output,
+                        Ok(output) => {
+                            metrics.observe_prefill_duration(output.prefill_duration.as_secs_f64());
+                            metrics.observe_decode_duration(output.decode_duration.as_secs_f64());
+                            output
+                        }
                         Err(err) => {
                             if let Some(entry_id) = hit_entry_id {
                                 let mut cache = prefix_cache.lock().unwrap();

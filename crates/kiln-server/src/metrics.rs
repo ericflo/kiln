@@ -7,6 +7,26 @@ use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const LATENCY_BUCKETS_SECONDS: [f64; 13] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
+
+const LATENCY_BUCKETS_US: [u64; LATENCY_BUCKETS_SECONDS.len()] = [
+    5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000,
+    10_000_000, 30_000_000, 60_000_000,
+];
+
+const REQUEST_LATENCY_BUCKETS_SECONDS: [f64; 16] = [
+    0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 420.0, 600.0,
+    900.0,
+];
+
+const REQUEST_LATENCY_BUCKETS_US: [u64; REQUEST_LATENCY_BUCKETS_SECONDS.len()] = [
+    100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000, 30_000_000,
+    60_000_000, 120_000_000, 180_000_000, 240_000_000, 300_000_000, 420_000_000, 600_000_000,
+    900_000_000,
+];
+
 /// Atomically tracked metrics for the kiln server.
 pub struct Metrics {
     // Inference counters
@@ -21,12 +41,26 @@ pub struct Metrics {
     /// Currently in-flight inference requests.
     pub active_requests: AtomicU64,
 
+    /// Peak concurrently in-flight inference requests since process start.
+    pub active_requests_peak: AtomicU64,
+
     /// Prompt/prefix prefill tokens completed by currently in-flight requests.
     pub request_prefill_tokens_completed: Arc<AtomicU64>,
 
     /// Request duration tracking (simple: count + sum in microseconds).
     pub request_duration_count: AtomicU64,
     pub request_duration_sum_us: AtomicU64,
+    pub request_duration_buckets: [AtomicU64; REQUEST_LATENCY_BUCKETS_US.len() + 1],
+
+    /// Time spent in model prefill before decode starts, in microseconds.
+    pub prefill_duration_count: AtomicU64,
+    pub prefill_duration_sum_us: AtomicU64,
+    pub prefill_duration_buckets: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
+
+    /// Time spent in token decode after prefill, in microseconds.
+    pub decode_duration_count: AtomicU64,
+    pub decode_duration_sum_us: AtomicU64,
+    pub decode_duration_buckets: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
 
     // Training counters
     pub training_sft_completed: AtomicU64,
@@ -46,9 +80,17 @@ impl Metrics {
             requests_rejected: AtomicU64::new(0),
             tokens_generated: AtomicU64::new(0),
             active_requests: AtomicU64::new(0),
+            active_requests_peak: AtomicU64::new(0),
             request_prefill_tokens_completed: Arc::new(AtomicU64::new(0)),
             request_duration_count: AtomicU64::new(0),
             request_duration_sum_us: AtomicU64::new(0),
+            request_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            prefill_duration_count: AtomicU64::new(0),
+            prefill_duration_sum_us: AtomicU64::new(0),
+            prefill_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            decode_duration_count: AtomicU64::new(0),
+            decode_duration_sum_us: AtomicU64::new(0),
+            decode_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             training_sft_completed: AtomicU64::new(0),
             training_sft_failed: AtomicU64::new(0),
             training_sft_cancelled: AtomicU64::new(0),
@@ -73,6 +115,23 @@ impl Metrics {
         self.request_duration_count.fetch_add(1, Ordering::Relaxed);
         let us = (secs * 1_000_000.0) as u64;
         self.request_duration_sum_us.fetch_add(us, Ordering::Relaxed);
+        observe_bucket(&self.request_duration_buckets, &REQUEST_LATENCY_BUCKETS_US, us);
+    }
+
+    /// Record model prefill duration in seconds.
+    pub fn observe_prefill_duration(&self, secs: f64) {
+        self.prefill_duration_count.fetch_add(1, Ordering::Relaxed);
+        let us = (secs * 1_000_000.0) as u64;
+        self.prefill_duration_sum_us.fetch_add(us, Ordering::Relaxed);
+        observe_bucket(&self.prefill_duration_buckets, &LATENCY_BUCKETS_US, us);
+    }
+
+    /// Record model decode duration in seconds.
+    pub fn observe_decode_duration(&self, secs: f64) {
+        self.decode_duration_count.fetch_add(1, Ordering::Relaxed);
+        let us = (secs * 1_000_000.0) as u64;
+        self.decode_duration_sum_us.fetch_add(us, Ordering::Relaxed);
+        observe_bucket(&self.decode_duration_buckets, &LATENCY_BUCKETS_US, us);
     }
 
     /// Add generated token count.
@@ -82,7 +141,8 @@ impl Metrics {
 
     /// Increment active requests (call on request entry).
     pub fn inc_active(&self) {
-        self.active_requests.fetch_add(1, Ordering::Relaxed);
+        let active = self.active_requests.fetch_add(1, Ordering::Relaxed) + 1;
+        update_peak(&self.active_requests_peak, active);
     }
 
     /// Decrement active requests (call on request exit).
@@ -131,11 +191,61 @@ impl Metrics {
         prom_counter(&mut out, "kiln_requests_total", "status", "rejected", self.requests_rejected.load(Ordering::Relaxed));
 
         out.push_str("# HELP kiln_request_duration_seconds Request latency.\n");
-        out.push_str("# TYPE kiln_request_duration_seconds summary\n");
+        out.push_str("# TYPE kiln_request_duration_seconds histogram\n");
         let count = self.request_duration_count.load(Ordering::Relaxed);
         let sum_us = self.request_duration_sum_us.load(Ordering::Relaxed);
+        render_histogram_buckets(
+            &mut out,
+            "kiln_request_duration_seconds",
+            &REQUEST_LATENCY_BUCKETS_SECONDS,
+            &self.request_duration_buckets,
+        );
         push_line(&mut out, &format!("kiln_request_duration_seconds_count {count}"));
         push_line(&mut out, &format!("kiln_request_duration_seconds_sum {:.6}", sum_us as f64 / 1_000_000.0));
+
+        out.push_str("# HELP kiln_request_prefill_duration_seconds Model prefill latency before decode.\n");
+        out.push_str("# TYPE kiln_request_prefill_duration_seconds histogram\n");
+        let prefill_count = self.prefill_duration_count.load(Ordering::Relaxed);
+        let prefill_sum_us = self.prefill_duration_sum_us.load(Ordering::Relaxed);
+        render_histogram_buckets(
+            &mut out,
+            "kiln_request_prefill_duration_seconds",
+            &LATENCY_BUCKETS_SECONDS,
+            &self.prefill_duration_buckets,
+        );
+        push_line(
+            &mut out,
+            &format!("kiln_request_prefill_duration_seconds_count {prefill_count}"),
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_request_prefill_duration_seconds_sum {:.6}",
+                prefill_sum_us as f64 / 1_000_000.0
+            ),
+        );
+
+        out.push_str("# HELP kiln_request_decode_duration_seconds Model decode latency after prefill.\n");
+        out.push_str("# TYPE kiln_request_decode_duration_seconds histogram\n");
+        let decode_count = self.decode_duration_count.load(Ordering::Relaxed);
+        let decode_sum_us = self.decode_duration_sum_us.load(Ordering::Relaxed);
+        render_histogram_buckets(
+            &mut out,
+            "kiln_request_decode_duration_seconds",
+            &LATENCY_BUCKETS_SECONDS,
+            &self.decode_duration_buckets,
+        );
+        push_line(
+            &mut out,
+            &format!("kiln_request_decode_duration_seconds_count {decode_count}"),
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_request_decode_duration_seconds_sum {:.6}",
+                decode_sum_us as f64 / 1_000_000.0
+            ),
+        );
 
         out.push_str("# HELP kiln_tokens_generated_total Total tokens generated.\n");
         out.push_str("# TYPE kiln_tokens_generated_total counter\n");
@@ -144,6 +254,16 @@ impl Metrics {
         out.push_str("# HELP kiln_active_requests Currently in-flight requests.\n");
         out.push_str("# TYPE kiln_active_requests gauge\n");
         push_line(&mut out, &format!("kiln_active_requests {}", self.active_requests.load(Ordering::Relaxed)));
+
+        out.push_str("# HELP kiln_active_requests_peak Peak in-flight requests since process start.\n");
+        out.push_str("# TYPE kiln_active_requests_peak gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_active_requests_peak {}",
+                self.active_requests_peak.load(Ordering::Relaxed)
+            ),
+        );
 
         out.push_str("# HELP kiln_request_prefill_tokens_completed Prompt/prefix prefill tokens completed by currently in-flight requests.\n");
         out.push_str("# TYPE kiln_request_prefill_tokens_completed gauge\n");
@@ -369,6 +489,39 @@ fn push_line(out: &mut String, line: &str) {
     out.push('\n');
 }
 
+fn observe_bucket(buckets: &[AtomicU64], bounds_us: &[u64], value_us: u64) {
+    let index = bounds_us
+        .iter()
+        .position(|&bound| value_us <= bound)
+        .unwrap_or(bounds_us.len());
+    buckets[index].fetch_add(1, Ordering::Relaxed);
+}
+
+fn update_peak(peak: &AtomicU64, value: u64) {
+    let mut current = peak.load(Ordering::Relaxed);
+    while value > current {
+        match peak.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn render_histogram_buckets(
+    out: &mut String,
+    name: &str,
+    bounds_seconds: &[f64],
+    buckets: &[AtomicU64],
+) {
+    let mut cumulative = 0;
+    for (idx, bound) in bounds_seconds.iter().enumerate() {
+        cumulative += buckets[idx].load(Ordering::Relaxed);
+        push_line(out, &format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}"));
+    }
+    cumulative += buckets[bounds_seconds.len()].load(Ordering::Relaxed);
+    push_line(out, &format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}"));
+}
+
 fn prom_counter(out: &mut String, name: &str, label: &str, value: &str, count: u64) {
     out.push_str(&format!("{name}{{{label}=\"{value}\"}} {count}\n"));
 }
@@ -388,8 +541,12 @@ mod tests {
         m.inc_request(RequestStatus::Ok);
         m.inc_request(RequestStatus::Error);
         m.observe_duration(0.5);
+        m.observe_prefill_duration(0.25);
+        m.observe_decode_duration(0.75);
         m.add_tokens(100);
         m.inc_active();
+        m.inc_active();
+        m.dec_active();
         m.request_prefill_tokens_completed
             .store(8192, std::sync::atomic::Ordering::Relaxed);
 
@@ -427,6 +584,7 @@ mod tests {
         assert!(output.contains("kiln_requests_total{status=\"error\"} 1"));
         assert!(output.contains("kiln_tokens_generated_total 100"));
         assert!(output.contains("kiln_active_requests 1"));
+        assert!(output.contains("kiln_active_requests_peak 2"));
         assert!(output.contains("kiln_request_prefill_tokens_completed 8192"));
         assert!(output.contains("kiln_scheduler_waiting 3"));
         assert!(output.contains("kiln_blocks_total 256"));
@@ -446,8 +604,16 @@ mod tests {
         assert!(output.contains("kiln_prefix_cache_state_bytes 196"));
         assert!(output.contains("kiln_prefix_cache_max_state_bytes 392"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
+        assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="0.5"} 1"#));
+        assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="+Inf"} 1"#));
         assert!(output.contains("kiln_request_duration_seconds_count 1"));
         assert!(output.contains("kiln_request_duration_seconds_sum 0.5"));
+        assert!(output.contains(r#"kiln_request_prefill_duration_seconds_bucket{le="0.25"} 1"#));
+        assert!(output.contains("kiln_request_prefill_duration_seconds_count 1"));
+        assert!(output.contains("kiln_request_prefill_duration_seconds_sum 0.25"));
+        assert!(output.contains(r#"kiln_request_decode_duration_seconds_bucket{le="1"} 1"#));
+        assert!(output.contains("kiln_request_decode_duration_seconds_count 1"));
+        assert!(output.contains("kiln_request_decode_duration_seconds_sum 0.75"));
     }
 
     #[test]
