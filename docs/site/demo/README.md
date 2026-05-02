@@ -2,7 +2,7 @@
 
 This directory holds the canonical Kiln demo asciicast — a 60–90 second silent recording showing the full live-LoRA online-learning loop end-to-end on a single GPU: cold start → first chat (base model) → `/v1/train/sft` correction → hot-swap → second chat (improved). It is the demo linked from the README hero and the project website.
 
-The actual recording (`kiln-60s.cast`) is recorded against the canonical scenes pinned down in [`SCRIPT.md`](SCRIPT.md), driven by the reference shell script in [`demo.sh`](demo.sh) and the SFT request body in [`demo-sft.json`](demo-sft.json). The standalone player page is [`index.html`](index.html), which embeds asciinema-player and auto-loads `kiln-60s.cast`.
+The actual recording (`kiln-60s.cast`) is recorded against the canonical scenes pinned down in [`SCRIPT.md`](SCRIPT.md), driven by the reference shell script in [`demo.sh`](demo.sh) and the SFT request body in [`demo-sft.json`](demo-sft.json). The checked-in recording was captured on kiln v0.2.8 and may show that startup banner; it is kept because it demonstrates the same live-LoRA SFT and adapter flow used by the current Quickstart. The standalone player page is [`index.html`](index.html), which embeds asciinema-player and auto-loads `kiln-60s.cast`.
 
 ## Files
 
@@ -12,7 +12,7 @@ The actual recording (`kiln-60s.cast`) is recorded against the canonical scenes 
 | [`index.html`](index.html) | Standalone demo page styled to match `docs/site/index.html`. Embeds the asciinema player with `data-src="kiln-60s.cast"`. |
 | [`demo.sh`](demo.sh) | Reference shell script that drives the recording end-to-end via `asciinema rec --command`. Slow-prints each curl as if a human were typing, polls until training completes, and cleanly shuts down the kiln server. Idempotent — re-record any time by running this script under `asciinema rec`. |
 | [`demo-sft.json`](demo-sft.json) | SFT request body used in Scene 3. Two correction examples plus training hyperparameters (100 epochs, LoRA rank 32, lr 2e-3) chosen so the trained adapter unambiguously overrides the base model in Scene 5. |
-| `kiln-60s.cast` | The asciicast recording itself — captured on an A6000 against `Qwen3.5-4B`. ~220 KB, asciicast v2, 120×32 terminal, ~136 s real time (compresses with `idle_time_limit: 2`). Plays end-to-end in the embedded player. |
+| `kiln-60s.cast` | The asciicast recording itself — captured on kiln v0.2.8 on an A6000 against `Qwen3.5-4B`, so its startup banner may show `0.2.8`. It still demonstrates the same live-LoRA flow used by the current Quickstart. ~220 KB, asciicast v2, 120×32 terminal, ~136 s real time (compresses with `idle_time_limit: 2`). Plays end-to-end in the embedded player. |
 
 ## Player embed snippet
 
