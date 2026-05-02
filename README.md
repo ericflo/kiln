@@ -129,7 +129,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.9
+  Version: 0.2.13
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
