@@ -77,6 +77,10 @@ pub struct MemoryConfig {
     pub gpu_memory_gb: Option<f64>,
     pub inference_memory_fraction: f64,
     pub training_memory_gb: Option<f64>,
+    /// Reserve GPU memory for per-request prefill activations before auto-sizing
+    /// the paged KV cache. `None` uses the CUDA production default; explicit
+    /// `0.0` disables the reserve. Override via `KILN_PREFILL_ACTIVATION_RESERVE_GB`.
+    pub prefill_activation_reserve_gb: Option<f64>,
     /// Enable FP8 (E4M3FN) quantization for KV cache, halving memory usage.
     /// When enabled, K/V values are stored as 8-bit floats with per-tensor scaling.
     /// Default: false
@@ -357,6 +361,7 @@ impl Default for MemoryConfig {
             gpu_memory_gb: None,
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
+            prefill_activation_reserve_gb: None,
             kv_cache_fp8: false,
             cuda_graphs: true,
         }
@@ -578,6 +583,11 @@ impl KilnConfig {
                 self.memory.training_memory_gb = Some(g);
             }
         }
+        if let Ok(v) = std::env::var("KILN_PREFILL_ACTIVATION_RESERVE_GB") {
+            if let Ok(g) = v.parse() {
+                self.memory.prefill_activation_reserve_gb = Some(g);
+            }
+        }
         if let Ok(v) = std::env::var("KILN_KV_CACHE_FP8") {
             self.memory.kv_cache_fp8 = v == "1" || v.eq_ignore_ascii_case("true");
         }
@@ -726,6 +736,13 @@ impl KilnConfig {
         if !(0.0..=1.0).contains(&f) {
             anyhow::bail!("memory.inference_memory_fraction must be between 0.0 and 1.0, got {f}");
         }
+        if let Some(gb) = self.memory.prefill_activation_reserve_gb {
+            if gb < 0.0 || !gb.is_finite() {
+                anyhow::bail!(
+                    "memory.prefill_activation_reserve_gb must be a finite value >= 0.0, got {gb}"
+                );
+            }
+        }
 
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         let level = self.logging.level.to_lowercase();
@@ -839,6 +856,7 @@ num_blocks = 128
 gpu_memory_gb = 24.0
 inference_memory_fraction = 0.5
 training_memory_gb = 6.0
+prefill_activation_reserve_gb = 3.5
 kv_cache_fp8 = true
 cuda_graphs = false
 
@@ -885,6 +903,7 @@ composed_cache_max_entries = 8
         assert_eq!(config.memory.gpu_memory_gb, Some(24.0));
         assert_eq!(config.memory.inference_memory_fraction, 0.5);
         assert_eq!(config.memory.training_memory_gb, Some(6.0));
+        assert_eq!(config.memory.prefill_activation_reserve_gb, Some(3.5));
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert_eq!(config.training.grad_checkpoint_segments, Some(8));
@@ -1008,6 +1027,7 @@ port = 3000
             std::env::set_var("KILN_TRAINING_MAX_QUEUED_JOBS", "7");
             std::env::set_var("KILN_TRAINING_MAX_TRACKED_JOBS", "9");
             std::env::set_var("KILN_TRAINING_TRACKED_JOB_TTL_SECS", "11");
+            std::env::set_var("KILN_PREFILL_ACTIVATION_RESERVE_GB", "2.5");
             std::env::set_var("KILN_KV_CACHE_FP8", "1");
             std::env::set_var("KILN_CUDA_GRAPHS", "false");
             std::env::set_var("KILN_PREFIX_CACHE_ENABLED", "false");
@@ -1037,6 +1057,7 @@ port = 3000
         assert_eq!(config.training.max_queued_jobs, 7);
         assert_eq!(config.training.max_tracked_jobs, 9);
         assert_eq!(config.training.tracked_job_ttl_secs, 11);
+        assert_eq!(config.memory.prefill_activation_reserve_gb, Some(2.5));
         assert!(config.memory.kv_cache_fp8);
         assert!(!config.memory.cuda_graphs);
         assert!(!config.prefix_cache.enabled);
@@ -1062,6 +1083,7 @@ port = 3000
             std::env::remove_var("KILN_TRAINING_MAX_QUEUED_JOBS");
             std::env::remove_var("KILN_TRAINING_MAX_TRACKED_JOBS");
             std::env::remove_var("KILN_TRAINING_TRACKED_JOB_TTL_SECS");
+            std::env::remove_var("KILN_PREFILL_ACTIVATION_RESERVE_GB");
             std::env::remove_var("KILN_KV_CACHE_FP8");
             std::env::remove_var("KILN_CUDA_GRAPHS");
             std::env::remove_var("KILN_PREFIX_CACHE_ENABLED");

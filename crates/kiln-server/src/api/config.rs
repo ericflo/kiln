@@ -36,6 +36,7 @@ struct MemoryBudgetConfig {
     total_vram_gb: f64,
     model_gb: f64,
     kv_cache_gb: f64,
+    prefill_activation_reserve_gb: f64,
     training_budget_gb: f64,
     inference_memory_fraction: f64,
 }
@@ -105,6 +106,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             total_vram_gb: b.total_vram_bytes as f64 / 1e9,
             model_gb: b.model_memory_bytes as f64 / 1e9,
             kv_cache_gb: b.kv_cache_bytes as f64 / 1e9,
+            prefill_activation_reserve_gb: b.prefill_activation_reserve_bytes as f64 / 1e9,
             training_budget_gb: b.training_budget_bytes as f64 / 1e9,
             inference_memory_fraction: b.inference_memory_fraction,
         },
