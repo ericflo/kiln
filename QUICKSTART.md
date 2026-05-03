@@ -385,8 +385,10 @@ Training runs in the background. The model continues serving requests during tra
 Via CLI:
 
 ```bash
-./target/release/kiln health
+./target/release/kiln train status
 ```
+
+`kiln health` is still useful for server/model diagnostics; `kiln train status` shows the training queue and recent jobs.
 
 Via curl:
 
