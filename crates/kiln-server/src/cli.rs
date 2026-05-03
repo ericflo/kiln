@@ -15,7 +15,7 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln train sft --file examples.jsonl --adapter my-task
       Teach the model from corrected chat examples and hot-swap the trained LoRA adapter.
 
-  kiln train grpo --file scored.jsonl --adapter my-task
+  kiln train grpo --file grpo-batch.json --adapter my-task
       Improve an adapter from scored completions using GRPO rewards.
 
   kiln adapters list
@@ -135,7 +135,7 @@ pub enum TrainCommands {
     },
     /// Train a LoRA adapter from scored GRPO completions
     Grpo {
-        /// Path to JSONL file with scored completions
+        /// Path to single JSON GRPO request/batch file
         #[arg(long, short)]
         file: String,
 
