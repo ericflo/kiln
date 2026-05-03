@@ -100,6 +100,31 @@
     a:hover { color: var(--accent); }
     a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
     a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .site-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      color: var(--fg-dim);
+    }
+    @media (max-width: 640px) {
+      .site-nav-bar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .site-nav {
+        flex-wrap: wrap;
+        gap: 0.35rem 1rem;
+        line-height: 1.35;
+        width: 100%;
+      }
+    }
     .meta-line { color: var(--fg-mute); font-size: 0.875rem; }
     .prose-body p { color: var(--fg-dim); line-height: 1.7; margin-bottom: 1.1rem; }
     .prose-body h2 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; margin-top: 2.5rem; margin-bottom: 0.9rem; color: var(--fg); }
@@ -118,14 +143,15 @@
 <body class="min-h-screen">
   <!-- nav -->
   <header class="border-b" style="border-color: var(--line);">
-    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
       <a href="../" class="flex items-center gap-2.5">
         <img src="../assets/logo.png" alt="" width="28" height="28" class="rounded">
         <span class="text-lg font-semibold tracking-tight">Kiln</span>
       </a>
-      <nav class="flex items-center gap-5 text-sm" style="color: var(--fg-dim);">
+      <nav class="site-nav text-sm">
         <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
         <a href="./">Demo</a>
+        <a href="../troubleshooting.html">Troubleshooting</a>
         <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
         <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
       </nav>
