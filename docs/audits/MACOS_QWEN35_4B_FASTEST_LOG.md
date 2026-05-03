@@ -6710,3 +6710,56 @@ linear layers, `in_proj` is the largest synchronized GDN stage by roughly 2x
 over `out_proj` and roughly 3x-5x over the recurrence/gating pieces. The next
 low-level optimization should inspect and ablate the Metal GDN input-projection
 decode path before spending more time on endpoint cache reuse.
+
+## Experiment E223-E224: GDN Input-Projection Ablation and Rejected Cooperative Kernel
+
+Hypothesis:
+
+E222 identified GDN `in_proj` as the largest synchronized sub-stage inside the
+linear-attention decode layers. Before designing a more invasive path, check
+whether the current fused Metal input-projection kernel is actually better than
+the Candle fallback, and whether the existing tile8 cooperative GEMV pattern
+helps this projection shape.
+
+Measurements:
+
+All runs used the rebuilt release bench with
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| E215 | compact fused QKV default | 488.8 ms | 5.92 | 169.0 ms | 167.4 ms | 201.8 ms | baseline |
+| E223 | `KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION=1` | 446.3 ms | 5.21 | 191.8 ms | 190.5 ms | 215.1 ms | fused GDN in-proj is necessary |
+| E224 | temporary tile8 cooperative GDN in-proj | 444.5 ms | 5.63 | 177.7 ms | 176.1 ms | 197.3 ms | rejected and reverted |
+
+Temporary E224 change:
+
+The current `kiln_gdn_in_proj_decode_bf16` kernel uses one thread per output
+element and loops serially over the hidden dimension. E224 temporarily rewrote
+it to use the same tile8 cooperative transposed-GEMV mapping as the fused QKV
+projection: four SIMD groups per threadgroup, eight output columns per SIMD
+group, `simd_sum` reductions across the hidden dimension, and compact group
+ranges for `qkv`, `z`, `a`, and `b`.
+
+Validation:
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  - Passed for the temporary cooperative candidate.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed for the candidate before E224.
+  - Passed again after reverting the candidate, so subsequent runs use the
+    accepted scalar fused kernel.
+
+Artifacts:
+
+- `e223_m1_bs1_p64_o64_warmed_no_gdn_in_proj_fusion.log`
+- `e224_m1_bs1_p64_o64_warmed_coop_gdn_in_proj.log`
+
+Takeaway:
+
+The fused Metal GDN input projection should stay enabled: disabling it is a
+large decode regression. The naive cooperative tile8 rewrite is also worse
+than the existing scalar fused kernel, though not as bad as falling back to
+four Candle matmuls. The next GDN input-projection work needs a different
+kernel design, likely one that improves data reuse without paying the tile8
+threadgroup/reduction overhead that hurt both E220 and E224.

@@ -473,3 +473,13 @@
   `recurrent` 9.5 ms, `qkv_conv_norm` 7.1 ms, and `post_transpose` ~0.0 ms.
   Treat this as target selection, not a latency baseline: the next low-level
   target is Metal GDN input projection.
+- 2026-05-03 E223-E224: Ablated Metal GDN input projection. Disabling
+  `KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION=1` made warmed p64/o64 decode much
+  worse than the E215 baseline: 191.8 ms mean ITL / 5.21 tok/s vs 169.0 ms /
+  5.92 tok/s, so the fused kernel is necessary. A temporary tile8 cooperative
+  GDN in-proj rewrite passed
+  `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  but still slowed warmed p64/o64 decode to 177.7 ms / 5.63 tok/s, so it was
+  reverted. Release `kiln-bench` was rebuilt after the revert. Next
+  input-projection work needs a different kernel design, not the existing
+  cooperative transposed-GEMV template.
