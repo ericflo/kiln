@@ -6432,3 +6432,96 @@ The zero-token endpoint-cache graph is now closed in both chat directions:
 prefill, decode, or generation on the later request. The next optimization
 work should shift back to low-level kernel/profile evidence, since cache reuse
 is not the whole fastest-inference objective.
+
+## Experiment E203-E214: Warmed Low-Level Metal Fused-QKV Dispatch
+
+Hypothesis:
+
+The next speed work needs to get back under endpoint caches. The existing
+`kiln-bench --paged --latency-only` p64/o16 numbers were not reliable for
+kernel decisions because the first timed prefill included first-use Metal and
+Candle compilation. The fused QKV decode projection also looked suspect: the
+old kernel launched a rectangular 2D grid sized to the largest of Q/K/V, so
+Qwen3.5-4B full-attention decode spent half the fused-QKV threadgroups on
+immediate K/V returns (`128 * 3 = 384` groups instead of the exact
+`128 + 32 + 32 = 192` groups).
+
+Change:
+
+- Added `--latency-warmup-runs <n>` to `kiln-bench`, which runs throwaway
+  latency passes before the measured run. This preserves the default benchmark
+  behavior while allowing kernel A/B runs that exclude first-use compilation
+  from the reported prefill/decode timings.
+- Changed the Metal fused-QKV transposed cooperative GEMV kernel from a
+  rectangular `(max_projection_groups, 3)` grid to a compact concatenated
+  Q/K/V grid. The kernel now maps one 1D group range onto Q, then K, then V,
+  so it dispatches exactly the projection groups needed.
+
+Validation:
+
+- `cargo test -p kiln-model --features metal test_fused_qkv_transposed_coop_gemv_matches_broadcast_matmul --lib`
+  - Passed: 1 test.
+- `cargo check --locked -p kiln-server --features metal --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs crates/kiln-server/src/bench.rs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+
+Measurements:
+
+All warmed measurements used:
+
+`./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 16 --temperature 0.0`
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Notes |
+|---|---:|---:|---:|---:|---:|---:|---|
+| E203 | cold default | 11049.4 ms | 5.19 | 192.6 ms | 173.1 ms | 492.0 ms | polluted by first-use compile |
+| E204 | repeat default, no explicit warmup | 1975.4 ms | 3.32 | 300.8 ms | 171.8 ms | 2199.3 ms | decode outlier; still not stable |
+| E205 | cold tile4 GEMV | 9600.7 ms | 5.75 | 173.9 ms | 170.8 ms | 225.3 ms | tile4 also disables fused QKV |
+| E206 | cold no fused QKV | 10787.9 ms | 5.90 | 169.4 ms | 167.9 ms | 190.0 ms | separates fused QKV from tile4 |
+| E207 | warmed default, pre-change | 491.8 ms | 5.79 | 172.8 ms | 169.2 ms | 196.6 ms | first warmed baseline |
+| E208 | warmed no fused QKV, pre-change | 455.9 ms | 5.94 | 168.3 ms | 169.5 ms | 171.4 ms | slightly better than E207 |
+| E209 | warmed tile4 GEMV, pre-change | 459.5 ms | 5.52 | 181.0 ms | 180.5 ms | 198.5 ms | reject for decode |
+| E210 | warmed default repeat, pre-change | 452.3 ms | 5.91 | 169.1 ms | 169.2 ms | 174.3 ms | baseline repeat narrowed gap |
+| E211 | warmed no fused QKV repeat, pre-change | 448.4 ms | 5.89 | 169.9 ms | 169.2 ms | 193.2 ms | no-fused effect small/noisy |
+| E212 | warmed compact fused QKV | 450.9 ms | 5.85 | 170.9 ms | 169.3 ms | 190.0 ms | compact grid, no regression |
+| E213 | warmed no fused QKV post-change | 455.1 ms | 5.52 | 181.2 ms | 181.5 ms | 188.7 ms | noisy control |
+| E214 | warmed compact fused QKV repeat | 450.0 ms | 5.96 | 167.9 ms | 168.0 ms | 173.1 ms | best warmed default sample |
+
+Two-sample averages for the most comparable warmed paths:
+
+- Pre-change default (E207, E210): 472.1 ms prefill, 171.0 ms mean ITL,
+  5.85 decode tok/s.
+- Pre-change no-fused-QKV (E208, E211): 452.2 ms prefill, 169.1 ms mean ITL,
+  5.91 decode tok/s.
+- Post-change compact fused-QKV (E212, E214): 450.5 ms prefill, 169.4 ms mean
+  ITL, 5.90 decode tok/s.
+
+Artifacts:
+
+- `e203_m1_bs1_p64_o16_lowlevel_baseline.log`
+- `e204_m1_bs1_p64_o16_lowlevel_repeat.log`
+- `e205_m1_bs1_p64_o16_tile4_gemv.log`
+- `e206_m1_bs1_p64_o16_no_fused_qkv.log`
+- `e207_m1_bs1_p64_o16_warmed_baseline.log`
+- `e208_m1_bs1_p64_o16_warmed_no_fused_qkv.log`
+- `e209_m1_bs1_p64_o16_warmed_tile4_gemv.log`
+- `e210_m1_bs1_p64_o16_warmed_baseline_repeat.log`
+- `e211_m1_bs1_p64_o16_warmed_no_fused_qkv_repeat.log`
+- `e212_m1_bs1_p64_o16_warmed_compact_fused_qkv.log`
+- `e213_m1_bs1_p64_o16_warmed_no_fused_qkv_postcompact.log`
+- `e214_m1_bs1_p64_o16_warmed_compact_fused_qkv_repeat.log`
+
+Takeaway:
+
+The benchmark harness now has an explicit steady-state mode for low-level
+kernel work. The compact fused-QKV grid removes known empty GPU work and keeps
+the default fused path competitive with disabling the fused path outright. The
+measured p64/o16 improvement is small and close to run noise, so this should be
+treated as a low-level cleanup plus measurement foundation, not the final
+kernel win. Next low-level work should use the warmed harness on longer decode
+runs and bs>1/server shapes, then target the remaining decode-heavy kernels
+rather than returning to endpoint-cache-only work.

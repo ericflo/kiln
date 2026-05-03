@@ -433,3 +433,15 @@
   Focused test passed, and `cargo test -p kiln-server chat_ --lib` passed
   72 tests. No live run; this is the final endpoint-cache cleanup before
   returning to low-level Metal/kernel profiling and optimization.
+- 2026-05-03 E203-E214: Pivoted back to low-level Metal work. Added
+  `kiln-bench --latency-warmup-runs <n>` so kernel A/Bs can exclude first-use
+  Metal/Candle compilation from measured latency, then compacted the Metal
+  fused-QKV transposed cooperative GEMV dispatch from a rectangular
+  max-projection grid to an exact concatenated Q/K/V grid. For Qwen3.5-4B
+  full-attention decode this cuts fused-QKV threadgroups from `128 * 3 = 384`
+  to `128 + 32 + 32 = 192`. Parity test, check, release build, rustfmt check,
+  and `git diff --check` passed. Warmed p64/o16 averages: old default E207/E210
+  472.1 ms prefill / 171.0 ms mean ITL / 5.85 tok/s; compact fused QKV
+  E212/E214 450.5 ms prefill / 169.4 ms mean ITL / 5.90 tok/s. Treat as
+  low-level cleanup plus measurement foundation; next runs should broaden to
+  longer decode and bs>1/server shapes.

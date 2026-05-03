@@ -2350,23 +2350,39 @@ kernel void kiln_fused_qkv_transposed_coop_gemv8_bf16(
     uint simd_group [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    const uint proj = tgroup.y;
-    const uint col_base = (tgroup.x * 4 + simd_group) * 8;
+    constexpr uint TILE_COLS = 8;
+    constexpr uint SIMD_GROUPS = 4;
+    constexpr uint COLS_PER_TGROUP = TILE_COLS * SIMD_GROUPS;
+
+    const uint q_groups = (q_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;
+    const uint k_groups = (k_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;
+    const uint v_groups = (v_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;
+    const uint group = tgroup.x;
 
     device const bfloat* weight_t = q_t;
     device bfloat* out = q_out;
     uint output_dim = q_output_dim;
-    if (proj == 1) {
+    uint group_in_proj = group;
+    if (group < q_groups) {
+        weight_t = q_t;
+        out = q_out;
+        output_dim = q_output_dim;
+    } else if (group < q_groups + k_groups) {
         weight_t = k_t;
         out = k_out;
         output_dim = k_output_dim;
-    } else if (proj == 2) {
+        group_in_proj = group - q_groups;
+    } else if (group < q_groups + k_groups + v_groups) {
         weight_t = v_t;
         out = v_out;
         output_dim = v_output_dim;
+        group_in_proj = group - q_groups - k_groups;
+    } else {
+        return;
     }
 
-    if (proj > 2 || col_base >= output_dim) {
+    const uint col_base = group_in_proj * COLS_PER_TGROUP + simd_group * TILE_COLS;
+    if (col_base >= output_dim) {
         return;
     }
 
@@ -3997,10 +4013,13 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
 
         let cols_per_threadgroup =
             METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
-        let max_output_dim = q_output_dim.max(k_output_dim).max(v_output_dim);
+        let q_groups = q_output_dim.div_ceil(cols_per_threadgroup);
+        let k_groups = k_output_dim.div_ceil(cols_per_threadgroup);
+        let v_groups = v_output_dim.div_ceil(cols_per_threadgroup);
+        let total_groups = q_groups + k_groups + v_groups;
         let threadgroups_per_grid = objc2_metal::MTLSize {
-            width: max_output_dim.div_ceil(cols_per_threadgroup),
-            height: 3,
+            width: total_groups,
+            height: 1,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
