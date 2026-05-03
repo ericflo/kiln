@@ -64,6 +64,10 @@ struct CapturedDecodeGraph {
     /// Updated via cudaMemcpyHtoDAsync before each replay so RoPE sees
     /// the correct position while reading from the same device pointer.
     position_buffer: Tensor,
+    /// Sequence length used when this graph was captured. Paged decode kernels
+    /// bake this into KV write offsets and attention read lengths, so replay is
+    /// only safe while this remains identical.
+    captured_seq_len: usize,
     /// Pre-allocated fused GDN decode recurrent outputs, one per linear layer.
     /// Their device pointers are captured by the graph and must stay alive for
     /// replay.
@@ -177,6 +181,20 @@ impl CudaGraphRunner {
             // Phase 3: replay if we have a valid captured graph
             if let Some(ref captured) = self.captured {
                 if captured.adapter_gen == self.adapter_generation {
+                    if captured.captured_seq_len != seq_len {
+                        tracing::warn!(
+                            captured_seq_len = captured.captured_seq_len,
+                            requested_seq_len = seq_len,
+                            "CUDA graph replay disabled: paged decode capture bakes dynamic seq_len/KV offsets into kernel arguments"
+                        );
+                        self.captured = None;
+                        self.enabled = false;
+                        return Self::eager_forward(
+                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                            linear_state, lora,
+                        );
+                    }
+
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
@@ -389,18 +407,15 @@ impl CudaGraphRunner {
                     "CUDA graph captured for decode ({} layers)",
                     config.num_layers,
                 );
-                let _ = (
+                self.captured = Some(CapturedDecodeGraph {
                     graph,
                     output_logits,
+                    adapter_gen: self.adapter_generation,
                     token_buffer,
                     position_buffer,
-                    gdn_decode_outputs,
-                );
-                tracing::warn!(
-                    "CUDA graph capture succeeded, but replay is disabled for paged decode until all captured Candle allocations have graph-stable ownership"
-                );
-                self.captured = None;
-                self.enabled = false;
+                    captured_seq_len: seq_len,
+                    _gdn_decode_outputs: gdn_decode_outputs,
+                });
                 Ok(logits)
             }
             Ok(None) => {
