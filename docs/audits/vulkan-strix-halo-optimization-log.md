@@ -2000,8 +2000,46 @@ Verdict:
 - The current profile again points at split GDN recurrent state traffic/compute as the main bs=1 bottleneck.
 - The next source-level candidate should be a real recurrent-state residency or shader-algorithm change; the existing guards do not expose another small default win.
 
+### E069: Batch-Local Common Prefix Reuse
+
+Change:
+- Added a native-batch-only local prefix reuse path for greedy Vulkan batches where all rows miss the external prefix cache but share an identical block-aligned prompt prefix.
+- The shared prefix is prefetched once into shared KV blocks and a linear-attention state snapshot; each row then prefills only its suffix before the rows decode together.
+- Added an 8-block minimum shared-prefix threshold after A/B testing showed small shared prefixes regress.
+- Added rollback guard `KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE=1`.
+- Added targeted tests for the common-prefix threshold and shared-prefix block allocation in native batch greedy generation.
+
+Reasoning:
+- This follows the "remove the need to do it at all" principle for a common server traffic shape: multiple requests in one batch can share a long system/developer/user preamble even when the global prefix cache has no reusable entry yet.
+- Reusing one in-flight batch prefix should avoid duplicate prefill work without mutating external prefix-cache stats/refcounts and without changing bs=1 generation.
+- The state snapshot cost and extra prefix/suffix split overhead are only worthwhile for long prefixes, so the final implementation requires at least eight full shared blocks.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-model batch_local_prefix_reuse_requires_minimum_shared_blocks -- --nocapture` passed.
+  - `cargo test -p kiln-model native_batch_greedy_reuses_common_block_prefix -- --nocapture` passed.
+  - `cargo test -p kiln-model native_batch_greedy -- --nocapture` passed, 3 tests.
+  - `cargo test -p kiln-model compact_linear_attention_state_selects_active_batch_rows -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Short/common-prefix guard finding:
+  - Initial unthresholded 4-row fixture with 209 prompt tokens total and only 32 shared tokens triggered local reuse and regressed: 17.128s / 0.934 tok/s versus rollback guard 13.913s / 1.150 tok/s.
+  - After adding the 8-block threshold, the same fixture no longer triggered local reuse (`cached_tokens=0` on all rows) and measured 14.213s / 1.126 tok/s, in the same noisy band as the guarded run.
+- Long common-prefix win:
+  - Fixture: 4 rows, 1757 prompt tokens total, 8 completion tokens, 416 shared prompt tokens / 26 shared blocks.
+  - Rollback guard `KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE=1`: 39.222s / 0.204 tok/s; row prefills were 9486.6ms, 9688.8ms, 9675.5ms, and 9791.5ms.
+  - Thresholded no-env path: 17.869s / 0.448 tok/s; common prefix prefill was 9030.0ms, suffix prefills were 2060.7ms, 2036.9ms, 2059.6ms, and 2093.5ms.
+  - This is a 2.20x throughput improvement for long shared-prefix all-miss native batch traffic.
+- The standard short all-miss batch fixture did not share a full block-aligned prefix and therefore did not trigger this path (`cached_tokens=0` rows); the observed 11.792s / 1.357 tok/s was not attributable to local prefix reuse.
+
+Verdict:
+- Keep.
+- The final threshold preserves the long shared-prefix win while avoiding the measured small-prefix regression.
+- This does not change bs=1 behavior and composes with the external prefix cache: it only runs when every row misses the external cache.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
 
-For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, and E062 routes single-row tails back to the tuned bs=1 decode path. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
+For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, and E069 removes duplicate prefill for long in-batch common prefixes. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.

@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 use std::path::Path;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
 
 use kiln_core::config::ModelConfig;
@@ -228,6 +228,44 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
         block_table.push(block_id);
     }
     block_table
+}
+
+const BATCH_LOCAL_PREFIX_MIN_BLOCKS: usize = 8;
+
+fn common_block_aligned_prefix_len(prompts: &[Vec<TokenId>], block_size: usize) -> usize {
+    if prompts.len() < 2 || block_size == 0 {
+        return 0;
+    }
+    let Some(min_len) = prompts.iter().map(Vec::len).min() else {
+        return 0;
+    };
+    let mut common = 0usize;
+    'tokens: while common < min_len {
+        let token = prompts[0][common];
+        for prompt in &prompts[1..] {
+            if prompt[common] != token {
+                break 'tokens;
+            }
+        }
+        common += 1;
+    }
+    let aligned = common / block_size * block_size;
+    if aligned == 0 || prompts.iter().any(|prompt| aligned >= prompt.len()) {
+        0
+    } else {
+        aligned
+    }
+}
+
+fn batch_local_common_prefix_len(prompts: &[Vec<TokenId>], block_size: usize) -> usize {
+    let aligned = common_block_aligned_prefix_len(prompts, block_size);
+    let min_tokens = block_size.saturating_mul(BATCH_LOCAL_PREFIX_MIN_BLOCKS);
+    if aligned >= min_tokens { aligned } else { 0 }
+}
+
+fn batch_local_prefix_reuse_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE").is_err())
 }
 
 fn stack_linear_attention_states(states: &[LinearAttentionState]) -> Result<LinearAttentionState> {
@@ -1111,16 +1149,31 @@ impl ModelRunner {
                 *cached_prefix = None;
             }
         }
+        let batch_local_prefix_tokens =
+            if batch_local_prefix_reuse_enabled() && cached_prefixes.iter().all(Option::is_none) {
+                batch_local_common_prefix_len(prompts, block_size)
+            } else {
+                0
+            };
 
-        let (mut reservation, block_tables) = {
+        let (mut reservation, block_tables, batch_local_prefix_blocks) = {
             let mut bm_guard = lock_block_manager(block_manager)?;
             let mut all_blocks = Vec::new();
+            let batch_local_prefix_blocks = if batch_local_prefix_tokens > 0 {
+                let prefix_blocks = bm_guard
+                    .allocate(batch_local_prefix_tokens / block_size)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                all_blocks.extend(prefix_blocks.iter().copied());
+                prefix_blocks
+            } else {
+                Vec::new()
+            };
             let mut block_tables = Vec::with_capacity(prompts.len());
             for (idx, prompt) in prompts.iter().enumerate() {
                 let cached_blocks = cached_prefixes[idx]
                     .as_ref()
                     .map(|prefix| prefix.block_ids.as_slice())
-                    .unwrap_or(&[]);
+                    .unwrap_or(batch_local_prefix_blocks.as_slice());
                 let max_total = prompt.len() + params.max_tokens;
                 let total_blocks = Self::blocks_needed(max_total, block_size);
                 let num_blocks = total_blocks.saturating_sub(cached_blocks.len());
@@ -1137,7 +1190,82 @@ impl ModelRunner {
                     block_ids: all_blocks,
                 },
                 block_tables,
+                batch_local_prefix_blocks,
             )
+        };
+
+        let batch_local_prefix_state = if batch_local_prefix_tokens > 0 {
+            check_cancelled(cancel)?;
+            let prefix_start = batch_timing.then(Instant::now);
+            let mut linear_state = self.new_linear_state()?;
+            let prefix_tokens = &prompts[0][..batch_local_prefix_tokens];
+            let prefix_block_table = append_prefix_block_table(&batch_local_prefix_blocks, &[]);
+            {
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                if streaming_prefill_enabled_for(self.backend.device(), prefix_tokens.len()) {
+                    let logits = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        prefix_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &prefix_block_table,
+                        0,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
+                    )
+                    .context("batch local common-prefix prefill (streaming) failed")?;
+                    let _ = greedy_sample(&logits)?;
+                } else if self.supports_paged_greedy_argmax() {
+                    let _ = model_forward_paged_last_token_greedy(
+                        &*self.backend,
+                        prefix_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &prefix_block_table,
+                        0,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("batch local common-prefix greedy prefill failed")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefix_tokens.len() as u64);
+                    }
+                } else {
+                    let logits = model_forward_paged_last_token(
+                        &*self.backend,
+                        prefix_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &prefix_block_table,
+                        0,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("batch local common-prefix prefill failed")?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefix_tokens.len() as u64);
+                    }
+                    let _ = greedy_sample(&logits)?;
+                }
+            }
+            if let Some(start) = prefix_start {
+                eprintln!(
+                    "batch greedy local prefix prefill: rows={} cached_tokens={} blocks={} elapsed_ms={:.1}",
+                    prompts.len(),
+                    batch_local_prefix_tokens,
+                    batch_local_prefix_blocks.len(),
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            Some(linear_state)
+        } else {
+            None
         };
 
         struct BatchSeq {
@@ -1153,7 +1281,17 @@ impl ModelRunner {
         for (idx, prompt_tokens) in prompts.iter().enumerate() {
             check_cancelled(cancel)?;
             let prefill_start = batch_timing.then(Instant::now);
-            let cached_prefix = cached_prefixes[idx].take();
+            let cached_prefix = match cached_prefixes[idx].take() {
+                Some(prefix) => Some(prefix),
+                None => match &batch_local_prefix_state {
+                    Some(prefix_state) => Some(PagedPrefixReuse {
+                        cached_tokens: batch_local_prefix_tokens,
+                        block_ids: batch_local_prefix_blocks.clone(),
+                        linear_state: prefix_state.snapshot()?,
+                    }),
+                    None => None,
+                },
+            };
             let cached_tokens = cached_prefix
                 .as_ref()
                 .map(|prefix| prefix.cached_tokens)
@@ -5172,6 +5310,42 @@ mod tests {
     }
 
     #[test]
+    fn common_prefix_len_uses_only_full_blocks_and_leaves_suffix() {
+        let prompts = vec![
+            vec![1, 2, 3, 4, 5, 10],
+            vec![1, 2, 3, 4, 5, 11, 12],
+            vec![1, 2, 3, 4, 6, 13],
+        ];
+        assert_eq!(common_block_aligned_prefix_len(&prompts, 4), 4);
+
+        let exact_block_prompts = vec![vec![1, 2, 3, 4], vec![1, 2, 3, 4, 5]];
+        assert_eq!(common_block_aligned_prefix_len(&exact_block_prompts, 4), 0);
+
+        let partial_block_prompts = vec![vec![1, 2, 9], vec![1, 2, 10]];
+        assert_eq!(
+            common_block_aligned_prefix_len(&partial_block_prompts, 4),
+            0
+        );
+    }
+
+    #[test]
+    fn batch_local_prefix_reuse_requires_minimum_shared_blocks() {
+        let small_common = vec![vec![1, 2, 3, 4, 5, 10], vec![1, 2, 3, 4, 5, 11]];
+        assert_eq!(batch_local_common_prefix_len(&small_common, 4), 0);
+
+        let mut large_a = Vec::new();
+        let mut large_b = Vec::new();
+        for idx in 0..32 {
+            let token = (idx % 7 + 1) as TokenId;
+            large_a.push(token);
+            large_b.push(token);
+        }
+        large_a.push(10);
+        large_b.push(11);
+        assert_eq!(batch_local_common_prefix_len(&[large_a, large_b], 4), 32);
+    }
+
+    #[test]
     fn compact_linear_attention_state_selects_active_batch_rows() -> Result<()> {
         let device = Device::Cpu;
         let recurrent = Tensor::from_vec(
@@ -5298,6 +5472,64 @@ mod tests {
         assert!(output.outputs[0].token_ids.is_empty());
         assert_eq!(output.outputs[1].finish_reason, FinishReason::MaxTokens);
         assert_eq!(output.outputs[1].token_ids, vec![2, 2, 2]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn native_batch_greedy_reuses_common_block_prefix() -> Result<()> {
+        let config = zero_layer_tied_config();
+        let device = Device::Cpu;
+        let weights = zero_layer_tied_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = std::sync::Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = std::sync::Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?);
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 2,
+            ..Default::default()
+        };
+        let shared_prefix = (0..32)
+            .map(|idx| (idx % 4 + 1) as TokenId)
+            .collect::<Vec<_>>();
+        let mut first = shared_prefix.clone();
+        first.push(5);
+        let mut second = shared_prefix;
+        second.push(6);
+        let mut output = runner.generate_paged_shared_tokens_batch_greedy(
+            &[first, second],
+            &params,
+            &block_manager,
+            &paged_cache,
+            None,
+            None,
+        )?;
+
+        assert_eq!(output.outputs.len(), 2);
+        assert_eq!(output.outputs[0].token_ids, vec![5, 5]);
+        assert_eq!(output.outputs[1].token_ids, vec![6, 6]);
+        assert_eq!(
+            output.allocated_blocks.len(),
+            10,
+            "eight shared prefix blocks plus one suffix block per row"
+        );
+        block_manager
+            .lock()
+            .unwrap()
+            .free_all(&std::mem::take(&mut output.allocated_blocks));
+        assert_eq!(block_manager.lock().unwrap().num_free(), num_blocks);
 
         Ok(())
     }
