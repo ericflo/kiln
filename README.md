@@ -304,6 +304,8 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 **Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
+**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.2` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, currently `kiln-v0.2.13`, so the version split is intentional.
+
 See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
 
 | Platform | Installer | Size |
