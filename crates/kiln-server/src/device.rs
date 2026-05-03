@@ -13,7 +13,7 @@ pub fn select_device() -> Result<Device> {
     #[cfg(feature = "cuda")]
     if candle_core::utils::cuda_is_available() {
         tracing::info!("CUDA available — using GPU device 0");
-        return Device::new_cuda(0).context("failed to initialize CUDA device");
+        return Ok(Device::new_cuda(0)?);
     }
 
     #[cfg(feature = "vulkan")]
@@ -29,7 +29,7 @@ pub fn select_device() -> Result<Device> {
     #[cfg(feature = "metal")]
     if candle_core::utils::metal_is_available() {
         tracing::info!("Metal available — using Apple Silicon GPU");
-        return Device::new_metal(0).context("failed to initialize Metal device");
+        return Ok(Device::new_metal(0)?);
     }
 
     tracing::info!("no GPU feature active — using CPU");
