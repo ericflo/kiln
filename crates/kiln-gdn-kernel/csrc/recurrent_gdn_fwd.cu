@@ -153,10 +153,19 @@ __device__ __forceinline__ float silu(float x) {
     return x / (1.0f + expf(-x));
 }
 
+__device__ __forceinline__ float to_f32(float x) {
+    return x;
+}
+
+__device__ __forceinline__ float to_f32(__nv_bfloat16 x) {
+    return bf16_to_f32(x);
+}
+
+template <typename VType>
 __global__ void gdn_decode_gates_recurrent_rmsnorm_bf16_kernel(
     const __nv_bfloat16 *__restrict__ q,        // [B, 1, q_heads, dk]
     const __nv_bfloat16 *__restrict__ k,        // [B, 1, q_heads, dk]
-    const __nv_bfloat16 *__restrict__ v,        // [B, 1, value_heads, dv]
+    const VType *__restrict__ v,                  // [B, 1, value_heads, dv]
     const __nv_bfloat16 *__restrict__ a,        // [B, 1, value_heads]
     const __nv_bfloat16 *__restrict__ b,        // [B, 1, value_heads]
     const __nv_bfloat16 *__restrict__ a_log,    // [value_heads]
@@ -210,7 +219,7 @@ __global__ void gdn_decode_gates_recurrent_rmsnorm_bf16_kernel(
         v_pred += k_smem[i] * d;
     }
 
-    const float delta = beta_t * (bf16_to_f32(v[v_base + tid]) - v_pred);
+    const float delta = beta_t * (to_f32(v[v_base + tid]) - v_pred);
     float y = 0.0f;
     #pragma unroll
     for (int i = 0; i < 128; ++i) {
@@ -289,6 +298,54 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_recurrent_forward(
     return 0;
 }
 
+
+extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_vf32_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    const void *z,
+    const void *weight,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float eps,
+    void *stream
+) {
+    if (batch <= 0 || q_heads <= 0 || value_heads <= 0) return -1;
+    if (dk != 128 || dv != 128) return -2;
+    if (value_heads < q_heads || (value_heads % q_heads) != 0) return -3;
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    gdn_decode_gates_recurrent_rmsnorm_bf16_kernel<float><<<batch * value_heads, 128, 0, s>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(q),
+        reinterpret_cast<const __nv_bfloat16 *>(k),
+        reinterpret_cast<const float *>(v),
+        reinterpret_cast<const __nv_bfloat16 *>(a),
+        reinterpret_cast<const __nv_bfloat16 *>(b),
+        reinterpret_cast<const __nv_bfloat16 *>(a_log),
+        reinterpret_cast<const __nv_bfloat16 *>(dt_bias),
+        reinterpret_cast<__nv_bfloat16 *>(state),
+        reinterpret_cast<const __nv_bfloat16 *>(z),
+        reinterpret_cast<const __nv_bfloat16 *>(weight),
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        q_heads,
+        value_heads,
+        eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return (int)err;
+    return 0;
+}
+
 extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_bf16(
     const void *q,
     const void *k,
@@ -314,7 +371,7 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_bf16(
     if (value_heads < q_heads || (value_heads % q_heads) != 0) return -3;
 
     cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
-    gdn_decode_gates_recurrent_rmsnorm_bf16_kernel<<<batch * value_heads, 128, 0, s>>>(
+    gdn_decode_gates_recurrent_rmsnorm_bf16_kernel<__nv_bfloat16><<<batch * value_heads, 128, 0, s>>>(
         reinterpret_cast<const __nv_bfloat16 *>(q),
         reinterpret_cast<const __nv_bfloat16 *>(k),
         reinterpret_cast<const __nv_bfloat16 *>(v),

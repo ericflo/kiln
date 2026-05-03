@@ -90,6 +90,27 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_gdn_decode_gates_recurrent_vf32_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        a_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        value_heads: i32,
+        dk: i32,
+        dv: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_gdn_decode_gates_recurrent_bf16(
         q: *const core::ffi::c_void,
         k: *const core::ffi::c_void,
@@ -498,14 +519,12 @@ pub fn gdn_decode_gates_recurrent_supports(
     }
     if q.dtype() != DType::BF16
         || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
+        || !matches!(v.dtype(), DType::BF16 | DType::F32)
         || a.dtype() != DType::BF16
         || b.dtype() != DType::BF16
         || a_log.dtype() != DType::BF16
         || dt_bias.dtype() != DType::BF16
         || state.dtype() != DType::BF16
-        || z.dtype() != DType::BF16
-        || weight.dtype() != DType::BF16
     {
         return false;
     }
@@ -570,16 +589,17 @@ pub fn gdn_decode_gates_recurrent(
     let (batch, _, q_heads, dk) = q.dims4()?;
     let (_, _, value_heads, dv) = v.dims4()?;
 
-    let q = q.contiguous()?;
-    let k = k.contiguous()?;
-    let v = v.contiguous()?;
-    let a = a.contiguous()?;
-    let b = b.contiguous()?;
-    let a_log = a_log.contiguous()?;
-    let dt_bias = dt_bias.contiguous()?;
-    let z = z.contiguous()?;
-    let weight = weight.contiguous()?;
-    let out = Tensor::zeros((batch, 1, value_heads, dv), DType::BF16, device)?;
+    let q = gdn_gates_ctx(q.contiguous(), "gdn_decode_gates_recurrent q contiguous")?;
+    let k = gdn_gates_ctx(k.contiguous(), "gdn_decode_gates_recurrent k contiguous")?;
+    let v = gdn_gates_ctx(v.contiguous(), "gdn_decode_gates_recurrent v contiguous")?;
+    let a = gdn_gates_ctx(a.contiguous(), "gdn_decode_gates_recurrent a contiguous")?;
+    let b = gdn_gates_ctx(b.contiguous(), "gdn_decode_gates_recurrent b contiguous")?;
+    let a_log = gdn_gates_ctx(a_log.contiguous(), "gdn_decode_gates_recurrent a_log contiguous")?;
+    let dt_bias = gdn_gates_ctx(dt_bias.contiguous(), "gdn_decode_gates_recurrent dt_bias contiguous")?;
+    let out = gdn_gates_ctx(
+        Tensor::zeros((batch, 1, value_heads, dv), DType::BF16, device),
+        "gdn_decode_gates_recurrent out zeros",
+    )?;
 
     {
         let (q_storage, q_layout) = q.storage_and_layout();
@@ -590,8 +610,6 @@ pub fn gdn_decode_gates_recurrent(
         let (al_storage, al_layout) = a_log.storage_and_layout();
         let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
         let (s_storage, s_layout) = state.storage_and_layout();
-        let (z_storage, z_layout) = z.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_cuda = match &*q_storage {
@@ -626,14 +644,6 @@ pub fn gdn_decode_gates_recurrent(
             candle_core::Storage::Cuda(c) => c,
             _ => candle_core::bail!("kiln-gdn-kernel: state must be on CUDA"),
         };
-        let z_cuda = match &*z_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-gdn-kernel: z must be on CUDA"),
-        };
-        let w_cuda = match &*w_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => candle_core::bail!("kiln-gdn-kernel: weight must be on CUDA"),
-        };
         let out_cuda = match &*out_storage {
             candle_core::Storage::Cuda(c) => c,
             _ => candle_core::bail!("kiln-gdn-kernel: out must be on CUDA"),
@@ -648,9 +658,6 @@ pub fn gdn_decode_gates_recurrent(
         let k_slice = k_cuda
             .as_cuda_slice::<bf16>()?
             .slice(k_layout.start_offset()..);
-        let v_slice = v_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(v_layout.start_offset()..);
         let a_slice = a_cuda
             .as_cuda_slice::<bf16>()?
             .slice(a_layout.start_offset()..);
@@ -666,12 +673,6 @@ pub fn gdn_decode_gates_recurrent(
         let s_slice = s_cuda
             .as_cuda_slice::<bf16>()?
             .slice(s_layout.start_offset()..);
-        let z_slice = z_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(z_layout.start_offset()..);
-        let w_slice = w_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(w_layout.start_offset()..);
         let out_slice = out_cuda
             .as_cuda_slice::<bf16>()?
             .slice(out_layout.start_offset()..);
@@ -679,36 +680,68 @@ pub fn gdn_decode_gates_recurrent(
         unsafe {
             let (q_ptr, _g1) = q_slice.device_ptr(&stream);
             let (k_ptr, _g2) = k_slice.device_ptr(&stream);
-            let (v_ptr, _g3) = v_slice.device_ptr(&stream);
             let (a_ptr, _g4) = a_slice.device_ptr(&stream);
             let (b_ptr, _g5) = b_slice.device_ptr(&stream);
             let (al_ptr, _g6) = al_slice.device_ptr(&stream);
             let (dt_ptr, _g7) = dt_slice.device_ptr(&stream);
             let (s_ptr, _g8) = s_slice.device_ptr(&stream);
-            let (z_ptr, _g9) = z_slice.device_ptr(&stream);
-            let (w_ptr, _g10) = w_slice.device_ptr(&stream);
             let (out_ptr, _g11) = out_slice.device_ptr(&stream);
 
-            let status = kiln_gdn_decode_gates_recurrent_bf16(
-                q_ptr as *const _,
-                k_ptr as *const _,
-                v_ptr as *const _,
-                a_ptr as *const _,
-                b_ptr as *const _,
-                al_ptr as *const _,
-                dt_ptr as *const _,
-                s_ptr as *mut _,
-                z_ptr as *const _,
-                w_ptr as *const _,
-                out_ptr as *mut _,
-                batch as i32,
-                q_heads as i32,
-                value_heads as i32,
-                dk as i32,
-                dv as i32,
-                eps,
-                raw_stream,
-            );
+            let status = match v.dtype() {
+                DType::BF16 => {
+                    let v_slice = v_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(v_layout.start_offset()..);
+                    let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+                    kiln_gdn_decode_gates_recurrent_bf16(
+                        q_ptr as *const _,
+                        k_ptr as *const _,
+                        v_ptr as *const _,
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        s_ptr as *mut _,
+                        core::ptr::null(),
+                        core::ptr::null(),
+                        out_ptr as *mut _,
+                        batch as i32,
+                        q_heads as i32,
+                        value_heads as i32,
+                        dk as i32,
+                        dv as i32,
+                        eps,
+                        raw_stream,
+                    )
+                }
+                DType::F32 => {
+                    let v_slice = v_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(v_layout.start_offset()..);
+                    let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+                    kiln_gdn_decode_gates_recurrent_vf32_bf16(
+                        q_ptr as *const _,
+                        k_ptr as *const _,
+                        v_ptr as *const _,
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        s_ptr as *mut _,
+                        core::ptr::null(),
+                        core::ptr::null(),
+                        out_ptr as *mut _,
+                        batch as i32,
+                        q_heads as i32,
+                        value_heads as i32,
+                        dk as i32,
+                        dv as i32,
+                        eps,
+                        raw_stream,
+                    )
+                }
+                other => candle_core::bail!("kiln-gdn-kernel: unsupported fused decode v dtype {other:?}"),
+            };
             if status != 0 {
                 candle_core::bail!(
                     "kiln_gdn_decode_gates_recurrent_bf16 failed with status {status}"

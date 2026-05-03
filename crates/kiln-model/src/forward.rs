@@ -3951,7 +3951,7 @@ fn gated_deltanet_forward_decode_if(
                 &v,
                 &a,
                 &b,
-                &weights.a_log,
+                &weights.a_log_gates,
                 &weights.dt_bias,
                 recurrent_state,
                 &z,
