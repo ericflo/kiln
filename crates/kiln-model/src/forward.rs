@@ -6217,6 +6217,90 @@ pub fn model_forward_paged_next_token_greedy(
     )
 }
 
+/// Batched paged decode API for real continuous-batching work.
+///
+/// Phase 1 intentionally keeps the existing [`PagedKvCache`] API and its
+/// caller-held mutex: each request still has its own [`BlockTable`] and KV
+/// window, but the server-side scheduler can now hand a decode microbatch to a
+/// single model API. This WIP implementation is behavior-first and executes
+/// each row with the existing single-sequence forward path. Follow-up phases
+/// replace the row loop with a true layer-wise batch path that packs GDN state,
+/// supports N block tables in full-attention layers, and captures CUDA graphs
+/// per batch shape.
+///
+/// CUDA graphs are deliberately not used for `batch_size > 1` here; the graph
+/// runner is currently captured for the batch-1 decode shape only. TODO(phase2
+/// continuous batching): add graph capture/replay keyed by decode batch shape.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_batched_decode(
+    backend: &dyn BackendRuntime,
+    input_tokens: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[BlockTable],
+    sequence_lengths: &[usize],
+    linear_states: &mut [&mut LinearAttentionState],
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let batch_size = input_tokens.len();
+    anyhow::ensure!(batch_size > 0, "batched decode requires at least one token");
+    anyhow::ensure!(
+        block_tables.len() == batch_size,
+        "batched decode block_tables length {} != input_tokens length {batch_size}",
+        block_tables.len()
+    );
+    anyhow::ensure!(
+        sequence_lengths.len() == batch_size,
+        "batched decode sequence_lengths length {} != input_tokens length {batch_size}",
+        sequence_lengths.len()
+    );
+    anyhow::ensure!(
+        linear_states.len() == batch_size,
+        "batched decode linear_states length {} != input_tokens length {batch_size}",
+        linear_states.len()
+    );
+
+    if batch_size == 1 {
+        return model_forward_paged(
+            backend,
+            &[input_tokens[0]],
+            weights,
+            config,
+            paged_cache,
+            &block_tables[0],
+            sequence_lengths[0],
+            Some(&mut *linear_states[0]),
+            lora,
+            None,
+        );
+    }
+
+    let mut logits_rows = Vec::with_capacity(batch_size);
+    for (((&token, block_table), &seq_len), linear_state) in input_tokens
+        .iter()
+        .zip(block_tables.iter())
+        .zip(sequence_lengths.iter())
+        .zip(linear_states.iter_mut())
+    {
+        logits_rows.push(model_forward_paged(
+            backend,
+            &[token],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(&mut **linear_state),
+            lora,
+            None,
+        )?);
+    }
+
+    let logits_refs: Vec<&Tensor> = logits_rows.iter().collect();
+    Tensor::cat(&logits_refs, 0).context("cat batched decode logits")
+}
+
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
 ///
 /// Same semantics as [`model_forward_paged`] (identical layer loop, RoPE,

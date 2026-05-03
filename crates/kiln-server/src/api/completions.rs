@@ -2145,8 +2145,10 @@ const MAX_COMPOSE_ADAPTERS: usize = 16;
 /// Designed for the GRPO loop: groups of `n` completions per prompt are
 /// the unit of advantage normalization, and issuing N separate HTTP requests
 /// per group adds non-trivial overhead. With this endpoint a GRPO worker
-/// posts the whole group in one call and the iteration-level scheduler
-/// batches the underlying prefill/decode steps.
+/// posts the whole group in one call. Real serving currently dispatches each
+/// output through the normal chat-completions path; the continuous-batching
+/// rebuild wires real decode scheduling through the production backend in
+/// phases.
 ///
 /// `stream: true` is not supported on this endpoint — for v1 we only return
 /// the aggregated final result. Per-prompt adapter override is also a future
@@ -2322,8 +2324,8 @@ async fn batch_completions_inner(
     // Spawn one task per (prompt, completion) pair. Each task synthesizes a
     // ChatCompletionRequest with this prompt's messages and a derived seed,
     // then dispatches through the existing generate_real / generate_mock
-    // path. The iteration-level scheduler is what actually batches concurrent
-    // requests; we do not introduce a new code path inside the engine.
+    // path. This endpoint is an API-level batching convenience, not a separate
+    // engine-level batch path.
     let mut handles = Vec::with_capacity(total_outputs);
     for (prompt_idx, prompt_messages) in req.prompts.iter().enumerate() {
         for completion_idx in 0..n_per {
