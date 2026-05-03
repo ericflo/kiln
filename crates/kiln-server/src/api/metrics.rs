@@ -49,6 +49,10 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     let active_adapter = state.active_adapter_name.read().unwrap().clone();
+    let (rendered_prompt_cache_hits, rendered_prompt_cache_misses, rendered_prompt_cache_entries) =
+        state.rendered_prompt_cache.lock().unwrap().stats();
+    let (prompt_token_cache_hits, prompt_token_cache_misses, prompt_token_cache_entries) =
+        state.prompt_token_cache.lock().unwrap().stats();
 
     let gauges = SnapshotGauges {
         scheduler_waiting,
@@ -63,6 +67,12 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         vram_kv_cache: state.memory_budget.kv_cache_bytes,
         vram_training_budget: state.memory_budget.training_budget_bytes,
         prefix_cache,
+        rendered_prompt_cache_hits,
+        rendered_prompt_cache_misses,
+        rendered_prompt_cache_entries,
+        prompt_token_cache_hits,
+        prompt_token_cache_misses,
+        prompt_token_cache_entries,
         training_active,
         active_adapter,
     };

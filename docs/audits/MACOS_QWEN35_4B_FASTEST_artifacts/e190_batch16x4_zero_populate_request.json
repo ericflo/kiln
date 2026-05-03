@@ -1,0 +1,105 @@
+{
+  "prompts": [
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 0"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 1"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 2"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 3"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 4"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 5"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 6"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 7"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 8"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 9"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 10"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 11"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 12"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 13"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 14"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "batch choices rehydrate prompt 15"
+      }
+    ]
+  ],
+  "n": 4,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "max_tokens": 0,
+  "seed": 190
+}

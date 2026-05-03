@@ -249,8 +249,7 @@ async fn main() -> Result<()> {
     state.training_webhook_url = config.training.webhook_url.clone();
     state.max_queued_training_jobs = config.training.max_queued_jobs;
     state.max_tracked_jobs = config.training.max_tracked_jobs;
-    state.tracked_job_ttl =
-        std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.adapter_max_disk_bytes = config.adapters.max_disk_bytes;
     state.composed_cache_max_bytes = config.adapters.composed_cache_max_bytes;
     state.composed_cache_max_entries = config.adapters.composed_cache_max_entries;
@@ -278,7 +277,9 @@ async fn main() -> Result<()> {
         state.composed_cache_max_bytes,
         state.composed_cache_max_entries,
     ) {
-        (None, None) => tracing::info!("composed-adapter cache LRU eviction disabled (operator opt-out)"),
+        (None, None) => {
+            tracing::info!("composed-adapter cache LRU eviction disabled (operator opt-out)")
+        }
         (bytes, entries) => tracing::info!(
             cap_bytes = ?bytes,
             cap_gib = ?bytes.map(|b| b as f64 / 1024.0 / 1024.0 / 1024.0),
@@ -403,12 +404,12 @@ fn spawn_backend_prewarm(state: AppState) {
                 stop: Vec::new(),
                 seed: Some(42),
             };
-            // Warm one full paged block plus a decode step. The previous
-            // 8-token prompt missed first-block prompt shapes that desktop
-            // traffic commonly hits, leaving Metal/Candle kernels to compile
-            // on the first live request.
-            let prompt_tokens = [1_u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-            let num_blocks = 2;
+            // Warm several paged blocks plus a decode step. Short one-block
+            // prewarm misses the multi-block prompt shapes that desktop chat
+            // and batch traffic commonly hits, leaving Metal/Candle kernels to
+            // compile on the first live request.
+            let prompt_tokens: Vec<u32> = (1..=64).collect();
+            let num_blocks = (prompt_tokens.len() + params.max_tokens).div_ceil(16) + 1;
             // Warm the base paged path used by every desktop request. The
             // previous speculative-first prewarm made readiness wait on
             // skip-layer draft/verify work; live greedy requests can still

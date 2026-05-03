@@ -86,7 +86,7 @@ pub fn sample_with_params(
     top_k: u32,
     seed: Option<u64>,
 ) -> Result<u32> {
-    if temperature == 0.0 {
+    if kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k) {
         return greedy_sample(logits);
     }
 
@@ -101,7 +101,7 @@ pub fn sample_with_params(
     // Default sampling stays on-device for GPU backends. This keeps the
     // default desktop path off the full-vocab DtoH transfer.
     if seed.is_none()
-        && top_p >= 1.0
+        && kiln_core::sampling::SamplingParams::top_p_disables_nucleus_filter(top_p)
         && (top_k == 0 || top_k as usize >= vocab_size)
         && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
     {
@@ -109,11 +109,12 @@ pub fn sample_with_params(
         return Ok(sampled.to_scalar::<u32>()?);
     }
 
-    // The default sampling shape is full-vocab temperature sampling
-    // (`top_k=0`, `top_p=1`). It still needs one host transfer for categorical
-    // RNG, but it does not need an O(V log V) sort because no rank-based
-    // filtering is requested.
-    if top_p >= 1.0 && (top_k == 0 || top_k as usize >= vocab_size) {
+    // Full-vocab temperature sampling with nucleus filtering disabled still
+    // needs one host transfer for seeded categorical RNG, but it does not need
+    // an O(V log V) sort because no rank-based filtering is requested.
+    if kiln_core::sampling::SamplingParams::top_p_disables_nucleus_filter(top_p)
+        && (top_k == 0 || top_k as usize >= vocab_size)
+    {
         return sample_full_distribution_unsorted(&scaled, seed);
     }
 
@@ -384,6 +385,20 @@ mod tests {
     }
 
     #[test]
+    fn test_sample_top_k_one_is_greedy() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        for seed in 0..20 {
+            let token = sample_with_params(&logits, 0.8, 0.2, 1, Some(seed))?;
+            assert_eq!(
+                token, 1,
+                "top_k=1 should pick the argmax regardless of seed/top_p"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_sample_very_low_temperature_is_near_greedy() -> Result<()> {
         let device = Device::Cpu;
         // With very low temperature, sampling should consistently pick the max
@@ -475,6 +490,31 @@ mod tests {
         let logits = Tensor::new(&[f32::NAN, f32::NEG_INFINITY, f32::NAN], &device)?;
         let token = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(token, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_top_p_outside_range_is_full_distribution() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.25, -0.5], &device)?;
+        for seed in 0..80 {
+            let full = sample_with_params(&logits, 1.0, 1.0, 0, Some(seed))?;
+            let zero = sample_with_params(&logits, 1.0, 0.0, 0, Some(seed))?;
+            let negative = sample_with_params(&logits, 1.0, -0.5, 0, Some(seed))?;
+            let above_one = sample_with_params(&logits, 1.0, 1.5, 0, Some(seed))?;
+            assert_eq!(
+                zero, full,
+                "top_p=0 disables nucleus filtering and should match top_p=1 for seed={seed}"
+            );
+            assert_eq!(
+                negative, full,
+                "negative top_p disables nucleus filtering and should match top_p=1 for seed={seed}"
+            );
+            assert_eq!(
+                above_one, full,
+                "top_p>1 disables nucleus filtering and should match top_p=1 for seed={seed}"
+            );
+        }
         Ok(())
     }
 

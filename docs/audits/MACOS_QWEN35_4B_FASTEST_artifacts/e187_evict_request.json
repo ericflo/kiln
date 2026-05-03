@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "batch request rehydrate eviction filler 128"
+    }
+  ],
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "max_tokens": 0,
+  "seed": 187
+}

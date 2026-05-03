@@ -1,0 +1,57 @@
+=== Kiln Benchmark Suite ===
+
+GPU: unknown (10240 MB)
+Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a...
+2026-05-03T11:39:13.559399Z  INFO kiln_model::loader: Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (2 shards)
+2026-05-03T11:39:13.560469Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-05-03T11:39:13.560712Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-05-03T11:39:13.560725Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-05-03T11:39:13.560815Z  INFO kiln_server::device: Metal available — using Apple Silicon GPU
+Model loaded in 10.99s (backend: metal, VRAM: 0 MB)
+
+--- Latency Benchmark (MTP — native speculative, paged) ---
+  Measuring latency [MTP, paged, blocks=6] (52 prompt tokens)...
+    Prefill (MTP): 5818.4ms (9 tok/s)
+2026-05-03T11:39:30.612540Z  INFO kiln_model::forward: deferred native MTP CPU load complete load_elapsed_ms=1
+2026-05-03T11:39:31.881851Z  INFO kiln_model::forward: lazy native MTP GPU upload complete upload_elapsed_ms=1269
+    Decode (MTP): 16 tokens, mean ITL 542.4ms (1.8 tok/s), α = 0.250 (3/12)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: unknown (10240 MB VRAM, source: apple-silicon-unified)
+Model load time: 10.99s (VRAM: 0 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         52
+Prefill time:          5818.4 ms (9 tok/s)
+Time to first token:   5818.4 ms
+Mean inter-token:      542.4 ms (1.8 tok/s)
+P50 inter-token:       291.6 ms
+P99 inter-token:       3501.6 ms
+Tokens generated:      16
+Spec method:           mtp
+Draft acceptance α:    0.250
+
+       25.33 real         1.55 user         7.14 sys
+          4781375488  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              577401  page reclaims
+              529032  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               35631  voluntary context switches
+              237177  involuntary context switches
+         39066016593  instructions retired
+         25740139061  cycles elapsed
+          9296154880  peak memory footprint

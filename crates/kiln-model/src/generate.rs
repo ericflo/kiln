@@ -21,8 +21,7 @@ use crate::forward::{
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    model_forward_paged_streaming_with_progress,
-    streaming_prefill_enabled_for,
+    model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -81,6 +80,7 @@ pub struct PagedPrefixReuse {
     pub cached_tokens: usize,
     pub block_ids: Vec<u32>,
     pub linear_state: LinearAttentionState,
+    pub next_token: Option<PagedPrefixNextToken>,
 }
 
 /// A completed block-aligned prompt prefix produced by generation.
@@ -88,6 +88,16 @@ pub struct PagedPrefixRegistration {
     pub prompt_tokens: Vec<TokenId>,
     pub block_ids: Vec<u32>,
     pub linear_state: LinearAttentionState,
+    pub next_token: Option<PagedPrefixNextToken>,
+}
+
+/// Saved first-token source for an exact prompt-cache hit.
+#[derive(Clone)]
+pub enum PagedPrefixNextToken {
+    /// Full last-position logits. Supports both greedy and stochastic sampling.
+    Logits(Tensor),
+    /// Greedy token only. Usable only when the later request is also greedy.
+    GreedyToken(TokenId),
 }
 
 /// Result of paged generation plus an optional prefix-cache registration.
@@ -102,6 +112,15 @@ pub struct PrefixCachedGenerationOutput {
 enum PrefillSampleSource {
     Logits(Tensor),
     GreedyToken(TokenId),
+}
+
+impl PrefillSampleSource {
+    fn cached_next_token(&self) -> PagedPrefixNextToken {
+        match self {
+            Self::Logits(logits) => PagedPrefixNextToken::Logits(logits.clone()),
+            Self::GreedyToken(token) => PagedPrefixNextToken::GreedyToken(*token),
+        }
+    }
 }
 
 /// Result of streaming paged generation plus prefix-cache ownership metadata.
@@ -224,7 +243,7 @@ fn sample_first_decode_token(
     logits: &candle_core::Tensor,
     params: &SamplingParams,
 ) -> Result<TokenId> {
-    if params.temperature == 0.0 {
+    if params.is_effectively_greedy() {
         Ok(greedy_sample(logits)?)
     } else {
         Ok(sample_with_params(
@@ -471,7 +490,7 @@ impl ModelRunner {
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
 
-        let mut next_token = if params.temperature == 0.0 {
+        let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -548,7 +567,7 @@ impl ModelRunner {
             .context("decode forward pass failed")?;
             kv_cache.advance(1);
 
-            next_token = if params.temperature == 0.0 {
+            next_token = if params.is_effectively_greedy() {
                 greedy_sample(&logits)?
             } else {
                 sample_with_params(
@@ -602,7 +621,7 @@ impl ModelRunner {
         let mut step_seed = params.seed;
 
         // Sample first token from the last position's logits
-        let mut next_token = if params.temperature == 0.0 {
+        let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -669,7 +688,7 @@ impl ModelRunner {
             kv_cache.advance(1);
 
             // Sample next token from the new logits
-            next_token = if params.temperature == 0.0 {
+            next_token = if params.is_effectively_greedy() {
                 greedy_sample(&logits)?
             } else {
                 sample_with_params(
@@ -971,10 +990,25 @@ impl ModelRunner {
         };
 
         let cached_prefix = cached_prefix.filter(|prefix| {
-            prefix.cached_tokens > 0
-                && prefix.cached_tokens < prompt_tokens.len()
-                && prefix.cached_tokens % block_size == 0
-                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+            if prefix.cached_tokens == 0 || prefix.cached_tokens > prompt_tokens.len() {
+                return false;
+            }
+
+            let exact_candidate = prefix.cached_tokens == prompt_tokens.len();
+            let expected_blocks = if exact_candidate {
+                Self::blocks_needed(prefix.cached_tokens, block_size)
+            } else {
+                prefix.cached_tokens / block_size
+            };
+            let block_shape_valid = prefix.block_ids.len() == expected_blocks;
+            let partial_hit = prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0;
+            let exact_hit = prefix.cached_tokens == prompt_tokens.len()
+                && prefix.next_token.as_ref().is_some_and(|next| match next {
+                    PagedPrefixNextToken::Logits(_) => true,
+                    PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
+                });
+            block_shape_valid && (partial_hit || exact_hit)
         });
 
         let cached_blocks = cached_prefix
@@ -1028,22 +1062,64 @@ impl ModelRunner {
         block_size: usize,
         cancel: Option<&CancelHandle>,
     ) -> Result<PrefixCachedGenerationOutput> {
-        let cached_tokens = cached_prefix
-            .as_ref()
-            .map(|prefix| prefix.cached_tokens)
-            .unwrap_or(0);
-        let mut linear_state = match cached_prefix {
-            Some(prefix) => prefix.linear_state,
-            None => self.new_linear_state()?,
+        let (cached_tokens, exact_next_token, mut linear_state) = match cached_prefix {
+            Some(prefix) => {
+                let exact_next_token = if prefix.cached_tokens == prompt_tokens.len() {
+                    prefix.next_token
+                } else {
+                    None
+                };
+                (prefix.cached_tokens, exact_next_token, prefix.linear_state)
+            }
+            None => (0, None, self.new_linear_state()?),
         };
+
+        if let Some(next_token) = exact_next_token {
+            let decode_start = std::time::Instant::now();
+            let output = match next_token {
+                PagedPrefixNextToken::Logits(logits) => self.decode_from_prefill_logits(
+                    logits,
+                    prompt_tokens.len(),
+                    params,
+                    paged_cache,
+                    block_table,
+                    &mut linear_state,
+                    cancel,
+                )?,
+                PagedPrefixNextToken::GreedyToken(token) => {
+                    anyhow::ensure!(
+                        params.is_effectively_greedy(),
+                        "greedy cached first token cannot serve non-greedy sampling"
+                    );
+                    self.decode_from_prefill_token(
+                        token,
+                        prompt_tokens.len(),
+                        params,
+                        paged_cache,
+                        block_table,
+                        &mut linear_state,
+                        params.seed,
+                        cancel,
+                    )?
+                }
+            };
+
+            return Ok(PrefixCachedGenerationOutput {
+                output,
+                registration: None,
+                allocated_blocks: Vec::new(),
+                prefill_duration: std::time::Duration::ZERO,
+                decode_duration: decode_start.elapsed(),
+            });
+        }
 
         let prefill_tokens = &prompt_tokens[cached_tokens..];
         anyhow::ensure!(
             !prefill_tokens.is_empty(),
-            "prefix cache hit must leave at least one suffix token"
+            "non-exact prefix cache hit must leave at least one suffix token"
         );
 
-        let use_greedy_prefill_token = params.temperature == 0.0
+        let use_greedy_prefill_token = params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
             && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
         let prefill_start = std::time::Instant::now();
@@ -1108,6 +1184,7 @@ impl ModelRunner {
             block_table,
             &linear_state,
             block_size,
+            Some(prefill_source.cached_next_token()),
         )?;
 
         let decode_start = std::time::Instant::now();
@@ -1150,11 +1227,19 @@ impl ModelRunner {
         block_table: &BlockTable,
         linear_state: &LinearAttentionState,
         block_size: usize,
+        next_token: Option<PagedPrefixNextToken>,
     ) -> Result<Option<PagedPrefixRegistration>> {
-        if prompt_tokens.is_empty() || prompt_tokens.len() % block_size != 0 {
+        if prompt_tokens.is_empty() {
             return Ok(None);
         }
-        let num_prompt_blocks = prompt_tokens.len() / block_size;
+        let num_prompt_blocks = if next_token.is_some() {
+            Self::blocks_needed(prompt_tokens.len(), block_size)
+        } else {
+            if prompt_tokens.len() % block_size != 0 {
+                return Ok(None);
+            }
+            prompt_tokens.len() / block_size
+        };
         if num_prompt_blocks == 0 || block_table.blocks.len() < num_prompt_blocks {
             return Ok(None);
         }
@@ -1162,6 +1247,7 @@ impl ModelRunner {
             prompt_tokens: prompt_tokens.to_vec(),
             block_ids: block_table.blocks[..num_prompt_blocks].to_vec(),
             linear_state: linear_state.snapshot()?,
+            next_token,
         }))
     }
 
@@ -1177,7 +1263,7 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         let step_seed = params.seed;
 
-        let next_token = if params.temperature == 0.0 {
+        let next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -1280,7 +1366,7 @@ impl ModelRunner {
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
     ) -> Result<TokenId> {
-        if params.temperature == 0.0
+        if params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
         {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
@@ -1316,7 +1402,7 @@ impl ModelRunner {
             .context("decode forward pass (paged) failed")?
         };
 
-        if params.temperature == 0.0 {
+        if params.is_effectively_greedy() {
             greedy_sample(&logits)
         } else {
             sample_with_params(
@@ -1446,7 +1532,7 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
 
-        let mut next_token = if params.temperature == 0.0 {
+        let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -1730,7 +1816,7 @@ impl ModelRunner {
                 )
                 .context("prefill forward pass (paged, streaming) failed")?,
             )
-        } else if params.temperature == 0.0
+        } else if params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
         {
             PrefillSampleSource::GreedyToken(
@@ -1779,7 +1865,7 @@ impl ModelRunner {
         let mut next_token = match prefill_source {
             PrefillSampleSource::GreedyToken(token) => token,
             PrefillSampleSource::Logits(logits) => {
-                if params.temperature == 0.0 {
+                if params.is_effectively_greedy() {
                     greedy_sample(&logits)?
                 } else {
                     sample_with_params(
@@ -1834,7 +1920,7 @@ impl ModelRunner {
                 break;
             }
 
-            next_token = if params.temperature == 0.0
+            next_token = if params.is_effectively_greedy()
                 && matches!(self.backend.device(), candle_core::Device::Metal(_))
             {
                 let token = model_forward_paged_next_token_greedy(
@@ -1967,7 +2053,7 @@ impl ModelRunner {
         };
 
         // Sample first token from prefill logits
-        let mut last_token = if params.temperature == 0.0 {
+        let mut last_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -2484,7 +2570,7 @@ impl ModelRunner {
             None => rand::make_rng::<rand::rngs::StdRng>(),
         };
 
-        let mut last_token = if params.temperature == 0.0 {
+        let mut last_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -2951,10 +3037,8 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(
-                    runner_guard.backend.device(),
-                    prompt_tokens.len(),
-                ) {
+                if streaming_prefill_enabled_for(runner_guard.backend.device(), prompt_tokens.len())
+                {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
                         &prompt_tokens,
@@ -3057,16 +3141,31 @@ impl ModelRunner {
         };
 
         let cached_prefix = cached_prefix.filter(|prefix| {
-            prefix.cached_tokens > 0
-                && prefix.cached_tokens < prompt_tokens.len()
-                && prefix.cached_tokens % block_size == 0
-                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+            if prefix.cached_tokens == 0 || prefix.cached_tokens > prompt_tokens.len() {
+                return false;
+            }
+
+            let exact_candidate = prefix.cached_tokens == prompt_tokens.len();
+            let expected_blocks = if exact_candidate {
+                Self::blocks_needed(prefix.cached_tokens, block_size)
+            } else {
+                prefix.cached_tokens / block_size
+            };
+            let block_shape_valid = prefix.block_ids.len() == expected_blocks;
+            let partial_hit = prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0;
+            let exact_hit = prefix.cached_tokens == prompt_tokens.len()
+                && prefix.next_token.as_ref().is_some_and(|next| match next {
+                    PagedPrefixNextToken::Logits(_) => true,
+                    PagedPrefixNextToken::GreedyToken(_) => params.is_effectively_greedy(),
+                });
+            block_shape_valid && (partial_hit || exact_hit)
         });
 
         let cached_blocks = cached_prefix
             .as_ref()
-            .map(|prefix| prefix.block_ids.as_slice())
-            .unwrap_or(&[]);
+            .map(|prefix| prefix.block_ids.clone())
+            .unwrap_or_default();
         let cached_tokens = cached_prefix
             .as_ref()
             .map(|prefix| prefix.cached_tokens)
@@ -3081,7 +3180,7 @@ impl ModelRunner {
                 .allocate(additional_blocks_needed)
                 .map_err(|e| anyhow::anyhow!("{e}"))?
         };
-        let block_table = append_prefix_block_table(cached_blocks, &allocated_blocks);
+        let block_table = append_prefix_block_table(&cached_blocks, &allocated_blocks);
 
         // Free helper for failure paths so a prefill error does not leak the
         // freshly-allocated suffix blocks (the cached-prefix blocks remain
@@ -3099,85 +3198,116 @@ impl ModelRunner {
             }
         };
 
-        let prefill_result = (|| -> Result<(candle_core::Tensor, LinearAttentionState, Option<PagedPrefixRegistration>)> {
-            let mut linear_state = match cached_prefix {
-                Some(prefix) => prefix.linear_state,
-                None => {
+        let (exact_next_token, mut linear_state) = match cached_prefix {
+            Some(prefix) => {
+                let exact_next_token = if prefix.cached_tokens == prompt_tokens.len() {
+                    prefix.next_token
+                } else {
+                    None
+                };
+                (exact_next_token, prefix.linear_state)
+            }
+            None => {
+                let runner_guard = runner_lock
+                    .read()
+                    .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
+                (None, runner_guard.new_linear_state()?)
+            }
+        };
+
+        let (next_token, registration) = if let Some(next_token) = exact_next_token {
+            let next_token = match next_token {
+                PagedPrefixNextToken::Logits(logits) => {
+                    match sample_first_decode_token(&logits, &params) {
+                        Ok(token) => token,
+                        Err(err) => {
+                            free_allocated(&allocated_blocks);
+                            return Err(err);
+                        }
+                    }
+                }
+                PagedPrefixNextToken::GreedyToken(token) => {
+                    if params.temperature != 0.0 {
+                        free_allocated(&allocated_blocks);
+                        anyhow::bail!("greedy cached first token cannot serve non-greedy sampling");
+                    }
+                    token
+                }
+            };
+            (next_token, None)
+        } else {
+            let prefill_result =
+                (|| -> Result<(candle_core::Tensor, Option<PagedPrefixRegistration>)> {
+                    let prefill_tokens = &prompt_tokens[cached_tokens..];
+                    anyhow::ensure!(
+                        !prefill_tokens.is_empty(),
+                        "non-exact streaming prefix cache hit must leave at least one suffix token"
+                    );
+
                     let runner_guard = runner_lock
                         .read()
                         .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-                    runner_guard.new_linear_state()?
+                    let logits = {
+                        let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                        if streaming_prefill_enabled_for(
+                            runner_guard.backend.device(),
+                            prompt_tokens.len(),
+                        ) {
+                            model_forward_paged_streaming(
+                                &*runner_guard.backend,
+                                prefill_tokens,
+                                &runner_guard.weights,
+                                &runner_guard.config,
+                                &mut pc_guard,
+                                &block_table,
+                                cached_tokens,
+                                Some(&mut linear_state),
+                                runner_guard.active_lora.as_ref(),
+                            )
+                            .context("prefill forward pass (streaming paged prefix cache) failed")?
+                        } else {
+                            model_forward_paged_last_token(
+                                &*runner_guard.backend,
+                                prefill_tokens,
+                                &runner_guard.weights,
+                                &runner_guard.config,
+                                &mut pc_guard,
+                                &block_table,
+                                cached_tokens,
+                                Some(&mut linear_state),
+                                runner_guard.active_lora.as_ref(),
+                                None,
+                            )
+                            .context("prefill forward pass (paged prefix cache) failed")?
+                        }
+                    };
+                    let registration = runner_guard.completed_prompt_registration(
+                        &prompt_tokens,
+                        &block_table,
+                        &linear_state,
+                        block_size,
+                        Some(PagedPrefixNextToken::Logits(logits.clone())),
+                    )?;
+                    Ok((logits, registration))
+                })();
+
+            let (logits, registration) = match prefill_result {
+                Ok(t) => t,
+                Err(err) => {
+                    free_allocated(&allocated_blocks);
+                    return Err(err);
                 }
             };
-
-            let prefill_tokens = &prompt_tokens[cached_tokens..];
-            anyhow::ensure!(
-                !prefill_tokens.is_empty(),
-                "streaming prefix cache hit must leave at least one suffix token"
-            );
-
-            let runner_guard = runner_lock
-                .read()
-                .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
-            let logits = {
-                let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(
-                    runner_guard.backend.device(),
-                    prompt_tokens.len(),
-                ) {
-                    model_forward_paged_streaming(
-                        &*runner_guard.backend,
-                        prefill_tokens,
-                        &runner_guard.weights,
-                        &runner_guard.config,
-                        &mut pc_guard,
-                        &block_table,
-                        cached_tokens,
-                        Some(&mut linear_state),
-                        runner_guard.active_lora.as_ref(),
-                    )
-                    .context("prefill forward pass (streaming paged prefix cache) failed")?
-                } else {
-                    model_forward_paged_last_token(
-                        &*runner_guard.backend,
-                        prefill_tokens,
-                        &runner_guard.weights,
-                        &runner_guard.config,
-                        &mut pc_guard,
-                        &block_table,
-                        cached_tokens,
-                        Some(&mut linear_state),
-                        runner_guard.active_lora.as_ref(),
-                        None,
-                    )
-                    .context("prefill forward pass (paged prefix cache) failed")?
+            let next_token = match sample_first_decode_token(&logits, &params) {
+                Ok(t) => t,
+                Err(err) => {
+                    free_allocated(&allocated_blocks);
+                    return Err(err);
                 }
             };
-            let registration = runner_guard.completed_prompt_registration(
-                &prompt_tokens,
-                &block_table,
-                &linear_state,
-                block_size,
-            )?;
-            Ok((logits, linear_state, registration))
-        })();
-
-        let (logits, mut linear_state, registration) = match prefill_result {
-            Ok(t) => t,
-            Err(err) => {
-                free_allocated(&allocated_blocks);
-                return Err(err);
-            }
+            drop(logits);
+            (next_token, registration)
         };
-
-        let next_token = match sample_first_decode_token(&logits, &params) {
-            Ok(t) => t,
-            Err(err) => {
-                free_allocated(&allocated_blocks);
-                return Err(err);
-            }
-        };
-        drop(logits);
 
         let (tx, rx) = mpsc::channel();
         // Rendezvous channel for the final "blocks to free" list. The API
@@ -3487,6 +3617,7 @@ impl ModelRunner {
             block_table,
             &linear_state,
             block_size,
+            Some(PagedPrefixNextToken::Logits(logits.clone())),
         )?;
 
         let receiver = self.stream_decode_from_prefill_logits(
@@ -3913,7 +4044,7 @@ impl ModelRunner {
             .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
 
-        let mut next_token = if params.temperature == 0.0 {
+        let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
             sample_with_params(
@@ -3976,7 +4107,7 @@ impl ModelRunner {
                 break;
             }
 
-            next_token = if params.temperature == 0.0
+            next_token = if params.is_effectively_greedy()
                 && matches!(self.backend.device(), candle_core::Device::Metal(_))
             {
                 let token = match model_forward_paged_next_token_greedy(
@@ -4612,6 +4743,169 @@ mod tests {
         assert_eq!(table.lookup(0, 16), Some((7, 0)));
         assert_eq!(table.lookup(31, 16), Some((8, 15)));
         assert_eq!(table.lookup(32, 16), Some((20, 0)));
+    }
+
+    #[test]
+    fn exact_prefix_cache_hit_skips_prefill_and_matches_tokens() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?);
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 3,
+            ..Default::default()
+        };
+        let prompt = [1, 2, 3];
+
+        let mut first = runner.generate_from_tokens_paged_interleaved_with_prefix_cache(
+            &prompt,
+            &params,
+            &block_manager,
+            &paged_cache,
+            None,
+            None,
+        )?;
+        let registration = first
+            .registration
+            .take()
+            .expect("prompt should register an exact cache entry");
+        assert!(
+            registration.next_token.is_some(),
+            "exact prompt reuse needs the saved first-token source"
+        );
+
+        let retained_blocks = registration.block_ids.clone();
+        let blocks_to_free: Vec<u32> = first
+            .allocated_blocks
+            .into_iter()
+            .filter(|block_id| !retained_blocks.contains(block_id))
+            .collect();
+        block_manager.lock().unwrap().free_all(&blocks_to_free);
+
+        let cached_prefix = PagedPrefixReuse {
+            cached_tokens: registration.prompt_tokens.len(),
+            block_ids: registration.block_ids,
+            linear_state: registration.linear_state,
+            next_token: registration.next_token,
+        };
+        let second = runner.generate_from_tokens_paged_interleaved_with_prefix_cache(
+            &prompt,
+            &params,
+            &block_manager,
+            &paged_cache,
+            Some(cached_prefix),
+            None,
+        )?;
+
+        assert_eq!(second.prefill_duration, std::time::Duration::ZERO);
+        assert_eq!(second.output.token_ids, first.output.token_ids);
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_exact_prefix_cache_hit_uses_saved_first_token_source() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+
+        let runner = Arc::new(std::sync::RwLock::new(ModelRunner::new(
+            weights,
+            tokenizer,
+            config.clone(),
+        )));
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = Arc::new(Mutex::new(BlockManager::new(num_blocks, block_size)));
+        let paged_cache = Arc::new(Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?));
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 3,
+            ..Default::default()
+        };
+        let prompt = [1, 2, 3];
+
+        let mut first = runner
+            .read()
+            .unwrap()
+            .generate_from_tokens_paged_interleaved_with_prefix_cache(
+                &prompt,
+                &params,
+                block_manager.as_ref(),
+                paged_cache.as_ref(),
+                None,
+                None,
+            )?;
+        let registration = first
+            .registration
+            .take()
+            .expect("prompt should register an exact cache entry");
+        let retained_blocks = registration.block_ids.clone();
+        let blocks_to_free: Vec<u32> = first
+            .allocated_blocks
+            .iter()
+            .copied()
+            .filter(|block_id| !retained_blocks.contains(block_id))
+            .collect();
+        block_manager.lock().unwrap().free_all(&blocks_to_free);
+
+        let cached_prefix = PagedPrefixReuse {
+            cached_tokens: registration.prompt_tokens.len(),
+            block_ids: registration.block_ids,
+            linear_state: registration.linear_state,
+            next_token: registration.next_token,
+        };
+        let streaming = ModelRunner::spawn_streaming_paged_shared_tokens_with_prefix_cache(
+            runner.clone(),
+            prompt.to_vec(),
+            params,
+            block_manager.clone(),
+            paged_cache.clone(),
+            Some(cached_prefix),
+        )?;
+        assert!(
+            streaming.registration.is_none(),
+            "exact streaming hits should skip prefill and avoid re-registering the prompt"
+        );
+
+        let mut streamed_tokens = Vec::new();
+        loop {
+            match streaming.receiver.recv()? {
+                StreamEvent::Token(token) => streamed_tokens.push(token.token_id),
+                StreamEvent::Done(_) => break,
+            }
+        }
+        streaming
+            .block_free_signal
+            .expect("prefix streaming output should expose a free signal")
+            .send(streaming.allocated_blocks)
+            .unwrap();
+
+        assert_eq!(streamed_tokens, first.output.token_ids);
+        Ok(())
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "stream lower cache promotion live"
+    }
+  ],
+  "temperature": 0.0,
+  "max_tokens": 2,
+  "seed": 184
+}
