@@ -4,12 +4,21 @@ This guide gets you from a fresh machine to running Kiln with real GPU inference
 
 ## Prerequisites
 
-Either an NVIDIA GPU **or** an Apple Silicon Mac.
+Choose the path that matches how you want to run Kiln.
 
-- **NVIDIA path**: GPU with 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.) and CUDA 12.0+ (`nvcc --version` to check)
-- **Apple Silicon path**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
-- **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-- **Disk**: ~20GB free (model weights + build artifacts)
+**Desktop App path (recommended for most users):**
+
+- **Platform**: Windows, Linux, or macOS on Apple Silicon.
+- **GPU**: NVIDIA GPU or Apple Silicon Mac. NVIDIA systems should have 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.); Apple Silicon systems should have 16GB+ unified memory.
+- **Disk**: ~20GB free for the server binary, model weights, and adapters.
+- **Build tooling**: No Rust toolchain, CUDA toolkit, or Xcode install is required for the GUI path. The app downloads the matching prebuilt `kiln` server binary for your platform.
+
+**Source / CLI path (for contributors and direct CLI users):**
+
+- **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
+- **NVIDIA builds**: GPU with 24GB+ VRAM and CUDA 12.0+ (`nvcc --version` to check).
+- **Apple Silicon builds**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
+- **Disk**: ~20GB free for model weights and build artifacts.
 
 If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
 
@@ -27,7 +36,7 @@ Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The instal
 | Linux | [Kiln.Desktop_0.2.2_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb) | 8.8 MB |
 | Linux | [Kiln.Desktop_0.2.2_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage) | 85.7 MB |
 
-Continue with section 1 (Build Kiln) only if you want to build from source, contribute, or use the CLI directly. Otherwise, install the desktop app, let it finish its first-launch downloads, then skip ahead to section 4 (Test Inference) once the server is running.
+Continue with section 1 (Build Kiln) only if you want to build from source, contribute, or use the CLI directly. Otherwise, install the desktop app, choose or download the Qwen3.5-4B model weights, start the server from the app, then skip ahead to section 4 (Test Inference).
 
 ## 1. Build Kiln
 
