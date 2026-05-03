@@ -76,17 +76,13 @@ This downloads ~8GB of safetensors weights plus the tokenizer.
 
 ## 3. Start the Server
 
-```bash
-./target/release/kiln serve --config kiln.example.toml
-```
-
-But first, tell Kiln where the model is. Set the model path via environment variable:
+Point Kiln at the model directory you downloaded in step 2, then start the server:
 
 ```bash
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
 
-Or create a `kiln.toml` config file:
+Optionally, create a `kiln.toml` config file instead:
 
 ```toml
 [model]
