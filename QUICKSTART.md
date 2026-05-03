@@ -547,7 +547,11 @@ kiln adapters load support-bot
 kiln adapters unload support-bot
 kiln adapters delete support-bot
     List, load, unload the active adapter, or delete a saved adapter on the running server.
+```
 
+The CLI currently covers the basic adapter lifecycle: `list`, `load`, `unload`, and `delete`. For advanced adapter download, upload, merge, and composition flows — plus training-completion webhooks — use the dashboard or the HTTP API examples in [9. Advanced API Examples](#9-advanced-api-examples).
+
+```
 Global options:
   --config, -c <file>   Path to TOML config file
 ```
