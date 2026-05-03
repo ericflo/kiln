@@ -6582,3 +6582,63 @@ careful kernel design. Contiguous paged attention and attention-gate fusion are
 not obvious next wins at this shape. The next low-level slice should either
 profile per-layer/per-kernel timings directly or broaden to server bs>1 before
 changing another default.
+
+## Experiment E221: Synchronized Paged Layer Profiling Hook
+
+Hypothesis:
+
+Whole-request decode timing is enough to reject bad kernel changes, but it is
+not enough to choose the next low-level target. The first profiling attempt
+without synchronization only measured Metal enqueue time, not GPU execution, so
+the hook needs to synchronize around profiled layers when explicitly enabled.
+
+Change:
+
+- Added `KILN_PROFILE_PAGED_LAYERS=1`, gated off by default.
+- When enabled, `model_forward_paged_inner` synchronizes the Metal device
+  before and after each transformer block and prints:
+  `kiln_profile_paged_layer layer=<n> kind=<linear|full> seq_len=<n> start_pos=<n> elapsed_ms=<n>`.
+- The hook is intentionally intrusive and should be used only for profiling
+  runs, not normal benchmark numbers.
+
+Validation:
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/forward.rs`
+  - Failed on pre-existing test formatting churn outside the scoped profiler
+    diff; left the source diff scoped instead of accepting broad test reflow.
+
+Measurement:
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 221`
+
+Measured output:
+
+- Prefill p64: 830.3 ms with profiling sync enabled.
+- Decode p64/o1: 191.5 ms mean ITL with profiling sync enabled.
+- Measured prefill layer sum: 777.0 ms total
+  - 24 linear/GDN layers: 567.5 ms total, 23.65 ms avg
+  - 8 full-attention layers: 209.5 ms total, 26.18 ms avg
+- Measured decode layer sum: 153.8 ms total
+  - 24 linear/GDN layers: 118.6 ms total, 4.94 ms avg
+  - 8 full-attention layers: 35.2 ms total, 4.40 ms avg
+
+Artifact:
+
+- `e221_m1_bs1_p64_o1_paged_layer_profile.log`
+
+Takeaway:
+
+Under synchronized profiling, decode time is dominated by the 24 linear/GDN
+layers in aggregate, not the 8 full-attention layers. This agrees with E218:
+MLP/GDN-adjacent work is still the larger decode target. The next kernel work
+should inspect GDN/linear-layer sub-ops with synchronized sub-stage timing or a
+proper Metal profiler, rather than spending more time on full-attention decode
+toggles that were neutral at p64/o64.

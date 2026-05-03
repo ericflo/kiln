@@ -5,6 +5,7 @@
 //! `Tensor` objects and are composed into the full transformer forward pass.
 
 use anyhow::{Context, Result};
+use candle_core::backend::BackendDevice;
 use candle_core::{DType, Device, Tensor};
 use std::sync::{Mutex, OnceLock};
 
@@ -106,6 +107,40 @@ fn should_use_fused_rmsnorm() -> bool {
 fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     let sig = cuda_sigmoid(x)?;
     Ok((x * sig)?)
+}
+
+fn env_truthy_for_profile(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(false)
+}
+
+fn profile_paged_layers_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_PAGED_LAYERS"))
+}
+
+fn synchronize_for_profile(device: &Device) -> Result<()> {
+    if let Device::Metal(device) = device {
+        device.synchronize()?;
+    }
+    Ok(())
+}
+
+fn log_paged_layer_profile(
+    layer: usize,
+    kind: &str,
+    seq_len: usize,
+    start_pos: usize,
+    elapsed: std::time::Duration,
+) {
+    eprintln!(
+        "kiln_profile_paged_layer layer={layer} kind={kind} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        elapsed.as_secs_f64() * 1000.0
+    );
 }
 
 #[cfg(feature = "metal")]
@@ -6962,6 +6997,7 @@ fn model_forward_paged_inner(
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
     let mut linear_attn_idx: usize = 0;
+    let profile_paged_layers = profile_paged_layers_enabled();
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
@@ -6969,6 +7005,12 @@ fn model_forward_paged_inner(
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
+                let layer_profile_start = if profile_paged_layers {
+                    synchronize_for_profile(device)?;
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 // Phase B12: tell the capture layer that we are entering the
                 // base-model layer `i`. `capture_b12_gqa_tap` call sites inside
                 // `gqa_attention_paged` / `transformer_block_paged` gate on
@@ -6998,8 +7040,18 @@ fn model_forward_paged_inner(
                 hidden = block_result
                     .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
+                if let Some(start) = layer_profile_start {
+                    synchronize_for_profile(device)?;
+                    log_paged_layer_profile(i, "full", seq_len, start_pos, start.elapsed());
+                }
             }
             GpuAttentionWeights::Linear(lin_weights) => {
+                let layer_profile_start = if profile_paged_layers {
+                    synchronize_for_profile(device)?;
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
@@ -7105,6 +7157,10 @@ fn model_forward_paged_inner(
                     crate::mtp_debug::capture_c41_layer1_tap("layer_1_output", &hidden)?;
                 }
                 linear_attn_idx += 1;
+                if let Some(start) = layer_profile_start {
+                    synchronize_for_profile(device)?;
+                    log_paged_layer_profile(i, "linear", seq_len, start_pos, start.elapsed());
+                }
             }
         }
 

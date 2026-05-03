@@ -453,3 +453,12 @@
   so that fusion remains important. A temporary cooperative tile8 MLP gate/up
   rewrite passed parity but slowed decode to 175.5 ms / 5.70 tok/s in E220, so
   it was reverted before committing and logged as rejected.
+- 2026-05-03 E221: Added `KILN_PROFILE_PAGED_LAYERS=1`, an intrusive
+  synchronized Metal layer profiler for paged forward. E221 p64/o1 showed the
+  measured decode layer sum at 153.8 ms of a 191.5 ms profiled step: 24
+  linear/GDN layers contributed 118.6 ms total (4.94 ms avg), while 8
+  full-attention layers contributed 35.2 ms total (4.40 ms avg). This points
+  the next kernel work toward GDN/linear-layer sub-ops rather than more
+  full-attention decode toggles. `cargo check`, release `kiln-bench` build, and
+  `git diff --check` passed; rustfmt check on `forward.rs` still wants
+  pre-existing test reflow, so the source diff was kept scoped.
