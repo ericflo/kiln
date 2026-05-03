@@ -562,12 +562,18 @@ textarea { resize: vertical; min-height: 80px; }
     </div>
     <div class="panel-body" style="border-top:1px solid var(--border);">
       <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Upload Adapter</div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.4;">
+      <div id="upload-adapter-help" style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.4;">
         Import a PEFT-compatible <code>.tar.gz</code>/<code>.tgz</code> adapter archive, typically one created by Kiln's adapter download/export endpoint. The adapter name becomes the saved adapter directory name.
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:center;">
-        <input type="text" id="upload-name" placeholder="adapter name">
-        <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" style="font-family:var(--sans);font-size:12px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:end;">
+        <div class="form-group" style="margin-bottom:0;">
+          <label for="upload-name">Adapter Name</label>
+          <input type="text" id="upload-name" placeholder="adapter name" aria-describedby="upload-adapter-help">
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label for="upload-archive">Adapter Archive</label>
+          <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help" style="font-family:var(--sans);font-size:12px;">
+        </div>
         <button class="btn btn-primary" onclick="uploadAdapter()">Upload</button>
       </div>
     </div>
