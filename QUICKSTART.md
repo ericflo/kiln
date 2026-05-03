@@ -272,76 +272,19 @@ Francisco.").
 > on Hugging Face. If a tool call format ever looks ambiguous, that file is
 > the source of truth.
 
-### 4.2 Troubleshooting: long tools-bearing prompts on older releases
+### 4.2 Troubleshooting: older-release long-prefill timeouts
 
-For current users, start by upgrading to the latest `kiln-v*` release
-before applying old concurrency workarounds. The current `kiln-v0.2.13`
-release line includes the v0.2.10-v0.2.13 long-prefill
+If long tools-bearing prompts or long-prefill requests time out, first upgrade
+to the latest `kiln-v*` release. Current releases include the long-prefill
 dispatcher, timeout, prefix-cache memory, KV auto-sizing, streaming-prefill,
-and observability fixes that replaced the v0.2.9-era workaround framing.
+and observability fixes that replaced the v0.2.9 workaround guidance.
 
-If you are pinned to kiln-v0.2.9 and see tools-bearing chat completions with
-input prompts longer than roughly 30k tokens degrade after a prefill timeout,
-run your client with **at most one in-flight request at a time**
-(`workers=1`). This is a client-side workaround — there is no kiln-side flag
-to set; you control it by serializing requests in your driver, worker pool,
-or load generator.
+Pinned older-release users should see the
+[troubleshooting page](docs/site/troubleshooting.html) for the historical
+`workers=1` client-side serialization and `request_timeout_secs >= 600`
+details.
 
-If you push two or more concurrent in-flight prefills under that older
-workload, a single 300-second prefill timeout (the v0.2.9 default
-`server.request_timeout_secs` in [`kiln.example.toml`](kiln.example.toml))
-can leave kiln in a degraded prefill state. Subsequent requests then fail
-with HTTP 500:
-
-```
-{"error":{"code":"generation_error","message":"Text generation failed: prefill forward pass (paged) failed: ..."}}
-```
-
-…until the server is restarted. With `workers=1` there is no concurrent
-prefill, no degraded state, and the failure mode does not occur.
-
-The original cascade and symptoms are tracked in
-[issue #664](https://github.com/ericflo/kiln/issues/664); the underlying
-KV-cache-exhaustion / prefill-state-cleanup investigation is in
-[issue #656](https://github.com/ericflo/kiln/issues/656). Current users
-should upgrade to the latest `kiln-v*` release rather than carrying this
-v0.2.9 workaround forward.
-
-### 4.3 Troubleshooting: v0.2.9 long-prefill 408s
-
-On kiln-v0.2.9, long-prefill workloads (input prompts of roughly 20k tokens
-or more) under `workers=2` with a tight KV-cache cap could hit repeated HTTP
-408 prefill timeouts at exactly the old `server.request_timeout_secs`
-boundary (300 seconds). The recommended fix for current users is to upgrade
-to the latest `kiln-v*` release: v0.2.10 routed prefix-cache prefill through
-the tiled/streaming long-prefill dispatcher, raised the default timeout to
-600 seconds, and added progress metrics for
-[issue #686](https://github.com/ericflo/kiln/issues/686); v0.2.11-v0.2.13
-added follow-on prefix-cache memory bounds, post-load KV
-auto-sizing, streaming-prefill hardening, and throughput observability.
-
-If you must stay pinned to kiln-v0.2.9, use one of these mitigations:
-
-- **Workaround A (recommended): run with `workers=1`.** Same client-side
-  serialization pattern as §4.2 — there is no kiln-side flag, you
-  control it by keeping at most one in-flight request in your driver,
-  worker pool, or load generator. With no concurrent prefill the
-  regression does not trigger.
-- **Workaround B: raise `server.request_timeout_secs` to at least 600.**
-  If `workers=2` is required, bump `server.request_timeout_secs` in
-  [`kiln.example.toml`](kiln.example.toml) to `600` or higher. The
-  v0.2.8 round-6 p99 prefill latency on the same workload was at or
-  below 300 seconds under loose KV; budget roughly 2× that headroom
-  (≥600s) for the tighter KV cap on v0.2.9.
-
-The v0.2.9 diagnosis is tracked in
-[issue #686](https://github.com/ericflo/kiln/issues/686) and the bisect
-audit lives at
-[`docs/audits/PHASE11_ISSUE_686_BISECT.md`](docs/audits/PHASE11_ISSUE_686_BISECT.md).
-Those fixes have landed; upgrade to the latest `kiln-v*` release unless you
-are intentionally reproducing v0.2.9 behavior.
-
-### 4.4 Troubleshooting: KV cache OOM auto-recovery
+### 4.3 Troubleshooting: KV cache OOM auto-recovery
 
 At startup, kiln's auto-sizer computes the paged KV cache budget as
 `available_for_kv = (total_vram - model_bytes) * inference_memory_fraction`

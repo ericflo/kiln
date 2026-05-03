@@ -269,6 +269,41 @@ curl -s http://localhost:8420/v1/models | jq .</code></pre>
       </article>
 
       <article class="card p-6">
+        <h2 class="text-xl font-semibold mb-4">Older-release long-prefill and tool-call timeouts</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>On kiln-v0.2.9, long tools-bearing chat completions or long-prefill prompts could time out under concurrent load, then leave later requests failing until restart.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>This guidance is only for users intentionally pinned to kiln-v0.2.9.</li>
+              <li>Issue <a href="https://github.com/ericflo/kiln/issues/664">#664</a> tracks the tools-bearing cascade after a prefill timeout.</li>
+              <li>Issue <a href="https://github.com/ericflo/kiln/issues/656">#656</a> tracks the KV-cache-exhaustion and prefill-state-cleanup investigation.</li>
+              <li>Issue <a href="https://github.com/ericflo/kiln/issues/686">#686</a> tracks repeated long-prefill HTTP 408s around the old timeout boundary.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Upgrade to the latest <code>kiln-v*</code> release. If pinned to v0.2.9, run clients with <code>workers=1</code> so requests are serialized; if concurrent workers are required, set <code>server.request_timeout_secs</code> to at least <code>600</code>.</p>
+          </div>
+        </div>
+        <div class="mt-5 space-y-3" style="color: var(--fg-dim);">
+          <p>
+            The <code>workers=1</code> mitigation is client-side serialization, not a kiln server flag: keep at most one in-flight request in your driver, worker pool, or load generator. It avoids concurrent prefills, which is the condition that exposed the older degraded-state failure mode.
+          </p>
+          <p>
+            The <code>request_timeout_secs &gt;= 600</code> mitigation is also historical. It was useful for pinned kiln-v0.2.9 deployments that had to keep <code>workers=2</code> while running tight KV-cache caps and roughly 20k-token-or-longer prefills. Current releases route prefix-cache prefill through the tiled/streaming dispatcher and include follow-on prefix-cache memory, KV auto-sizing, streaming-prefill, and observability fixes.
+          </p>
+          <p>
+            For the original diagnosis and bisect notes, read
+            <a href="https://github.com/ericflo/kiln/blob/main/docs/audits/PHASE11_ISSUE_686_BISECT.md"><code>docs/audits/PHASE11_ISSUE_686_BISECT.md</code></a>.
+          </p>
+        </div>
+      </article>
+
+      <article class="card p-6">
         <h2 class="text-xl font-semibold mb-4">Mock mode is not real training</h2>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
