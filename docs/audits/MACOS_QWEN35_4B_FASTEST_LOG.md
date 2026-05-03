@@ -7708,3 +7708,59 @@ standalone Metal RMSNorm. Future normalization/residual work should either
 fuse a larger block boundary, such as FFN residual into the next layer's
 pre-attention RMSNorm, or improve the existing Metal RMSNorm arithmetic without
 adding numerical drift.
+
+## Experiment E262: Rejected Combined GDN In-Projection Weight Layout
+
+Hypothesis:
+
+E255 ranked GDN `in_proj` as the largest decode sub-stage. The current Metal
+kernel reads four separate transposed weights (`qkv`, `z`, `a`, `b`) and
+branches over output ranges. A combined opt-in layout, `[hidden, qkv+z+a+b]`,
+might simplify the projection kernel and improve row/coalescing behavior, at
+the cost of extra model-load work and extra Metal memory.
+
+Temporary change:
+
+- Added an opt-in `KILN_ENABLE_METAL_GDN_COMBINED_IN_PROJ=1` load-time packed
+  GDN input-projection tensor.
+- Added a simple combined-weight decode projection kernel over the packed
+  layout.
+- Routed GDN decode through it when the packed tensor existed.
+- Reverted the candidate before commit after full-model timing.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  - Passed with the combined path added to the existing parity test.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed with the candidate applied.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+Run used
+`KILN_ENABLE_METAL_GDN_COMBINED_IN_PROJ=1 --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E262 | opt-in combined GDN in-proj weight layout | 9108.9 ms | 4.92 | 203.1 ms | 169.0 ms | 2187.6 ms | rejected |
+
+Memory-pressure check after E262:
+
+- `memory_pressure` reported 606,814 free pages out of 1,048,576 total
+  (~58% free), so the large regression is attributed to the candidate rather
+  than system pressure.
+
+Artifact:
+
+- `e262_m1_bs1_p64_o64_warmed_combined_gdn_in_proj_opt_in.log`
+
+Takeaway:
+
+Naively concatenating the existing transposed GDN projection weights is the
+wrong weight-layout change. It adds substantial load-time/memory work and
+destroys prefill, while decode regresses far beyond noise. Future GDN
+projection work should avoid extra resident copies and should change the
+projection algorithm or packing format in a way that improves the actual
+reduction, not merely concatenate the current row-major transposes.

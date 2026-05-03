@@ -600,3 +600,10 @@
   169.5 ms. The candidate was reverted before commit; future residual/norm
   work needs a larger fused boundary or tighter arithmetic, not this small
   post-attention fusion.
+- 2026-05-03 E262: Rejected a combined GDN input-projection weight layout.
+  The opt-in candidate packed `[hidden, qkv+z+a+b]` at load time and passed the
+  focused Metal GDN in-proj parity test, but full warmed p64/o64 collapsed to
+  9108.9 ms prefill / 203.1 ms mean ITL / 4.92 tok/s. `memory_pressure`
+  reported ~58% free pages after the run, so this is a real rejection; future
+  GDN projection work must avoid extra resident copies and improve the
+  reduction/packing algorithm itself.
