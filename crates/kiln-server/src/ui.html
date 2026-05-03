@@ -1270,6 +1270,21 @@ function renderChat() {
   el.scrollTop = el.scrollHeight;
 }
 
+function formatQuickInferenceError(error) {
+  const message = error?.message || String(error || 'Unknown error');
+  return [
+    '',
+    'Quick Inference could not complete this request.',
+    `Server error: ${message}`,
+    '',
+    'Next steps:',
+    '1. If kiln serve just started, wait for model startup to finish and try again.',
+    '2. Open /health to check whether the server is ready.',
+    '3. Check the kiln serve logs for model path or GPU initialization errors.',
+    '4. See Troubleshooting: https://ericflo.github.io/kiln/troubleshooting.html',
+  ].join('\n');
+}
+
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
@@ -1337,7 +1352,7 @@ async function sendChat() {
     }
   } catch (e) {
     if (e.name !== 'AbortError') {
-      chatMessages[chatMessages.length - 1].content += '\n[Error: ' + e.message + ']';
+      chatMessages[chatMessages.length - 1].content += formatQuickInferenceError(e);
       renderChat();
     }
   }
