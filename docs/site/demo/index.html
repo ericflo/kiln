@@ -128,6 +128,7 @@
     .meta-line { color: var(--fg-mute); font-size: 0.875rem; }
     .prose-body p { color: var(--fg-dim); line-height: 1.7; margin-bottom: 1.1rem; }
     .prose-body h2 { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; margin-top: 2.5rem; margin-bottom: 0.9rem; color: var(--fg); }
+    .prose-body h3 { font-size: 1rem; font-weight: 600; letter-spacing: -0.005em; margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--fg); }
     .prose-body strong { color: var(--fg); font-weight: 600; }
 
     /* asciinema-player container — keep it visually inside the kiln palette */
@@ -221,9 +222,67 @@
       <p>
         <strong>Scenes 5&ndash;6.</strong> The same prompt as scene 2 &mdash; verbatim. The model
         now answers correctly with the language from the correction examples. A final
-        <code>/v1/adapters</code> list confirms the new adapter is active, rank 8, about 4 MB on
+        <code>/v1/adapters</code> list confirms the new adapter is active, rank 32, about 12 MB on
         disk, ready for the next correction to stack on top.
       </p>
+
+      <h2 id="transcript">Transcript fallback</h2>
+      <p>
+        If the asciinema player or CDN script does not load, this transcript covers the commands
+        and terminal outputs that matter for the demo flow. Timestamps are approximate; the
+        recording is one shell session.
+      </p>
+
+      <h3>Scene 1 &mdash; start the server</h3>
+      <pre><code>$ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve --config kiln.example.toml
+
+Version: 0.2.8
+Mode:    GPU inference
+Model:   ./Qwen3.5-4B
+CUDA:    available ✓
+GPU:     NVIDIA RTX A6000
+Listen:  http://127.0.0.1:8420</code></pre>
+
+      <h3>Scene 2 &mdash; ask the base model</h3>
+      <pre><code>$ curl -s http://localhost:8420/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":48,"temperature":0.0}' \
+    | jq -r '.choices[0].message.content'
+
+Kiln is a tool for managing kiln operations in pottery and ceramics, often used to control firing schedules and monitor temperatures.</code></pre>
+
+      <h3>Scene 3 &mdash; submit two SFT correction examples</h3>
+      <pre><code>$ curl -s http://localhost:8420/v1/train/sft \
+    -H 'Content-Type: application/json' \
+    -d @demo-sft.json \
+    | jq -c '{job_id, state}'
+
+{"job_id":"7f3d2e91-2e0e-4c9a-9c3e-1f5d7d6a2c11","state":"pending"}</code></pre>
+      <p>
+        The request body contains two chat-format examples: the corrected one-sentence Kiln
+        description and the canonical target model answer for <code>Qwen/Qwen3.5-4B</code>. It writes
+        an adapter named <code>demo</code>.
+      </p>
+
+      <h3>Scene 4 &mdash; confirm training completed</h3>
+      <pre><code>$ curl -s http://localhost:8420/v1/train/status \
+    | jq -c '.[-1] | {state, adapter_name, current_loss, elapsed_secs}'
+
+{"state":"completed","adapter_name":"demo","current_loss":0.0241,"elapsed_secs":62.4}</code></pre>
+
+      <h3>Scene 5 &mdash; ask the same prompt with the adapter</h3>
+      <pre><code>$ curl -s http://localhost:8420/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.0}' \
+    | jq -r '.choices[0].message.content'
+
+Kiln is a single-GPU inference server for Qwen3.5-4B with live LoRA training over HTTP — submit corrections and the model improves in seconds.</code></pre>
+
+      <h3>Scene 6 &mdash; list the saved adapter</h3>
+      <pre><code>$ curl -s http://localhost:8420/v1/adapters \
+    | jq -c '.available[] | {name, size_bytes, modified_at}'
+
+{"name":"demo","size_bytes":12582912,"modified_at":"2026-05-01T04:39:42.512Z"}</code></pre>
 
       <h2>Why this loop matters</h2>
       <p>
