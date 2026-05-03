@@ -129,6 +129,10 @@ pub enum TrainCommands {
         #[arg(long, default_value = "1")]
         epochs: u32,
 
+        /// LoRA rank for the trained adapter
+        #[arg(long)]
+        lora_rank: Option<usize>,
+
         /// Server URL
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
@@ -142,6 +146,10 @@ pub enum TrainCommands {
         /// Adapter name to train
         #[arg(long, default_value = "default")]
         adapter: String,
+
+        /// LoRA rank for the trained adapter
+        #[arg(long)]
+        lora_rank: Option<usize>,
 
         /// Server URL
         #[arg(long, default_value = "http://localhost:8420")]
@@ -717,6 +725,7 @@ pub async fn run_train_sft(
     adapter: &str,
     lr: f64,
     epochs: u32,
+    lora_rank: Option<usize>,
 ) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(file)
         .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
@@ -739,12 +748,7 @@ pub async fn run_train_sft(
         style(adapter).white().bold()
     );
 
-    let body = serde_json::json!({
-        "adapter_name": adapter,
-        "examples": examples,
-        "learning_rate": lr,
-        "num_epochs": epochs,
-    });
+    let body = build_sft_training_payload(examples, adapter, lr, epochs, lora_rank);
 
     let client = reqwest::Client::new();
     let resp = client
@@ -787,22 +791,19 @@ pub async fn run_train_sft(
 }
 
 /// Run the `train grpo` CLI subcommand.
-pub async fn run_train_grpo(url: &str, file: &str, adapter: &str) -> anyhow::Result<()> {
+pub async fn run_train_grpo(
+    url: &str,
+    file: &str,
+    adapter: &str,
+    lora_rank: Option<usize>,
+) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(file)
         .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
 
     let body: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Invalid JSON in {file}: {e}"))?;
 
-    // Wrap with adapter name if not already present
-    let body = if body.get("adapter_name").is_some() {
-        body
-    } else {
-        let mut obj = body;
-        obj.as_object_mut()
-            .map(|m| m.insert("adapter_name".into(), serde_json::json!(adapter)));
-        obj
-    };
+    let body = build_grpo_training_payload(body, adapter, lora_rank)?;
 
     println!(
         "{} Submitting GRPO training batch on adapter '{}'",
@@ -848,6 +849,54 @@ pub async fn run_train_grpo(url: &str, file: &str, adapter: &str) -> anyhow::Res
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn build_sft_training_payload(
+    examples: Vec<serde_json::Value>,
+    adapter: &str,
+    lr: f64,
+    epochs: u32,
+    lora_rank: Option<usize>,
+) -> serde_json::Value {
+    let mut config = serde_json::json!({
+        "output_name": adapter,
+        "learning_rate": lr,
+        "epochs": epochs,
+    });
+    if let Some(rank) = lora_rank {
+        config["lora_rank"] = serde_json::json!(rank);
+    }
+
+    serde_json::json!({
+        "examples": examples,
+        "config": config,
+    })
+}
+
+fn build_grpo_training_payload(
+    mut body: serde_json::Value,
+    adapter: &str,
+    lora_rank: Option<usize>,
+) -> anyhow::Result<serde_json::Value> {
+    let obj = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("GRPO request must be a JSON object with groups and config"))?;
+    obj.remove("adapter_name");
+
+    let config = obj
+        .entry("config")
+        .or_insert_with(|| serde_json::json!({}));
+    let config_obj = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("GRPO request config must be a JSON object"))?;
+    config_obj.remove("epochs");
+    config_obj.remove("num_epochs");
+    config_obj.insert("output_name".into(), serde_json::json!(adapter));
+    if let Some(rank) = lora_rank {
+        config_obj.insert("lora_rank".into(), serde_json::json!(rank));
+    }
+
+    Ok(body)
 }
 
 /// Run the `train status` CLI subcommand.
@@ -1011,6 +1060,79 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
     use serde_json::json;
+
+    #[test]
+    fn build_sft_training_payload_uses_nested_config() {
+        let body = build_sft_training_payload(
+            vec![json!({
+                "messages": [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Bonjour"},
+                ]
+            })],
+            "sft-adapter",
+            2e-4,
+            3,
+            Some(8),
+        );
+
+        assert_eq!(body["config"]["output_name"], "sft-adapter");
+        assert_eq!(body["config"]["learning_rate"], 2e-4);
+        assert_eq!(body["config"]["epochs"], 3);
+        assert_eq!(body["config"]["lora_rank"], 8);
+        assert!(body.get("adapter_name").is_none());
+        assert!(body.get("num_epochs").is_none());
+    }
+
+    #[test]
+    fn build_sft_training_payload_omits_unset_lora_rank() {
+        let body = build_sft_training_payload(vec![], "sft-adapter", 1e-4, 1, None);
+
+        assert_eq!(body["config"]["output_name"], "sft-adapter");
+        assert!(body["config"].get("lora_rank").is_none());
+    }
+
+    #[test]
+    fn build_grpo_training_payload_overrides_output_name_in_config() {
+        let mut body = json!({
+            "groups": [{
+                "messages": [{"role": "user", "content": "Write a haiku"}],
+                "completions": [{"text": "Moonlit pond", "reward": 1.0}],
+            }],
+            "config": {
+                "output_name": "old-adapter",
+                "learning_rate": 5e-5,
+                "epochs": 3,
+            },
+        });
+        body.as_object_mut()
+            .unwrap()
+            .insert("adapter_name".to_string(), json!("legacy-top-level"));
+
+        let body = build_grpo_training_payload(body, "grpo-adapter", Some(16)).unwrap();
+
+        assert_eq!(body["config"]["output_name"], "grpo-adapter");
+        assert_eq!(body["config"]["learning_rate"], 5e-5);
+        assert_eq!(body["config"]["lora_rank"], 16);
+        assert!(body.get("adapter_name").is_none());
+        assert!(body["config"].get("epochs").is_none());
+        assert!(body["config"].get("num_epochs").is_none());
+    }
+
+    #[test]
+    fn build_grpo_training_payload_creates_config() {
+        let body = json!({
+            "groups": [{
+                "messages": [{"role": "user", "content": "Write a haiku"}],
+                "completions": [{"text": "Moonlit pond", "reward": 1.0}],
+            }],
+        });
+
+        let body = build_grpo_training_payload(body, "grpo-adapter", None).unwrap();
+
+        assert_eq!(body["config"]["output_name"], "grpo-adapter");
+        assert!(body["config"].get("lora_rank").is_none());
+    }
 
     #[test]
     fn render_api_error_structured_with_hint() {

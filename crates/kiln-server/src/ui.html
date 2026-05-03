@@ -566,7 +566,7 @@ textarea { resize: vertical; min-height: 80px; }
             </div>
             <div class="form-group">
               <label>Epochs</label>
-              <input type="number" name="num_epochs" value="3" min="1" max="100">
+              <input type="number" name="epochs" value="3" min="1" max="100">
             </div>
           </div>
           <div class="form-row">
@@ -581,7 +581,7 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-group">
             <label>Training Examples (JSON array)</label>
-            <textarea name="examples" rows="6" placeholder='[{"instruction":"Translate to French","input":"Hello","output":"Bonjour"}]'></textarea>
+            <textarea name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
@@ -599,8 +599,8 @@ textarea { resize: vertical; min-height: 80px; }
               <input type="text" name="output_name" value="grpo-adapter" required>
             </div>
             <div class="form-group">
-              <label>Epochs</label>
-              <input type="number" name="num_epochs" value="1" min="1" max="100">
+              <label>KL Coefficient</label>
+              <input type="text" name="kl_coeff" value="0.1">
             </div>
           </div>
           <div class="form-row">
@@ -615,7 +615,7 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-group">
             <label>GRPO Groups (JSON array)</label>
-            <textarea name="groups" rows="6" placeholder='[{"prompt":"Write a haiku","completions":[{"text":"Silent moonlit night...","reward":0.9},{"text":"The cat sat...","reward":0.2}]}]'></textarea>
+            <textarea name="groups" rows="6" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
@@ -1207,7 +1207,8 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
         output_name: form.output_name.value,
         auto_load: form.auto_load.checked,
         learning_rate: parseFloat(form.learning_rate.value),
-        num_epochs: parseInt(form.num_epochs.value),
+        epochs: parseInt(form.epochs.value),
+        lora_rank: parseInt(form.rank.value),
       }
     };
     const res = await api('/v1/train/sft', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
@@ -1230,7 +1231,8 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
         output_name: form.output_name.value,
         auto_load: form.auto_load.checked,
         learning_rate: parseFloat(form.learning_rate.value),
-        num_epochs: parseInt(form.num_epochs.value),
+        kl_coeff: parseFloat(form.kl_coeff.value),
+        lora_rank: parseInt(form.rank.value),
       }
     };
     const res = await api('/v1/train/grpo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
