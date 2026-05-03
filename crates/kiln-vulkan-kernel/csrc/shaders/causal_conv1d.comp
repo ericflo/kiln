@@ -1,0 +1,63 @@
+// Causal Conv1d dispatch 1: compute outputs only (no state writes)
+// Computes out[B,C,T] = silu(depthwise_conv(x, weight))
+//
+// This dispatch ONLY computes outputs. State advancement is handled by the
+// separate `causal_conv1d_state_advance.comp` dispatch, eliminating the race
+// condition where t=seq_len-1 writes conv_state while other threads for the
+// same (b,c) are still reading it.
+//
+// Input:  x[B,C,T], weight[C,K]
+// Output: out[B,C,T]
+//
+// Push constants: batch, channels, seq_len, kernel_size
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint total = batch * channels * seq_len;
+    if (idx >= total) {
+        return;
+    }
+
+    const uint b = idx / (channels * seq_len);
+    const uint c = (idx / seq_len) % channels;
+    const uint t = idx % seq_len;
+
+    float sum = 0.0;
+    for (uint k = 0; k < kernel_size; k++) {
+        float x_val;
+        if (k <= t) {
+            x_val = data_x[((b * channels + c) * seq_len) + (t - k)];
+        } else {
+            // Missing taps: zero for prefill.
+            // State handling is done by the separate advance_state dispatch.
+            x_val = 0.0;
+        }
+        sum += x_val * data_weight[c * kernel_size + k];
+    }
+
+    // Stable silu activation: x * sigmoid(x), branch on sign to avoid overflow
+    float silu;
+    if (sum >= 0.0) {
+        silu = sum / (1.0 + exp(-sum));
+    } else {
+        float e = exp(sum);
+        silu = sum * e / (1.0 + e);
+    }
+    data_out[idx] = silu;
+}

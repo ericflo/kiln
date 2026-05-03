@@ -347,12 +347,17 @@ fn spawn_backend_prewarm(state: AppState) {
         return;
     };
 
-    let (is_metal, device) = {
+    let (is_gpu, device) = {
         let runner_guard = runner.read().unwrap();
         let device = runner_guard.weights.embed_tokens.device().clone();
-        (matches!(device, candle_core::Device::Metal(_)), device)
+        let is_metal = matches!(device, candle_core::Device::Metal(_));
+        #[cfg(feature = "vulkan")]
+        let is_vulkan = kiln_model::backend::vulkan::vulkan_is_available();
+        #[cfg(not(feature = "vulkan"))]
+        let is_vulkan = false;
+        (is_metal || is_vulkan, device)
     };
-    if !is_metal {
+    if !is_gpu {
         return;
     }
 
@@ -377,6 +382,8 @@ fn spawn_backend_prewarm(state: AppState) {
                 return Ok(());
             };
 
+            precompile_metal_custom_kernels(&device);
+            precompile_vulkan_custom_kernels(&device);
             let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
                 temperature: 0.0,
@@ -485,6 +492,24 @@ fn precompile_metal_custom_kernels(device: &candle_core::Device) {
 
 #[cfg(not(feature = "metal"))]
 fn precompile_metal_custom_kernels(_device: &candle_core::Device) {}
+
+#[cfg(feature = "vulkan")]
+fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {
+    let start = std::time::Instant::now();
+    match kiln_model::backend::vulkan::precompile_custom_kernels() {
+        Ok(()) => tracing::info!(
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "Vulkan custom kernels precompiled during background prewarm"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            "Vulkan custom kernel precompile failed; falling back to lazy compilation"
+        ),
+    }
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {}
 
 fn prewarm_kv_dtype(config: &ModelConfig) -> candle_core::DType {
     match config.dtype {

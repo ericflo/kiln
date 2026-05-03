@@ -1,0 +1,30 @@
+// Simple element-wise add kernel: out = a + b
+// Used for testing the Vulkan dispatch pipeline.
+// This is the simplest possible kernel that exercises:
+// 1. Shader compilation and pipeline creation
+// 2. Buffer creation and data upload
+// 3. Compute dispatch
+// 4. Data readback
+//
+// Push constants: total_elements (u32)
+// Input: a[total_elements], b[total_elements]
+// Output: out[total_elements]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint total_elements;
+};
+
+layout(binding = 0) readonly buffer ABuf { float data_a[]; };
+layout(binding = 1) readonly buffer BBuf { float data_b[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= total_elements) return;
+    data_out[idx] = data_a[idx] + data_b[idx];
+}

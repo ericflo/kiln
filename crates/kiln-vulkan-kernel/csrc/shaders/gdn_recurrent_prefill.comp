@@ -1,0 +1,78 @@
+// GDN recurrent prefill (head-last layout)
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint seq_len;
+    uint dk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf { float data_v[]; };
+layout(binding = 3) readonly buffer BetaBuf { float data_beta[]; };
+layout(binding = 4) readonly buffer GBuf { float data_g[]; };
+layout(binding = 5) buffer StateBuf { float data_state[]; };
+layout(binding = 6) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * seq_len * heads * dv;
+    if (idx >= total) return;
+
+    uint b = idx / (seq_len * heads * dv);
+    uint t = (idx / (heads * dv)) % seq_len;
+    uint h = (idx / dv) % heads;
+    uint d = idx % dv;
+
+    uint bh = b * seq_len * heads + t * heads + h;
+    uint q_off = bh * dk;
+    uint k_off = q_off;
+    uint v_off = bh * dv;
+    uint state_off = (b * heads + h) * dk * dv;
+
+    float beta_val = data_beta[bh];
+    float g_val = exp(data_g[bh]);
+
+    // Load state shard
+    float s_shard[32];
+    uint lane = gl_LocalInvocationID.x % 32;
+    uint col = gl_LocalInvocationID.x / 32;
+    for (uint r = 0; r < 32; r++) {
+        s_shard[r] = data_state[state_off + col * dk + r * 32 + lane];
+    }
+
+    // Recurrent step
+    float k_reg[32];
+    float q_reg[32];
+    for (uint r = 0; r < 32; r++) {
+        uint i = r * 32 + lane;
+        k_reg[r] = data_k[k_off + i];
+        q_reg[r] = data_q[q_off + i];
+    }
+
+    float kv_shard = 0.0;
+    for (uint r = 0; r < 32; r++) {
+        kv_shard += g_val * s_shard[r] * k_reg[r];
+    }
+
+    float delta_col = (data_v[v_off + col] - kv_shard) * beta_val;
+    float attn_partial = 0.0;
+    for (uint r = 0; r < 32; r++) {
+        s_shard[r] = g_val * s_shard[r] + k_reg[r] * delta_col;
+        attn_partial += s_shard[r] * q_reg[r];
+    }
+
+    if (lane == 0) {
+        data_out[(b * seq_len + t) * heads * dv + h * dv + d] = attn_partial;
+    }
+
+    for (uint r = 0; r < 32; r++) {
+        data_state[state_off + col * dk + r * 32 + lane] = s_shard[r];
+    }
+}

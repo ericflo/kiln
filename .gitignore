@@ -11,3 +11,6 @@ profile-out/
 profile/
 profiling/
 profiling-artifacts/
+
+# Vulkan SPIR-V build artifacts
+*.spv
