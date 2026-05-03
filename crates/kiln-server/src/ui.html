@@ -1184,10 +1184,13 @@ function renderMergeSources() {
   for (let i = 0; i < mergeSourceCount; i++) {
     const sel = existing[i] ? existing[i].name : '';
     const w = existing[i] ? existing[i].weight : '0.5';
+    const rowNumber = i + 1;
+    const nameId = `merge-src-name-${rowNumber}`;
+    const weightId = `merge-src-weight-${rowNumber}`;
     html += `<div class="merge-source" style="display:grid;grid-template-columns:1fr 90px auto;gap:6px;margin-bottom:6px;align-items:center;">
-      <select class="merge-src-name"><option value="">(select adapter)</option>${adapterOptions}</select>
-      <input type="number" class="merge-src-weight" step="0.05" value="${w}">
-      <button type="button" class="btn btn-sm btn-danger" onclick="removeMergeSource(${i})" ${mergeSourceCount <= 1 ? 'disabled' : ''}>−</button>
+      <select id="${nameId}" class="merge-src-name" aria-label="Merge source ${rowNumber} adapter"><option value="">(select adapter)</option>${adapterOptions}</select>
+      <input id="${weightId}" type="number" class="merge-src-weight" step="0.05" value="${w}" aria-label="Merge source ${rowNumber} weight">
+      <button type="button" class="btn btn-sm btn-danger" onclick="removeMergeSource(${i})" aria-label="Remove merge source ${rowNumber}" ${mergeSourceCount <= 1 ? 'disabled' : ''}>−</button>
     </div>`;
   }
   list.innerHTML = html;
