@@ -235,6 +235,83 @@
       </article>
 
       <article class="card p-6">
+        <div class="label mb-3">Advanced flows</div>
+        <h2 class="text-2xl font-semibold mb-4">Copy-paste power-user requests</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          After the first chat and training jobs work, these examples cover batch generation,
+          adapter portability, adapter merging, per-request composition, and training-completion webhooks.
+        </p>
+        <div class="grid gap-4">
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Batch completions for rollouts</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
+  -H "Content-Type: application/json" \
+  -d '{"prompts": ["Name a warm color.", "Name a cool color."], "max_tokens": 32, "seed": 7}' \
+  | python3 -m json.tool</code></pre>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Download and upload an adapter archive</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -L http://localhost:8420/v1/adapters/default/download \
+  -o default-adapter.tar.gz
+
+curl -s http://localhost:8420/v1/adapters/upload \
+  -F "file=@default-adapter.tar.gz" \
+  -F "name=default-copy" \
+  | python3 -m json.tool</code></pre>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Merge adapters with TIES</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/adapters/merge \
+  -H "Content-Type: application/json" \
+  -d '{
+    "output_name": "merged-ties",
+    "mode": "ties",
+    "adapters": [
+      {"name": "default", "weight": 0.7},
+      {"name": "grpo-demo", "weight": 0.3}
+    ]
+  }' \
+  | python3 -m json.tool</code></pre>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Concatenate adapters into a wider LoRA</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/adapters/merge \
+  -H "Content-Type: application/json" \
+  -d '{
+    "output_name": "merged-concat",
+    "mode": "concat",
+    "adapters": [
+      {"name": "default", "weight": 1.0},
+      {"name": "format-fixes", "weight": 1.0}
+    ]
+  }' \
+  | python3 -m json.tool</code></pre>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Compose adapters per request</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Write a short checklist."}],
+    "max_tokens": 96,
+    "adapters": [{"name":"default","scale":0.7}]
+  }' \
+  | python3 -m json.tool</code></pre>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">Notify another service when training completes</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code># kiln.toml
+[training]
+webhook_url = "https://example.internal/kiln/training-complete"
+
+# or configure the same target with an environment variable
+export KILN_TRAINING_WEBHOOK_URL="https://example.internal/kiln/training-complete"
+kiln serve --config kiln.toml</code></pre>
+          </section>
+        </div>
+      </article>
+
+      <article class="card p-6">
         <div class="label mb-3">Run and observe</div>
         <h2 class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
