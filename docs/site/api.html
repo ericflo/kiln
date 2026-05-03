@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln API Reference &mdash; Endpoint map</title>
+  <meta name="description" content="A compact website API reference for Kiln endpoints: health, metrics, OpenAI-compatible inference, adapter management, SFT, GRPO, training queue, and config.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/api.html">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+
+  <meta property="og:title" content="Kiln API Reference &mdash; Endpoint map">
+  <meta property="og:description" content="A compact endpoint map for Kiln: health, metrics, inference, adapters, SFT, GRPO, training queue, and config.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/api.html">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Kiln API Reference &mdash; Endpoint map">
+  <meta name="twitter:description" content="A compact endpoint map for Kiln: health, metrics, inference, adapters, SFT, GRPO, training queue, and config.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    .label {
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .endpoint-list { display: grid; gap: 0.75rem; }
+    .endpoint {
+      background: var(--bg-soft-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+    }
+    .method {
+      display: inline-flex;
+      min-width: 3.8rem;
+      justify-content: center;
+      border-radius: 999px;
+      border: 1px solid rgba(249,115,22,0.35);
+      color: var(--accent);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 0.15rem 0.45rem;
+    }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .site-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      color: var(--fg-dim);
+    }
+    @media (max-width: 640px) {
+      .site-nav-bar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .site-nav {
+        flex-wrap: wrap;
+        gap: 0.35rem 1rem;
+        line-height: 1.35;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
+      <a href="./" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="site-nav text-sm">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="api.html">API</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">API reference &middot; endpoint map</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        The Kiln API surface at a glance.
+      </h1>
+      <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
+        A compact website map for cold readers who want to see the serving, adapter, training,
+        monitoring, and configuration endpoints before walking through the full Quickstart.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-8">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Quickstart &rarr;
+        </a>
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          GRPO guide &rarr;
+        </a>
+        <a href="demo/" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Demo &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <main class="max-w-4xl mx-auto px-6 py-12">
+    <div class="grid gap-6">
+      <article class="card p-6">
+        <div class="label mb-3">Run and observe</div>
+        <h2 class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, and training progress.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration.</div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Inference</div>
+        <h2 class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts.</div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Adapters</div>
+        <h2 class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list loaded LoRA adapters.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/unload</code> &mdash; unload the active adapter.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/adapters/{name}</code> &mdash; delete an adapter.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters/{name}/download</code> &mdash; export an adapter as a tar.gz archive.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/upload</code> &mdash; import an adapter from a multipart tar.gz archive.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/merge</code> &mdash; combine adapters with weighted average, TIES, or concatenation.</div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Training</div>
+        <h2 class="text-2xl font-semibold mb-4">SFT, GRPO, status, and queue control</h2>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/train/sft</code> &mdash; submit supervised fine-tuning examples.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/train/grpo</code> &mdash; submit a GRPO batch of prompts, completions, and rewards.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status</code> &mdash; summarize training queue and job state.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/queue</code> &mdash; list queued training jobs.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a queued job.</div>
+        </div>
+      </article>
+
+      <article class="card p-6" style="background: var(--bg-soft-2);">
+        <div class="label mb-3">Security note</div>
+        <h2 class="text-2xl font-semibold mb-4">Training data changes the active adapter</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Kiln&rsquo;s training endpoints are privileged: do not expose <code>/v1/train/sft</code> or
+          <code>/v1/train/grpo</code> to untrusted inputs. Training validates request structure, not
+          whether an example is semantically safe or desirable. Treat training data like code review
+          input, and start with the <a href="https://github.com/ericflo/kiln/blob/main/README.md#security-model">README security model</a>
+          and <a href="troubleshooting.html">Troubleshooting</a> guide when hardening a deployment.
+        </p>
+      </article>
+    </div>
+  </main>
+
+  <!-- next steps -->
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <div class="grid sm:grid-cols-3 gap-4">
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">
+          <h3 class="font-semibold mb-2">Quickstart</h3>
+          <p style="color: var(--fg-dim);">Run the server, send the first chat request, and post the first SFT job.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">
+          <h3 class="font-semibold mb-2">GRPO guide</h3>
+          <p style="color: var(--fg-dim);">See scored-completion payloads and the generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="demo/">
+          <h3 class="font-semibold mb-2">Demo</h3>
+          <p style="color: var(--fg-dim);">Watch the live LoRA training loop update the next chat completion.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- footer -->
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="./">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="api.html">API</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
