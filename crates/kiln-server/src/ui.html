@@ -967,7 +967,12 @@ function renderRecentRequests(rows) {
   const el = document.getElementById('recent-requests-panel');
   if (!el) return;
   if (!rows || rows.length === 0) {
-    el.innerHTML = '<div class="empty">No requests yet — try Quick Inference below</div>';
+    el.innerHTML = `<div class="empty">
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No recent requests yet.</div>
+      <div>Recent chat completions will appear here with prompt and completion previews, token counts, finish status, and streaming/error badges.</div>
+      <div style="margin-top:8px;">Use <strong>Quick Inference</strong> below to create the first entry.</div>
+      <div style="margin-top:8px;">This is normal on a fresh server or after restart.</div>
+    </div>`;
     return;
   }
   const items = rows.map(r => {
