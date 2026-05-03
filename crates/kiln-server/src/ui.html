@@ -222,6 +222,8 @@ a { color: var(--accent); text-decoration: none; }
   white-space: nowrap;
 }
 .btn:hover { background: var(--border); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:disabled:hover { background: var(--surface2); }
 .btn-sm { font-size: 11px; padding: 2px 8px; }
 .btn-primary { background: var(--accent2); border-color: var(--accent2); color: #fff; }
 .btn-primary:hover { background: var(--accent); }
@@ -562,9 +564,10 @@ textarea { resize: vertical; min-height: 80px; }
     </div>
     <div class="panel-body" style="border-top:1px solid var(--border);">
       <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Merge Adapters</div>
+      <div id="merge-helper" style="font-size:12px;color:var(--text2);margin-bottom:8px;"></div>
       <div id="merge-sources" style="margin-bottom:6px;"></div>
       <div style="display:flex;gap:6px;margin-bottom:8px;">
-        <button type="button" class="btn btn-sm" onclick="addMergeSource()">+ Add source</button>
+        <button type="button" class="btn btn-sm" id="add-merge-source" onclick="addMergeSource()">+ Add source</button>
       </div>
       <div class="form-row" style="margin-bottom:8px;">
         <div class="form-group" style="margin-bottom:0;">
@@ -585,7 +588,7 @@ textarea { resize: vertical; min-height: 80px; }
         <input type="number" id="merge-density" step="0.05" min="0.01" max="1" value="0.2">
       </div>
       <div style="display:flex;justify-content:flex-end;">
-        <button class="btn btn-primary" onclick="mergeAdapters()">Merge</button>
+        <button class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge</button>
       </div>
     </div>
   </div>
@@ -1081,12 +1084,28 @@ let mergeSourceCount = 2;
 function renderMergeSources() {
   const list = document.getElementById('merge-sources');
   if (!list) return;
+  const available = (lastAdapters && lastAdapters.available) || [];
+  const canMerge = available.length >= 2;
+  const helper = document.getElementById('merge-helper');
+  if (helper) {
+    helper.textContent = canMerge
+      ? 'Choose two or more saved adapters to merge into a new adapter.'
+      : 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload/import an adapter first.';
+  }
+  const addBtn = document.getElementById('add-merge-source');
+  if (addBtn) addBtn.disabled = !canMerge;
+  const mergeBtn = document.getElementById('merge-btn');
+  if (mergeBtn) mergeBtn.disabled = !canMerge;
+  if (!canMerge) {
+    list.innerHTML = '';
+    return;
+  }
   // Preserve current values across re-renders.
   const existing = Array.from(list.querySelectorAll('.merge-source')).map(row => ({
     name: row.querySelector('.merge-src-name').value,
     weight: row.querySelector('.merge-src-weight').value,
   }));
-  const adapterOptions = (lastAdapters && lastAdapters.available || [])
+  const adapterOptions = available
     .map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)}</option>`)
     .join('');
   let html = '';
@@ -1134,6 +1153,11 @@ window.onMergeModeChange = function() {
 };
 
 window.mergeAdapters = async function() {
+  const available = (lastAdapters && lastAdapters.available) || [];
+  if (available.length < 2) {
+    toast('Merging requires at least two saved adapters', 'err');
+    return;
+  }
   const list = document.getElementById('merge-sources');
   const rows = Array.from(list.querySelectorAll('.merge-source'));
   const sources = [];
