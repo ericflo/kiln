@@ -80,6 +80,42 @@ pub enum DecodeSlot {
     },
 }
 
+fn collect_ready_decode_indices(
+    slots: &mut [&mut DecodeSlot],
+    sampling: &[SamplingParams],
+    output: &mut [TokenId],
+) -> Result<(Vec<usize>, Vec<SamplingParams>)> {
+    anyhow::ensure!(
+        slots.len() == sampling.len() && slots.len() == output.len(),
+        "decode slots length {} sampling length {} output length {} mismatch",
+        slots.len(),
+        sampling.len(),
+        output.len()
+    );
+
+    let mut decode_indices = Vec::new();
+    let mut decode_params = Vec::new();
+    for (idx, slot) in slots.iter_mut().enumerate() {
+        match slot {
+            DecodeSlot::Real {
+                state,
+                first_token_pending,
+                ..
+            } if *first_token_pending => {
+                output[idx] = state.next_token;
+                *first_token_pending = false;
+            }
+            DecodeSlot::Real { .. } => {
+                decode_indices.push(idx);
+                decode_params.push(sampling[idx].clone());
+            }
+            DecodeSlot::Mock { .. } => anyhow::bail!("mock slot sent to real decode forward"),
+        }
+    }
+
+    Ok((decode_indices, decode_params))
+}
+
 pub trait DecodeForward: Send + Sync + 'static {
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot>;
     fn forward_decode(
@@ -234,40 +270,39 @@ impl DecodeForward for RealDecodeForward {
         sampling: &[SamplingParams],
     ) -> Result<Vec<TokenId>> {
         let mut output = vec![0; slots.len()];
-        let mut decode_indices = Vec::new();
-        let mut decode_params = Vec::new();
-        for (idx, slot) in slots.iter_mut().enumerate() {
-            match slot {
-                DecodeSlot::Real {
-                    state,
-                    first_token_pending,
-                    ..
-                } if *first_token_pending => {
-                    output[idx] = state.next_token;
-                    *first_token_pending = false;
-                }
-                DecodeSlot::Real { .. } => {
-                    decode_indices.push(idx);
-                    decode_params.push(sampling[idx].clone());
-                }
-                DecodeSlot::Mock { .. } => anyhow::bail!("mock slot sent to real decode forward"),
-            }
-        }
+        let (decode_indices, decode_params) =
+            collect_ready_decode_indices(slots, sampling, &mut output)?;
 
         if !decode_indices.is_empty() {
             let _gpu_guard = self.gpu_lock.read().unwrap();
             let mut row_refs: Vec<&mut PagedBatchedDecodeState> =
                 Vec::with_capacity(decode_indices.len());
-            for slot in slots.iter_mut() {
-                if let DecodeSlot::Real {
-                    state,
-                    first_token_pending: false,
-                    ..
-                } = &mut **slot
-                {
-                    row_refs.push(state);
+            let mut next_decode_index = decode_indices.iter().copied().peekable();
+            for (idx, slot) in slots.iter_mut().enumerate() {
+                if next_decode_index.peek() != Some(&idx) {
+                    continue;
+                }
+                match &mut **slot {
+                    DecodeSlot::Real {
+                        state,
+                        first_token_pending: false,
+                        ..
+                    } => {
+                        row_refs.push(state);
+                        next_decode_index.next();
+                    }
+                    DecodeSlot::Real { .. } => {
+                        anyhow::bail!("decode row {idx} became first-token pending")
+                    }
+                    DecodeSlot::Mock { .. } => anyhow::bail!("mock slot sent to real decode forward"),
                 }
             }
+            anyhow::ensure!(
+                row_refs.len() == decode_params.len(),
+                "decode row length {} != params length {} after row selection",
+                row_refs.len(),
+                decode_params.len()
+            );
             let next_tokens = self.runner.read().unwrap().paged_batched_decode_step(
                 &mut row_refs,
                 &decode_params,
@@ -787,6 +822,8 @@ impl BatchingEngineActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_core::block::BlockTable;
+    use kiln_model::LinearAttentionState;
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
@@ -861,6 +898,69 @@ mod tests {
             adapter: None,
             cancel: CancelHandle::new(),
         }
+    }
+
+    fn real_slot(next_token: TokenId, first_token_pending: bool) -> DecodeSlot {
+        DecodeSlot::Real {
+            state: PagedBatchedDecodeState {
+                block_table: BlockTable::new(),
+                linear_state: LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                },
+                seq_len: 1,
+                next_token,
+                generated_tokens: Vec::new(),
+                step_seed: None,
+                registration: None,
+                allocated_blocks: Vec::new(),
+                prefill_duration: Duration::ZERO,
+                decode_duration: Duration::ZERO,
+            },
+            hit_entry_id: None,
+            adapter: None,
+            first_token_pending,
+        }
+    }
+
+    #[test]
+    fn real_decode_selection_skips_first_token_rows_for_model_step() {
+        let mut pending_a = real_slot(101, true);
+        let mut ready_a = real_slot(202, false);
+        let mut pending_b = real_slot(303, true);
+        let mut ready_b = real_slot(404, false);
+        let mut slots = vec![&mut pending_a, &mut ready_a, &mut pending_b, &mut ready_b];
+        let sampling = vec![
+            SamplingParams {
+                max_tokens: 11,
+                ..SamplingParams::default()
+            },
+            SamplingParams {
+                max_tokens: 22,
+                ..SamplingParams::default()
+            },
+            SamplingParams {
+                max_tokens: 33,
+                ..SamplingParams::default()
+            },
+            SamplingParams {
+                max_tokens: 44,
+                ..SamplingParams::default()
+            },
+        ];
+        let mut output = vec![0; slots.len()];
+
+        let (decode_indices, decode_params) =
+            collect_ready_decode_indices(&mut slots, &sampling, &mut output).unwrap();
+
+        assert_eq!(output, vec![101, 0, 303, 0]);
+        assert_eq!(decode_indices, vec![1, 3]);
+        assert_eq!(decode_params.len(), decode_indices.len());
+        assert_eq!(decode_params[0].max_tokens, 22);
+        assert_eq!(decode_params[1].max_tokens, 44);
+        drop(slots);
+        assert!(matches!(pending_a, DecodeSlot::Real { first_token_pending: false, .. }));
+        assert!(matches!(pending_b, DecodeSlot::Real { first_token_pending: false, .. }));
     }
 
     #[tokio::test]
