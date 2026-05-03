@@ -581,7 +581,10 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-group">
             <label>Training Examples (JSON array)</label>
-            <textarea name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
+            <textarea id="sft-examples" name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+              <button type="button" class="btn btn-sm" id="use-sft-sample">Use sample SFT payload</button>
+            </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
@@ -615,7 +618,10 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-group">
             <label>GRPO Groups (JSON array)</label>
-            <textarea name="groups" rows="6" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
+            <textarea id="grpo-groups" name="groups" rows="6" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+              <button type="button" class="btn btn-sm" id="use-grpo-sample">Use sample GRPO payload</button>
+            </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
             <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
@@ -1194,6 +1200,39 @@ window.cancelJob = async function(jobId) {
     pollTraining();
   } catch (e) { toast(e.message, 'err'); }
 };
+
+function fillSftSamplePayload() {
+  const sample = [
+    {
+      messages: [
+        { role: 'user', content: 'Translate to French: Hello' },
+        { role: 'assistant', content: 'Bonjour' },
+      ],
+    },
+  ];
+  document.getElementById('sft-examples').value = JSON.stringify(sample, null, 2);
+}
+
+function fillGrpoSamplePayload() {
+  const sample = [
+    {
+      messages: [
+        { role: 'user', content: 'Write a haiku about the moon' },
+      ],
+      completions: [
+        {
+          text: 'Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight',
+          reward: 0.9,
+        },
+        { text: 'The moon is bright tonight.', reward: 0.2 },
+      ],
+    },
+  ];
+  document.getElementById('grpo-groups').value = JSON.stringify(sample, null, 2);
+}
+
+document.getElementById('use-sft-sample').addEventListener('click', fillSftSamplePayload);
+document.getElementById('use-grpo-sample').addEventListener('click', fillGrpoSamplePayload);
 
 // --- SFT Form ---
 document.getElementById('sft-form').addEventListener('submit', async (e) => {
