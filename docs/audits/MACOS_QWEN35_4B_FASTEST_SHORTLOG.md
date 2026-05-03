@@ -503,3 +503,12 @@
   misses. This validates the current branch on a non-cache bs>1 server shape;
   future bs>1 speed work still needs true batched model-forward or scheduler
   continuous batching.
+- 2026-05-03 E235-E237: Reduced decode hot-path Metal output allocation count
+  for fused full-attention QKV projection and GDN input projection by backing
+  each logical output tuple with one sliced output tensor. Focused Metal parity
+  tests passed, release `kiln-bench` build passed, and rustfmt for `metal.rs`
+  passed. Warmed p64/o64 measured E235 169.0 ms mean ITL / 5.92 tok/s and E236
+  168.1 ms / 5.95 tok/s. Synchronized E237 p64/o1 showed projection kernel
+  time basically unchanged (`in_proj` 36.754 ms, `out_proj` 17.302 ms across
+  24 GDN layers), so treat this as a small allocation-overhead cleanup, not a
+  new GEMV-throughput breakthrough.

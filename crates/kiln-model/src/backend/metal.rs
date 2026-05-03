@@ -3922,11 +3922,15 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
     let (_, k_output_dim) = k_t.dims2()?;
     let (_, v_output_dim) = v_t.dims2()?;
 
+    let total_output_dim = q_output_dim + k_output_dim + v_output_dim;
     // The kernel writes each projection output independently with the existing
-    // tile8 cooperative GEMV mapping.
-    let q_out = unsafe { Tensor::empty((1usize, 1usize, q_output_dim), DType::BF16, x.device())? };
-    let k_out = unsafe { Tensor::empty((1usize, 1usize, k_output_dim), DType::BF16, x.device())? };
-    let v_out = unsafe { Tensor::empty((1usize, 1usize, v_output_dim), DType::BF16, x.device())? };
+    // tile8 cooperative GEMV mapping. Back the three result views with one
+    // allocation to avoid repeated small Metal buffer allocations in decode.
+    let fused_out =
+        unsafe { Tensor::empty((1usize, 1usize, total_output_dim), DType::BF16, x.device())? };
+    let q_out = fused_out.narrow(2, 0, q_output_dim)?;
+    let k_out = fused_out.narrow(2, q_output_dim, k_output_dim)?;
+    let v_out = fused_out.narrow(2, q_output_dim + k_output_dim, v_output_dim)?;
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal fused QKV projection requires Metal tensors");
@@ -4118,11 +4122,14 @@ fn metal_gdn_in_proj_decode_bf16(
     let (_, nv) = a_t.dims2()?;
     let total = qkv_dim + z_dim + (nv * 2);
 
-    // The kernel writes every output element exactly once.
-    let qkv_out = unsafe { Tensor::empty((1usize, 1usize, qkv_dim), DType::BF16, x.device())? };
-    let z_out = unsafe { Tensor::empty((1usize, 1usize, z_dim), DType::BF16, x.device())? };
-    let a_out = unsafe { Tensor::empty((1usize, 1usize, nv), DType::BF16, x.device())? };
-    let b_out = unsafe { Tensor::empty((1usize, 1usize, nv), DType::BF16, x.device())? };
+    // The kernel writes every output element exactly once. Keep the four
+    // logical outputs as views over one allocation so decode avoids multiple
+    // small Metal buffer allocations per GDN layer.
+    let proj_out = unsafe { Tensor::empty((1usize, 1usize, total), DType::BF16, x.device())? };
+    let qkv_out = proj_out.narrow(2, 0, qkv_dim)?;
+    let z_out = proj_out.narrow(2, qkv_dim, z_dim)?;
+    let a_out = proj_out.narrow(2, qkv_dim + z_dim, nv)?;
+    let b_out = proj_out.narrow(2, qkv_dim + z_dim + nv, nv)?;
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal gdn in-proj requires Metal tensors");

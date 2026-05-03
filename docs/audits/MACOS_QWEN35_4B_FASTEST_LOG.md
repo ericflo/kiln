@@ -6918,3 +6918,78 @@ distinct and cold, the result exercises physical model work rather than the
 deterministic cache-hit paths. Future bs>1 work still needs a true batched
 model-forward path or scheduler-level continuous batching; today this endpoint
 fans out per prompt and the shared GPU work remains effectively per-request.
+
+## Experiment E235-E237: Shared Projection Output Buffers
+
+Hypothesis:
+
+The previous profiling still points at low-level projection costs, especially
+GDN `in_proj`. The rejected E224 cooperative rewrite showed that changing the
+GEMV reduction geometry naively is worse, but the fused projection wrappers were
+still allocating several small Metal output tensors per decode layer. Backing
+logical projection tuples with one sliced output tensor should remove allocator
+work without changing the kernel math or dispatch geometry.
+
+Change:
+
+- `metal_fused_qkv_transposed_coop_gemv_bf16` now allocates one
+  `[1, 1, q+k+v]` BF16 output and returns `q`, `k`, and `v` as last-axis
+  narrow views.
+- `metal_gdn_in_proj_decode_bf16` now allocates one
+  `[1, 1, qkv+z+a+b]` BF16 output and returns `mixed_qkv`, `z`, `a`, and `b`
+  as last-axis narrow views.
+- The Metal kernels and reductions are unchanged; buffer offsets are supplied
+  through Candle's layout offsets for each view.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_fused_qkv_transposed_coop_gemv_matches_broadcast_matmul --lib`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Measurements:
+
+All p64/o64 runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E235 | shared projection output buffers | 434.4 ms | 5.92 | 169.0 ms | 169.1 ms | 185.5 ms | keep as small allocation cleanup |
+| E236 | shared projection output buffers repeat | 423.4 ms | 5.95 | 168.1 ms | 167.6 ms | 179.7 ms | keep |
+
+Synchronized p64/o1 profile after the change:
+
+| Experiment | Profiled mean ITL | Layer sum | Linear/GDN layer sum | Full-attn layer sum | GDN measured decode stage sum |
+|---|---:|---:|---:|---:|---:|
+| E237 | 234.4 ms | 203.3 ms | 165.1 ms | 38.2 ms | 70.6 ms |
+
+E237 measured decode GDN sub-stage sum across 24 linear layers:
+
+- `in_proj`: 36.754 ms total, 1.531 ms avg
+- `out_proj`: 17.302 ms total, 0.721 ms avg
+- `gates_recur_gated_norm`: 8.614 ms total, 0.359 ms avg
+- `qkv_conv_norm`: 7.814 ms total, 0.326 ms avg
+- `gated_norm`: 0.092 ms total, effectively skipped by the fused path
+- `post_transpose`: ~0.0 ms
+
+Artifacts:
+
+- `e235_m1_bs1_p64_o64_warmed_shared_projection_buffers.log`
+- `e236_m1_bs1_p64_o64_warmed_shared_projection_buffers_repeat.log`
+- `e237_m1_bs1_p64_o1_shared_projection_buffers_profile.log`
+
+Takeaway:
+
+This change is worth keeping, but it should be interpreted narrowly. E235/E236
+are in the fastest warmed p64/o64 range seen so far on this branch, while E237
+shows the heavy projection kernel timings are effectively unchanged from E233.
+The benefit is likely from reducing hot-path Metal allocation overhead around
+fused projection outputs, not from improving GDN GEMV throughput. The next
+material speed target remains real kernel math and true bs>1 execution:
+projection GEMV design, fused GDN stages, batched model-forward, or
+scheduler-level continuous batching.
