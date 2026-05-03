@@ -110,6 +110,18 @@ struct CapturedDecodeGraph {
     seqused_k_buffer: Option<Tensor>,
     /// Pre-allocated current KV write slot buffer on GPU (u32, shape [1]).
     kv_slot_buffer: Option<Tensor>,
+    /// Pre-allocated RoPE cosine table on GPU (f32, shape [1, rotary_dim / 2]).
+    /// Updated before replay so RoPE consumes graph-stable table pointers.
+    rotary_cos_buffer: Tensor,
+    /// Pre-allocated RoPE sine table on GPU (f32, shape [1, rotary_dim / 2]).
+    rotary_sin_buffer: Tensor,
+    /// Pre-allocated paged FlashAttention outputs, one per full-attention layer.
+    /// The CUDA graph captures these destination pointers; replay must not
+    /// write into capture-time temporary allocations that Candle can free.
+    _paged_decode_outputs: Vec<Tensor>,
+    /// Pre-allocated paged FlashAttention LSE scratch tensors, one per
+    /// full-attention layer, for the same graph-stable destination reason.
+    _paged_decode_lse: Vec<Tensor>,
     /// Max K/V length baked into the captured kernel launch shape.
     max_seqlen_k: usize,
     /// Pre-allocated fused GDN decode recurrent outputs, one per linear layer.
@@ -246,6 +258,19 @@ impl CudaGraphRunner {
                             linear_state, lora,
                         );
                     }
+                    if let Err(e) = Self::update_rotary_buffers(
+                        &captured.rotary_cos_buffer,
+                        &captured.rotary_sin_buffer,
+                        config,
+                        seq_len,
+                    ) {
+                        tracing::warn!("Failed to update rotary graph buffers: {e}, falling back to eager");
+                        self.captured.remove(&requested_key);
+                        return Self::eager_forward(
+                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                            linear_state, lora,
+                        );
+                    }
                     if let (Some(block_table_buffer), Some(seqused_k_buffer), Some(kv_slot_buffer)) = (
                         captured.block_table_buffer.as_ref(),
                         captured.seqused_k_buffer.as_ref(),
@@ -354,6 +379,34 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
+    fn rotary_table_values(config: &ModelConfig, position: usize) -> (Vec<f32>, Vec<f32>) {
+        let half_rotary = config.rotary_dim() / 2;
+        let mut cos = Vec::with_capacity(half_rotary);
+        let mut sin = Vec::with_capacity(half_rotary);
+        for i in 0..half_rotary {
+            let inv_freq = 1.0f32
+                / (config.rope_theta.powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
+            let freq = position as f32 * inv_freq;
+            cos.push(freq.cos());
+            sin.push(freq.sin());
+        }
+        (cos, sin)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn update_rotary_buffers(
+        rotary_cos_buffer: &Tensor,
+        rotary_sin_buffer: &Tensor,
+        config: &ModelConfig,
+        position: usize,
+    ) -> Result<()> {
+        let (cos, sin) = Self::rotary_table_values(config, position);
+        Self::update_cuda_scalar(rotary_cos_buffer, cos.as_slice(), "rotary cos buffer")?;
+        Self::update_cuda_scalar(rotary_sin_buffer, sin.as_slice(), "rotary sin buffer")?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
     fn update_paged_metadata_buffers(
         block_table_buffer: &Tensor,
         seqused_k_buffer: &Tensor,
@@ -445,6 +498,8 @@ impl CudaGraphRunner {
         let output_logits =
             Self::new_output_logits(config, device, weights.embed_tokens.dtype())?;
         let output_logits_for_capture = output_logits.clone();
+        let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
+        let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
         let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
         let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
             (
@@ -454,6 +509,11 @@ impl CudaGraphRunner {
             )
         } else {
             (None, None, None)
+        };
+        let (paged_decode_outputs, paged_decode_lse) = if key.stable_metadata {
+            Self::new_paged_decode_outputs(config, device, weights.embed_tokens.dtype())?
+        } else {
+            (Vec::new(), Vec::new())
         };
         let graph_inputs = match (
             block_table_buffer.as_ref(),
@@ -465,6 +525,10 @@ impl CudaGraphRunner {
                 seqused_k,
                 kv_slot,
                 max_seqlen_k: key.max_seqlen_k,
+                rotary_cos: &rotary_cos_buffer,
+                rotary_sin: &rotary_sin_buffer,
+                attn_out: &paged_decode_outputs,
+                softmax_lse: &paged_decode_lse,
             }),
             _ => None,
         };
@@ -538,6 +602,10 @@ impl CudaGraphRunner {
                     block_table_buffer,
                     seqused_k_buffer,
                     kv_slot_buffer,
+                    rotary_cos_buffer,
+                    rotary_sin_buffer,
+                    _paged_decode_outputs: paged_decode_outputs,
+                    _paged_decode_lse: paged_decode_lse,
                     max_seqlen_k,
                     _gdn_decode_outputs: gdn_decode_outputs,
                 });
@@ -653,6 +721,30 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
+    fn new_rotary_cos_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        position: usize,
+    ) -> Result<Tensor> {
+        let (cos, _) = Self::rotary_table_values(config, position);
+        Tensor::new(cos.as_slice(), device)?
+            .reshape((1usize, cos.len()))
+            .context("create CUDA graph rotary cos buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_rotary_sin_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        position: usize,
+    ) -> Result<Tensor> {
+        let (_, sin) = Self::rotary_table_values(config, position);
+        Tensor::new(sin.as_slice(), device)?
+            .reshape((1usize, sin.len()))
+            .context("create CUDA graph rotary sin buffer")
+    }
+
+    #[cfg(feature = "cuda")]
     fn new_output_logits(
         config: &ModelConfig,
         device: &Device,
@@ -660,6 +752,31 @@ impl CudaGraphRunner {
     ) -> Result<Tensor> {
         Tensor::zeros((1, 1, config.vocab_size), dtype, device)
             .context("create CUDA graph output logits")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_paged_decode_outputs(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+        let mut outputs = Vec::with_capacity(config.num_full_attention_layers);
+        let mut lse = Vec::with_capacity(config.num_full_attention_layers);
+        for _ in 0..config.num_full_attention_layers {
+            outputs.push(
+                Tensor::zeros(
+                    (1, 1, config.num_attention_heads, config.head_dim),
+                    dtype,
+                    device,
+                )
+                .context("create CUDA graph paged decode output")?,
+            );
+            lse.push(
+                Tensor::zeros((1, config.num_attention_heads, 1), candle_core::DType::F32, device)
+                    .context("create CUDA graph paged decode LSE")?,
+            );
+        }
+        Ok((outputs, lse))
     }
 
     #[cfg(feature = "cuda")]

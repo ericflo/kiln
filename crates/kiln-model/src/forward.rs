@@ -4476,6 +4476,10 @@ pub(crate) struct PagedDecodeGraphInputs<'a> {
     pub seqused_k: &'a Tensor,
     pub kv_slot: &'a Tensor,
     pub max_seqlen_k: usize,
+    pub rotary_cos: &'a Tensor,
+    pub rotary_sin: &'a Tensor,
+    pub attn_out: &'a [Tensor],
+    pub softmax_lse: &'a [Tensor],
 }
 
 /// Try the fused paged-decode flash-attention kernel.
@@ -4729,12 +4733,23 @@ fn try_flash_attn_paged_decode(
         #[cfg(feature = "cuda")]
         {
             if let Some(inputs) = graph_inputs {
+                let attn_out = inputs.attn_out.get(full_attn_layer_idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing CUDA graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
+                    )
+                })?;
+                let softmax_lse = inputs.softmax_lse.get(full_attn_layer_idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing CUDA graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
+                    )
+                })?;
                 kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
                     &q_fa,
                     k_pool,
                     v_pool,
                     bt_tensor,
                     inputs.seqused_k,
+                    Some((attn_out, softmax_lse)),
                     inputs.max_seqlen_k,
                     block_size,
                     softmax_scale,
@@ -7226,17 +7241,26 @@ fn model_forward_paged_inner(
             &positions_owned
         }
     };
-    let rope_tables_owned = if positions_gpu.is_none() {
-        Some(rotary_tables_from_tensor(
-            positions,
-            &weights.rotary_inv_freq,
-        )?)
+    let graph_rope_tables = {
+        #[cfg(feature = "cuda")]
+        {
+            graph_inputs.map(|inputs| (inputs.rotary_cos, inputs.rotary_sin))
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Option::<(&Tensor, &Tensor)>::None
+        }
+    };
+    let rope_tables_owned = if positions_gpu.is_none() && graph_rope_tables.is_none() {
+        Some(rotary_tables_from_tensor(positions, &weights.rotary_inv_freq)?)
     } else {
         None
     };
-    let rope_tables = rope_tables_owned
-        .as_ref()
-        .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor));
+    let rope_tables = graph_rope_tables.or_else(|| {
+        rope_tables_owned
+            .as_ref()
+            .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor))
+    });
 
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;

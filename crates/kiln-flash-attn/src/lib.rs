@@ -771,6 +771,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
     v_pool: &Tensor,
     block_table: &Tensor,
     seqused_k: &Tensor,
+    graph_outputs: Option<(&Tensor, &Tensor)>,
     max_seqlen_k: usize,
     page_block_size: usize,
     softmax_scale: f32,
@@ -816,8 +817,29 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
     let v_pool = v_pool.contiguous()?;
     let block_table = block_table.contiguous()?;
     let seqused_k = seqused_k.contiguous()?;
-    let out = Tensor::zeros((b, 1, num_heads, head_dim), DType::BF16, device)?;
-    let softmax_lse = Tensor::zeros((b, num_heads, 1), DType::F32, device)?;
+    let out_owned;
+    let softmax_lse_owned;
+    let (out, softmax_lse) = if let Some((out, softmax_lse)) = graph_outputs {
+        if out.dtype() != DType::BF16 || out.dims() != [b, 1, num_heads, head_dim] {
+            candle_core::bail!(
+                "flash_attn_paged_decode_dyn_seqlen graph out must be bf16 [{b}, 1, {num_heads}, {head_dim}], got {:?} {:?}",
+                out.dtype(),
+                out.dims()
+            );
+        }
+        if softmax_lse.dtype() != DType::F32 || softmax_lse.dims() != [b, num_heads, 1] {
+            candle_core::bail!(
+                "flash_attn_paged_decode_dyn_seqlen graph softmax_lse must be f32 [{b}, {num_heads}, 1], got {:?} {:?}",
+                softmax_lse.dtype(),
+                softmax_lse.dims()
+            );
+        }
+        (out, softmax_lse)
+    } else {
+        out_owned = Tensor::zeros((b, 1, num_heads, head_dim), DType::BF16, device)?;
+        softmax_lse_owned = Tensor::zeros((b, num_heads, 1), DType::F32, device)?;
+        (&out_owned, &softmax_lse_owned)
+    };
 
     {
         let (q_storage, q_layout) = q.storage_and_layout();
@@ -888,7 +910,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
         }
     }
 
-    Ok(out)
+    Ok(out.clone())
 }
 
 /// Write one token-major bf16 K/V row into a paged KV pool using a graph-stable
