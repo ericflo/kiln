@@ -6525,3 +6525,60 @@ treated as a low-level cleanup plus measurement foundation, not the final
 kernel win. Next low-level work should use the warmed harness on longer decode
 runs and bs>1/server shapes, then target the remaining decode-heavy kernels
 rather than returning to endpoint-cache-only work.
+
+## Experiment E215-E220: Longer Decode Kernel Ablations and Rejected MLP Coop Attempt
+
+Hypothesis:
+
+The p64/o16 decode window is too short to make confident kernel decisions. A
+p64/o64 warmed run gives 64 measured decode steps, making it a better first
+screen for decode-heavy Metal paths after the compact fused-QKV change.
+
+Measurements:
+
+All runs used the rebuilt release bench with
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| E215 | compact fused QKV default | 488.8 ms | 5.92 | 169.0 ms | 167.4 ms | 201.8 ms | keep compact fused QKV |
+| E216 | disable fused QKV | 476.3 ms | 5.85 | 171.1 ms | 168.7 ms | 211.2 ms | slower decode |
+| E217 | disable contiguous paged attn decode | 451.1 ms | 5.89 | 169.8 ms | 169.0 ms | 184.6 ms | neutral; no change |
+| E218 | disable MLP gate/up fusion | 454.4 ms | 5.31 | 188.2 ms | 187.1 ms | 203.2 ms | fusion is important |
+| E219 | disable attention gate fusion | 446.0 ms | 5.89 | 169.9 ms | 168.4 ms | 192.8 ms | neutral; no change |
+| E220 | temporary cooperative MLP gate/up kernel | 486.9 ms | 5.70 | 175.5 ms | 174.3 ms | 196.8 ms | rejected and reverted |
+
+Temporary E220 change:
+
+The current MLP gate/up fusion uses one thread per intermediate output and
+loops over the hidden dimension serially. E220 tried a cooperative tile8 SIMD
+variant that computes eight intermediate columns per SIMD group and fuses
+SiLU(gate) * up after `simd_sum` reduction. The parity test passed:
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_matches_reference --lib`
+
+But warmed p64/o64 decode slowed from E215 `169.0 ms` mean ITL to E220
+`175.5 ms`, so the cooperative MLP attempt was reverted before committing.
+The likely issue is that the current scalar fused path benefits from much
+higher output-column parallelism and avoids the heavier cooperative
+threadgroup/reduction overhead for this shape, even though it does more serial
+work per output.
+
+Artifacts:
+
+- `e215_m1_bs1_p64_o64_warmed_compact_fused_qkv.log`
+- `e216_m1_bs1_p64_o64_warmed_no_fused_qkv.log`
+- `e217_m1_bs1_p64_o64_warmed_no_contiguous_paged_attn.log`
+- `e218_m1_bs1_p64_o64_warmed_no_mlp_gate_up_fusion.log`
+- `e219_m1_bs1_p64_o64_warmed_no_attn_gate_fusion.log`
+- `e220_m1_bs1_p64_o64_warmed_coop_mlp_gate_up.log`
+
+Takeaway:
+
+For p64/o64, compact fused QKV remains slightly ahead of disabling fused QKV.
+MLP gate/up fusion is a real decode win and should stay enabled, but the
+straight cooperative rewrite is worse and should not be retried without a more
+careful kernel design. Contiguous paged attention and attention-gate fusion are
+not obvious next wins at this shape. The next low-level slice should either
+profile per-layer/per-kernel timings directly or broaden to server bs>1 before
+changing another default.

@@ -445,3 +445,11 @@
   E212/E214 450.5 ms prefill / 169.4 ms mean ITL / 5.90 tok/s. Treat as
   low-level cleanup plus measurement foundation; next runs should broaden to
   longer decode and bs>1/server shapes.
+- 2026-05-03 E215-E220: Broadened warmed low-level checks to p64/o64. Compact
+  fused QKV stayed slightly ahead of disabling fused QKV (E215 169.0 ms mean
+  ITL / 5.92 tok/s vs E216 171.1 ms / 5.85 tok/s). Disabling contiguous paged
+  attention decode and attention-gate fusion were neutral at this shape.
+  Disabling MLP gate/up fusion was clearly worse (E218 188.2 ms / 5.31 tok/s),
+  so that fusion remains important. A temporary cooperative tile8 MLP gate/up
+  rewrite passed parity but slowed decode to 175.5 ms / 5.70 tok/s in E220, so
+  it was reverted before committing and logged as rejected.
