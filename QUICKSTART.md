@@ -11,6 +11,8 @@ Either an NVIDIA GPU **or** an Apple Silicon Mac.
 - **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
 - **Disk**: ~20GB free (model weights + build artifacts)
 
+If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
+
 ## Quick path: Desktop App (recommended for most users)
 
 Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. **No Rust toolchain or CUDA build required for the GUI itself.**
@@ -499,7 +501,7 @@ curl -s http://localhost:8420/v1/adapters/upload \
 # -> {"name":"imported","size_bytes":...,"files":...}
 ```
 
-Body limit is 2 GB compressed / 4 GB extracted. Uploads fail with 409 if the target name already exists.
+Body limit is 2 GB gzipped / 4 GB extracted. Uploads fail with 409 if the target name already exists.
 
 ### 9.4 Merge adapters (TIES)
 
