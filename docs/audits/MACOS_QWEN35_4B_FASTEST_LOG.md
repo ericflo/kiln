@@ -6642,3 +6642,71 @@ MLP/GDN-adjacent work is still the larger decode target. The next kernel work
 should inspect GDN/linear-layer sub-ops with synchronized sub-stage timing or a
 proper Metal profiler, rather than spending more time on full-attention decode
 toggles that were neutral at p64/o64.
+
+## Experiment E222: Synchronized GDN Stage Profiling Hook
+
+Hypothesis:
+
+The layer profiler shows aggregate linear/GDN dominance, but it does not say
+which sub-op inside each linear-attention block deserves kernel work. An
+intrusive synchronized stage profiler can identify the next low-level target
+without changing normal inference behavior.
+
+Change:
+
+- Added `KILN_PROFILE_GDN_STAGES=1`, gated off by default.
+- When enabled for paged linear-attention layers, the decode path synchronizes
+  the Metal device around GDN sub-stages and prints:
+  `kiln_profile_gdn_stage layer=<n> stage=<name> seq_len=<n> start_pos=<n> elapsed_ms=<n>`.
+- Stages include `in_proj`, `qkv_conv_norm` / `qkv_conv_split_norm`, `gates`,
+  `recurrent`, `post_transpose`, `gated_norm`, and `out_proj`, with additional
+  names for fused gates+recurrent paths when those paths are active.
+- The hook is profiling-only and intentionally adds many synchronizations.
+
+Validation:
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/forward.rs`
+  - Still fails on pre-existing test formatting churn outside this scoped
+    profiler diff.
+
+Measurement:
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 222`
+
+Measured output:
+
+- Prefill p64: 542.4 ms with layer and GDN-stage profiling sync enabled.
+- Decode p64/o1: 262.8 ms mean ITL with layer and GDN-stage profiling sync
+  enabled.
+- Measured decode layer sum: 225.5 ms total
+  - 24 linear/GDN layers: 188.2 ms total, 7.84 ms avg
+  - 8 full-attention layers: 37.3 ms total, 4.66 ms avg
+- Measured decode GDN stage sum across the 24 linear layers: 91.9 ms total
+  - `in_proj`: 36.1 ms total, 1.50 ms avg
+  - `out_proj`: 17.0 ms total, 0.71 ms avg
+  - `gates`: 12.4 ms total, 0.52 ms avg
+  - `gated_norm`: 9.8 ms total, 0.41 ms avg
+  - `recurrent`: 9.5 ms total, 0.39 ms avg
+  - `qkv_conv_norm`: 7.1 ms total, 0.30 ms avg
+  - `post_transpose`: ~0.0 ms
+
+Artifact:
+
+- `e222_m1_bs1_p64_o1_gdn_stage_profile.log`
+
+Takeaway:
+
+This run is not a latency baseline because the profiler synchronizes around
+every stage. As a target-selection run, it is useful: within measured decode
+linear layers, `in_proj` is the largest synchronized GDN stage by roughly 2x
+over `out_proj` and roughly 3x-5x over the recurrence/gating pieces. The next
+low-level optimization should inspect and ablate the Metal GDN input-projection
+decode path before spending more time on endpoint cache reuse.

@@ -462,3 +462,14 @@
   full-attention decode toggles. `cargo check`, release `kiln-bench` build, and
   `git diff --check` passed; rustfmt check on `forward.rs` still wants
   pre-existing test reflow, so the source diff was kept scoped.
+- 2026-05-03 E222: Added `KILN_PROFILE_GDN_STAGES=1`, an intrusive
+  synchronized GDN sub-stage profiler for paged linear-attention decode.
+  E222 p64/o1, with both layer and GDN-stage profiling enabled, reported
+  262.8 ms mean ITL due to instrumentation overhead. The measured decode layer
+  sum was 225.5 ms: 24 linear/GDN layers contributed 188.2 ms total (7.84 ms
+  avg), while 8 full-attention layers contributed 37.3 ms total (4.66 ms avg).
+  Across the measured decode linear layers, GDN stages summed to 91.9 ms:
+  `in_proj` 36.1 ms, `out_proj` 17.0 ms, `gates` 12.4 ms, `gated_norm` 9.8 ms,
+  `recurrent` 9.5 ms, `qkv_conv_norm` 7.1 ms, and `post_transpose` ~0.0 ms.
+  Treat this as target selection, not a latency baseline: the next low-level
+  target is Metal GDN input projection.

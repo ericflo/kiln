@@ -123,6 +123,11 @@ fn profile_paged_layers_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_PAGED_LAYERS"))
 }
 
+fn profile_gdn_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
+}
+
 fn synchronize_for_profile(device: &Device) -> Result<()> {
     if let Device::Metal(device) = device {
         device.synchronize()?;
@@ -141,6 +146,39 @@ fn log_paged_layer_profile(
         "kiln_profile_paged_layer layer={layer} kind={kind} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
         elapsed.as_secs_f64() * 1000.0
     );
+}
+
+fn start_gdn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+) -> Result<Option<std::time::Instant>> {
+    if context.is_some() {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_gdn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let Some((layer, start_pos)) = context else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_gdn_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
 }
 
 #[cfg(feature = "metal")]
@@ -3391,6 +3429,7 @@ pub fn gated_deltanet_forward(
         capture_b11_taps,
         capture_c41_taps,
         false,
+        None,
     )
 }
 
@@ -3490,8 +3529,10 @@ fn gated_deltanet_forward_decode_if(
     capture_b11_taps: bool,
     capture_c41_taps: bool,
     use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
     let input_dtype = x.dtype();
     let nk = config.linear_num_key_heads;
     let dk = config.linear_key_head_dim;
@@ -3505,6 +3546,7 @@ fn gated_deltanet_forward_decode_if(
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let (mixed_qkv, z, a, b) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
         if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
@@ -3523,6 +3565,13 @@ fn gated_deltanet_forward_decode_if(
             (mixed_qkv, z, a, b)
         }
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "in_proj",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_in_proj`. Matches the HF reference layout
     // `concat([in_proj_qkvz(x), in_proj_ba(x)], dim=-1)` = [q, k, v, z, b, a]
@@ -3564,6 +3613,7 @@ fn gated_deltanet_forward_decode_if(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/qkv_conv_norm");
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let (q, k, v) = crate::backend::metal::metal_gdn_decode_qkv_conv_norm_bf16(
                     &mixed_qkv,
                     &weights.conv1d,
@@ -3578,6 +3628,13 @@ fn gated_deltanet_forward_decode_if(
                 )
                 .context("metal gdn decode qkv conv/norm kernel failed")?;
                 let z = z.reshape((batch, seq_len, nv, dv))?;
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "qkv_conv_norm",
+                    seq_len,
+                    stage_profile,
+                )?;
                 Some((q, k, v, z, false))
             } else {
                 None
@@ -3609,6 +3666,7 @@ fn gated_deltanet_forward_decode_if(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/qkv_conv_split");
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let (q, k, v) =
                     crate::backend::metal::metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
                         &mixed_qkv,
@@ -3626,6 +3684,13 @@ fn gated_deltanet_forward_decode_if(
                     gdn_qk_norm(&q, &k, input_dtype, scale)?
                 };
                 let z = z.reshape((batch, seq_len, nv, dv))?;
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "qkv_conv_split_norm",
+                    seq_len,
+                    stage_profile,
+                )?;
                 Some((q, k, v, z, false))
             } else {
                 None
@@ -3651,6 +3716,7 @@ fn gated_deltanet_forward_decode_if(
         // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
         // kill switch all route through the portable candle path below — which is the
         // parity oracle.
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
             // Transpose to [B, channels, T] for conv
@@ -3724,6 +3790,13 @@ fn gated_deltanet_forward_decode_if(
             // Transpose back to [B, T, qkv_dim]
             post_silu.transpose(1, 2)?
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "conv",
+            seq_len,
+            stage_profile,
+        )?;
 
         // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
         // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
@@ -3736,6 +3809,7 @@ fn gated_deltanet_forward_decode_if(
         }
 
         // --- Step 3: Split into Q, K, V and reshape to heads ---
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (q, k, v, z) = {
             kiln_nvtx::range!(c"kiln/gdn/qkv_split");
             let q = mixed_qkv
@@ -3750,6 +3824,13 @@ fn gated_deltanet_forward_decode_if(
             let z = z.reshape((batch, seq_len, nv, dv))?;
             (q, k, v, z)
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split",
+            seq_len,
+            stage_profile,
+        )?;
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
@@ -3763,6 +3844,7 @@ fn gated_deltanet_forward_decode_if(
         // path skips the F32 round-trip through HBM. The candle path is the
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (q, k, qk_expanded) = {
             #[cfg(feature = "metal")]
             {
@@ -3867,6 +3949,13 @@ fn gated_deltanet_forward_decode_if(
                 }
             }
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm",
+            seq_len,
+            stage_profile,
+        )?;
         (q, k, v, z, qk_expanded)
     };
 
@@ -3929,22 +4018,29 @@ fn gated_deltanet_forward_decode_if(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
-                Some(
-                    crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
-                        &q,
-                        &k,
-                        &v,
-                        &a,
-                        &b,
-                        &weights.a_log,
-                        &weights.dt_bias,
-                        recurrent_state,
-                        &z,
-                        &weights.norm,
-                        config.rms_norm_eps as f32,
-                    )
-                    .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?,
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+                let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &weights.a_log,
+                    &weights.dt_bias,
+                    recurrent_state,
+                    &z,
+                    &weights.norm,
+                    config.rms_norm_eps as f32,
                 )
+                .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?;
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gates_recur_gated_norm",
+                    seq_len,
+                    stage_profile,
+                )?;
+                Some(out)
             } else {
                 None
             }
@@ -3992,19 +4088,27 @@ fn gated_deltanet_forward_decode_if(
                         )
                     {
                         kiln_nvtx::range!(c"kiln/gdn/gates_recur");
-                        Some(
-                            crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
-                                &q,
-                                &k,
-                                &v,
-                                &a,
-                                &b,
-                                &weights.a_log,
-                                &weights.dt_bias,
-                                recurrent_state,
-                            )
-                            .context("metal gdn decode gates+recurrent kernel failed")?,
+                        let stage_profile =
+                            start_gdn_stage_profile(profile_device, profile_context)?;
+                        let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
+                            &q,
+                            &k,
+                            &v,
+                            &a,
+                            &b,
+                            &weights.a_log,
+                            &weights.dt_bias,
+                            recurrent_state,
                         )
+                        .context("metal gdn decode gates+recurrent kernel failed")?;
+                        finish_gdn_stage_profile(
+                            profile_device,
+                            profile_context,
+                            "gates_recur",
+                            seq_len,
+                            stage_profile,
+                        )?;
+                        Some(out)
                     } else {
                         None
                     }
@@ -4036,6 +4140,7 @@ fn gated_deltanet_forward_decode_if(
         // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
         // identical — the reference path is the original Phase-6 implementation
         // and remains the parity oracle.
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
             if backend.supports_gdn_gates() {
@@ -4050,6 +4155,13 @@ fn gated_deltanet_forward_decode_if(
                 gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
             }
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "gates",
+            seq_len,
+            stage_profile,
+        )?;
 
         // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
         // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
@@ -4064,7 +4176,8 @@ fn gated_deltanet_forward_decode_if(
             crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
         }
 
-        let native_recurrent_prefill = if recurrent_unexpanded_qk {
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+        let recurrent_result = if let Some(attn_out) = if recurrent_unexpanded_qk {
             let v_recur = v.to_dtype(input_dtype)?;
             gdn_recurrent_prefill_native_head_last(
                 backend,
@@ -4077,9 +4190,7 @@ fn gated_deltanet_forward_decode_if(
             )?
         } else {
             None
-        };
-
-        if let Some(attn_out) = native_recurrent_prefill {
+        } {
             (attn_out, true, false) // [B, T, nv, dv], contiguous
         } else {
             // Cast v back to input_dtype so the recurrence stays in bf16. The
@@ -4132,7 +4243,15 @@ fn gated_deltanet_forward_decode_if(
                     ), // [B, nv, T, dv]
                 }
             }
-        }
+        };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "recurrent",
+            seq_len,
+            stage_profile,
+        )?;
+        recurrent_result
     };
 
     // Restore state to its original dtype so the caller's F32 invariant holds
@@ -4143,6 +4262,7 @@ fn gated_deltanet_forward_decode_if(
 
     // Transpose to [B, T, nv, dv] unless the Metal full-chunk path already
     // wrote that contiguous layout directly.
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/post_transpose");
         if attn_out_head_last {
@@ -4151,6 +4271,13 @@ fn gated_deltanet_forward_decode_if(
             attn_out.transpose(1, 2)?
         }
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "post_transpose",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_recur_out`. Captured post-transpose (shape
     // [B, T, nv, dv]) so the layout matches the input HF passes to its
@@ -4166,6 +4293,7 @@ fn gated_deltanet_forward_decode_if(
     }
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
         let attn_out = if attn_out_already_gated_norm {
@@ -4178,6 +4306,13 @@ fn gated_deltanet_forward_decode_if(
             .reshape((batch, seq_len, v_dim))?
             .to_dtype(input_dtype)?
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "gated_norm",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_gated_norm`. Output of the GatedRMSNorm /
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
@@ -4194,6 +4329,7 @@ fn gated_deltanet_forward_decode_if(
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
     // it should be added to GpuLinearAttentionWeights and applied after conv1d.
     // Pre-transposed cache (see Step 1 note).
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
         linear_with_lora_t_decode_if(
@@ -4204,6 +4340,13 @@ fn gated_deltanet_forward_decode_if(
             0.0,
         )?
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "out_proj",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
@@ -5856,6 +5999,7 @@ pub fn model_forward(
                     /* capture_b11_taps = */ false,
                     /* capture_c41_taps = */ false,
                     use_metal_decode_ffn,
+                    None,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
@@ -6998,6 +7142,7 @@ fn model_forward_paged_inner(
     let mut full_attn_idx: usize = 0;
     let mut linear_attn_idx: usize = 0;
     let profile_paged_layers = profile_paged_layers_enabled();
+    let profile_gdn_stages = profile_gdn_stages_enabled();
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
@@ -7124,6 +7269,7 @@ fn model_forward_paged_inner(
                     capture_b11_taps,
                     capture_c41_taps,
                     use_metal_decode_ffn,
+                    profile_gdn_stages.then_some((i, start_pos)),
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
