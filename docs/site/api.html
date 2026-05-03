@@ -188,7 +188,7 @@
         <h2 class="text-2xl font-semibold mb-4">Copy-paste first requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Once Kiln is serving on <code>localhost:8420</code>, these are the smallest useful
-          requests to chat, submit one SFT correction, and watch the training queue.
+          requests to chat, submit one SFT correction, submit scored GRPO completions, and watch the training queue.
         </p>
         <div class="grid gap-4">
           <section class="endpoint">
@@ -208,6 +208,22 @@
       {"role": "assistant", "content": "Hey there!"}
     ]}],
     "config": {"output_name": "default", "learning_rate": 1e-4, "epochs": 3}
+  }' \
+  | python3 -m json.tool</code></pre>
+          </section>
+          <section class="endpoint">
+            <h3 class="font-semibold mb-2">First GRPO scored-completions submission</h3>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/grpo \
+  -H "Content-Type: application/json" \
+  -d '{
+    "groups": [{
+      "messages": [{"role": "user", "content": "Name a warm color."}],
+      "completions": [
+        {"text": "Orange", "reward": 1.0},
+        {"text": "Blue", "reward": 0.0}
+      ]
+    }],
+    "config": {"output_name": "grpo-demo", "learning_rate": 1e-5, "kl_coeff": 0.1}
   }' \
   | python3 -m json.tool</code></pre>
           </section>
