@@ -1,4 +1,16 @@
-// GDN recurrent prefill (head-last layout)
+// GDN recurrent single-token step.
+//
+// Inputs use the BackendRuntime::gdn_recurrent_step contract:
+//   q, k:  [B, H, dk]
+//   v:     [B, H, dv]
+//   beta:  [B, H]
+//   g:     [B, H]
+//   state: [B, H, dk, dv]
+// Output:
+//   out:   [B, H, dv]
+//
+// The Rust wrapper passes all storage buffers as f32 values converted from the
+// source Candle tensors. It converts the f32 result back to the requested dtype.
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
@@ -22,57 +34,36 @@ layout(binding = 6) writeonly buffer OutBuf { float data_out[]; };
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint total = batch * seq_len * heads * dv;
+    uint total = batch * heads * dv;
     if (idx >= total) return;
 
-    uint b = idx / (seq_len * heads * dv);
-    uint t = (idx / (heads * dv)) % seq_len;
+    uint b = idx / (heads * dv);
     uint h = (idx / dv) % heads;
     uint d = idx % dv;
 
-    uint bh = b * seq_len * heads + t * heads + h;
+    uint bh = b * heads + h;
     uint q_off = bh * dk;
     uint k_off = q_off;
     uint v_off = bh * dv;
     uint state_off = (b * heads + h) * dk * dv;
 
     float beta_val = data_beta[bh];
-    float g_val = exp(data_g[bh]);
+    float decay = exp(data_g[bh]);
 
-    // Load state shard
-    float s_shard[32];
-    uint lane = gl_LocalInvocationID.x % 32;
-    uint col = gl_LocalInvocationID.x / 32;
-    for (uint r = 0; r < 32; r++) {
-        s_shard[r] = data_state[state_off + col * dk + r * 32 + lane];
+    float v_pred = 0.0;
+    for (uint i = 0; i < dk; i++) {
+        float s = data_state[state_off + i * dv + d];
+        v_pred += data_k[k_off + i] * (decay * s);
     }
 
-    // Recurrent step
-    float k_reg[32];
-    float q_reg[32];
-    for (uint r = 0; r < 32; r++) {
-        uint i = r * 32 + lane;
-        k_reg[r] = data_k[k_off + i];
-        q_reg[r] = data_q[q_off + i];
+    float delta = beta_val * (data_v[v_off + d] - v_pred);
+
+    float out_acc = 0.0;
+    for (uint i = 0; i < dk; i++) {
+        float new_s = decay * data_state[state_off + i * dv + d] + data_k[k_off + i] * delta;
+        data_state[state_off + i * dv + d] = new_s;
+        out_acc += data_q[q_off + i] * new_s;
     }
 
-    float kv_shard = 0.0;
-    for (uint r = 0; r < 32; r++) {
-        kv_shard += g_val * s_shard[r] * k_reg[r];
-    }
-
-    float delta_col = (data_v[v_off + col] - kv_shard) * beta_val;
-    float attn_partial = 0.0;
-    for (uint r = 0; r < 32; r++) {
-        s_shard[r] = g_val * s_shard[r] + k_reg[r] * delta_col;
-        attn_partial += s_shard[r] * q_reg[r];
-    }
-
-    if (lane == 0) {
-        data_out[(b * seq_len + t) * heads * dv + h * dv + d] = attn_partial;
-    }
-
-    for (uint r = 0; r < 32; r++) {
-        data_state[state_off + col * dk + r * 32 + lane] = s_shard[r];
-    }
+    data_out[bh * dv + d] = out_acc;
 }

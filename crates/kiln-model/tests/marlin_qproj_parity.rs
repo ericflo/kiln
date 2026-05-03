@@ -97,8 +97,7 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
     // --- Build a synthetic activation of shape [1, m, k] (the forward path
     // consumes `[batch, seq, hidden]`).
     let acts_host = random_vec(m * k, 0xDEAD_BEEF_F00D_BABE ^ (m as u64), 0.25);
-    let acts_cpu = Tensor::from_vec(acts_host, (1, m, k), &Device::Cpu)
-        .expect("acts cpu tensor");
+    let acts_cpu = Tensor::from_vec(acts_host, (1, m, k), &Device::Cpu).expect("acts cpu tensor");
     let x = acts_cpu
         .to_dtype(DType::BF16)
         .expect("acts -> bf16")
@@ -157,19 +156,16 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
     };
 
     // --- Baseline (KILN_W4A16 unset): BF16 broadcast_matmul via q_proj_t.
-    let baseline = q_proj_forward(&x, &baseline_weights, None, 0.0)
-        .expect("baseline q_proj_forward");
+    let baseline =
+        q_proj_forward(&x, &baseline_weights, None, 0.0).expect("baseline q_proj_forward");
     // --- Marlin (KILN_W4A16 set): W4A16 kernel + (optional) LoRA delta.
-    let marlin = q_proj_forward(&x, &marlin_weights, None, 0.0)
-        .expect("marlin q_proj_forward");
+    let marlin = q_proj_forward(&x, &marlin_weights, None, 0.0).expect("marlin q_proj_forward");
 
     assert_eq!(baseline.dims(), marlin.dims(), "shape mismatch");
 
     let cos = cosine_similarity(&baseline, &marlin);
     let mad = max_abs_diff(&baseline, &marlin);
-    eprintln!(
-        "m={m} k={k} n={n} cosine_similarity={cos:.6} max_abs_diff={mad:.5}"
-    );
+    eprintln!("m={m} k={k} n={n} cosine_similarity={cos:.6} max_abs_diff={mad:.5}");
 
     // The Phase 6 wiring spec: cosine similarity >= 0.9995.
     assert!(

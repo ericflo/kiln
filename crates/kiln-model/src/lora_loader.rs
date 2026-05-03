@@ -71,8 +71,8 @@ impl LoraWeights {
         let config_path = adapter_dir.join("adapter_config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let config: AdapterConfig = serde_json::from_str(&config_str)
-            .context("failed to parse adapter_config.json")?;
+        let config: AdapterConfig =
+            serde_json::from_str(&config_str).context("failed to parse adapter_config.json")?;
 
         let rank = config.r;
         let alpha = config.lora_alpha;
@@ -104,9 +104,11 @@ impl LoraWeights {
                 let b_key = tensor_map.get(&(layer_idx, module.clone(), "B".to_string()));
 
                 if let (Some(a_name), Some(b_name)) = (a_key, b_key) {
-                    let a_view = tensors.tensor(a_name)
+                    let a_view = tensors
+                        .tensor(a_name)
                         .with_context(|| format!("failed to get tensor {a_name}"))?;
-                    let b_view = tensors.tensor(b_name)
+                    let b_view = tensors
+                        .tensor(b_name)
                         .with_context(|| format!("failed to get tensor {b_name}"))?;
 
                     let a = safetensor_to_candle(&a_view, device)
@@ -163,7 +165,9 @@ fn parse_peft_key(key: &str) -> Option<ParsedKey> {
     let layer_idx: usize = parts.get(layer_pos + 1)?.parse().ok()?;
 
     // Find "lora_A" or "lora_B"
-    let lora_pos = parts.iter().position(|p| *p == "lora_A" || *p == "lora_B")?;
+    let lora_pos = parts
+        .iter()
+        .position(|p| *p == "lora_A" || *p == "lora_B")?;
     let ab = if parts[lora_pos] == "lora_A" {
         "A".to_string()
     } else {
@@ -206,11 +210,7 @@ fn safetensor_to_candle(
 /// - `scale`: alpha / rank
 ///
 /// Returns: the LoRA delta tensor (same shape as base_output)
-pub fn compute_lora_delta(
-    x: &Tensor,
-    proj: &LoraProjectionWeights,
-    scale: f32,
-) -> Result<Tensor> {
+pub fn compute_lora_delta(x: &Tensor, proj: &LoraProjectionWeights, scale: f32) -> Result<Tensor> {
     // x: [..., in_features]
     // A: [rank, in_features] -> A^T: [in_features, rank]
     // B: [out_features, rank] -> B^T: [rank, out_features]
@@ -231,6 +231,20 @@ pub fn compute_lora_delta(
     Ok(delta)
 }
 
+fn cpu_needs_f32_matmul(lhs: &Tensor, rhs: &Tensor) -> bool {
+    matches!(lhs.device(), Device::Cpu) && (lhs.dtype() != DType::F32 || rhs.dtype() != DType::F32)
+}
+
+fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if cpu_needs_f32_matmul(lhs, rhs) {
+        let lhs_f32 = lhs.to_dtype(DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(DType::F32)?;
+        Ok(lhs_f32.broadcast_matmul(&rhs_f32)?)
+    } else {
+        Ok(lhs.broadcast_matmul(rhs)?)
+    }
+}
+
 /// Apply a LoRA-augmented linear projection.
 ///
 /// Computes: `(x @ W^T) + (x @ A^T @ B^T) * scale`
@@ -242,7 +256,8 @@ pub fn linear_with_lora(
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
 ) -> Result<Tensor> {
-    let base_output = x.broadcast_matmul(&base_weight.t()?)?;
+    let base_weight_t = base_weight.t()?;
+    let base_output = broadcast_matmul_cpu_compatible(x, &base_weight_t)?;
     if let Some(proj) = lora {
         let delta = compute_lora_delta(x, proj, scale)?;
         Ok((base_output + delta)?)
@@ -272,11 +287,17 @@ pub fn linear_with_lora_t(
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
 ) -> Result<Tensor> {
-    let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() {
+    let cpu_f32_matmul = cpu_needs_f32_matmul(x, base_weight_t);
+    let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() || cpu_f32_matmul {
         let in_dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
         let w_f32 = base_weight_t.to_dtype(DType::F32)?;
-        x_f32.broadcast_matmul(&w_f32)?.to_dtype(in_dtype)?
+        let out = x_f32.broadcast_matmul(&w_f32)?;
+        if cpu_f32_matmul {
+            out
+        } else {
+            out.to_dtype(in_dtype)?
+        }
     } else {
         x.broadcast_matmul(base_weight_t)?
     };
@@ -322,23 +343,14 @@ mod tests {
         let device = Device::Cpu;
 
         // x: [1, 2, 4] (batch=1, seq_len=2, in_features=4)
-        let x = Tensor::new(
-            &[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-            &device,
-        )?
-        .unsqueeze(0)?;
+        let x = Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?
+            .unsqueeze(0)?;
 
         // A: [2, 4] (rank=2, in_features=4) — identity-like
-        let a = Tensor::new(
-            &[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-            &device,
-        )?;
+        let a = Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?;
 
         // B: [3, 2] (out_features=3, rank=2)
-        let b = Tensor::new(
-            &[[1.0_f32, 0.0], [0.0, 1.0], [1.0, 1.0]],
-            &device,
-        )?;
+        let b = Tensor::new(&[[1.0_f32, 0.0], [0.0, 1.0], [1.0, 1.0]], &device)?;
 
         let proj = LoraProjectionWeights { a, b };
         let delta = compute_lora_delta(&x, &proj, 2.0)?;
@@ -367,14 +379,8 @@ mod tests {
         let w = Tensor::zeros((3, 4), DType::F32, &device)?;
 
         // A: [2, 4], B: [3, 2]
-        let a = Tensor::new(
-            &[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
-            &device,
-        )?;
-        let b = Tensor::new(
-            &[[1.0_f32, 0.0], [0.0, 1.0], [0.5, 0.5]],
-            &device,
-        )?;
+        let a = Tensor::new(&[[1.0_f32, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], &device)?;
+        let b = Tensor::new(&[[1.0_f32, 0.0], [0.0, 1.0], [0.5, 0.5]], &device)?;
 
         let proj = LoraProjectionWeights { a, b };
 

@@ -303,7 +303,9 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(
         stderr,
         "  {}",
-        style("│           🔥 K I L N 🔥             │").cyan().bold()
+        style("│           🔥 K I L N 🔥             │")
+            .cyan()
+            .bold()
     );
     let _ = writeln!(
         stderr,
@@ -325,12 +327,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     );
 
     if let Some(cp) = config_path {
-        let _ = writeln!(
-            stderr,
-            "  {} {}",
-            style("Config:").dim(),
-            style(cp).white()
-        );
+        let _ = writeln!(stderr, "  {} {}", style("Config:").dim(), style(cp).white());
     }
 
     let mode = if model_path.is_some() {
@@ -341,12 +338,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(stderr, "  {} {}", style("Mode:").dim(), mode);
 
     if let Some(mp) = model_path {
-        let _ = writeln!(
-            stderr,
-            "  {} {}",
-            style("Model:").dim(),
-            style(mp).white()
-        );
+        let _ = writeln!(stderr, "  {} {}", style("Model:").dim(), style(mp).white());
     }
 
     let cuda_status = if candle_core::utils::cuda_is_available() {
@@ -429,15 +421,30 @@ pub fn format_health_pretty(body: &serde_json::Value) -> String {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    let _ = writeln!(out, "  {} {}", style("Version:").dim(), style(version).white().bold());
+    let _ = writeln!(
+        out,
+        "  {} {}",
+        style("Version:").dim(),
+        style(version).white().bold()
+    );
     let _ = writeln!(
         out,
         "  {}  {}",
         style("Uptime:").dim(),
         style(format_uptime_secs(uptime_secs)).white().bold()
     );
-    let _ = writeln!(out, "  {}   {}", style("Model:").dim(), style(model).white().bold());
-    let _ = writeln!(out, "  {} {}", style("Backend:").dim(), style(backend).white().bold());
+    let _ = writeln!(
+        out,
+        "  {}   {}",
+        style("Model:").dim(),
+        style(model).white().bold()
+    );
+    let _ = writeln!(
+        out,
+        "  {} {}",
+        style("Backend:").dim(),
+        style(backend).white().bold()
+    );
     let _ = writeln!(
         out,
         "  {} {}",
@@ -454,9 +461,18 @@ pub fn format_health_pretty(body: &serde_json::Value) -> String {
     if let Some(sched) = body.get("scheduler").and_then(|v| v.as_object()) {
         let waiting = sched.get("waiting").and_then(|v| v.as_u64()).unwrap_or(0);
         let running = sched.get("running").and_then(|v| v.as_u64()).unwrap_or(0);
-        let blocks_used = sched.get("blocks_used").and_then(|v| v.as_u64()).unwrap_or(0);
-        let blocks_free = sched.get("blocks_free").and_then(|v| v.as_u64()).unwrap_or(0);
-        let blocks_total = sched.get("blocks_total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let blocks_used = sched
+            .get("blocks_used")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let blocks_free = sched
+            .get("blocks_free")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let blocks_total = sched
+            .get("blocks_total")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let _ = writeln!(
             out,
             "  {} waiting={} running={}  blocks={}/{} ({} free)",
@@ -470,9 +486,15 @@ pub fn format_health_pretty(body: &serde_json::Value) -> String {
     }
 
     if let Some(gpu) = body.get("gpu_memory").and_then(|v| v.as_object()) {
-        let total = gpu.get("total_vram_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let total = gpu
+            .get("total_vram_gb")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let model_gb = gpu.get("model_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let kv = gpu.get("kv_cache_gb").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let kv = gpu
+            .get("kv_cache_gb")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let train = gpu
             .get("training_budget_gb")
             .and_then(|v| v.as_f64())
@@ -550,10 +572,7 @@ pub async fn run_health(url: &str, json: bool) -> anyhow::Result<()> {
     let body: serde_json::Value = resp.json().await?;
 
     if status.is_success() {
-        println!(
-            "{} Server is healthy",
-            style("✓").green().bold()
-        );
+        println!("{} Server is healthy", style("✓").green().bold());
         if json {
             println!("{}", serde_json::to_string_pretty(&body)?);
         } else {
@@ -578,10 +597,7 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
 
     match KilnConfig::load(file) {
         Ok(config) => {
-            println!(
-                "{} Configuration is valid",
-                style("✓").green().bold()
-            );
+            println!("{} Configuration is valid", style("✓").green().bold());
             println!();
             println!(
                 "  {} {}:{}",
@@ -589,11 +605,7 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
                 config.server.host,
                 config.server.port
             );
-            println!(
-                "  {} {}",
-                style("Model ID:").dim(),
-                config.model.model_id
-            );
+            println!("  {} {}", style("Model ID:").dim(), config.model.model_id);
             println!(
                 "  {} {}",
                 style("Served as:").dim(),
@@ -602,16 +614,8 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             if let Some(ref p) = config.model.path {
                 println!("  {} {}", style("Model path:").dim(), p);
             }
-            println!(
-                "  {} {}",
-                style("Log level:").dim(),
-                config.logging.level
-            );
-            println!(
-                "  {} {}",
-                style("Log format:").dim(),
-                config.logging.format
-            );
+            println!("  {} {}", style("Log level:").dim(), config.logging.level);
+            println!("  {} {}", style("Log format:").dim(), config.logging.format);
             println!(
                 "  {} {}",
                 style("KV cache FP8:").dim(),
@@ -635,10 +639,7 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!(
-                "{} Configuration error: {e}",
-                style("✗").red().bold()
-            );
+            eprintln!("{} Configuration error: {e}", style("✗").red().bold());
             std::process::exit(1);
         }
     }
@@ -657,17 +658,10 @@ pub async fn run_adapters_list(url: &str) -> anyhow::Result<()> {
                 println!("{}", style("No adapters loaded").dim());
             }
             Some(list) => {
-                println!(
-                    "{} {} adapter(s):",
-                    style("✓").green().bold(),
-                    list.len()
-                );
+                println!("{} {} adapter(s):", style("✓").green().bold(), list.len());
                 for a in list {
                     let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                    let active = a
-                        .get("active")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
+                    let active = a.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
                     let status_str = if active {
                         style("active").green()
                     } else {
@@ -785,8 +779,8 @@ pub async fn run_train_sft(
     epochs: u32,
     lora_rank: Option<usize>,
 ) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
+    let content =
+        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
 
     let mut examples = Vec::new();
     for (i, line) in content.lines().enumerate() {
@@ -819,10 +813,7 @@ pub async fn run_train_sft(
     let resp_body: serde_json::Value = resp.json().await?;
 
     if status.is_success() {
-        println!(
-            "{} Training job submitted",
-            style("✓").green().bold()
-        );
+        println!("{} Training job submitted", style("✓").green().bold());
         let job_id = resp_body.get("job_id").and_then(|j| j.as_str());
         if let Some(id) = job_id {
             println!("  {} {}", style("Job ID:").dim(), id);
@@ -855,8 +846,8 @@ pub async fn run_train_grpo(
     adapter: &str,
     lora_rank: Option<usize>,
 ) -> anyhow::Result<()> {
-    let content = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
+    let content =
+        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
 
     let body: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Invalid JSON in {file}: {e}"))?;
@@ -880,10 +871,7 @@ pub async fn run_train_grpo(
     let resp_body: serde_json::Value = resp.json().await?;
 
     if status.is_success() {
-        println!(
-            "{} GRPO training job submitted",
-            style("✓").green().bold()
-        );
+        println!("{} GRPO training job submitted", style("✓").green().bold());
         let job_id = resp_body.get("job_id").and_then(|j| j.as_str());
         if let Some(id) = job_id {
             println!("  {} {}", style("Job ID:").dim(), id);
@@ -936,14 +924,12 @@ fn build_grpo_training_payload(
     adapter: &str,
     lora_rank: Option<usize>,
 ) -> anyhow::Result<serde_json::Value> {
-    let obj = body
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("GRPO request must be a JSON object with groups and config"))?;
+    let obj = body.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!("GRPO request must be a JSON object with groups and config")
+    })?;
     obj.remove("adapter_name");
 
-    let config = obj
-        .entry("config")
-        .or_insert_with(|| serde_json::json!({}));
+    let config = obj.entry("config").or_insert_with(|| serde_json::json!({}));
     let config_obj = config
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("GRPO request config must be a JSON object"))?;
@@ -1029,16 +1015,18 @@ async fn print_all_job_statuses(url: &str) -> anyhow::Result<()> {
     }
     // Sort terminal by elapsed_secs ascending (most recent submissions last).
     terminal.sort_by(|a, b| {
-        let ea = a.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let eb = b.get("elapsed_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let ea = a
+            .get("elapsed_secs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let eb = b
+            .get("elapsed_secs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         ea.partial_cmp(&eb).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    println!(
-        "{} {} job(s):",
-        style("✓").green().bold(),
-        jobs.len()
-    );
+    println!("{} {} job(s):", style("✓").green().bold(), jobs.len());
     for job in running.iter().chain(queued.iter()).chain(terminal.iter()) {
         print_job_line(job);
     }
@@ -1063,19 +1051,19 @@ fn print_job_summary(job: &serde_json::Value) {
         .get("adapter_name")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let progress_pct = (job
-        .get("progress")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-        * 100.0)
-        .round() as i64;
+    let progress_pct =
+        (job.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0) * 100.0).round() as i64;
     let elapsed = job
         .get("elapsed_secs")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0)
         .round() as i64;
 
-    println!("{} Job {}", style("✓").green().bold(), style(id).white().bold());
+    println!(
+        "{} Job {}",
+        style("✓").green().bold(),
+        style(id).white().bold()
+    );
     println!("  {} {}", style("State:").dim(), style_state(state));
     println!("  {} {}", style("Adapter:").dim(), style(adapter).white());
     println!("  {} {}%", style("Progress:").dim(), progress_pct);
@@ -1092,12 +1080,8 @@ fn print_job_line(job: &serde_json::Value) {
         .get("adapter_name")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let progress_pct = (job
-        .get("progress")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0)
-        * 100.0)
-        .round() as i64;
+    let progress_pct =
+        (job.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0) * 100.0).round() as i64;
     let elapsed = job
         .get("elapsed_secs")
         .and_then(|v| v.as_f64())
@@ -1372,7 +1356,10 @@ mod tests {
         assert!(out.contains("model_loaded"), "got: {out}");
         assert!(out.contains("scheduler_responsive"), "got: {out}");
         // ✓ glyph appears at least twice (once per check, plus the runtime header is rendered separately)
-        assert!(out.contains("✓"), "expected at least one ✓ glyph, got: {out}");
+        assert!(
+            out.contains("✓"),
+            "expected at least one ✓ glyph, got: {out}"
+        );
     }
 
     #[test]

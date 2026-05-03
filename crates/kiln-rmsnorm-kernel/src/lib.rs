@@ -68,8 +68,7 @@
 //! ([`fused_rmsnorm_backward`]); the QK-norm kernels remain forward-only.
 
 use candle_core::{
-    CpuStorage, CudaStorage, DType, Device, Layout, Result, Shape, Tensor,
-    backend::BackendStorage,
+    CpuStorage, CudaStorage, DType, Device, Layout, Result, Shape, Tensor, backend::BackendStorage,
     cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
@@ -280,9 +279,7 @@ pub fn rmsnorm_backward_fallback(
 
     let x_dims = x.dims().to_vec();
     let hidden = *x_dims.last().ok_or_else(|| {
-        candle_core::Error::Msg(
-            "rmsnorm_backward_fallback: x must have rank >= 1".to_string(),
-        )
+        candle_core::Error::Msg("rmsnorm_backward_fallback: x must have rank >= 1".to_string())
     })?;
 
     let x_f32 = x.to_dtype(DType::F32)?;
@@ -296,13 +293,9 @@ pub fn rmsnorm_backward_fallback(
 
     // c = (1/H) * rms_inv^2 * sum_j ((1+w_j) * x_j * g_j)   →  [..., 1]
     let inv_h = 1.0f64 / (hidden as f64);
-    let weighted = x_f32
-        .broadcast_mul(&w_plus_one)?
-        .mul(&g_f32)?;
+    let weighted = x_f32.broadcast_mul(&w_plus_one)?.mul(&g_f32)?;
     let sum_xgw = weighted.sum_keepdim(last_dim)?;
-    let c = (sum_xgw * inv_h)?
-        .mul(&rms_inv)?
-        .mul(&rms_inv)?;
+    let c = (sum_xgw * inv_h)?.mul(&rms_inv)?.mul(&rms_inv)?;
 
     // grad_x = rms_inv * ((1+w) * grad_out - x * c)
     let term_a = g_f32.broadcast_mul(&w_plus_one)?;
@@ -311,9 +304,7 @@ pub fn rmsnorm_backward_fallback(
     let grad_x = grad_x_f32.to_dtype(dtype)?;
 
     // grad_w[j] = sum over leading dims of (x[..., j] * rms_inv[..., 0] * grad_out[..., j])
-    let per_elem = x_f32
-        .broadcast_mul(&rms_inv)?
-        .mul(&g_f32)?;
+    let per_elem = x_f32.broadcast_mul(&rms_inv)?.mul(&g_f32)?;
     // Reduce all leading axes; `Tensor::sum(0)` removes axis 0 each call.
     let mut grad_w_f32 = per_elem;
     while grad_w_f32.rank() > 1 {
@@ -349,9 +340,7 @@ pub fn fused_rmsnorm_backward(
     if !matches!(x.device(), Device::Cuda(_)) {
         candle_core::bail!("fused_rmsnorm_backward requires CUDA tensors");
     }
-    if x.dtype() != DType::BF16
-        || weight.dtype() != DType::BF16
-        || grad_out.dtype() != DType::BF16
+    if x.dtype() != DType::BF16 || weight.dtype() != DType::BF16 || grad_out.dtype() != DType::BF16
     {
         candle_core::bail!(
             "fused_rmsnorm_backward requires bf16 (got x={:?}, w={:?}, g={:?})",
@@ -669,15 +658,14 @@ impl candle_core::CustomOp2 for RmsNormCustomOp {
         let shape = Shape::from(dims.as_slice());
 
         if rows == 0 {
-            return Ok((CudaStorage::wrap_cuda_slice(out_slice, device.clone()), shape));
+            return Ok((
+                CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+                shape,
+            ));
         }
 
-        let x_slice = s_x
-            .as_cuda_slice::<bf16>()?
-            .slice(l_x.start_offset()..);
-        let w_slice = s_w
-            .as_cuda_slice::<bf16>()?
-            .slice(l_w.start_offset()..);
+        let x_slice = s_x.as_cuda_slice::<bf16>()?.slice(l_x.start_offset()..);
+        let w_slice = s_w.as_cuda_slice::<bf16>()?.slice(l_w.start_offset()..);
 
         unsafe {
             let (x_ptr, _g1) = x_slice.device_ptr(&stream);
@@ -700,7 +688,10 @@ impl candle_core::CustomOp2 for RmsNormCustomOp {
             }
         }
 
-        Ok((CudaStorage::wrap_cuda_slice(out_slice, device.clone()), shape))
+        Ok((
+            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            shape,
+        ))
     }
 
     fn bwd(
@@ -1753,10 +1744,7 @@ mod tests {
         let w_var_a = Var::from_tensor(&w_t).unwrap();
         let y_a = fused_rmsnorm_with_autograd(x_var_a.as_tensor(), w_var_a.as_tensor(), eps as f32)
             .unwrap();
-        let loss_a = (y_a.broadcast_mul(&g_const))
-            .unwrap()
-            .sum_all()
-            .unwrap();
+        let loss_a = (y_a.broadcast_mul(&g_const)).unwrap().sum_all().unwrap();
         let grads_a = loss_a.backward().unwrap();
         let gx_a = grads_a.get(x_var_a.as_tensor()).cloned().unwrap();
         let gw_a = grads_a.get(w_var_a.as_tensor()).cloned().unwrap();

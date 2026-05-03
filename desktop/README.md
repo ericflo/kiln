@@ -4,8 +4,9 @@ System-tray app that wraps the `kiln` local LLM server in a GUI for people who d
 
 ## Platform scope
 
-Windows, Linux, and macOS (Apple Silicon). The Linux and Windows bundles drive
-CUDA-backed `kiln`; the macOS bundle drives the candle-metal backend on
+Windows, Linux, and macOS (Apple Silicon). The Windows bundle drives
+CUDA-backed `kiln`; Linux chooses CUDA on NVIDIA systems and Vulkan on
+AMD/Intel systems; the macOS bundle drives the candle-metal backend on
 Apple Silicon (M-series) Macs. Intel Macs are not supported; an x86_64 build
 would be strictly worse than running Linux in a VM.
 
@@ -18,7 +19,7 @@ would be strictly worse than running Linux in a VM.
 - `Kiln.Desktop_0.1.10_amd64.deb` (Debian/Ubuntu, 8.3 MB)
 - `Kiln.Desktop_0.1.10_amd64.AppImage` (portable Linux, 82 MB)
 
-The desktop installer bundles only the wrapper. On first launch the app offers to auto-download the prebuilt `kiln` server binary from the latest `kiln-v*` GitHub release — `aarch64-apple-darwin-metal` on macOS, `x86_64-unknown-linux-gnu-cuda124` on Linux x86_64, `x86_64-pc-windows-msvc-cuda124` on Windows x86_64 — and verifies it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be installed separately; see the root [QUICKSTART.md](../QUICKSTART.md) or use the HuggingFace downloader in Settings.
+The desktop installer bundles only the wrapper. On first launch the app offers to auto-download the prebuilt `kiln` server binary from the latest `kiln-v*` GitHub release — `aarch64-apple-darwin-metal` on macOS, `x86_64-unknown-linux-gnu-cuda124` or `x86_64-unknown-linux-gnu-vulkan` on Linux x86_64, `x86_64-pc-windows-msvc-cuda124` on Windows x86_64 — and verifies it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be installed separately; see the root [QUICKSTART.md](../QUICKSTART.md) or use the HuggingFace downloader in Settings.
 
 ## Model weights
 
@@ -59,7 +60,7 @@ See **[CHANGELOG.md](CHANGELOG.md)** for older versions and full release history
 
 ## Architecture
 
-The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight GPU server (CUDA on Linux/Windows, Metal on macOS), and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA/Metal into the Tauri build.
+The app is a [Tauri v2](https://v2.tauri.app/) project (Rust backend, HTML/JS frontend) that spawns and supervises the `kiln` binary as a **child process**. Kiln is NOT embedded as a library — it is a heavyweight GPU server (CUDA or Vulkan on Linux, CUDA on Windows, Metal on macOS), and keeping it as a separate binary preserves headless usage and avoids dragging candle/CUDA/Vulkan/Metal into the Tauri build.
 
 ```
 Kiln Desktop (Tauri)

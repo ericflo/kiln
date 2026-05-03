@@ -1,17 +1,36 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ash::vk;
+use std::collections::HashMap;
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PipelineKey {
+    shader_hash: u64,
+    total_bindings: u32,
+    push_constant_size: u32,
+}
+
+struct CachedComputePipeline {
+    set_layout: vk::DescriptorSetLayout,
+    layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+}
 
 /// Extract a null-terminated string from the Vulkan device_name field ([i8; 256] in ash 0.37).
 fn extract_device_name(name_array: &[i8; 256]) -> String {
     let end = name_array.iter().position(|&c| c == 0).unwrap_or(256);
     let bytes: &[u8] = unsafe { std::slice::from_raw_parts(name_array.as_ptr() as *const u8, end) };
-    std::str::from_utf8(bytes).map(String::from).unwrap_or_default()
+    std::str::from_utf8(bytes)
+        .map(String::from)
+        .unwrap_or_default()
 }
 
 /// Vulkan device abstraction for Kiln.
 pub struct VulkanDevice {
+    #[allow(dead_code)]
+    entry: ash::Entry,
     #[allow(dead_code)]
     instance: ash::Instance,
     #[allow(dead_code)]
@@ -26,6 +45,9 @@ pub struct VulkanDevice {
     /// Maximum shared memory per workgroup (from VkPhysicalDeviceLimits).
     /// Used by PR2 to decide whether solve_tri can run without exceeding device limits.
     max_compute_shared_memory_size: vk::DeviceSize,
+    pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
+    transient_command_pool: Mutex<vk::CommandPool>,
+    transient_descriptor_pool: Mutex<vk::DescriptorPool>,
 }
 
 impl std::fmt::Debug for VulkanDevice {
@@ -33,7 +55,18 @@ impl std::fmt::Debug for VulkanDevice {
         f.debug_struct("VulkanDevice")
             .field("device_name", &self.device_name)
             .field("vendor_id", &self.vendor_id)
-            .field("max_compute_shared_memory_size", &self.max_compute_shared_memory_size)
+            .field(
+                "max_compute_shared_memory_size",
+                &self.max_compute_shared_memory_size,
+            )
+            .field(
+                "pipeline_cache_len",
+                &self
+                    .pipeline_cache
+                    .lock()
+                    .map(|cache| cache.len())
+                    .unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -68,13 +101,16 @@ impl VulkanDevice {
         let available = unsafe { instance.enumerate_physical_devices() }
             .map(|d| !d.is_empty())
             .unwrap_or(false);
-        unsafe { instance.destroy_instance(None); }
+        unsafe {
+            instance.destroy_instance(None);
+        }
         available
     }
 
     /// Create a new Vulkan device, selecting the best available GPU.
     pub fn new() -> Result<Self> {
-        let entry = unsafe { ash::Entry::load() }.map_err(|e| anyhow::anyhow!("failed to load Vulkan entry: {}", e))?;
+        let entry = unsafe { ash::Entry::load() }
+            .map_err(|e| anyhow::anyhow!("failed to load Vulkan entry: {}", e))?;
 
         // Create instance
         let app_info = vk::ApplicationInfo::builder()
@@ -83,17 +119,18 @@ impl VulkanDevice {
             .api_version(vk::make_api_version(0, 1, 2, 0))
             .build();
 
-        let instance_info = vk::InstanceCreateInfo::builder()
-            .application_info(&app_info);
+        let instance_info = vk::InstanceCreateInfo::builder().application_info(&app_info);
 
         let instance = unsafe {
-            entry.create_instance(&instance_info, None)
+            entry
+                .create_instance(&instance_info, None)
                 .context("failed to create Vulkan instance")?
         };
 
         // Enumerate physical devices
         let physical_devices = unsafe {
-            instance.enumerate_physical_devices()
+            instance
+                .enumerate_physical_devices()
                 .context("failed to enumerate physical devices")?
         };
 
@@ -108,23 +145,28 @@ impl VulkanDevice {
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let vendor_id = properties.vendor_id;
         let device_name = extract_device_name(&properties.device_name);
-        let max_compute_shared_memory_size = properties.limits.max_compute_shared_memory_size as vk::DeviceSize;
+        let max_compute_shared_memory_size =
+            properties.limits.max_compute_shared_memory_size as vk::DeviceSize;
 
         // Find compute queue family
-        let queue_families = unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let compute_family = queue_families
             .iter()
             .position(|q| q.queue_flags.contains(vk::QueueFlags::COMPUTE))
-            .ok_or_else(|| anyhow!("no compute queue family found"))? as u32;
+            .ok_or_else(|| anyhow!("no compute queue family found"))?
+            as u32;
 
         // Get memory properties and find memory types
         let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-        let device_local_mem_type = Self::find_memory_type(&mem_props, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            .ok_or_else(|| anyhow!("no device-local memory type found"))?;
+        let device_local_mem_type =
+            Self::find_memory_type(&mem_props, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .ok_or_else(|| anyhow!("no device-local memory type found"))?;
         let host_visible_mem_type = Self::find_memory_type(
             &mem_props,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        ).ok_or_else(|| anyhow!("no host-visible memory type found"))?;
+        )
+        .ok_or_else(|| anyhow!("no host-visible memory type found"))?;
 
         // Create logical device
         let queue_info = vk::DeviceQueueCreateInfo::builder()
@@ -138,13 +180,42 @@ impl VulkanDevice {
             .build();
 
         let device = unsafe {
-            Arc::new(instance.create_device(physical_device, &device_info, None)
-                .context("failed to create Vulkan logical device")?)
+            Arc::new(
+                instance
+                    .create_device(physical_device, &device_info, None)
+                    .context("failed to create Vulkan logical device")?,
+            )
         };
 
         let queue = unsafe { device.get_device_queue(compute_family, 0) };
 
+        let transient_command_pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::builder()
+                    .queue_family_index(compute_family)
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create Vulkan transient command pool")?;
+
+        let transient_descriptor_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::builder()
+                    .max_sets(1)
+                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(64)
+                        .build()])
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create Vulkan transient descriptor pool")?;
+
         Ok(Self {
+            entry,
             instance,
             physical_device,
             device,
@@ -155,6 +226,9 @@ impl VulkanDevice {
             device_local_mem_type,
             host_visible_mem_type,
             max_compute_shared_memory_size,
+            pipeline_cache: Mutex::new(HashMap::new()),
+            transient_command_pool: Mutex::new(transient_command_pool),
+            transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
         })
     }
 
@@ -186,7 +260,10 @@ impl VulkanDevice {
 
         // Respect GGML_VK_VISIBLE_DEVICES (llama.cpp compatibility)
         if let Ok(visible) = std::env::var("GGML_VK_VISIBLE_DEVICES") {
-            let indices: Vec<usize> = visible.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            let indices: Vec<usize> = visible
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
             if let Some(&idx) = indices.first() {
                 if idx < physical_devices.len() {
                     tracing::info!(device_index = idx, "using GGML_VK_VISIBLE_DEVICES");
@@ -275,6 +352,161 @@ impl VulkanDevice {
     pub fn max_compute_shared_memory_size(&self) -> vk::DeviceSize {
         self.max_compute_shared_memory_size
     }
+
+    /// Return a cached compute pipeline compatible with the provided shader,
+    /// descriptor binding count, and push-constant size.
+    ///
+    /// Pipeline creation is expensive on RADV and can dominate decode latency if
+    /// done per token. Descriptors and command buffers still remain per-dispatch
+    /// because they depend on the live buffers, but shader modules, descriptor
+    /// set layouts, pipeline layouts, and compute pipelines are stable.
+    pub(crate) fn get_or_create_compute_pipeline(
+        &self,
+        spirv: &[u8],
+        total_bindings: usize,
+        push_constant_size: u32,
+    ) -> Result<(vk::DescriptorSetLayout, vk::PipelineLayout, vk::Pipeline)> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        spirv.hash(&mut hasher);
+        let key = PipelineKey {
+            shader_hash: hasher.finish(),
+            total_bindings: total_bindings as u32,
+            push_constant_size,
+        };
+
+        let mut cache = self
+            .pipeline_cache
+            .lock()
+            .map_err(|_| anyhow!("Vulkan pipeline cache mutex poisoned"))?;
+        if let Some(cached) = cache.get(&key) {
+            return Ok((cached.set_layout, cached.layout, cached.pipeline));
+        }
+
+        let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
+            .map(|i| {
+                vk::DescriptorSetLayoutBinding::builder()
+                    .binding(i)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .build()
+            })
+            .collect();
+        let set_layout = unsafe {
+            self.device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::builder()
+                    .bindings(&desc_bindings)
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create descriptor set layout")?;
+
+        let push_constant_range = vk::PushConstantRange::builder()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .size(push_constant_size)
+            .build();
+        let set_layouts = [set_layout];
+        let layout = unsafe {
+            self.device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::builder()
+                    .set_layouts(&set_layouts)
+                    .push_constant_ranges(&[push_constant_range])
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create pipeline layout")?;
+
+        let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
+        let shader_module = unsafe {
+            self.device.create_shader_module(
+                &vk::ShaderModuleCreateInfo::builder()
+                    .code(spirv_words)
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create shader module")?;
+
+        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(shader_module)
+            .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
+            .build();
+        let pipeline = unsafe {
+            self.device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &[vk::ComputePipelineCreateInfo::builder()
+                    .stage(stage_info)
+                    .layout(layout)
+                    .build()],
+                None,
+            )
+        }
+        .map_err(|(errs, _)| {
+            if !errs.is_empty() {
+                anyhow!("failed to create compute pipeline: {:?}", errs[0])
+            } else {
+                anyhow!("failed to create compute pipeline")
+            }
+        })?[0];
+
+        unsafe {
+            self.device.destroy_shader_module(shader_module, None);
+        }
+
+        cache.insert(
+            key,
+            CachedComputePipeline {
+                set_layout,
+                layout,
+                pipeline,
+            },
+        );
+        Ok((set_layout, layout, pipeline))
+    }
+
+    pub(crate) fn transient_command_pool(&self) -> Result<MutexGuard<'_, vk::CommandPool>> {
+        self.transient_command_pool
+            .lock()
+            .map_err(|_| anyhow!("Vulkan command pool mutex poisoned"))
+    }
+
+    pub(crate) fn transient_descriptor_pool(&self) -> Result<MutexGuard<'_, vk::DescriptorPool>> {
+        self.transient_descriptor_pool
+            .lock()
+            .map_err(|_| anyhow!("Vulkan descriptor pool mutex poisoned"))
+    }
+}
+
+impl Drop for VulkanDevice {
+    fn drop(&mut self) {
+        if let Ok(pool) = self.transient_descriptor_pool.lock() {
+            unsafe {
+                self.device.destroy_descriptor_pool(*pool, None);
+            }
+        }
+        if let Ok(pool) = self.transient_command_pool.lock() {
+            unsafe {
+                self.device.destroy_command_pool(*pool, None);
+            }
+        }
+        if let Ok(mut cache) = self.pipeline_cache.lock() {
+            for (_, cached) in cache.drain() {
+                unsafe {
+                    self.device.destroy_pipeline(cached.pipeline, None);
+                    self.device.destroy_pipeline_layout(cached.layout, None);
+                    self.device
+                        .destroy_descriptor_set_layout(cached.set_layout, None);
+                }
+            }
+        }
+        unsafe {
+            self.device.destroy_device(None);
+            self.instance.destroy_instance(None);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -290,7 +522,20 @@ mod tests {
         // On a machine with Vulkan, this test runs as a smoke test.
         if result.is_ok() {
             let dev = result.unwrap();
-            assert!(!dev.device_name().is_empty(), "device name should not be empty");
+            assert!(
+                !dev.device_name().is_empty(),
+                "device name should not be empty"
+            );
         }
+    }
+
+    #[test]
+    fn test_vulkan_device_prewarm_and_drop() {
+        let Ok(dev) = VulkanDevice::new() else {
+            return;
+        };
+
+        crate::kernels::prewarm_builtin_pipelines(&dev).unwrap();
+        drop(dev);
     }
 }

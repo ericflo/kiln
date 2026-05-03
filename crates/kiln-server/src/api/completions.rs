@@ -9,16 +9,17 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use std::path::{Path, PathBuf};
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::ChatMessage;
-use kiln_model::adapter_merge::{merge_concat, PeftLora};
+use kiln_model::adapter_merge::{PeftLora, merge_concat};
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{
     CancelHandle, GenerationOutput, ModelRunner, PagedPrefixReuse, SpeculativeConfig, StreamEvent,
 };
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
@@ -263,10 +264,7 @@ async fn emit_reasoning_chunk(
 /// `(reasoning_content, content)` around the same `</think>` boundary the
 /// streaming splitter handles. Returns `(None, raw)` when the prompt did not
 /// prefill `<think>\n` so non-reasoning models keep emitting plain content.
-fn split_reasoning_response(
-    model_output: &str,
-    prompt_text: &str,
-) -> (Option<String>, String) {
+fn split_reasoning_response(model_output: &str, prompt_text: &str) -> (Option<String>, String) {
     if !prompt_starts_in_reasoning(prompt_text) {
         return (None, model_output.to_string());
     }
@@ -285,6 +283,21 @@ fn split_reasoning_response(
     }
 }
 
+fn finish_reason_wire(reason: &kiln_model::FinishReason) -> &'static str {
+    match reason {
+        kiln_model::FinishReason::Eos => "stop",
+        kiln_model::FinishReason::MaxTokens => "length",
+        kiln_model::FinishReason::StopSequence(_) => "stop",
+    }
+}
+
+fn native_vulkan_batch_greedy_decode_enabled() -> bool {
+    !std::env::var("KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE")
+        .ok()
+        .as_deref()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
 /// Push a [`RequestRecord`] into the dashboard's recent-requests ring. Logs a
 /// warning if the lock is poisoned but otherwise never panics — request
 /// recording must not fail the user's request.
@@ -296,7 +309,7 @@ fn record_recent_request(state: &AppState, record: RequestRecord) {
 }
 
 /// OpenAI-compatible chat completion request.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionRequest {
     /// When omitted, the server falls back to its configured `served_model_id`.
     #[serde(default)]
@@ -344,13 +357,13 @@ pub struct ChatCompletionRequest {
 }
 
 /// A single source adapter for per-request composition.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AdapterRef {
     pub name: String,
     pub scale: f32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     #[serde(default, deserialize_with = "deserialize_optional_content")]
@@ -648,7 +661,11 @@ async fn chat_completions_inner(
     // Apply chat template and tokenize
     let prompt_text = state
         .tokenizer
-        .apply_chat_template_full(&chat_messages, req.tools.as_deref(), req.tool_choice.as_ref())
+        .apply_chat_template_full(
+            &chat_messages,
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+        )
         .map_err(ApiError::chat_template_failed)?;
     let prompt_tokens = state
         .tokenizer
@@ -1149,8 +1166,8 @@ async fn ensure_composed_adapter_swap(
     let composed_active = target.active_name.clone();
 
     tokio::task::spawn_blocking(move || {
-        let lora = LoraWeights::load(&cache_dir, num_layers, &device)
-            .map_err(|e| format!("{e}"))?;
+        let lora =
+            LoraWeights::load(&cache_dir, num_layers, &device).map_err(|e| format!("{e}"))?;
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
         *active_name.write().unwrap() = Some(composed_active);
@@ -1406,8 +1423,7 @@ async fn generate_real(
     // clients can render the two channels separately. For non-reasoning
     // templates this returns `(None, output.text)` and the response shape
     // is byte-identical to before.
-    let (reasoning_content, completion_text) =
-        split_reasoning_response(&output.text, prompt_text);
+    let (reasoning_content, completion_text) = split_reasoning_response(&output.text, prompt_text);
 
     // Recent-requests preview wants the user-visible answer, but the
     // reasoning often dominates the first few hundred chars. Show
@@ -1533,18 +1549,13 @@ async fn generate_real_streaming(
             let mut completion_buf = String::new();
             let mut completion_token_count: u32 = 0;
 
-            let record = |finish_reason: String,
-                          completion: &str,
-                          completion_tokens: u32| {
+            let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
                     id: id.clone(),
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
                     prompt_preview: prompt_preview.clone(),
-                    completion_preview: truncate_chars(
-                        completion,
-                        COMPLETION_PREVIEW_MAX_CHARS,
-                    ),
+                    completion_preview: truncate_chars(completion, COMPLETION_PREVIEW_MAX_CHARS),
                     prompt_tokens: prompt_token_count as u32,
                     completion_tokens,
                     duration_ms: request_start.elapsed().as_millis() as u64,
@@ -1765,11 +1776,7 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         _ => {
-                            record(
-                                "error".to_string(),
-                                &completion_buf,
-                                completion_token_count,
-                            );
+                            record("error".to_string(), &completion_buf, completion_token_count);
                             let _ = tx.send(Event::default().data("[DONE]")).await;
                             return;
                         }
@@ -1785,11 +1792,7 @@ async fn generate_real_streaming(
                     {
                         Ok(Ok(rx)) => rx,
                         _ => {
-                            record(
-                                "error".to_string(),
-                                &completion_buf,
-                                completion_token_count,
-                            );
+                            record("error".to_string(), &completion_buf, completion_token_count);
                             let _ = tx.send(Event::default().data("[DONE]")).await;
                             return;
                         }
@@ -1939,15 +1942,9 @@ async fn generate_real_streaming(
                 // Drain any pending partial-tag tail before the timeout
                 // chunk so the client doesn't lose those bytes.
                 let trailing = reasoning_splitter.flush();
-                let _ = emit_reasoning_chunk(
-                    &tx,
-                    &id,
-                    created,
-                    &model,
-                    trailing,
-                    &mut completion_buf,
-                )
-                .await;
+                let _ =
+                    emit_reasoning_chunk(&tx, &id, created, &model, trailing, &mut completion_buf)
+                        .await;
                 let error_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
@@ -2215,6 +2212,328 @@ pub struct BatchCompletionItem {
     pub usage: Usage,
 }
 
+async fn try_native_vulkan_batch_greedy_response(
+    state: &AppState,
+    req: &BatchCompletionRequest,
+    jobs: &[ChatCompletionRequest],
+    output_jobs: &[(usize, usize, usize)],
+    request_start: std::time::Instant,
+) -> Result<Option<Response>, ApiError> {
+    if !native_vulkan_batch_greedy_decode_enabled() {
+        return Ok(None);
+    }
+    if jobs.len() <= 1 {
+        return Ok(None);
+    }
+    if req.temperature.unwrap_or(1.0) != 0.0 {
+        return Ok(None);
+    }
+    if req.stop.as_ref().is_some_and(|stop| !stop.is_empty()) {
+        return Ok(None);
+    }
+
+    let ModelBackend::Real {
+        runner,
+        block_manager,
+        paged_cache,
+        prefix_cache,
+    } = state.backend.as_ref()
+    else {
+        return Ok(None);
+    };
+
+    {
+        let runner_guard = runner.read().unwrap();
+        if runner_guard.active_lora().is_some() || runner_guard.backend_name() != "vulkan" {
+            return Ok(None);
+        }
+    }
+
+    let mut prompt_texts = Vec::with_capacity(jobs.len());
+    let mut prompt_tokens = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let chat_messages: Vec<ChatMessage> = job.messages.iter().map(message_to_chat).collect();
+        let prompt_text = state
+            .tokenizer
+            .apply_chat_template_full(
+                &chat_messages,
+                job.tools.as_deref(),
+                job.tool_choice.as_ref(),
+            )
+            .map_err(ApiError::chat_template_failed)?;
+        let tokens = state
+            .tokenizer
+            .encode(&prompt_text)
+            .map_err(ApiError::tokenization_failed)?;
+        prompt_texts.push(prompt_text);
+        prompt_tokens.push(tokens);
+    }
+
+    let prefix_enabled = {
+        let cache = prefix_cache.lock().unwrap();
+        cache.is_enabled()
+    };
+    let adapter = state.active_adapter_name.read().unwrap().clone();
+    let mut cached_prefixes = (0..jobs.len())
+        .map(|_| None::<PagedPrefixReuse>)
+        .collect::<Vec<_>>();
+    let mut hit_entry_ids = Vec::new();
+    if prefix_enabled {
+        let mut cache = prefix_cache.lock().unwrap();
+        for (idx, tokens) in prompt_tokens.iter().enumerate() {
+            let hit = match cache.lookup(&adapter, tokens) {
+                Ok(hit) => hit,
+                Err(err) => {
+                    for &entry_id in &hit_entry_ids {
+                        cache.release_hit(entry_id);
+                    }
+                    return Err(ApiError::generation_failed(err));
+                }
+            };
+            if let Some(hit) = hit {
+                hit_entry_ids.push(hit.entry_id);
+                cached_prefixes[idx] = Some(PagedPrefixReuse {
+                    cached_tokens: hit.cached_tokens,
+                    block_ids: hit.block_ids,
+                    linear_state: hit.linear_state,
+                });
+            }
+        }
+    }
+
+    let params = SamplingParams {
+        temperature: 0.0,
+        top_p: req.top_p.unwrap_or(1.0),
+        top_k: req.top_k.unwrap_or(0),
+        max_tokens: req.max_tokens.unwrap_or(2048),
+        stop: Vec::new(),
+        seed: req.seed,
+        ..Default::default()
+    };
+
+    tracing::debug!(
+        batch = jobs.len(),
+        prefix_hits = hit_entry_ids.len(),
+        "using native Vulkan greedy batch decode path"
+    );
+
+    let runner = runner.clone();
+    let bm = block_manager.clone();
+    let pc = paged_cache.clone();
+    let gpu_lock = state.gpu_lock.clone();
+    let memory_budget = state.memory_budget.clone();
+    let timeout = state.request_timeout;
+    let batch_prompt_tokens = prompt_tokens.clone();
+    let batch_cached_prefixes = prefix_enabled.then_some(cached_prefixes);
+    let cancel = CancelHandle::with_prefill_progress_gauge(
+        state.metrics.request_prefill_tokens_completed.clone(),
+    );
+    let cancel_inner = cancel.clone();
+    let generation = tokio::task::spawn_blocking(move || {
+        let _gpu_guard = gpu_lock.read().unwrap();
+        let runner_guard = runner.read().unwrap();
+        runner_guard.generate_paged_shared_tokens_batch_greedy(
+            &batch_prompt_tokens,
+            &params,
+            bm.as_ref(),
+            pc.as_ref(),
+            batch_cached_prefixes,
+            Some(&cancel_inner),
+        )
+    });
+
+    tokio::pin!(generation);
+    let mut batch_output = match tokio::time::timeout(timeout, &mut generation).await {
+        Ok(join_result) => match join_result {
+            Ok(Ok(output)) => {
+                observe_post_prefill_vram(&memory_budget);
+                cancel.clear_prefill_progress();
+                output
+            }
+            Ok(Err(err)) => {
+                observe_post_prefill_vram(&memory_budget);
+                cancel.clear_prefill_progress();
+                if !hit_entry_ids.is_empty() {
+                    let mut cache = prefix_cache.lock().unwrap();
+                    for &entry_id in &hit_entry_ids {
+                        cache.release_hit(entry_id);
+                    }
+                }
+                tracing::error!(error = %format!("{err:#}"), "native batch generation failed");
+                return Err(ApiError::generation_failed(err));
+            }
+            Err(err) => {
+                observe_post_prefill_vram(&memory_budget);
+                cancel.clear_prefill_progress();
+                if !hit_entry_ids.is_empty() {
+                    let mut cache = prefix_cache.lock().unwrap();
+                    for &entry_id in &hit_entry_ids {
+                        cache.release_hit(entry_id);
+                    }
+                }
+                return Err(ApiError::internal(format!("join error: {err}")));
+            }
+        },
+        Err(_) => {
+            cancel.cancel();
+            let timed_out_result = generation.await;
+            cancel.clear_prefill_progress();
+            if let Ok(Ok(mut output)) = timed_out_result {
+                let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+                if !allocated_blocks.is_empty() {
+                    let mut bm_guard = block_manager.lock().unwrap();
+                    bm_guard.free_all(&allocated_blocks);
+                }
+            }
+            if !hit_entry_ids.is_empty() {
+                let mut cache = prefix_cache.lock().unwrap();
+                for &entry_id in &hit_entry_ids {
+                    cache.release_hit(entry_id);
+                }
+            }
+            return Err(ApiError::request_timeout(timeout.as_secs()));
+        }
+    };
+
+    if batch_output.outputs.len() != jobs.len() || batch_output.registrations.len() != jobs.len() {
+        if !batch_output.allocated_blocks.is_empty() {
+            let mut bm_guard = block_manager.lock().unwrap();
+            bm_guard.free_all(&batch_output.allocated_blocks);
+        }
+        if !hit_entry_ids.is_empty() {
+            let mut cache = prefix_cache.lock().unwrap();
+            for &entry_id in &hit_entry_ids {
+                cache.release_hit(entry_id);
+            }
+        }
+        return Err(ApiError::internal(format!(
+            "native batch returned {} outputs and {} registrations for {} jobs",
+            batch_output.outputs.len(),
+            batch_output.registrations.len(),
+            jobs.len()
+        )));
+    }
+
+    let mut blocks_to_free = std::mem::take(&mut batch_output.allocated_blocks);
+    if prefix_enabled {
+        let mut retained_blocks = Vec::new();
+        let mut evicted_blocks = Vec::new();
+        {
+            let mut cache = prefix_cache.lock().unwrap();
+            for &entry_id in &hit_entry_ids {
+                cache.release_hit(entry_id);
+            }
+            for registration in batch_output.registrations.into_iter().flatten() {
+                let outcome = cache.register(adapter.clone(), registration);
+                retained_blocks.extend(outcome.retained_blocks);
+                evicted_blocks.extend(outcome.evicted_blocks);
+            }
+        }
+        blocks_to_free.retain(|block_id| !retained_blocks.contains(block_id));
+        blocks_to_free.extend(evicted_blocks);
+    }
+    if !blocks_to_free.is_empty() {
+        let mut bm_guard = block_manager.lock().unwrap();
+        bm_guard.free_all(&blocks_to_free);
+    }
+
+    struct JobResult {
+        text: String,
+        finish_reason: String,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    }
+
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
+    let mut job_results: Vec<Option<JobResult>> = (0..jobs.len()).map(|_| None).collect();
+    let mut unique_completion_tokens = 0usize;
+
+    for (job_idx, output) in batch_output.outputs.iter().enumerate() {
+        let job = &jobs[job_idx];
+        let prompt_text = &prompt_texts[job_idx];
+        let prompt_token_count = prompt_tokens[job_idx].len();
+        let finish_reason = finish_reason_wire(&output.finish_reason).to_string();
+        let completion_tokens = output.token_ids.len();
+        unique_completion_tokens = unique_completion_tokens.saturating_add(completion_tokens);
+        let (reasoning_content, completion_text) =
+            split_reasoning_response(&output.text, prompt_text);
+        let preview_source = if completion_text.is_empty() {
+            reasoning_content.as_deref().unwrap_or("")
+        } else {
+            completion_text.as_str()
+        };
+        record_recent_request(
+            state,
+            RequestRecord {
+                id: format!("chatcmpl-{}", Uuid::new_v4()),
+                timestamp_unix_ms: now_unix_ms(),
+                model: model.clone(),
+                prompt_preview: truncate_chars(
+                    &last_user_message_text(job),
+                    PROMPT_PREVIEW_MAX_CHARS,
+                ),
+                completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
+                prompt_tokens: prompt_token_count as u32,
+                completion_tokens: completion_tokens as u32,
+                duration_ms: request_start.elapsed().as_millis() as u64,
+                streamed: false,
+                finish_reason: finish_reason.clone(),
+            },
+        );
+        job_results[job_idx] = Some(JobResult {
+            text: completion_text,
+            finish_reason,
+            prompt_tokens: prompt_token_count,
+            completion_tokens,
+        });
+    }
+
+    state.metrics.add_tokens(unique_completion_tokens as u64);
+
+    let mut completions = Vec::with_capacity(output_jobs.len());
+    let mut total_prompt_tokens = 0usize;
+    let mut total_completion_tokens = 0usize;
+
+    for &(prompt_index, completion_index, job_idx) in output_jobs {
+        let job = job_results
+            .get(job_idx)
+            .and_then(|job| job.as_ref())
+            .ok_or_else(|| ApiError::internal("batch job index out of range"))?;
+        total_prompt_tokens = total_prompt_tokens.saturating_add(job.prompt_tokens);
+        total_completion_tokens = total_completion_tokens.saturating_add(job.completion_tokens);
+        completions.push(BatchCompletionItem {
+            prompt_index,
+            completion_index,
+            text: job.text.clone(),
+            finish_reason: job.finish_reason.clone(),
+            usage: Usage {
+                prompt_tokens: job.prompt_tokens,
+                completion_tokens: job.completion_tokens,
+                total_tokens: job.prompt_tokens + job.completion_tokens,
+            },
+        });
+    }
+
+    Ok(Some(
+        Json(BatchCompletionResponse {
+            id: format!("batchcmpl-{}", Uuid::new_v4()),
+            object: "batch.completion",
+            created: now_epoch(),
+            model,
+            completions,
+            usage: Usage {
+                prompt_tokens: total_prompt_tokens,
+                completion_tokens: total_completion_tokens,
+                total_tokens: total_prompt_tokens.saturating_add(total_completion_tokens),
+            },
+        })
+        .into_response(),
+    ))
+}
+
 async fn batch_completions(
     State(state): State<AppState>,
     Json(req): Json<BatchCompletionRequest>,
@@ -2246,6 +2565,7 @@ async fn batch_completions_inner(
     state: &AppState,
     req: BatchCompletionRequest,
 ) -> Result<Response, ApiError> {
+    let request_start = std::time::Instant::now();
     let n_per = req.n.unwrap_or(1);
 
     if req.prompts.is_empty() {
@@ -2254,9 +2574,7 @@ async fn batch_completions_inner(
         ));
     }
     if n_per == 0 {
-        return Err(ApiError::batch_invalid_request(
-            "'n' must be >= 1 when set",
-        ));
+        return Err(ApiError::batch_invalid_request("'n' must be >= 1 when set"));
     }
     let total_outputs = req.prompts.len().saturating_mul(n_per);
     if total_outputs > BATCH_MAX_TOTAL_OUTPUTS {
@@ -2319,14 +2637,32 @@ async fn batch_completions_inner(
         }
     }
 
-    // Spawn one task per (prompt, completion) pair. Each task synthesizes a
-    // ChatCompletionRequest with this prompt's messages and a derived seed,
-    // then dispatches through the existing generate_real / generate_mock
-    // path. The iteration-level scheduler is what actually batches concurrent
-    // requests; we do not introduce a new code path inside the engine.
-    let mut handles = Vec::with_capacity(total_outputs);
+    // Synthesize the minimal set of actual generation jobs. Non-greedy
+    // sampling keeps one job per requested output because the derived seed is
+    // part of the output contract. Greedy decoding is deterministic, so
+    // duplicate prompts and n>1 completions can share one generation result.
+    let dedupe_deterministic_outputs = req.temperature.unwrap_or(1.0) == 0.0;
+    let mut jobs = Vec::with_capacity(total_outputs);
+    let mut output_jobs = Vec::with_capacity(total_outputs);
+    let mut deterministic_job_by_prompt: HashMap<String, usize> = HashMap::new();
+
     for (prompt_idx, prompt_messages) in req.prompts.iter().enumerate() {
         for completion_idx in 0..n_per {
+            let job_idx = if dedupe_deterministic_outputs {
+                let key = serde_json::to_string(prompt_messages).map_err(|e| {
+                    ApiError::internal(format!("failed to serialize batch prompt key: {e}"))
+                })?;
+                if let Some(&job_idx) = deterministic_job_by_prompt.get(&key) {
+                    output_jobs.push((prompt_idx, completion_idx, job_idx));
+                    continue;
+                }
+                let job_idx = jobs.len();
+                deterministic_job_by_prompt.insert(key, job_idx);
+                job_idx
+            } else {
+                jobs.len()
+            };
+
             let derived_seed = req
                 .seed
                 .map(|s| s.wrapping_add((prompt_idx * n_per + completion_idx) as u64));
@@ -2358,33 +2694,49 @@ async fn batch_completions_inner(
                 tools: None,
                 tool_choice: None,
             };
-            let state_clone = state.clone();
-            handles.push(tokio::spawn(async move {
-                generate_one_response(&state_clone, synth_req).await
-            }));
+            jobs.push(synth_req);
+            output_jobs.push((prompt_idx, completion_idx, job_idx));
         }
+    }
+
+    if let Some(resp) =
+        try_native_vulkan_batch_greedy_response(state, &req, &jobs, &output_jobs, request_start)
+            .await?
+    {
+        return Ok(resp);
+    }
+
+    let mut handles = Vec::with_capacity(jobs.len());
+    for synth_req in jobs {
+        let state_clone = state.clone();
+        handles.push(tokio::spawn(async move {
+            generate_one_response(&state_clone, synth_req).await
+        }));
+    }
+
+    let mut job_responses = Vec::with_capacity(handles.len());
+    for handle in handles {
+        let resp = match handle.await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(ApiError::internal(format!("batch task join error: {e}")));
+            }
+        };
+        job_responses.push(resp);
     }
 
     let mut completions = Vec::with_capacity(total_outputs);
     let mut total_prompt_tokens = 0usize;
     let mut total_completion_tokens = 0usize;
 
-    for (idx, handle) in handles.into_iter().enumerate() {
-        let prompt_index = idx / n_per;
-        let completion_index = idx % n_per;
-        let resp = match handle.await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(e),
-            Err(e) => {
-                return Err(ApiError::internal(format!(
-                    "batch task join error: {e}"
-                )));
-            }
-        };
+    for (prompt_index, completion_index, job_idx) in output_jobs {
+        let resp = job_responses
+            .get(job_idx)
+            .ok_or_else(|| ApiError::internal("batch job index out of range"))?;
         let choice = resp
             .choices
-            .into_iter()
-            .next()
+            .first()
             .ok_or_else(|| ApiError::internal("generate returned a response with no choices"))?;
         total_prompt_tokens = total_prompt_tokens.saturating_add(resp.usage.prompt_tokens);
         total_completion_tokens =
@@ -2392,9 +2744,13 @@ async fn batch_completions_inner(
         completions.push(BatchCompletionItem {
             prompt_index,
             completion_index,
-            text: choice.message.content,
-            finish_reason: choice.finish_reason,
-            usage: resp.usage,
+            text: choice.message.content.clone(),
+            finish_reason: choice.finish_reason.clone(),
+            usage: Usage {
+                prompt_tokens: resp.usage.prompt_tokens,
+                completion_tokens: resp.usage.completion_tokens,
+                total_tokens: resp.usage.total_tokens,
+            },
         });
     }
 
@@ -2435,7 +2791,11 @@ async fn generate_one_response(
 
     let prompt_text = state
         .tokenizer
-        .apply_chat_template_full(&chat_messages, req.tools.as_deref(), req.tool_choice.as_ref())
+        .apply_chat_template_full(
+            &chat_messages,
+            req.tools.as_deref(),
+            req.tool_choice.as_ref(),
+        )
         .map_err(ApiError::chat_template_failed)?;
     let prompt_tokens = state
         .tokenizer
@@ -2584,7 +2944,10 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["function"]["name"], "Bash");
         assert_eq!(tools[1]["function"]["name"], "Read");
-        assert_eq!(req.tool_choice.as_ref().and_then(|v| v.as_str()), Some("auto"));
+        assert_eq!(
+            req.tool_choice.as_ref().and_then(|v| v.as_str()),
+            Some("auto")
+        );
     }
 
     /// CI hardening for kiln#659: pins the FULL chain
@@ -2653,7 +3016,11 @@ mod tests {
         // Step 1: deserialize wire payload (pins serde + content-shape parsing
         // including `content: null` on the assistant tool-calls turn).
         let req = parse_request(json);
-        assert_eq!(req.messages.len(), 5, "fixture must exercise multi-turn shape");
+        assert_eq!(
+            req.messages.len(),
+            5,
+            "fixture must exercise multi-turn shape"
+        );
         assert_eq!(
             req.tools.as_ref().map(|t| t.len()),
             Some(2),
@@ -2663,9 +3030,8 @@ mod tests {
         // Step 2: load the production bundled Qwen3.5-4B chat template — the
         // canonical template every kiln user actually hits at runtime. Path is
         // relative to this source file (crates/kiln-server/src/api/...).
-        let template = include_str!(
-            "../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja"
-        );
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
         let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
 
         // Step 3: wire EXACTLY as `chat_completions_inner` does (see the
@@ -2673,8 +3039,7 @@ mod tests {
         // `apply_chat_template_full(..., req.tools.as_deref(), req.tool_choice.as_ref())`
         // pair near the top of that function). Drift between this test and the
         // production wiring would defeat the point of the smoke test.
-        let chat_messages: Vec<ChatMessage> =
-            req.messages.iter().map(message_to_chat).collect();
+        let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
         let prompt = tok
             .apply_chat_template_full(
                 &chat_messages,
@@ -2758,7 +3123,10 @@ mod tests {
         // Assistant message with content:null lands as empty string + tool_calls populated.
         assert_eq!(req.messages[0].role, "assistant");
         assert_eq!(req.messages[0].content, "");
-        let calls = req.messages[0].tool_calls.as_ref().expect("tool_calls present");
+        let calls = req.messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls present");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["id"], "call_42");
         assert_eq!(calls[0]["function"]["name"], "Bash");
@@ -2772,8 +3140,14 @@ mod tests {
     #[test]
     fn tools_absent_request_keeps_options_none() {
         let req = parse_request(r#"{"messages":[{"role":"user","content":"hi"}]}"#);
-        assert!(req.tools.is_none(), "tools should default to None when absent");
-        assert!(req.tool_choice.is_none(), "tool_choice should default to None");
+        assert!(
+            req.tools.is_none(),
+            "tools should default to None when absent"
+        );
+        assert!(
+            req.tool_choice.is_none(),
+            "tool_choice should default to None"
+        );
         assert!(req.messages[0].tool_calls.is_none());
         assert!(req.messages[0].name.is_none());
         assert!(req.messages[0].tool_call_id.is_none());
@@ -3029,7 +3403,10 @@ mod tests {
     }
 
     /// Build a minimal request body, invoke the route, and return (status, body).
-    async fn batch_post(state: AppState, body_json: &str) -> (axum::http::StatusCode, serde_json::Value) {
+    async fn batch_post(
+        state: AppState,
+        body_json: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
         use tower::ServiceExt;
@@ -3055,9 +3432,7 @@ mod tests {
 
     #[test]
     fn batch_request_parses_minimal_shape() {
-        let req = parse_batch_request(
-            r#"{"prompts":[[{"role":"user","content":"hi"}]]}"#,
-        );
+        let req = parse_batch_request(r#"{"prompts":[[{"role":"user","content":"hi"}]]}"#);
         assert_eq!(req.prompts.len(), 1);
         assert_eq!(req.prompts[0][0].role, "user");
         assert_eq!(req.prompts[0][0].content, "hi");
@@ -3098,8 +3473,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_rejects_empty_prompts() {
-        let (status, body) =
-            batch_post(make_batch_test_state(), r#"{"prompts":[]}"#).await;
+        let (status, body) = batch_post(make_batch_test_state(), r#"{"prompts":[]}"#).await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "batch_invalid_request");
     }

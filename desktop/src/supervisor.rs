@@ -418,7 +418,10 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
-            matches!(sup.state().await, ServerState::Starting | ServerState::Running),
+            matches!(
+                sup.state().await,
+                ServerState::Starting | ServerState::Running
+            ),
             "expected Starting or Running"
         );
 

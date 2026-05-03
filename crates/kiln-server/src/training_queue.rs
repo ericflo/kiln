@@ -5,12 +5,12 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kiln_model::lora_loader::LoraWeights;
-use kiln_train::{GrpoRequest, SftRequest, TrainingState};
 use kiln_train::trainer;
+use kiln_train::{GrpoRequest, SftRequest, TrainingState};
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -234,7 +234,11 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
     });
     let removed = before - jobs.len();
     if removed > 0 {
-        tracing::debug!(removed, remaining = jobs.len(), "GC'd terminal training jobs past TTL");
+        tracing::debug!(
+            removed,
+            remaining = jobs.len(),
+            "GC'd terminal training jobs past TTL"
+        );
     }
     removed
 }
@@ -359,7 +363,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     job.finished_at = Some(std::time::Instant::now());
                 }
             }
-            state.metrics.inc_training(metric_type, TrainingMetricStatus::Completed);
+            state
+                .metrics
+                .inc_training(metric_type, TrainingMetricStatus::Completed);
 
             if let Some(ref url) = state.training_webhook_url {
                 let event = TrainingCompletionEvent {
@@ -398,7 +404,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     job.finished_at = Some(std::time::Instant::now());
                 }
             }
-            state.metrics.inc_training(metric_type, TrainingMetricStatus::Failed);
+            state
+                .metrics
+                .inc_training(metric_type, TrainingMetricStatus::Failed);
 
             if let Some(ref url) = state.training_webhook_url {
                 let event = TrainingCompletionEvent {
@@ -558,9 +566,9 @@ mod tests {
     /// documented payload shape.
     #[tokio::test]
     async fn test_fire_completion_webhook_posts_expected_payload() {
+        use axum::Json;
         use axum::extract::State;
         use axum::routing::post;
-        use axum::Json;
         use std::sync::Arc as StdArc;
         use std::sync::Mutex as StdMutex;
 
@@ -623,9 +631,9 @@ mod tests {
     /// Failure event test: error string is propagated, adapter_path is null.
     #[tokio::test]
     async fn test_fire_completion_webhook_failure_event_shape() {
+        use axum::Json;
         use axum::extract::State;
         use axum::routing::post;
-        use axum::Json;
         use std::sync::Arc as StdArc;
         use std::sync::Mutex as StdMutex;
 
@@ -706,11 +714,11 @@ mod tests {
     /// We verify the redirect-target endpoint is never POSTed to.
     #[tokio::test]
     async fn test_fire_completion_webhook_does_not_follow_redirects() {
+        use axum::Json;
         use axum::extract::State;
-        use axum::http::{header, StatusCode};
+        use axum::http::{StatusCode, header};
         use axum::response::IntoResponse;
         use axum::routing::post;
-        use axum::Json;
         use std::sync::Arc as StdArc;
         use std::sync::Mutex as StdMutex;
 
@@ -719,11 +727,7 @@ mod tests {
             StdArc::new(StdMutex::new(Vec::new()));
 
         async fn redirect_handler() -> impl IntoResponse {
-            (
-                StatusCode::FOUND,
-                [(header::LOCATION, "/hook-final")],
-                "",
-            )
+            (StatusCode::FOUND, [(header::LOCATION, "/hook-final")], "")
         }
 
         async fn final_handler(

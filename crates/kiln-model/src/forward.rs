@@ -6,7 +6,9 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
+use std::cell::{Cell, RefCell};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
@@ -43,6 +45,406 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
 fn fused_paged_decode_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
+}
+
+#[derive(Clone)]
+struct DecodeProfileEntry {
+    layer: Option<usize>,
+    name: &'static str,
+    elapsed: Duration,
+}
+
+thread_local! {
+    static DECODE_PROFILE_ROWS: RefCell<Option<Vec<DecodeProfileEntry>>> = const { RefCell::new(None) };
+    static DECODE_PROFILE_LAYER: Cell<Option<usize>> = const { Cell::new(None) };
+    static VULKAN_SKIP_GDN_STATE_READBACK: Cell<bool> = const { Cell::new(false) };
+}
+
+struct VulkanGdnStateReadbackGuard {
+    previous: bool,
+}
+
+impl Drop for VulkanGdnStateReadbackGuard {
+    fn drop(&mut self) {
+        VULKAN_SKIP_GDN_STATE_READBACK.with(|skip| skip.set(self.previous));
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn vulkan_skip_gdn_state_readback_active() -> bool {
+    VULKAN_SKIP_GDN_STATE_READBACK.with(|skip| skip.get())
+}
+
+pub(crate) fn with_vulkan_gdn_state_readback_skip<T, F>(skip: bool, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    if !skip {
+        return f();
+    }
+
+    let previous = VULKAN_SKIP_GDN_STATE_READBACK.with(|skip| {
+        let previous = skip.get();
+        skip.set(true);
+        previous
+    });
+    let _guard = VulkanGdnStateReadbackGuard { previous };
+    f()
+}
+
+fn decode_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_PROFILE_DECODE").is_ok()
+            || std::env::var("KILN_VULKAN_DECODE_PROFILE").is_ok()
+    })
+}
+
+struct DecodeProfileGuard {
+    active: bool,
+    previous_rows: Option<Vec<DecodeProfileEntry>>,
+    previous_layer: Option<usize>,
+}
+
+impl DecodeProfileGuard {
+    fn new(seq_len: usize, start_pos: usize) -> Self {
+        if !decode_profile_enabled() || seq_len != 1 || start_pos == 0 {
+            return Self {
+                active: false,
+                previous_rows: None,
+                previous_layer: None,
+            };
+        }
+
+        let previous_rows = DECODE_PROFILE_ROWS.with(|rows| rows.replace(Some(Vec::new())));
+        let previous_layer = DECODE_PROFILE_LAYER.with(|layer| layer.replace(None));
+        Self {
+            active: true,
+            previous_rows,
+            previous_layer,
+        }
+    }
+
+    fn finish(mut self, start_pos: usize, token_id: u32, mode: LmHeadMode) {
+        if !self.active {
+            return;
+        }
+
+        let rows = DECODE_PROFILE_ROWS
+            .with(|profile_rows| profile_rows.replace(self.previous_rows.take()))
+            .unwrap_or_default();
+        DECODE_PROFILE_LAYER.with(|layer| layer.set(self.previous_layer));
+        self.active = false;
+        emit_decode_profile(start_pos, token_id, mode, rows);
+    }
+}
+
+impl Drop for DecodeProfileGuard {
+    fn drop(&mut self) {
+        if self.active {
+            DECODE_PROFILE_ROWS.with(|rows| {
+                let _ = rows.replace(self.previous_rows.take());
+            });
+            DECODE_PROFILE_LAYER.with(|layer| layer.set(self.previous_layer));
+        }
+    }
+}
+
+struct DecodeSubprofileCapture {
+    active: bool,
+    previous_rows: Option<Vec<DecodeProfileEntry>>,
+    previous_layer: Option<usize>,
+}
+
+impl DecodeSubprofileCapture {
+    fn new(active: bool) -> Self {
+        if !active {
+            return Self {
+                active: false,
+                previous_rows: None,
+                previous_layer: None,
+            };
+        }
+
+        let previous_rows = DECODE_PROFILE_ROWS.with(|rows| rows.replace(Some(Vec::new())));
+        let previous_layer = DECODE_PROFILE_LAYER.with(|layer| layer.replace(None));
+        Self {
+            active: true,
+            previous_rows,
+            previous_layer,
+        }
+    }
+
+    fn finish(mut self) -> Vec<DecodeProfileEntry> {
+        if !self.active {
+            return Vec::new();
+        }
+
+        let rows = DECODE_PROFILE_ROWS
+            .with(|profile_rows| profile_rows.replace(self.previous_rows.take()))
+            .unwrap_or_default();
+        DECODE_PROFILE_LAYER.with(|layer| layer.set(self.previous_layer));
+        self.active = false;
+        rows
+    }
+}
+
+impl Drop for DecodeSubprofileCapture {
+    fn drop(&mut self) {
+        if self.active {
+            DECODE_PROFILE_ROWS.with(|rows| {
+                let _ = rows.replace(self.previous_rows.take());
+            });
+            DECODE_PROFILE_LAYER.with(|layer| layer.set(self.previous_layer));
+        }
+    }
+}
+
+struct DecodeProfileLayerGuard {
+    active: bool,
+    previous_layer: Option<usize>,
+}
+
+impl DecodeProfileLayerGuard {
+    fn new(layer_idx: usize) -> Self {
+        let active = DECODE_PROFILE_ROWS.with(|rows| rows.borrow().is_some());
+        if !active {
+            return Self {
+                active: false,
+                previous_layer: None,
+            };
+        }
+        let previous_layer = DECODE_PROFILE_LAYER.with(|layer| layer.replace(Some(layer_idx)));
+        Self {
+            active: true,
+            previous_layer,
+        }
+    }
+}
+
+impl Drop for DecodeProfileLayerGuard {
+    fn drop(&mut self) {
+        if self.active {
+            DECODE_PROFILE_LAYER.with(|layer| layer.set(self.previous_layer));
+        }
+    }
+}
+
+fn decode_profile_time<T, F>(name: &'static str, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let active = DECODE_PROFILE_ROWS.with(|rows| rows.borrow().is_some());
+    if !active {
+        return f();
+    }
+
+    let start = Instant::now();
+    let result = f();
+    let elapsed = start.elapsed();
+    let layer = DECODE_PROFILE_LAYER.with(|current| current.get());
+    DECODE_PROFILE_ROWS.with(|rows| {
+        if let Some(rows) = rows.borrow_mut().as_mut() {
+            rows.push(DecodeProfileEntry {
+                layer,
+                name,
+                elapsed,
+            });
+        }
+    });
+    result
+}
+
+fn emit_decode_profile(
+    start_pos: usize,
+    token_id: u32,
+    mode: LmHeadMode,
+    rows: Vec<DecodeProfileEntry>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let total_ms: f64 = rows
+        .iter()
+        .map(|row| row.elapsed.as_secs_f64() * 1000.0)
+        .sum();
+    let mut totals: std::collections::BTreeMap<&'static str, (f64, usize)> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let entry = totals.entry(row.name).or_insert((0.0, 0));
+        entry.0 += row.elapsed.as_secs_f64() * 1000.0;
+        entry.1 += 1;
+    }
+
+    let totals_line = totals
+        .iter()
+        .map(|(name, (ms, count))| format!("{name}={ms:.1}ms/{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut top = rows;
+    top.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+    let top_line = top
+        .iter()
+        .take(10)
+        .map(|row| match row.layer {
+            Some(layer) => format!(
+                "L{layer}:{}={:.1}ms",
+                row.name,
+                row.elapsed.as_secs_f64() * 1000.0
+            ),
+            None => format!("{}={:.1}ms", row.name, row.elapsed.as_secs_f64() * 1000.0),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    eprintln!(
+        "    Decode profile pos {start_pos} token {token_id} mode {mode:?}: profiled {total_ms:.1}ms"
+    );
+    eprintln!("      totals: {totals_line}");
+    eprintln!("      top: {top_line}");
+}
+
+#[derive(Clone)]
+struct BatchGreedyProfileEntry {
+    layer: Option<usize>,
+    name: &'static str,
+    elapsed: Duration,
+}
+
+fn vulkan_batch_greedy_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = |name: &str| {
+            std::env::var(name).ok().as_deref().is_some_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            })
+        };
+        enabled("KILN_PROFILE_VULKAN_BATCH_GREEDY") || enabled("KILN_PROFILE_VULKAN_BATCH_DECODE")
+    })
+}
+
+fn push_batch_greedy_profile(
+    rows: &mut Vec<BatchGreedyProfileEntry>,
+    active: bool,
+    layer: Option<usize>,
+    name: &'static str,
+    start: Option<Instant>,
+) {
+    if active {
+        if let Some(start) = start {
+            rows.push(BatchGreedyProfileEntry {
+                layer,
+                name,
+                elapsed: start.elapsed(),
+            });
+        }
+    }
+}
+
+fn emit_vulkan_batch_greedy_profile(
+    batch: usize,
+    start_positions: &[usize],
+    rows: Vec<BatchGreedyProfileEntry>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let min_pos = start_positions.iter().copied().min().unwrap_or(0);
+    let max_pos = start_positions.iter().copied().max().unwrap_or(0);
+    let total_ms: f64 = rows
+        .iter()
+        .map(|row| row.elapsed.as_secs_f64() * 1000.0)
+        .sum();
+    let mut totals: std::collections::BTreeMap<&'static str, (f64, usize)> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let entry = totals.entry(row.name).or_insert((0.0, 0));
+        entry.0 += row.elapsed.as_secs_f64() * 1000.0;
+        entry.1 += 1;
+    }
+
+    let totals_line = totals
+        .iter()
+        .map(|(name, (ms, count))| format!("{name}={ms:.1}ms/{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut top = rows;
+    top.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+    let top_line = top
+        .iter()
+        .take(12)
+        .map(|row| match row.layer {
+            Some(layer) => format!(
+                "L{layer}:{}={:.1}ms",
+                row.name,
+                row.elapsed.as_secs_f64() * 1000.0
+            ),
+            None => format!("{}={:.1}ms", row.name, row.elapsed.as_secs_f64() * 1000.0),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    eprintln!(
+        "    Batch greedy decode profile batch={batch} pos {min_pos}..{max_pos}: profiled {total_ms:.1}ms"
+    );
+    eprintln!("      totals: {totals_line}");
+    eprintln!("      top: {top_line}");
+}
+
+fn emit_vulkan_batch_greedy_subop_profile(
+    batch: usize,
+    start_positions: &[usize],
+    rows: Vec<DecodeProfileEntry>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let min_pos = start_positions.iter().copied().min().unwrap_or(0);
+    let max_pos = start_positions.iter().copied().max().unwrap_or(0);
+    let total_ms: f64 = rows
+        .iter()
+        .map(|row| row.elapsed.as_secs_f64() * 1000.0)
+        .sum();
+    let mut totals: std::collections::BTreeMap<&'static str, (f64, usize)> =
+        std::collections::BTreeMap::new();
+    for row in &rows {
+        let entry = totals.entry(row.name).or_insert((0.0, 0));
+        entry.0 += row.elapsed.as_secs_f64() * 1000.0;
+        entry.1 += 1;
+    }
+
+    let totals_line = totals
+        .iter()
+        .map(|(name, (ms, count))| format!("{name}={ms:.1}ms/{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut top = rows;
+    top.sort_by(|a, b| b.elapsed.cmp(&a.elapsed));
+    let top_line = top
+        .iter()
+        .take(16)
+        .map(|row| match row.layer {
+            Some(layer) => format!(
+                "L{layer}:{}={:.1}ms",
+                row.name,
+                row.elapsed.as_secs_f64() * 1000.0
+            ),
+            None => format!("{}={:.1}ms", row.name, row.elapsed.as_secs_f64() * 1000.0),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    eprintln!(
+        "    Batch greedy subop profile batch={batch} pos {min_pos}..{max_pos}: profiled {total_ms:.1}ms"
+    );
+    eprintln!("      totals: {totals_line}");
+    eprintln!("      top: {top_line}");
 }
 
 /// Threshold above which the fused `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd`
@@ -173,6 +575,24 @@ fn linear_with_lora_t_decode_if(
     }
 }
 
+fn linear_with_lora_t_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    if lora.is_none() {
+        if let Some(backend) = backend {
+            if let Some(out) = backend.linear_decode(x, weight_t)? {
+                return Ok(out);
+            }
+        }
+    }
+    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
+}
+
 #[cfg(feature = "metal")]
 fn metal_attn_gate_debug_active() -> bool {
     crate::mtp_debug::is_subop_capture_armed()
@@ -208,6 +628,7 @@ fn attention_output_gate_decode_if(
 }
 
 fn full_attn_qkv_proj_decode_if(
+    backend: &dyn BackendRuntime,
     use_metal_decode_gemv: bool,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
@@ -240,21 +661,40 @@ fn full_attn_qkv_proj_decode_if(
         }
     }
 
+    if lora_layer.is_none()
+        && attn_weights.q_proj_marlin.is_none()
+        && !crate::mtp_debug::is_mtp_fp32_head_armed()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+    {
+        if let Some(out) = backend.full_attn_qkv_decode(
+            x,
+            &attn_weights.q_proj_t,
+            &attn_weights.k_proj_t,
+            &attn_weights.v_proj_t,
+        )? {
+            kiln_nvtx::range!(c"kiln/proj/qkv_fused");
+            return Ok(out);
+        }
+    }
+
     let q_raw = q_proj_forward_decode_if(
+        Some(backend),
         use_metal_decode_gemv,
         x,
         attn_weights,
         lora_layer.and_then(|l| l.q_proj.as_ref()),
         lora_scale,
     )?;
-    let k = linear_with_lora_t_decode_if(
+    let k = linear_with_lora_t_backend_decode_if(
+        Some(backend),
         use_metal_decode_gemv,
         x,
         &attn_weights.k_proj_t,
         lora_layer.and_then(|l| l.k_proj.as_ref()),
         lora_scale,
     )?;
-    let v = linear_with_lora_t_decode_if(
+    let v = linear_with_lora_t_backend_decode_if(
+        Some(backend),
         use_metal_decode_gemv,
         x,
         &attn_weights.v_proj_t,
@@ -1268,6 +1708,28 @@ fn cached_transpose(weight: &Tensor) -> Result<Tensor> {
     Ok(weight.t()?.contiguous()?)
 }
 
+fn cpu_needs_f32_matmul(lhs: &Tensor, rhs: &Tensor) -> bool {
+    matches!(lhs.device(), Device::Cpu) && (lhs.dtype() != DType::F32 || rhs.dtype() != DType::F32)
+}
+
+fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if cpu_needs_f32_matmul(lhs, rhs) {
+        let lhs_f32 = lhs.to_dtype(DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(DType::F32)?;
+        Ok(lhs_f32.broadcast_matmul(&rhs_f32)?)
+    } else {
+        Ok(lhs.broadcast_matmul(rhs)?)
+    }
+}
+
+fn promote_cpu_activation(t: Tensor) -> Result<Tensor> {
+    if matches!(t.device(), Device::Cpu) && t.dtype() != DType::F32 {
+        Ok(t.to_dtype(DType::F32)?)
+    } else {
+        Ok(t)
+    }
+}
+
 /// Tiny BF16 placeholder that replaces a projection's pre-transposed
 /// contiguous copy (`*_proj_t`) once Marlin has absorbed it. Dropping the
 /// original `Tensor` field releases the underlying CUDA buffer (the
@@ -1832,7 +2294,7 @@ impl GpuWeights {
 pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_weights.device())?;
     let out = embed_weights.index_select(&index, 0)?;
-    Ok(out)
+    promote_cpu_activation(out)
 }
 
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
@@ -1849,7 +2311,7 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
 fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_tokens_t.device())?;
     let gathered = embed_tokens_t.index_select(&index, 1)?;
-    Ok(gathered.t()?.contiguous()?)
+    promote_cpu_activation(gathered.t()?.contiguous()?)
 }
 
 /// RMSNorm: x * weight / sqrt(mean(x^2) + eps).
@@ -2382,18 +2844,21 @@ pub fn swiglu_ffn(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, false)
+    swiglu_ffn_impl(None, x, mlp, lora, false)
 }
 
-fn swiglu_ffn_metal_decode(
+fn swiglu_ffn_backend_decode_if(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
+    use_metal_decode_gemv: bool,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, true)
+    swiglu_ffn_impl(Some(backend), x, mlp, lora, use_metal_decode_gemv)
 }
 
 fn swiglu_ffn_impl(
+    backend: Option<&dyn BackendRuntime>,
     x: &Tensor,
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
@@ -2403,60 +2868,96 @@ fn swiglu_ffn_impl(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
+    if lora_layer.is_none()
+        && mlp.gate_proj_marlin.is_none()
+        && mlp.up_proj_marlin.is_none()
+        && mlp.down_proj_marlin.is_none()
+    {
+        if let Some(backend) = backend {
+            if let Some(out) = decode_profile_time("mlp.fused", || {
+                backend.mlp_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t, &mlp.down_proj_t)
+            })? {
+                return Ok(out);
+            }
+            if let Some(hidden) = decode_profile_time("mlp.gate_up", || {
+                backend.mlp_gate_up_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t)
+            })? {
+                let out = decode_profile_time("mlp.down", || {
+                    kiln_nvtx::range!(c"kiln/mlp/down");
+                    mlp_proj_forward_decode_if(
+                        Some(backend),
+                        use_metal_decode_gemv,
+                        &hidden,
+                        &mlp.down_proj_t,
+                        mlp.down_proj_marlin.as_ref(),
+                        None,
+                        lora_scale,
+                    )
+                })?;
+                return Ok(out);
+            }
+        }
+    }
     #[cfg(feature = "metal")]
     if let Some(hidden) = try_metal_mlp_gate_up_hidden(x, mlp, lora_layer)? {
-        let out = {
+        let out = decode_profile_time("mlp.down", || {
             kiln_nvtx::range!(c"kiln/mlp/down");
             mlp_proj_forward_decode_if(
+                backend,
                 use_metal_decode_gemv,
                 &hidden,
                 &mlp.down_proj_t,
                 mlp.down_proj_marlin.as_ref(),
                 None,
                 lora_scale,
-            )?
-        };
+            )
+        })?;
         return Ok(out);
     }
 
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
-    let gate = {
+    let gate = decode_profile_time("mlp.gate", || {
         kiln_nvtx::range!(c"kiln/mlp/gate");
-        mlp_proj_forward(
+        mlp_proj_forward_decode_if(
+            backend,
+            use_metal_decode_gemv,
             x,
             &mlp.gate_proj_t,
             mlp.gate_proj_marlin.as_ref(),
             lora_layer.and_then(|l| l.gate_proj.as_ref()),
             lora_scale,
-        )?
-    };
+        )
+    })?;
     // SiLU activation: x * sigmoid(x)
-    let gate = cuda_silu(&gate)?;
+    let gate = decode_profile_time("mlp.silu", || cuda_silu(&gate))?;
     // x @ up_proj_t -> [batch, seq_len, intermediate_size]
-    let up = {
+    let up = decode_profile_time("mlp.up", || {
         kiln_nvtx::range!(c"kiln/mlp/up");
-        mlp_proj_forward(
+        mlp_proj_forward_decode_if(
+            backend,
+            use_metal_decode_gemv,
             x,
             &mlp.up_proj_t,
             mlp.up_proj_marlin.as_ref(),
             lora_layer.and_then(|l| l.up_proj.as_ref()),
             lora_scale,
-        )?
-    };
+        )
+    })?;
     // Element-wise multiply
-    let hidden = (gate * up)?;
+    let hidden = decode_profile_time("mlp.mul", || Ok((gate * up)?))?;
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
-    let out = {
+    let out = decode_profile_time("mlp.down", || {
         kiln_nvtx::range!(c"kiln/mlp/down");
         mlp_proj_forward_decode_if(
+            backend,
             use_metal_decode_gemv,
             &hidden,
             &mlp.down_proj_t,
             mlp.down_proj_marlin.as_ref(),
             lora_layer.and_then(|l| l.down_proj.as_ref()),
             lora_scale,
-        )?
-    };
+        )
+    })?;
     Ok(out)
 }
 
@@ -2530,10 +3031,11 @@ fn mlp_proj_forward(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
-    mlp_proj_forward_decode_if(false, x, weight_t, marlin, lora, lora_scale)
+    mlp_proj_forward_decode_if(None, false, x, weight_t, marlin, lora, lora_scale)
 }
 
 fn mlp_proj_forward_decode_if(
+    backend: Option<&dyn BackendRuntime>,
     use_metal_decode_gemv: bool,
     x: &Tensor,
     weight_t: &Tensor,
@@ -2555,7 +3057,14 @@ fn mlp_proj_forward_decode_if(
     // Non-CUDA builds never carry Marlin weights; reference the parameter so
     // the signature stays unified without a dead_code warning.
     let _ = marlin;
-    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
+    linear_with_lora_t_backend_decode_if(
+        backend,
+        use_metal_decode_gemv,
+        x,
+        weight_t,
+        lora,
+        lora_scale,
+    )
 }
 
 fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
@@ -2566,10 +3075,33 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
                 .context("metal lm_head kernel failed");
         }
     }
-    Ok(x.broadcast_matmul(embed_tokens_t)?)
+    broadcast_matmul_cpu_compatible(x, embed_tokens_t)
 }
 
-fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
+fn lm_head_forward_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Tensor> {
+    if let Some(backend) = backend {
+        if let Some(logits) = backend.linear_decode(x, embed_tokens_t)? {
+            return Ok(logits);
+        }
+    }
+    lm_head_forward(x, embed_tokens_t)
+}
+
+fn lm_head_argmax_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<u32> {
+    if let Some(backend) = backend {
+        if let Some(token) = backend.linear_decode_argmax(x, embed_tokens_t)? {
+            return Ok(token);
+        }
+    }
+
     #[cfg(feature = "metal")]
     {
         if crate::backend::metal::metal_lm_head_argmax_supports(x, embed_tokens_t) {
@@ -2988,8 +3520,8 @@ fn gdn_chunkwise_recurrence(
     // kernel (CUDA today) collapses the whole recurrence into one block
     // per (B,H).
     if seq_len == 1 {
-        if dtype == DType::BF16
-            && state.dtype() == DType::BF16
+        if matches!(dtype, DType::BF16 | DType::F32)
+            && state.dtype() == dtype
             && backend.supports_gdn_recurrent_step()
         {
             // The five squeeze+contiguous calls below each emit a bf16 ucopy
@@ -3470,24 +4002,26 @@ fn gated_deltanet_forward_decode_if(
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
-    let (mixed_qkv, z, a, b) = {
+    let (mixed_qkv, z, a, b) = decode_profile_time("gdn.in_proj", || {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
-        if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
-            x,
-            &weights.in_proj_qkv_t,
-            &weights.in_proj_z_t,
-            &weights.in_proj_a_t,
-            &weights.in_proj_b_t,
-        )? {
-            (mixed_qkv, z, a, b)
-        } else {
-            let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
-            let z = x.broadcast_matmul(&weights.in_proj_z_t)?; // [B, T, v_dim]
-            let a = x.broadcast_matmul(&weights.in_proj_a_t)?; // [B, T, nv]
-            let b = x.broadcast_matmul(&weights.in_proj_b_t)?; // [B, T, nv]
-            (mixed_qkv, z, a, b)
-        }
-    };
+        Ok(
+            if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
+                x,
+                &weights.in_proj_qkv_t,
+                &weights.in_proj_z_t,
+                &weights.in_proj_a_t,
+                &weights.in_proj_b_t,
+            )? {
+                (mixed_qkv, z, a, b)
+            } else {
+                let mixed_qkv = broadcast_matmul_cpu_compatible(x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
+                let z = broadcast_matmul_cpu_compatible(x, &weights.in_proj_z_t)?; // [B, T, v_dim]
+                let a = broadcast_matmul_cpu_compatible(x, &weights.in_proj_a_t)?; // [B, T, nv]
+                let b = broadcast_matmul_cpu_compatible(x, &weights.in_proj_b_t)?; // [B, T, nv]
+                (mixed_qkv, z, a, b)
+            },
+        )
+    })?;
 
     // Phase B11b tap: `gdn_in_proj`. Matches the HF reference layout
     // `concat([in_proj_qkvz(x), in_proj_ba(x)], dim=-1)` = [q, k, v, z, b, a]
@@ -3616,7 +4150,7 @@ fn gated_deltanet_forward_decode_if(
         // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
         // kill switch all route through the portable candle path below — which is the
         // parity oracle.
-        let mixed_qkv = {
+        let mixed_qkv = decode_profile_time("gdn.conv", || {
             kiln_nvtx::range!(c"kiln/gdn/conv");
             // Transpose to [B, channels, T] for conv
             let mixed_qkv_ct = {
@@ -3687,8 +4221,8 @@ fn gated_deltanet_forward_decode_if(
                 cuda_silu(&y.to_dtype(DType::F32)?)?
             };
             // Transpose back to [B, T, qkv_dim]
-            post_silu.transpose(1, 2)?
-        };
+            Ok(post_silu.transpose(1, 2)?)
+        })?;
 
         // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
         // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
@@ -3701,7 +4235,7 @@ fn gated_deltanet_forward_decode_if(
         }
 
         // --- Step 3: Split into Q, K, V and reshape to heads ---
-        let (q, k, v, z) = {
+        let (q, k, v, z) = decode_profile_time("gdn.qkv_split", || {
             kiln_nvtx::range!(c"kiln/gdn/qkv_split");
             let q = mixed_qkv
                 .narrow(2, 0, qk_dim)?
@@ -3713,8 +4247,8 @@ fn gated_deltanet_forward_decode_if(
                 .narrow(2, 2 * qk_dim, v_dim)?
                 .reshape((batch, seq_len, nv, dv))?;
             let z = z.reshape((batch, seq_len, nv, dv))?;
-            (q, k, v, z)
-        };
+            Ok((q, k, v, z))
+        })?;
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
@@ -3728,13 +4262,13 @@ fn gated_deltanet_forward_decode_if(
         // path skips the F32 round-trip through HBM. The candle path is the
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
-        let (q, k, qk_expanded) = {
+        let (q, k, qk_expanded) = decode_profile_time("gdn.qk_norm", || {
             #[cfg(feature = "metal")]
             {
                 if recurrent_unexpanded_qk {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, false)
+                    Ok((q, k, false))
                 } else if input_dtype == DType::BF16
                     && gqa_ratio > 1
                     && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
@@ -3748,7 +4282,7 @@ fn gated_deltanet_forward_decode_if(
                         1e-6,
                     )
                     .context("metal gdn qk_norm gqa kernel failed")
-                    .map(|(q, k)| (q, k, true))?
+                    .map(|(q, k)| (q, k, true))
                 } else {
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -3770,7 +4304,7 @@ fn gated_deltanet_forward_decode_if(
                     };
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, true)
+                    Ok((q, k, true))
                 }
             }
             #[cfg(not(feature = "metal"))]
@@ -3806,7 +4340,7 @@ fn gated_deltanet_forward_decode_if(
                 };
 
                 if let Some((q, k)) = fused_gqa {
-                    (q, k, true)
+                    Ok((q, k, true))
                 } else {
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -3828,10 +4362,10 @@ fn gated_deltanet_forward_decode_if(
                     };
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, true)
+                    Ok((q, k, true))
                 }
             }
-        };
+        })?;
         (q, k, v, z, qk_expanded)
     };
 
@@ -3870,17 +4404,35 @@ fn gated_deltanet_forward_decode_if(
     // update that was previously done per token.
     let state_external_dtype = recurrent_state.dtype();
     if state_external_dtype != input_dtype {
-        *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
+        *recurrent_state = decode_profile_time("gdn.state_to_input", || {
+            Ok(recurrent_state.to_dtype(input_dtype)?)
+        })?;
     }
 
-    let fused_decode_gates_recurrent_rmsnorm = {
-        #[cfg(feature = "metal")]
-        {
-            if recurrent_unexpanded_qk
-                && seq_len == 1
-                && !capture_b11_taps
-                && !capture_c41_taps
-                && crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_supports(
+    let fused_decode_gates_recurrent_rmsnorm =
+        decode_profile_time("gdn.fused_gates_recur_norm", || {
+            Ok({
+                if seq_len == 1 && !capture_b11_taps && !capture_c41_taps {
+                    if let Some(out) = backend.gdn_decode_gates_recurrent_rmsnorm(
+                        &q,
+                        &k,
+                        &v,
+                        &a,
+                        &b,
+                        &weights.a_log,
+                        &weights.dt_bias,
+                        recurrent_state,
+                        &z,
+                        &weights.norm,
+                        config.rms_norm_eps,
+                    )? {
+                        kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
+                        Some(out)
+                    } else {
+                        #[cfg(feature = "metal")]
+                        {
+                            if recurrent_unexpanded_qk
+                        && crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_supports(
                     &q,
                     &k,
                     &v,
@@ -3891,11 +4443,11 @@ fn gated_deltanet_forward_decode_if(
                     recurrent_state,
                     &z,
                     &weights.norm,
-                )
-            {
-                kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
-                Some(
-                    crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                        )
+                    {
+                        kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
+                        Some(
+                            crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
                         &q,
                         &k,
                         &v,
@@ -3909,56 +4461,49 @@ fn gated_deltanet_forward_decode_if(
                         config.rms_norm_eps as f32,
                     )
                     .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?,
-                )
-            } else {
-                None
-            }
-        }
-        #[cfg(not(feature = "metal"))]
-        {
-            None
-        }
-    };
-
-    let fused_decode_gates_recurrent = {
-        if fused_decode_gates_recurrent_rmsnorm.is_none()
-            && seq_len == 1
-            && !capture_b11_taps
-            && !capture_c41_taps
-        {
-            if let Some(out) = backend.gdn_decode_gates_recurrent(
-                &q,
-                &k,
-                &v,
-                &a,
-                &b,
-                &weights.a_log,
-                &weights.dt_bias,
-                recurrent_state,
-                &z,
-                &weights.norm,
-                config.rms_norm_eps,
-            )? {
-                kiln_nvtx::range!(c"kiln/gdn/gates_recur");
-                Some(out)
-            } else {
-                #[cfg(feature = "metal")]
-                {
-                    if recurrent_unexpanded_qk
-                        && crate::backend::metal::metal_gdn_decode_gates_recurrent_supports(
-                            &q,
-                            &k,
-                            &v,
-                            &a,
-                            &b,
-                            &weights.a_log,
-                            &weights.dt_bias,
-                            recurrent_state,
                         )
+                    } else {
+                        None
+                    }
+                        }
+                        #[cfg(not(feature = "metal"))]
+                        {
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            })
+        })?;
+
+    let fused_decode_gates_recurrent = decode_profile_time("gdn.fused_gates_recur", || {
+        Ok({
+            if fused_decode_gates_recurrent_rmsnorm.is_none()
+                && seq_len == 1
+                && !capture_b11_taps
+                && !capture_c41_taps
+            {
+                if let Some(out) = backend.gdn_decode_gates_recurrent(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &weights.a_log,
+                    &weights.dt_bias,
+                    recurrent_state,
+                    &z,
+                    &weights.norm,
+                    config.rms_norm_eps,
+                )? {
+                    kiln_nvtx::range!(c"kiln/gdn/gates_recur");
+                    Some(out)
+                } else {
+                    #[cfg(feature = "metal")]
                     {
-                        kiln_nvtx::range!(c"kiln/gdn/gates_recur");
-                        Some(
-                            crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
+                        if recurrent_unexpanded_qk
+                            && crate::backend::metal::metal_gdn_decode_gates_recurrent_supports(
                                 &q,
                                 &k,
                                 &v,
@@ -3968,121 +4513,142 @@ fn gated_deltanet_forward_decode_if(
                                 &weights.dt_bias,
                                 recurrent_state,
                             )
-                            .context("metal gdn decode gates+recurrent kernel failed")?,
-                        )
-                    } else {
+                        {
+                            kiln_nvtx::range!(c"kiln/gdn/gates_recur");
+                            Some(
+                                crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
+                                    &q,
+                                    &k,
+                                    &v,
+                                    &a,
+                                    &b,
+                                    &weights.a_log,
+                                    &weights.dt_bias,
+                                    recurrent_state,
+                                )
+                                .context("metal gdn decode gates+recurrent kernel failed")?,
+                            )
+                        } else {
+                            None
+                        }
+                    }
+                    #[cfg(not(feature = "metal"))]
+                    {
                         None
                     }
                 }
-                #[cfg(not(feature = "metal"))]
-                {
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    };
-
-    let (attn_out, attn_out_head_last, attn_out_already_gated_norm) = if let Some(attn_out) =
-        fused_decode_gates_recurrent_rmsnorm
-    {
-        (attn_out, true, true) // [B, T, nv, dv], contiguous and gated-normalized
-    } else if let Some(attn_out) = fused_decode_gates_recurrent {
-        (attn_out, true, false) // [B, T, nv, dv], contiguous
-    } else {
-        // --- Step 6: Compute gates ---
-        //
-        // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
-        // the sigmoid + softplus + exp + mul chain into one launch, and the
-        // candle-op reference path for everything outside the kernel's
-        // envelope (unsupported backend, non-bf16, nv > 256, or kill switches
-        // like `KILN_DISABLE_FUSED_GDN_GATES=1` /
-        // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
-        // identical — the reference path is the original Phase-6 implementation
-        // and remains the parity oracle.
-        let (beta, g) = {
-            kiln_nvtx::range!(c"kiln/gdn/gates");
-            if backend.supports_gdn_gates() {
-                if let Some((beta, g)) =
-                    backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
-                {
-                    (beta, g)
-                } else {
-                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
-                }
             } else {
-                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                None
             }
-        };
+        })
+    })?;
 
-        // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
-        // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
-        // recurrence). Shapes [B, T, nv]. HF mirror: `beta = b.sigmoid()` and
-        // `g = -A_log.exp() * F.softplus(a + dt_bias)`.
-        if capture_b11_taps {
-            crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_beta", &beta)?;
-            crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_g", &g)?;
-        }
-        if capture_c41_taps {
-            crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_beta", &beta)?;
-            crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
-        }
-
-        let native_recurrent_prefill = if recurrent_unexpanded_qk {
-            let v_recur = v.to_dtype(input_dtype)?;
-            gdn_recurrent_prefill_native_head_last(
-                backend,
-                &q,
-                &k,
-                &v_recur,
-                &beta,
-                &g,
-                recurrent_state,
-            )?
-        } else {
-            None
-        };
-
-        if let Some(attn_out) = native_recurrent_prefill {
+    let (attn_out, attn_out_head_last, attn_out_already_gated_norm) =
+        if let Some(attn_out) = fused_decode_gates_recurrent_rmsnorm {
+            (attn_out, true, true) // [B, T, nv, dv], contiguous and gated-normalized
+        } else if let Some(attn_out) = fused_decode_gates_recurrent {
             (attn_out, true, false) // [B, T, nv, dv], contiguous
         } else {
-            // Cast v back to input_dtype so the recurrence stays in bf16. The
-            // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
-            // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
-            // hits a dtype mismatch on bf16 GPU runs, because the state-derived
-            // tensor inherits the (now bf16) state dtype.
-            let (q, k, v, beta, g) = {
-                kiln_nvtx::range!(c"kiln/gdn/recur_prep");
-                let v = v.to_dtype(input_dtype)?;
+            // --- Step 6: Compute gates ---
+            //
+            // Two paths: a fused backend kernel (`backend.gdn_gates`) that collapses
+            // the sigmoid + softplus + exp + mul chain into one launch, and the
+            // candle-op reference path for everything outside the kernel's
+            // envelope (unsupported backend, non-bf16, nv > 256, or kill switches
+            // like `KILN_DISABLE_FUSED_GDN_GATES=1` /
+            // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
+            // identical — the reference path is the original Phase-6 implementation
+            // and remains the parity oracle.
+            let (beta, g) = decode_profile_time("gdn.gates", || {
+                kiln_nvtx::range!(c"kiln/gdn/gates");
+                Ok(if backend.supports_gdn_gates() {
+                    if let Some((beta, g)) =
+                        backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
+                    {
+                        (beta, g)
+                    } else {
+                        gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                    }
+                } else {
+                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                })
+            })?;
 
-                // Transpose to [B, nv, T, dim] for per-head processing.
-                let q = q.transpose(1, 2)?; // [B, nv, T, dk]
-                let k = k.transpose(1, 2)?; // [B, nv, T, dk]
-                let v = v.transpose(1, 2)?; // [B, nv, T, dv]
-                let beta = beta.transpose(1, 2)?; // [B, nv, T]
-                let g = g.transpose(1, 2)?; // [B, nv, T]
-                (q, k, v, beta, g)
+            // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
+            // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
+            // recurrence). Shapes [B, T, nv]. HF mirror: `beta = b.sigmoid()` and
+            // `g = -A_log.exp() * F.softplus(a + dt_bias)`.
+            if capture_b11_taps {
+                crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_beta", &beta)?;
+                crate::mtp_debug::capture_b11_layer0_tap("gdn_gate_g", &g)?;
+            }
+            if capture_c41_taps {
+                crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_beta", &beta)?;
+                crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
+            }
+
+            let native_recurrent_prefill = if recurrent_unexpanded_qk {
+                let v_recur = v.to_dtype(input_dtype)?;
+                decode_profile_time("gdn.recurrent", || {
+                    gdn_recurrent_prefill_native_head_last(
+                        backend,
+                        &q,
+                        &k,
+                        &v_recur,
+                        &beta,
+                        &g,
+                        recurrent_state,
+                    )
+                })?
+            } else {
+                None
             };
 
-            if let Some(attn_out) =
-                gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)?
-            {
+            if let Some(attn_out) = native_recurrent_prefill {
                 (attn_out, true, false) // [B, T, nv, dv], contiguous
             } else {
-                match gdn_chunkwise_recurrence_head_last_full_chunks(
-                    backend,
-                    &q,
-                    &k,
-                    &v,
-                    &beta,
-                    &g,
-                    recurrent_state,
-                    GDN_CHUNK_SIZE,
-                )? {
-                    Some(attn_out) => (attn_out, true, false), // [B, T, nv, dv], contiguous
-                    None => (
-                        gdn_chunkwise_recurrence(
+                // Cast v back to input_dtype so the recurrence stays in bf16. The
+                // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
+                // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
+                // hits a dtype mismatch on bf16 GPU runs, because the state-derived
+                // tensor inherits the (now bf16) state dtype.
+                let (q, k, v, beta, g) = decode_profile_time("gdn.recur_prep", || {
+                    kiln_nvtx::range!(c"kiln/gdn/recur_prep");
+                    let v = v.to_dtype(input_dtype)?;
+
+                    // Transpose to [B, nv, T, dim] for per-head processing.
+                    let q = q.transpose(1, 2)?; // [B, nv, T, dk]
+                    let k = k.transpose(1, 2)?; // [B, nv, T, dk]
+                    let v = v.transpose(1, 2)?; // [B, nv, T, dv]
+                    let beta = beta.transpose(1, 2)?; // [B, nv, T]
+                    let g = g.transpose(1, 2)?; // [B, nv, T]
+                    Ok((q, k, v, beta, g))
+                })?;
+
+                if seq_len == 1 {
+                    (
+                        decode_profile_time("gdn.recurrent", || {
+                            gdn_chunkwise_recurrence(
+                                backend,
+                                &q,
+                                &k,
+                                &v,
+                                &beta,
+                                &g,
+                                recurrent_state,
+                                GDN_CHUNK_SIZE,
+                            )
+                        })?,
+                        false,
+                        false,
+                    )
+                } else if let Some(attn_out) = decode_profile_time("gdn.recurrent", || {
+                    gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)
+                })? {
+                    (attn_out, true, false) // [B, T, nv, dv], contiguous
+                } else {
+                    match decode_profile_time("gdn.recurrent", || {
+                        gdn_chunkwise_recurrence_head_last_full_chunks(
                             backend,
                             &q,
                             &k,
@@ -4091,31 +4657,48 @@ fn gated_deltanet_forward_decode_if(
                             &g,
                             recurrent_state,
                             GDN_CHUNK_SIZE,
-                        )?,
-                        false,
-                        false,
-                    ), // [B, nv, T, dv]
+                        )
+                    })? {
+                        Some(attn_out) => (attn_out, true, false), // [B, T, nv, dv], contiguous
+                        None => (
+                            decode_profile_time("gdn.recurrent", || {
+                                gdn_chunkwise_recurrence(
+                                    backend,
+                                    &q,
+                                    &k,
+                                    &v,
+                                    &beta,
+                                    &g,
+                                    recurrent_state,
+                                    GDN_CHUNK_SIZE,
+                                )
+                            })?,
+                            false,
+                            false,
+                        ), // [B, nv, T, dv]
+                    }
                 }
             }
-        }
-    };
+        };
 
     // Restore state to its original dtype so the caller's F32 invariant holds
     // across layer calls and across prefill/decode steps.
     if state_external_dtype != input_dtype {
-        *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
+        *recurrent_state = decode_profile_time("gdn.state_restore", || {
+            Ok(recurrent_state.to_dtype(state_external_dtype)?)
+        })?;
     }
 
     // Transpose to [B, T, nv, dv] unless the Metal full-chunk path already
     // wrote that contiguous layout directly.
-    let attn_out = {
+    let attn_out = decode_profile_time("gdn.post_transpose", || {
         kiln_nvtx::range!(c"kiln/gdn/post_transpose");
         if attn_out_head_last {
-            attn_out
+            Ok(attn_out)
         } else {
-            attn_out.transpose(1, 2)?
+            Ok(attn_out.transpose(1, 2)?)
         }
-    };
+    })?;
 
     // Phase B11b tap: `gdn_recur_out`. Captured post-transpose (shape
     // [B, T, nv, dv]) so the layout matches the input HF passes to its
@@ -4131,7 +4714,7 @@ fn gated_deltanet_forward_decode_if(
     }
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
-    let attn_out = {
+    let attn_out = decode_profile_time("gdn.gated_norm", || {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
         let attn_out = if attn_out_already_gated_norm {
             attn_out
@@ -4139,10 +4722,10 @@ fn gated_deltanet_forward_decode_if(
             gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?
         };
         // Reshape to [B, T, v_dim] and cast back to input dtype
-        attn_out
+        Ok(attn_out
             .reshape((batch, seq_len, v_dim))?
-            .to_dtype(input_dtype)?
-    };
+            .to_dtype(input_dtype)?)
+    })?;
 
     // Phase B11b tap: `gdn_gated_norm`. Output of the GatedRMSNorm /
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
@@ -4159,16 +4742,17 @@ fn gated_deltanet_forward_decode_if(
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
     // it should be added to GpuLinearAttentionWeights and applied after conv1d.
     // Pre-transposed cache (see Step 1 note).
-    let out = {
+    let out = decode_profile_time("gdn.out_proj", || {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_out,
             &weights.out_proj_t,
             None,
             0.0,
-        )?
-    };
+        )
+    })?;
 
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
@@ -4209,10 +4793,11 @@ pub fn q_proj_forward(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
-    q_proj_forward_decode_if(false, x, attn_weights, lora, lora_scale)
+    q_proj_forward_decode_if(None, false, x, attn_weights, lora, lora_scale)
 }
 
 fn q_proj_forward_decode_if(
+    backend: Option<&dyn BackendRuntime>,
     use_metal_decode_gemv: bool,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
@@ -4230,7 +4815,8 @@ fn q_proj_forward_decode_if(
         }
         return Ok(base);
     }
-    linear_with_lora_t_decode_if(
+    linear_with_lora_t_backend_decode_if(
+        backend,
         use_metal_decode_gemv,
         x,
         &attn_weights.q_proj_t,
@@ -4272,6 +4858,7 @@ pub fn gqa_attention(
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
         full_attn_qkv_proj_decode_if(
+            backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
@@ -4401,7 +4988,8 @@ pub fn gqa_attention(
     // Output projection
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -4758,6 +5346,7 @@ fn gqa_attention_paged_with_rope_tables(
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
         full_attn_qkv_proj_decode_if(
+            backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
@@ -5341,7 +5930,8 @@ fn gqa_attention_paged_with_rope_tables(
         }
         let out = {
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t_decode_if(
+            linear_with_lora_t_backend_decode_if(
+                Some(backend),
                 use_metal_decode_gemv,
                 &attn_output,
                 &attn_weights.o_proj_t,
@@ -5408,7 +5998,8 @@ fn gqa_attention_paged_with_rope_tables(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -5550,11 +6141,8 @@ pub fn transformer_block(
     };
 
     // Feed-forward network
-    let ffn_out = if use_metal_decode_ffn {
-        swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
-    } else {
-        swiglu_ffn(&normed, &layer.mlp, lora)?
-    };
+    let ffn_out =
+        swiglu_ffn_backend_decode_if(backend, &normed, &layer.mlp, lora, use_metal_decode_ffn)?;
 
     // Residual connection
     let out = {
@@ -5710,10 +6298,8 @@ fn transformer_block_paged_with_rope_tables(
     // standard `swiglu_ffn` fuses those and is fine for everyone else.
     let ffn_out = if b12_layer_31 {
         swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
-    } else if use_metal_decode_ffn {
-        swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
     } else {
-        swiglu_ffn(&normed, &layer.mlp, lora)?
+        swiglu_ffn_backend_decode_if(backend, &normed, &layer.mlp, lora, use_metal_decode_ffn)?
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
@@ -5726,6 +6312,100 @@ fn transformer_block_paged_with_rope_tables(
     };
     // Note: the final block output (`out`) is dumped as `post_layer` at the
     // outer MTP call site, so we do not re-capture it here.
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transformer_block_paged_batch_decode_rows(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    start_positions: &[usize],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[BlockTable],
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(w) => w,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!(
+                "transformer_block_paged_batch_decode_rows only supports full attention layers"
+            )
+        }
+    };
+    let (batch, seq_len, _hidden) = x.dims3()?;
+    anyhow::ensure!(
+        seq_len == 1,
+        "paged batch full-attention decode requires seq_len == 1, got {seq_len}"
+    );
+    anyhow::ensure!(
+        start_positions.len() == batch,
+        "start position count {} does not match batch {batch}",
+        start_positions.len()
+    );
+    anyhow::ensure!(
+        block_tables.len() == batch,
+        "block table count {} does not match batch {batch}",
+        block_tables.len()
+    );
+
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_attn");
+        rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
+    };
+
+    let device = x.device();
+    let mut row_outputs = Vec::with_capacity(batch);
+    for row in 0..batch {
+        let pos_f32 = [start_positions[row] as f32];
+        let positions = Tensor::new(pos_f32.as_slice(), device)?;
+        let row_normed = normed.narrow(0, row, 1)?;
+        let out = gqa_attention_paged_with_rope_tables(
+            backend,
+            &row_normed,
+            attn_weights,
+            &positions,
+            start_positions[row],
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            rotary_dim,
+            inv_freq,
+            None,
+            rms_norm_eps,
+            paged_cache,
+            &block_tables[row],
+            full_attn_layer_idx,
+            config.attn_output_gate,
+            lora,
+        )
+        .with_context(|| format!("full-attention row {row} in paged batch decode"))?;
+        row_outputs.push(out);
+    }
+    let row_refs: Vec<&Tensor> = row_outputs.iter().collect();
+    let attn_out = Tensor::cat(&row_refs, 0)?;
+
+    let x = {
+        kiln_nvtx::range!(c"kiln/residual");
+        (x + attn_out)?
+    };
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+        rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
+    };
+    let ffn_out = swiglu_ffn_backend_decode_if(backend, &normed, &layer.mlp, lora, false)?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/residual");
+        (x + ffn_out)?
+    };
     Ok(out)
 }
 
@@ -5836,11 +6516,13 @@ pub fn model_forward(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = if use_metal_decode_ffn {
-                    swiglu_ffn_metal_decode(&normed_post, &layer.mlp, layer_lora)?
-                } else {
-                    swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?
-                };
+                let ffn_out = swiglu_ffn_backend_decode_if(
+                    backend,
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -5856,7 +6538,7 @@ pub fn model_forward(
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head");
         hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_forward(&hidden, &weights.embed_tokens_t)?
+        lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)?
     };
 
     Ok(logits)
@@ -5985,7 +6667,13 @@ pub fn model_forward_segment(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                let ffn_out = swiglu_ffn_backend_decode_if(
+                    backend,
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    false,
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -6215,6 +6903,246 @@ pub fn model_forward_paged_next_token_greedy(
         lora,
         positions_gpu,
     )
+}
+
+/// Paged-KV decode for multiple independent sequences, greedy-only.
+///
+/// This is intentionally narrower than a full continuous-batching forward:
+/// GDN/MLP layers run with `batch = token_ids.len()`, while full-attention
+/// layers still use the existing single-sequence [`BlockTable`] API one row at a
+/// time. That gives native batched coverage for the 24 GDN-heavy layers without
+/// changing the paged KV table contract.
+pub fn model_forward_paged_next_tokens_greedy_batch(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[BlockTable],
+    start_positions: &[usize],
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Vec<u32>> {
+    let batch = token_ids.len();
+    anyhow::ensure!(batch > 0, "batch decode requires at least one token");
+    anyhow::ensure!(
+        block_tables.len() == batch,
+        "batch decode block table count {} does not match batch {batch}",
+        block_tables.len()
+    );
+    anyhow::ensure!(
+        start_positions.len() == batch,
+        "batch decode start position count {} does not match batch {batch}",
+        start_positions.len()
+    );
+
+    let profile = vulkan_batch_greedy_profile_enabled();
+    let mut profile_rows = Vec::new();
+    let subprofile = DecodeSubprofileCapture::new(profile);
+
+    let profile_start = profile.then(Instant::now);
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
+    push_batch_greedy_profile(&mut profile_rows, profile, None, "embedding", profile_start);
+
+    let mut full_attn_idx: usize = 0;
+    let mut linear_attn_idx: usize = 0;
+    for (i, layer) in weights.layers.iter().enumerate() {
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+        let _profile_layer = profile.then(|| DecodeProfileLayerGuard::new(i));
+
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                let profile_start = profile.then(Instant::now);
+                hidden = transformer_block_paged_batch_decode_rows(
+                    backend,
+                    &hidden,
+                    layer,
+                    config,
+                    start_positions,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.rotary_dim(),
+                    &weights.rotary_inv_freq,
+                    config.rms_norm_eps,
+                    paged_cache,
+                    block_tables,
+                    full_attn_idx,
+                    layer_lora,
+                )
+                .with_context(|| format!("transformer block {i} (full attention, paged batch)"))?;
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "full.block",
+                    profile_start,
+                );
+                full_attn_idx += 1;
+            }
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
+                })?;
+
+                let profile_start = profile.then(Instant::now);
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "linear.pre_norm",
+                    profile_start,
+                );
+                let profile_start = profile.then(Instant::now);
+                let attn_out = gated_deltanet_forward_decode_if(
+                    backend,
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                    false,
+                    false,
+                    false,
+                )
+                .with_context(|| {
+                    format!("gated deltanet layer {i} (linear attention, paged batch)")
+                })?;
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "linear.gdn",
+                    profile_start,
+                );
+                let profile_start = profile.then(Instant::now);
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + attn_out)?
+                };
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "linear.attn_resid",
+                    profile_start,
+                );
+
+                let profile_start = profile.then(Instant::now);
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
+                };
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "linear.post_norm",
+                    profile_start,
+                );
+                let profile_start = profile.then(Instant::now);
+                let ffn_out = swiglu_ffn_backend_decode_if(
+                    backend,
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    false,
+                )?;
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "linear.mlp",
+                    profile_start,
+                );
+                let profile_start = profile.then(Instant::now);
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual");
+                    (hidden + ffn_out)?
+                };
+                push_batch_greedy_profile(
+                    &mut profile_rows,
+                    profile,
+                    Some(i),
+                    "linear.mlp_resid",
+                    profile_start,
+                );
+                linear_attn_idx += 1;
+            }
+        }
+    }
+
+    let profile_start = profile.then(Instant::now);
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/final");
+        rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
+    };
+    push_batch_greedy_profile(
+        &mut profile_rows,
+        profile,
+        None,
+        "final_norm",
+        profile_start,
+    );
+    let profile_start = profile.then(Instant::now);
+    let logits = {
+        kiln_nvtx::range!(c"kiln/lm_head");
+        lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+    }?;
+    push_batch_greedy_profile(&mut profile_rows, profile, None, "lm_head", profile_start);
+    let profile_start = profile.then(Instant::now);
+    let tokens = greedy_sample_batched(&logits)?;
+    push_batch_greedy_profile(&mut profile_rows, profile, None, "sample", profile_start);
+    if profile {
+        let subprofile_rows = subprofile.finish();
+        emit_vulkan_batch_greedy_profile(batch, start_positions, profile_rows);
+        emit_vulkan_batch_greedy_subop_profile(batch, start_positions, subprofile_rows);
+    }
+    Ok(tokens)
+}
+
+fn greedy_sample_batched(logits: &Tensor) -> Result<Vec<u32>> {
+    let dims = logits.dims();
+    anyhow::ensure!(
+        dims.len() == 3 && dims[1] == 1,
+        "batched greedy logits must be [batch, 1, vocab], got {:?}",
+        dims
+    );
+    let batch = dims[0];
+    let vocab = dims[2];
+    let data = logits
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    anyhow::ensure!(
+        data.len() == batch * vocab,
+        "batched greedy logits data len {} does not match batch*vocab {}",
+        data.len(),
+        batch * vocab
+    );
+
+    let mut tokens = Vec::with_capacity(batch);
+    for row in 0..batch {
+        let start = row * vocab;
+        let row_logits = &data[start..start + vocab];
+        let (token, _) = row_logits.iter().enumerate().fold(
+            (0usize, f32::NEG_INFINITY),
+            |best, (idx, &score)| {
+                if score > best.1 { (idx, score) } else { best }
+            },
+        );
+        tokens.push(token as u32);
+    }
+    Ok(tokens)
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
@@ -6642,7 +7570,7 @@ pub fn mtp_forward_step(
     }
     let logits = {
         kiln_nvtx::range!(c"kiln/mtp/lm_head");
-        lm_head_forward(&normed, &weights.embed_tokens_t)?
+        lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
     };
     // Phase C14 tap 3/3: post-lm_head logits, pre-softmax / pre-sampler.
     if dump_c14_post_block {
@@ -6922,9 +7850,12 @@ fn model_forward_paged_inner(
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
+    let decode_profile = DecodeProfileGuard::new(seq_len, start_pos);
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    let mut hidden = decode_profile_time("embed", || {
+        embedding_lookup_from_weights(token_ids, weights)
+    })?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -6963,6 +7894,7 @@ fn model_forward_paged_inner(
     let mut full_attn_idx: usize = 0;
     let mut linear_attn_idx: usize = 0;
     for (i, layer) in weights.layers.iter().enumerate() {
+        let _decode_profile_layer = DecodeProfileLayerGuard::new(i);
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
             lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
@@ -6975,25 +7907,27 @@ fn model_forward_paged_inner(
                 // this TLS slot + the armed capture window so that only
                 // layer 31 emits sub-op taps. No-op on the production path.
                 crate::mtp_debug::enter_b12_layer_scope(i);
-                let block_result = transformer_block_paged_with_rope_tables(
-                    backend,
-                    &hidden,
-                    layer,
-                    config,
-                    positions,
-                    start_pos,
-                    config.num_attention_heads,
-                    config.num_kv_heads,
-                    config.head_dim,
-                    config.rotary_dim(),
-                    &weights.rotary_inv_freq,
-                    rope_tables,
-                    config.rms_norm_eps,
-                    paged_cache,
-                    block_table,
-                    full_attn_idx,
-                    layer_lora,
-                );
+                let block_result = decode_profile_time("layer.full", || {
+                    transformer_block_paged_with_rope_tables(
+                        backend,
+                        &hidden,
+                        layer,
+                        config,
+                        positions,
+                        start_pos,
+                        config.num_attention_heads,
+                        config.num_kv_heads,
+                        config.head_dim,
+                        config.rotary_dim(),
+                        &weights.rotary_inv_freq,
+                        rope_tables,
+                        config.rms_norm_eps,
+                        paged_cache,
+                        block_table,
+                        full_attn_idx,
+                        layer_lora,
+                    )
+                });
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
                     .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
@@ -7048,10 +7982,10 @@ fn model_forward_paged_inner(
                 if capture_c46_taps {
                     capture_c46_layer1_row_provenance_taps(&hidden)?;
                 }
-                let normed = {
+                let normed = decode_profile_time("norm.pre_attn", || {
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
-                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
-                };
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)
+                })?;
                 // Phase B11b tap: `layer_0_post_input_norm`. Captured only on
                 // layer 0 (the B10 scan localized divergence there) — pre-GDN
                 // input LayerNorm output. Shape [1, T, hidden]. HF mirror:
@@ -7084,19 +8018,21 @@ fn model_forward_paged_inner(
                         &hidden,
                     )?;
                 }
-                let normed_post = {
+                let normed_post = decode_profile_time("norm.pre_mlp", || {
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
                     rms_norm(
                         &hidden,
                         &layer.post_attention_layernorm,
                         config.rms_norm_eps,
-                    )?
-                };
-                let ffn_out = if use_metal_decode_ffn {
-                    swiglu_ffn_metal_decode(&normed_post, &layer.mlp, layer_lora)?
-                } else {
-                    swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?
-                };
+                    )
+                })?;
+                let ffn_out = swiglu_ffn_backend_decode_if(
+                    backend,
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -7130,31 +8066,34 @@ fn model_forward_paged_inner(
     // per-position and the matmul reduces along `hidden_size` only. `Skip`
     // returns `None` and is used by the streaming dispatcher for every tile
     // whose logits the caller will throw away.
-    match lm_head_mode {
+    let result = match lm_head_mode {
         LmHeadMode::Full => {
-            let logits = {
+            let logits = decode_profile_time("lm_head.full", || {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-                lm_head_forward(&hidden, &weights.embed_tokens_t)?
-            };
+                lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)
+            })?;
             Ok((Some(logits), None, None))
         }
         LmHeadMode::LastRowOnly => {
-            let logits = {
+            let logits = decode_profile_time("lm_head.last_row", || {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 let last = hidden.narrow(1, seq_len - 1, 1)?;
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
-                lm_head_forward(&normed, &weights.embed_tokens_t)?
-            };
+                lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+            })?;
             Ok((Some(logits), None, None))
         }
         LmHeadMode::LastRowArgmaxOnly => {
-            let token = {
+            let last =
+                decode_profile_time("lm_head.narrow", || Ok(hidden.narrow(1, seq_len - 1, 1)?))?;
+            let normed = decode_profile_time("final_norm", || {
+                rms_norm(&last, &weights.final_norm, config.rms_norm_eps)
+            })?;
+            let token = decode_profile_time("lm_head.argmax", || {
                 kiln_nvtx::range!(c"kiln/lm_head_argmax");
-                let last = hidden.narrow(1, seq_len - 1, 1)?;
-                let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
-                lm_head_argmax(&normed, &weights.embed_tokens_t)?
-            };
+                lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+            })?;
             Ok((None, None, Some(token)))
         }
         LmHeadMode::FullWithLastHidden => {
@@ -7166,18 +8105,18 @@ fn model_forward_paged_inner(
             // magnitude ratio) confirmed kiln was one RMSNorm behind. We now
             // apply `final_norm` ONCE and slice the last row from the normed
             // tensor for both the logits projection and the returned h_prev.
-            let normed = {
+            let normed = decode_profile_time("final_norm", || {
                 kiln_nvtx::range!(c"kiln/final_norm");
-                rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
-            };
+                rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)
+            })?;
             let last_hidden = normed.narrow(1, seq_len - 1, 1)?.contiguous()?;
             if crate::mtp_debug::is_h_main_capture_armed() {
                 let _ = crate::mtp_debug::capture_h_main_tap("h_post_final_norm", &last_hidden);
             }
-            let logits = {
+            let logits = decode_profile_time("lm_head.full", || {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                lm_head_forward(&normed, &weights.embed_tokens_t)?
-            };
+                lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+            })?;
             Ok((Some(logits), Some(last_hidden), None))
         }
         LmHeadMode::LastRowWithLastHidden => {
@@ -7186,21 +8125,29 @@ fn model_forward_paged_inner(
             // `final_norm` (cheap) — that row, once normed, is the canonical
             // post-final-norm `h_prev` the MTP head expects.
             let last_pre_norm = hidden.narrow(1, seq_len - 1, 1)?.contiguous()?;
-            let last_hidden = {
+            let last_hidden = decode_profile_time("final_norm", || {
                 kiln_nvtx::range!(c"kiln/final_norm");
-                rms_norm(&last_pre_norm, &weights.final_norm, config.rms_norm_eps)?
-            };
+                rms_norm(&last_pre_norm, &weights.final_norm, config.rms_norm_eps)
+            })?;
             if crate::mtp_debug::is_h_main_capture_armed() {
                 let _ = crate::mtp_debug::capture_h_main_tap("h_post_final_norm", &last_hidden);
             }
-            let logits = {
+            let logits = decode_profile_time("lm_head.last_row", || {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                lm_head_forward(&last_hidden, &weights.embed_tokens_t)?
-            };
+                lm_head_forward_backend_decode_if(
+                    Some(backend),
+                    &last_hidden,
+                    &weights.embed_tokens_t,
+                )
+            })?;
             Ok((Some(logits), Some(last_hidden), None))
         }
         LmHeadMode::Skip => Ok((None, None, None)),
+    };
+    if result.is_ok() {
+        decode_profile.finish(start_pos, token_ids[0], lm_head_mode);
     }
+    result
 }
 
 /// Streaming/tiled paged prefill — the Phase 7 long-context entry point.
@@ -7671,9 +8618,15 @@ mod tests {
         let elems = batch * seq_len * heads * hidden;
 
         let mut rng = StdRng::seed_from_u64(0xC0DA_6A7E);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let z_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-2.0f32..2.0f32)).collect();
-        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
+        let x_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let z_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-2.0f32..2.0f32))
+            .collect();
+        let w_data: Vec<f32> = (0..hidden)
+            .map(|_| rng.random_range(0.5f32..1.5f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
             .to_dtype(DType::BF16)?;
@@ -7730,9 +8683,15 @@ mod tests {
         let elems = batch * seq_len * heads * hidden;
 
         let mut rng = StdRng::seed_from_u64(0x6A7E_DA75);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let z_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-2.0f32..2.0f32)).collect();
-        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
+        let x_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let z_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-2.0f32..2.0f32))
+            .collect();
+        let w_data: Vec<f32> = (0..hidden)
+            .map(|_| rng.random_range(0.5f32..1.5f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
             .to_dtype(DType::BF16)?;
@@ -7783,7 +8742,9 @@ mod tests {
         let elems = batch * seq_len * hidden;
 
         let mut rng = StdRng::seed_from_u64(0xA11CE);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let x_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let w_data: Vec<f32> = (0..hidden)
             .map(|_| rng.random_range(-0.2f32..0.2f32))
             .collect();
@@ -9930,8 +10891,12 @@ mod tests {
         let n_v = b * nv * c * dv;
         let n_b = b * nv * c;
 
-        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.05f32..0.05f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let a_data: Vec<f32> = (0..n_a)
+            .map(|_| rng.random_range(-0.05f32..0.05f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
@@ -9995,8 +10960,12 @@ mod tests {
         let n_v = b * nv * c * dv;
         let n_b = b * nv * c;
 
-        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.05f32..0.05f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let a_data: Vec<f32> = (0..n_a)
+            .map(|_| rng.random_range(-0.05f32..0.05f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
@@ -10070,13 +11039,23 @@ mod tests {
         let n_b = b * nv * t;
         let n_s = b * nv * dk * dv;
 
-        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let q_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let k_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.3f32..1.2f32)).collect();
         // Small negative gates so exp(g) stays in (~0.8, 1.0).
-        let g_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let g_data: Vec<f32> = (0..n_b)
+            .map(|_| rng.random_range(-0.2f32..0.0f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
 
         let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?;
         let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?;
@@ -10179,12 +11158,22 @@ mod tests {
         let n_b = b * nv * t;
         let n_s = b * nv * dk * dv;
 
-        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let q_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let k_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.3f32..1.2f32)).collect();
-        let g_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let g_data: Vec<f32> = (0..n_b)
+            .map(|_| rng.random_range(-0.2f32..0.0f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
 
         let q = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
         let k = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
@@ -10279,12 +11268,24 @@ mod tests {
         // Small negative gates so big_g stays in a reasonable range — the
         // recurrence produces g_t near zero so the cumulative sum caps
         // around -10 at most.
-        let g_data: Vec<f32> = (0..n_g).map(|_| rng.random_range(-0.15f32..0.0f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let ks_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qs_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let g_data: Vec<f32> = (0..n_g)
+            .map(|_| rng.random_range(-0.15f32..0.0f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let kkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let ks_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qs_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
 
         let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
         let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
@@ -10390,9 +11391,15 @@ mod tests {
                 }
             })
             .collect();
-        let b_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.2f32..0.2f32)).collect();
-        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let qss_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let b_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.2f32..0.2f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let qss_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
         let decay_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.6f32..1.0f32)).collect();
 
@@ -10477,14 +11484,28 @@ mod tests {
         let n_dkc = b * nv * dk * c;
         let n_dkdv = b * nv * dk * dv;
 
-        let g_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(-0.15f32..0.0f32)).collect();
-        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let ks_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qs_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let g_data: Vec<f32> = (0..n_c)
+            .map(|_| rng.random_range(-0.15f32..0.0f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let kkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let ks_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qs_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
-        let kt_data: Vec<f32> = (0..n_dkc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let kt_data: Vec<f32> = (0..n_dkc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
         let state_data: Vec<f32> = (0..n_dkdv)
             .map(|_| rng.random_range(-0.25f32..0.25f32))
             .collect();
@@ -10583,9 +11604,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
@@ -10672,9 +11699,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -10751,9 +11784,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
@@ -10830,9 +11869,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -10903,9 +11948,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -11579,7 +12630,9 @@ mod tests {
 
         // Final recurrent state must match (the load-bearing invariant for
         // training-time streaming — autograd flows through this state thread).
-        let mr = mono_state.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?;
+        let mr = mono_state.recurrent_states[0]
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         let sr = stream_state.recurrent_states[0]
             .flatten_all()?
             .to_vec1::<f32>()?;

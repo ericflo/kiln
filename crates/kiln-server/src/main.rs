@@ -249,8 +249,7 @@ async fn main() -> Result<()> {
     state.training_webhook_url = config.training.webhook_url.clone();
     state.max_queued_training_jobs = config.training.max_queued_jobs;
     state.max_tracked_jobs = config.training.max_tracked_jobs;
-    state.tracked_job_ttl =
-        std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
+    state.tracked_job_ttl = std::time::Duration::from_secs(config.training.tracked_job_ttl_secs);
     state.adapter_max_disk_bytes = config.adapters.max_disk_bytes;
     state.composed_cache_max_bytes = config.adapters.composed_cache_max_bytes;
     state.composed_cache_max_entries = config.adapters.composed_cache_max_entries;
@@ -278,7 +277,9 @@ async fn main() -> Result<()> {
         state.composed_cache_max_bytes,
         state.composed_cache_max_entries,
     ) {
-        (None, None) => tracing::info!("composed-adapter cache LRU eviction disabled (operator opt-out)"),
+        (None, None) => {
+            tracing::info!("composed-adapter cache LRU eviction disabled (operator opt-out)")
+        }
         (bytes, entries) => tracing::info!(
             cap_bytes = ?bytes,
             cap_gib = ?bytes.map(|b| b as f64 / 1024.0 / 1024.0 / 1024.0),

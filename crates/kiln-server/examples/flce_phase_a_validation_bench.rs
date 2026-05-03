@@ -673,14 +673,15 @@ fn main() -> Result<()> {
 
     // Per-cell verdicts. The original Phase A cells use streaming=None;
     // the GDN-streaming audit cells use streaming=Some(true).
-    let cell = |t: usize, flce: bool, streaming: Option<bool>, tile: Option<usize>| -> Option<&Row> {
-        rows.iter().find(|r| {
-            r.target_t == t
-                && r.use_flce == flce
-                && r.streaming == streaming
-                && r.tile_tokens == tile
-        })
-    };
+    let cell =
+        |t: usize, flce: bool, streaming: Option<bool>, tile: Option<usize>| -> Option<&Row> {
+            rows.iter().find(|r| {
+                r.target_t == t
+                    && r.use_flce == flce
+                    && r.streaming == streaming
+                    && r.tile_tokens == tile
+            })
+        };
     let t2048_off = cell(2048, false, None, None);
     let t2048_on = cell(2048, true, None, None);
     let t8192_on = cell(8192, true, None, None);
@@ -699,9 +700,18 @@ fn main() -> Result<()> {
         ("T=16384  FLCE=ON  STREAM=unset           ", t16384_on),
         ("T=2048   FLCE=ON  STREAM=ON  tile=default", t2048_on_stream),
         ("T=8192   FLCE=ON  STREAM=ON  tile=default", t8192_on_stream),
-        ("T=8192   FLCE=ON  STREAM=ON  tile=4096   ", t8192_on_stream_4096),
-        ("T=8192   FLCE=ON  STREAM=ON  tile=2048   ", t8192_on_stream_2048),
-        ("T=16384  FLCE=ON  STREAM=ON  tile=4096   ", t16384_on_stream_4096),
+        (
+            "T=8192   FLCE=ON  STREAM=ON  tile=4096   ",
+            t8192_on_stream_4096,
+        ),
+        (
+            "T=8192   FLCE=ON  STREAM=ON  tile=2048   ",
+            t8192_on_stream_2048,
+        ),
+        (
+            "T=16384  FLCE=ON  STREAM=ON  tile=4096   ",
+            t16384_on_stream_4096,
+        ),
     ] {
         match r {
             Some(r) => println!(
@@ -744,12 +754,9 @@ fn main() -> Result<()> {
     //       smaller tiles should produce monotonically smaller peak VRAM.
     //       The headline acceptance criterion is that at least ONE of the
     //       T=8192 STREAMING cells completes without OOM.
-    let stream_t8192_4096_ok =
-        matches!(t8192_on_stream_4096.map(|r| &r.status), Some(Status::Ok));
-    let stream_t8192_2048_ok =
-        matches!(t8192_on_stream_2048.map(|r| &r.status), Some(Status::Ok));
-    let stream_t8192_default_ok =
-        matches!(t8192_on_stream.map(|r| &r.status), Some(Status::Ok));
+    let stream_t8192_4096_ok = matches!(t8192_on_stream_4096.map(|r| &r.status), Some(Status::Ok));
+    let stream_t8192_2048_ok = matches!(t8192_on_stream_2048.map(|r| &r.status), Some(Status::Ok));
+    let stream_t8192_default_ok = matches!(t8192_on_stream.map(|r| &r.status), Some(Status::Ok));
     let any_8192_stream_ok =
         stream_t8192_default_ok || stream_t8192_4096_ok || stream_t8192_2048_ok;
 
@@ -768,11 +775,7 @@ fn main() -> Result<()> {
         // T=8192 still OOM with streaming ON. Inspect the T=8192 cells'
         // peak-VRAM ladder to distinguish "streaming reduces peak but not
         // enough" from "streaming has no measurable effect".
-        let peaks_monotonic = match (
-            t8192_on_stream,
-            t8192_on_stream_4096,
-            t8192_on_stream_2048,
-        ) {
+        let peaks_monotonic = match (t8192_on_stream, t8192_on_stream_4096, t8192_on_stream_2048) {
             (Some(a), Some(b), Some(c)) => a.peak_mib >= b.peak_mib && b.peak_mib >= c.peak_mib,
             _ => false,
         };

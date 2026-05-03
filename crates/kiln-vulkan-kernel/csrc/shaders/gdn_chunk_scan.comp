@@ -36,15 +36,22 @@ void main() {
     uint base = bh * chunk * dv;
     uint cc_base = bh * chunk * chunk;
 
-    // Scan: accumulate through the chunk
-    float acc = 0.0;
-    for (uint j = 0; j <= c; j++) {
-        float product = 1.0;
-        for (uint k = j + 1; k <= c; k++) {
-            product *= data_a_strict[cc_base + k * chunk + j];
+    // Forward substitution for this output column through token c:
+    // W[t] = beta[t] * (V'[t] - sum_{i<t} A[t,i] * W[i]).
+    float w_vals[128];
+    for (uint t = 0; t <= c; t++) {
+        float acc_a = 0.0;
+        for (uint i = 0; i < t; i++) {
+            acc_a += data_a_strict[cc_base + t * chunk + i] * w_vals[i];
         }
-        acc += product * data_v_prime[base + j * dv + d];
+        w_vals[t] = data_beta[bh * chunk + t] * (data_v_prime[base + t * dv + d] - acc_a);
     }
-    
-    data_out[base + c * dv + d] = acc * data_beta[bh * chunk + c];
+
+    float intra = 0.0;
+    for (uint i = 0; i <= c; i++) {
+        intra += data_b_mask[cc_base + c * chunk + i] * w_vals[i];
+    }
+
+    data_out[base + c * dv + d] = data_q_s_scaled[base + c * dv + d] + intra;
+    data_p_out[base + c * dv + d] = w_vals[c] * data_decay_last_col[bh * chunk + c];
 }

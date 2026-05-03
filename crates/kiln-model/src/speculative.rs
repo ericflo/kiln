@@ -11,8 +11,8 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
-use rand::rngs::StdRng;
 use rand::RngExt;
+use rand::rngs::StdRng;
 
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
@@ -22,9 +22,9 @@ use kiln_core::token::TokenId;
 use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
-    model_forward, model_forward_embed, model_forward_head, model_forward_paged,
-    model_forward_paged_with_last_hidden, model_forward_segment, mtp_forward_step, GpuWeights,
-    LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_head,
+    model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
+    mtp_forward_step,
 };
 use crate::kv_cache::KvCache;
 use crate::paged_kv_cache::PagedKvCache;

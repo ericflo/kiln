@@ -1,0 +1,89 @@
+// Fused single-token GDN input projections.
+//
+// Computes four row-vector matmuls in one dispatch:
+//   qkv = x[hidden] * qkv_weight_t[hidden, qkv_dim]
+//   z   = x[hidden] * z_weight_t[hidden, z_dim]
+//   a   = x[hidden] * a_weight_t[hidden, a_dim]
+//   b   = x[hidden] * b_weight_t[hidden, b_dim]
+//
+// Rust passes CPU tensors converted to f32. Weight buffers are intended to be
+// cached on the Vulkan backend so decode pays only an x upload and output
+// readback after the first token.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint qkv_dim;
+    uint z_dim;
+    uint a_dim;
+    uint b_dim;
+    uint total_out;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer QkvWeightBuf { float data_qkv_w[]; };
+layout(binding = 2) readonly buffer ZWeightBuf { float data_z_w[]; };
+layout(binding = 3) readonly buffer AWeightBuf { float data_a_w[]; };
+layout(binding = 4) readonly buffer BWeightBuf { float data_b_w[]; };
+layout(binding = 5) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial[256];
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint out_idx = gl_WorkGroupID.x * 16 + col_lane;
+    uint partial_idx = col_lane * 16 + red_lane;
+
+    uint col = out_idx;
+    uint width = qkv_dim;
+    uint projection = 0;
+
+    if (col >= qkv_dim) {
+        col -= qkv_dim;
+        width = z_dim;
+        projection = 1;
+    }
+    if (projection == 1 && col >= z_dim) {
+        col -= z_dim;
+        width = a_dim;
+        projection = 2;
+    }
+    if (projection == 2 && col >= a_dim) {
+        col -= a_dim;
+        width = b_dim;
+        projection = 3;
+    }
+
+    float sum = 0.0;
+    if (out_idx < total_out) {
+        for (uint h = red_lane; h < hidden; h += 16) {
+            float w = 0.0;
+            uint off = h * width + col;
+            if (projection == 0) {
+                w = data_qkv_w[off];
+            } else if (projection == 1) {
+                w = data_z_w[off];
+            } else if (projection == 2) {
+                w = data_a_w[off];
+            } else {
+                w = data_b_w[off];
+            }
+            sum += data_x[h] * w;
+        }
+    }
+
+    partial[partial_idx] = sum;
+    barrier();
+
+    if (red_lane == 0 && out_idx < total_out) {
+        float total = 0.0;
+        for (uint lane = 0; lane < 16; lane++) {
+            total += partial[col_lane * 16 + lane];
+        }
+        data_out[out_idx] = total;
+    }
+}

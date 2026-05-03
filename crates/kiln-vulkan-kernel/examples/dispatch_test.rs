@@ -13,10 +13,7 @@ fn main() -> Result<()> {
     );
 
     // 2. Compile add.comp (element-wise add: out = a + b)
-    let shader_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/add.comp"
-    );
+    let shader_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
     println!("Compiling shader: {}", shader_path);
     let spirv = kiln_vulkan_kernel::pipeline::ShaderPipeline::compile_shader(shader_path)?;
     println!("Compiled SPIR-V: {} bytes", spirv.len());

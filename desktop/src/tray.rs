@@ -56,8 +56,7 @@ pub fn build_tray(app: &AppHandle, supervisor: Arc<Supervisor>) -> tauri::Result
         .build(app)?;
     let dashboard = MenuItemBuilder::with_id(ITEM_DASHBOARD, "Open Dashboard").build(app)?;
     let settings = MenuItemBuilder::with_id(ITEM_SETTINGS, "Settings…").build(app)?;
-    let copy_url =
-        MenuItemBuilder::with_id(ITEM_COPY_URL, "Copy OpenAI Base URL").build(app)?;
+    let copy_url = MenuItemBuilder::with_id(ITEM_COPY_URL, "Copy OpenAI Base URL").build(app)?;
     let open_in_browser =
         MenuItemBuilder::with_id(ITEM_OPEN_IN_BROWSER, "Open Kiln UI in Browser").build(app)?;
     let start = MenuItemBuilder::with_id(ITEM_START, "Start Server").build(app)?;
@@ -713,7 +712,10 @@ mod tests {
             "Status: Training"
         );
         assert_eq!(
-            format!("Status: {}", state_label(&ServerState::Error("boom".into()))),
+            format!(
+                "Status: {}",
+                state_label(&ServerState::Error("boom".into()))
+            ),
             "Status: Error: boom"
         );
         // Helper must match the inline format used by the watcher.
@@ -799,7 +801,11 @@ mod tests {
     #[test]
     fn ready_notification_body_contains_openai_base_url() {
         let body = ready_notification_body(9000);
-        assert!(body.contains("http://localhost:9000/v1"), "body was {}", body);
+        assert!(
+            body.contains("http://localhost:9000/v1"),
+            "body was {}",
+            body
+        );
         assert!(body.contains("OpenAI base URL"), "body was {}", body);
         assert_eq!(
             ready_notification_body(8080),
@@ -809,10 +815,7 @@ mod tests {
 
     #[test]
     fn open_kiln_ui_failure_body_contains_url_and_error() {
-        let body = open_kiln_ui_failure_body(
-            "http://127.0.0.1:9000/ui",
-            "xdg-open: not found",
-        );
+        let body = open_kiln_ui_failure_body("http://127.0.0.1:9000/ui", "xdg-open: not found");
         assert!(
             body.contains("http://127.0.0.1:9000/ui"),
             "body should include URL for manual paste, got: {}",
@@ -926,7 +929,11 @@ mod tests {
         let mut ptrs: Vec<*const u8> = Vec::with_capacity(states.len());
         for s in &states {
             let bytes = state_icon_bytes(s);
-            assert!(!bytes.is_empty(), "icon bytes for {:?} must be non-empty", s);
+            assert!(
+                !bytes.is_empty(),
+                "icon bytes for {:?} must be non-empty",
+                s
+            );
             ptrs.push(bytes.as_ptr());
         }
         let mut sorted = ptrs.clone();
@@ -945,14 +952,20 @@ mod tests {
             let err = "supervisor already running";
             let body = tray_op_error_body(op, err);
             assert!(body.contains(op), "body {body:?} should contain op {op:?}");
-            assert!(body.contains(err), "body {body:?} should contain err {err:?}");
+            assert!(
+                body.contains(err),
+                "body {body:?} should contain err {err:?}"
+            );
         }
     }
 
     #[test]
     fn tray_op_error_body_empty_err() {
         let body = tray_op_error_body("start", "");
-        assert!(!body.is_empty(), "body should be non-empty even when err is empty");
+        assert!(
+            !body.is_empty(),
+            "body should be non-empty even when err is empty"
+        );
         assert!(body.contains("start"), "body {body:?} should contain op");
     }
 }

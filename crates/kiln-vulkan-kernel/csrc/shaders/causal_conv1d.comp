@@ -6,7 +6,7 @@
 // condition where t=seq_len-1 writes conv_state while other threads for the
 // same (b,c) are still reading it.
 //
-// Input:  x[B,C,T], weight[C,K]
+// Input:  x[B,C,T], weight[C,K], conv_state[B,C,K-1]
 // Output: out[B,C,T]
 //
 // Push constants: batch, channels, seq_len, kernel_size
@@ -25,7 +25,8 @@ layout(push_constant) uniform Parameters {
 
 layout(binding = 0) readonly buffer XBuf { float data_x[]; };
 layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
-layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+layout(binding = 2) readonly buffer ConvStateBuf { float data_conv_state[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
 
 void main() {
     const uint idx = gl_GlobalInvocationID.x;
@@ -38,15 +39,20 @@ void main() {
     const uint c = (idx / seq_len) % channels;
     const uint t = idx % seq_len;
 
+    const uint state_len = kernel_size - 1;
+    const uint state_base = (b * channels + c) * state_len;
+    const uint x_base = (b * channels + c) * seq_len;
+
     float sum = 0.0;
     for (uint k = 0; k < kernel_size; k++) {
+        // Match the portable reference exactly:
+        // padded = concat([conv_state, x], time), output[t] = dot(weight, padded[t:t+K]).
+        const uint logical_t = t + k;
         float x_val;
-        if (k <= t) {
-            x_val = data_x[((b * channels + c) * seq_len) + (t - k)];
+        if (logical_t < state_len) {
+            x_val = data_conv_state[state_base + logical_t];
         } else {
-            // Missing taps: zero for prefill.
-            // State handling is done by the separate advance_state dispatch.
-            x_val = 0.0;
+            x_val = data_x[x_base + logical_t - state_len];
         }
         sum += x_val * data_weight[c * kernel_size + k];
     }

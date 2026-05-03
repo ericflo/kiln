@@ -28,27 +28,34 @@ layout(binding = 9) writeonly buffer QSScaledBuf { float data_q_s_scaled[]; };
 layout(binding = 10) writeonly buffer DecayLastColBuf { float data_decay_last_col[]; };
 layout(binding = 11) writeonly buffer PLastBuf { float data_p_last[]; };
 
+float cumulative_g(uint g_base, uint end_inclusive) {
+    float acc = 0.0;
+    for (uint i = 0; i <= end_inclusive; i++) {
+        acc += data_g[g_base + i];
+    }
+    return acc;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     uint total_bh = batch * heads;
-    if (idx >= total_bh * chunk * chunk + total_bh * chunk * dv * 2) return;
+    uint per_bh = chunk * chunk + chunk * dv + chunk + 1;
+    if (idx >= total_bh * per_bh) return;
 
-    uint bh = idx / (chunk * chunk + chunk * dv * 2);
-    uint local = idx % (chunk * chunk + chunk * dv * 2);
+    uint bh = idx / per_bh;
+    uint local = idx % per_bh;
 
     uint g_base = bh * chunk;
     uint cc_base = bh * chunk * chunk;
     uint cv_base = bh * chunk * dv;
+    uint decay_base = bh * chunk;
 
     if (local < chunk * chunk) {
         uint c1 = local / chunk;
         uint c2 = local % chunk;
-        float decay;
-        if (c1 > c2) {
-            decay = exp(data_g[g_base + c1] - data_g[g_base + c2]);
-        } else {
-            decay = 0.0;
-        }
+        float g1 = cumulative_g(g_base, c1);
+        float g2 = cumulative_g(g_base, c2);
+        float decay = exp(g1 - g2);
         // a_strict: kkt * decay * strict_lower
         data_a_strict[cc_base + local] = (c1 > c2) ? data_kkt[cc_base + local] * decay : 0.0;
         // b_mask: qkt * decay * causal_lower (c1 >= c2)
@@ -56,12 +63,18 @@ void main() {
     } else if (local < chunk * chunk + chunk * dv) {
         uint cv = (local - chunk * chunk) / dv;
         uint d = (local - chunk * chunk) % dv;
-        float p = exp(data_g[g_base + chunk - 1] - data_g[g_base + cv]);
+        float p = exp(cumulative_g(g_base, cv));
         // v_prime: v - ks_entry * p
         data_v_prime[cv_base + cv * dv + d] = data_v[cv_base + cv * dv + d] - data_ks_entry[cv_base + cv * dv + d] * p;
         // q_s_scaled: q_s * p
         data_q_s_scaled[cv_base + cv * dv + d] = data_q_s[cv_base + cv * dv + d] * p;
+    } else if (local < chunk * chunk + chunk * dv + chunk) {
+        uint c = local - chunk * chunk - chunk * dv;
+        float g_last = cumulative_g(g_base, chunk - 1);
+        float g_c = cumulative_g(g_base, c);
+        data_decay_last_col[decay_base + c] = exp(g_last - g_c);
     } else {
-        // decay_last_col and p_last handled separately
+        float g_last = cumulative_g(g_base, chunk - 1);
+        data_p_last[bh] = exp(g_last);
     }
 }

@@ -17,6 +17,7 @@ Choose the path that matches how you want to run Kiln.
 
 - **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
 - **NVIDIA builds**: GPU with 24GB+ VRAM and CUDA 12.0+ (`nvcc --version` to check).
+- **AMD / Intel Linux builds**: Vulkan 1.2+ driver and tools (`vulkaninfo --summary` should list your GPU). Install `glslc` to embed shaders at build time.
 - **Apple Silicon builds**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
 - **Disk**: ~20GB free for model weights and build artifacts.
 
@@ -24,7 +25,7 @@ If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mo
 
 ## Quick path: Desktop App (recommended for most users)
 
-Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. **No Rust toolchain or CUDA build required for the GUI itself.**
+Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. Linux chooses CUDA for NVIDIA systems and Vulkan for AMD/Intel systems. **No Rust toolchain or CUDA build required for the GUI itself.**
 
 **Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
@@ -54,6 +55,14 @@ cargo build --release --features cuda
 ```
 
 The first build takes 15-30 minutes (CUDA kernel compilation). Subsequent builds are fast.
+
+**Linux + AMD / Intel (Vulkan):**
+
+```bash
+cargo build --release --features vulkan
+```
+
+Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. `KILN_VULKAN_DEVICE=0` or `GGML_VK_VISIBLE_DEVICES=0` can pin a specific Vulkan physical device.
 
 **macOS + Apple Silicon:**
 
@@ -131,7 +140,7 @@ Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachab
 
 **Training endpoints are privileged.** `/v1/train/sft` and `/v1/train/grpo` apply a faithful gradient update to whatever structurally-valid examples you POST — kiln does not validate the *content* of training data. A poisoned example will permanently influence the active adapter until you unload it. Do not expose training endpoints to untrusted inputs, and treat your training corpus as security-sensitive. See the README's [Security model](README.md#security-model) section for the full picture.
 
-On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. No config changes needed — the binary selects the backend that was compiled in.
+On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. On Linux AMD/Intel builds, the equivalent Vulkan log line is `Vulkan available — using Vulkan GPU (AMD/Intel)`. No config changes needed — the binary selects the backend that was compiled in.
 
 ## 4. Test Inference
 

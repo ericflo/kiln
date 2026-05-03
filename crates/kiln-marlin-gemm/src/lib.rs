@@ -43,9 +43,7 @@
 //!   permuted scales from a fake-quantized fp32 weight matrix.
 
 use candle_core::{
-    backend::BackendStorage,
-    cuda_backend::cudarc::driver::DevicePtr,
-    DType, Result, Tensor,
+    DType, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::{bf16, f16};
 
@@ -128,19 +126,19 @@ pub fn marlin_w4a16_gemm(
     }
 
     if !(groupsize == -1 || groupsize == 128) {
-        candle_core::bail!(
-            "kiln-marlin-gemm: groupsize must be -1 or 128 (got {groupsize})"
-        );
+        candle_core::bail!("kiln-marlin-gemm: groupsize must be -1 or 128 (got {groupsize})");
     }
     // `groupsize_for_dims` is the actual chunk size in K used for sizing the
     // scales tensor; `-1` means per-column, i.e. one row of scales total.
     // The kernel itself takes `-1` as a sentinel for per-column, so we keep
     // `groupsize` as-is when forwarding to the FFI call.
-    let groupsize_for_dims: usize = if groupsize == -1 { k } else { groupsize as usize };
+    let groupsize_for_dims: usize = if groupsize == -1 {
+        k
+    } else {
+        groupsize as usize
+    };
     if groupsize_for_dims > k || k % groupsize_for_dims != 0 {
-        candle_core::bail!(
-            "kiln-marlin-gemm: k={k} must be divisible by groupsize={groupsize}"
-        );
+        candle_core::bail!("kiln-marlin-gemm: k={k} must be divisible by groupsize={groupsize}");
     }
 
     let expected_s_rows = k / groupsize_for_dims;
@@ -161,7 +159,10 @@ pub fn marlin_w4a16_gemm(
         );
     }
     if scales.dtype() != DType::F16 {
-        candle_core::bail!("kiln-marlin-gemm: scales must be f16 (got {:?})", scales.dtype());
+        candle_core::bail!(
+            "kiln-marlin-gemm: scales must be f16 (got {:?})",
+            scales.dtype()
+        );
     }
 
     // The kernel is FP16-only; cast bf16 -> fp16 on the way in.
@@ -376,11 +377,12 @@ pub mod pack {
         assert_eq!(k % 128, 0, "k must be %128 == 0");
         assert_eq!(n % 256, 0, "n must be %256 == 0");
 
-        let g = if groupsize == -1 { k } else { groupsize as usize };
-        assert!(
-            k % g == 0,
-            "k={k} must be divisible by groupsize={g}"
-        );
+        let g = if groupsize == -1 {
+            k
+        } else {
+            groupsize as usize
+        };
+        assert!(k % g == 0, "k={k} must be divisible by groupsize={g}");
         let num_groups = k / g;
 
         // 1) Compute per-(group, column) scales. We use upstream Marlin's

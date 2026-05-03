@@ -54,8 +54,14 @@ fn time_fwd_bwd(
 fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
-    if n == 0 { return 0.0; }
-    if n % 2 == 1 { v[n/2] } else { (v[n/2-1] + v[n/2]) / 2.0 }
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
 }
 
 fn run_shape(label: &str, b: usize, t: usize, h: usize, device: &Device) -> Result<()> {
@@ -98,8 +104,8 @@ fn main() -> Result<()> {
     println!("|:-------------------|--:|-----:|-----:|----------:|---------:|--------:|");
 
     let h = 2560; // Qwen3.5-4B hidden
-    run_shape("decode",        1, 1,    h, &device)?;
-    run_shape("training T=512",  1, 512,  h, &device)?;
+    run_shape("decode", 1, 1, h, &device)?;
+    run_shape("training T=512", 1, 512, h, &device)?;
     run_shape("training T=2048", 1, 2048, h, &device)?;
     run_shape("training T=4096", 1, 4096, h, &device)?;
     run_shape("training T=8192", 1, 8192, h, &device)?;

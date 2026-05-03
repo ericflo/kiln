@@ -37,17 +37,15 @@ const MODEL_ENV: &str = "KILN_MTP_BYTE_EQ_MODEL";
 #[test]
 fn mtp_weights_match_safetensors_byte_for_byte() {
     let Some(model_dir) = std::env::var_os(MODEL_ENV).map(PathBuf::from) else {
-        eprintln!(
-            "[mtp_byte_eq] skipped — set {MODEL_ENV}=/path/to/Qwen3.5-4B to enable"
-        );
+        eprintln!("[mtp_byte_eq] skipped — set {MODEL_ENV}=/path/to/Qwen3.5-4B to enable");
         return;
     };
     run(&model_dir).expect("byte-eq comparison failed");
 }
 
 fn run(model_dir: &Path) -> Result<()> {
-    let config = qwen35_4b_config()
-        .context("could not build Qwen3.5-4B model config for byte-eq test")?;
+    let config =
+        qwen35_4b_config().context("could not build Qwen3.5-4B model config for byte-eq test")?;
 
     // 1. Load MTP via the kiln loader.
     let opts = LoadModelOptions { load_mtp: true };
@@ -63,13 +61,12 @@ fn run(model_dir: &Path) -> Result<()> {
     let mmaps: Vec<Mmap> = shards
         .iter()
         .map(|p| {
-            let f = std::fs::File::open(p)
-                .with_context(|| format!("open shard {}", p.display()))?;
+            let f =
+                std::fs::File::open(p).with_context(|| format!("open shard {}", p.display()))?;
             // SAFETY: read-only mmap of an immutable file for the duration of
             // this test. Standard safetensors loader pattern.
-            let mmap = unsafe {
-                Mmap::map(&f).with_context(|| format!("mmap shard {}", p.display()))?
-            };
+            let mmap =
+                unsafe { Mmap::map(&f).with_context(|| format!("mmap shard {}", p.display()))? };
             anyhow::Ok(mmap)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -115,11 +112,7 @@ fn run(model_dir: &Path) -> Result<()> {
     let mut all_ok = true;
 
     let cases: Vec<(&str, String, &WeightTensor)> = vec![
-        (
-            "fc",
-            format!("{mtp_prefix}fc.weight"),
-            &mtp.fc,
-        ),
+        ("fc", format!("{mtp_prefix}fc.weight"), &mtp.fc),
         (
             "pre_fc_norm_embedding",
             format!("{mtp_prefix}pre_fc_norm_embedding.weight"),

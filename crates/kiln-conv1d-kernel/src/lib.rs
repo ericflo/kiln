@@ -51,8 +51,7 @@
 //!   `conv_state` in place (matches the candle fallback's semantics).
 
 use candle_core::{
-    backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr, DType, Device, Result,
-    Tensor,
+    DType, Device, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
 
@@ -367,9 +366,7 @@ pub fn causal_conv1d_prefill(
     let device = x.device();
     let (batch, channels, seq_len) = x.dims3()?;
     if seq_len <= 1 {
-        candle_core::bail!(
-            "kiln-conv1d-kernel: prefill path requires seq_len > 1 (got {seq_len})"
-        );
+        candle_core::bail!("kiln-conv1d-kernel: prefill path requires seq_len > 1 (got {seq_len})");
     }
 
     let weight_flat = match weight.rank() {
@@ -513,7 +510,9 @@ mod tests {
     ) -> Result<Tensor> {
         let (_batch, channels, _one) = x.dims3()?;
         let x_f32 = x.to_dtype(DType::F32)?;
-        let w_f32 = weight.to_dtype(DType::F32)?.reshape((channels, kernel_size))?;
+        let w_f32 = weight
+            .to_dtype(DType::F32)?
+            .reshape((channels, kernel_size))?;
         let window = Tensor::cat(&[&conv_state.clone(), &x_f32], 2)?;
         let w_expanded = w_f32.unsqueeze(0)?;
         let output = window.broadcast_mul(&w_expanded)?.sum(2)?.unsqueeze(2)?;
@@ -532,7 +531,9 @@ mod tests {
     ) -> Result<Tensor> {
         let (_batch, channels, seq_len) = x.dims3()?;
         let x_f32 = x.to_dtype(DType::F32)?;
-        let w_f32 = weight.to_dtype(DType::F32)?.reshape((channels, kernel_size))?;
+        let w_f32 = weight
+            .to_dtype(DType::F32)?
+            .reshape((channels, kernel_size))?;
         let x_padded = Tensor::cat(&[&conv_state.clone(), &x_f32], 2)?;
         let mut outs = Vec::with_capacity(seq_len);
         for t in 0..seq_len {
@@ -592,9 +593,12 @@ mod tests {
 
         let x_f32 = Tensor::from_vec(raw_x, (batch, channels, 1), &device).unwrap();
         let w_f32 = Tensor::from_vec(raw_w, (channels, 1, kernel_size), &device).unwrap();
-        let state_ref_f32 =
-            Tensor::from_vec(raw_state.clone(), (batch, channels, kernel_size - 1), &device)
-                .unwrap();
+        let state_ref_f32 = Tensor::from_vec(
+            raw_state.clone(),
+            (batch, channels, kernel_size - 1),
+            &device,
+        )
+        .unwrap();
 
         let x = x_f32.to_dtype(DType::BF16).unwrap();
         let w = w_f32.to_dtype(DType::BF16).unwrap();
@@ -602,8 +606,7 @@ mod tests {
         let mut state_fused = state_ref_f32.clone();
 
         let y_ref = reference_decode_with_silu(&x, &w, &mut state_ref, kernel_size).unwrap();
-        let y_fused =
-            causal_conv1d_update(&x, &w, &mut state_fused, kernel_size).unwrap();
+        let y_fused = causal_conv1d_update(&x, &w, &mut state_fused, kernel_size).unwrap();
 
         // Output parity.
         let diff = (&y_ref - &y_fused)
@@ -654,9 +657,12 @@ mod tests {
 
         let x_f32 = Tensor::from_vec(raw_x, (batch, channels, seq_len), &device).unwrap();
         let w_f32 = Tensor::from_vec(raw_w, (channels, 1, kernel_size), &device).unwrap();
-        let state_ref_f32 =
-            Tensor::from_vec(raw_state.clone(), (batch, channels, kernel_size - 1), &device)
-                .unwrap();
+        let state_ref_f32 = Tensor::from_vec(
+            raw_state.clone(),
+            (batch, channels, kernel_size - 1),
+            &device,
+        )
+        .unwrap();
 
         let x = x_f32.to_dtype(DType::BF16).unwrap();
         let w = w_f32.to_dtype(DType::BF16).unwrap();

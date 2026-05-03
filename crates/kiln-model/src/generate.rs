@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -20,9 +21,10 @@ use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    model_forward_paged_streaming_with_progress,
-    streaming_prefill_enabled_for,
+    model_forward_paged_next_tokens_greedy_batch, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
+    with_vulkan_gdn_state_readback_skip,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -97,6 +99,14 @@ pub struct PrefixCachedGenerationOutput {
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
     pub decode_duration: std::time::Duration,
+}
+
+/// Batch generation output plus block ownership needed by callers that want to
+/// register prompt prefixes after native batch generation succeeds.
+pub struct PagedBatchGenerationOutput {
+    pub outputs: Vec<GenerationOutput>,
+    pub registrations: Vec<Option<PagedPrefixRegistration>>,
+    pub allocated_blocks: Vec<u32>,
 }
 
 enum PrefillSampleSource {
@@ -220,6 +230,130 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
     block_table
 }
 
+fn stack_linear_attention_states(states: &[LinearAttentionState]) -> Result<LinearAttentionState> {
+    anyhow::ensure!(
+        !states.is_empty(),
+        "cannot stack an empty linear attention state batch"
+    );
+    let recurrent_len = states[0].recurrent_states.len();
+    let conv_len = states[0].conv_states.len();
+    for (idx, state) in states.iter().enumerate() {
+        anyhow::ensure!(
+            state.recurrent_states.len() == recurrent_len,
+            "linear state {idx} recurrent layer count mismatch"
+        );
+        anyhow::ensure!(
+            state.conv_states.len() == conv_len,
+            "linear state {idx} conv layer count mismatch"
+        );
+    }
+
+    let mut recurrent_states = Vec::with_capacity(recurrent_len);
+    for layer in 0..recurrent_len {
+        let first_dims = states[0].recurrent_states[layer].dims();
+        for (idx, state) in states.iter().enumerate().skip(1) {
+            let dims = state.recurrent_states[layer].dims();
+            anyhow::ensure!(
+                dims.len() == first_dims.len() && dims[1..] == first_dims[1..],
+                "linear state {idx} recurrent layer {layer} shape {:?} incompatible with {:?}",
+                dims,
+                first_dims
+            );
+        }
+        let refs: Vec<&Tensor> = states
+            .iter()
+            .map(|state| &state.recurrent_states[layer])
+            .collect();
+        recurrent_states.push(Tensor::cat(&refs, 0).context("stack recurrent linear states")?);
+    }
+
+    let mut conv_states = Vec::with_capacity(conv_len);
+    for layer in 0..conv_len {
+        let first_dims = states[0].conv_states[layer].dims();
+        for (idx, state) in states.iter().enumerate().skip(1) {
+            let dims = state.conv_states[layer].dims();
+            anyhow::ensure!(
+                dims.len() == first_dims.len() && dims[1..] == first_dims[1..],
+                "linear state {idx} conv layer {layer} shape {:?} incompatible with {:?}",
+                dims,
+                first_dims
+            );
+        }
+        let refs: Vec<&Tensor> = states
+            .iter()
+            .map(|state| &state.conv_states[layer])
+            .collect();
+        conv_states.push(Tensor::cat(&refs, 0).context("stack conv linear states")?);
+    }
+
+    Ok(LinearAttentionState {
+        recurrent_states,
+        conv_states,
+    })
+}
+
+fn select_tensor_batch_rows(tensor: &Tensor, rows: &[usize], label: &str) -> Result<Tensor> {
+    anyhow::ensure!(!rows.is_empty(), "cannot select zero rows from {label}");
+    let dims = tensor.dims();
+    anyhow::ensure!(
+        !dims.is_empty(),
+        "{label} must have a batch dimension, got scalar"
+    );
+    let batch = dims[0];
+    for &row in rows {
+        anyhow::ensure!(
+            row < batch,
+            "{label} row index {row} out of bounds for batch {batch}"
+        );
+    }
+    if rows.len() == batch && rows.iter().copied().eq(0..batch) {
+        return Ok(tensor.clone());
+    }
+
+    let mut slices = Vec::with_capacity(rows.len());
+    for &row in rows {
+        slices.push(
+            tensor
+                .narrow(0, row, 1)
+                .with_context(|| format!("select {label} row {row}"))?,
+        );
+    }
+    let refs: Vec<&Tensor> = slices.iter().collect();
+    Tensor::cat(&refs, 0).with_context(|| format!("compact {label} rows"))
+}
+
+fn select_linear_attention_state_rows(
+    state: &LinearAttentionState,
+    rows: &[usize],
+) -> Result<LinearAttentionState> {
+    anyhow::ensure!(
+        !rows.is_empty(),
+        "cannot compact linear attention state to an empty batch"
+    );
+    let mut recurrent_states = Vec::with_capacity(state.recurrent_states.len());
+    for (layer, tensor) in state.recurrent_states.iter().enumerate() {
+        recurrent_states.push(select_tensor_batch_rows(
+            tensor,
+            rows,
+            &format!("recurrent linear state layer {layer}"),
+        )?);
+    }
+
+    let mut conv_states = Vec::with_capacity(state.conv_states.len());
+    for (layer, tensor) in state.conv_states.iter().enumerate() {
+        conv_states.push(select_tensor_batch_rows(
+            tensor,
+            rows,
+            &format!("conv linear state layer {layer}"),
+        )?);
+    }
+
+    Ok(LinearAttentionState {
+        recurrent_states,
+        conv_states,
+    })
+}
+
 fn sample_first_decode_token(
     logits: &candle_core::Tensor,
     params: &SamplingParams,
@@ -303,6 +437,12 @@ impl ModelRunner {
         let device = weights.embed_tokens.device().clone();
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
         let backend = backend::for_device(&device);
+        if let Err(err) = backend.prewarm_decode_weights(&weights) {
+            tracing::warn!(
+                error = %err,
+                "backend decode weight prewarm failed; continuing with lazy uploads"
+            );
+        }
         Self {
             weights,
             tokenizer,
@@ -312,6 +452,15 @@ impl ModelRunner {
             cuda_graph: Mutex::new(cuda_graph),
             backend,
         }
+    }
+
+    fn supports_paged_greedy_argmax(&self) -> bool {
+        matches!(self.backend.device(), candle_core::Device::Metal(_))
+            || self.backend.supports_linear_decode_argmax()
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
     }
 
     /// Load a LoRA adapter from a PEFT-compatible directory.
@@ -894,6 +1043,375 @@ impl ModelRunner {
         })
     }
 
+    /// Greedy batch generation for already-tokenized prompts on the shared paged
+    /// cache.
+    ///
+    /// This is a conservative native batching bridge for `/v1/completions/batch`:
+    /// prompts are prefilled independently, then decode proceeds in lockstep
+    /// through [`model_forward_paged_next_tokens_greedy_batch`]. Optional cached
+    /// prefixes let cache-hit rows prefill only their suffix before joining the
+    /// decode batch. Stop sequences, stochastic sampling, and active LoRA stay
+    /// on the established per-request path.
+    pub fn generate_paged_shared_tokens_batch_greedy(
+        &self,
+        prompts: &[Vec<TokenId>],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        cached_prefixes: Option<Vec<Option<PagedPrefixReuse>>>,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchGenerationOutput> {
+        anyhow::ensure!(!prompts.is_empty(), "batch must not be empty");
+        anyhow::ensure!(
+            params.temperature == 0.0,
+            "native batch greedy generation requires temperature == 0"
+        );
+        anyhow::ensure!(
+            params.stop.is_empty(),
+            "native batch greedy generation does not support stop sequences"
+        );
+        anyhow::ensure!(
+            self.active_lora.is_none(),
+            "native batch greedy generation does not support active LoRA"
+        );
+        for (idx, prompt) in prompts.iter().enumerate() {
+            anyhow::ensure!(!prompt.is_empty(), "prompt {idx} must not be empty");
+        }
+        let batch_timing = std::env::var("KILN_PROFILE_VULKAN_BATCH_GREEDY")
+            .ok()
+            .as_deref()
+            .is_some_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+            });
+        let batch_start = batch_timing.then(Instant::now);
+
+        let block_size = {
+            let bm_guard = lock_block_manager(block_manager)?;
+            bm_guard.block_size()
+        };
+        let mut cached_prefixes = cached_prefixes.unwrap_or_else(|| {
+            (0..prompts.len())
+                .map(|_| None::<PagedPrefixReuse>)
+                .collect()
+        });
+        anyhow::ensure!(
+            cached_prefixes.len() == prompts.len(),
+            "cached prefix count {} does not match batch size {}",
+            cached_prefixes.len(),
+            prompts.len()
+        );
+        for (idx, cached_prefix) in cached_prefixes.iter_mut().enumerate() {
+            let prompt_tokens = &prompts[idx];
+            if !cached_prefix.as_ref().is_some_and(|prefix| {
+                prefix.cached_tokens > 0
+                    && prefix.cached_tokens < prompt_tokens.len()
+                    && prefix.cached_tokens % block_size == 0
+                    && prefix.block_ids.len() == prefix.cached_tokens / block_size
+            }) {
+                *cached_prefix = None;
+            }
+        }
+
+        let (mut reservation, block_tables) = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            let mut all_blocks = Vec::new();
+            let mut block_tables = Vec::with_capacity(prompts.len());
+            for (idx, prompt) in prompts.iter().enumerate() {
+                let cached_blocks = cached_prefixes[idx]
+                    .as_ref()
+                    .map(|prefix| prefix.block_ids.as_slice())
+                    .unwrap_or(&[]);
+                let max_total = prompt.len() + params.max_tokens;
+                let total_blocks = Self::blocks_needed(max_total, block_size);
+                let num_blocks = total_blocks.saturating_sub(cached_blocks.len());
+                let block_ids = bm_guard
+                    .allocate(num_blocks)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let block_table = append_prefix_block_table(cached_blocks, &block_ids);
+                all_blocks.extend(block_ids);
+                block_tables.push(block_table);
+            }
+            (
+                SharedBlockReservation {
+                    block_manager,
+                    block_ids: all_blocks,
+                },
+                block_tables,
+            )
+        };
+
+        struct BatchSeq {
+            next_token: TokenId,
+            seq_len: usize,
+            generated_tokens: Vec<TokenId>,
+            finish_reason: Option<FinishReason>,
+        }
+
+        let mut seqs = Vec::with_capacity(prompts.len());
+        let mut linear_states = Vec::with_capacity(prompts.len());
+        let mut registrations = Vec::with_capacity(prompts.len());
+        for (idx, prompt_tokens) in prompts.iter().enumerate() {
+            check_cancelled(cancel)?;
+            let prefill_start = batch_timing.then(Instant::now);
+            let cached_prefix = cached_prefixes[idx].take();
+            let cached_tokens = cached_prefix
+                .as_ref()
+                .map(|prefix| prefix.cached_tokens)
+                .unwrap_or(0);
+            let mut linear_state = match cached_prefix {
+                Some(prefix) => prefix.linear_state,
+                None => self.new_linear_state()?,
+            };
+            let prefill_tokens = &prompt_tokens[cached_tokens..];
+            anyhow::ensure!(
+                !prefill_tokens.is_empty(),
+                "batch prompt {idx} cached prefix must leave at least one suffix token"
+            );
+            let next_token = {
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
+                    let logits = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &block_tables[idx],
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
+                    )
+                    .with_context(|| format!("batch prefill prompt {idx} (streaming) failed"))?;
+                    greedy_sample(&logits)?
+                } else if self.supports_paged_greedy_argmax() {
+                    let token = model_forward_paged_last_token_greedy(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &block_tables[idx],
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .with_context(|| format!("batch greedy prefill prompt {idx} failed"))?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                    }
+                    token
+                } else {
+                    let logits = model_forward_paged_last_token(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &block_tables[idx],
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .with_context(|| format!("batch prefill prompt {idx} failed"))?;
+                    if let Some(cancel) = cancel {
+                        cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                    }
+                    greedy_sample(&logits)?
+                }
+            };
+            registrations.push(self.completed_prompt_registration(
+                prompt_tokens,
+                &block_tables[idx],
+                &linear_state,
+                block_size,
+            )?);
+            seqs.push(BatchSeq {
+                next_token,
+                seq_len: prompt_tokens.len(),
+                generated_tokens: Vec::new(),
+                finish_reason: None,
+            });
+            linear_states.push(linear_state);
+            if let Some(start) = prefill_start {
+                eprintln!(
+                    "batch greedy prefill row {idx}: cached_tokens={cached_tokens} prompt_tokens={} prefill_tokens={} elapsed_ms={:.1}",
+                    prompt_tokens.len(),
+                    prefill_tokens.len(),
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+
+        let stack_start = batch_timing.then(Instant::now);
+        let mut linear_state = stack_linear_attention_states(&linear_states)?;
+        let mut active_rows: Vec<usize> = (0..seqs.len()).collect();
+        if let Some(start) = stack_start {
+            eprintln!(
+                "batch greedy stack linear_state: batch={} elapsed_ms={:.1}",
+                prompts.len(),
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
+        for step in 0..params.max_tokens {
+            check_cancelled(cancel)?;
+
+            let previous_active_rows = std::mem::take(&mut active_rows);
+            let mut retained_state_rows = Vec::with_capacity(previous_active_rows.len());
+            for (state_row, &seq_idx) in previous_active_rows.iter().enumerate() {
+                let seq = &mut seqs[seq_idx];
+                if seq.finish_reason.is_some() {
+                    continue;
+                }
+                if self.eos_token_ids.contains(&seq.next_token) {
+                    seq.finish_reason = Some(FinishReason::Eos);
+                    continue;
+                }
+                seq.generated_tokens.push(seq.next_token);
+                if seq.generated_tokens.len() >= params.max_tokens {
+                    seq.finish_reason = Some(FinishReason::MaxTokens);
+                }
+                if seq.finish_reason.is_none() {
+                    active_rows.push(seq_idx);
+                    retained_state_rows.push(state_row);
+                }
+            }
+
+            if step + 1 >= params.max_tokens || active_rows.is_empty() {
+                break;
+            }
+
+            if retained_state_rows.len() != previous_active_rows.len() {
+                let compact_start = batch_timing.then(Instant::now);
+                linear_state =
+                    select_linear_attention_state_rows(&linear_state, &retained_state_rows)
+                        .context("compact native batch linear attention state")?;
+                if let Some(start) = compact_start {
+                    eprintln!(
+                        "batch greedy compact active rows: old_batch={} new_batch={} elapsed_ms={:.1}",
+                        previous_active_rows.len(),
+                        active_rows.len(),
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+            }
+
+            let input_tokens: Vec<TokenId> = active_rows
+                .iter()
+                .map(|&seq_idx| seqs[seq_idx].next_token)
+                .collect();
+            let start_positions: Vec<usize> = active_rows
+                .iter()
+                .map(|&seq_idx| seqs[seq_idx].seq_len)
+                .collect();
+            let final_decode_by_max_tokens = step + 2 >= params.max_tokens;
+            let decode_start = batch_timing.then(Instant::now);
+            let next_tokens = if active_rows.len() == 1 {
+                let seq_idx = active_rows[0];
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                vec![with_vulkan_gdn_state_readback_skip(
+                    final_decode_by_max_tokens,
+                    || {
+                        model_forward_paged_next_token_greedy(
+                            &*self.backend,
+                            input_tokens[0],
+                            &self.weights,
+                            &self.config,
+                            &mut pc_guard,
+                            &block_tables[seq_idx],
+                            start_positions[0],
+                            Some(&mut linear_state),
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .context("batch greedy single-row tail forward pass failed")
+                    },
+                )?]
+            } else {
+                let active_block_tables_buf;
+                let active_block_tables: &[BlockTable] = if active_rows.len() == block_tables.len()
+                    && active_rows.iter().copied().eq(0..block_tables.len())
+                {
+                    &block_tables
+                } else {
+                    active_block_tables_buf = active_rows
+                        .iter()
+                        .map(|&seq_idx| block_tables[seq_idx].clone())
+                        .collect::<Vec<_>>();
+                    &active_block_tables_buf
+                };
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                with_vulkan_gdn_state_readback_skip(final_decode_by_max_tokens, || {
+                    model_forward_paged_next_tokens_greedy_batch(
+                        &*self.backend,
+                        &input_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        active_block_tables,
+                        &start_positions,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                    )
+                    .context("batch greedy decode forward pass failed")
+                })?
+            };
+            if let Some(start) = decode_start {
+                let min_pos = start_positions.iter().copied().min().unwrap_or(0);
+                let max_pos = start_positions.iter().copied().max().unwrap_or(0);
+                eprintln!(
+                    "batch greedy decode step {step}: pos {min_pos}..{max_pos} elapsed_ms={:.1}",
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+            anyhow::ensure!(
+                next_tokens.len() == active_rows.len(),
+                "batch decode returned {} tokens for {} active sequences",
+                next_tokens.len(),
+                active_rows.len()
+            );
+            for (&seq_idx, token) in active_rows.iter().zip(next_tokens) {
+                let seq = &mut seqs[seq_idx];
+                seq.next_token = token;
+                seq.seq_len += 1;
+            }
+        }
+
+        let outputs = seqs
+            .into_iter()
+            .map(|seq| {
+                let text = self
+                    .tokenizer
+                    .decode(&seq.generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .context("failed to decode batch output tokens")?;
+                Ok(GenerationOutput {
+                    text,
+                    token_ids: seq.generated_tokens,
+                    finish_reason: seq.finish_reason.unwrap_or(FinishReason::MaxTokens),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(start) = batch_start {
+            eprintln!(
+                "batch greedy total: batch={} max_tokens={} elapsed_ms={:.1}",
+                prompts.len(),
+                params.max_tokens,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
+        let allocated_blocks = std::mem::take(&mut reservation.block_ids);
+        Ok(PagedBatchGenerationOutput {
+            outputs,
+            registrations,
+            allocated_blocks,
+        })
+    }
+
     fn generate_from_tokens_paged_shared(
         &self,
         prompt_tokens: &[TokenId],
@@ -1044,7 +1562,7 @@ impl ModelRunner {
         );
 
         let use_greedy_prefill_token = params.temperature == 0.0
-            && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            && self.supports_paged_greedy_argmax()
             && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
@@ -1280,9 +1798,7 @@ impl ModelRunner {
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
     ) -> Result<TokenId> {
-        if params.temperature == 0.0
-            && matches!(self.backend.device(), candle_core::Device::Metal(_))
-        {
+        if params.temperature == 0.0 && self.supports_paged_greedy_argmax() {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
             return model_forward_paged_next_token_greedy(
                 &*self.backend,
@@ -1730,9 +2246,7 @@ impl ModelRunner {
                 )
                 .context("prefill forward pass (paged, streaming) failed")?,
             )
-        } else if params.temperature == 0.0
-            && matches!(self.backend.device(), candle_core::Device::Metal(_))
-        {
+        } else if params.temperature == 0.0 && self.supports_paged_greedy_argmax() {
             PrefillSampleSource::GreedyToken(
                 model_forward_paged_last_token_greedy(
                     &*self.backend,
@@ -1834,9 +2348,7 @@ impl ModelRunner {
                 break;
             }
 
-            next_token = if params.temperature == 0.0
-                && matches!(self.backend.device(), candle_core::Device::Metal(_))
-            {
+            next_token = if params.temperature == 0.0 && self.supports_paged_greedy_argmax() {
                 let token = model_forward_paged_next_token_greedy(
                     &*self.backend,
                     next_token,
@@ -2951,10 +3463,8 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(
-                    runner_guard.backend.device(),
-                    prompt_tokens.len(),
-                ) {
+                if streaming_prefill_enabled_for(runner_guard.backend.device(), prompt_tokens.len())
+                {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
                         &prompt_tokens,
@@ -3976,9 +4486,7 @@ impl ModelRunner {
                 break;
             }
 
-            next_token = if params.temperature == 0.0
-                && matches!(self.backend.device(), candle_core::Device::Metal(_))
-            {
+            next_token = if params.temperature == 0.0 && self.supports_paged_greedy_argmax() {
                 let token = match model_forward_paged_next_token_greedy(
                     &*self.backend,
                     next_token,
@@ -4139,6 +4647,55 @@ mod tests {
             embed_tokens: embed,
             embed_tokens_t: embed_t,
             layers: vec![layer],
+            final_norm,
+            rotary_inv_freq,
+            mtp: None,
+        }
+    }
+
+    fn zero_layer_tied_config() -> ModelConfig {
+        ModelConfig {
+            hidden_size: 8,
+            num_layers: 0,
+            num_attention_heads: 2,
+            num_kv_heads: 1,
+            head_dim: 4,
+            intermediate_size: 16,
+            vocab_size: 32,
+            max_position_embeddings: 128,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 0,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        }
+    }
+
+    fn zero_layer_tied_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
+        let h = config.hidden_size;
+        let vocab = config.vocab_size;
+        let mut embed_data = vec![0.0f32; vocab * h];
+        for token in 0..h.min(vocab) {
+            embed_data[token * h + token] = 1.0;
+        }
+        let embed = Tensor::from_vec(embed_data, (vocab, h), device).unwrap();
+        let embed_t = embed.t().unwrap().contiguous().unwrap();
+        let final_norm = Tensor::ones((h,), candle_core::DType::F32, device).unwrap();
+        let rotary_inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
+                .unwrap();
+
+        GpuWeights {
+            embed_tokens: embed,
+            embed_tokens_t: embed_t,
+            layers: Vec::new(),
             final_norm,
             rotary_inv_freq,
             mtp: None,
@@ -4612,6 +5169,137 @@ mod tests {
         assert_eq!(table.lookup(0, 16), Some((7, 0)));
         assert_eq!(table.lookup(31, 16), Some((8, 15)));
         assert_eq!(table.lookup(32, 16), Some((20, 0)));
+    }
+
+    #[test]
+    fn compact_linear_attention_state_selects_active_batch_rows() -> Result<()> {
+        let device = Device::Cpu;
+        let recurrent = Tensor::from_vec(
+            (0..16).map(|v| v as f32).collect::<Vec<_>>(),
+            (4, 2, 2, 1),
+            &device,
+        )?;
+        let conv = Tensor::from_vec(
+            (100..124).map(|v| v as f32).collect::<Vec<_>>(),
+            (4, 3, 2),
+            &device,
+        )?;
+        let state = LinearAttentionState {
+            recurrent_states: vec![recurrent],
+            conv_states: vec![conv],
+        };
+
+        let compact = select_linear_attention_state_rows(&state, &[0, 2, 3])?;
+        assert_eq!(compact.recurrent_states[0].dims(), &[3, 2, 2, 1]);
+        assert_eq!(compact.conv_states[0].dims(), &[3, 3, 2]);
+        assert_eq!(
+            compact.recurrent_states[0]
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            vec![
+                0.0, 1.0, 2.0, 3.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+            ]
+        );
+        assert_eq!(
+            compact.conv_states[0].flatten_all()?.to_vec1::<f32>()?,
+            vec![
+                100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0,
+                118.0, 119.0, 120.0, 121.0, 122.0, 123.0,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn native_batch_greedy_stops_empty_rows_on_eos() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+        let mut runner = ModelRunner::new(weights, tokenizer, config.clone());
+        runner.eos_token_ids = (0u32..32).collect();
+
+        let block_size = 4;
+        let num_blocks = 64;
+        let block_manager = std::sync::Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = std::sync::Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?);
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 100,
+            ..Default::default()
+        };
+        let output = runner.generate_paged_shared_tokens_batch_greedy(
+            &[vec![1, 2], vec![3, 4, 5]],
+            &params,
+            &block_manager,
+            &paged_cache,
+            None,
+            None,
+        )?;
+
+        assert_eq!(output.outputs.len(), 2);
+        for row in output.outputs {
+            assert_eq!(row.finish_reason, FinishReason::Eos);
+            assert!(
+                row.token_ids.is_empty(),
+                "EOS rows should not emit the EOS token"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn native_batch_greedy_routes_single_active_tail_after_eos() -> Result<()> {
+        let config = zero_layer_tied_config();
+        let device = Device::Cpu;
+        let weights = zero_layer_tied_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+        let mut runner = ModelRunner::new(weights, tokenizer, config.clone());
+        runner.eos_token_ids = vec![1];
+
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = std::sync::Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = std::sync::Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?);
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 3,
+            ..Default::default()
+        };
+        let output = runner.generate_paged_shared_tokens_batch_greedy(
+            &[vec![1], vec![2]],
+            &params,
+            &block_manager,
+            &paged_cache,
+            None,
+            None,
+        )?;
+
+        assert_eq!(output.outputs.len(), 2);
+        assert_eq!(output.outputs[0].finish_reason, FinishReason::Eos);
+        assert!(output.outputs[0].token_ids.is_empty());
+        assert_eq!(output.outputs[1].finish_reason, FinishReason::MaxTokens);
+        assert_eq!(output.outputs[1].token_ids, vec![2, 2, 2]);
+
+        Ok(())
     }
 
     #[test]

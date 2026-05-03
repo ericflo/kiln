@@ -1,0 +1,54 @@
+// Reduce per-block argmax pairs to one token id.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint block_count;
+};
+
+layout(binding = 0) readonly buffer BlockScoreBuf { float data_block_score[]; };
+layout(binding = 1) readonly buffer BlockIndexBuf { uint data_block_index[]; };
+layout(binding = 2) writeonly buffer OutIndexBuf { uint data_out_index[]; };
+
+shared float partial_score[256];
+shared uint partial_index[256];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+
+    float best_score = -3.4028234663852886e38;
+    uint best_index = 0;
+    for (uint i = tid; i < block_count; i += 256) {
+        const float candidate_score = data_block_score[i];
+        const uint candidate_index = data_block_index[i];
+        if (candidate_score > best_score ||
+            (candidate_score == best_score && candidate_index < best_index)) {
+            best_score = candidate_score;
+            best_index = candidate_index;
+        }
+    }
+
+    partial_score[tid] = best_score;
+    partial_index[tid] = best_index;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float candidate_score = partial_score[tid + stride];
+            const uint candidate_index = partial_index[tid + stride];
+            if (candidate_score > partial_score[tid] ||
+                (candidate_score == partial_score[tid] && candidate_index < partial_index[tid])) {
+                partial_score[tid] = candidate_score;
+                partial_index[tid] = candidate_index;
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        data_out_index[0] = partial_index[0];
+    }
+}

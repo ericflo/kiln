@@ -323,6 +323,18 @@ impl RealPrefixCache {
         }))
     }
 
+    pub fn would_hit(&self, adapter: &Option<String>, prompt_tokens: &[TokenId]) -> bool {
+        if !self.is_enabled() {
+            return false;
+        }
+        self.entries.iter().any(|entry| {
+            &entry.adapter == adapter
+                && prompt_tokens.len() > entry.prompt_tokens.len()
+                && prompt_tokens.starts_with(&entry.prompt_tokens)
+                && entry.prompt_tokens.len() % self.block_size == 0
+        })
+    }
+
     pub fn release_hit(&mut self, entry_id: u64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == entry_id) {
             entry.active_uses = entry.active_uses.saturating_sub(1);
@@ -388,8 +400,7 @@ impl RealPrefixCache {
         // re-claimed them. Returning them in `evicted_blocks` would cause the
         // API layer to free live cached blocks back to the BlockManager, where
         // a concurrent request can re-allocate and overwrite them.
-        let registration_set: HashSet<u32> =
-            registration.block_ids.iter().copied().collect();
+        let registration_set: HashSet<u32> = registration.block_ids.iter().copied().collect();
         evicted_blocks.retain(|block_id| !registration_set.contains(block_id));
         debug_assert!(
             evicted_blocks
@@ -676,8 +687,7 @@ impl AppState {
             }
         };
 
-        let configured_inference_fraction =
-            memory_cfg.inference_memory_fraction.clamp(0.1, 1.0);
+        let configured_inference_fraction = memory_cfg.inference_memory_fraction.clamp(0.1, 1.0);
 
         // Estimate model weight memory (approximate: params * dtype_bytes)
         // Qwen3.5-4B ≈ 4B params * 2 bytes (bf16) ≈ 8GB
@@ -905,8 +915,8 @@ impl AppState {
             max_blocks = prefix_cache_max_blocks,
             max_entries = prefix_cache_max_entries,
             state_bytes_per_entry = prefix_cache_state_bytes_per_entry,
-            max_state_bytes = prefix_cache_state_bytes_per_entry
-                .saturating_mul(prefix_cache_max_entries as u64),
+            max_state_bytes =
+                prefix_cache_state_bytes_per_entry.saturating_mul(prefix_cache_max_entries as u64),
             "prefix cache budget"
         );
         let prefix_cache = RealPrefixCache::new(
@@ -972,8 +982,8 @@ fn linear_attention_state_bytes(config: &ModelConfig, device: &candle_core::Devi
     let recurrent_elems = (config.linear_num_value_heads
         * config.linear_key_head_dim
         * config.linear_value_head_dim) as u64;
-    let conv_elems = (config.linear_qkv_dim()
-        * config.linear_conv_kernel_dim.saturating_sub(1)) as u64;
+    let conv_elems =
+        (config.linear_qkv_dim() * config.linear_conv_kernel_dim.saturating_sub(1)) as u64;
     num_linear_layers.saturating_mul(
         recurrent_elems
             .saturating_mul(recurrent_dtype_bytes)
@@ -1251,8 +1261,8 @@ fn suggested_emergency_num_blocks(
             .max(MIN_AUTO_KV_BLOCKS);
     }
     let conservative_fraction = 0.30_f64;
-    let available_for_kv = ((total_vram.saturating_sub(estimated_model_bytes)) as f64
-        * conservative_fraction) as u64;
+    let available_for_kv =
+        ((total_vram.saturating_sub(estimated_model_bytes)) as f64 * conservative_fraction) as u64;
     let raw = (available_for_kv / bytes_per_block) as usize;
     cap_auto_num_blocks(
         raw,
@@ -1370,6 +1380,12 @@ mod tests {
         let outcome = cache.register(None, registration);
         assert_eq!(outcome.retained_blocks, vec![9]);
         assert!(outcome.evicted_blocks.is_empty());
+
+        assert!(cache.would_hit(&None, &[1, 2, 3, 4, 5]));
+        assert!(!cache.would_hit(&None, &[7, 8, 9, 10, 11]));
+        let stats_before_lookup = cache.stats();
+        assert_eq!(stats_before_lookup.lookup_hits, 0);
+        assert_eq!(stats_before_lookup.lookup_misses, 0);
 
         assert!(
             cache
@@ -1564,8 +1580,7 @@ mod tests {
             },
         );
 
-        let retained_set: HashSet<u32> =
-            outcome.retained_blocks.iter().copied().collect();
+        let retained_set: HashSet<u32> = outcome.retained_blocks.iter().copied().collect();
         assert_eq!(
             retained_set.len(),
             outcome.retained_blocks.len(),
@@ -1573,8 +1588,7 @@ mod tests {
             outcome.retained_blocks,
         );
 
-        let evicted_set: HashSet<u32> =
-            outcome.evicted_blocks.iter().copied().collect();
+        let evicted_set: HashSet<u32> = outcome.evicted_blocks.iter().copied().collect();
         assert_eq!(
             evicted_set.len(),
             outcome.evicted_blocks.len(),
@@ -1858,11 +1872,11 @@ mod tests {
     /// the loop logic.
     fn dummy_cpu_cache() -> PagedKvCache {
         PagedKvCache::new_uninit_with_fp8(
-            1, // num_full_attn_layers
-            8, // num_blocks
+            1,  // num_full_attn_layers
+            8,  // num_blocks
             16, // block_size
-            1, // num_kv_heads
-            4, // head_dim
+            1,  // num_kv_heads
+            4,  // head_dim
             DType::F32,
             &candle_core::Device::Cpu,
             false,
@@ -1877,15 +1891,10 @@ mod tests {
             (fraction * 1000.0) as usize
         };
         let calls = std::cell::Cell::new(0u32);
-        let result = auto_size_with_retry(
-            0.85,
-            AUTO_SIZER_FALLBACK_FRACTIONS,
-            &compute,
-            |_n| {
-                calls.set(calls.get() + 1);
-                Ok(dummy_cpu_cache())
-            },
-        );
+        let result = auto_size_with_retry(0.85, AUTO_SIZER_FALLBACK_FRACTIONS, &compute, |_n| {
+            calls.set(calls.get() + 1);
+            Ok(dummy_cpu_cache())
+        });
         let success = result.unwrap_or_else(|_| panic!("expected success"));
         assert_eq!(success.fraction, 0.85);
         assert_eq!(success.num_blocks, 850);
@@ -1903,23 +1912,18 @@ mod tests {
         let compute = |fraction: f64| -> usize { (fraction * 1000.0) as usize };
         let calls = std::cell::Cell::new(0u32);
         let attempted_fractions = std::cell::RefCell::new(Vec::<f64>::new());
-        let result = auto_size_with_retry(
-            0.85,
-            AUTO_SIZER_FALLBACK_FRACTIONS,
-            &compute,
-            |n| {
-                calls.set(calls.get() + 1);
-                let frac = (n as f64) / 1000.0;
-                attempted_fractions.borrow_mut().push(frac);
-                if frac >= oom_at_or_above - 1e-9 {
-                    Err(format!(
-                        "CUDA OOM: out of memory while allocating k_pool for layer 0 (n={n})"
-                    ))
-                } else {
-                    Ok(dummy_cpu_cache())
-                }
-            },
-        );
+        let result = auto_size_with_retry(0.85, AUTO_SIZER_FALLBACK_FRACTIONS, &compute, |n| {
+            calls.set(calls.get() + 1);
+            let frac = (n as f64) / 1000.0;
+            attempted_fractions.borrow_mut().push(frac);
+            if frac >= oom_at_or_above - 1e-9 {
+                Err(format!(
+                    "CUDA OOM: out of memory while allocating k_pool for layer 0 (n={n})"
+                ))
+            } else {
+                Ok(dummy_cpu_cache())
+            }
+        });
         let success = result.unwrap_or_else(|_| panic!("expected success after fallback"));
         assert_eq!(success.fraction, 0.65, "should land on the 0.65 fallback");
         assert_eq!(success.num_blocks, 650);
@@ -1941,17 +1945,12 @@ mod tests {
         let compute = |fraction: f64| -> usize { (fraction * 1000.0) as usize };
         let calls = std::cell::Cell::new(0u32);
         let attempted = std::cell::RefCell::new(Vec::<f64>::new());
-        let result = auto_size_with_retry(
-            0.50,
-            AUTO_SIZER_FALLBACK_FRACTIONS,
-            &compute,
-            |n| {
-                calls.set(calls.get() + 1);
-                let frac = (n as f64) / 1000.0;
-                attempted.borrow_mut().push(frac);
-                Ok(dummy_cpu_cache())
-            },
-        );
+        let result = auto_size_with_retry(0.50, AUTO_SIZER_FALLBACK_FRACTIONS, &compute, |n| {
+            calls.set(calls.get() + 1);
+            let frac = (n as f64) / 1000.0;
+            attempted.borrow_mut().push(frac);
+            Ok(dummy_cpu_cache())
+        });
         let success = result.unwrap_or_else(|_| panic!("expected success"));
         assert_eq!(success.fraction, 0.50);
         assert_eq!(success.num_blocks, 500);
@@ -2132,6 +2131,9 @@ mod tests {
             kiln_core::vram::VramSource::None,
         );
         assert!(msg.contains("KILN_NUM_BLOCKS=64"), "message: {msg}");
-        assert!(msg.contains("0.0 GiB"), "should print 0.0 GiB when unknown: {msg}");
+        assert!(
+            msg.contains("0.0 GiB"),
+            "should print 0.0 GiB when unknown: {msg}"
+        );
     }
 }

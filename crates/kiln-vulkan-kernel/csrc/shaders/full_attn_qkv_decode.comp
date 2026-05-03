@@ -1,0 +1,67 @@
+// Fused single-token full-attention Q/K/V projections.
+//
+// Computes three row-vector matmuls in one dispatch:
+//   q = x[hidden] * q_weight_t[hidden, q_dim]
+//   k = x[hidden] * k_weight_t[hidden, k_dim]
+//   v = x[hidden] * v_weight_t[hidden, v_dim]
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint q_dim;
+    uint k_dim;
+    uint v_dim;
+    uint total_out;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer QWeightBuf { float data_q_w[]; };
+layout(binding = 2) readonly buffer KWeightBuf { float data_k_w[]; };
+layout(binding = 3) readonly buffer VWeightBuf { float data_v_w[]; };
+layout(binding = 4) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial[256];
+
+void main() {
+    uint out_idx = gl_WorkGroupID.x;
+    if (out_idx >= total_out) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint col = out_idx;
+    uint width = q_dim;
+    uint projection = 0;
+
+    if (col >= q_dim) {
+        col -= q_dim;
+        width = k_dim;
+        projection = 1;
+    }
+    if (projection == 1 && col >= k_dim) {
+        col -= k_dim;
+        width = v_dim;
+        projection = 2;
+    }
+
+    float sum = 0.0;
+    for (uint h = tid; h < hidden; h += 256) {
+        uint off = h * width + col;
+        float w = projection == 0 ? data_q_w[off] : (projection == 1 ? data_k_w[off] : data_v_w[off]);
+        sum += data_x[h] * w;
+    }
+
+    partial[tid] = sum;
+    barrier();
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partial[tid] += partial[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        data_out[out_idx] = partial[0];
+    }
+}

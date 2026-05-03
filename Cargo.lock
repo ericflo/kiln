@@ -1907,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-vulkan-kernel"
-version = "0.2.2"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "ash",

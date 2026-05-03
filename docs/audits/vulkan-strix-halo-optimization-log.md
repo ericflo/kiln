@@ -1,0 +1,2007 @@
+# Vulkan Strix Halo Optimization Log
+
+## Objective
+
+Make Vulkan a first-class Kiln inference backend and push Qwen3.5-4B performance on the local AMD Strix Halo machine as far as current architecture allows. Track both latency and throughput experiments. Treat passing tests as correctness evidence only; speed claims require direct benchmark output.
+
+## Test Host
+
+- Date: 2026-05-03
+- GPU: Radeon 8060S Graphics (RADV STRIX_HALO)
+- Detected VRAM: 98304 MiB via Linux DRM sysfs
+- Model: local `Qwen3.5-4B/`
+- Benchmark binary: `./target/release/kiln-bench --features vulkan`
+- Main latency harness: `--latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+
+## Running Verdict
+
+Vulkan is functional and integrated, but it is not yet "fastest anywhere." The best verified no-env default single-user decode result from the final source state is 367.8ms mean inter-token latency (about 2.7 tok/s). The HTTP server path now uses the same tiled projection and greedy Vulkan argmax paths as the bench, but bs>1 server throughput still does not scale: the current server interleaves independent requests rather than running a native batched Vulkan decode kernel. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
+
+## Experiments
+
+### E001: First-Class Build And Runtime Integration
+
+Change:
+- Added Vulkan feature paths alongside CUDA and Metal in build, CI, release, docs, desktop, and benchmark selection.
+- Added Linux DRM sysfs VRAM detection for AMD/Intel Vulkan systems.
+
+Evidence:
+- Vulkan builds with `cargo build --release --features vulkan --bin kiln-bench`.
+- Benchmark reports backend `"vulkan"` and GPU `"Radeon 8060S Graphics (RADV STRIX_HALO)"`.
+
+Verdict: keep.
+
+### E002: Vulkan Device Lifetime
+
+Change:
+- Made `VulkanDevice` own the `ash::Entry` lifetime.
+
+Reasoning:
+- Avoids dangling Vulkan loader/entry lifetime during teardown.
+
+Verdict: keep.
+
+### E003: F32-Compatible Vulkan GDN Paths
+
+Change:
+- Relaxed GDN gates, gated RMSNorm, and recurrent step to support F32 where the Vulkan-selected CPU tensor path produces F32.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed after F32 parity cases were added.
+
+Verdict: keep.
+
+### E004: Cached Vulkan Weight Buffers
+
+Change:
+- Added a `TensorId` keyed Vulkan weight cache in `VulkanBackend`.
+- Uploads immutable projection weights once as F32 device-local Vulkan buffers.
+
+Reasoning:
+- Single-token decode repeatedly uses the same transposed weights; repeated host-to-device weight upload is pure waste.
+
+Verdict: keep.
+
+### E005: GDN Input Projection Fusion
+
+Change:
+- Added `gdn_in_proj_decode.comp` and backend dispatch for single-token GDN input projections.
+- Collapses qkv, z, a, and b projections into one Vulkan dispatch.
+
+Evidence:
+- `gdn_in_proj_decode_matches_cpu_reference` passed in the Vulkan parity test suite.
+
+Verdict: keep.
+
+### E006: Generic Vulkan Single-Token Linear Decode
+
+Change:
+- Added `linear_decode.comp`, cached dispatch, and forward routing for q/k/v/o, MLP gate/up/down, GDN out projection, and later LM head.
+
+Evidence:
+- `linear_decode_matches_cpu_reference` passed.
+- Earlier baseline was roughly 2.3s/token; generic cached linear reduced warmed decode to roughly 1.2s/token before weight prewarm.
+
+Verdict: keep.
+
+### E007: Reusable Transient Command Pool
+
+Change:
+- Reused a transient command pool for hot upload/readback helpers instead of creating and destroying a command pool per dispatch.
+
+Evidence:
+- Vulkan parity suite stayed green.
+- Best warmed latency before later prewarm was roughly 1.2s/token.
+
+Verdict: keep.
+
+### E008: Fused MLP Decode
+
+Change:
+- Added `mlp_gate_up_decode.comp` and full fused MLP decode dispatch.
+
+Evidence:
+- `mlp_gate_up_decode_matches_cpu_reference` and `mlp_decode_matches_cpu_reference` passed.
+- Benchmarks were neutral or worse than generic cached GEMV.
+
+Verdict:
+- Keep implementation opt-in via `KILN_ENABLE_VULKAN_MLP_GATE_UP=1` and `KILN_ENABLE_VULKAN_MLP_DECODE=1`.
+- Do not promote until tiled/tuned or tensor residency changes.
+
+### E009: Fused GDN Decode Gates + Recurrent + RMSNorm
+
+Change:
+- Added `gdn_decode_gates_recurrent_rmsnorm.comp`.
+
+Evidence:
+- `gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference` passed.
+- Benchmark worsened or failed to beat generic split path.
+
+Verdict:
+- Keep opt-in via `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1`.
+
+### E010: Fused Full-Attention QKV
+
+Change:
+- Added `full_attn_qkv_decode.comp`.
+
+Evidence:
+- `full_attn_qkv_decode_matches_cpu_reference` passed.
+- Combined opt-in benchmark after weight prewarm:
+  - Command: `KILN_BENCH_LOG_ITL=1 KILN_ENABLE_VULKAN_MLP_DECODE=1 KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1 KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 1919.1ms
+  - Decode steps: 898.5, 802.8, 925.3, 806.0, 903.0, 810.0ms
+  - Mean ITL: 857.6ms
+
+Verdict:
+- Keep opt-in via `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1`.
+- Do not promote; default mean 825.5ms is better.
+
+### E011: Decode Weight Prewarm And LM Head Linear Routing
+
+Change:
+- Added `BackendRuntime::prewarm_decode_weights`.
+- Vulkan prewarms all base decode transposed projection weights and tied LM-head table into its F32 weight cache.
+- Bench and `ModelRunner` call prewarm once after backend creation.
+- Decoupled generic `linear_decode` from the experimental full-attn QKV env gate.
+- Routed one-token LM head through backend `linear_decode` where supported.
+
+Evidence:
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 10 tests.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Default benchmark:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prewarm: 249 weights, 16040 MiB F32 cache, 30430ms
+  - Prefill: 2371.0ms (4 tok/s)
+  - Decode steps: 833.8, 819.7, 827.2, 839.3, 814.0, 818.8ms
+  - Mean ITL: 825.5ms
+  - P50 ITL: 827.2ms
+  - Decode throughput: 1.2 tok/s
+
+Verdict:
+- Keep. This removes the prior first-token lazy upload spike.
+- Not sufficient; warmed decode remains slow.
+
+### E012: Correct Vulkan Causal Conv1d State Handling
+
+Change:
+- Updated `causal_conv1d.comp` to read `conv_state` for the left side of the causal window instead of treating missing taps as zero.
+- Updated `causal_conv1d_state_advance.comp` to preserve chronological state order, matching the portable fallback.
+- Fixed the Rust dispatch binding count for the state-aware output shader.
+- Embedded `causal_conv1d_state_advance.comp` at build time and added both conv pipelines to Vulkan prewarm.
+- Added low-level Vulkan parity tests for single-token update and prefill, including the `seq_len < K-1` state-shift case.
+
+Evidence:
+- Initial parity failed and showed the output shader was still using only three bindings.
+- After binding fix: `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 12 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+
+Verdict:
+- Keep the correctness fix.
+- Do not enable by default until latency beats the host fallback.
+
+### E013: A/B Corrected Vulkan Conv1d Opt-In
+
+Change:
+- Enabled corrected conv1d via `KILN_ENABLE_VULKAN_FUSED_CONV1D=1`.
+
+Evidence:
+- Command: `KILN_BENCH_LOG_ITL=1 KILN_ENABLE_VULKAN_FUSED_CONV1D=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+- Before command-pool cleanup:
+  - Prefill: 1931.9ms
+  - Decode steps: 809.9, 832.3, 845.0, 842.6, 846.5, 835.9ms
+  - Mean ITL: 835.4ms
+- Default rerun with same binary family:
+  - Prefill: 2357.3ms
+  - Decode steps: 815.6, 829.0, 825.8, 834.4, 812.0, 809.5ms
+  - Mean ITL: 821.1ms
+
+Verdict:
+- Corrected conv1d is not a decode latency win.
+- Keep opt-in.
+
+### E014: Remove Conv1d Command-Pool Churn
+
+Change:
+- Converted conv1d input/state uploads and output/state readbacks from per-call command-pool helpers to the reusable transient command pool.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 12 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Opt-in benchmark:
+  - Command: `KILN_BENCH_LOG_ITL=1 KILN_ENABLE_VULKAN_FUSED_CONV1D=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 2019.2ms
+  - Decode steps: 803.4, 850.1, 838.6, 847.2, 836.5, 847.0ms
+  - Mean ITL: 837.1ms
+
+Verdict:
+- Not a real decode win. Command-pool cleanup is still correct and may help this opt-in path, but the two extra Vulkan dispatches/readbacks do not beat the CPU fallback in the measured decode loop.
+- Keep conv1d opt-in.
+
+### E015: Vulkan Greedy LM-Head Argmax
+
+Change:
+- Added a two-dispatch Vulkan argmax path for single-token transposed linear projection:
+  - `linear_decode_argmax_blocks.comp` computes 16 logits per workgroup and writes per-block max pairs.
+  - `linear_decode_argmax_reduce.comp` reduces block max pairs to one token id.
+- Added `BackendRuntime::linear_decode_argmax` and `supports_linear_decode_argmax`.
+- Implemented Vulkan `linear_decode_argmax` using cached F32 weights.
+- Routed paged greedy prefill/decode through `model_forward_paged_*_greedy` when the backend supports argmax, not only on Metal.
+
+Reasoning:
+- Greedy decode does not need a host `[1, 1, vocab]` logits tensor. Keeping logits on Vulkan removes a readback/materialization step and CPU argmax.
+
+Evidence:
+- `linear_decode_argmax_matches_cpu_reference` passed with a non-multiple-of-16 output size.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Default benchmark:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 1883.7ms
+  - Decode steps: 774.8, 790.8, 800.2, 769.3, 791.3, 796.2ms
+  - Mean ITL: 787.1ms
+  - P50 ITL: 791.3ms
+  - Decode throughput: 1.3 tok/s
+
+Verdict:
+- Keep and use by default for greedy paged Vulkan.
+- This is the current best default latency result.
+
+### E016: Conv1d Opt-In Retest After Vulkan Argmax
+
+Change:
+- Retested corrected conv1d with Vulkan argmax now active.
+
+Evidence:
+- Command: `KILN_BENCH_LOG_ITL=1 KILN_ENABLE_VULKAN_FUSED_CONV1D=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+- Prefill: 1858.3ms
+- Decode steps: 782.1, 801.8, 810.7, 809.5, 822.0, 794.7ms
+- Mean ITL: 803.4ms
+
+Verdict:
+- Conv1d may slightly improve prefill in this short harness, but it remains worse for decode latency than the default 787.1ms result.
+- Keep opt-in.
+
+### E017: Argmax Workgroup Shape 8x32
+
+Change:
+- Changed `linear_decode_argmax_blocks.comp` from 16 output columns x 16 reduction lanes to 8 output columns x 32 reduction lanes.
+
+Reasoning:
+- More reduction lanes per output might reduce hidden-dimension loop time on RDNA, at the cost of doubling output-block workgroups.
+
+Evidence:
+- Focused parity: `cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode_argmax_matches_cpu_reference -- --nocapture` passed.
+- Benchmark:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 2141.9ms
+  - Decode steps: 786.6, 785.2, 810.1, 808.2, 784.8, 806.2ms
+  - Mean ITL: 796.8ms
+
+Verdict:
+- Worse than the 16x16 argmax baseline of 787.1ms mean ITL.
+- Reverted to 16x16.
+
+### E018: Production Paged Generation Vulkan Argmax Wiring
+
+Change:
+- Added `ModelRunner::supports_paged_greedy_argmax`, true for Metal and any backend with `supports_linear_decode_argmax`.
+- Replaced Metal-only greedy gates in production paged prefill/decode paths with that helper:
+  - prefix-cache paged prefill
+  - prefix-cache paged decode
+  - non-shared paged prefill
+  - non-shared paged decode
+  - streaming paged locked decode loop
+
+Reasoning:
+- The benchmark path already used Vulkan greedy LM-head argmax, but real server generation still had Metal-only gates. That meant greedy Vulkan server requests could fall back to full logits materialization even though the backend had a faster argmax path.
+
+Evidence:
+- `cargo fmt --all` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Post-wiring default benchmark:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prewarm: 249 weights, 16040 MiB F32 cache, 23140ms
+  - Prefill: 2755.9ms
+  - Decode steps: 785.1, 783.1, 766.1, 782.5, 793.3, 796.9ms
+  - Mean ITL: 784.5ms
+  - P50 ITL: 785.1ms
+  - P99 ITL: 796.9ms
+  - Decode throughput: 1.3 tok/s
+
+Verdict:
+- Keep. This closes the production/bench routing mismatch.
+- The prefill number moved worse on this run, but decode ITL is slightly better than the prior 787.1ms anchor and within short-run variance.
+
+### E019: HTTP Server bs=1 And bs=4 Throughput
+
+Change:
+- No code change. Measured the release server after E018.
+
+Server command:
+- `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18420 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+
+Workload:
+- OpenAI-compatible chat completions with `temperature=0.0`, `max_tokens=4`, short unique prompts, served model `qwen3.5-4b-kiln`.
+- Prefix cache disabled to avoid shared-prefix cache effects in raw bs>1 numbers.
+
+Evidence:
+- Warmup:
+  - 4 completion tokens in 4.498s.
+- bs=1, three measured runs:
+  - 4 tokens in 4.504s, 0.888 completion tok/s end-to-end
+  - 4 tokens in 4.501s, 0.889 completion tok/s end-to-end
+  - 4 tokens in 4.482s, 0.893 completion tok/s end-to-end
+  - Mean latency: 4.496s for 4 completion tokens.
+- bs=4 as four concurrent `/v1/chat/completions` requests:
+  - Wall time: 18.309s
+  - Completion tokens: 16
+  - Aggregate completion throughput: 0.874 tok/s
+  - Per-request latencies: 10.980s, 13.418s, 15.882s, 18.300s
+- bs=4 through `/v1/completions/batch`:
+  - Wall time: 18.248s
+  - Completion tokens: 16
+  - Aggregate completion throughput: 0.877 tok/s
+
+Verdict:
+- The HTTP server is using Vulkan successfully, but bs>1 does not improve throughput. This is expected from the current architecture: the batch endpoint fans out per-prompt tasks and the shared paged-cache path interleaves them, but decode work still runs as independent single-sequence forward passes with serialized access to shared GPU/cache state.
+- Do not market this as batched Vulkan inference. The next performance step for bs>1 is native multi-sequence Vulkan decode, not another single-token scalar optimization.
+
+### E020: Opt-In Decode Profiler
+
+Change:
+- Added `KILN_VULKAN_DECODE_PROFILE=1` / `KILN_PROFILE_DECODE=1` instrumentation around paged decode operation families.
+- The profiler is active only for single-token decode (`seq_len == 1 && start_pos > 0`) and reports aggregate bucket totals plus the largest per-layer events.
+
+Evidence:
+- `cargo check -p kiln-server --features vulkan` passed.
+- Initial profile command:
+  - `KILN_VULKAN_DECODE_PROFILE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 2 --skip-training`
+- Initial profile result:
+  - Prefill: 2168.9ms
+  - Mean ITL: 807.6ms
+  - Step 1 major buckets: `gdn.in_proj=195.7ms/24`, `gdn.recurrent=199.4ms/72`, `mlp.down=102.5ms/32`, `mlp.gate=69.0ms/32`, `mlp.up=73.3ms/32`, `layer.full=142.0ms/8`, `gdn.gated_norm=34.5ms/24`, `gdn.out_proj=25.0ms/24`, `lm_head.argmax=16.2ms/1`
+  - Step 2 major buckets: `gdn.in_proj=198.2ms/24`, `gdn.recurrent=200.1ms/72`, `mlp.down=101.2ms/32`, `mlp.gate=70.4ms/32`, `mlp.up=74.1ms/32`, `layer.full=133.4ms/8`, `lm_head.argmax=13.2ms/1`
+
+Verdict:
+- Keep instrumentation.
+- The first profile exposed two useful facts:
+  - The largest remaining decode time is split across GDN input projection/recurrent state work and MLP/full-attention projections.
+  - The `gdn.recurrent` count was polluted by prefill-only probe calls in single-token decode, so the profiler itself pointed to a small cleanup.
+
+### E021: GDN Recurrent Transfer Command-Pool Cleanup
+
+Change:
+- Updated `dispatch_gdn_recurrent_step` to use `upload_data_with_command_pool` and `read_back_with_command_pool` with `vk_device.transient_command_pool()` instead of creating/destroying command pools through the older upload/readback helpers.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- Release anchors after the cleanup:
+  - First six-token run: prefill 2027.6ms, mean ITL 801.8ms.
+  - Profile run: prefill 1867.3ms, mean ITL 774.4ms; `gdn.recurrent` dropped to `176.6ms/72` and `190.3ms/72`.
+  - Second six-token run: prefill 1869.2ms, mean ITL 791.6ms.
+
+Verdict:
+- Keep as cleanup: it removes obvious command-pool churn in a hot recurrent-step path.
+- Do not update the best anchor from this change alone; the six-token runs did not beat E018's 784.5ms anchor.
+
+### E022: Rejected Batched Transfer Helper
+
+Change:
+- Tried adding `upload_many_with_command_pool` and `read_back_many_with_command_pool` to batch the recurrent-step q/k/v/beta/g/state transfers into fewer command submissions.
+
+Evidence:
+- During the experiment, parity and integration stayed green:
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+- Performance got worse:
+  - Six-token anchor: prefill 1899.1ms, mean ITL 792.0ms.
+  - Profile run: mean ITL 799.7ms; `gdn.recurrent=187.0ms/72` and `198.2ms/72`.
+
+Verdict:
+- Reverted the helper usage and removed the unused helper functions.
+- The batched helper reduced submission count but did not improve the measured decode loop on this stack.
+
+### E023: Skip Single-Token GDN Prefill-Only Recurrent Probes
+
+Change:
+- In `gated_deltanet_forward_decode_if`, when `seq_len == 1`, call `gdn_chunkwise_recurrence` directly after `gdn.recur_prep`.
+- This skips `gdn_recurrent_prefill_head_last` and `gdn_chunkwise_recurrence_head_last_full_chunks`, which are prefill/full-chunk paths that immediately return `None` for single-token decode.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Focused profile command:
+  - `KILN_VULKAN_DECODE_PROFILE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 2 --skip-training`
+- Focused profile result:
+  - Prefill: 2063.5ms
+  - Mean ITL: 777.1ms
+  - `gdn.recurrent` is now counted as 24 real recurrent calls instead of 72 total probe+real calls.
+  - Step 1 major buckets: `gdn.in_proj=177.5ms/24`, `gdn.recurrent=194.7ms/24`, `mlp.down=98.7ms/32`, `mlp.gate=69.1ms/32`, `mlp.up=73.2ms/32`, `layer.full=126.4ms/8`, `lm_head.argmax=12.8ms/1`
+  - Step 2 major buckets: `gdn.in_proj=190.5ms/24`, `gdn.recurrent=189.2ms/24`, `mlp.down=99.4ms/32`, `mlp.gate=69.5ms/32`, `mlp.up=74.6ms/32`, `layer.full=132.1ms/8`, `lm_head.argmax=15.7ms/1`
+- Standard anchor:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prewarm: 249 weights, 16040 MiB F32 cache, 9865ms
+  - Prefill: 1992.9ms
+  - Decode steps: 762.3, 784.0, 773.1, 776.7, 784.0, 781.4ms
+  - Mean ITL: 776.9ms
+  - P50 ITL: 781.4ms
+  - P99 ITL: 784.0ms
+  - Decode throughput: 1.3 tok/s
+
+HTTP rerun:
+- Server command:
+  - `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18421 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+- bs=1, three measured 4-token chat runs:
+  - 4 tokens in 4.585s, 0.872 completion tok/s end-to-end
+  - 4 tokens in 4.549s, 0.879 completion tok/s end-to-end
+  - 4 tokens in 4.538s, 0.881 completion tok/s end-to-end
+  - Mean latency: 4.557s for 4 completion tokens.
+- bs=4 as four concurrent `/v1/chat/completions` requests:
+  - Wall time: 18.272s
+  - Completion tokens: 16
+  - Aggregate completion throughput: 0.876 tok/s
+  - Per-request latencies: 18.264s, 13.544s, 6.766s, 15.885s
+- bs=4 through `/v1/completions/batch`:
+  - Wall time: 18.252s
+  - Completion tokens: 16
+  - Aggregate completion throughput: 0.877 tok/s
+
+Verdict:
+- Keep. This is the new best default single-user bench anchor.
+- The HTTP server result did not materially improve and still has no bs>1 throughput scaling. The server bottleneck remains native batched decode, not this single-token control-flow cleanup.
+
+### E024: MLP Gate/Up Fusion Retest
+
+Change:
+- Retested the existing `KILN_ENABLE_VULKAN_MLP_GATE_UP=1` opt-in after the latest single-token cleanup.
+
+Evidence:
+- Command: `KILN_BENCH_LOG_ITL=1 KILN_ENABLE_VULKAN_MLP_GATE_UP=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+- Prefill: 2013.8ms
+- Decode steps: 879.9, 897.8, 890.1, 894.5, 894.8, 886.1ms
+- Mean ITL: 890.5ms
+
+Verdict:
+- Still do not promote. The fused gate/up path is much slower than the default split projection path on this Strix Halo stack.
+
+### E025: Tile Generic Linear Decode
+
+Change:
+- Changed `linear_decode.comp` from one output column per 256-lane workgroup to 16 output columns x 16 reduction lanes per workgroup.
+- Updated `dispatch_linear_decode_cached` to dispatch `ceil(out_dim / 16)` workgroups.
+
+Reasoning:
+- Weights are stored as row-major `[hidden, out_dim]`. The old one-column kernel read `weight[h * out_dim + col]` with a stride of `out_dim` across neighboring lanes. The tiled shape reads contiguous output columns across `local_size_x`, matching the already successful LM-head argmax layout and removing 15/16ths of the projection workgroup launches.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Standard anchor:
+  - Prefill: 2044.3ms
+  - Decode steps: 518.9, 530.1, 527.5, 533.2, 529.7, 528.4ms
+  - Mean ITL: 528.0ms
+- Focused profile after this change:
+  - Mean ITL: 507.0ms
+  - `mlp.down` fell to ~21.6ms/32.
+  - `mlp.gate` fell to ~24-25ms/32.
+  - `mlp.up` fell to ~25-26ms/32.
+  - `layer.full` fell to ~31-32ms/8.
+
+Verdict:
+- Keep. This is the largest single shader-geometry win so far.
+
+### E026: Tile GDN Input Projection
+
+Change:
+- Changed `gdn_in_proj_decode.comp` to the same 16 output columns x 16 reduction lanes shape.
+- Updated its dispatch count to `ceil(total_out / 16)`.
+
+Evidence:
+- First attempt failed parity because `total_out` was accidentally changed in the push constants instead of the dispatch count; fixed before benchmarking.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- Standard anchor after the fixed tiled shader:
+  - Prefill: 1936.5ms
+  - Decode steps: 356.1, 367.1, 358.1, 380.9, 370.5, 387.8ms
+  - Mean ITL: 370.1ms
+- Focused profile:
+  - Mean ITL: 384.9ms
+  - `gdn.in_proj` fell from ~165-178ms/24 after E025 to ~24-25ms/24.
+  - Remaining largest bucket became GDN recurrent state work.
+
+Verdict:
+- Keep. This removes most of the GDN input projection cost without changing model behavior.
+
+### E027: Fused GDN Decode Retest And Revert Promotion
+
+Change:
+- Retested `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1` after E025/E026.
+- Briefly promoted it to default, then reverted the promotion after current-source no-env reruns showed the split path was more stable.
+
+Evidence:
+- Fused opt-in run 1:
+  - Prefill: 2862.6ms
+  - Decode steps: 359.7, 234.7, 362.4, 250.9, 370.7, 269.0ms
+  - Mean ITL: 307.9ms
+- Fused opt-in run 2:
+  - Prefill: 2158.7ms
+  - Decode steps: 356.7, 260.6, 381.9, 273.6, 386.5, 283.2ms
+  - Mean ITL: 323.8ms
+- Profile with fused opt-in captured only high-latency steps:
+  - Mean ITL: 386.9ms
+  - `gdn.fused_gates_recur_norm` was ~216-221ms/24.
+- After brief default promotion, no-env default reruns regressed:
+  - Mean ITL: 394.2ms, then 384.2ms.
+- Split-path A/B through `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED=1` on that promoted binary:
+  - Prefill: 1868.2ms
+  - Decode steps: 367.1, 358.0, 350.9, 359.8, 361.6, 372.6ms
+  - Mean ITL: 361.7ms.
+- Final source state returns fused GDN decode to opt-in only.
+
+Verdict:
+- Keep fused GDN decode opt-in only. It can produce faster transient means, but it is not stable enough to be the default on this host.
+
+### E028: Full-Attn QKV And MLP Fusion Retests After Tiling
+
+Change:
+- Retested old projection-related opt-ins after the tiled generic projection work:
+  - `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1`
+  - `KILN_ENABLE_VULKAN_MLP_DECODE=1`
+- Also tiled `mlp_gate_up_decode.comp` and fixed the fused MLP down-projection dispatch geometry to use `ceil(out_dim / 16)`.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests, including `mlp_gate_up_decode_matches_cpu_reference` and `mlp_decode_matches_cpu_reference`.
+- Full-attn QKV opt-in:
+  - Prefill: 2804.5ms
+  - Mean ITL: 354.7ms
+  - Verdict: worse than the best split-path tiled projection result and worse prefill.
+- Full MLP decode opt-in:
+  - Prefill: 2642.0ms
+  - Decode steps: 365.1, 366.5, 361.6, 365.1, 379.3, 370.7ms
+  - Mean ITL: 368.0ms
+  - Verdict: not better than split-path default; do not promote.
+
+Verdict:
+- Keep the tiled MLP shader correctness fix, but keep the MLP/full-attn fusion paths opt-in.
+
+### E029: Host-Visible Fused GDN State Experiment
+
+Change:
+- Added opt-in `KILN_ENABLE_VULKAN_GDN_HOST_VISIBLE_STATE=1` for the fused GDN path.
+- The state buffer is allocated host-visible/coherent, written directly before dispatch, and read directly after dispatch, avoiding explicit transfer commands for that state buffer.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- Opt-in benchmark:
+  - Prefill: 2099.4ms
+  - Decode steps: 375.8, 379.9, 369.3, 365.6, 391.2, 379.2ms
+  - Mean ITL: 376.8ms
+
+Verdict:
+- Keep disabled. On this stack, avoiding transfer commands did not compensate for shader access to host-visible state memory.
+
+### E030: Final Default And HTTP Server Rerun After Tiling
+
+Change:
+- Final default keeps:
+  - tiled generic `linear_decode`
+  - tiled `gdn_in_proj_decode`
+  - Vulkan greedy LM-head argmax
+  - fused GDN/MLP/full-attn/host-visible-state paths opt-in only
+
+Evidence:
+- Final no-env default bench:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 2540.7ms
+  - Decode steps: 362.6, 365.3, 365.0, 372.6, 379.8, 361.4ms
+  - Mean ITL: 367.8ms
+  - P50 ITL: 365.3ms
+  - P99 ITL: 379.8ms
+  - Decode throughput: 2.7 tok/s
+- Final server command:
+  - `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18423 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+- bs=1, three measured 4-token chat runs:
+  - 4 tokens in 3.182s, 1.257 tok/s
+  - 4 tokens in 3.058s, 1.308 tok/s
+  - 4 tokens in 3.217s, 1.243 tok/s
+  - Mean latency: 3.153s for 4 completion tokens.
+- bs=4 as four concurrent `/v1/chat/completions` requests:
+  - Wall time: 12.848s
+  - Completion tokens: 16
+  - Aggregate completion throughput: 1.245 tok/s
+  - Per-request latencies: 12.840s, 10.638s, 5.301s, 11.717s
+- bs=4 through `/v1/completions/batch`:
+  - Wall time: 13.070s
+  - Completion tokens: 16
+  - Aggregate completion throughput: 1.224 tok/s
+
+Verdict:
+- Keep. This is a real default latency/server win versus E023:
+  - Bench mean ITL improved from 776.9ms to 367.8ms.
+  - HTTP bs=1 improved from 4.557s to 3.153s for 4 completion tokens.
+- bs>1 still does not scale; aggregate throughput remains close to one active decode stream.
+
+### E031: GDN Recurrent Workgroup Shape 128-Wide
+
+Change:
+- Tried changing `gdn_recurrent_prefill.comp` from `local_size_x=256` to `local_size_x=128`.
+- Updated `dispatch_gdn_recurrent_step` workgroup count from `ceil(total / 256)` to `ceil(total / 128)`.
+
+Reasoning:
+- For Qwen3.5-4B, `dv=128`, so a 128-wide group maps one GDN head per workgroup. The existing 256-wide group maps two heads per workgroup. Since the shader does no inter-lane sharing, a narrower group might improve scheduling or reduce idle work.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- First anchor:
+  - Prefill: 1873.3ms
+  - Decode steps: 345.8, 356.3, 349.3, 373.0, 378.9, 373.2ms
+  - Mean ITL: 362.7ms
+- Confirmation anchor:
+  - Prefill: 2283.1ms
+  - Decode steps: 375.0, 397.5, 380.4, 385.2, 389.5, 384.1ms
+  - Mean ITL: 385.3ms
+
+Verdict:
+- Reverted to the stable 256-wide workgroup. The first run was slightly better than the 367.8ms default anchor, but the confirmation run was worse; this is not a reliable promotion.
+
+### E032: Reusable Transient Descriptor Pool
+
+Change:
+- Added a reusable transient descriptor pool to `VulkanDevice`.
+- Changed `run_compute_pipeline` to allocate each dispatch descriptor set from that pool, wait for the dispatch, reset the pool, and keep the existing transient command-pool synchronization.
+- This removes one `vkCreateDescriptorPool` / `vkDestroyDescriptorPool` pair from every cached Vulkan compute dispatch.
+
+Reasoning:
+- After projection tiling, decode still launches many small kernels per token. Descriptor pool create/destroy is pure CPU/Vulkan-driver churn and does not do model work.
+- The existing helper already waits the queue idle after each dispatch, so a single reset-after-dispatch transient descriptor pool preserves the current synchronization semantics.
+
+Evidence:
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 13 tests.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Standard anchor run 1:
+  - Prefill: 1878.3ms
+  - Decode steps: 374.6, 350.1, 355.1, 367.8, 364.3, 369.3ms
+  - Mean ITL: 363.5ms
+- Standard anchor run 2:
+  - Prefill: 1903.8ms
+  - Decode steps: 353.8, 346.5, 346.9, 360.0, 361.1, 367.7ms
+  - Mean ITL: 356.0ms
+- Two-run mean ITL: 359.8ms, versus the prior stable no-env default anchor of 367.8ms.
+- Production HTTP rerun, prefix cache disabled, current prompt fixture:
+  - Server command: `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18424 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+  - bs=1: 4-token chat runs 3.200s, 3.176s, 3.192s; mean 3.189s.
+  - bs=4 concurrent `/v1/chat/completions`: 16 tokens in 14.290s, 1.120 tok/s aggregate; per-request latencies 10.808s, 14.289s, 13.075s, 11.955s.
+  - bs=4 `/v1/completions/batch`: 16 tokens in 15.544s, 1.029 tok/s aggregate.
+
+Verdict:
+- Keep. This is a small but clean bs=1 source-level win with no correctness fallout.
+- It does not fix bs>1. The server path remains effectively one active decode forward at a time, so higher batch sizes still need native multi-sequence Vulkan decode instead of endpoint fanout.
+
+### E033: Greedy Deterministic Batch Dedupe
+
+Change:
+- Changed `/v1/completions/batch` to synthesize the minimal set of generation jobs for deterministic greedy requests.
+- When `temperature == 0.0`, duplicate prompts and `n > 1` completions now share one `generate_one_response` call and duplicate that deterministic result in the batch response.
+- Non-greedy sampling keeps the previous one-job-per-output behavior because derived seeds and sampling randomness are part of the output contract.
+
+Reasoning:
+- The previous batch endpoint always spawned one task per `(prompt, completion)` pair. That is correct but wasteful for greedy duplicate work.
+- For greedy decode, the seed is irrelevant and identical rendered prompts produce identical outputs. Computing those duplicates repeatedly cannot improve quality or diversity; it only spends decode time.
+
+Evidence:
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo test -p kiln-server batch_ --features vulkan` passed, including 11 batch endpoint unit tests.
+- `cargo build --release --features vulkan --bin kiln` passed.
+- Production server command:
+  - `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18425 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+- Focused HTTP batch benchmark, `temperature: 0`, `max_tokens: 4`:
+  - One prompt with `n=4`: 16 completion tokens in 3.265s, 4.900 aggregate tok/s.
+  - Four duplicate prompts with `n=1`: 16 completion tokens in 3.201s, 4.999 aggregate tok/s.
+  - Four distinct prompts with `n=1`: 16 completion tokens in 12.727s, 1.257 aggregate tok/s.
+
+Verdict:
+- Keep. This is a real bs>1 endpoint win for deterministic duplicate work and follows the "remove the need to do it" rule.
+- It does not solve distinct-prompt batching. The distinct-prompt case still behaves like one serialized decode stream.
+
+### E034: Batch-Aware Vulkan Linear Decode Primitive
+
+Change:
+- Made the cached Vulkan linear-decode path capable of handling `x` shaped `[batch, 1, hidden]` for future native multi-sequence decode.
+- First tried extending the existing `linear_decode.comp` shader with a `batch` push constant and a flattened `batch * ceil(out_dim / 16)` dispatch.
+- After batch=1 anchors regressed, restored the original single-stream shader and split the batched variant into `linear_decode_batched.comp`, used only when `batch > 1`.
+
+Reasoning:
+- Distinct-prompt bs>1 will eventually need backend kernels that operate over multiple active sequences in one forward call. Generic projection is one of the common primitives.
+- The production server does not yet construct `[batch, 1, hidden]` decode tensors, so this is a building block rather than an endpoint speedup.
+- The batch=1 hot path must stay on the fastest known shader.
+
+Evidence:
+- Direct parity:
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests.
+  - New test: `linear_decode_batched_matches_cpu_reference`.
+- Full server check:
+  - `cargo check -p kiln-server --features vulkan` passed.
+- Rejected hot-path attempt:
+  - Shared batch-aware `linear_decode.comp` anchor 1: mean ITL 368.5ms.
+  - Shared batch-aware `linear_decode.comp` anchor 2: mean ITL 371.9ms.
+  - This was worse than the descriptor-pool source-state reruns at 363.5ms / 356.0ms.
+- Final split-shader guard:
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+  - Standard anchor after restoring the single-stream shader:
+    - Prefill: 1865.7ms
+    - Decode steps: 360.2, 365.6, 369.1, 363.1, 377.6, 370.1ms
+    - Mean ITL: 367.6ms
+
+Verdict:
+- Keep the split primitive. It advances the native batching substrate without imposing the batch-aware shader on single-stream decode.
+- No default bs=1 win; do not count this as a latency improvement.
+
+### E035: Promote Full Vulkan MLP Decode
+
+Change:
+- Retested the full fused Vulkan MLP decode path after E032 descriptor-pool reuse and E034 shader split.
+- Promoted it from opt-in (`KILN_ENABLE_VULKAN_MLP_DECODE=1`) to default.
+- Added `KILN_DISABLE_VULKAN_MLP_DECODE=1` as the escape hatch.
+
+Reasoning:
+- Earlier full MLP decode was not better than split generic projections, but the cost model changed after descriptor-pool reuse and the projection shader work.
+- Full MLP decode removes host-visible round trips for the gate/up hidden buffer and combines the MLP's gate/up/down work into two Vulkan dispatches.
+- The path is already shape-gated to single-token, CPU-F32, no-LoRA decode and has direct parity coverage.
+
+Rejected Retests:
+- `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1`:
+  - Prefill: 1923.3ms
+  - Decode steps: 376.4, 365.5, 369.4, 377.5, 389.1, 374.2ms
+  - Mean ITL: 375.3ms
+  - Verdict: still worse than default; keep opt-in.
+- `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1`:
+  - Prefill: 1888.5ms
+  - Decode steps: 399.7, 403.1, 404.1, 411.3, 416.9, 423.5ms
+  - Mean ITL: 409.8ms
+  - Verdict: much worse; keep opt-in.
+
+Evidence:
+- MLP decode opt-in run 1:
+  - Prefill: 1889.5ms
+  - Decode steps: 318.2, 322.0, 330.9, 341.8, 346.2, 350.6ms
+  - Mean ITL: 334.9ms
+- MLP decode opt-in run 2:
+  - Prefill: 1972.9ms
+  - Decode steps: 352.4, 337.9, 345.4, 354.5, 356.5, 368.3ms
+  - Mean ITL: 352.5ms
+- `cargo fmt --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests including `mlp_decode_matches_cpu_reference`.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Promoted no-env default run 1:
+  - Prefill: 2112.9ms
+  - Decode steps: 336.5, 339.0, 338.1, 346.4, 359.3, 353.1ms
+  - Mean ITL: 345.4ms
+- Promoted no-env default run 2:
+  - Prefill: 1923.8ms
+  - Decode steps: 342.5, 340.0, 335.8, 340.8, 365.5, 370.8ms
+  - Mean ITL: 349.2ms
+- Promoted no-env two-run mean ITL: 347.3ms.
+- Production HTTP rerun, prefix cache disabled:
+  - Server command: `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18426 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+  - bs=1: 4-token chat runs 3.234s, 3.126s, 3.087s; mean 3.149s.
+  - bs=4 concurrent `/v1/chat/completions`, distinct prompts: 16 tokens in 12.993s, 1.231 tok/s aggregate; per-request latencies 12.992s, 9.670s, 10.805s, 11.909s.
+  - bs=4 `/v1/completions/batch`, distinct prompts: 16 tokens in 13.031s, 1.228 tok/s aggregate.
+  - bs=4 `/v1/completions/batch`, one duplicate prompt with `n=4`: 16 tokens in 3.292s, 4.861 tok/s aggregate.
+
+Verdict:
+- Keep and default-enable full Vulkan MLP decode.
+- This is a real source-level bs=1 decode win: latest default mean ITL improves from the E034 guard of 367.6ms to a two-run mean of 347.3ms.
+- End-to-end HTTP bs=1 is only slightly better than the prior best because fixed prompt/template/prefill/server costs dominate the 4-token fixture.
+- Distinct-prompt bs>1 still does not scale; native multi-sequence paged decode remains the missing production path.
+
+### E036: Promote Host-Visible Split GDN Recurrent State
+
+Change:
+- Added a host-visible recurrent state path to the split `dispatch_gdn_recurrent_step`.
+- The default now maps/writes/reads the mutable recurrent state buffer directly as host-visible coherent memory, avoiding explicit state upload/readback copy commands for each GDN linear layer and token.
+- Added `KILN_DISABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE=1` as the escape hatch.
+
+Reasoning:
+- After E035, the decode profiler showed `gdn.recurrent` as the dominant bucket:
+  - Around 176-190ms per token across 24 linear-attention layers.
+  - Each layer was paying for mutable recurrent-state transfer around the recurrent kernel.
+- The earlier host-visible fused-GDN experiment was slower, but that path also fused gates/recurrent/norm and changed more of the memory access pattern. The split recurrent kernel deserved an isolated test.
+
+Evidence:
+- Profile before this change, after E035:
+  - `gdn.recurrent`: 176.4-190.3ms per token across 24 calls.
+  - `mlp.fused`: ~53-54ms across 32 calls.
+  - `gdn.gated_norm`: ~31.9-33.5ms across 24 calls.
+- `KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE=1 cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests.
+- Opt-in run 1:
+  - Prefill: 1869.0ms
+  - Decode steps: 324.7, 327.0, 320.6, 342.9, 345.3, 351.2ms
+  - Mean ITL: 335.3ms
+- Opt-in run 2:
+  - Prefill: 1896.4ms
+  - Decode steps: 323.7, 321.1, 346.7, 352.4, 343.9, 355.8ms
+  - Mean ITL: 340.6ms
+- After promotion:
+  - `cargo fmt --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Promoted no-env default run 1:
+  - Prefill: 1922.1ms
+  - Decode steps: 319.3, 319.7, 325.2, 342.2, 355.3, 339.0ms
+  - Mean ITL: 333.4ms
+- Promoted no-env default run 2:
+  - Prefill: 2009.0ms
+  - Decode steps: 349.4, 337.7, 330.1, 342.9, 336.2, 350.1ms
+  - Mean ITL: 341.1ms
+- Promoted no-env two-run mean ITL: 337.3ms.
+- Production HTTP rerun, prefix cache disabled:
+  - Server command: `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18427 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+  - bs=1: 4-token chat runs 3.228s, 3.104s, 3.102s; mean 3.145s.
+  - bs=4 concurrent `/v1/chat/completions`, distinct prompts: 16 tokens in 12.541s, 1.276 tok/s aggregate; per-request latencies 3.125s, 10.471s, 12.540s, 11.493s.
+  - bs=4 `/v1/completions/batch`, distinct prompts: 16 tokens in 12.552s, 1.275 tok/s aggregate.
+  - bs=4 `/v1/completions/batch`, one duplicate prompt with `n=4`: 16 tokens in 3.183s, 5.027 tok/s aggregate.
+- Promoted profile check:
+  - Profiled token times: 333.0ms, 332.1ms, 341.5ms.
+  - `gdn.recurrent`: 156.4ms, 158.9ms, 168.1ms across 24 calls.
+  - Other large buckets: `mlp.fused` ~53ms/32, `gdn.gated_norm` ~28-29ms/24, `layer.full` ~26-28ms/8, `gdn.in_proj` ~20-21ms/24, `lm_head.argmax` ~13-18ms.
+
+Verdict:
+- Keep and default-enable host-visible split GDN recurrent state.
+- This is the best default source-level decode result so far: current two-run mean ITL is 337.3ms, down from E035's 347.3ms.
+- It improves distinct bs=4 aggregate slightly, but not by true batching; the server still runs one active forward stream at a time for distinct prompts.
+
+### E037: Reject Host-Visible Split GDN Recurrent I/O
+
+Change:
+- Tested an opt-in path that made the split recurrent step's Q/K/V/beta/g inputs and output buffer host-visible coherent memory.
+- Kept E036's accepted host-visible recurrent state path in place during the test, so this isolated the transient input/output buffers.
+- Removed the opt-in path after measurement instead of leaving another slow hot-path switch.
+
+Reasoning:
+- Hypothesis: remove five tiny device-local upload submissions and the output readback copy from every recurrent layer.
+- On Strix Halo, shader access to host-visible input/output memory was not better than keeping those transient tensors device-local.
+
+Evidence:
+- `KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_IO=1 cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests.
+- Opt-in run 1:
+  - Prefill: 1885.6ms
+  - Decode steps: 337.4, 321.1, 323.4, 343.3, 344.7, 341.1ms
+  - Mean ITL: 335.2ms
+- Opt-in run 2:
+  - Prefill: 2089.2ms
+  - Decode steps: 344.5, 349.7, 337.6, 332.0, 360.8, 355.0ms
+  - Mean ITL: 346.6ms
+- Opt-in two-run mean ITL: 340.9ms.
+- Current no-env default after E036 remains 333.4ms and 341.1ms, two-run mean 337.3ms.
+
+Verdict:
+- Reject and remove the host-visible recurrent I/O path.
+- Keep Q/K/V/beta/g inputs and recurrent output device-local.
+- E036 remains the current default: host-visible recurrent state only.
+
+### E038: GDN Gates/Gated RMSNorm Transfer Cleanup
+
+Change:
+- Replaced the old `VulkanBuffer::upload_data` / `read_back` helpers in `dispatch_gdn_gates` and `dispatch_gdn_gated_rms_norm` with the reusable transient command-pool helpers.
+- This removes per-transfer command pool creation/destruction from two default GDN decode kernels that run in every linear-attention layer.
+
+Reasoning:
+- After E036/E037, `gdn.gated_norm` was still a visible 24-call bucket.
+- The kernels were already using the cached compute-pipeline and descriptor-pool path, but their surrounding tensor transfers still used the older transfer helpers.
+
+Evidence:
+- `cargo fmt --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- No-env default run 1:
+  - Prefill: 1835.3ms
+  - Decode steps: 313.7, 316.9, 320.2, 333.3, 343.5, 337.4ms
+  - Mean ITL: 327.5ms
+- No-env default run 2:
+  - Prefill: 1889.0ms
+  - Decode steps: 325.9, 326.8, 325.1, 347.0, 338.3, 343.1ms
+  - Mean ITL: 334.4ms
+- Two-run mean ITL: 330.9ms.
+- Profile after the transfer cleanup:
+  - Profiled token times: 346.2ms, 346.6ms, 350.1ms.
+  - `gdn.gated_norm`: 22.9ms, 20.1ms, 24.2ms across 24 calls.
+  - `gdn.gates`: 7.6ms, 7.3ms, 7.1ms across 24 calls.
+
+Verdict:
+- Keep the transfer cleanup.
+- This moved the default source-level bs=1 anchor from E036's 337.3ms two-run mean to 330.9ms.
+
+### E039: Cache Immutable GDN Gates/Norm Weights
+
+Change:
+- Added cached-buffer dispatch variants for:
+  - `dispatch_gdn_gates_cached`, reusing device-local `A_log` and `dt_bias` buffers.
+  - `dispatch_gdn_gated_rms_norm_cached`, reusing the device-local GDN norm weight buffer.
+- Routed the Vulkan backend through the existing f32 weight cache for those immutable per-layer tensors.
+- Extended the Vulkan parity test to cover the cached gates and cached gated-RMSNorm paths.
+
+Reasoning:
+- Even after E038, the default path still uploaded tiny immutable GDN weights every token and every layer.
+- These weights are stable model parameters and fit the existing Vulkan weight-cache design already used by projections.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests including the cached gates/norm assertions.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- No-env default run 1:
+  - Prefill: 1899.2ms
+  - Decode steps: 337.7, 327.8, 320.0, 330.0, 326.8, 339.5ms
+  - Mean ITL: 330.3ms
+- No-env default run 2:
+  - Prefill: 1924.5ms
+  - Decode steps: 321.3, 319.0, 323.0, 345.6, 332.8, 340.1ms
+  - Mean ITL: 330.3ms
+- Two-run mean ITL: 330.3ms.
+- Profile after cached weights:
+  - Profiled token times: 337.4ms, 343.2ms, 339.6ms.
+  - `gdn.gates`: 5.1ms, 4.8ms, 5.0ms across 24 calls.
+  - `gdn.gated_norm`: 19.0ms, 15.8ms, 19.2ms across 24 calls.
+  - Dominant remaining bucket: `gdn.recurrent` at 176.7-184.4ms across 24 calls.
+
+Verdict:
+- Keep cached immutable GDN gates/norm weights.
+- Current default source-level bs=1 anchor is 330.3ms mean ITL across two no-env runs.
+- This improves single-stream decode but does not change distinct-prompt bs>1 behavior; production still needs native multi-sequence paged decode to scale distinct prompts.
+
+### E040: HTTP Server Rerun After GDN Transfer/Cache Cleanup
+
+Change:
+- No additional code change. Measured the release server after E038/E039.
+
+Server command:
+- `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18428 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+
+Workload:
+- OpenAI-compatible chat completions and `/v1/completions/batch`.
+- `temperature=0.0`, `top_p=1.0`, `max_tokens=4`, served model `qwen3.5-4b-kiln`.
+- Prefix cache disabled to avoid shared-prefix effects.
+
+Evidence:
+- `cargo build --release --features vulkan --bin kiln` passed.
+- Warmup:
+  - 4 completion tokens in 3.131s.
+- bs=1, three measured chat runs:
+  - 4 tokens in 3.051s, 1.311 completion tok/s end-to-end.
+  - 4 tokens in 3.116s, 1.284 completion tok/s end-to-end.
+  - 4 tokens in 2.984s, 1.341 completion tok/s end-to-end.
+  - Mean latency: 3.050s for 4 completion tokens.
+- bs=4 as four concurrent `/v1/chat/completions` requests with distinct prompts:
+  - Wall time: 12.601s.
+  - Completion tokens: 16.
+  - Aggregate completion throughput: 1.270 tok/s.
+  - Per-request latencies: 9.624s, 11.628s, 12.594s, 10.605s.
+- bs=4 through `/v1/completions/batch` with distinct prompts:
+  - Wall time: 12.281s.
+  - Completion tokens: 16.
+  - Aggregate completion throughput: 1.303 tok/s.
+- bs=4 through `/v1/completions/batch`, one duplicate prompt with `n=4`:
+  - Wall time: 2.991s.
+  - Completion tokens: 16.
+  - Aggregate completion throughput: 5.349 tok/s.
+
+Verdict:
+- Keep. The current release server is measurably faster for bs=1 and deterministic duplicate work.
+- Distinct-prompt bs=4 is slightly better than E036 but still not true batching; the server continues to serialize distinct prompt forward work.
+
+### E041: Promote Single-Submit Split GDN Recurrent Step
+
+Change:
+- Added a single-submit path for the split `dispatch_gdn_recurrent_step`.
+- For each recurrent layer, the path records Q/K/V/beta/g staging copies, optional state upload, compute dispatch, output copy, and optional state readback copy into one command buffer.
+- Promoted it to default after A/B; `KILN_DISABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT=1` is the escape hatch.
+
+Reasoning:
+- E037 showed shader reads from host-visible Q/K/V/beta/g were slower, so the winning direction is still device-local recurrent inputs/output.
+- The previous split recurrent path paid multiple queue submissions around each layer: five small input uploads, one compute dispatch, and one output readback.
+- Combining those operations keeps fast device-local shader buffers while removing repeated transfer-submit overhead.
+
+Evidence:
+- `KILN_ENABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step -- --nocapture` passed, 2 recurrent tests.
+- After promotion:
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 14 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Opt-in run 1:
+  - Prefill: 1835.1ms
+  - Decode steps: 325.0, 317.3, 324.8, 339.5, 346.4, 340.9ms
+  - Mean ITL: 332.3ms
+- Opt-in run 2:
+  - Prefill: 2399.7ms
+  - Decode steps: 325.1, 308.2, 311.0, 325.5, 324.6, 329.2ms
+  - Mean ITL: 320.6ms
+- Opt-in run 3:
+  - Prefill: 2291.9ms
+  - Decode steps: 305.2, 316.5, 321.8, 336.2, 327.4, 319.7ms
+  - Mean ITL: 321.1ms
+- Promoted no-env default run 1:
+  - Prefill: 1882.4ms
+  - Decode steps: 321.7, 321.7, 316.6, 334.8, 339.6, 323.2ms
+  - Mean ITL: 326.3ms
+- Promoted no-env default run 2:
+  - Prefill: 1847.5ms
+  - Decode steps: 321.7, 321.7, 325.0, 325.0, 337.3, 330.1ms
+  - Mean ITL: 326.8ms
+- Promoted no-env two-run mean ITL: 326.5ms.
+- Profile after promotion:
+  - Profiled token times: 332.1ms, 335.5ms, 338.5ms.
+  - `gdn.recurrent`: 169.8ms, 171.3ms, 172.8ms across 24 calls.
+  - Other large buckets: `mlp.fused` ~53-54ms/32, `layer.full` ~27-28ms/8, `gdn.gated_norm` ~23ms/24, `gdn.in_proj` ~20-21ms/24, `lm_head.argmax` ~14-19ms.
+
+Verdict:
+- Keep and default-enable single-submit split GDN recurrent.
+- This is the best source-level bs=1 default so far: current two-run mean ITL is 326.5ms, down from E039's 330.3ms.
+- The remaining dominant bucket is still GDN recurrent state work; further substantial wins likely require keeping recurrent state and GDN intermediates resident across layers/tokens or implementing true multi-sequence decode for bs>1.
+
+### E042: HTTP Server Rerun After Single-Submit Recurrent
+
+Change:
+- No additional code change. Measured the release server after E041.
+
+Server command:
+- `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18429 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+
+Workload:
+- OpenAI-compatible chat completions and `/v1/completions/batch`.
+- `temperature=0.0`, `top_p=1.0`, `max_tokens=4`, served model `qwen3.5-4b-kiln`.
+- Prefix cache disabled to avoid shared-prefix effects.
+
+Evidence:
+- `cargo build --release --features vulkan --bin kiln` passed.
+- Warmup:
+  - 4 completion tokens in 3.136s.
+- bs=1, three measured chat runs:
+  - 4 tokens in 2.980s, 1.342 completion tok/s end-to-end.
+  - 4 tokens in 2.994s, 1.336 completion tok/s end-to-end.
+  - 4 tokens in 3.000s, 1.334 completion tok/s end-to-end.
+  - Mean latency: 2.991s for 4 completion tokens.
+- bs=4 as four concurrent `/v1/chat/completions` requests with distinct prompts:
+  - Wall time: 12.100s.
+  - Completion tokens: 16.
+  - Aggregate completion throughput: 1.322 tok/s.
+  - Per-request latencies: 5.031s, 9.976s, 12.096s, 11.085s.
+- bs=4 through `/v1/completions/batch` with distinct prompts:
+  - Wall time: 12.003s.
+  - Completion tokens: 16.
+  - Aggregate completion throughput: 1.333 tok/s.
+- bs=4 through `/v1/completions/batch`, one duplicate prompt with `n=4`:
+  - Wall time: 2.954s.
+  - Completion tokens: 16.
+  - Aggregate completion throughput: 5.417 tok/s.
+
+Verdict:
+- Keep. This is the best measured production fixture so far for bs=1 and duplicate deterministic batch work.
+- Distinct-prompt bs=4 remains serialized in practice; native multi-sequence paged Vulkan decode is still the required bs>1 throughput work.
+
+### E043: Reject Single-Submit GDN Gated RMSNorm
+
+Change:
+- Tested an opt-in single-submit path for `dispatch_gdn_gated_rms_norm_cached`.
+- The path staged x/z, dispatched the cached-weight gated RMSNorm kernel, and copied output back in one command buffer/queue submit.
+- Removed the opt-in path after measurement.
+
+Reasoning:
+- After E041, `gdn.gated_norm` was still a visible 24-call bucket.
+- The same single-submit idea that helped recurrent state might have removed transfer-submit overhead around gated RMSNorm.
+
+Evidence:
+- `KILN_ENABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_gates_and_gated_rms_norm -- --nocapture` passed, 1 focused test.
+- Opt-in run 1:
+  - Prefill: 2203.3ms
+  - Decode steps: 326.7, 323.5, 318.3, 338.1, 326.5, 339.6ms
+  - Mean ITL: 328.8ms
+- Opt-in run 2:
+  - Prefill: 2093.4ms
+  - Decode steps: 333.4, 318.0, 331.6, 339.7, 346.5, 332.5ms
+  - Mean ITL: 333.6ms
+- Current no-env default after E041 remains 326.3ms and 326.8ms, two-run mean 326.5ms.
+
+Verdict:
+- Reject and remove.
+- Unlike the recurrent kernel, gated RMSNorm did not benefit from manually combining the transfer and compute work into one command buffer. Keep the existing split helper path.
+
+### E044: Promote Single-Submit Generic Linear Decode
+
+Change:
+- Added a single-submit path for cached generic `linear_decode`.
+- The path records x staging copy, cached-weight projection dispatch, and output copy into one command buffer/queue submit.
+- It supports both the existing batch=1 shader and the split `linear_decode_batched.comp` shader for `batch > 1`.
+- Promoted it to default after A/B; `KILN_DISABLE_VULKAN_LINEAR_DECODE_SINGLE_SUBMIT=1` is the escape hatch.
+
+Reasoning:
+- Several remaining decode buckets route through generic cached `linear_decode`: GDN output projection and parts of full-attention decode.
+- Each call was still paying separate transfer, compute, and readback submissions around a cached weight buffer.
+- This is a higher-leverage boundary reduction than the rejected gated-RMSNorm experiment because it applies across multiple projection families.
+
+Evidence:
+- `KILN_ENABLE_VULKAN_LINEAR_DECODE_SINGLE_SUBMIT=1 cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode -- --nocapture` passed, 3 tests including batch=1, batched, and argmax coverage.
+- After promotion:
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode -- --nocapture` passed, 3 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Opt-in run 1:
+  - Prefill: 1955.7ms
+  - Decode steps: 312.6, 314.0, 310.4, 330.5, 331.2, 329.3ms
+  - Mean ITL: 321.3ms
+- Opt-in run 2:
+  - Prefill: 2277.6ms
+  - Decode steps: 302.9, 313.0, 314.0, 322.6, 315.9, 319.6ms
+  - Mean ITL: 314.7ms
+- Promoted no-env default run 1:
+  - Prefill: 1868.8ms
+  - Decode steps: 335.1, 328.4, 318.1, 327.2, 331.9, 328.5ms
+  - Mean ITL: 328.2ms
+- Promoted no-env default run 2:
+  - Prefill: 1946.0ms
+  - Decode steps: 317.5, 303.2, 306.8, 315.6, 319.7, 322.8ms
+  - Mean ITL: 314.3ms
+- Promoted no-env default run 3:
+  - Prefill: 1878.4ms
+  - Decode steps: 310.1, 306.4, 314.9, 329.0, 340.1, 329.1ms
+  - Mean ITL: 321.6ms
+- Promoted no-env three-run mean ITL: 321.4ms.
+- Profile after promotion:
+  - Profiled token times: 333.6ms, 323.5ms, 318.4ms.
+  - `gdn.out_proj`: 13.2ms, 12.4ms, 11.2ms across 24 calls.
+  - `layer.full`: 27.3ms, 25.9ms, 25.3ms across 8 calls.
+  - `gdn.recurrent`: 166.7ms, 160.0ms, 161.1ms across 24 calls.
+  - Other large buckets: `mlp.fused` ~53-55ms/32, `gdn.in_proj` ~24ms/24, `gdn.gated_norm` ~21-23ms/24, `lm_head.argmax` ~13-18ms.
+
+Verdict:
+- Keep and default-enable generic linear-decode single-submit.
+- This is the best source-level bs=1 default so far: current three-run mean ITL is 321.4ms, down from E041's 326.5ms.
+- It also keeps the batch-aware linear primitive covered for future native bs>1 decode, though production distinct-prompt batching still needs a multi-sequence forward path.
+
+### E045: HTTP Server Rerun After Generic Linear Single-Submit
+
+Change:
+- No additional code change. Measured the release server after E044.
+
+Server command:
+- `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18430 KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0 ./target/release/kiln serve`
+
+Workload:
+- Same short OpenAI-compatible chat and `/v1/completions/batch` fixture as E040/E042.
+- `temperature=0.0`, `top_p=1.0`, `max_tokens=4`, served model `qwen3.5-4b-kiln`.
+- Prefix cache disabled to avoid shared-prefix effects.
+
+Evidence:
+- `cargo build --release --features vulkan --bin kiln` passed.
+- HTTP pass 1:
+  - Warmup: 4 tokens in 3.039s.
+  - bs=1 measured chat runs: 3.014s, 3.060s, 3.139s; mean 3.071s.
+  - bs=4 concurrent distinct chat: 16 tokens in 12.346s, 1.296 tok/s aggregate; per-request latencies 12.338s, 10.265s, 9.301s, 11.339s.
+  - bs=4 distinct batch: 16 tokens in 12.641s, 1.266 tok/s aggregate.
+  - duplicate `n=4` batch: 16 tokens in 2.990s, 5.351 tok/s aggregate.
+- HTTP pass 2:
+  - bs=1 measured chat runs: 3.066s, 3.077s, 3.019s; mean 3.054s.
+  - bs=4 concurrent distinct chat: 16 tokens in 11.767s, 1.360 tok/s aggregate; per-request latencies 2.948s, 10.762s, 11.764s, 5.834s.
+  - bs=4 distinct batch: 16 tokens in 12.107s, 1.322 tok/s aggregate.
+  - duplicate `n=4` batch: 16 tokens in 2.994s, 5.345 tok/s aggregate.
+- Same-binary source-level disable guard:
+  - `KILN_DISABLE_VULKAN_LINEAR_DECODE_SINGLE_SUBMIT=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 1885.2ms.
+  - Decode steps: 334.7, 327.0, 327.1, 328.9, 328.0, 336.3ms.
+  - Mean ITL: 330.3ms.
+
+Verdict:
+- Keep E044 as a source-level default because the same-binary controlled benchmark shows a clear win over disabling it.
+- Do not count this as a production HTTP fixture win. E042 remains the best short HTTP fixture for bs=1 and duplicate deterministic batch work.
+- Distinct-prompt bs>1 is still serialized; this experiment does not change that architecture.
+
+### E046: Reject Single-Submit GDN Input Projection
+
+Change:
+- Tested an opt-in single-submit path for `dispatch_gdn_in_proj_decode_cached`.
+- The path staged x, dispatched the fused QKV/Z/A/B projection against cached weights, and copied the fused output back in one command buffer/queue submit.
+- Removed the opt-in path after measurement.
+
+Reasoning:
+- After E044, `gdn.in_proj` remained around 24ms across 24 GDN calls.
+- It looked structurally similar to generic `linear_decode`, where single-submit helped.
+
+Evidence:
+- `KILN_ENABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj -- --nocapture` passed, 1 focused test.
+- Opt-in run 1:
+  - Prefill: 1841.5ms
+  - Decode steps: 326.6, 322.6, 327.4, 323.9, 343.3, 328.7ms
+  - Mean ITL: 328.7ms
+- Opt-in run 2:
+  - Prefill: 1799.6ms
+  - Decode steps: 326.6, 323.1, 323.5, 320.4, 339.7, 329.5ms
+  - Mean ITL: 327.1ms
+- Current no-env default after E044 remains 328.2ms, 314.3ms, and 321.6ms, three-run mean 321.4ms.
+
+Verdict:
+- Reject and remove.
+- The fused GDN input projection does not benefit from the manual single-submit wrapper on this driver; keep the existing upload/compute/readback helper path.
+
+### E047: Promote Native Greedy Batch Decode Bridge
+
+Change:
+- Added `gdn_in_proj_decode_batched.comp` and `mlp_gate_up_decode_batched.comp` for batch>1 single-token decode.
+- Extended the Vulkan decode wrappers so `gdn_in_proj_decode`, `mlp_gate_up_decode`, and `mlp_decode` accept `[batch, 1, hidden]` while keeping the established batch=1 shaders on the single-stream path.
+- Added `model_forward_paged_next_tokens_greedy_batch`, which runs GDN/MLP layers with a real batch dimension and still processes full-attention layers one row at a time through the existing `BlockTable`/paged-KV API.
+- Added `ModelRunner::generate_paged_shared_tokens_batch_greedy` and promoted it in `/v1/completions/batch` for eligible Vulkan greedy batches.
+- Rollback: `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`.
+
+Eligibility gates:
+- Real Vulkan backend only.
+- `temperature == 0.0`.
+- No stop sequences.
+- No active LoRA adapter.
+- Prefix cache disabled. Prefix-cache-enabled traffic keeps the existing per-request path so cached-prefix lookup/registration semantics are not bypassed.
+- More than one unique deterministic generation job after duplicate-output dedupe.
+
+Reasoning:
+- Distinct-prompt batch work was still fanout over independent single-request jobs.
+- A full multi-sequence paged-KV rewrite is larger because `BlockTable` and `PagedKvCache::{write,read}` are single-sequence contracts today.
+- Qwen3.5-4B has 24 linear-attention/GDN-heavy layers and only 8 full-attention layers, so a partial lockstep bridge can batch the dominant GDN/MLP decode work without changing the paged-KV table shape.
+
+Evidence:
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity batched -- --nocapture` passed, 3 focused batched tests.
+- Final validation `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Short HTTP fixture with opt-in prototype, prefix cache disabled, `temperature=0`, `top_p=1`, `max_tokens=4`:
+  - Warmup chat: 4 tokens in 3.502s.
+  - bs=1 chat runs: 3.719s, 3.756s, 3.472s; mean 3.649s.
+  - bs=4 concurrent distinct chat: 16 tokens in 12.438s, 1.286 tok/s aggregate.
+  - bs=4 distinct batch: 16 tokens in 11.857s, 1.349 tok/s aggregate.
+  - duplicate `n=4` batch: 16 tokens in 3.063s, 5.223 tok/s aggregate.
+- Longer same-prompt distinct batch fixture, prefix cache disabled, `temperature=0`, `top_p=1`, `max_tokens=16`:
+  - Opt-in prototype: 64 tokens in 26.312s, 2.432 tok/s.
+  - Same-source unflagged pre-promotion baseline: 64 tokens in 29.596s, 2.162 tok/s.
+  - Promoted no-env default after backend batch-MLP gate fix: 64 tokens in 26.615s, 2.405 tok/s.
+  - Promoted same-binary disable guard after backend batch-MLP gate fix (`KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`): 64 tokens in 28.697s, 2.230 tok/s.
+- Final bs=1 source bench after promotion:
+  - `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 2496.8ms.
+  - Decode steps: 317.5, 321.3, 312.0, 314.5, 329.6, 336.9ms.
+  - Mean ITL: 321.9ms, 3.1 tok/s.
+
+Verdict:
+- Keep and default-enable for the eligible batch endpoint path.
+- This is the first accepted distinct-prompt bs>1 server improvement: the same-binary promoted disable guard shows a 7.8% aggregate throughput win on the 64-token batch fixture, while bs=1 source latency stays in the existing 321ms band.
+- This is still not full continuous batching. Prefill remains per prompt, full-attention layers still run row-by-row, completed rows stay in the fixed batch shape as dummy work, and prefix-cache-enabled traffic falls back to the old path.
+
+### E048: Prefix-Cache-Aware Native Batch On Default Server Config
+
+Change:
+- Removed the blanket "prefix cache must be disabled" gate from the native greedy batch endpoint path.
+- Added `RealPrefixCache::would_hit`, a non-mutating prefix-cache probe.
+- If any prompt would hit the prefix cache, the batch endpoint keeps the established per-request path so cached KV blocks and linear-attention state are reused.
+- If every prompt would miss, the endpoint now runs the native Vulkan batch path even when prefix cache is enabled, then registers any block-aligned prompt snapshots returned by batch generation.
+- Batch generation now returns prompt-prefix registrations and allocated block ownership so the API layer can retain registered blocks and free the rest, matching the single-request prefix-cache ownership pattern.
+
+Reasoning:
+- E047 was measured with `KILN_PREFIX_CACHE_ENABLED=0`, but the production default has prefix caching enabled.
+- Prefix cache is a performance feature, not an output semantics feature. The safe default-server policy is to preserve cache-hit behavior and use native batch only for miss-only batches where the old path would not reuse any cached prefix anyway.
+- Registering block-aligned prompt snapshots keeps future prefix-cache reuse available instead of blindly bypassing the cache.
+
+Evidence:
+- `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed, including `would_hit` coverage that confirms the probe does not increment hit/miss counters.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed after the runtime change.
+- Default prefix-cache-enabled server command:
+  - `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18453 KILN_REQUEST_TIMEOUT_SECS=600 ./target/release/kiln serve`
+  - Startup confirmed prefix cache enabled: `max_blocks=31350`, `max_entries=20`.
+- Prefix-enabled 64-token distinct batch fixture, `temperature=0`, `top_p=1`, `max_tokens=16`:
+  - No-env default: 64 tokens in 26.977s, 2.372 tok/s.
+  - Same-binary disable guard (`KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`): 64 tokens in 28.427s, 2.251 tok/s.
+
+Verdict:
+- Keep.
+- The default server configuration now gets the distinct-prompt native batch win for prefix-cache miss batches: 5.4% aggregate throughput improvement on the 64-token fixture versus the disable guard.
+- Prefix-cache hits still fall back to the prior path; the remaining work is native batching for suffix prefill/decode after shared cached prefixes.
+
+### E049: Mixed Prefix-Hit/Prefix-Miss Batch Split
+
+Change:
+- Extended the E048 gate from "all prompts must miss the prefix cache" to a mixed execution plan.
+- Prefix-cache miss jobs are grouped into the native Vulkan greedy batch path when at least two misses are present.
+- Prefix-cache hit jobs are still executed through the existing single-request path so they perform the real `lookup`, reuse cached blocks/GDN state, and update prefix-cache metrics/refcounts normally.
+- The final batch response merges native miss-job outputs with hit-job responses before expanding duplicate deterministic outputs.
+
+Reasoning:
+- A batch with one cached long-prefix request and several unrelated misses was still falling back entirely to the old per-job fanout.
+- There is no need to choose between prefix reuse and native batching: the miss subset can be batched, while hit requests keep the more efficient cached-prefix path.
+
+Evidence:
+- Added `Clone` derives for `ChatCompletionRequest`, `Message`, and `AdapterRef` so hit jobs can be spawned through the existing response generator while native miss jobs run separately.
+- `cargo fmt --check` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed.
+- Mixed hit/miss fixture:
+  - Registered a 32-token base prompt with `max_tokens=0`; prefix metrics showed one cached entry, 2 cached blocks.
+  - Used a delimiter-shaped suffix prompt so its rendered prompt starts with the cached 32-token base.
+  - No-env split path metrics after batch: `kiln_prefix_cache_lookups_total{result="hit"} 1`, `kiln_prefix_cache_hit_tokens_total 32`, `kiln_prefix_cache_hit_blocks_total 2`.
+  - No-env split path: 64 tokens in 27.345s, 2.340 tok/s.
+  - Same fixture with `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`: 64 tokens in 28.458s, 2.249 tok/s, also with one prefix hit.
+
+Verdict:
+- Keep.
+- Mixed prefix-hit/prefix-miss traffic gets a 4.0% aggregate throughput improvement while preserving real prefix-cache reuse for hit jobs.
+- The remaining structural limitation is that hit-job suffixes are not themselves part of the native batch; this still requires a batch generator that accepts per-row cached prefixes and linear-attention states.
+
+### E050: Native Batch With Per-Row Cached Prefixes
+
+Change:
+- Extended `ModelRunner::generate_paged_shared_tokens_batch_greedy` to accept an optional per-row `PagedPrefixReuse`.
+- For prefix-hit rows, batch generation now appends newly allocated blocks after cached KV blocks, starts prefill at the cached token count, resumes from the cached linear-attention state, and registers the completed block-aligned prompt snapshot after success.
+- Updated `/v1/completions/batch` so eligible Vulkan greedy batches do real prefix-cache lookups for every row, pass hit snapshots into one native batch, release hit refcounts on every error/timeout/success path, and register returned prompt snapshots before freeing unretained blocks.
+- Removed the E049 mixed split path; prefix-hit and prefix-miss rows now share one native batch whenever the batch endpoint is otherwise eligible.
+
+Reasoning:
+- E049 preserved cache reuse but ran hit rows outside the native batch, so mixed traffic still paid a separate per-request path for cached suffixes.
+- The cache hit already provides exactly the reusable state needed by lockstep decode: cached block IDs plus a single-row linear-attention snapshot. The missing piece was row-local suffix prefill before stacking the linear states for batched decode.
+- Keeping lookup/release/register ownership in the API layer preserves the single-request cache semantics while letting the model batch generator stay focused on block tables, suffix prefill, and decode.
+
+Evidence:
+- `cargo fmt --check` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Final bs=1 source bench after the server change:
+  - `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill: 1869.9ms.
+  - Decode steps: 303.9, 313.6, 316.1, 329.7, 340.4, 325.7ms.
+  - Mean ITL: 321.6ms, 3.1 tok/s.
+- Mixed hit/miss fixture, default prefix-cache-enabled server:
+  - Registered the same 32-token base prompt with `max_tokens=0`; prefix metrics showed one cached entry and 2 cached blocks.
+  - Batch had one delimiter-shaped prefix-hit row plus three unrelated miss rows, `temperature=0`, `top_p=1`, `max_tokens=16`.
+  - No-env all-native path metrics after batch: `kiln_prefix_cache_lookups_total{result="hit"} 1`, `kiln_prefix_cache_hit_tokens_total 32`, `kiln_prefix_cache_hit_blocks_total 2`.
+  - No-env all-native path: 64 tokens in 26.984s, 2.372 tok/s.
+  - Same fixture with `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`: 64 tokens in 29.245s, 2.188 tok/s, also with one prefix hit.
+
+Verdict:
+- Keep.
+- This replaces the E049 split path with a simpler all-native mixed path.
+- The current rerun shows an 8.4% aggregate throughput improvement versus the disable guard, and it is also slightly faster than the E049 split result (27.345s / 2.340 tok/s).
+- Remaining bs>1 work is now below this bridge: batched full-attention paged-KV reads/writes, variable-row compaction after EOS, and broader continuous batching outside `/v1/completions/batch`.
+
+### E051: Retest Rejected Full-Attn QKV And Fused GDN Decode Paths
+
+Change:
+- No accepted runtime change.
+- Retested `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1` on the current E050 source because full-attention layers remain row-by-row in native batch decode.
+- Retested `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1` because the latest decode profile still shows `gdn.recurrent` as the dominant bs=1 bucket.
+- Briefly tried a 128-lane `gdn_decode_gates_recurrent_rmsnorm.comp` workgroup for Qwen3.5-4B's `dv=128`; reverted it after measurement.
+
+Reasoning:
+- Full-attn QKV was previously rejected for bs=1, but not against the current native batch bridge.
+- Fused GDN decode can remove separate gates/recurrent/gated-norm round trips in principle, but earlier measurements were unstable. Current defaults changed enough to justify one retest.
+- The fused GDN shader used 256 lanes per head while Qwen3.5-4B has `dv=128`, so a 128-lane variant was a small contained tuning attempt.
+
+Evidence:
+- Current decode profile (`KILN_PROFILE_DECODE=1`, 3 decode steps) still identifies `gdn.recurrent` as the largest bs=1 bucket:
+  - `gdn.recurrent`: 177.0ms, 176.7ms, 173.9ms across 24 calls.
+  - `mlp.fused`: 55.1ms, 56.8ms, 54.1ms across 32 calls.
+  - `layer.full`: 26.1ms, 26.8ms, 25.7ms across 8 calls.
+- `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1`:
+  - bs=1 source bench: prefill 1873.9ms, mean ITL 379.8ms, decode steps 381.7, 368.7, 381.7, 375.3, 390.7, 380.5ms.
+  - Mixed 64-token cache-hit/miss batch: 30.826s, 2.076 tok/s, with one prefix hit, 32 hit tokens, 2 hit blocks.
+- `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1` before shader tuning:
+  - First run: prefill 1890.2ms, mean ITL 290.0ms, decode steps 226.9, 346.6, 223.4, 348.9, 242.7, 351.3ms.
+  - Confirmation run: prefill 1926.3ms, mean ITL 362.2ms, decode steps 358.2, 353.8, 350.9, 367.7, 362.4, 380.2ms.
+- 128-lane fused-shader tuning:
+  - Focused parity `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_decode_gates_recurrent_rmsnorm -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - Opt-in bench was prefill 1932.2ms, mean ITL 363.7ms, decode steps 366.0, 353.1, 357.3, 364.2, 379.9, 361.9ms.
+
+Verdict:
+- Reject.
+- Full-attn QKV is worse for both current bs=1 and the mixed batch fixture.
+- Fused GDN decode remains too unstable to promote; the 128-lane tuning did not help.
+- The 128-lane shader and wider-shape guard changes were reverted. Keep the fused GDN decode path opt-in only.
+
+### E052: Batch Full-Attention Layer Post-MLP Work
+
+Change:
+- Added `transformer_block_paged_batch_decode_rows` for native batch decode.
+- Full-attention layers still run paged attention row-by-row through the existing single-sequence `BlockTable` API, but no longer run the whole transformer block row-by-row.
+- After row-local attention outputs are concatenated, the batch path now performs the residual add, post-attention RMSNorm, and SwiGLU MLP once over `[batch, 1, hidden]`.
+
+Reasoning:
+- E050 batched GDN and MLP layers, but the 8 full-attention layers still called the full transformer block once per row.
+- That row loop included each full-attention layer's MLP, so batch>1 traffic still paid separate MLP dispatches for those 8 layers even though MLP decode already supports `batch > 1`.
+- This keeps the hard part, paged-KV attention, unchanged while removing unnecessary per-row MLP work.
+
+Evidence:
+- `cargo fmt --check` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+- `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Mixed hit/miss fixture, default prefix-cache-enabled server:
+  - Registered the same 32-token base prompt with `max_tokens=0`; prefix metrics showed one cached entry and 2 cached blocks.
+  - Batch had one delimiter-shaped prefix-hit row plus three unrelated miss rows, `temperature=0`, `top_p=1`, `max_tokens=16`.
+  - No-env native path metrics after batch: `kiln_prefix_cache_lookups_total{result="hit"} 1`, `kiln_prefix_cache_hit_tokens_total 32`, `kiln_prefix_cache_hit_blocks_total 2`.
+  - No-env native path: 64 tokens in 26.037s, 2.458 tok/s.
+  - Same-source disable guard (`KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`): 64 tokens in 30.892s, 2.072 tok/s.
+  - Compared with E050's same fixture result, no-env improved from 26.984s / 2.372 tok/s to 26.037s / 2.458 tok/s.
+- Short miss-only distinct prompt check, default prefix-cache-enabled server:
+  - 64 tokens in 26.401s, 2.424 tok/s, with 77 prompt tokens.
+- bs=1 source checks after the patch:
+  - Post-E052 reruns: mean ITL 329.5ms and 334.1ms.
+  - This edit only changes `model_forward_paged_next_tokens_greedy_batch`, so it is not on the bs=1 source path. The best E050 no-env bs=1 anchor remains 321.6ms.
+
+Verdict:
+- Keep.
+- Mixed cache-hit/miss native batch throughput improves another 3.6% over E050 and 18.6% versus the current disable guard.
+- This is still not full multi-sequence paged attention: QKV projection, KV write/read, SDPA, and o_proj for full-attention layers remain row-local.
+
+### E053: Rejected Batch Full-Attention QKV/O-Projection Factoring
+
+Change:
+- Added a batch-only projected-QKV paged decode core for `transformer_block_paged_batch_decode_rows`.
+- The experiment batched full-attention QKV projection, QK norm, and o_proj over `[batch, 1, hidden]`, then kept RoPE, paged KV write/read, and SDPA row-local.
+- LoRA and MTP/debug capture paths still fell back to the existing row-local `gqa_attention_paged_with_rope_tables`.
+- Reverted after measurement.
+
+Reasoning:
+- E052 removed per-row MLP work from full-attention layers, but QKV and o_proj still ran once per row.
+- The existing Vulkan `linear_decode_batched` primitive can handle `batch > 1`, so factoring projection and o_proj out of the row-local attention loop looked like the next low-risk step before building true batched paged attention.
+
+Evidence:
+- With the experiment applied:
+  - `cargo fmt --check` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Mixed hit/miss fixture, default prefix-cache-enabled server:
+  - First valid run: 64 tokens in 27.042s, 2.367 tok/s, with one prefix hit, 32 hit tokens, 2 hit blocks.
+  - Confirmation run: 64 tokens in 26.540s, 2.411 tok/s, again with 32 hit tokens and 2 hit blocks.
+  - Both runs were slower than E052's 26.037s / 2.458 tok/s.
+- Short miss-only distinct prompt check:
+  - 64 tokens in 26.241s, 2.439 tok/s, with 77 prompt tokens.
+  - This slightly beat E052's short miss-only check (26.401s / 2.424 tok/s), but the gain was small and did not justify regressing the mixed prefix-cache fixture.
+- After reverting:
+  - `cargo fmt --check` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+  - Mixed hit/miss fixture returned to 64 tokens in 26.009s, 2.461 tok/s, with one prefix hit, 32 hit tokens, 2 hit blocks.
+
+Verdict:
+- Reject.
+- The projection/o_proj factoring is not enough on its own. It slightly helped the short all-miss case but regressed the mixed cache-hit/cache-miss fixture that exercises the default server path.
+- Keep the E052 structure: batched post-attention MLP for full-attention layers, row-local attention including QKV and o_proj.
+
+### E054: Rejected GDN Recurrent Host-Visible State Buffer Cache
+
+Change:
+- Added an opt-in `KILN_ENABLE_VULKAN_GDN_RECURRENT_STATE_CACHE=1` experiment.
+- The experiment remembered the host-visible Vulkan buffer for the CPU tensor returned by the previous `gdn_recurrent_step`, then reused that buffer when the next step consumed the same tensor id.
+- The goal was to skip re-extracting and rewriting the 2 MiB recurrent state into a fresh host-visible buffer on every GDN layer/token.
+- Reverted after measurement.
+
+Reasoning:
+- The current split recurrent path already uses a host-visible mutable state buffer, but the model state is still represented as a CPU `Tensor` between calls for rollback/prefix-cache semantics.
+- Since the recurrent step reads the updated state back to CPU, the next step usually writes those same bytes back to Vulkan. A tensor-id keyed cache looked like a contained way to avoid one direction of that copy without changing public state semantics.
+
+Evidence:
+- With the opt-in implementation applied:
+  - `cargo fmt --check` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo test -p kiln-server real_prefix_cache --features vulkan -- --nocapture` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Same-source no-env bs=1 anchor:
+  - Prefill 1867.3ms.
+  - Decode steps: 320.4, 316.6, 315.2, 336.2, 322.5, 333.1ms.
+  - Mean ITL 324.0ms.
+- `KILN_ENABLE_VULKAN_GDN_RECURRENT_STATE_CACHE=1`:
+  - First run: prefill 2484.1ms, mean ITL 333.3ms, decode steps 366.9, 326.0, 313.0, 332.4, 328.8, 332.9ms.
+  - Confirmation run: prefill 1858.2ms, mean ITL 329.1ms, decode steps 364.0, 320.1, 314.6, 323.9, 327.3, 324.5ms.
+- After reverting:
+  - `cargo fmt --check` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+
+Verdict:
+- Reject.
+- The cache removes one apparent state write, but the extra buffer lifetime/map path did not beat the simple current single-submit recurrent implementation.
+- A real win likely needs a stronger representation change: keep recurrent state resident through the full decode loop and only materialize CPU snapshots for rollback/prefix-cache boundaries.
+
+### E055: Rejected Native Batch Profiling And Batch Device-Local GDN State
+
+Change:
+- Added temporary native-batch decode profiling around the lockstep batch path.
+- Also tested making split GDN recurrent state device-local by default for `batch > 1`, while keeping host-visible recurrent state for bs=1.
+- Removed the batch profiler hooks and reverted the GDN state policy after measurement.
+
+Reasoning:
+- The mixed batch path needed a current breakdown before attempting deeper bs>1 work.
+- Short profiling showed native batch decode was dominated by GDN recurrent state, MLP, and LM-head work, not the row-local full-attention attention calls.
+- Device-local recurrent state looked attractive for batch because the short profiled fixture improved, but the full 64-token fixture is the acceptance gate.
+
+Evidence:
+- `KILN_PROFILE_DECODE=1`, mixed fixture with `max_tokens=4`, host-visible recurrent state:
+  - `gdn.recurrent`: 529.0ms, 734.1ms, 672.6ms across 24 calls on three batch decode steps.
+  - `mlp.fused`: ~195-202ms across 32 calls.
+  - `lm_head.batch`: ~86-98ms per step.
+  - `full.row.attn`: ~51-56ms across 32 calls.
+- `KILN_DISABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE=1` improved the short 4-token fixture from 12.348s to 11.598s, but promoting a batch-specific device-local default regressed the full mixed fixture:
+  - Default with batch device-local policy: 26.894s / 2.380 tok/s, then 27.322s / 2.342 tok/s.
+- After reverting the GDN policy but keeping the batch profiler code inactive, the mixed fixture still measured 26.888s / 2.380 tok/s, slower than the E052/E053-revert 26.009s / 2.461 tok/s confirmation.
+- Removed the batch-only profiler hooks from the default path.
+
+Verdict:
+- Reject.
+- The profile data is useful, but the temporary instrumentation and device-local batch policy are not default-speed improvements.
+- The next bs>1 work should target persistent state/intermediate residency or a better batched LM-head/GDN strategy without adding inactive-path overhead.
+
+### E056: Rejected Batched Vulkan LM-Head Argmax
+
+Change:
+- Added a batched Vulkan LM-head argmax experiment to avoid reading back `[batch, vocab]` logits for greedy native batch decode.
+- First version used separate upload, block-argmax dispatch, reduce dispatch, and readback.
+- Second version combined upload, both dispatches, and readback into one command buffer.
+- Removed the model/backend/shader/test surfaces after measurement.
+
+Reasoning:
+- Batch profiles showed `lm_head.batch` around 86-98ms per decode step because greedy sampling materializes full vocab logits on CPU.
+- A batched argmax should theoretically keep logits device-local and read back only one token id per row.
+
+Evidence:
+- Focused parity passed for both single and batched argmax while the experiment was applied.
+- Multi-submit batched argmax on the 64-token mixed fixture regressed to 54.129s / 1.182 tok/s.
+- Single-submit batched argmax was worse:
+  - 73.428s / 0.872 tok/s on the mixed fixture.
+  - 73.292s / 0.873 tok/s confirmation.
+- After removing the argmax route and doing a clean rebuild, bs=1 source latency remained healthy:
+  - Prefill 1982.8ms, mean ITL 328.5ms.
+
+Verdict:
+- Reject.
+- On Strix Halo/RADV, the argmax shader shape is much slower than materializing logits through the existing batched linear path.
+- LM-head optimization still matters, but this reduction kernel is not the right implementation.
+
+### E057: Native Batch Bridge Rolled Back To Opt-In
+
+Change:
+- Changed `KILN_ENABLE_VULKAN_BATCH_GREEDY_DECODE=1` to opt into the native greedy batch bridge.
+- `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1` remains an explicit override if both env vars are present.
+
+Reasoning:
+- After the profiler and argmax experiments were removed, the native batch bridge in this source state repeatedly measured as pathological on the mixed fixture.
+- The existing non-native batch path is slower than E052's best native result, but it is much faster than the current native path and preserves correctness/prefix-cache behavior.
+
+Evidence:
+- Clean no-debug default before rollback, mixed prefix-hit/prefix-miss fixture:
+  - 75.371s / 0.849 tok/s, with one hit, 32 hit tokens, 2 hit blocks.
+- Existing rollback guard on the same binary:
+  - `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`: 28.546s / 2.242 tok/s, with the same prefix-cache metrics.
+- New no-env default after making native batch opt-in:
+  - 28.863s / 2.217 tok/s, with one hit, 32 hit tokens, 2 hit blocks.
+- Validation after rollback:
+  - `cargo fmt --all --check` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+
+Verdict:
+- Keep the rollback.
+- This gives up the earlier E052 native-batch default win until the pathology is found, but it avoids shipping a 3x default regression.
+- Current safest default mixed-batch result is 28.863s / 2.217 tok/s; native batch remains available only for targeted debugging with `KILN_ENABLE_VULKAN_BATCH_GREEDY_DECODE=1`.
+
+### E058: Fixed Opt-In Native Batch GDN Input Projection
+
+Change:
+- Added env-gated native-batch timing behind `KILN_PROFILE_VULKAN_BATCH_GREEDY=1`.
+- Reused the existing decode sub-op profiler inside `model_forward_paged_next_tokens_greedy_batch` so native batch can attribute GDN/MLP sub-ops without affecting the no-profile path.
+- Removed the stale `batch != 1` guard from the Vulkan backend's `gdn_in_proj_decode` route. The kernel layer already had `gdn_in_proj_decode_batched.comp`, but the model backend never called it for native batch rows.
+- Kept native batch opt-in only.
+
+Reasoning:
+- E057 proved the current native batch bridge was pathological, but not why.
+- Coarse profiling showed the post-prefill native decode steps were taking about 4.0-4.4s each on the 4-row mixed fixture.
+- Sub-op profiling showed the dominant cost was not LM head: `gdn.in_proj` alone was around 2.9-3.1s per decode step across 24 GDN layers because `batch > 1` fell back to four CPU `broadcast_matmul`s per layer.
+
+Evidence:
+- Before the backend gate fix, profiled opt-in native batch on the mixed `max_tokens=4` fixture:
+  - End-to-end batch: 20.466s for 16 generated tokens.
+  - Decode step profiles: 4171.7ms, 4023.2ms, 3990.9ms.
+  - `linear.gdn`: 3833.4ms, 3677.0ms, 3641.5ms across 24 layers.
+  - `gdn.in_proj`: 3123.5ms, 2912.4ms, 2947.6ms across 24 layers.
+- After enabling the existing batched Vulkan GDN in-proj shader:
+  - Profiled mixed `max_tokens=4`: 15.141s for 16 generated tokens.
+  - Decode step profiles: 970.4ms, 1168.4ms, 1192.1ms.
+  - `gdn.in_proj`: 86.7ms, 86.8ms, 85.3ms across 24 layers.
+  - Remaining decode bottleneck became `gdn.recurrent`: 491.6ms, 657.5ms, 690.5ms across 24 layers.
+- Full no-profile mixed `max_tokens=16` fixture after the fix:
+  - Opt-in native: 27.750s / 2.306 tok/s.
+  - Opt-in native confirmation: 29.851s / 2.144 tok/s.
+  - Same-binary no-env fallback: 29.137s / 2.197 tok/s.
+- Longer no-profile mixed `max_tokens=32` fixture:
+  - No-env fallback: 50.908s / 2.514 tok/s.
+  - Opt-in native: 54.790s / 2.336 tok/s.
+- Validation after the fix and profiler cleanup:
+  - `cargo fmt --all --check` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+
+Verdict:
+- Keep the batched GDN in-proj backend fix and the env-gated profiler.
+- Keep native batch opt-in only.
+- This removes the worst native-batch pathology and makes targeted debugging viable again, but it is not a reliable default throughput win. The longer fixture shows the remaining native batch path is still limited by row prefill and batched GDN recurrent state traffic.
+
+### E059: Promoted Native Batch With Batch-Default Fused GDN Decode
+
+Change:
+- Made `gdn_decode_gates_recurrent_rmsnorm.comp` batch-aware for `[batch, 1, nv, *]` inputs and `[batch, nv, dk, dv]` recurrent state.
+- Updated the Vulkan fused GDN decode dispatcher to pass `batch` as a push constant and dispatch `batch * nv` workgroups.
+- Extended the existing GDN fused decode parity test to a `batch=3` shape.
+- Changed the Vulkan backend so fused GDN decode remains opt-in for bs=1, but is enabled by shape for `batch > 1`.
+- Re-promoted native greedy batch decode as the default. `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1` remains the rollback guard.
+
+Reasoning:
+- E058 made native batch use the batched Vulkan input-projection shader, exposing `gdn.recurrent` as the remaining dominant native-batch decode bucket.
+- The existing fused GDN decode path was single-row only and therefore invisible to native batch.
+- Fusing gates + recurrent update + gated RMSNorm is a good batch-specific fit because it removes the separate gates/recurrent/gated-norm CPU/Vulkan boundaries from every GDN layer and token.
+- The old bs=1 fused GDN path remains too unstable to default, so the promotion is deliberately shape-scoped to `batch > 1`.
+
+Evidence:
+- Validation for the batch-aware fused shader:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests, including the batch-shaped fused GDN decode test.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Profiled native batch with explicit fused opt-ins, mixed `max_tokens=4`:
+  - End-to-end: 12.390s for 16 generated tokens.
+  - Decode step profiles: 823.0ms, 1397.4ms, 1395.6ms.
+  - `gdn.fused_gates_recur_norm`: 331.8ms, 898.8ms, 895.4ms across 24 layers.
+  - This was not uniformly better per short decode step than E058, but it showed the batch-fused path was active and correct.
+- No-profile explicit fused native measurements:
+  - `max_tokens=16`: 28.586s / 2.239 tok/s.
+  - `max_tokens=32`: 36.617s / 3.496 tok/s, confirmation 37.817s / 3.385 tok/s.
+- After making fused GDN automatic for `batch > 1`, but keeping native batch opt-in:
+  - `max_tokens=16`: 23.358s / 2.740 tok/s.
+  - `max_tokens=32`: 37.429s / 3.420 tok/s.
+- After re-promoting native batch to no-env default:
+  - `max_tokens=16`: 23.640s / 2.707 tok/s.
+  - `max_tokens=32`: 41.595s / 3.077 tok/s.
+- Same-binary rollback guard:
+  - `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`, `max_tokens=16`: 28.761s / 2.225 tok/s.
+  - `KILN_DISABLE_VULKAN_BATCH_GREEDY_DECODE=1`, `max_tokens=32`: 49.893s / 2.565 tok/s.
+- bs=1 source anchor after the promotion:
+  - `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill 2585.9ms.
+  - Mean ITL 318.1ms, p50 319.0ms, p99 334.4ms.
+
+Verdict:
+- Keep.
+- This establishes a new default mixed-batch best on the current source state: 23.640s / 2.707 tok/s for the 64-token fixture, a 21.6% throughput gain over the same-binary disable guard.
+- Longer generation benefits more: 41.595s / 3.077 tok/s for 128 tokens, a 20.0% throughput gain over the same-binary disable guard.
+- The shape-scoped fused GDN policy preserves bs=1 behavior while making native batch default-safe again.
+
+### E060: Rejected Cached Immutable Fused-GDN Tensors
+
+Change:
+- Tried caching the immutable fused-GDN decode side tensors (`A_log`, `dt_bias`, and gated RMSNorm weight) in Vulkan device-local buffers instead of uploading them inside every fused GDN decode dispatch.
+- Added those tensors to decode weight prewarm for linear-attention layers.
+- Reverted the experiment after measurement; the fused GDN decode dispatcher now uses the E059 direct-upload path again.
+
+Reasoning:
+- These tensors are small, but the fused GDN batch path calls them at every GDN layer and decode step, so avoiding repeated uploads looked like a low-risk throughput candidate.
+- In practice, the added cache/prewarm path increased startup work and made the mixed batch fixture slower, especially on longer generation.
+- The E059 direct path remains simpler and faster for the current batch-fused GDN decode implementation.
+
+Evidence:
+- Cached experiment startup:
+  - Prewarm count increased from the E059 249 weights to 321 weights.
+  - Log line: `weights=321`, `f32_cache_mb=16040`, `elapsed_ms=19232`.
+- Cached experiment, no-env mixed fixture:
+  - `max_tokens=16`: 24.808s / 2.580 tok/s, worse than E059 default 23.640s / 2.707 tok/s.
+  - `max_tokens=32`: 54.755s / 2.338 tok/s, much worse than E059 default 41.595s / 3.077 tok/s.
+- Validation after reverting to the E059 direct path:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+
+Verdict:
+- Reject and revert.
+- Small immutable-buffer caching is not useful at this layer boundary on Strix Halo; it adds prewarm/cache pressure without improving the batch-fused decode loop.
+- Current default remains E059: native batch is enabled by default, fused GDN decode is automatic for `batch > 1`, and bs=1 fused GDN stays opt-in.
+
+### E061: Native Batch Active-Row Compaction After EOS
+
+Change:
+- Changed `ModelRunner::generate_paged_shared_tokens_batch_greedy` so finished rows are removed from later native batch decode calls.
+- The loop now tracks active sequence indices. Rows that hit EOS or `max_tokens` stop contributing `input_tokens`, `start_positions`, `BlockTable`s, and sequence-length updates.
+- Added `select_linear_attention_state_rows` to compact the stacked GDN linear-attention recurrent/conv state to the remaining active rows before the next decode pass.
+- Added focused tests for compacting linear-attention state rows and for native batch greedy stopping empty EOS rows.
+
+Reasoning:
+- Before this change, if one row hit EOS while other rows kept generating, the lockstep native batch loop still decoded the finished row's stale token and advanced its paged position until every row finished or the global `max_tokens` cap was reached.
+- Removing a row after EOS is the cleanest kind of speedup: for early-finish traffic, the server no longer performs attention, GDN, MLP, LM-head, KV writes, or recurrent-state traffic for work that cannot affect the response.
+- This does not change the bs=1 path, and it is a no-op for the current fixed-`max_tokens` benchmark fixture when every row finishes by length.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-model generate::tests::compact_linear_attention_state_selects_active_batch_rows -- --nocapture` passed.
+  - `cargo test -p kiln-model generate::tests::native_batch_greedy_stops_empty_rows_on_eos -- --nocapture` passed.
+  - `cargo test -p kiln-model generate::tests::test_paged_eos_detection -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Server sanity run after the change:
+  - Prefix-cache-enabled default Vulkan server, `/v1/completions/batch`, 4 distinct prompts, `temperature=0`, `top_p=1`, `max_tokens=16`.
+  - All rows finished by length, so active-row compaction did not trigger.
+  - 64 tokens in 24.231s, 2.641 tok/s.
+- bs=1 source anchor after the change, with no server resident:
+  - `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
+  - Prefill 2195.1ms.
+  - Mean ITL 320.9ms, p50 324.8ms, p99 332.7ms.
+
+Verdict:
+- Keep.
+- This is primarily a correctness and wasted-work removal for variable-length batch traffic; it will not improve the fixed-length benchmark unless some rows naturally hit EOS early.
+- The single-request path remains in band with the E059/E060 source state, and native batch default behavior for max-length rows is unchanged apart from negligible active-row bookkeeping.
+
+### E062: Native Batch Single-Row Tail Route
+
+Change:
+- Extended the E061 active-row compaction path so when only one sequence remains active, the native batch loop calls `model_forward_paged_next_token_greedy` instead of `model_forward_paged_next_tokens_greedy_batch`.
+- The remaining row still uses its original block table and the compacted single-row GDN linear-attention state.
+- Added a deterministic zero-layer tied-weight test where one row hits EOS immediately and the other row continues, forcing the single-active-row tail route.
+
+Reasoning:
+- E061 removes finished rows, but after compaction a variable-length batch can spend many remaining steps with `active_rows.len() == 1`.
+- The native batch bridge has batch-specific overhead for block-table slicing, batched hidden tensors, batched full-attention row plumbing, and batched LM-head output handling. Once only one row remains, none of that buys throughput.
+- Routing the tail to the established bs=1 greedy paged path removes that overhead and keeps using the most tuned single-stream decode implementation.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-model generate::tests::native_batch_greedy_routes_single_active_tail_after_eos -- --nocapture` passed.
+  - `cargo test -p kiln-model generate::tests::native_batch_greedy_stops_empty_rows_on_eos -- --nocapture` passed.
+  - `cargo test -p kiln-model generate::tests::compact_linear_attention_state_selects_active_batch_rows -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- No fixed-length throughput measurement was repeated for this sub-change:
+  - The standard `max_tokens=16` fixture from E061/E059 has all rows finishing by length, so it does not exercise the single-active-tail route.
+  - The expected effect is only on variable-length batches where all but one row hit EOS before the global `max_tokens` cap.
+
+Verdict:
+- Keep.
+- This is a narrow removal of tail work for variable-length native batches and does not affect the bs=1 request path or full-batch fixed-length decode.
+
+### E063: Rejected Default Single-Submit Batch Fused-GDN Decode
+
+Change:
+- Added an experimental single-submit implementation for `dispatch_gdn_decode_gates_recurrent_rmsnorm`.
+- The experimental path records all input staging copies, fused GDN compute, output copy, and recurrent-state copy into one command buffer and one queue submit.
+- After measurement, kept it opt-in only behind `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED_SINGLE_SUBMIT=1`; the no-env default uses the E059 direct fused-GDN path.
+
+Reasoning:
+- The fresh native-batch profile after E062 showed the batch-fused GDN decode path was still the dominant decode bucket:
+  - Step 0 `gdn.fused_gates_recur_norm`: 381.0ms across 24 layers.
+  - Step 1: 674.4ms.
+  - Step 2: 865.9ms.
+- The direct dispatcher still paid separate upload/readback command-pool helpers around many small inputs and the large mutable recurrent state. A one-command-buffer implementation was a plausible way to reduce CPU/Vulkan boundary cost without changing shader math.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - Focused fused-GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_decode_gates_recurrent_rmsnorm -- --nocapture`.
+  - Full Vulkan GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`, 16 tests.
+  - Focused native-batch generation tests passed:
+    - `cargo test -p kiln-model generate::tests::native_batch_greedy_routes_single_active_tail_after_eos -- --nocapture`
+    - `cargo test -p kiln-model generate::tests::native_batch_greedy_stops_empty_rows_on_eos -- --nocapture`
+    - `cargo test -p kiln-model generate::tests::compact_linear_attention_state_selects_active_batch_rows -- --nocapture`
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Profile fixture, 4 distinct prompts, `temperature=0`, `top_p=1`, `max_tokens=4`:
+  - Before single-submit experiment: 12.156s / 1.316 tok/s.
+  - Single-submit default: 12.107s / 1.322 tok/s.
+  - The profile did not show a clear bucket reduction; `gdn.fused_gates_recur_norm` shifted from 381.0/674.4/865.9ms to 525.0/706.9/697.9ms across the three decode steps.
+- No-profile same-binary `max_tokens=16` fixture, same four prompts:
+  - Single-submit default: 26.743s / 2.393 tok/s.
+  - Disable guard for the same binary (`KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_SINGLE_SUBMIT=1` before the final opt-in flip): 26.603s / 2.406 tok/s.
+
+Verdict:
+- Reject as a default.
+- The experiment is left opt-in only because it preserves parity and may be useful for driver/runtime A/B work, but the default path is restored to the direct fused-GDN dispatcher.
+- This result suggests the dominant batch-fused GDN cost is not just command submission count; deeper state residency or a wider fused region is still the right direction.
+
+### E064: Embedded Batched SPIR-V Lookup Fix
+
+Change:
+- Added the missing `SHADER_SPIRVS` lookup entries for `gdn_in_proj_decode_batched` and `mlp_gate_up_decode_batched`.
+- These shaders were already compiled and embedded by `build.rs`, but the runtime lookup table did not name them, so `compile_shader` could fall back to temp-file/runtime SPIR-V lookup for the batched variants.
+
+Reasoning:
+- The default native batch path uses the batched GDN input projection shader for `batch > 1`.
+- Wiring the already-embedded modules into the lookup table removes an avoidable runtime fallback and makes deployment more robust if `glslc` or temp cached `.spv` files are absent.
+- A companion attempt to return borrowed embedded SPIR-V instead of allocating a `Vec<u8>` was rejected immediately: `include_bytes!` is not guaranteed 4-byte aligned, and shader module creation currently casts SPIR-V bytes to `u32`.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Server startup still prewarmed 249 decode weights; Vulkan pipeline prewarm completed in 2ms in the measured run.
+- Same four-prompt no-profile batch fixture used during E063, `max_tokens=16`:
+  - 64 completion tokens in 26.911s, 2.378 tok/s.
+  - This did not beat the recent same-fixture E063 direct-path result of 26.603s / 2.406 tok/s, and it remains behind the E059 standard mixed fixture.
+- bs=1 source anchor after the change:
+  - Prefill 1924.0ms.
+  - Mean ITL 323.1ms, p50 323.5ms, p99 336.6ms.
+
+Verdict:
+- Keep as a correctness/robustness fix, not a throughput win.
+- The performance result confirms that the remaining batch cost is dominated by GDN state traffic and wider decode work, not shader lookup overhead.
+
+### E065: Rejected Named Pipeline Key For Batch-Fused GDN
+
+Change:
+- Tried a named pipeline-cache key for `gdn_decode_gates_recurrent_rmsnorm` and routed the default direct fused-GDN decode dispatcher through it.
+- The intent was to skip cloning embedded SPIR-V bytes and hashing the SPIR-V payload on every batch-fused GDN dispatch once prewarm had populated the pipeline cache.
+- Reverted after measurement.
+
+Reasoning:
+- E064 showed shader lookup work is not the main bottleneck, but the batch-fused GDN path still calls the dispatcher for every GDN layer and generated token.
+- A named key was a narrower alternative to borrowed SPIR-V: it preserved the existing aligned `Vec<u8>` creation on pipeline-cache miss, while cache hits could avoid both allocation and byte hashing.
+
+Evidence:
+- Validation before measurement:
+  - `cargo fmt --all --check` passed after formatting.
+  - Focused fused-GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_decode_gates_recurrent_rmsnorm -- --nocapture`.
+  - Full Vulkan GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`, 16 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Same four-prompt no-profile batch fixture used during E063/E064, `max_tokens=16`:
+  - Named-key experiment: 64 completion tokens in 27.238s, 2.350 tok/s.
+  - E064 source state: 26.911s, 2.378 tok/s.
+  - E063 direct-path comparison: 26.603s, 2.406 tok/s.
+- Validation after reverting to E064 source state:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed, 16 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+
+Verdict:
+- Reject and revert.
+- The current default should keep the simple byte-hash pipeline cache path; removing shader lookup overhead does not address the dominant GDN state-transfer/compute cost.
+
+### E066: Final-Step Batch GDN State Readback Skip
+
+Change:
+- Added a scoped internal `with_vulkan_gdn_state_readback_skip` guard for decode calls known to be terminal because of `max_tokens`.
+- In native greedy batch generation, the decode call that computes the final token now runs under this guard.
+- The Vulkan fused GDN decode path still computes the updated recurrent state because it is needed for the current token's output, but skips reading that state back to a CPU tensor when the caller will not run another token.
+- Added parity coverage: the skip-readback fused-GDN path must produce the same output as the normal path, while returning the original state tensor unchanged.
+
+Reasoning:
+- In the batch greedy loop, after token `N-1` is pushed, the decode call that computes token `N` is known to be the last call when `N == max_tokens`.
+- The updated recurrent state from that final decode can never affect the response: the next loop iteration only pushes the sampled final token and exits.
+- This directly removes work instead of trying to make it faster: one full fused-GDN recurrent-state readback across 24 linear layers is skipped for every max-token-capped native batch response.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - Focused fused-GDN parity passed, including the skip-readback assertion: `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_decode_gates_recurrent_rmsnorm -- --nocapture`.
+  - Full Vulkan GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`, 16 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Same four-prompt no-profile batch fixture used during E063-E065, `max_tokens=16`:
+  - E066: 64 completion tokens in 26.496s, 2.415 tok/s.
+  - E064 source state: 26.911s, 2.378 tok/s.
+  - E063 direct-path comparison: 26.603s, 2.406 tok/s.
+- bs=1 source anchor after the change:
+  - Prefill 1975.7ms.
+  - Mean ITL 319.7ms, p50 321.8ms, p99 334.1ms.
+
+Verdict:
+- Keep.
+- This is a narrow, safe batch win for max-token-capped generation and does not harm the bs=1 source anchor.
+- The same idea could be extended later to final-step KV cache writes or to non-batch paged decode paths, but those need separate correctness review.
+
+### E067: Rejected Final-Step Split GDN Recurrent State Readback Skip
+
+Change:
+- Temporarily extended the E066 final-decode readback-skip guard to the normal paged single-request decode path.
+- The attempted route marked `decode_next_token_paged_interleaved` calls known to be terminal by `max_tokens`, threaded a `skip_state_readback` flag through the split `dispatch_gdn_recurrent_step` kernel, and avoided assigning the returned recurrent state in the Vulkan backend when the guard was active.
+- Added temporary recurrent-step parity coverage: the skip-readback path had to produce the same output as the normal path while returning the original state tensor unchanged.
+- Reverted after measurement.
+
+Reasoning:
+- The default bs=1 path does not use the fused GDN decode kernel unless explicitly enabled; it uses the split `gdn_recurrent_step` path.
+- If a final-by-`max_tokens` decode call is known before sampling, the updated GDN recurrent state from that call should be dead just like in E066's batch-fused case.
+- This was a narrow "remove work" test for bs=1 without changing GDN math or persistent state semantics outside the final token.
+
+Evidence:
+- Validation before measurement:
+  - `cargo fmt --all --check` passed.
+  - Focused recurrent parity passed with skip assertions: `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step -- --nocapture`.
+  - Full Vulkan GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`, 16 tests.
+  - The non-single-submit recurrent path also passed the focused parity test with `KILN_DISABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT=1`.
+  - Model-level max-token and batch routing tests passed:
+    - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture`
+    - `cargo test -p kiln-model generate::tests::test_generate_paged_shared_max_tokens -- --nocapture`
+    - `cargo test -p kiln-model native_batch_greedy -- --nocapture`
+    - `cargo test -p kiln-model compact_linear_attention_state_selects_active_batch_rows -- --nocapture`
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- bs=1 source anchors with the experiment:
+  - Run 1: prefill 2161.5ms, mean ITL 331.9ms, p50 337.0ms, p99 341.5ms.
+  - Run 2: prefill 2127.3ms, mean ITL 330.0ms, p50 330.1ms, p99 347.2ms.
+  - The final decode step did not show a benefit: 337.3ms and 347.2ms in the two runs.
+- Validation after reverting:
+  - `cargo fmt --all --check` passed.
+  - Full Vulkan GDN parity passed: `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`, 16 tests.
+  - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Post-revert bs=1 source anchor on the kept code path:
+  - Prefill 2097.1ms.
+  - Mean ITL 330.9ms, p50 331.5ms, p99 338.7ms.
+
+Verdict:
+- Reject and revert.
+- The post-revert anchor shows the 330ms measurements were environmental/run noise rather than a clear E067 regression, but the experiment still failed to create a measurable win.
+- The useful direction for bs=1 remains deeper GDN recurrent state residency or a wider fused region, not skipping only the final split-state readback.
+
+### E068: Current Recurrent-Path Profile And Escape-Hatch Retest
+
+Change:
+- No code change.
+- Re-profiled the final kept source state and retested the existing recurrent-path escape hatches under the same noisy runtime conditions seen around E067.
+
+Reasoning:
+- E067 did not produce a win, but the post-revert run showed the machine was currently measuring around 330ms mean ITL instead of the earlier 319-321ms band.
+- Before trying a larger recurrent-state rewrite, the current profile and existing env guards should confirm the dominant bucket and whether any already-implemented alternative path deserves promotion.
+
+Evidence:
+- Short profiled bs=1 run:
+  - Command: `KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 3 --skip-training`.
+  - Prefill 2124.9ms.
+  - Mean ITL 329.6ms, p50 329.7ms, p99 331.6ms.
+  - `gdn.recurrent`: 183.7ms, 180.5ms, 178.3ms across 24 calls on the three decode steps.
+  - Next buckets: `mlp.fused` 55.4-55.7-54.6ms/32, `layer.full` 27.3-26.6-26.3ms/8, `gdn.in_proj` 25.0-24.7-24.0ms/24, `gdn.gated_norm` 18.4-18.1-20.4ms/24, `lm_head.argmax` 14.5-16.3-16.9ms/1.
+- Existing recurrent state-buffer guard:
+  - `KILN_DISABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE=1`: prefill 3992.6ms, mean ITL 329.7ms, p50 332.4ms, p99 340.0ms.
+  - Result: neutral for decode and worse for prefill; no default flip.
+- Existing recurrent submit guard:
+  - `KILN_DISABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT=1`: prefill 3881.6ms, mean ITL 332.4ms, p50 336.8ms, p99 340.3ms.
+  - Result: slower; keep single-submit default.
+- Existing bs=1 fused-GDN opt-in:
+  - `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1`: prefill 4136.4ms, mean ITL 330.4ms, p50 330.0ms, p99 338.8ms.
+  - Result: neutral in this run and historically unstable; do not promote.
+
+Verdict:
+- Keep defaults unchanged.
+- The current profile again points at split GDN recurrent state traffic/compute as the main bs=1 bottleneck.
+- The next source-level candidate should be a real recurrent-state residency or shader-algorithm change; the existing guards do not expose another small default win.
+
+## Next Candidate
+
+The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
+
+For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, and E062 routes single-row tails back to the tuned bs=1 decode path. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.

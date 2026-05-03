@@ -39,7 +39,7 @@ use tracing;
 use kiln_core::config::ModelConfig;
 
 use crate::backend::BackendRuntime;
-use crate::forward::{model_forward_paged, GpuWeights, LinearAttentionState};
+use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged};
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 
@@ -133,8 +133,15 @@ impl CudaGraphRunner {
     ) -> Result<candle_core::Tensor> {
         if !self.enabled {
             return Self::eager_forward(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             );
         }
 
@@ -143,8 +150,15 @@ impl CudaGraphRunner {
             self.warmup_done = true;
             tracing::debug!("CUDA graph: warmup decode step");
             return Self::eager_forward(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             );
         }
 
@@ -156,13 +170,23 @@ impl CudaGraphRunner {
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
-                    if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len) {
-                        tracing::warn!("Failed to update position buffer: {e}, falling back to eager");
+                    if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len)
+                    {
+                        tracing::warn!(
+                            "Failed to update position buffer: {e}, falling back to eager"
+                        );
                         self.captured = None;
                         self.enabled = false;
                         return Self::eager_forward(
-                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                            linear_state, lora,
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
                         );
                     }
 
@@ -175,8 +199,15 @@ impl CudaGraphRunner {
                             self.captured = None;
                             self.enabled = false;
                             return Self::eager_forward(
-                                backend, token_id, weights, config, paged_cache, block_table,
-                                seq_len, linear_state, lora,
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
                             );
                         }
                     }
@@ -188,16 +219,30 @@ impl CudaGraphRunner {
 
             // Phase 2: capture
             match self.try_capture(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             ) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
                     tracing::warn!("CUDA graph capture failed: {e:#}, using eager decode");
                     self.enabled = false;
                     return Self::eager_forward(
-                        backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                        linear_state, lora,
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
                     );
                 }
             }
@@ -205,7 +250,14 @@ impl CudaGraphRunner {
 
         #[cfg(not(feature = "cuda"))]
         Self::eager_forward(
-            backend, token_id, weights, config, paged_cache, block_table, seq_len, linear_state,
+            backend,
+            token_id,
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            linear_state,
             lora,
         )
     }
@@ -238,9 +290,7 @@ impl CudaGraphRunner {
         unsafe {
             let (dev_ptr, _guard) = slice.device_ptr(&stream);
             candle_core::cuda_backend::cudarc::driver::result::memcpy_htod_async(
-                dev_ptr,
-                &pos_f32,
-                raw_stream,
+                dev_ptr, &pos_f32, raw_stream,
             )
             .map_err(|e| anyhow::anyhow!("memcpy_htod_async for position buffer: {e:?}"))?;
         }

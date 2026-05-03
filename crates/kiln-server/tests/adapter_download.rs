@@ -130,7 +130,10 @@ async fn test_download_adapter_returns_valid_tar_gz() {
     let weights = found
         .get("test-adapter/adapter_model.safetensors")
         .expect("weights entry missing");
-    assert_eq!(weights.as_slice(), b"\x00\x01\x02\x03fake-safetensors-bytes");
+    assert_eq!(
+        weights.as_slice(),
+        b"\x00\x01\x02\x03fake-safetensors-bytes"
+    );
 }
 
 #[tokio::test]

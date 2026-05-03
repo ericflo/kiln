@@ -54,7 +54,15 @@ impl KvCache {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        Self::new_with_fp8(num_full_attn_layers, num_kv_heads, head_dim, max_seq_len, dtype, device, false)
+        Self::new_with_fp8(
+            num_full_attn_layers,
+            num_kv_heads,
+            head_dim,
+            max_seq_len,
+            dtype,
+            device,
+            false,
+        )
     }
 
     /// Create a new KV cache with optional FP8 quantization.
@@ -67,13 +75,22 @@ impl KvCache {
         device: &Device,
         fp8: bool,
     ) -> Result<Self> {
+        let dtype = cpu_compatible_compute_dtype(dtype, device);
         let storage_dtype = if fp8 { DType::U8 } else { dtype };
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
-            let k = Tensor::zeros((1, num_kv_heads, max_seq_len, head_dim), storage_dtype, device)
-                .with_context(|| format!("allocating k_cache for full-attn layer {i}"))?;
-            let v = Tensor::zeros((1, num_kv_heads, max_seq_len, head_dim), storage_dtype, device)
-                .with_context(|| format!("allocating v_cache for full-attn layer {i}"))?;
+            let k = Tensor::zeros(
+                (1, num_kv_heads, max_seq_len, head_dim),
+                storage_dtype,
+                device,
+            )
+            .with_context(|| format!("allocating k_cache for full-attn layer {i}"))?;
+            let v = Tensor::zeros(
+                (1, num_kv_heads, max_seq_len, head_dim),
+                storage_dtype,
+                device,
+            )
+            .with_context(|| format!("allocating v_cache for full-attn layer {i}"))?;
             layers.push((k, v));
         }
         let fp8_scales = vec![(1.0_f32, 1.0_f32); num_full_attn_layers];
@@ -176,8 +193,10 @@ impl KvCache {
             let existing_k_q = k_cache.narrow(2, 0, self.seq_len)?;
             let existing_v_q = v_cache.narrow(2, 0, self.seq_len)?;
 
-            let existing_k = fp8::dequantize_from_fp8(&existing_k_q, old_k_scale, self.compute_dtype, &device)?;
-            let existing_v = fp8::dequantize_from_fp8(&existing_v_q, old_v_scale, self.compute_dtype, &device)?;
+            let existing_k =
+                fp8::dequantize_from_fp8(&existing_k_q, old_k_scale, self.compute_dtype, &device)?;
+            let existing_v =
+                fp8::dequantize_from_fp8(&existing_v_q, old_v_scale, self.compute_dtype, &device)?;
 
             let new_k_typed = new_k.to_dtype(self.compute_dtype)?;
             let new_v_typed = new_v.to_dtype(self.compute_dtype)?;
@@ -215,6 +234,14 @@ impl KvCache {
         for s in &mut self.fp8_scales {
             *s = (1.0, 1.0);
         }
+    }
+}
+
+fn cpu_compatible_compute_dtype(dtype: DType, device: &Device) -> DType {
+    if matches!(device, Device::Cpu) && dtype != DType::F32 {
+        DType::F32
+    } else {
+        dtype
     }
 }
 
