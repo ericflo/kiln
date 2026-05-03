@@ -944,7 +944,7 @@ fn metal_gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Te
     }
     if a.dtype() != DType::BF16
         || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::BF16
+        || a_log.dtype() != DType::F32
         || dt_bias.dtype() != DType::BF16
     {
         return false;
@@ -1407,7 +1407,7 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
         || v.dtype() != DType::BF16
         || a.dtype() != DType::BF16
         || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::BF16
+        || a_log.dtype() != DType::F32
         || dt_bias.dtype() != DType::BF16
         || state.dtype() != DType::BF16
     {
@@ -1477,7 +1477,7 @@ fn metal_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> boo
     {
         return false;
     }
-    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::BF16 {
+    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::F32 {
         return false;
     }
     let Ok((batch, seq_len, heads, hidden)) = x.dims4() else {
@@ -5364,7 +5364,7 @@ inline float kiln_stable_softplus(float x) {
 kernel void kiln_gdn_gates_bf16(
     device const bfloat* a [[buffer(0)]],
     device const bfloat* b [[buffer(1)]],
-    device const bfloat* a_log [[buffer(2)]],
+    device const float* a_log [[buffer(2)]],
     device const bfloat* dt_bias [[buffer(3)]],
     device bfloat* beta_out [[buffer(4)]],
     device bfloat* g_out [[buffer(5)]],
@@ -5401,7 +5401,7 @@ kernel void kiln_gdn_decode_gates_recurrent_bf16(
     device const bfloat* v [[buffer(2)]],
     device const bfloat* a [[buffer(3)]],
     device const bfloat* b [[buffer(4)]],
-    device const bfloat* a_log [[buffer(5)]],
+    device const float* a_log [[buffer(5)]],
     device const bfloat* dt_bias [[buffer(6)]],
     device bfloat* state [[buffer(7)]],
     device bfloat* out [[buffer(8)]],
@@ -5486,11 +5486,11 @@ kernel void kiln_gdn_decode_gates_recurrent_rmsnorm_bf16(
     device const bfloat* v [[buffer(2)]],
     device const bfloat* a [[buffer(3)]],
     device const bfloat* b [[buffer(4)]],
-    device const bfloat* a_log [[buffer(5)]],
+    device const float* a_log [[buffer(5)]],
     device const bfloat* dt_bias [[buffer(6)]],
     device bfloat* state [[buffer(7)]],
     device const bfloat* z [[buffer(8)]],
-    device const bfloat* weight [[buffer(9)]],
+    device const float* weight [[buffer(9)]],
     device bfloat* out [[buffer(10)]],
     constant uint& batch_heads [[buffer(11)]],
     constant uint& dk [[buffer(12)]],
@@ -6083,7 +6083,7 @@ using namespace metal;
 kernel void kiln_gated_rmsnorm_bf16(
     device const bfloat* x [[buffer(0)]],
     device const bfloat* z [[buffer(1)]],
-    device const bfloat* weight [[buffer(2)]],
+    device const float* weight [[buffer(2)]],
     device bfloat* out [[buffer(3)]],
     constant uint& rows [[buffer(4)]],
     constant uint& hidden [[buffer(5)]],
@@ -9773,7 +9773,7 @@ mod tests {
 
         let a = Tensor::from_slice(&a_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
         let b = Tensor::from_slice(&b_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
-        let a_log = Tensor::from_slice(&a_log_data, nv, device)?.to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&a_log_data, nv, device)?;
         let dt_bias = Tensor::from_slice(&dt_bias_data, nv, device)?.to_dtype(DType::BF16)?;
 
         assert!(metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias));
@@ -10440,12 +10440,12 @@ mod tests {
             .to_dtype(DType::BF16)?;
         let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
             .to_dtype(DType::BF16)?;
-        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?.to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?;
         let dt_bias =
             Tensor::from_slice(&dt_bias_data, value_heads, &device)?.to_dtype(DType::BF16)?;
         let z = Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&weight_data, dv, &device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&weight_data, dv, &device)?;
         let mut state_ref = Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
             .to_dtype(DType::BF16)?;
         let mut state_fused =

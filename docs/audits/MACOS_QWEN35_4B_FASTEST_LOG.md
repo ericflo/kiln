@@ -6763,3 +6763,100 @@ than the existing scalar fused kernel, though not as bad as falling back to
 four Candle matmuls. The next GDN input-projection work needs a different
 kernel design, likely one that improves data reuse without paying the tile8
 threadgroup/reduction overhead that hurt both E220 and E224.
+
+## Experiment E225-E233: F32 Aux-Weight GDN Kernels
+
+Hypothesis:
+
+The Qwen3.5-4B checkpoint stores `linear_attn.A_log` and
+`linear_attn.norm.weight` as F32, while `dt_bias` is BF16. Several Metal GDN
+gates/rmsnorm support checks required those tiny auxiliary tensors to be BF16,
+so the real model was falling back to split gate/recurrent/rmsnorm work even
+though the activation/state tensors were already in the supported BF16 decode
+shape.
+
+Metadata check:
+
+Safetensors header inspection confirmed the live checkpoint layout:
+
+- `linear_attn.A_log`: F32 `[32]`
+- `linear_attn.norm.weight`: F32 `[128]`
+- `linear_attn.dt_bias`: BF16 `[32]`
+
+Change:
+
+- Kept GDN activations and recurrent state BF16.
+- Updated Metal GDN gates, gated RMSNorm, decode gates+recurrent, and decode
+  gates+recurrent+rmsnorm kernels to read F32 `A_log` / norm weights where the
+  checkpoint actually stores them.
+- Updated support checks and focused tests so these kernels accept the real
+  Qwen3.5-4B dtype envelope instead of declining it.
+
+Validation:
+
+- `cargo test -p kiln-model --features metal test_gdn_gates_matches_fallback_decode_shape --lib`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_gdn_decode_gates_recurrent_matches_split_reference --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+
+Measurements:
+
+All p64/o64 runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| E229 | same-session baseline before F32 aux change | 478.4 ms | 5.73 | 174.4 ms | 173.2 ms | 206.1 ms | comparison point |
+| E225 | disable GDN qkv-conv/norm fusion | 484.4 ms | 5.64 | 177.3 ms | 175.7 ms | 215.4 ms | keep fusion |
+| E226 | disable Metal GDN gates | 475.3 ms | 5.69 | 175.6 ms | 173.1 ms | 215.3 ms | keep gates path |
+| E227 | disable GDN gates+recurrent+rmsnorm | 443.3 ms | 5.30 | 188.8 ms | 187.2 ms | 282.5 ms | slower |
+| E230 | repeat disable GDN gates+recurrent+rmsnorm | 469.3 ms | 5.43 | 184.0 ms | 182.4 ms | 233.1 ms | slower |
+| E231 | F32 aux kernels | 421.2 ms | 5.94 | 168.4 ms | 167.7 ms | 178.2 ms | keep |
+| E232 | F32 aux kernels repeat | 416.4 ms | 5.81 | 172.2 ms | 169.2 ms | 218.7 ms | keep |
+
+Synchronized p64/o1 stage profiles:
+
+| Experiment | Variant | Profiled mean ITL | Layer sum | Linear/GDN layer sum | GDN measured decode stage sum | Gates/recurrent shape |
+|---|---|---:|---:|---:|---:|---|
+| E228 | before F32 aux change | 255.8 ms | 225.6 ms | 187.3 ms | 91.2 ms | split `gates` + `recurrent` + `gated_norm` |
+| E233 | after F32 aux change | 233.7 ms | 200.3 ms | 163.0 ms | 70.0 ms | fused `gates_recur_gated_norm`; separate `gated_norm` ~0 |
+
+E233 measured decode GDN sub-stage sum across 24 linear layers:
+
+- `in_proj`: 36.9 ms total, 1.54 ms avg
+- `out_proj`: 17.0 ms total, 0.71 ms avg
+- `gates_recur_gated_norm`: 8.6 ms total, 0.36 ms avg
+- `qkv_conv_norm`: 7.4 ms total, 0.31 ms avg
+- `gated_norm`: 0.1 ms total, effectively skipped because the fused path
+  already produced gated-normalized output
+- `post_transpose`: ~0.0 ms
+
+Artifacts:
+
+- `e225_m1_bs1_p64_o64_warmed_no_gdn_qkv_conv_norm.log`
+- `e226_m1_bs1_p64_o64_warmed_no_gdn_gates.log`
+- `e227_m1_bs1_p64_o64_warmed_no_gdn_gates_recur_rmsnorm.log`
+- `e228_m1_bs1_p64_o1_gdn_stage_profile_current.log`
+- `e229_m1_bs1_p64_o64_warmed_current_baseline.log`
+- `e230_m1_bs1_p64_o64_warmed_no_gdn_gates_recur_rmsnorm_repeat.log`
+- `e231_m1_bs1_p64_o64_warmed_f32_gdn_aux_kernels.log`
+- `e232_m1_bs1_p64_o64_warmed_f32_gdn_aux_kernels_repeat.log`
+- `e233_m1_bs1_p64_o1_gdn_stage_profile_f32_aux.log`
+
+Takeaway:
+
+This is a real low-level default-path improvement. Matching Metal GDN kernel
+support to the checkpoint's F32 auxiliary weights enables the fused
+gates+recurrent+rmsnorm decode path and removes the separate gates/recurrent
+/gated-norm work in linear-attention decode. Same-session warmed p64/o64
+improved from E229 `174.4 ms` mean ITL to E231/E232 `170.3 ms` average, with
+E231 reaching `168.4 ms`. The synchronized profiled layer sum dropped by about
+25 ms and the measured GDN stage sum dropped by about 21 ms in one decode step.

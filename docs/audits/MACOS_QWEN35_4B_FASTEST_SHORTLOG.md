@@ -483,3 +483,15 @@
   reverted. Release `kiln-bench` was rebuilt after the revert. Next
   input-projection work needs a different kernel design, not the existing
   cooperative transposed-GEMV template.
+- 2026-05-03 E225-E233: Matched Metal GDN gates/rmsnorm kernels to the real
+  checkpoint dtype envelope: `A_log` and `linear_attn.norm.weight` are F32,
+  while `dt_bias` is BF16. Updating the gates, gated RMSNorm, and fused
+  gates+recurrent+rmsnorm kernels to read F32 aux weights enabled the fused
+  decode path. Focused Metal parity tests passed, release `kiln-bench` build
+  passed, `cargo check` passed, rustfmt for `metal.rs` passed, and
+  `git diff --check` passed. Same-session warmed p64/o64 improved from E229
+  174.4 ms mean ITL / 5.73 tok/s to E231 168.4 ms / 5.94 tok/s and E232
+  172.2 ms / 5.81 tok/s. Synchronized p64/o1 profiling dropped measured
+  linear/GDN layer sum from E228 187.3 ms to E233 163.0 ms; GDN stage sum
+  dropped from 91.2 ms to 70.0 ms as split `gates` + `recurrent` +
+  `gated_norm` became fused `gates_recur_gated_norm`.
