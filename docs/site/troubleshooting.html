@@ -194,6 +194,26 @@
       </div>
 <pre class="mt-6"><code>curl -s http://localhost:8420/health | jq .
 curl -s http://localhost:8420/v1/models | jq .</code></pre>
+      <div class="card p-6 mt-6">
+        <div class="label mb-2">Desktop App first launch</div>
+        <h2 class="text-xl font-semibold mb-3">If the Desktop App does not finish first launch</h2>
+        <p class="mb-4" style="color: var(--fg-dim);">
+          The Desktop App wraps the same Kiln server, model path, CUDA driver, and local port checks. If setup stalls,
+          open the app's <strong>Logs</strong> view first, then compare the message with these common recovery paths.
+        </p>
+        <div class="grid md:grid-cols-2 gap-5 check-list" style="color: var(--fg-dim);">
+          <ul class="list-disc pl-5">
+            <li>If the server binary failed to download or verify, retry the download and confirm the app can write to its data directory.</li>
+            <li>If the model path is unset or missing weights, choose the local Qwen3.5-4B directory that contains safetensors, config, and tokenizer files.</li>
+            <li>If the CUDA driver is too old or an update is blocked on Linux or Windows, update the NVIDIA driver before launching the CUDA server.</li>
+          </ul>
+          <ul class="list-disc pl-5">
+            <li>If the port is already in use, stop the other Kiln/server process or change the Desktop App server port before restarting.</li>
+            <li>If the server enters a crash/restart loop, open <strong>Logs</strong>, fix the first setup error shown there, then restart from the app.</li>
+            <li>For app-specific paths and log locations, see the <a href="https://github.com/ericflo/kiln/blob/main/desktop/README.md#troubleshooting">Desktop troubleshooting notes</a>.</li>
+          </ul>
+        </div>
+      </div>
     </div>
   </section>
 
