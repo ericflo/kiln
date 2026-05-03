@@ -611,9 +611,12 @@ See [`deploy/kiln.service`](deploy/kiln.service). Copy the binary to `/usr/local
 sudo systemctl enable --now kiln
 ```
 
-## Next Steps
+## Where to go next
 
-- **GRPO training**: Submit scored completions to `/v1/train/grpo` for reinforcement learning from feedback
-- **FP8 KV cache**: Set `kv_cache_fp8 = true` in config to double your context length
-- **Prefix caching**: Enabled by default — repeated prompt prefixes reuse cached KV blocks
-- **Monitoring**: Scrape `/metrics` with Prometheus for request latency, throughput, and training progress
+- **Docs site**: Start at the [Kiln website](https://ericflo.github.io/kiln/) for the current docs index.
+- **API reference**: See the [HTTP API reference](https://ericflo.github.io/kiln/api.html) for endpoint shapes and request examples.
+- **Architecture**: Read the [architecture guide](https://ericflo.github.io/kiln/architecture.html) for the single-model design, scheduler, cache, and training flow.
+- **Demo**: Watch the [demo/asciicast](https://ericflo.github.io/kiln/demo/) to see the UI and common commands in context.
+- **Troubleshooting**: Use the [troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) for setup, GPU, model-path, and server-health issues.
+- **GRPO guide**: Follow [`docs/GRPO_GUIDE.md`](docs/GRPO_GUIDE.md) for generate→score→train workflows.
+- **Release notes and terms**: Check [`CHANGELOG.md`](CHANGELOG.md) for version history and [`LICENSE`](LICENSE) for project licensing.
