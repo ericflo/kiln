@@ -371,6 +371,51 @@ textarea { resize: vertical; min-height: 80px; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
+@media (max-width: 640px) {
+  .header {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+  .header-stats {
+    width: 100%;
+    margin-left: 0;
+    gap: 8px 12px;
+  }
+  .main {
+    padding: 12px;
+    gap: 12px;
+  }
+  .main > *, .panel, .form-row > *, .chat-input-row input {
+    min-width: 0;
+  }
+  .panel-head {
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tab {
+    flex: 1 0 auto;
+    text-align: center;
+  }
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+  .chat-controls, .chat-input-row, .adapter-actions {
+    flex-wrap: wrap;
+  }
+  .chat-controls select, .chat-input-row input {
+    width: 100%;
+  }
+  .chat-input-row .btn, .form-group .btn {
+    max-width: 100%;
+    white-space: normal;
+  }
+}
+
 /* Empty state */
 .empty {
   text-align: center;
