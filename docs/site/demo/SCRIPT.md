@@ -6,7 +6,7 @@ This is the recording script for the canonical Kiln demo asciicast. Total target
 
 The actual `.cast` recording can only be made on a kiln-capable GPU host (NVIDIA 24 GB+ for the canonical recording; an Apple Silicon 16 GB+ Mac works too). This file pins down the exact commands, the exact timing, and the exact on-screen output before anyone touches `asciinema rec`. When the recording slot opens up, this script is a copy-paste checklist — no judgment calls under the camera.
 
-The companion file [`README.md`](README.md) covers the player embed and the stub `kiln-60s.cast` that the page renders today. [`index.html`](index.html) is the standalone player page.
+The companion file [`README.md`](README.md) covers the player embed and the checked-in `kiln-60s.cast` that the page renders today. That recording is current reference material captured on kiln v0.2.8 and can be re-recorded later when the demo flow or release line changes. [`index.html`](index.html) is the standalone player page.
 
 ## Prerequisites (pre-recording state)
 
@@ -219,7 +219,7 @@ If you prefer to type the scenes by hand, run `asciinema rec docs/site/demo/kiln
 
 3. **Verify the player picks it up:** open `docs/site/demo/index.html` locally (any static file server, e.g. `python3 -m http.server -d docs/site` then visit http://localhost:8000/demo/). The player should auto-load `kiln-60s.cast` and play.
 
-4. **Ship it.** Commit `docs/site/demo/kiln-60s.cast` (replacing the stub), push, and the Pages workflow auto-deploys on `docs/site/**`. The demo is then live at https://ericflo.github.io/kiln/demo/.
+4. **Ship it.** Commit `docs/site/demo/kiln-60s.cast` (replacing the existing recording), push, and the Pages workflow auto-deploys on `docs/site/**`. The demo is then live at https://ericflo.github.io/kiln/demo/.
 
 ### Theme and font
 
