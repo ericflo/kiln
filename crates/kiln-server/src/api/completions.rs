@@ -2924,10 +2924,22 @@ async fn generate_real(
                         Some(&cancel_inner),
                     )
                 } else {
-                    let hit = {
+                    let (hit, should_register_on_miss) = {
                         let mut cache = prefix_cache.lock().unwrap();
-                        cache.lookup(&adapter, &prompt_tokens)?
+                        let hit = cache.lookup(&adapter, &prompt_tokens)?;
+                        let should_register = cache.should_register_prompt(&prompt_tokens);
+                        (hit, should_register)
                     };
+                    if hit.is_none() && !should_register_on_miss {
+                        return runner_guard.generate_paged_shared_tokens(
+                            &prompt_tokens,
+                            &params,
+                            bm.as_ref(),
+                            pc.as_ref(),
+                            Some(&cancel_inner),
+                        );
+                    }
+
                     let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
                     let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                         cached_tokens: hit.cached_tokens,

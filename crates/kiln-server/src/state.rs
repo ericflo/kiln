@@ -219,6 +219,7 @@ pub const MIN_PREFIX_CACHE_MAX_ENTRIES: usize = 1;
 const MIN_PREFIX_CACHE_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREFIX_CACHE_STATE_BYTES: u64 = 1024 * 1024 * 1024;
 const PREFIX_CACHE_STATE_FRACTION_DIVISOR: u64 = 40;
+const REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS: usize = 64;
 
 pub struct RealPrefixCache {
     enabled: bool,
@@ -226,6 +227,7 @@ pub struct RealPrefixCache {
     max_entries: usize,
     state_bytes_per_entry: u64,
     max_state_bytes: u64,
+    min_register_tokens: usize,
     block_size: usize,
     next_entry_id: u64,
     entries: Vec<RealPrefixCacheEntry>,
@@ -750,6 +752,24 @@ impl RealPrefixCache {
         max_entries: usize,
         state_bytes_per_entry: u64,
     ) -> Self {
+        Self::new_with_min_register_tokens(
+            enabled,
+            block_size,
+            max_blocks,
+            max_entries,
+            state_bytes_per_entry,
+            0,
+        )
+    }
+
+    pub fn new_with_min_register_tokens(
+        enabled: bool,
+        block_size: usize,
+        max_blocks: usize,
+        max_entries: usize,
+        state_bytes_per_entry: u64,
+        min_register_tokens: usize,
+    ) -> Self {
         let max_entries = max_entries.max(MIN_PREFIX_CACHE_MAX_ENTRIES);
         let max_state_bytes = state_bytes_per_entry.saturating_mul(max_entries as u64);
         Self {
@@ -758,6 +778,7 @@ impl RealPrefixCache {
             max_entries,
             state_bytes_per_entry,
             max_state_bytes,
+            min_register_tokens,
             block_size,
             next_entry_id: 1,
             entries: Vec::new(),
@@ -775,6 +796,12 @@ impl RealPrefixCache {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled && self.max_blocks > 0
+    }
+
+    pub fn should_register_prompt(&self, prompt_tokens: &[TokenId]) -> bool {
+        self.is_enabled()
+            && !prompt_tokens.is_empty()
+            && prompt_tokens.len() >= self.min_register_tokens
     }
 
     pub fn lookup(
@@ -836,7 +863,7 @@ impl RealPrefixCache {
         let exact_reusable = registration.next_token.is_some();
         let strict_prefix_reusable = registration.prompt_tokens.len() % self.block_size == 0;
         if !self.is_enabled()
-            || registration.prompt_tokens.is_empty()
+            || !self.should_register_prompt(&registration.prompt_tokens)
             || (!exact_reusable && !strict_prefix_reusable)
             || registration.block_ids.is_empty()
         {
@@ -1541,14 +1568,16 @@ impl AppState {
             state_bytes_per_entry = prefix_cache_state_bytes_per_entry,
             max_state_bytes =
                 prefix_cache_state_bytes_per_entry.saturating_mul(prefix_cache_max_entries as u64),
+            min_register_tokens = REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
             "prefix cache budget"
         );
-        let prefix_cache = RealPrefixCache::new(
+        let prefix_cache = RealPrefixCache::new_with_min_register_tokens(
             prefix_cache_cfg.enabled,
             block_size,
             prefix_cache_max_blocks,
             prefix_cache_max_entries,
             prefix_cache_state_bytes_per_entry,
+            REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
         );
 
         Self {
@@ -2283,6 +2312,35 @@ mod tests {
         assert_eq!(stats.max_entries, 1024);
         assert_eq!(stats.cached_state_bytes, 49);
         assert_eq!(stats.max_state_bytes, 1024 * 49);
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_min_register_tokens_skips_short_prompts() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let state = LinearAttentionState::new(&config, &device)?;
+        let mut cache = RealPrefixCache::new_with_min_register_tokens(true, 4, 4, 1024, 49, 9);
+
+        let outcome = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![9, 10],
+                linear_state: state,
+                next_token: Some(PagedPrefixNextToken::GreedyToken(123)),
+            },
+        );
+        assert!(outcome.retained_blocks.is_empty());
+        assert!(outcome.evicted_blocks.is_empty());
+        assert!(cache.lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8])?.is_none());
+
+        let stats = cache.stats();
+        assert_eq!(stats.lookup_hits, 0);
+        assert_eq!(stats.lookup_misses, 1);
+        assert_eq!(stats.cached_blocks, 0);
+        assert_eq!(stats.cached_entries, 0);
+        assert_eq!(stats.cached_state_bytes, 0);
         Ok(())
     }
 

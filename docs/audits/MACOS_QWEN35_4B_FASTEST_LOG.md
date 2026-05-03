@@ -7270,3 +7270,91 @@ from E239's 4.43 s wall / 4,416.317 ms handler to 2.48 s wall / 2,461.483 ms
 handler without changing output shape or relying on prefix cache. Startup
 prewarm took longer in this run, but it moved substantial setup out of the first
 user request, which is the right tradeoff for interactive server latency.
+
+## Experiments E245-E249: Short-Prompt Prefix Miss Fast Path
+
+Hypothesis:
+
+E244 validated the shared-prewarm improvement with prefix cache disabled. The
+shipping default still enables the real prefix cache, so the same bs=4 cold
+short-prompt shape needed to be retested with default prefix behavior. For
+17-token prompts, retaining GDN snapshots is unlikely to amortize its setup
+cost; exact deterministic repeats are already covered by completion, chat, and
+batch caches.
+
+Measurements before the accepted code change:
+
+| Experiment | Variant | Wall time | HTTP handler | Prefix metrics | Verdict |
+|---|---|---:|---:|---|---|
+| E245 | default prefix enabled after shared prewarm | 5.22 s | 5,210.563 ms | 0 hits, 4 misses, 4 entries, 110,100,480 state bytes | exposes default-path regression |
+| E246 | second distinct batch on same server | 5.06 s | 5,052.511 ms | cumulative 0 hits, 8 misses, 8 entries, 220,200,960 state bytes | confirms not just first request setup |
+| E247 | skip retaining prompts below 64 tokens | 5.99 s | 5,981.216 ms | 0 entries, 0 state bytes | rejected as incomplete |
+
+E247 proved that retention policy alone is not sufficient. The prefix-enabled
+generation path was still constructing a completed-prompt registration snapshot
+before `RealPrefixCache::register()` rejected it.
+
+Accepted change:
+
+- Production `RealPrefixCache` now has a 64-token minimum registration policy.
+- The unit-level constructor keeps a zero-token minimum so cache mechanics tests
+  still exercise short registrations directly.
+- After a prefix-cache lookup miss, requests below the registration threshold
+  now route directly to `generate_paged_shared_tokens()` instead of the
+  prefix-cache generation path. This preserves lookup stats and long-prefix
+  reuse while avoiding registration snapshot construction for short misses.
+
+Validation:
+
+- `cargo test -p kiln-server real_prefix_cache_min_register_tokens_skips_short_prompts --lib`
+  - Passed.
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-server/src/state.rs crates/kiln-server/src/api/completions.rs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln`
+  - Passed.
+
+Accepted result:
+
+| Experiment | Variant | Wall time | HTTP handler | Prefix metrics | Verdict |
+|---|---|---:|---:|---|---|
+| E248 | short prefix miss skips registration path | 4.48 s | 4,474.376 ms | 0 hits, 4 misses, 0 entries, 0 state bytes | accepted default-path cleanup |
+
+The E248 timing improves the default prefix-enabled short-miss shape versus
+E245/E246 and keeps the prefix cache from retaining short-prompt GDN state. It
+does not reproduce E244's 2.48 s no-prefix timing in the same session.
+
+Control caveat:
+
+E249 reran the no-prefix control on the current binary and measured 31.90 s
+wall / 31,878.744 ms handler. The machine was under heavy memory pressure
+(`vm_stat` showed very low free pages, large compressor occupancy, and high swap
+activity), so E249 is logged as a contaminated control, not a regression
+verdict. Further timing work should resume only after memory pressure is cleared
+or on a clean host.
+
+Artifacts:
+
+- `e245_server_prefix_shared_prewarm.log`
+- `e245_batch4_distinct_max2_prefix_shared_prewarm_response.json`
+- `e245_batch4_distinct_max2_prefix_shared_prewarm_time.log`
+- `e245_batch4_distinct_max2_prefix_shared_prewarm_metrics.prom`
+- `e246_batch4_distinct2_max2_request.json`
+- `e246_batch4_distinct2_max2_prefix_second_response.json`
+- `e246_batch4_distinct2_max2_prefix_second_time.log`
+- `e246_batch4_distinct2_max2_prefix_second_metrics.prom`
+- `e247_server_prefix_min64_prewarm.log`
+- `e247_batch4_distinct_max2_prefix_min64_response.json`
+- `e247_batch4_distinct_max2_prefix_min64_time.log`
+- `e247_batch4_distinct_max2_prefix_min64_metrics.prom`
+- `e248_server_prefix_short_miss_no_registration.log`
+- `e248_batch4_distinct_max2_prefix_short_miss_no_registration_response.json`
+- `e248_batch4_distinct_max2_prefix_short_miss_no_registration_time.log`
+- `e248_batch4_distinct_max2_prefix_short_miss_no_registration_metrics.prom`
+- `e249_server_no_prefix_current_control.log`
+- `e249_batch4_distinct_max2_no_prefix_current_control_response.json`
+- `e249_batch4_distinct_max2_no_prefix_current_control_time.log`
+- `e249_batch4_distinct_max2_no_prefix_current_control_metrics.prom`

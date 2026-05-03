@@ -543,3 +543,14 @@
   reservation afterward. Fresh no-prefix bs=4 distinct batch improved from E239
   4.43 s wall / 4,416.317 ms handler to 2.48 s / 2,461.483 ms with the same 8
   generated tokens and 0 prefix-cache lookups.
+- 2026-05-03 E245-E249: Fixed the default prefix-enabled short-miss path after
+  shared prewarm. E245/E246 showed the default prefix-enabled bs=4 short-prompt
+  shape at 5.22 s / 5,210.563 ms and 5.06 s / 5,052.511 ms while retaining
+  27.5 MB of GDN state per 17-token prompt. E247 skipped retention below
+  64 tokens but still took 5.99 s because the prefix generation path built a
+  registration snapshot before rejecting it. The accepted E248 change routes a
+  short prefix-cache miss directly to `generate_paged_shared_tokens()` and keeps
+  `RealPrefixCache` from registering prompts below 64 tokens; E248 measured
+  4.48 s / 4,474.376 ms with 4 prefix misses, 0 cached entries, and 0 retained
+  state bytes. E249 no-prefix control was contaminated by severe memory
+  pressure and is logged only as a caveat, not a regression verdict.

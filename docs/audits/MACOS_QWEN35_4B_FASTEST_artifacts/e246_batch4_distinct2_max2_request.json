@@ -1,0 +1,32 @@
+{
+  "model": "qwen3.5-4b-kiln",
+  "prompts": [
+    [
+      {
+        "role": "user",
+        "content": "Give one concise fact about Jupiter."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Give one concise fact about Saturn."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Give one concise fact about Uranus."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Give one concise fact about Neptune."
+      }
+    ]
+  ],
+  "temperature": 0.0,
+  "max_tokens": 2,
+  "seed": 245
+}
