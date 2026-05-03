@@ -7422,3 +7422,49 @@ small local loop-shape changes and instead target material work reduction:
 fusing qkv projection with decode conv/norm, changing weight layout to improve
 strided-column memory access, or eliminating the materialized `mixed_qkv`
 boundary.
+
+## Experiment E253: Rejected GDN QKV Conv-Norm Output Sharing
+
+Hypothesis:
+
+The accepted E235/E236 output-sharing cleanup reduced small Metal allocations
+for fused QKV and GDN input-projection output tuples. Applying the same backing
+allocation strategy to the GDN decode qkv-conv-norm output tuple might remove
+two more small allocations without changing kernel math.
+
+Temporary change:
+
+- Allocated one `(batch, 1, nk + nk + nv, dk)` BF16 output tensor in
+  `metal_gdn_decode_qkv_conv_norm_bf16`.
+- Returned Q/K/V as narrow views over that backing tensor.
+- Reverted the candidate before commit after full-model measurement.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_gdn_decode_qkv_conv_norm_matches_split_reference --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Full-model warmed p64/o64:
+
+Run used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E251 | baseline scalar/control | 414.9 ms | 5.99 | 166.9 ms | 165.5 ms | 179.4 ms | control |
+| E253 | shared qkv-conv-norm outputs | 442.0 ms | 3.51 | 285.3 ms | 294.2 ms | 540.8 ms | rejected and reverted |
+
+Artifact:
+
+- `e253_m1_bs1_p64_o64_warmed_qkv_conv_norm_shared_outputs.log`
+
+Takeaway:
+
+Sharing output buffers at this later GDN boundary preserves focused numerical
+parity but hurts end-to-end decode latency. This reinforces the E252 lesson:
+small local kernel/wrapper cleanups can disturb Metal scheduling enough to
+lose, and the next low-level work should focus on reducing materialized
+intermediate tensors or changing projection layout rather than adding more
+view-sharing around existing launches.

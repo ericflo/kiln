@@ -562,3 +562,10 @@
   E252 was 683.1 ms / 305.1 ms / 3.28 tok/s. The candidate was reverted before
   commit; future GDN in-proj work should reduce material work or improve weight
   layout rather than tweaking the scalar loop shape.
+- 2026-05-03 E253: Rejected sharing one backing allocation across the GDN
+  qkv-conv-norm Q/K/V outputs. The wrapper-only candidate passed focused Metal
+  parity and release `kiln-bench` built, but warmed p64/o64 regressed to
+  442.0 ms prefill / 285.3 ms mean ITL / 3.51 tok/s versus E251's
+  414.9 ms / 166.9 ms / 5.99 tok/s control. The candidate was reverted before
+  commit; more view-sharing around existing launches is not the right low-level
+  direction for this path.
