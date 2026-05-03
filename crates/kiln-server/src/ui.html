@@ -605,16 +605,16 @@ textarea { resize: vertical; min-height: 80px; }
   <!-- Training -->
   <div class="panel" style="grid-column: 1 / -1;">
     <div class="panel-head"><h2>Training</h2></div>
-    <div class="tabs">
-      <button class="tab active" data-tab="queue">Queue</button>
-      <button class="tab" data-tab="sft">Submit SFT</button>
-      <button class="tab" data-tab="grpo">Submit GRPO</button>
+    <div class="tabs" role="tablist" aria-label="Training views" data-training-tabs>
+      <button class="tab active" id="training-tab-queue" data-tab="queue" type="button" role="tab" aria-selected="true" aria-controls="tab-queue" tabindex="0">Queue</button>
+      <button class="tab" id="training-tab-sft" data-tab="sft" type="button" role="tab" aria-selected="false" aria-controls="tab-sft" tabindex="-1">Submit SFT</button>
+      <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Submit GRPO</button>
     </div>
     <div class="panel-body">
-      <div class="tab-content active" id="tab-queue">
+      <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue">
         <div class="empty">Loading...</div>
       </div>
-      <div class="tab-content" id="tab-sft">
+      <div class="tab-content" id="tab-sft" role="tabpanel" aria-labelledby="training-tab-sft" hidden inert>
         <form id="sft-form">
           <div class="form-row">
             <div class="form-group">
@@ -652,7 +652,7 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
         </form>
       </div>
-      <div class="tab-content" id="tab-grpo">
+      <div class="tab-content" id="tab-grpo" role="tabpanel" aria-labelledby="training-tab-grpo" hidden inert>
         <form id="grpo-form">
           <div class="form-row">
             <div class="form-group">
@@ -741,12 +741,38 @@ async function api(path, opts) {
   return res.json();
 }
 
-// --- Tabs ---
-document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    const target = tab.dataset.tab;
-    tab.closest('.panel').querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
-    tab.closest('.panel').querySelectorAll('.tab-content').forEach(tc => tc.classList.toggle('active', tc.id === 'tab-' + target));
+// --- Training Tabs ---
+function selectTrainingTab(tab, focus = false) {
+  const panel = tab.closest('.panel');
+  panel.querySelectorAll('[role="tab"]').forEach(item => {
+    const selected = item === tab;
+    item.classList.toggle('active', selected);
+    item.setAttribute('aria-selected', String(selected));
+    item.tabIndex = selected ? 0 : -1;
+  });
+  panel.querySelectorAll('[role="tabpanel"]').forEach(tabPanel => {
+    const selected = tabPanel.id === tab.getAttribute('aria-controls');
+    tabPanel.classList.toggle('active', selected);
+    tabPanel.hidden = !selected;
+    tabPanel.inert = !selected;
+  });
+  if (focus) tab.focus();
+}
+
+document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
+  tab.addEventListener('click', () => selectTrainingTab(tab));
+  tab.addEventListener('keydown', event => {
+    const tabs = Array.from(tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]'));
+    const index = tabs.indexOf(tab);
+    let nextTab = null;
+    if (event.key === 'ArrowRight') nextTab = tabs[(index + 1) % tabs.length];
+    if (event.key === 'ArrowLeft') nextTab = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (event.key === 'Home') nextTab = tabs[0];
+    if (event.key === 'End') nextTab = tabs[tabs.length - 1];
+    if (nextTab) {
+      event.preventDefault();
+      selectTrainingTab(nextTab, true);
+    }
   });
 });
 
