@@ -14,7 +14,7 @@ Common next steps:
   kiln health         inspect a running server
   kiln train sft      train a LoRA adapter from corrections
   kiln train grpo     train a LoRA adapter from scored completions
-  kiln adapters list  list loaded adapters
+  kiln adapters list  list saved adapters and show which one is active
 "#;
 
 const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
@@ -31,7 +31,7 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
       Improve an adapter from scored completions using GRPO rewards.
 
   kiln adapters list
-      Show adapters loaded by the running server.
+      Show saved adapters and which adapter is active on the running server.
 "#;
 
 const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
@@ -60,13 +60,16 @@ Use these commands after `kiln serve` is running; they call the adapter API rath
 
 const ADAPTERS_EXAMPLES: &str = r#"Examples:
   kiln adapters list
-      Show adapters loaded by the running server.
+      Show saved adapters and which adapter is active on the running server.
 
   kiln adapters load support-bot
       Load a saved adapter into the running server.
 
+  kiln adapters unload
+      Unload the active adapter and revert the running server to the base model.
+
   kiln adapters unload support-bot
-      Stop using a loaded adapter without deleting it from disk.
+      Backcompat form; the name is ignored because the server unloads the active adapter.
 
   kiln adapters delete support-bot
       Delete an adapter through the running server.
@@ -227,7 +230,7 @@ pub enum TrainCommands {
 
 #[derive(Subcommand)]
 pub enum AdapterCommands {
-    /// List adapters loaded by the running server
+    /// List saved adapters and show which one is active
     List {
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
@@ -241,10 +244,10 @@ pub enum AdapterCommands {
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
-    /// Unload an active adapter
+    /// Unload the active adapter and revert to the base model
     Unload {
-        /// Adapter name
-        name: String,
+        /// Optional legacy adapter name; ignored because the server unloads the active adapter
+        name: Option<String>,
         /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
@@ -651,35 +654,7 @@ pub async fn run_adapters_list(url: &str) -> anyhow::Result<()> {
     let body: serde_json::Value = resp.json().await?;
 
     if status.is_success() {
-        let adapters = body.get("adapters").and_then(|a| a.as_array());
-        match adapters {
-            Some(list) if list.is_empty() => {
-                println!("{}", style("No adapters loaded").dim());
-            }
-            Some(list) => {
-                println!(
-                    "{} {} adapter(s):",
-                    style("✓").green().bold(),
-                    list.len()
-                );
-                for a in list {
-                    let name = a.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                    let active = a
-                        .get("active")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let status_str = if active {
-                        style("active").green()
-                    } else {
-                        style("loaded").dim()
-                    };
-                    println!("  {} [{}]", style(name).white().bold(), status_str);
-                }
-            }
-            None => {
-                println!("{}", serde_json::to_string_pretty(&body)?);
-            }
-        }
+        print_adapters_list(&body)?;
     } else {
         eprintln!(
             "{} Server returned {}",
@@ -692,11 +667,99 @@ pub async fn run_adapters_list(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn format_size_bytes(size: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    if size >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", size as f64 / GIB)
+    } else if size >= 1024 * 1024 {
+        format!("{:.1} MiB", size as f64 / MIB)
+    } else if size >= 1024 {
+        format!("{:.1} KiB", size as f64 / KIB)
+    } else {
+        format!("{size} B")
+    }
+}
+
+fn format_adapters_list(body: &serde_json::Value) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    let Some(available) = body.get("available").and_then(|a| a.as_array()) else {
+        return Ok(serde_json::to_string_pretty(body)?);
+    };
+
+    let active = body.get("active").and_then(|a| a.as_str());
+    if available.is_empty() {
+        return Ok(style("No saved adapters are available").dim().to_string());
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{} {} saved adapter(s):",
+        style("✓").green().bold(),
+        available.len()
+    );
+    for adapter in available {
+        let name = adapter.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+        let status_str = if active == Some(name) {
+            style("active").green()
+        } else {
+            style("available").dim()
+        };
+        let has_config = adapter
+            .get("has_config")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let has_weights = adapter
+            .get("has_weights")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let size = adapter
+            .get("size_bytes")
+            .and_then(|v| v.as_u64())
+            .map(format_size_bytes)
+            .unwrap_or_else(|| "unknown size".to_string());
+
+        let _ = writeln!(
+            out,
+            "  {} [{}] config={} weights={} size={}",
+            style(name).white().bold(),
+            status_str,
+            style(has_config).cyan(),
+            style(has_weights).cyan(),
+            style(size).cyan()
+        );
+    }
+
+    Ok(out.trim_end().to_string())
+}
+
+fn print_adapters_list(body: &serde_json::Value) -> anyhow::Result<()> {
+    println!("{}", format_adapters_list(body)?);
+    Ok(())
+}
+
+fn adapter_load_url(url: &str) -> String {
+    format!("{url}/v1/adapters/load")
+}
+
+fn adapter_unload_url(url: &str) -> String {
+    format!("{url}/v1/adapters/unload")
+}
+
+fn build_adapter_load_payload(name: &str) -> serde_json::Value {
+    serde_json::json!({ "name": name })
+}
+
 /// Run the `adapters load` CLI subcommand.
 pub async fn run_adapters_load(url: &str, name: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{url}/v1/adapters/{name}/load"))
+        .post(adapter_load_url(url))
+        .json(&build_adapter_load_payload(name))
         .send()
         .await?;
     let status = resp.status();
@@ -721,26 +784,32 @@ pub async fn run_adapters_load(url: &str, name: &str) -> anyhow::Result<()> {
 }
 
 /// Run the `adapters unload` CLI subcommand.
-pub async fn run_adapters_unload(url: &str, name: &str) -> anyhow::Result<()> {
+pub async fn run_adapters_unload(url: &str, name: Option<&str>) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{url}/v1/adapters/{name}/unload"))
+        .post(adapter_unload_url(url))
         .send()
         .await?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
     if status.is_success() {
-        println!(
-            "{} Adapter '{}' unloaded",
-            style("✓").green().bold(),
-            style(name).white().bold()
-        );
+        if let Some(name) = name {
+            println!(
+                "{} Active adapter unloaded; reverted to base model (ignored legacy name '{}')",
+                style("✓").green().bold(),
+                style(name).white().bold()
+            );
+        } else {
+            println!(
+                "{} Active adapter unloaded; reverted to base model",
+                style("✓").green().bold()
+            );
+        }
     } else {
         eprintln!(
-            "{} Failed to unload adapter '{}': {}",
+            "{} Failed to unload active adapter: {}",
             style("✗").red().bold(),
-            name,
             render_api_error(&body, status)
         );
         std::process::exit(1);
@@ -1233,6 +1302,101 @@ mod tests {
             !out.contains("hint:"),
             "should not render a hint label when hint is missing, got: {out}"
         );
+    }
+
+    #[test]
+    fn cli_format_adapters_list_uses_current_available_shape() {
+        let body = json!({
+            "active": "support-bot",
+            "available": [
+                {
+                    "name": "support-bot",
+                    "has_config": true,
+                    "has_weights": true,
+                    "size_bytes": 2048,
+                    "modified_at": "2026-05-03T00:00:00Z",
+                    "files": ["adapter_config.json", "adapter_model.safetensors"],
+                },
+                {
+                    "name": "draft-bot",
+                    "has_config": true,
+                    "has_weights": false,
+                    "size_bytes": 0,
+                    "modified_at": null,
+                    "files": ["adapter_config.json"],
+                },
+            ],
+        });
+
+        let out = format_adapters_list(&body).expect("format failed");
+
+        assert!(out.contains("2 saved adapter(s)"), "got: {out}");
+        assert!(out.contains("support-bot"), "got: {out}");
+        assert!(out.contains("[active]"), "got: {out}");
+        assert!(out.contains("draft-bot"), "got: {out}");
+        assert!(out.contains("[available]"), "got: {out}");
+        assert!(out.contains("config=true"), "got: {out}");
+        assert!(out.contains("weights=false"), "got: {out}");
+        assert!(out.contains("size=2.0 KiB"), "got: {out}");
+    }
+
+    #[test]
+    fn cli_format_adapters_list_empty_saved_state() {
+        let body = json!({
+            "active": null,
+            "available": [],
+        });
+
+        let out = format_adapters_list(&body).expect("format failed");
+
+        assert!(
+            out.contains("No saved adapters are available"),
+            "got: {out}"
+        );
+        assert!(
+            !out.contains("No adapters loaded"),
+            "old loaded-adapter empty state should not appear, got: {out}"
+        );
+    }
+
+    #[test]
+    fn cli_adapter_load_and_unload_routes_match_current_api() {
+        assert_eq!(
+            adapter_load_url("http://localhost:8420"),
+            "http://localhost:8420/v1/adapters/load"
+        );
+        assert_eq!(
+            adapter_unload_url("http://localhost:8420"),
+            "http://localhost:8420/v1/adapters/unload"
+        );
+        assert_eq!(build_adapter_load_payload("support-bot"), json!({ "name": "support-bot" }));
+    }
+
+    #[test]
+    fn cli_parses_adapters_unload_without_name() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "adapters", "unload"]).expect("parse failed");
+        match cli.command {
+            Some(Commands::Adapters(AdapterCommands::Unload { name, url })) => {
+                assert_eq!(name, None);
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected adapters unload, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn cli_parses_adapters_unload_legacy_name() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["kiln", "adapters", "unload", "support-bot"])
+            .expect("parse failed");
+        match cli.command {
+            Some(Commands::Adapters(AdapterCommands::Unload { name, url })) => {
+                assert_eq!(name.as_deref(), Some("support-bot"));
+                assert_eq!(url, "http://localhost:8420");
+            }
+            other => panic!("expected adapters unload, got {:?}", other.is_some()),
+        }
     }
 
     #[test]

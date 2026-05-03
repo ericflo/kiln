@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
                 return cli::run_adapters_load(url, name).await;
             }
             AdapterCommands::Unload { name, url } => {
-                return cli::run_adapters_unload(url, name).await;
+                return cli::run_adapters_unload(url, name.as_deref()).await;
             }
             AdapterCommands::Delete { name, url } => {
                 return cli::run_adapters_delete(url, name).await;
