@@ -33,10 +33,10 @@ use kiln_core::block::BlockTable;
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
 /// basic tensor operations that all have CUDA support.
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
-    let neg_x = x.neg()?;
-    let exp_neg_x = neg_x.exp()?;
-    let one_plus = (exp_neg_x + 1.0)?;
-    let result = one_plus.recip()?;
+    let neg_x = x.neg().context("cuda_sigmoid x.neg")?;
+    let exp_neg_x = neg_x.exp().context("cuda_sigmoid exp")?;
+    let one_plus = (exp_neg_x + 1.0).context("cuda_sigmoid add one")?;
+    let result = one_plus.recip().context("cuda_sigmoid recip")?;
     Ok(result)
 }
 
@@ -3322,17 +3322,31 @@ fn gated_deltanet_gates_fallback(
     weights: &GpuLinearAttentionWeights,
     input_dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
-    let beta = cuda_sigmoid(b)?; // [B, T, nv], bf16
-    let a_f32 = a.to_dtype(DType::F32)?;
-    let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
-    let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
+    let beta = cuda_sigmoid(b).context("gdn gates fallback beta cuda_sigmoid")?; // [B, T, nv], bf16
+    let a_f32 = a.to_dtype(DType::F32).context("gdn gates fallback a to f32")?;
+    let a_log_f32 = weights
+        .a_log
+        .to_dtype(DType::F32)
+        .context("gdn gates fallback a_log to f32")?;
+    let dt_bias_f32 = weights
+        .dt_bias
+        .to_dtype(DType::F32)
+        .context("gdn gates fallback dt_bias to f32")?;
     let g = {
-        let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
-        let sp = softplus(&a_biased)?;
-        let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
-        sp.broadcast_mul(&neg_decay)?
+        let a_biased = a_f32
+            .broadcast_add(&dt_bias_f32)
+            .context("gdn gates fallback broadcast_add dt_bias")?;
+        let sp = softplus(&a_biased).context("gdn gates fallback softplus")?;
+        let neg_decay = a_log_f32
+            .exp()
+            .context("gdn gates fallback a_log exp")?
+            .neg()
+            .context("gdn gates fallback a_log neg")?; // -exp(A_log)
+        sp.broadcast_mul(&neg_decay)
+            .context("gdn gates fallback broadcast_mul neg_decay")?
     }
-    .to_dtype(input_dtype)?;
+    .to_dtype(input_dtype)
+    .context("gdn gates fallback output to input dtype")?;
     Ok((beta, g))
 }
 
@@ -4005,14 +4019,18 @@ fn gated_deltanet_forward_decode_if(
             kiln_nvtx::range!(c"kiln/gdn/gates");
             if backend.supports_gdn_gates() {
                 if let Some((beta, g)) =
-                    backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
+                    backend
+                        .gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)
+                        .context("gdn decode gates fused backend")?
                 {
                     (beta, g)
                 } else {
-                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)
+                        .context("gdn decode gates fallback after backend miss")?
                 }
             } else {
-                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)
+                    .context("gdn decode gates fallback")?
             }
         };
 

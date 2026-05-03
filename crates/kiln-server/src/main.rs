@@ -8,7 +8,7 @@ use clap::Parser;
 use kiln_server::api;
 use kiln_server::cli::{self, AdapterCommands, Cli, Commands, TrainCommands};
 use kiln_server::config::KilnConfig;
-use kiln_server::device::select_device;
+use kiln_server::device::select_device_with_options;
 use kiln_server::state;
 
 use kiln_core::block::BlockManager;
@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
         tracing::info!("loading model weights from {mp}");
-        let device = select_device()?;
+        let device = select_device_with_options(config.memory.cuda_graphs)?;
         let model_weights = kiln_model::load_model_with_options(
             Path::new(mp),
             &model_config,

@@ -141,7 +141,21 @@ impl CudaGraphRunner {
         // Phase 1: warmup — run eagerly to prime GPU memory pools
         if !self.warmup_done {
             self.warmup_done = true;
-            tracing::debug!("CUDA graph: warmup decode step");
+            tracing::debug!("CUDA graph: warmup decode step with graph-shaped inputs");
+            #[cfg(feature = "cuda")]
+            {
+                match Self::eager_forward_with_position_buffer(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                ) {
+                    Ok(logits) => return Ok(logits),
+                    Err(e) => {
+                        tracing::warn!(
+                            "CUDA graph-shaped warmup failed: {e:#}, using plain eager decode"
+                        );
+                    }
+                }
+            }
             return Self::eager_forward(
                 backend, token_id, weights, config, paged_cache, block_table, seq_len,
                 linear_state, lora,
@@ -281,13 +295,17 @@ impl CudaGraphRunner {
         // This tensor's device pointer gets baked into the captured graph.
         // On replay, we update its contents via memcpy (outside the graph)
         // so the RoPE kernels see the correct position each step.
-        let pos_f32 = seq_len as f32;
-        let position_buffer = Tensor::new(&[pos_f32], device)?;
+        let position_buffer = Self::new_position_buffer(device, seq_len)?;
 
         // Synchronize all pending work before capture
         stream
             .synchronize()
             .map_err(|e| anyhow::anyhow!("sync before graph capture: {e}"))?;
+
+        let capture_status = stream
+            .capture_status()
+            .map_err(|e| anyhow::anyhow!("capture_status before begin_capture: {e}"))?;
+        tracing::debug!(?capture_status, stream = ?stream.cu_stream(), "CUDA graph stream status before begin_capture");
 
         // Begin stream capture — all subsequent GPU operations are recorded
         stream
@@ -368,6 +386,43 @@ impl CudaGraphRunner {
             None, // no pre-allocated position buffer — creates one internally
         )
         .context("eager decode forward pass failed")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_position_buffer(device: &Device, position: usize) -> Result<Tensor> {
+        Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
+    }
+
+    /// Eager decode that uses the same pre-allocated position tensor path as
+    /// graph capture. This primes kernels/modules that the plain eager path
+    /// skips, keeping unsupported lazy work out of the later capture window.
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn eager_forward_with_position_buffer(
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &mut PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<candle_core::Tensor> {
+        let position_buffer = Self::new_position_buffer(weights.embed_tokens.device(), seq_len)?;
+        model_forward_paged(
+            backend,
+            &[token_id],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(linear_state),
+            lora,
+            Some(&position_buffer),
+        )
+        .context("graph-shaped eager decode forward pass failed")
     }
 }
 
