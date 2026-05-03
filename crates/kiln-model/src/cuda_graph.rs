@@ -39,7 +39,9 @@ use tracing;
 use kiln_core::config::ModelConfig;
 
 use crate::backend::BackendRuntime;
-use crate::forward::{model_forward_paged, GpuWeights, LinearAttentionState};
+use crate::forward::{
+    model_forward_paged, model_forward_paged_with_graph_inputs, GpuWeights, LinearAttentionState,
+};
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 
@@ -54,6 +56,10 @@ struct CapturedDecodeGraph {
     output_logits: candle_core::Tensor,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
+    /// Pre-allocated token-id buffer on GPU (u32, shape [1]).
+    /// Updated before each replay so embedding lookup reads the current token
+    /// from a graph-stable device pointer.
+    token_buffer: Tensor,
     /// Pre-allocated position buffer on GPU (f32, shape [1]).
     /// Updated via cudaMemcpyHtoDAsync before each replay so RoPE sees
     /// the correct position while reading from the same device pointer.
@@ -174,6 +180,15 @@ impl CudaGraphRunner {
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
+                    if let Err(e) = Self::update_token_buffer(&captured.token_buffer, token_id) {
+                        tracing::warn!("Failed to update token buffer: {e}, falling back to eager");
+                        self.captured = None;
+                        self.enabled = false;
+                        return Self::eager_forward(
+                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                            linear_state, lora,
+                        );
+                    }
                     if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len) {
                         tracing::warn!("Failed to update position buffer: {e}, falling back to eager");
                         self.captured = None;
@@ -234,39 +249,52 @@ impl CudaGraphRunner {
     /// changing the device pointer. This is done outside the CUDA graph so
     /// replayed RoPE kernels read the correct position.
     #[cfg(feature = "cuda")]
+    fn update_token_buffer(token_buffer: &Tensor, token_id: u32) -> Result<()> {
+        Self::update_cuda_scalar(token_buffer, &[token_id], "token buffer")
+    }
+
+    #[cfg(feature = "cuda")]
     fn update_position_buffer(position_buffer: &Tensor, position: usize) -> Result<()> {
+        let pos_f32 = [position as f32];
+        Self::update_cuda_scalar(position_buffer, &pos_f32, "position buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn update_cuda_scalar<T>(tensor: &Tensor, value: &[T], label: &str) -> Result<()>
+    where
+        T: candle_core::cuda_backend::cudarc::driver::DeviceRepr
+            + candle_core::cuda_backend::CudaDType,
+    {
         use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 
-        let pos_f32 = [position as f32];
-
-        let (storage, _layout) = position_buffer.storage_and_layout();
+        let (storage, _layout) = tensor.storage_and_layout();
         let cuda_storage = match &*storage {
             candle_core::Storage::Cuda(s) => s,
-            _ => anyhow::bail!("position buffer must be CUDA storage"),
+            _ => anyhow::bail!("{label} must be CUDA storage"),
         };
 
         let stream = cuda_storage.device.cuda_stream();
         let raw_stream = stream.cu_stream();
-        let slice = cuda_storage.as_cuda_slice::<f32>()?;
+        let slice = cuda_storage.as_cuda_slice::<T>()?;
 
-        // SAFETY: We write into the position buffer before graph replay.
-        // No concurrent GPU reads occur between this memcpy and graph launch
-        // (the stream is serialized). The device pointer and allocation size
-        // are valid because the position_buffer tensor is alive.
+        // SAFETY: We write into the scalar buffer before graph replay. No
+        // concurrent GPU reads occur between this memcpy and graph launch (the
+        // stream is serialized). The device pointer and allocation size are
+        // valid because the captured graph owns the tensor.
         unsafe {
             let (dev_ptr, _guard) = slice.device_ptr(&stream);
             candle_core::cuda_backend::cudarc::driver::result::memcpy_htod_async(
                 dev_ptr,
-                &pos_f32,
+                value,
                 raw_stream,
             )
-            .map_err(|e| anyhow::anyhow!("memcpy_htod_async for position buffer: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("memcpy_htod_async for {label}: {e:?}"))?;
         }
 
-        // Synchronize to ensure the copy completes before graph replay
+        // Synchronize to ensure the copy completes before graph replay.
         stream
             .synchronize()
-            .map_err(|e| anyhow::anyhow!("stream sync after position update: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("stream sync after {label} update: {e}"))?;
 
         Ok(())
     }
@@ -297,7 +325,11 @@ impl CudaGraphRunner {
 
         // Pre-allocate graph-stable decode tensors BEFORE capture. Their
         // device pointers get baked into the captured graph.
+        let token_buffer = Self::new_token_buffer(device, token_id)?;
         let position_buffer = Self::new_position_buffer(device, seq_len)?;
+        let output_logits =
+            Self::new_output_logits(config, device, weights.embed_tokens.dtype())?;
+        let output_logits_for_capture = output_logits.clone();
         let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
         Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
@@ -322,7 +354,7 @@ impl CudaGraphRunner {
         let logits_result = kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
             gdn_decode_outputs.clone(),
             || {
-                model_forward_paged(
+                let logits = model_forward_paged_with_graph_inputs(
                     backend,
                     &[token_id],
                     weights,
@@ -332,8 +364,13 @@ impl CudaGraphRunner {
                     seq_len,
                     Some(linear_state),
                     lora,
-                    Some(&position_buffer),
-                )
+                    &token_buffer,
+                    &position_buffer,
+                )?;
+                output_logits_for_capture
+                    .slice_set(&logits, 0, 0)
+                    .context("copy CUDA graph logits into stable output")?;
+                Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
             },
         );
 
@@ -352,13 +389,18 @@ impl CudaGraphRunner {
                     "CUDA graph captured for decode ({} layers)",
                     config.num_layers,
                 );
-                self.captured = Some(CapturedDecodeGraph {
+                let _ = (
                     graph,
-                    output_logits: logits.clone(),
-                    adapter_gen: self.adapter_generation,
+                    output_logits,
+                    token_buffer,
                     position_buffer,
-                    _gdn_decode_outputs: gdn_decode_outputs,
-                });
+                    gdn_decode_outputs,
+                );
+                tracing::warn!(
+                    "CUDA graph capture succeeded, but replay is disabled for paged decode until all captured Candle allocations have graph-stable ownership"
+                );
+                self.captured = None;
+                self.enabled = false;
                 Ok(logits)
             }
             Ok(None) => {
@@ -399,8 +441,23 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
+    fn new_token_buffer(device: &Device, token_id: u32) -> Result<Tensor> {
+        Tensor::new(&[token_id], device).context("create CUDA graph token buffer")
+    }
+
+    #[cfg(feature = "cuda")]
     fn new_position_buffer(device: &Device, position: usize) -> Result<Tensor> {
         Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_output_logits(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+    ) -> Result<Tensor> {
+        Tensor::zeros((1, 1, config.vocab_size), dtype, device)
+            .context("create CUDA graph output logits")
     }
 
     #[cfg(feature = "cuda")]

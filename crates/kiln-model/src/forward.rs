@@ -1840,6 +1840,10 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     Ok(out)
 }
 
+fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result<Tensor> {
+    Ok(embed_weights.index_select(index, 0)?)
+}
+
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
     let t_dims = weights.embed_tokens_t.dims();
     if t_dims.len() == 2 {
@@ -1851,9 +1855,34 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
     embedding_lookup(token_ids, &weights.embed_tokens)
 }
 
-fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
+fn embedding_lookup_from_weights_with_index(
+    index: &Tensor,
+    weights: &GpuWeights,
+) -> Result<Tensor> {
+    let t_dims = weights.embed_tokens_t.dims();
+    if t_dims.len() == 2 {
+        let expected_embed_dims = [t_dims[1], t_dims[0]];
+        if weights.embed_tokens.dims() != expected_embed_dims.as_slice() {
+            return embedding_lookup_from_transposed_index(index, &weights.embed_tokens_t);
+        }
+    }
+
+    embedding_lookup_with_index(index, &weights.embed_tokens)
+}
+
+fn embedding_lookup_from_transposed(
+    token_ids: &[u32],
+    embed_tokens_t: &Tensor,
+) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_tokens_t.device())?;
-    let gathered = embed_tokens_t.index_select(&index, 1)?;
+    embedding_lookup_from_transposed_index(&index, embed_tokens_t)
+}
+
+fn embedding_lookup_from_transposed_index(
+    index: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Tensor> {
+    let gathered = embed_tokens_t.index_select(index, 1)?;
     Ok(gathered.t()?.contiguous()?)
 }
 
@@ -2787,8 +2816,14 @@ fn causal_conv1d_decode(
     let output = window.broadcast_mul(&w_expanded)?.sum(2)?; // [batch, channels]
     let output = output.unsqueeze(2)?; // [batch, channels, 1]
 
-    // Update conv_state: drop oldest, append newest
-    *conv_state = window.narrow(2, 1, kernel_size - 1)?.contiguous()?;
+    // Update conv_state in place: drop oldest, append newest. CUDA graph
+    // capture bakes the conv_state device pointer into later decode kernels, so
+    // rebinding `conv_state` to a newly allocated tensor during capture leaves
+    // replay with a dangling pointer. Keep the caller-owned storage stable.
+    let next_state = window.narrow(2, 1, kernel_size - 1)?.contiguous()?;
+    conv_state
+        .slice_set(&next_state, 0, 0)
+        .context("update decode conv_state in place")?;
 
     Ok(output)
 }
@@ -6025,7 +6060,10 @@ pub fn model_forward_segment(
 ///
 /// Returns `([1, seq_len, hidden_size], positions)` — the initial hidden state
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
-pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
+pub fn model_forward_embed(
+    token_ids: &[u32],
+    weights: &GpuWeights,
+) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
     hidden = hidden.unsqueeze(0)?;
@@ -6134,6 +6172,7 @@ pub fn model_forward_paged(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
         LmHeadMode::Full,
     )?;
@@ -6169,6 +6208,7 @@ pub fn model_forward_paged_last_token(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
         LmHeadMode::LastRowOnly,
     )?;
@@ -6203,6 +6243,7 @@ pub fn model_forward_paged_last_token_greedy(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
         LmHeadMode::LastRowArgmaxOnly,
     )?;
@@ -6238,6 +6279,37 @@ pub fn model_forward_paged_next_token_greedy(
         lora,
         positions_gpu,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_with_graph_inputs(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    token_ids_gpu: &Tensor,
+    positions_gpu: &Tensor,
+) -> Result<Tensor> {
+    let (logits, _hidden, _token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        Some(token_ids_gpu),
+        Some(positions_gpu),
+        LmHeadMode::Full,
+    )?;
+    Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 
 /// Batched paged decode API for real continuous-batching work.
@@ -6394,6 +6466,7 @@ pub fn model_forward_paged_with_last_hidden(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
         LmHeadMode::FullWithLastHidden,
     )?;
@@ -6439,6 +6512,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
         LmHeadMode::LastRowWithLastHidden,
     )?;
@@ -7024,6 +7098,7 @@ fn model_forward_paged_inner(
     start_pos: usize,
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
+    token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
     lm_head_mode: LmHeadMode,
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
@@ -7031,7 +7106,10 @@ fn model_forward_paged_inner(
     let device = weights.embed_tokens.device();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    let mut hidden = match token_ids_gpu {
+        Some(index) => embedding_lookup_from_weights_with_index(index, weights)?,
+        None => embedding_lookup_from_weights(token_ids, weights)?,
+    };
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -7467,6 +7545,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             state_for_tile,
             lora,
             None,
+            None,
             mode,
         )
         .with_context(|| {
@@ -7549,6 +7628,7 @@ pub fn model_forward_paged_streaming_with(
             start_pos + cursor,
             state_for_tile,
             lora,
+            None,
             None,
             mode,
         )
