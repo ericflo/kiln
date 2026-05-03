@@ -288,6 +288,12 @@ a { color: var(--accent); text-decoration: none; }
   margin-bottom: 4px;
   font-weight: 500;
 }
+.form-help {
+  margin-top: 6px;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.4;
+}
 input[type="text"], input[type="number"], textarea, select {
   width: 100%;
   font-family: var(--mono);
@@ -630,6 +636,7 @@ textarea { resize: vertical; min-height: 80px; }
           <div class="form-group">
             <label>Training Examples (JSON array)</label>
             <textarea id="sft-examples" name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
+            <div class="form-help">Expected: a JSON array of examples. Each example needs a <code>messages</code> array with at least one <code>user</code> message and one <code>assistant</code> message.</div>
             <div style="display:flex;justify-content:flex-end;margin-top:6px;">
               <button type="button" class="btn btn-sm" id="use-sft-sample">Use sample SFT payload</button>
             </div>
@@ -667,6 +674,7 @@ textarea { resize: vertical; min-height: 80px; }
           <div class="form-group">
             <label>GRPO Groups (JSON array)</label>
             <textarea id="grpo-groups" name="groups" rows="6" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
+            <div class="form-help">Expected: a JSON array of groups. Each group needs <code>messages</code> plus <code>completions</code> containing <code>text</code> and a numeric <code>reward</code>.</div>
             <div style="display:flex;justify-content:flex-end;margin-top:6px;">
               <button type="button" class="btn btn-sm" id="use-grpo-sample">Use sample GRPO payload</button>
             </div>
@@ -1303,20 +1311,105 @@ function fillGrpoSamplePayload() {
 document.getElementById('use-sft-sample').addEventListener('click', fillSftSamplePayload);
 document.getElementById('use-grpo-sample').addEventListener('click', fillGrpoSamplePayload);
 
+function parseJsonArrayField(value, label) {
+  const text = value.trim();
+  if (!text) {
+    throw new Error(`${label} cannot be empty. Paste a JSON array or use the sample payload.`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${label} must be valid JSON. Check commas, quotes, and brackets.`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON array, not an object or single item.`);
+  }
+  if (parsed.length === 0) {
+    throw new Error(`${label} must include at least one item.`);
+  }
+  return parsed;
+}
+
+function parseFiniteNumberField(value, label) {
+  const text = value.trim();
+  if (!text) {
+    throw new Error(`${label} is required.`);
+  }
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} must be a finite number.`);
+  }
+  return parsed;
+}
+
+function parsePositiveIntegerField(value, label) {
+  const parsed = parseFiniteNumberField(value, label);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive whole number.`);
+  }
+  return parsed;
+}
+
+function validateMessages(messages, label) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error(`${label} needs a non-empty messages array.`);
+  }
+  const roles = messages.map((message) => message && message.role);
+  if (!roles.includes('user') || !roles.includes('assistant')) {
+    throw new Error(`${label} messages need both user and assistant roles.`);
+  }
+}
+
+function validateSftExamples(examples) {
+  examples.forEach((example, index) => {
+    validateMessages(example && example.messages, `SFT example ${index + 1}`);
+  });
+}
+
+function validateGrpoGroups(groups) {
+  groups.forEach((group, groupIndex) => {
+    const label = `GRPO group ${groupIndex + 1}`;
+    if (!group || typeof group !== 'object') {
+      throw new Error(`${label} must be an object with messages and completions.`);
+    }
+    if (!Array.isArray(group.messages) || group.messages.length === 0) {
+      throw new Error(`${label} needs a non-empty messages array.`);
+    }
+    if (!Array.isArray(group.completions) || group.completions.length === 0) {
+      throw new Error(`${label} needs a non-empty completions array.`);
+    }
+    group.completions.forEach((completion, completionIndex) => {
+      if (!completion || typeof completion.text !== 'string' || !completion.text.trim()) {
+        throw new Error(`${label} completion ${completionIndex + 1} needs non-empty text.`);
+      }
+      if (typeof completion.reward !== 'number' || !Number.isFinite(completion.reward)) {
+        throw new Error(`${label} completion ${completionIndex + 1} needs a numeric reward, not a quoted string.`);
+      }
+    });
+  });
+}
+
 // --- SFT Form ---
 document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
-    const examples = JSON.parse(form.examples.value);
+    const examples = parseJsonArrayField(form.examples.value, 'SFT examples');
+    validateSftExamples(examples);
+    const learningRate = parseFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
+    const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
+    const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
     const body = {
       examples,
       config: {
         output_name: form.output_name.value,
         auto_load: form.auto_load.checked,
-        learning_rate: parseFloat(form.learning_rate.value),
-        epochs: parseInt(form.epochs.value),
-        lora_rank: parseInt(form.rank.value),
+        learning_rate: learningRate,
+        epochs,
+        lora_rank: rank,
       }
     };
     const res = await api('/v1/train/sft', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
@@ -1332,15 +1425,19 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
-    const groups = JSON.parse(form.groups.value);
+    const groups = parseJsonArrayField(form.groups.value, 'GRPO groups');
+    validateGrpoGroups(groups);
+    const learningRate = parseFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
+    const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
+    const rank = parsePositiveIntegerField(form.rank.value, 'GRPO LoRA rank');
     const body = {
       groups,
       config: {
         output_name: form.output_name.value,
         auto_load: form.auto_load.checked,
-        learning_rate: parseFloat(form.learning_rate.value),
-        kl_coeff: parseFloat(form.kl_coeff.value),
-        lora_rank: parseInt(form.rank.value),
+        learning_rate: learningRate,
+        kl_coeff: klCoeff,
+        lora_rank: rank,
       }
     };
     const res = await api('/v1/train/grpo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
