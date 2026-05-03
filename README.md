@@ -335,7 +335,7 @@ Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to GHCR:
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
 # or pin a version:
-docker pull ghcr.io/ericflo/kiln-server:0.2.9
+docker pull ghcr.io/ericflo/kiln-server:0.2.13
 ```
 
 Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
