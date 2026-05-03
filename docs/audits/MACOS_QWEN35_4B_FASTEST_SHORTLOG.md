@@ -427,3 +427,9 @@
   0.000671 s / 0.060 ms handler; the following equivalent `n=1` chat hit the
   rehydrated request cache in 0.000699 s / 0.051 ms handler, with render/token,
   prefill/decode, and generated-token counters unchanged after eviction.
+- 2026-05-03 E202: Closed the reverse zero-token chat cache direction, letting
+  a hot normalized `n=1` request-cache entry synthesize a later chat `n>1`
+  response before prompt rendering/tokenization and seed the choices cache.
+  Focused test passed, and `cargo test -p kiln-server chat_ --lib` passed
+  72 tests. No live run; this is the final endpoint-cache cleanup before
+  returning to low-level Metal/kernel profiling and optimization.

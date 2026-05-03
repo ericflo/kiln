@@ -6386,3 +6386,49 @@ Direct chat `n>1` choices-cache hits now restore the single-chat request cache,
 not just return a fast multi-choice response. That keeps the zero-work chain
 alive after request-cache eviction: chat `n>1` hit, then chat `n=1` hit, with
 no render, tokenization, prefill, decode, or generation in either request.
+
+## Experiment E202: Single-Chat Request Cache Feeds Zero-Token Chat Choices
+
+Hypothesis:
+
+The previous endpoint-cache work closed the direction where hot chat `n>1`
+choices entries can restore `n=1` request-cache entries. The reverse zero-token
+case was still missing: a hot normalized single-chat request-cache entry proves
+the empty completion for a later zero-token chat `n>1` request, but the old path
+entered `generate_multi_chat_response`, rendered the prompt, and tokenized
+before producing cloned empty choices.
+
+Change:
+
+- Added `zero_chat_choices_response_from_request_cache_hit`, which probes the
+  normalized single-chat request cache for zero-token chat `n>1` requests before
+  prompt rendering/tokenization.
+- On a hit or completed wait, it synthesizes the multi-choice response and
+  finishes the chat choices cache owner so repeated `n>1` requests hit the
+  top-level choices cache too.
+- Added `multi_choice_zero_chat_hits_request_cache_before_prompt_work`, which
+  starts with a hot `n=1` zero-token chat request cache, then verifies the
+  later `n=4` chat returns before rendered-prompt and prompt-token cache lookup
+  and seeds the choices cache.
+
+Validation:
+
+- `cargo test -p kiln-server multi_choice_zero_chat_hits_request_cache_before_prompt_work --lib`
+  - Passed: 1 test.
+- `cargo test -p kiln-server chat_ --lib`
+  - Passed: 72 tests.
+
+Live result:
+
+Skipped for E202. This is the final endpoint-cache symmetry cleanup before
+returning to low-level Metal/kernel work; E199-E201 already measured the same
+class of zero-token request-cache/choices-cache removed-work path on a real
+Qwen3.5-4B Metal server.
+
+Takeaway:
+
+The zero-token endpoint-cache graph is now closed in both chat directions:
+`n=1` can feed `n>1`, and `n>1` can feed `n=1`, without render, tokenization,
+prefill, decode, or generation on the later request. The next optimization
+work should shift back to low-level kernel/profile evidence, since cache reuse
+is not the whole fastest-inference objective.

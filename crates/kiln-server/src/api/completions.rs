@@ -1029,6 +1029,40 @@ fn store_chat_request_cache_from_chat_choices_response(
     Ok(())
 }
 
+async fn zero_chat_choices_response_from_request_cache_hit(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
+    n_per: usize,
+    vocab_size: usize,
+) -> Result<Option<ChatCompletionResponse>, ApiError> {
+    if chat_request_max_tokens(req) != 0 || req.adapter.is_some() || req.adapters.is_some() {
+        return Ok(None);
+    }
+
+    let Some(key) = deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
+        req, req.seed, vocab_size,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let probe = state.chat_request_cache.lock().unwrap().probe(&key);
+    let cached = match probe {
+        DeterministicChatRequestCacheProbe::Hit(cached) => cached,
+        DeterministicChatRequestCacheProbe::Wait(receiver) => {
+            let Some(cached) = wait_for_deterministic_chat_request(receiver).await else {
+                return Ok(None);
+            };
+            cached
+        }
+        DeterministicChatRequestCacheProbe::Miss => return Ok(None),
+    };
+
+    let resp = response_from_cached_chat_request(state, req, request_start, cached);
+    chat_response_from_multi_responses(state, req, vec![(0, resp)], n_per, true).map(Some)
+}
+
 fn chat_choices_cache_value_from_response(
     resp: &ChatCompletionResponse,
 ) -> Option<DeterministicChatChoicesCacheValue> {
@@ -2064,6 +2098,25 @@ async fn chat_completions_inner(
                     ));
                 }
             }
+        }
+
+        if can_hit_chat_choices_cache_before_adapter_work
+            && let Some(resp) = zero_chat_choices_response_from_request_cache_hit(
+                state,
+                &req,
+                request_start,
+                n_per,
+                state.model_config.vocab_size,
+            )
+            .await?
+        {
+            finish_chat_choices_cache(
+                state,
+                chat_choices_cache_key,
+                chat_choices_cache_owner.take(),
+                &resp,
+            );
+            return Ok(Json(resp).into_response());
         }
 
         let resp = generate_multi_chat_response(state, &req, request_start, n_per).await?;
@@ -10443,6 +10496,84 @@ mod tests {
         );
         assert_eq!(hit["usage"], single["usage"]);
         assert_eq!(hit["choices"][0], single["choices"][0]);
+    }
+
+    #[tokio::test]
+    async fn multi_choice_zero_chat_hits_request_cache_before_prompt_work() {
+        let state = make_batch_test_state();
+        let single_body = serde_json::json!({
+            "messages": [{"role":"user","content":"single chat feeds zero chat n"}],
+            "temperature": 0.2,
+            "top_p": 0.1,
+            "max_tokens": 0,
+            "seed": 999
+        })
+        .to_string();
+        let multi_body = serde_json::json!({
+            "messages": [{"role":"user","content":"single chat feeds zero chat n"}],
+            "n": 4,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "max_tokens": 0,
+            "seed": 202
+        })
+        .to_string();
+
+        let (status_single, single) = chat_post(state.clone(), &single_body).await;
+        assert_eq!(status_single, axum::http::StatusCode::OK, "{single}");
+        assert_eq!(
+            state
+                .metrics
+                .tokens_generated
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let render_stats_after_single = state.rendered_prompt_cache.lock().unwrap().stats();
+        let token_stats_after_single = state.prompt_token_cache.lock().unwrap().stats();
+        assert_eq!(render_stats_after_single, (0, 1, 1));
+        assert_eq!(token_stats_after_single, (0, 1, 1));
+        assert_eq!(state.chat_request_cache.lock().unwrap().stats(), 1);
+        assert_eq!(state.chat_choices_cache.lock().unwrap().stats(), 0);
+
+        let (status_multi, multi) = chat_post(state.clone(), &multi_body).await;
+        assert_eq!(status_multi, axum::http::StatusCode::OK, "{multi}");
+        assert_eq!(multi["choices"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            state.rendered_prompt_cache.lock().unwrap().stats(),
+            render_stats_after_single,
+            "zero-token chat n should hit request cache before rendered-prompt lookup"
+        );
+        assert_eq!(
+            state.prompt_token_cache.lock().unwrap().stats(),
+            token_stats_after_single,
+            "zero-token chat n should hit request cache before prompt-token lookup"
+        );
+        assert_eq!(
+            state
+                .metrics
+                .tokens_generated
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "zero-token chat n request-cache hit should not generate model tokens"
+        );
+        assert_eq!(state.chat_choices_cache.lock().unwrap().stats(), 1);
+        assert_eq!(single["usage"], multi["usage"]);
+        assert_eq!(single["choices"][0], multi["choices"][0]);
+
+        let (status_repeat, repeat) = chat_post(state.clone(), &multi_body).await;
+        assert_eq!(status_repeat, axum::http::StatusCode::OK, "{repeat}");
+        assert_eq!(
+            state.rendered_prompt_cache.lock().unwrap().stats(),
+            render_stats_after_single,
+            "request-cache synthesized choices should seed the choices cache"
+        );
+        assert_eq!(
+            state.prompt_token_cache.lock().unwrap().stats(),
+            token_stats_after_single,
+            "choices-cache repeat should still avoid prompt-token lookup"
+        );
+        assert_eq!(multi["usage"], repeat["usage"]);
+        assert_eq!(multi["choices"], repeat["choices"]);
     }
 
     #[tokio::test]
