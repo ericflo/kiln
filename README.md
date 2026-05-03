@@ -13,6 +13,7 @@
   <a href="https://ericflo.github.io/kiln/">Website</a> &middot;
   <a href="docs/site/demo/">Demo</a> &middot;
   <a href="QUICKSTART.md">Quickstart</a> &middot;
+  <a href="https://ericflo.github.io/kiln/troubleshooting.html">Troubleshooting</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
   <a href="kiln.example.toml">Configuration</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
