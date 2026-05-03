@@ -224,6 +224,11 @@ impl CudaGraphRunner {
 
                     match captured.graph.launch() {
                         Ok(()) => {
+                            tracing::debug!(
+                                seq_len = requested_key.seq_len,
+                                blocks = requested_key.block_count(),
+                                "CUDA graph replay succeeded"
+                            );
                             return Ok(captured.output_logits.clone());
                         }
                         Err(e) => {
