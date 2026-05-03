@@ -175,7 +175,7 @@ curl http://localhost:8420/v1/train/sft \
 curl http://localhost:8420/v1/train/status
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads with prompts longer than ~30k tokens, see [QUICKSTART.md §4.2](QUICKSTART.md#42-known-limitation-workers1-for-long-tools-bearing-prompts) for the `workers=1` known-limitation note ([#664](https://github.com/ericflo/kiln/issues/664)).
+See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads on older pinned releases, see [QUICKSTART.md §4.2](QUICKSTART.md#42-troubleshooting-older-release-long-prefill-timeouts) for the legacy `workers=1` / request-timeout troubleshooting note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
 ## See it in action
 
