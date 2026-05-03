@@ -525,3 +525,14 @@
   showed prefix cache disabled with 0 lookups and 0 retained entries. This
   rules out prefix-cache registration as the bs=4 bottleneck for that shape;
   future bs>1 work should target actual batched/continuous model execution.
+- 2026-05-03 E240: Compared the E234/E239 four distinct prompts as sequential
+  no-prefix `/v1/chat/completions` calls. Sequential wall time was 6.01 s with
+  5,921.841 ms handler sum and 8 generated tokens; per-request curl timings
+  were 4.30 s, 0.57 s, 0.55 s, and 0.54 s. This was slower than the 4.43 s
+  no-prefix batch run, so naive serial batch handling is not the bs>1 fix.
+- 2026-05-03 E241-E243: Rejected a temporary tile16 Metal cooperative GEMV
+  candidate. Synthetic Qwen-shaped projection timings improved by 1.009-1.074x
+  versus tile8, but full warmed p64/o64 decode did not: tile8 control was
+  174.0 ms mean ITL, tile16 was 173.5 ms then 177.3 ms on repeat. The candidate
+  was reverted before commit; future GEMV work needs more than simple
+  column-width tuning.

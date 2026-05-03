@@ -7101,3 +7101,100 @@ prefix cache enabled (E234: 4.44 s wall / 4,420.024 ms handler; E239: 4.43 s
 wall / 4,416.317 ms handler). Future bs>1 speed work should target the actual
 execution structure: true batched model-forward or scheduler-level continuous
 batching, not more cache registration policy work.
+
+## Experiment E240: Sequential Chat Control for bs=4 Direction
+
+Hypothesis:
+
+The batch endpoint currently spawns one generation task per distinct rendered
+prompt. Before changing scheduling policy, compare the same four E234/E239
+prompts as sequential `/v1/chat/completions` requests on a no-prefix real
+server.
+
+Setup:
+
+- Release server with `KILN_PREFIX_CACHE_ENABLED=false`.
+- Same four prompts as E234/E239, converted to individual chat requests.
+- `temperature=0.0`, `max_tokens=2`, seeds 234-237.
+
+Result:
+
+| Shape | Prefix cache | Wall time | HTTP handler sum | Generated tokens | Request times |
+|---|---|---:|---:|---:|---|
+| 4 sequential chat requests | disabled | 6.01 s | 5,921.841 ms | 8 | 4.30 s, 0.57 s, 0.55 s, 0.54 s |
+
+Artifacts:
+
+- `e240_server_no_prefix_sequential_chat.log`
+- `e240_chat_seq_0_request.json` through `e240_chat_seq_3_request.json`
+- `e240_chat_seq_0_response.json` through `e240_chat_seq_3_response.json`
+- `e240_chat_seq_0_time.log` through `e240_chat_seq_3_time.log`
+- `e240_chat_seq_all_times.log`
+- `e240_chat_seq_total_time.log`
+- `e240_chat_seq_metrics.prom`
+
+Takeaway:
+
+Naively replacing batch fan-out with sequential single-request execution is not
+an obvious win. E240 was slower than the E239 concurrent batch shape (6.01 s
+sequential versus 4.43 s batch), with a large first chat request and three
+shorter follow-up requests. The bs>1 path still needs real batched model-forward
+or a scheduler that can continuously batch decode work, not just a serial loop.
+
+## Experiment E241-E243: Rejected Tile16 Cooperative GEMV Candidate
+
+Hypothesis:
+
+The accepted generic Metal transposed cooperative GEMV uses four SIMD groups per
+threadgroup and eight output columns per SIMD group. Try a temporary 16-column
+variant to improve weight/input reuse in decode projections.
+
+Temporary candidate:
+
+- Added `kiln_transposed_coop_gemv16_bf16`.
+- Added an opt-in default gate: `KILN_ENABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16=1`.
+- Extended the ignored synthetic Qwen3.5 GEMV microbench to report tile16.
+- Reverted the candidate after full-model benchmarks.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_matches_broadcast_matmul --lib`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_tile8_env_falls_back_to_tile4 --lib`
+  - Passed after folding tile16 env assertions into the existing env-mutating test.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Synthetic microbench:
+
+`KILN_METAL_TRANSPOSED_COOP_BENCH_WARMUP=5 KILN_METAL_TRANSPOSED_COOP_BENCH_ITERS=30 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_qwen35_synthetic --lib -- --ignored --nocapture`
+
+| Shape | Tile8 | Tile16 | Tile16 vs tile8 |
+|---|---:|---:|---:|
+| MLP gate/up `[2560,9216]` | 1135.542 us | 1098.242 us | 1.034x |
+| down_proj `[9216,2560]` | 1046.778 us | 1004.169 us | 1.042x |
+| attn_output `[2560,2560]` | 322.608 us | 319.751 us | 1.009x |
+| attn_qkv_like `[2560,4096]` | 535.490 us | 498.661 us | 1.074x |
+
+Full-model warmed p64/o64:
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E241 | tile8 control | 462.6 ms | 5.7 | 174.0 ms | 168.8 ms | 202.4 ms | control |
+| E242 | tile16 opt-in | 446.3 ms | 5.8 | 173.5 ms | 171.9 ms | 198.3 ms | too small to accept |
+| E243 | tile16 opt-in repeat | 479.8 ms | 5.6 | 177.3 ms | 175.5 ms | 214.4 ms | rejected and reverted |
+
+Artifacts:
+
+- `e241_tile16_synthetic_gemv_bench.log`
+- `e241_m1_bs1_p64_o64_warmed_tile8_control.log`
+- `e242_m1_bs1_p64_o64_warmed_tile16_opt_in.log`
+- `e243_m1_bs1_p64_o64_warmed_tile16_opt_in_repeat.log`
+
+Takeaway:
+
+The wider tile looked good in isolated synthetic projection timings, but the
+full decode loop did not show a stable improvement. The first opt-in run only
+matched tile8 within noise, and the repeat regressed. The candidate was reverted
+before commit. Future GEMV work should move beyond simple column-width tuning:
+better weight layout, fused consumers, or a different projection decomposition.
