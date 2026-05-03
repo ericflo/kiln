@@ -7198,3 +7198,75 @@ full decode loop did not show a stable improvement. The first opt-in run only
 matched tile8 within noise, and the repeat regressed. The candidate was reverted
 before commit. Future GEMV work should move beyond simple column-width tuning:
 better weight layout, fused consumers, or a different projection decomposition.
+
+## Experiment E244: Shared Server-State Startup Prewarm
+
+Hypothesis:
+
+E239/E240 showed a large first-live request cost even after background inference
+prewarm completed. The startup prewarm warmed kernels and a 64-token paged
+generation, but it used a temporary `BlockManager` and temporary `PagedKvCache`.
+Live server requests use the long-lived shared block manager and paged KV cache,
+so the first user request still paid some server-owned cache/allocation setup.
+
+Change:
+
+- `spawn_backend_prewarm` now clones the real server `block_manager` and
+  `paged_cache` from `ModelBackend::Real`.
+- Instead of creating temporary cache state, it calls
+  `runner_guard.generate_paged_shared_tokens(...)` with the same 64-token
+  synthetic prompt and 2-token greedy decode.
+- The existing shared generation path owns and frees its temporary block
+  reservation, so no prompt state remains allocated after prewarm.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-server/src/main.rs`
+  - Passed.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln`
+  - Passed.
+
+Real server result:
+
+Fresh release server with `KILN_PREFIX_CACHE_ENABLED=false`, same request body as
+E239: `e234_batch4_distinct_max2_request.json`.
+
+| Experiment | Startup prewarm | Shape | Wall time | HTTP handler | Generated tokens | Prefix cache |
+|---|---|---|---:|---:|---:|---|
+| E239 | temporary paged cache | 4 distinct prompts, `max_tokens=2` | 4.43 s | 4,416.317 ms | 8 | disabled, 0 lookups |
+| E244 | shared server paged cache | same | 2.48 s | 2,461.483 ms | 8 | disabled, 0 lookups |
+
+Observed startup:
+
+- KV cache: 512 blocks, block size 16, BF16 KV.
+- Prefix cache budget: `max_blocks=0`, `max_entries=1`.
+- Background inference prewarm: 17,152 ms.
+
+Metrics:
+
+- `kiln_request_duration_seconds_sum`: 2.461189
+- `kiln_tokens_generated_total`: 8
+- `kiln_rendered_prompt_cache_lookups_total{result="miss"}`: 4
+- `kiln_prompt_token_cache_lookups_total{result="miss"}`: 4
+- `kiln_prefix_cache_lookups_total{result="hit"}`: 0
+- `kiln_prefix_cache_lookups_total{result="miss"}`: 0
+- `kiln_prefix_cache_cached_entries`: 0
+- `kiln_prefix_cache_state_bytes`: 0
+
+Artifacts:
+
+- `e244_server_no_prefix_shared_prewarm.log`
+- `e244_batch4_distinct_max2_no_prefix_shared_prewarm_response.json`
+- `e244_batch4_distinct_max2_no_prefix_shared_prewarm_time.log`
+- `e244_batch4_distinct_max2_no_prefix_shared_prewarm_metrics.prom`
+
+Takeaway:
+
+This is an accepted server-latency win. Moving startup prewarm onto the same
+shared cache path used by live requests cut the first-live no-prefix bs=4 batch
+from E239's 4.43 s wall / 4,416.317 ms handler to 2.48 s wall / 2,461.483 ms
+handler without changing output shape or relying on prefix cache. Startup
+prewarm took longer in this run, but it moved substantial setup out of the first
+user request, which is the right tradeoff for interactive server latency.

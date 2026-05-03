@@ -536,3 +536,10 @@
   174.0 ms mean ITL, tile16 was 173.5 ms then 177.3 ms on repeat. The candidate
   was reverted before commit; future GEMV work needs more than simple
   column-width tuning.
+- 2026-05-03 E244: Accepted shared server-state startup prewarm. The previous
+  prewarm used a temporary `BlockManager`/`PagedKvCache`; it now runs the same
+  64-token/2-token synthetic generation through the live shared block manager
+  and paged KV cache via `generate_paged_shared_tokens`, which frees its
+  reservation afterward. Fresh no-prefix bs=4 distinct batch improved from E239
+  4.43 s wall / 4,416.317 ms handler to 2.48 s / 2,461.483 ms with the same 8
+  generated tokens and 0 prefix-cache lookups.

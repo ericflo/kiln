@@ -11,14 +11,12 @@ use kiln_server::config::KilnConfig;
 use kiln_server::device::select_device;
 use kiln_server::state;
 
-use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::ModelRunner;
 use kiln_model::engine::MockEngine;
 use kiln_model::forward::GpuWeights;
-use kiln_model::paged_kv_cache::PagedKvCache;
 use kiln_scheduler::{Scheduler, SchedulerConfig};
 use state::{AppState, ModelBackend};
 
@@ -350,7 +348,13 @@ fn load_chat_template_from_model_dir(dir: &Path) -> Result<Option<(&'static str,
 }
 
 fn spawn_backend_prewarm(state: AppState) {
-    let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+    let ModelBackend::Real {
+        runner,
+        block_manager,
+        paged_cache,
+        ..
+    } = state.backend.as_ref()
+    else {
         return;
     };
 
@@ -369,6 +373,8 @@ fn spawn_backend_prewarm(state: AppState) {
     }
 
     let runner = runner.clone();
+    let block_manager = block_manager.clone();
+    let paged_cache = paged_cache.clone();
     let gpu_lock = state.gpu_lock.clone();
     let prewarm_complete = state.inference_prewarm_complete.clone();
 
@@ -409,30 +415,17 @@ fn spawn_backend_prewarm(state: AppState) {
             // and batch traffic commonly hits, leaving Metal/Candle kernels to
             // compile on the first live request.
             let prompt_tokens: Vec<u32> = (1..=64).collect();
-            let num_blocks = (prompt_tokens.len() + params.max_tokens).div_ceil(16) + 1;
             // Warm the base paged path used by every desktop request. The
             // previous speculative-first prewarm made readiness wait on
             // skip-layer draft/verify work; live greedy requests can still
             // compile speculative kernels on demand without blocking startup.
-            let prewarm_result = {
-                let mut block_manager = BlockManager::new(num_blocks, 16);
-                let mut paged_cache = PagedKvCache::new_uninit(
-                    runner_guard.config.num_full_attention_layers,
-                    num_blocks,
-                    16,
-                    runner_guard.config.num_kv_heads,
-                    runner_guard.config.head_dim,
-                    prewarm_kv_dtype(&runner_guard.config),
-                    runner_guard.weights.embed_tokens.device(),
-                )?;
-                runner_guard.generate_from_tokens_paged(
-                    &prompt_tokens,
-                    &params,
-                    &mut block_manager,
-                    &mut paged_cache,
-                    None,
-                )
-            };
+            let prewarm_result = runner_guard.generate_paged_shared_tokens(
+                &prompt_tokens,
+                &params,
+                &block_manager,
+                &paged_cache,
+                None,
+            );
 
             if let Err(err) = prewarm_result {
                 anyhow::bail!("base paged inference prewarm failed: {err}");
@@ -517,14 +510,6 @@ fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {
 
 #[cfg(not(feature = "vulkan"))]
 fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {}
-
-fn prewarm_kv_dtype(config: &ModelConfig) -> candle_core::DType {
-    match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
-    }
-}
 
 /// Wait for SIGTERM or SIGINT, then signal shutdown.
 async fn shutdown_signal(shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
