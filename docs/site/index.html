@@ -249,7 +249,10 @@ scored = [{"text": r.choices[0].message.content, "reward": my_score(r)}
 
 <span style="color:#7f8694"># 3. Submit &mdash; server trains and hot-swaps immediately</span>
 requests.post("http://localhost:8420/v1/train/grpo",
-              json={"groups": [{"prompt": prompt, "completions": scored}]})
+              json={"groups": [{
+                  "messages": [{"role": "user", "content": prompt}],
+                  "completions": scored,
+              }]})
 
 <span style="color:#7f8694"># 4. Next inference already uses the improved weights</span></code></pre>
       <p class="text-sm mt-5" style="color: var(--fg-mute);">
