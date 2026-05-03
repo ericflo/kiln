@@ -531,7 +531,7 @@ textarea { resize: vertical; min-height: 80px; }
   <!-- Server Status -->
   <div class="panel">
     <div class="panel-head"><h2>Server Status</h2></div>
-    <div class="panel-body" id="server-status">
+    <div class="panel-body" id="server-status" data-panel-id="server-status-panel" role="status" aria-live="polite" aria-atomic="false" aria-busy="true">
       <div class="empty">Loading...</div>
     </div>
   </div>
@@ -539,7 +539,7 @@ textarea { resize: vertical; min-height: 80px; }
   <!-- Decode Performance -->
   <div class="panel">
     <div class="panel-head"><h2>Decode Performance</h2></div>
-    <div class="panel-body" id="decode-perf-panel">
+    <div class="panel-body" id="decode-perf-panel" data-panel-id="decode-stats-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
       <div class="empty">Loading...</div>
     </div>
   </div>
@@ -547,7 +547,7 @@ textarea { resize: vertical; min-height: 80px; }
   <!-- Recent Requests -->
   <div class="panel" style="grid-column: 1 / -1;">
     <div class="panel-head"><h2>Recent Requests</h2></div>
-    <div class="panel-body" id="recent-requests-panel">
+    <div class="panel-body" id="recent-requests-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
       <div class="empty">Loading...</div>
     </div>
   </div>
@@ -557,7 +557,7 @@ textarea { resize: vertical; min-height: 80px; }
     <div class="panel-head">
       <h2>Adapters</h2>
     </div>
-    <div class="panel-body" id="adapters-panel">
+    <div class="panel-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
       <div class="empty">Loading...</div>
     </div>
     <div class="panel-body" style="border-top:1px solid var(--border);">
@@ -611,7 +611,7 @@ textarea { resize: vertical; min-height: 80px; }
       <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Submit GRPO</button>
     </div>
     <div class="panel-body">
-      <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue">
+      <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-live="polite" aria-atomic="false" aria-busy="true" data-panel-id="training-queue-panel">
         <div class="empty">Loading...</div>
       </div>
       <div class="tab-content" id="tab-sft" role="tabpanel" aria-labelledby="training-tab-sft" hidden inert>
@@ -741,6 +741,12 @@ async function api(path, opts) {
   return res.json();
 }
 
+function setPanelBusy(id, busy) {
+  const el = document.getElementById(id);
+  if (el) el.setAttribute('aria-busy', String(busy));
+  return el;
+}
+
 // --- Training Tabs ---
 function selectTrainingTab(tab, focus = false) {
   const panel = tab.closest('.panel');
@@ -802,6 +808,7 @@ function fmtDuration(secs) {
 let lastHealth = null;
 
 async function pollHealth() {
+  const statusPanel = setPanelBusy('server-status', true);
   try {
     const h = await api('/health');
     lastHealth = h;
@@ -810,7 +817,9 @@ async function pollHealth() {
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
-    document.getElementById('server-status').innerHTML = apiFailureHtml('Server status', e);
+    if (statusPanel) statusPanel.innerHTML = apiFailureHtml('Server status', e);
+  } finally {
+    setPanelBusy('server-status', false);
   }
 }
 
@@ -886,7 +895,7 @@ function renderServerStatus(h) {
 
 // --- Decode Performance ---
 async function pollDecodePerf() {
-  const el = document.getElementById('decode-perf-panel');
+  const el = setPanelBusy('decode-perf-panel', true);
   if (!el) return;
   try {
     const data = await api('/v1/stats/decode');
@@ -914,6 +923,8 @@ async function pollDecodePerf() {
       <div style="margin-top:8px;font-size:12px;color:var(--text2)">Mean inter-token latency: ${mean} ms</div>`;
   } catch (e) {
     el.innerHTML = apiFailureHtml('Decode performance', e);
+  } finally {
+    setPanelBusy('decode-perf-panel', false);
   }
 }
 
@@ -981,22 +992,28 @@ function renderRecentRequests(rows) {
 function refreshRecentTimes() {
   const el = document.getElementById('recent-requests-panel');
   if (!el) return;
+  const liveMode = el.getAttribute('aria-live');
+  el.setAttribute('aria-live', 'off');
   el.querySelectorAll('.recent-row').forEach(row => {
     const ts = Number(row.dataset.ts || 0);
     if (!ts) return;
     const tcell = row.querySelector('.recent-time');
     if (tcell) tcell.textContent = fmtRelTime(ts);
   });
+  if (liveMode) el.setAttribute('aria-live', liveMode);
 }
 
 async function pollRecentRequests() {
+  const el = setPanelBusy('recent-requests-panel', true);
+  if (!el) return;
   try {
     const data = await api('/v1/stats/recent-requests');
     recentRequestsCache = Array.isArray(data) ? data : [];
     renderRecentRequests(recentRequestsCache);
   } catch (e) {
-    const el = document.getElementById('recent-requests-panel');
-    if (el) el.innerHTML = apiFailureHtml('Recent requests', e);
+    el.innerHTML = apiFailureHtml('Recent requests', e);
+  } finally {
+    setPanelBusy('recent-requests-panel', false);
   }
 }
 
@@ -1004,6 +1021,8 @@ async function pollRecentRequests() {
 let lastAdapters = null;
 
 async function pollAdapters() {
+  const adaptersPanel = setPanelBusy('adapters-panel', true);
+  if (!adaptersPanel) return;
   try {
     const data = await api('/v1/adapters');
     lastAdapters = data;
@@ -1011,7 +1030,9 @@ async function pollAdapters() {
     updateAdapterSelect(data);
     renderMergeSources();
   } catch (e) {
-    document.getElementById('adapters-panel').innerHTML = apiFailureHtml('Adapters', e);
+    adaptersPanel.innerHTML = apiFailureHtml('Adapters', e);
+  } finally {
+    setPanelBusy('adapters-panel', false);
   }
 }
 
@@ -1235,11 +1256,15 @@ window.mergeAdapters = async function() {
 
 // --- Training Queue ---
 async function pollTraining() {
+  const queuePanel = setPanelBusy('tab-queue', true);
+  if (!queuePanel) return;
   try {
     const data = await api('/v1/train/queue');
     renderTrainingQueue(data);
   } catch (e) {
-    document.getElementById('tab-queue').innerHTML = apiFailureHtml('Training queue', e);
+    queuePanel.innerHTML = apiFailureHtml('Training queue', e);
+  } finally {
+    setPanelBusy('tab-queue', false);
   }
 }
 
