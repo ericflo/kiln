@@ -356,6 +356,12 @@ textarea { resize: vertical; min-height: 80px; }
   margin-bottom: 8px;
 }
 .chat-controls select { width: auto; }
+.upload-adapter-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  align-items: end;
+}
 
 /* Tabs */
 .tabs {
@@ -421,6 +427,13 @@ textarea { resize: vertical; min-height: 80px; }
   .chat-input-row .btn, .form-group .btn {
     max-width: 100%;
     white-space: normal;
+  }
+  .upload-adapter-controls {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .upload-adapter-controls .btn {
+    width: 100%;
   }
 }
 
@@ -565,7 +578,7 @@ textarea { resize: vertical; min-height: 80px; }
       <div id="upload-adapter-help" style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.4;">
         Import a PEFT-compatible <code>.tar.gz</code>/<code>.tgz</code> adapter archive, typically one created by Kiln's adapter download/export endpoint. The adapter name becomes the saved adapter directory name.
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:end;">
+      <div class="upload-adapter-controls">
         <div class="form-group" style="margin-bottom:0;">
           <label for="upload-name">Adapter Name</label>
           <input type="text" id="upload-name" placeholder="adapter name" aria-describedby="upload-adapter-help">
