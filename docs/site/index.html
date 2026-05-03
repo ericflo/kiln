@@ -303,6 +303,18 @@ requests.post("http://localhost:8420/v1/train/grpo",
         Prerequisites: NVIDIA GPU with 24 GB+ VRAM and CUDA 12.4 <em>or</em> Apple Silicon Mac with 16 GB+ unified memory.
       </p>
 
+      <div class="rounded-xl border px-5 py-4 mb-8" style="border-color: var(--border); background: var(--bg-card);">
+        <h3 class="font-semibold mb-2">Desktop App &middot; recommended quick path</h3>
+        <p class="text-sm mb-3" style="color: var(--fg-mute);">
+          Prefer the GUI? Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2">Kiln Desktop desktop-v0.2.2</a>.
+          On first launch, the Desktop App downloads and verifies the matching <code>kiln</code> server binary for you.
+          No Rust toolchain, CUDA toolkit, or Xcode install is required for the GUI path.
+        </p>
+        <p class="text-sm" style="color: var(--fg-mute);">
+          Use the server binary commands below when you want to run <code>kiln serve</code> directly or automate a headless host.
+        </p>
+      </div>
+
       <h3 class="font-semibold mb-2 mt-2">Linux x86_64 &middot; CUDA 12.4</h3>
 <pre><code>curl -L -o kiln.tar.gz \
   https://github.com/ericflo/kiln/releases/download/kiln-v0.2.13/kiln-0.2.13-x86_64-unknown-linux-gnu-cuda124.tar.gz
