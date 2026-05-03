@@ -784,6 +784,7 @@ async function pollHealth() {
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
+    document.getElementById('server-status').innerHTML = apiFailureHtml('Server status', e);
   }
 }
 
