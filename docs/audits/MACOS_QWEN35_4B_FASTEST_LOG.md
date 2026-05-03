@@ -6291,3 +6291,98 @@ Batch responses synthesized from chat choices-cache hits now restore the
 single-chat request cache too. That means a hot `n>1` choices cache can serve a
 batch and then make later `n=1` chats skip render, tokenization, prefill,
 decode, and generation, even after the request cache had been evicted.
+
+## Experiment E199-E201: Chat Choices Hit Rehydrates Request Cache
+
+Hypothesis:
+
+E182-E183 made fresh chat `n>1` zero-token responses seed the normalized
+single-chat request cache. E193-E198 made batch responses synthesized from chat
+choices-cache hits do the same. A direct chat `n>1` choices-cache hit still
+returned before prompt work without restoring the single-chat request cache. If
+the request cache had been evicted while the choices cache was still hot, a
+later equivalent `n=1` chat had to render and tokenize again. The direct
+choices-cache hit can prove the same per-choice responses, so it should
+rehydrate those request-cache entries before returning.
+
+Change:
+
+- Updated the chat `n>1` choices-cache `Hit` and completed `Wait` branches to
+  call `store_chat_request_cache_from_chat_choices_response` before returning.
+- Added `chat_choices_cache_hit_rehydrates_request_cache_before_single_chat_work`,
+  which clears the request cache after a chat choices-cache populate, verifies
+  the repeated `n>1` chat returns before render/token work, and verifies the
+  following `n=1` chat also returns before render/token work from the
+  rehydrated request cache.
+
+Validation:
+
+- `cargo test -p kiln-server chat_choices_cache_hit_rehydrates_request_cache_before_single_chat_work --lib`
+  - Passed: 1 test.
+- `cargo test -p kiln-server chat_ --lib`
+  - Passed: 71 tests.
+- `cargo test -p kiln-server batch_ --lib`
+  - Passed: 55 tests.
+- `cargo test -p kiln-server completion_cache --lib`
+  - Passed: 9 tests.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln`
+  - Passed.
+
+Real server result:
+
+A fresh Qwen3.5-4B Metal server was started on port 8421 with the patched
+release binary. E199 populated the chat choices cache with a one-prompt
+`n=4`, `max_tokens=0` request. 129 distinct zero-token `n=1` chat requests
+then evicted the 128-entry request cache without touching the choices cache.
+E200 repeated the `n=4` chat request, hit the choices cache, and rehydrated the
+normalized request-cache entry. E201 sent the equivalent `n=1` chat with
+different zero-token sampling parameters and hit the rehydrated request cache.
+
+| Run | Request | Wall time | Handler duration | Prefill count | Decode count | Generated tokens | Render/token counters |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| E199 chat choices populate | 1 prompt, chat `n=4`, `max_tokens=0` | 0.039734 s | 38.831 ms | 0 | 0 | 0 | render miss 1, token miss 1 |
+| 129 request-cache eviction fillers | distinct chat `n=1`, `max_tokens=0` | 0.115272 s aggregate wall | 0.894 ms avg wall | unchanged | unchanged | unchanged at 0 | render/token misses to 130 |
+| E200 choices-cache hit + request rehydrate | same prompt, chat `n=4`, 4 outputs | 0.000671 s | 0.060 ms | unchanged | unchanged | unchanged at 0 | render/token counters unchanged |
+| E201 single chat from rehydrated request cache | same prompt, chat `n=1`, `max_tokens=0` | 0.000699 s | 0.051 ms | unchanged | unchanged | unchanged at 0 | render/token counters unchanged |
+
+E199 and E200 both returned four choices with usage `prompt_tokens=18`,
+`completion_tokens=0`, `total_tokens=18`. E201 returned one choice with the
+same usage and the same first choice payload.
+
+Metrics confirm the removed-work path:
+
+- E200 increased request count from 130 to 131 while rendered-prompt misses,
+  prompt-token misses, prefill count, decode count, and generated tokens stayed
+  unchanged.
+- E201 increased request count from 131 to 132 while the same render/token/model
+  counters stayed unchanged.
+
+Artifacts:
+
+- `e199_server.log`
+- `e199_health_after_prewarm.json`
+- `e199_before_metrics.prom`
+- `e199_chat_n4_zero_populate_choices_request.json`
+- `e199_chat_n4_zero_populate_choices_response.json`
+- `e199_chat_n4_zero_populate_choices_time.log`
+- `e199_after_populate_metrics.prom`
+- `e200_evict_request_cache_request.json`
+- `e200_evict_request_cache_times.log`
+- `e200_after_request_eviction_metrics.prom`
+- `e200_chat_n4_zero_rehydrate_request.json`
+- `e200_chat_n4_zero_rehydrate_response.json`
+- `e200_chat_n4_zero_rehydrate_time.log`
+- `e200_after_rehydrate_metrics.prom`
+- `e201_chat_single_from_choices_hit_rehydrated_request_cache_request.json`
+- `e201_chat_single_from_choices_hit_rehydrated_request_cache_hit_response.json`
+- `e201_chat_single_from_choices_hit_rehydrated_request_cache_hit_time.log`
+- `e201_after_hit_metrics.prom`
+
+Takeaway:
+
+Direct chat `n>1` choices-cache hits now restore the single-chat request cache,
+not just return a fast multi-choice response. That keeps the zero-work chain
+alive after request-cache eviction: chat `n>1` hit, then chat `n=1` hit, with
+no render, tokenization, prefill, decode, or generation in either request.

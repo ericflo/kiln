@@ -420,3 +420,10 @@
   rehydrated request entries in 0.000633 s / 0.151 ms handler; prompt-9
   `n=1` chat hit in 0.000497 s / 0.047 ms handler, with render/token,
   prefill/decode, and generated-token counters unchanged throughout.
+- 2026-05-03 E199-E201: Made direct chat `n>1` choices-cache hits rehydrate
+  the normalized single-chat request cache before returning. After a one-prompt
+  chat `n=4` zero-token populate and 129 `n=1` request-cache eviction fillers,
+  the repeated `n=4` chat hit choices cache and rehydrated the request cache in
+  0.000671 s / 0.060 ms handler; the following equivalent `n=1` chat hit the
+  rehydrated request cache in 0.000699 s / 0.051 ms handler, with render/token,
+  prefill/decode, and generated-token counters unchanged after eviction.
