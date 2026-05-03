@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln Architecture &mdash; Single-process inference and training</title>
+  <meta name="description" content="A docs-site architecture guide for Kiln: single-process serving, request flow, LoRA hot-swap training, and CUDA kernel crates.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/architecture.html">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+
+  <meta property="og:title" content="Kiln Architecture &mdash; Single-process inference and training">
+  <meta property="og:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and CUDA kernels.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/architecture.html">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Kiln Architecture &mdash; Single-process inference and training">
+  <meta name="twitter:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and CUDA kernels.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: #d8dde7;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    .label {
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .check-list li { margin-top: 0.55rem; }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .site-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      color: var(--fg-dim);
+    }
+    @media (max-width: 640px) {
+      .site-nav-bar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .site-nav {
+        flex-wrap: wrap;
+        gap: 0.35rem 1rem;
+        line-height: 1.35;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
+      <a href="./" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="site-nav text-sm">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Architecture &middot; cold-reader map</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        Kiln is one Rust process that serves, trains, and hot-swaps adapters.
+      </h1>
+      <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
+        This page is the website-level map of Kiln internals. It explains how the HTTP server,
+        scheduler, model engine, LoRA training queue, and CUDA kernel crates fit together before
+        you dive into the full GitHub architecture document.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-8">
+        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Full architecture doc &rarr;
+        </a>
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Quickstart &rarr;
+        </a>
+        <a href="troubleshooting.html" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Troubleshooting &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- overview -->
+  <main class="max-w-4xl mx-auto px-6 py-12">
+    <div class="grid gap-6">
+      <article class="card p-6">
+        <div class="label mb-3">System shape</div>
+        <h2 class="text-2xl font-semibold mb-4">Single-process server</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Kiln is built as one deployable Rust binary: a single process owns the OpenAI-compatible
+          Axum HTTP API, request scheduler, model engine, adapter registry, and background training
+          workers. There is no Python sidecar and no second model load for the normal SFT or GRPO path.
+        </p>
+        <pre class="mt-5"><code>client request
+  -> axum API
+  -> scheduler + block manager
+  -> Qwen/Qwen3.5-4B engine
+  -> sampler or streaming SSE response</code></pre>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Inference flow</div>
+        <h2 class="text-2xl font-semibold mb-4">Request path and batching</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">API edge</h3>
+            <p><code>/v1/chat/completions</code>, <code>/v1/models</code>, <code>/health</code>, and streaming responses stay compatible with familiar OpenAI-style clients.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Scheduler</h3>
+            <p>The iteration-level scheduler combines continuous batching with chunked prefill, so long prompts and decode work share one GPU loop.</p>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">Memory</h3>
+            <p>The paged KV block manager tracks the full-attention layers. Qwen3.5-4B&rsquo;s Gated DeltaNet layers do not need KV cache.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Live learning</div>
+        <h2 class="text-2xl font-semibold mb-4">LoRA hot-swap and training queue</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Training requests enter the same server through <code>/v1/train/sft</code> or
+          <code>/v1/train/grpo</code>. A FIFO background queue trains LoRA adapter weights against the
+          loaded base model, checkpoints progress, then publishes the new adapter atomically at an
+          iteration boundary. Subsequent inference requests see the updated adapter without restarting
+          the server.
+        </p>
+        <div class="grid sm:grid-cols-2 gap-4" style="color: var(--fg-dim);">
+          <div class="card p-4" style="background: var(--bg-soft-2);">
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">SFT</h3>
+            <p>Correct input/output examples update adapter weights directly from supervised loss.</p>
+          </div>
+          <div class="card p-4" style="background: var(--bg-soft-2);">
+            <h3 class="font-semibold mb-2" style="color: var(--fg);">GRPO</h3>
+            <p>Scored completions become a generate &rarr; score &rarr; train loop through the same HTTP API.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">GPU path</div>
+        <h2 class="text-2xl font-semibold mb-4">CUDA kernel crates</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Kiln keeps the Qwen3.5-4B fast path in Rust crates with focused native kernels where the model
+          needs them. The full-attention layers use vendored FlashAttention-style CUDA kernels, decode
+          uses paged GQA paths, and the hybrid architecture includes Gated DeltaNet support for the
+          linear-attention layers. The result is a small codebase that is tuned for one model instead of
+          abstracting over many model families.
+        </p>
+        <ul class="list-disc pl-5 check-list" style="color: var(--fg-dim);">
+          <li><code>kiln-server</code> owns HTTP routing, configuration, metrics, and API surfaces.</li>
+          <li><code>kiln-scheduler</code> and <code>kiln-core</code> coordinate batching, requests, and KV blocks.</li>
+          <li><code>kiln-model</code> loads Qwen3.5-4B weights, applies adapters, and drives the forward pass.</li>
+          <li><code>kiln-flash-attn</code> and CUDA-backed crates provide the tuned GPU kernels.</li>
+          <li><code>kiln-training</code> defines the SFT and GRPO training APIs and job state.</li>
+        </ul>
+      </article>
+    </div>
+  </main>
+
+  <!-- next steps -->
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">
+          <h3 class="font-semibold mb-2">Deep dive</h3>
+          <p style="color: var(--fg-dim);">Read the full GitHub architecture guide with crate-level detail and implementation notes.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">
+          <h3 class="font-semibold mb-2">GRPO guide</h3>
+          <p style="color: var(--fg-dim);">See the reward-scored training payloads and generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">
+          <h3 class="font-semibold mb-2">Quickstart</h3>
+          <p style="color: var(--fg-dim);">Run the server, send the first chat request, and post the first training example.</p>
+        </a>
+        <a class="card p-5 block" href="troubleshooting.html">
+          <h3 class="font-semibold mb-2">Troubleshooting</h3>
+          <p style="color: var(--fg-dim);">Check binary, CUDA or Metal setup, model path, health output, and adapter storage.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- footer -->
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="./">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
