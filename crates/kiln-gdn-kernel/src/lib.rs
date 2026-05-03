@@ -63,6 +63,7 @@ use candle_core::{
     cuda_backend::{CudaStorage, cudarc::driver::DevicePtr},
 };
 use half::bf16;
+use std::cell::RefCell;
 
 unsafe extern "C" {
     fn kiln_gdn_forward_substitution(
@@ -567,6 +568,63 @@ pub fn gdn_decode_gates_recurrent_supports(
         && state.is_contiguous()
 }
 
+struct DecodeGatesRecurrentOutputs {
+    outputs: Vec<Tensor>,
+    next: usize,
+}
+
+thread_local! {
+    static DECODE_GATES_RECURRENT_OUTPUTS: RefCell<Option<DecodeGatesRecurrentOutputs>> = const { RefCell::new(None) };
+}
+
+pub fn with_decode_gates_recurrent_outputs<R>(
+    outputs: Vec<Tensor>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let previous = DECODE_GATES_RECURRENT_OUTPUTS.replace(Some(DecodeGatesRecurrentOutputs {
+        outputs,
+        next: 0,
+    }));
+    let result = f();
+    DECODE_GATES_RECURRENT_OUTPUTS.replace(previous);
+    result
+}
+
+fn next_decode_gates_recurrent_output(
+    shape: (usize, usize, usize, usize),
+    device: &candle_core::Device,
+) -> Result<Option<Tensor>> {
+    DECODE_GATES_RECURRENT_OUTPUTS.with(|cell| {
+        let mut borrowed = cell.borrow_mut();
+        let Some(scratch) = borrowed.as_mut() else {
+            return Ok(None);
+        };
+        let Some(out) = scratch.outputs.get(scratch.next).cloned() else {
+            candle_core::bail!(
+                "kiln-gdn-kernel: missing graph GDN decode output {}",
+                scratch.next
+            );
+        };
+        scratch.next += 1;
+        if !matches!(out.device(), candle_core::Device::Cuda(_))
+            || !matches!(device, candle_core::Device::Cuda(_))
+        {
+            candle_core::bail!("kiln-gdn-kernel: graph GDN decode output device mismatch");
+        }
+        if out.dtype() != DType::BF16 {
+            candle_core::bail!("kiln-gdn-kernel: graph GDN decode output must be BF16");
+        }
+        if out.dims() != [shape.0, shape.1, shape.2, shape.3] {
+            candle_core::bail!(
+                "kiln-gdn-kernel: graph GDN decode output shape {:?} != {:?}",
+                out.dims(),
+                [shape.0, shape.1, shape.2, shape.3]
+            );
+        }
+        Ok(Some(out))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_decode_gates_recurrent(
     q: &Tensor,
@@ -596,10 +654,13 @@ pub fn gdn_decode_gates_recurrent(
     let b = gdn_gates_ctx(b.contiguous(), "gdn_decode_gates_recurrent b contiguous")?;
     let a_log = gdn_gates_ctx(a_log.contiguous(), "gdn_decode_gates_recurrent a_log contiguous")?;
     let dt_bias = gdn_gates_ctx(dt_bias.contiguous(), "gdn_decode_gates_recurrent dt_bias contiguous")?;
-    let out = gdn_gates_ctx(
-        Tensor::zeros((batch, 1, value_heads, dv), DType::BF16, device),
-        "gdn_decode_gates_recurrent out zeros",
-    )?;
+    let out = match next_decode_gates_recurrent_output((batch, 1, value_heads, dv), device)? {
+        Some(out) => out,
+        None => gdn_gates_ctx(
+            Tensor::zeros((batch, 1, value_heads, dv), DType::BF16, device),
+            "gdn_decode_gates_recurrent out zeros",
+        )?,
+    };
 
     {
         let (q_storage, q_layout) = q.storage_and_layout();

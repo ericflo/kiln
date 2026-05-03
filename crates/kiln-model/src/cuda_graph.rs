@@ -58,6 +58,10 @@ struct CapturedDecodeGraph {
     /// Updated via cudaMemcpyHtoDAsync before each replay so RoPE sees
     /// the correct position while reading from the same device pointer.
     position_buffer: Tensor,
+    /// Pre-allocated fused GDN decode recurrent outputs, one per linear layer.
+    /// Their device pointers are captured by the graph and must stay alive for
+    /// replay.
+    _gdn_decode_outputs: Vec<Tensor>,
 }
 
 /// Manages CUDA graph lifecycle for decode forward passes.
@@ -291,11 +295,11 @@ impl CudaGraphRunner {
         };
         let stream = cuda_dev.cuda_stream();
 
-        // Pre-allocate the position buffer on GPU BEFORE capture.
-        // This tensor's device pointer gets baked into the captured graph.
-        // On replay, we update its contents via memcpy (outside the graph)
-        // so the RoPE kernels see the correct position each step.
+        // Pre-allocate graph-stable decode tensors BEFORE capture. Their
+        // device pointers get baked into the captured graph.
         let position_buffer = Self::new_position_buffer(device, seq_len)?;
+        let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
+        Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
         // Synchronize all pending work before capture
         stream
@@ -315,17 +319,22 @@ impl CudaGraphRunner {
         // Run the forward pass with the pre-allocated position buffer.
         // All kernels are captured, including RoPE which reads from
         // position_buffer's stable GPU address.
-        let logits_result = model_forward_paged(
-            backend,
-            &[token_id],
-            weights,
-            config,
-            paged_cache,
-            block_table,
-            seq_len,
-            Some(linear_state),
-            lora,
-            Some(&position_buffer),
+        let logits_result = kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
+            gdn_decode_outputs.clone(),
+            || {
+                model_forward_paged(
+                    backend,
+                    &[token_id],
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(linear_state),
+                    lora,
+                    Some(&position_buffer),
+                )
+            },
         );
 
         // End capture — instantiates the graph
@@ -348,6 +357,7 @@ impl CudaGraphRunner {
                     output_logits: logits.clone(),
                     adapter_gen: self.adapter_generation,
                     position_buffer,
+                    _gdn_decode_outputs: gdn_decode_outputs,
                 });
                 Ok(logits)
             }
@@ -391,6 +401,42 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn new_position_buffer(device: &Device, position: usize) -> Result<Tensor> {
         Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn prepare_gdn_recurrent_state_for_capture(
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<()> {
+        for state in &mut linear_state.recurrent_states {
+            if state.dtype() != candle_core::DType::BF16 {
+                *state = state
+                    .to_dtype(candle_core::DType::BF16)
+                    .context("prepare CUDA graph GDN recurrent state")?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_gdn_decode_outputs(config: &ModelConfig, device: &Device) -> Result<Vec<Tensor>> {
+        let num_linear_layers = config.num_layers - config.num_full_attention_layers;
+        let mut outputs = Vec::with_capacity(num_linear_layers);
+        for _ in 0..num_linear_layers {
+            outputs.push(
+                Tensor::zeros(
+                    (
+                        1,
+                        1,
+                        config.linear_num_value_heads,
+                        config.linear_value_head_dim,
+                    ),
+                    candle_core::DType::BF16,
+                    device,
+                )
+                .context("create CUDA graph GDN decode output")?,
+            );
+        }
+        Ok(outputs)
     }
 
     /// Eager decode that uses the same pre-allocated position tensor path as
