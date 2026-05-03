@@ -35,6 +35,52 @@ int32_t kiln_gdn_gates_bf16(
     void* stream_raw      // cudaStream_t (raw)
 );
 
+// Same fused gates kernel for the production decode envelope where the
+// per-head gate parameters are loaded as F32 tensors.
+int32_t kiln_gdn_gates_bf16_f32_params(
+    const void* a,        // [rows, nv] bf16
+    const void* b,        // [rows, nv] bf16
+    const void* A_log,    // [nv] f32
+    const void* dt_bias,  // [nv] f32
+    void* beta_out,       // [rows, nv] bf16
+    void* g_out,          // [rows, nv] bf16
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw      // cudaStream_t (raw)
+);
+
+// Same fused gates kernel for the production decode envelope where A_log is
+// F32 and dt_bias remains BF16.
+int32_t kiln_gdn_gates_bf16_f32_bf16_params(
+    const void* a,        // [rows, nv] bf16
+    const void* b,        // [rows, nv] bf16
+    const void* A_log,    // [nv] f32
+    const void* dt_bias,  // [nv] bf16
+    void* beta_out,       // [rows, nv] bf16
+    void* g_out,          // [rows, nv] bf16
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw      // cudaStream_t (raw)
+);
+
+int32_t kiln_gdn_gate_beta_bf16(
+    const void* b,
+    void* beta_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+);
+
+int32_t kiln_gdn_gate_g_bf16(
+    const void* a,
+    const void* A_log,
+    const void* dt_bias,
+    void* g_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+);
+
 #ifdef __cplusplus
 }
 #endif

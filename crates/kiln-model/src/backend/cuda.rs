@@ -279,9 +279,30 @@ impl BackendRuntime for CudaBackend {
         a_log: &Tensor,
         dt_bias: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        // Decline quietly when the envelope isn't met — the candle reference
-        // path handles non-CUDA, non-bf16, and oversized nv.
-        if !kiln_gdn_kernel::gdn_gates_supports(a, b, a_log, dt_bias) {
+        let dims = a.dims();
+        let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
+        if !is_t1_decode {
+            tracing::debug!(
+                a_shape = ?a.shape(),
+                a_log_dtype = ?a_log.dtype(),
+                dt_bias_dtype = ?dt_bias.dtype(),
+                "CUDA gdn_gates fused path is decode-only; using Candle fallback"
+            );
+            return Ok(None);
+        }
+        if let Some(reason) = kiln_gdn_kernel::gdn_gates_decline_reason(a, b, a_log, dt_bias) {
+            tracing::debug!(
+                reason,
+                a_shape = ?a.shape(),
+                b_shape = ?b.shape(),
+                a_log_shape = ?a_log.shape(),
+                dt_bias_shape = ?dt_bias.shape(),
+                a_dtype = ?a.dtype(),
+                b_dtype = ?b.dtype(),
+                a_log_dtype = ?a_log.dtype(),
+                dt_bias_dtype = ?dt_bias.dtype(),
+                "CUDA gdn_gates declined; using Candle fallback"
+            );
             return Ok(None);
         }
         let (beta, g) =

@@ -59,7 +59,8 @@
 //! chunkwise recurrence and are *not* covered by this crate.
 
 use candle_core::{
-    DType, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
+    CustomOp1, CustomOp3, DType, Layout, Result, Shape, Tensor, backend::BackendStorage,
+    cuda_backend::{CudaStorage, cudarc::driver::DevicePtr},
 };
 use half::bf16;
 
@@ -748,6 +749,48 @@ unsafe extern "C" {
         nv: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_gdn_gates_bf16_f32_params(
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        A_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        beta_out: *mut core::ffi::c_void,
+        g_out: *mut core::ffi::c_void,
+        rows: i32,
+        nv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_gates_bf16_f32_bf16_params(
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        A_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        beta_out: *mut core::ffi::c_void,
+        g_out: *mut core::ffi::c_void,
+        rows: i32,
+        nv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_gate_beta_bf16(
+        b: *const core::ffi::c_void,
+        beta_out: *mut core::ffi::c_void,
+        rows: i32,
+        nv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_gate_g_bf16(
+        a: *const core::ffi::c_void,
+        A_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        g_out: *mut core::ffi::c_void,
+        rows: i32,
+        nv: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 unsafe extern "C" {
@@ -768,43 +811,130 @@ unsafe extern "C" {
 ///
 /// Requires:
 ///   - `a`, `b` of shape `[.., nv]`, bf16, CUDA
-///   - `A_log`, `dt_bias` of shape `[nv]`, bf16, CUDA
+///   - `A_log`, `dt_bias` of shape `[nv]`, bf16 or f32, CUDA
 ///   - `nv <= 256`
-pub fn gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Tensor) -> bool {
-    if !matches!(a.device(), candle_core::Device::Cuda(_)) {
-        return false;
+
+struct GdnGateBetaOp;
+
+impl CustomOp1 for GdnGateBetaOp {
+    fn name(&self) -> &'static str { "gdn-gate-beta" }
+
+    fn cpu_fwd(&self, _s: &candle_core::CpuStorage, _l: &Layout) -> Result<(candle_core::CpuStorage, Shape)> {
+        candle_core::bail!("GdnGateBetaOp CPU fallback is not implemented")
     }
-    if a.dtype() != DType::BF16
-        || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::BF16
-        || dt_bias.dtype() != DType::BF16
+
+    fn cuda_fwd(&self, s_b: &CudaStorage, l_b: &Layout) -> Result<(CudaStorage, Shape)> {
+        let dims = l_b.shape().dims().to_vec();
+        let nv = *dims.last().ok_or_else(|| candle_core::Error::Msg("GdnGateBetaOp: b must have rank >= 1".to_string()))?;
+        if nv == 0 || nv > 256 { candle_core::bail!("GdnGateBetaOp: nv {nv} outside 1..=256"); }
+        if !l_b.is_contiguous() { candle_core::bail!("GdnGateBetaOp requires contiguous b"); }
+        let rows: usize = dims[..dims.len() - 1].iter().product();
+        let device = s_b.device();
+        let stream = device.cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let elem_count: usize = dims.iter().product();
+        let out_slice = device.alloc_zeros::<bf16>(elem_count)?;
+        let b_slice = s_b.as_cuda_slice::<bf16>()?.slice(l_b.start_offset()..);
+        unsafe {
+            let (b_ptr, _g1) = b_slice.device_ptr(&stream);
+            let (out_ptr, _g2) = out_slice.device_ptr(&stream);
+            let status = kiln_gdn_gate_beta_bf16(b_ptr as *const _, out_ptr as *mut _, rows as i32, nv as i32, raw_stream);
+            if status != 0 { candle_core::bail!("GdnGateBetaOp: kernel failed with status {status}"); }
+        }
+        Ok((CudaStorage::wrap_cuda_slice(out_slice, device.clone()), Shape::from(dims.as_slice())))
+    }
+}
+
+struct GdnGateGOp;
+
+impl CustomOp3 for GdnGateGOp {
+    fn name(&self) -> &'static str { "gdn-gate-g" }
+
+    fn cpu_fwd(&self, _s1: &candle_core::CpuStorage, _l1: &Layout, _s2: &candle_core::CpuStorage, _l2: &Layout, _s3: &candle_core::CpuStorage, _l3: &Layout) -> Result<(candle_core::CpuStorage, Shape)> {
+        candle_core::bail!("GdnGateGOp CPU fallback is not implemented")
+    }
+
+    fn cuda_fwd(&self, s_a: &CudaStorage, l_a: &Layout, s_al: &CudaStorage, l_al: &Layout, s_dt: &CudaStorage, l_dt: &Layout) -> Result<(CudaStorage, Shape)> {
+        let dims = l_a.shape().dims().to_vec();
+        let nv = *dims.last().ok_or_else(|| candle_core::Error::Msg("GdnGateGOp: a must have rank >= 1".to_string()))?;
+        if nv == 0 || nv > 256 { candle_core::bail!("GdnGateGOp: nv {nv} outside 1..=256"); }
+        if l_al.shape().dims() != [nv] || l_dt.shape().dims() != [nv] { candle_core::bail!("GdnGateGOp: params must have shape [nv]"); }
+        if !l_a.is_contiguous() || !l_al.is_contiguous() || !l_dt.is_contiguous() { candle_core::bail!("GdnGateGOp requires contiguous inputs"); }
+        let rows: usize = dims[..dims.len() - 1].iter().product();
+        let device = s_a.device();
+        let stream = device.cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let elem_count: usize = dims.iter().product();
+        let out_slice = device.alloc_zeros::<bf16>(elem_count)?;
+        let a_slice = s_a.as_cuda_slice::<bf16>()?.slice(l_a.start_offset()..);
+        let al_slice = s_al.as_cuda_slice::<bf16>()?.slice(l_al.start_offset()..);
+        let dt_slice = s_dt.as_cuda_slice::<bf16>()?.slice(l_dt.start_offset()..);
+        unsafe {
+            let (a_ptr, _g1) = a_slice.device_ptr(&stream);
+            let (al_ptr, _g2) = al_slice.device_ptr(&stream);
+            let (dt_ptr, _g3) = dt_slice.device_ptr(&stream);
+            let (out_ptr, _g4) = out_slice.device_ptr(&stream);
+            let status = kiln_gdn_gate_g_bf16(a_ptr as *const _, al_ptr as *const _, dt_ptr as *const _, out_ptr as *mut _, rows as i32, nv as i32, raw_stream);
+            if status != 0 { candle_core::bail!("GdnGateGOp: kernel failed with status {status}"); }
+        }
+        Ok((CudaStorage::wrap_cuda_slice(out_slice, device.clone()), Shape::from(dims.as_slice())))
+    }
+}
+
+fn gdn_gates_ctx<T>(res: Result<T>, label: &str) -> Result<T> {
+    res.map_err(|err| candle_core::Error::Msg(format!("{label}: {err}")))
+}
+
+pub fn gdn_gates_decline_reason(
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+) -> Option<&'static str> {
+    if !matches!(a.device(), candle_core::Device::Cuda(_))
+        || !matches!(b.device(), candle_core::Device::Cuda(_))
+        || !matches!(a_log.device(), candle_core::Device::Cuda(_))
+        || !matches!(dt_bias.device(), candle_core::Device::Cuda(_))
     {
-        return false;
+        return Some("all inputs must be CUDA tensors");
+    }
+    if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
+        return Some("a and b must be bf16");
+    }
+    if !matches!(
+        (a_log.dtype(), dt_bias.dtype()),
+        (DType::BF16, DType::BF16) | (DType::F32, DType::F32) | (DType::F32, DType::BF16)
+    ) {
+        return Some("a_log/dt_bias must be bf16/bf16, f32/f32, or f32/bf16");
     }
     if a.shape() != b.shape() {
-        return false;
+        return Some("a and b shapes must match");
     }
     let last = match a.dims().last() {
         Some(n) => *n,
-        None => return false,
+        None => return Some("a must have rank >= 1"),
     };
     if last == 0 || last > 256 {
-        return false;
+        return Some("last dimension nv must be in 1..=256");
     }
     if a_log.dims() != [last] || dt_bias.dims() != [last] {
-        return false;
+        return Some("a_log and dt_bias must have shape [nv]");
     }
-    true
+    None
+}
+
+pub fn gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Tensor) -> bool {
+    gdn_gates_decline_reason(a, b, a_log, dt_bias).is_none()
 }
 
 /// Run the fused GDN gates kernel.
 ///
-/// Inputs (all bf16, all CUDA):
+/// Inputs (CUDA):
 ///   - `a`       : `[.., nv]` (last-dim is heads; other dims are collapsed
 ///                  to `rows`)
 ///   - `b`       : `[.., nv]` (same shape as `a`)
-///   - `a_log`   : `[nv]`
-///   - `dt_bias` : `[nv]`
+///   - `a_log`   : `[nv]` bf16 or f32
+///   - `dt_bias` : `[nv]` bf16 or f32
 ///
 /// Returns `(beta, g)`, both bf16 with the same shape as `a`. The
 /// non-head dims are collapsed internally for the kernel launch and
@@ -820,14 +950,24 @@ pub fn gdn_gates(
 ) -> Result<(Tensor, Tensor)> {
     if !gdn_gates_supports(a, b, a_log, dt_bias) {
         candle_core::bail!(
-            "kiln-gdn-kernel: gdn_gates: envelope violation \
-             (a={:?}, b={:?}, a_log={:?}, dt_bias={:?}, a.dtype={:?})",
+            "kiln-gdn-kernel: gdn_gates: envelope violation ({}) \
+             (a={:?} {:?}, b={:?} {:?}, a_log={:?} {:?}, dt_bias={:?} {:?})",
+            gdn_gates_decline_reason(a, b, a_log, dt_bias).unwrap_or("unknown"),
             a.shape(),
+            a.dtype(),
             b.shape(),
+            b.dtype(),
             a_log.shape(),
+            a_log.dtype(),
             dt_bias.shape(),
-            a.dtype()
+            dt_bias.dtype()
         );
+    }
+
+    if a_log.dtype() == DType::BF16 && dt_bias.dtype() == DType::BF16 {
+        let beta = b.apply_op1_no_bwd(&GdnGateBetaOp)?;
+        let g = a.apply_op3_no_bwd(a_log, dt_bias, &GdnGateGOp)?;
+        return Ok((beta, g));
     }
 
     let device = a.device();
@@ -835,13 +975,13 @@ pub fn gdn_gates(
     let nv = *shape.last().unwrap();
     let rows: usize = shape.iter().take(shape.len() - 1).product();
 
-    let a = a.contiguous()?;
-    let b = b.contiguous()?;
-    let a_log = a_log.contiguous()?;
-    let dt_bias = dt_bias.contiguous()?;
+    let a = gdn_gates_ctx(a.contiguous(), "gdn_gates a contiguous")?;
+    let b = gdn_gates_ctx(b.contiguous(), "gdn_gates b contiguous")?;
+    let a_log = gdn_gates_ctx(a_log.contiguous(), "gdn_gates a_log contiguous")?;
+    let dt_bias = gdn_gates_ctx(dt_bias.contiguous(), "gdn_gates dt_bias contiguous")?;
 
-    let beta = Tensor::zeros(shape.clone(), DType::BF16, device)?;
-    let g = Tensor::zeros(shape, DType::BF16, device)?;
+    let beta = gdn_gates_ctx(Tensor::zeros(shape.clone(), DType::BF16, device), "gdn_gates beta zeros")?;
+    let g = gdn_gates_ctx(Tensor::zeros(shape, DType::BF16, device), "gdn_gates g zeros")?;
 
     {
         let (a_storage, a_layout) = a.storage_and_layout();
@@ -880,43 +1020,104 @@ pub fn gdn_gates(
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
         let a_slice = a_cuda
-            .as_cuda_slice::<bf16>()?
+            .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
             .slice(a_layout.start_offset()..);
         let b_slice = b_cuda
-            .as_cuda_slice::<bf16>()?
+            .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
             .slice(b_layout.start_offset()..);
-        let al_slice = al_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(al_layout.start_offset()..);
-        let dt_slice = dt_cuda
-            .as_cuda_slice::<bf16>()?
-            .slice(dt_layout.start_offset()..);
         let beta_slice = beta_cuda
-            .as_cuda_slice::<bf16>()?
+            .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
             .slice(beta_layout.start_offset()..);
         let g_slice = g_cuda
-            .as_cuda_slice::<bf16>()?
+            .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
             .slice(g_layout.start_offset()..);
 
         unsafe {
             let (a_ptr, _g1) = a_slice.device_ptr(&stream);
             let (b_ptr, _g2) = b_slice.device_ptr(&stream);
-            let (al_ptr, _g3) = al_slice.device_ptr(&stream);
-            let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
             let (beta_ptr, _g5) = beta_slice.device_ptr(&stream);
             let (g_ptr, _g6) = g_slice.device_ptr(&stream);
 
-            let status = kiln_gdn_gates_bf16(
-                a_ptr as *const _,
-                b_ptr as *const _,
-                al_ptr as *const _,
-                dt_ptr as *const _,
-                beta_ptr as *mut _,
-                g_ptr as *mut _,
-                rows as i32,
-                nv as i32,
-                raw_stream,
-            );
+            let status = match (a_log.dtype(), dt_bias.dtype()) {
+                (DType::BF16, DType::BF16) => {
+                    let al_slice = al_cuda
+                        .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
+                        .slice(al_layout.start_offset()..);
+                    let dt_slice = dt_cuda
+                        .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
+                        .slice(dt_layout.start_offset()..);
+                    let (al_ptr, _g3) = al_slice.device_ptr(&stream);
+                    let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
+                    kiln_gdn_gates_bf16(
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        beta_ptr as *mut _,
+                        g_ptr as *mut _,
+                        rows as i32,
+                        nv as i32,
+                        raw_stream,
+                    )
+                }
+                (DType::F32, DType::F32) => {
+                    let al_slice = al_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|err| candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}")))?
+                        .slice(al_layout.start_offset()..);
+                    let dt_slice = dt_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|err| candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}")))?
+                        .slice(dt_layout.start_offset()..);
+                    let (al_ptr, _g3) = al_slice.device_ptr(&stream);
+                    let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
+                    kiln_gdn_gates_bf16_f32_params(
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        beta_ptr as *mut _,
+                        g_ptr as *mut _,
+                        rows as i32,
+                        nv as i32,
+                        raw_stream,
+                    )
+                }
+                (DType::F32, DType::BF16) => {
+                    let al_slice = al_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|err| candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}")))?
+                        .slice(al_layout.start_offset()..);
+                    let dt_slice = dt_cuda
+                        .as_cuda_slice::<bf16>()
+            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
+                        .slice(dt_layout.start_offset()..);
+                    let (al_ptr, _g3) = al_slice.device_ptr(&stream);
+                    let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
+                    kiln_gdn_gates_bf16_f32_bf16_params(
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        beta_ptr as *mut _,
+                        g_ptr as *mut _,
+                        rows as i32,
+                        nv as i32,
+                        raw_stream,
+                    )
+                }
+                _ => candle_core::bail!(
+                    "kiln-gdn-kernel: unsupported gate parameter dtypes {:?} / {:?}",
+                    a_log.dtype(),
+                    dt_bias.dtype()
+                ),
+            };
 
             if status != 0 {
                 candle_core::bail!("kiln_gdn_gates_bf16 failed with status {status}");
@@ -1120,7 +1321,7 @@ pub fn gdn_chunk_prep_supports(
 
 /// Run the fused GDN chunk-prep kernel.
 ///
-/// Inputs (all bf16, all CUDA):
+/// Inputs (CUDA):
 ///   - `g`         : `[B, H, C]`
 ///   - `v`         : `[B, H, C, dv]`
 ///   - `kkt`       : `[B, H, C, C]`

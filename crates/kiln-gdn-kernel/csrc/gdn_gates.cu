@@ -52,13 +52,50 @@ __device__ __forceinline__ float stable_sigmoid(float x) {
     return 1.0f / (1.0f + expf(-x));
 }
 
+__device__ __forceinline__ float param_to_float(__nv_bfloat16 x) {
+    return __bfloat162float(x);
+}
+
+__device__ __forceinline__ float param_to_float(float x) {
+    return x;
+}
+
+
+__global__ void gdn_gate_beta_bf16_kernel(
+    const __nv_bfloat16* __restrict__ b,
+    __nv_bfloat16* __restrict__ beta_out,
+    int32_t nv
+) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (tid >= nv) return;
+    const int idx = row * nv + tid;
+    beta_out[idx] = __float2bfloat16(stable_sigmoid(__bfloat162float(b[idx])));
+}
+
+__global__ void gdn_gate_g_bf16_kernel(
+    const __nv_bfloat16* __restrict__ a,
+    const __nv_bfloat16* __restrict__ A_log,
+    const __nv_bfloat16* __restrict__ dt_bias,
+    __nv_bfloat16* __restrict__ g_out,
+    int32_t nv
+) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (tid >= nv) return;
+    const int idx = row * nv + tid;
+    const float a_biased = __bfloat162float(a[idx]) + __bfloat162float(dt_bias[tid]);
+    g_out[idx] = __float2bfloat16(stable_softplus(a_biased) * -expf(__bfloat162float(A_log[tid])));
+}
+
 // One block per (B, T) row; each thread handles one head (nv dimension).
 // Loads A_log, dt_bias once per thread (tiny [nv] tensors).
+template <typename ALogT, typename DtBiasT>
 __global__ void gdn_gates_bf16_kernel(
     const __nv_bfloat16* __restrict__ a,        // [B, T, nv] bf16
     const __nv_bfloat16* __restrict__ b,        // [B, T, nv] bf16
-    const __nv_bfloat16* __restrict__ A_log,    // [nv] bf16
-    const __nv_bfloat16* __restrict__ dt_bias,  // [nv] bf16
+    const ALogT* __restrict__ A_log,            // [nv] bf16/f32
+    const DtBiasT* __restrict__ dt_bias,        // [nv] bf16/f32
     __nv_bfloat16* __restrict__ beta_out,       // [B, T, nv] bf16
     __nv_bfloat16* __restrict__ g_out,          // [B, T, nv] bf16
     int32_t nv
@@ -71,8 +108,8 @@ __global__ void gdn_gates_bf16_kernel(
 
     const float a_val  = __bfloat162float(a[idx]);
     const float b_val  = __bfloat162float(b[idx]);
-    const float A_log_val = __bfloat162float(A_log[tid]);
-    const float dt_bias_val = __bfloat162float(dt_bias[tid]);
+    const float A_log_val = param_to_float(A_log[tid]);
+    const float dt_bias_val = param_to_float(dt_bias[tid]);
 
     // beta = sigmoid(b)
     const float beta_f = stable_sigmoid(b_val);
@@ -89,7 +126,8 @@ __global__ void gdn_gates_bf16_kernel(
 
 }  // namespace
 
-extern "C" int32_t kiln_gdn_gates_bf16(
+template <typename ALogT, typename DtBiasT>
+int32_t launch_gdn_gates_bf16(
     const void* a,
     const void* b,
     const void* A_log,
@@ -116,11 +154,11 @@ extern "C" int32_t kiln_gdn_gates_bf16(
     dim3 grid(rows);
     dim3 block(threads);
 
-    gdn_gates_bf16_kernel<<<grid, block, 0, stream>>>(
+    gdn_gates_bf16_kernel<ALogT, DtBiasT><<<grid, block, 0, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(a),
         reinterpret_cast<const __nv_bfloat16*>(b),
-        reinterpret_cast<const __nv_bfloat16*>(A_log),
-        reinterpret_cast<const __nv_bfloat16*>(dt_bias),
+        reinterpret_cast<const ALogT*>(A_log),
+        reinterpret_cast<const DtBiasT*>(dt_bias),
         reinterpret_cast<__nv_bfloat16*>(beta_out),
         reinterpret_cast<__nv_bfloat16*>(g_out),
         nv
@@ -128,7 +166,97 @@ extern "C" int32_t kiln_gdn_gates_bf16(
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        return 1;
+        return static_cast<int32_t>(err);
     }
     return 0;
+}
+
+extern "C" int32_t kiln_gdn_gates_bf16(
+    const void* a,
+    const void* b,
+    const void* A_log,
+    const void* dt_bias,
+    void* beta_out,
+    void* g_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+) {
+    return launch_gdn_gates_bf16<__nv_bfloat16, __nv_bfloat16>(
+        a, b, A_log, dt_bias, beta_out, g_out, rows, nv, stream_raw);
+}
+
+extern "C" int32_t kiln_gdn_gates_bf16_f32_params(
+    const void* a,
+    const void* b,
+    const void* A_log,
+    const void* dt_bias,
+    void* beta_out,
+    void* g_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+) {
+    return launch_gdn_gates_bf16<float, float>(
+        a, b, A_log, dt_bias, beta_out, g_out, rows, nv, stream_raw);
+}
+
+extern "C" int32_t kiln_gdn_gates_bf16_f32_bf16_params(
+    const void* a,
+    const void* b,
+    const void* A_log,
+    const void* dt_bias,
+    void* beta_out,
+    void* g_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+) {
+    return launch_gdn_gates_bf16<float, __nv_bfloat16>(
+        a, b, A_log, dt_bias, beta_out, g_out, rows, nv, stream_raw);
+}
+
+
+extern "C" int32_t kiln_gdn_gate_beta_bf16(
+    const void* b,
+    void* beta_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+) {
+    if (rows <= 0 || nv <= 0) return 0;
+    if (nv > 256) return 2;
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    int threads = nv < 32 ? 32 : ((nv + 31) & ~31);
+    cudaGetLastError();
+    gdn_gate_beta_bf16_kernel<<<dim3(rows), dim3(threads), 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(b),
+        reinterpret_cast<__nv_bfloat16*>(beta_out),
+        nv);
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : static_cast<int32_t>(err);
+}
+
+extern "C" int32_t kiln_gdn_gate_g_bf16(
+    const void* a,
+    const void* A_log,
+    const void* dt_bias,
+    void* g_out,
+    int32_t rows,
+    int32_t nv,
+    void* stream_raw
+) {
+    if (rows <= 0 || nv <= 0) return 0;
+    if (nv > 256) return 2;
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    int threads = nv < 32 ? 32 : ((nv + 31) & ~31);
+    cudaGetLastError();
+    gdn_gate_g_bf16_kernel<<<dim3(rows), dim3(threads), 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(a),
+        reinterpret_cast<const __nv_bfloat16*>(A_log),
+        reinterpret_cast<const __nv_bfloat16*>(dt_bias),
+        reinterpret_cast<__nv_bfloat16*>(g_out),
+        nv);
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : static_cast<int32_t>(err);
 }

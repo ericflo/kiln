@@ -706,6 +706,7 @@ pub struct GpuLinearAttentionWeights {
     pub conv1d: Tensor,
     pub norm: Tensor,
     pub a_log: Tensor,
+    pub a_log_gates: Tensor,
     pub dt_bias: Tensor,
     /// Cached GDN projection transposes for the forward hot path,
     /// materialized contiguously once at load time.
@@ -1645,6 +1646,9 @@ impl GpuWeights {
                     let norm = aux_tensors.next().context(ctx("gdn_norm missing"))?;
                     let a_log = aux_tensors.next().context(ctx("a_log missing"))?;
                     let dt_bias = aux_tensors.next().context(ctx("dt_bias missing"))?;
+                    let a_log_gates = a_log
+                        .to_dtype(DType::BF16)
+                        .context(ctx("a_log gates bf16 cache"))?;
 
                     let attn_proj = projection_tensors_for_load_batch(
                         &[
@@ -1681,6 +1685,7 @@ impl GpuWeights {
                             conv1d,
                             norm,
                             a_log,
+                            a_log_gates,
                             dt_bias,
                             in_proj_qkv_t,
                             in_proj_z_t,
@@ -4020,7 +4025,7 @@ fn gated_deltanet_forward_decode_if(
             if backend.supports_gdn_gates() {
                 if let Some((beta, g)) =
                     backend
-                        .gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)
+                        .gdn_gates(&a, &b, &weights.a_log_gates, &weights.dt_bias)
                         .context("gdn decode gates fused backend")?
                 {
                     (beta, g)
@@ -8567,6 +8572,7 @@ mod tests {
                 conv1d: Tensor::zeros((1, 1), DType::F32, &device)?,
                 norm: Tensor::zeros((1,), DType::F32, &device)?,
                 a_log: Tensor::zeros((1,), DType::F32, &device)?,
+                a_log_gates: Tensor::zeros((1,), DType::F32, &device)?,
                 dt_bias: Tensor::zeros((1,), DType::F32, &device)?,
                 in_proj_qkv_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 in_proj_z_t: Tensor::zeros((1, 1), DType::F32, &device)?,
@@ -9259,6 +9265,7 @@ mod tests {
                     conv1d: randn(&[qkv_dim, 1, conv_kernel])?,
                     norm: Tensor::ones(dk, DType::F32, device)?,
                     a_log: Tensor::zeros(nv, DType::F32, device)?,
+                    a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::F32, device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,
