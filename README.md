@@ -95,7 +95,10 @@ scored = [{"text": r.choices[0].message.content, "reward": my_score(r)} for r in
 
 # 3. Submit — the server trains and hot-swaps immediately
 requests.post("http://localhost:8420/v1/train/grpo", json={
-    "groups": [{"prompt": prompt, "completions": scored}]
+    "groups": [{
+        "messages": [{"role": "user", "content": prompt}],
+        "completions": scored,
+    }]
 })
 
 # 4. Next inference already uses the improved weights
