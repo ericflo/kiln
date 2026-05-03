@@ -1536,7 +1536,12 @@ loadServedModelId();
 function renderChat() {
   const el = document.getElementById('chat-messages');
   if (chatMessages.length === 0) {
-    el.innerHTML = '<div class="empty" style="padding:30px">Send a message to test inference</div>';
+    el.innerHTML = `<div class="empty" style="padding:24px;text-align:left;">
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Send a message to test inference.</div>
+      <div>Quick Inference sends a chat completion to the currently selected adapter, or the <strong>Base Model</strong>, using the temperature above.</div>
+      <div style="margin-top:8px;">Try: <code>Explain Kiln in one sentence.</code></div>
+      <div style="margin-top:8px;">If the server is still starting or model loading fails, check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting guide</a>.</div>
+    </div>`;
     return;
   }
   el.innerHTML = chatMessages.map(m => `
