@@ -425,13 +425,15 @@ Or via curl:
 curl -s http://localhost:8420/v1/train/sft \
   -H "Content-Type: application/json" \
   -d '{
-    "adapter_name": "default",
     "examples": [
       {"messages": [{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}]},
       {"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}]}
     ],
-    "learning_rate": 1e-4,
-    "num_epochs": 3
+    "config": {
+      "output_name": "default",
+      "learning_rate": 1e-4,
+      "epochs": 3
+    }
   }' | python3 -m json.tool
 ```
 

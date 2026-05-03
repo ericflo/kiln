@@ -40,12 +40,18 @@ async fn main() -> Result<()> {
                 adapter,
                 lr,
                 epochs,
+                lora_rank,
                 url,
             } => {
-                return cli::run_train_sft(url, file, adapter, *lr, *epochs).await;
+                return cli::run_train_sft(url, file, adapter, *lr, *epochs, *lora_rank).await;
             }
-            TrainCommands::Grpo { file, adapter, url } => {
-                return cli::run_train_grpo(url, file, adapter).await;
+            TrainCommands::Grpo {
+                file,
+                adapter,
+                lora_rank,
+                url,
+            } => {
+                return cli::run_train_grpo(url, file, adapter, *lora_rank).await;
             }
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
