@@ -84,6 +84,37 @@ kiln_flash_status_t kiln_flash_attn_fwd_paged_decode(
     void *stream
 );
 
+kiln_flash_status_t kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
+    const void *q,
+    const void *k_pool,
+    const void *v_pool,
+    const int  *block_table,
+    const int  *seqused_k,
+    void *out,
+    void *softmax_lse_out,
+    int batch_size,
+    int num_heads,
+    int num_heads_k,
+    int head_dim,
+    int max_seqlen_k,
+    int max_blocks_per_seq,
+    int page_block_size,
+    float softmax_scale,
+    int is_causal,
+    void *stream
+);
+
+kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_slot(
+    void *k_pool,
+    void *v_pool,
+    const void *k,
+    const void *v,
+    const unsigned int *slot,
+    int num_kv_heads,
+    int head_dim,
+    void *stream
+);
+
 // Flash Attention Backward Pass
 //
 // All pointer arguments must be CUDA device pointers.

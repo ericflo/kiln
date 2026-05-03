@@ -4470,6 +4470,14 @@ pub fn gqa_attention(
     Ok(out)
 }
 
+#[cfg(feature = "cuda")]
+pub(crate) struct PagedDecodeGraphInputs<'a> {
+    pub block_table: &'a Tensor,
+    pub seqused_k: &'a Tensor,
+    pub kv_slot: &'a Tensor,
+    pub max_seqlen_k: usize,
+}
+
 /// Try the fused paged-decode flash-attention kernel.
 ///
 /// Returns `Ok(Some(output))` on success and `Ok(None)` when the kernel
@@ -4502,6 +4510,7 @@ fn try_flash_attn_paged_decode(
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Option<Tensor>> {
     const K_BLOCK_N: usize = 128;
 
@@ -4686,8 +4695,25 @@ fn try_flash_attn_paged_decode(
     }
 
     let device = q.device();
-    let bt_tensor =
-        Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
+    let bt_tensor_owned;
+    let bt_tensor = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(inputs) = graph_inputs {
+                inputs.block_table
+            } else {
+                bt_tensor_owned = Tensor::new(padded.as_slice(), device)?
+                    .reshape((1usize, max_blocks_per_seq))?;
+                &bt_tensor_owned
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            bt_tensor_owned =
+                Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
+            &bt_tensor_owned
+        }
+    };
 
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -4699,18 +4725,53 @@ fn try_flash_attn_paged_decode(
         q.transpose(1, 2)?.contiguous()?
     };
 
-    let attn_out = match backend.flash_attn_paged_decode(
-        &q_fa,
-        k_pool,
-        v_pool,
-        &bt_tensor,
-        total_seq_len,
-        block_size,
-        softmax_scale,
-        true,
-    )? {
-        Some(t) => t,
-        None => return Ok(None),
+    let attn_out = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(inputs) = graph_inputs {
+                kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
+                    &q_fa,
+                    k_pool,
+                    v_pool,
+                    bt_tensor,
+                    inputs.seqused_k,
+                    inputs.max_seqlen_k,
+                    block_size,
+                    softmax_scale,
+                    true,
+                )?
+            } else {
+                match backend.flash_attn_paged_decode(
+                    &q_fa,
+                    k_pool,
+                    v_pool,
+                    bt_tensor,
+                    total_seq_len,
+                    block_size,
+                    softmax_scale,
+                    true,
+                )? {
+                    Some(t) => t,
+                    None => return Ok(None),
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            match backend.flash_attn_paged_decode(
+                &q_fa,
+                k_pool,
+                v_pool,
+                bt_tensor,
+                total_seq_len,
+                block_size,
+                softmax_scale,
+                true,
+            )? {
+                Some(t) => t,
+                None => return Ok(None),
+            }
+        }
     };
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
@@ -4779,6 +4840,7 @@ pub fn gqa_attention_paged(
         full_attn_layer_idx,
         attn_output_gate,
         lora,
+        #[cfg(feature = "cuda")] None,
     )
 }
 
@@ -4801,6 +4863,7 @@ fn gqa_attention_paged_with_rope_tables(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let subop_armed = crate::mtp_debug::is_subop_capture_armed();
@@ -5047,7 +5110,26 @@ fn gqa_attention_paged_with_rope_tables(
     // Write new K/V into paged cache.
     if !single_token_self_attn {
         kiln_nvtx::range!(c"kiln/kv/copy");
-        if !paged_cache.write_token_major_native(
+        let graph_write_done = {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(inputs) = graph_inputs {
+                    paged_cache.write_token_major_native_graph_slot(
+                        full_attn_layer_idx,
+                        &k_cache_token_major,
+                        &v_cache_token_major,
+                        inputs.kv_slot,
+                    )?
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                false
+            }
+        };
+        if !graph_write_done && !paged_cache.write_token_major_native(
             full_attn_layer_idx,
             block_table,
             start_pos,
@@ -5111,6 +5193,7 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_weights,
                 lora_layer,
                 lora_scale,
+                #[cfg(feature = "cuda")] graph_inputs,
             )?
         };
         if let Some(out) = out_opt {
@@ -5662,6 +5745,7 @@ pub fn transformer_block_paged(
         block_table,
         full_attn_layer_idx,
         lora,
+        #[cfg(feature = "cuda")] None,
     )
 }
 
@@ -5684,6 +5768,7 @@ fn transformer_block_paged_with_rope_tables(
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -5735,6 +5820,7 @@ fn transformer_block_paged_with_rope_tables(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
+        #[cfg(feature = "cuda")] graph_inputs,
     )?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
@@ -6174,6 +6260,7 @@ pub fn model_forward_paged(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::Full,
     )?;
     // `LmHeadMode::Full` always returns Some.
@@ -6210,6 +6297,7 @@ pub fn model_forward_paged_last_token(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::LastRowOnly,
     )?;
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
@@ -6245,6 +6333,7 @@ pub fn model_forward_paged_last_token_greedy(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::LastRowArgmaxOnly,
     )?;
     token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
@@ -6294,6 +6383,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     lora: Option<&LoraWeights>,
     token_ids_gpu: &Tensor,
     positions_gpu: &Tensor,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
@@ -6307,6 +6397,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
         lora,
         Some(token_ids_gpu),
         Some(positions_gpu),
+        #[cfg(feature = "cuda")] graph_inputs,
         LmHeadMode::Full,
     )?;
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
@@ -6468,6 +6559,7 @@ pub fn model_forward_paged_with_last_hidden(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::FullWithLastHidden,
     )?;
     Ok((
@@ -6514,6 +6606,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         lora,
         None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::LastRowWithLastHidden,
     )?;
     Ok((
@@ -7100,6 +7193,7 @@ fn model_forward_paged_inner(
     lora: Option<&LoraWeights>,
     token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     lm_head_mode: LmHeadMode,
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
@@ -7178,6 +7272,7 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
+                    #[cfg(feature = "cuda")] graph_inputs,
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
@@ -7546,6 +7641,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             lora,
             None,
             None,
+            #[cfg(feature = "cuda")] None,
             mode,
         )
         .with_context(|| {
@@ -7630,6 +7726,7 @@ pub fn model_forward_paged_streaming_with(
             lora,
             None,
             None,
+            #[cfg(feature = "cuda")] None,
             mode,
         )
         .with_context(|| {
