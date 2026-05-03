@@ -2,6 +2,14 @@
 
 This document explains how Kiln works internally. It is aimed at contributors and power users who want to understand what happens between an HTTP request arriving and a token being generated — or a model being trained.
 
+## Where to go next
+
+- Use this architecture deep-dive when you want to understand Kiln's scheduler, model runner, LoRA hot-swap, training queue, and CUDA kernel layout.
+- Start with [Quickstart](QUICKSTART.md) when you want to install Kiln, run the server, or try the common API flows before reading internals.
+- Read [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) when you want the generate → score → train loop, reward-shaping examples, and GRPO request shapes.
+- Skim [README.md](README.md) when you want the shorter overview, feature map, install command, and links to the rest of the docs.
+- If setup or API behavior is confusing, use the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html).
+
 ## System Overview
 
 Kiln is a single Rust binary built as a Cargo workspace with twelve crates — seven portable crates plus five CUDA kernel crates that are only compiled when `--features cuda` is enabled:
