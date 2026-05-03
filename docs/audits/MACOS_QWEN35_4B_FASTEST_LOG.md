@@ -7358,3 +7358,67 @@ Artifacts:
 - `e249_batch4_distinct_max2_no_prefix_current_control_response.json`
 - `e249_batch4_distinct_max2_no_prefix_current_control_time.log`
 - `e249_batch4_distinct_max2_no_prefix_current_control_metrics.prom`
+
+## Experiments E250-E252: Rejected GDN In-Projection Unroll4 Kernel
+
+Hypothesis:
+
+The current Metal GDN input-projection kernel is scalar: one Metal thread owns
+one output column and loops over the 2,560 hidden inputs. The prior E224
+cooperative tile8 rewrite was rejected, but a less invasive loop-unroll variant
+might reduce loop overhead without adding simdgroup reductions or changing the
+dispatch shape.
+
+Temporary change:
+
+- Added an opt-in `kiln_gdn_in_proj_decode_unroll4_bf16` kernel behind
+  `KILN_ENABLE_METAL_GDN_IN_PROJ_UNROLL4=1`.
+- Added an ignored synthetic Qwen-shaped GDN in-proj microbench that compares
+  the current scalar kernel and unroll4 variant in the same binary.
+- Reverted the candidate before commit after full-model measurement.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  - Passed. The test covered both the current scalar kernel and the unroll4
+    candidate.
+- `KILN_METAL_GDN_IN_PROJ_BENCH_WARMUP=5 KILN_METAL_GDN_IN_PROJ_BENCH_ITERS=30 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_qwen35_synthetic --lib -- --ignored --nocapture`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Synthetic microbench:
+
+Qwen-shaped decode input projection:
+`x=[1,1,2560]`, `qkv_t=[2560,5120]`, `z_t=[2560,4096]`, `a/b_t=[2560,32]`.
+
+| Experiment | Scalar | Unroll4 | Speedup | Drift |
+|---|---:|---:|---:|---:|
+| E250 | 1198.901 us | 994.100 us | 1.206x | max/mean 0 |
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E251 | scalar control | 414.9 ms | 5.99 | 166.9 ms | 165.5 ms | 179.4 ms | control |
+| E252 | unroll4 opt-in | 683.1 ms | 3.28 | 305.1 ms | 304.0 ms | 381.1 ms | rejected and reverted |
+
+Artifacts:
+
+- `e250_gdn_in_proj_unroll4_synthetic_bench.log`
+- `e251_m1_bs1_p64_o64_warmed_gdn_inproj_scalar_control.log`
+- `e252_m1_bs1_p64_o64_warmed_gdn_inproj_unroll4_opt_in.log`
+
+Takeaway:
+
+The synthetic microbench was misleading for end-to-end decode. Unroll4 likely
+changed register pressure, scheduling, or GPU occupancy enough to hurt the
+full recurrent decode loop despite speeding the isolated in-proj launch. The
+candidate was reverted before commit. Future GDN in-proj work should avoid
+small local loop-shape changes and instead target material work reduction:
+fusing qkv projection with decode conv/norm, changing weight layout to improve
+strided-column memory access, or eliminating the materialized `mixed_qkv`
+boundary.

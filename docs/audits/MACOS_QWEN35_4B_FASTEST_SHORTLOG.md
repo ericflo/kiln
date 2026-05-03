@@ -554,3 +554,11 @@
   4.48 s / 4,474.376 ms with 4 prefix misses, 0 cached entries, and 0 retained
   state bytes. E249 no-prefix control was contaminated by severe memory
   pressure and is logged only as a caveat, not a regression verdict.
+- 2026-05-03 E250-E252: Rejected a GDN input-projection unroll4 Metal kernel.
+  The opt-in candidate passed focused Metal parity and the synthetic
+  Qwen-shaped GDN in-proj microbench improved from 1198.901 us to 994.100 us
+  (1.206x), but full warmed p64/o64 decode regressed badly: scalar control
+  E251 was 414.9 ms prefill / 166.9 ms mean ITL / 5.99 tok/s, while unroll4
+  E252 was 683.1 ms / 305.1 ms / 3.28 tok/s. The candidate was reverted before
+  commit; future GDN in-proj work should reduce material work or improve weight
+  layout rather than tweaking the scalar loop shape.
