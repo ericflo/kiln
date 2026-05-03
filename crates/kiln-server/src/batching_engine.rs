@@ -52,6 +52,10 @@ pub struct BatchedGenerationOutput {
     pub completion_tokens: usize,
 }
 
+fn completion_usage_tokens(visible_token_count: usize, finish_reason: &FinishReason) -> usize {
+    visible_token_count + usize::from(matches!(finish_reason, FinishReason::Eos))
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BatchingEngineSnapshot {
     pub accepting: bool,
@@ -759,7 +763,8 @@ impl BatchingEngineActor {
         let active = self.active.remove(idx);
         match self.forward.finish_request(active.slot, finish_reason) {
             Ok(output) => {
-                let completion_tokens = output.token_ids.len();
+                let completion_tokens =
+                    completion_usage_tokens(output.token_ids.len(), &output.finish_reason);
                 let _ = active.response_tx.blocking_send(EngineEvent::Done {
                     output: BatchedGenerationOutput {
                         text: output.text,
@@ -996,6 +1001,30 @@ mod tests {
 
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![101, 202]]);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn eos_finish_counts_terminal_token_for_usage() {
+        let forward = Arc::new(MockForward::default());
+        let handle = BatchingEngineHandle::start_with_options(forward.clone(), 8);
+
+        let mut rx = handle.enqueue(request(0, 1)).await.unwrap();
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(EngineEvent::Done {
+                output: BatchedGenerationOutput {
+                    completion_tokens: 1,
+                    token_ids,
+                    finish_reason: FinishReason::Eos,
+                    ..
+                }
+            }) if token_ids.is_empty()
+        ));
+
+        let calls = forward.calls.lock().unwrap().clone();
+        assert_eq!(calls, vec![vec![0]]);
         handle.stop().await.unwrap();
     }
 

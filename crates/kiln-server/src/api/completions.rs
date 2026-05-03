@@ -458,6 +458,14 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
+fn completion_usage_tokens(
+    visible_token_count: usize,
+    finish_reason: &kiln_model::FinishReason,
+) -> usize {
+    visible_token_count
+        + usize::from(matches!(finish_reason, kiln_model::FinishReason::Eos))
+}
+
 /// OpenAI-compatible streaming chunk.
 #[derive(Debug, Serialize)]
 pub struct ChatCompletionChunk {
@@ -1249,7 +1257,8 @@ async fn generate_real_batched(
         .model
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
-    let completion_tokens = output.completion_tokens;
+    let completion_tokens =
+        completion_usage_tokens(output.completion_tokens, &output.finish_reason);
     let (reasoning_content, completion_text) = split_reasoning_response(&output.text, prompt_text);
     let preview_source = if completion_text.is_empty() {
         reasoning_content.as_deref().unwrap_or("")
@@ -1530,7 +1539,7 @@ async fn generate_real(
         .model
         .clone()
         .unwrap_or_else(|| state.served_model_id.clone());
-    let completion_tokens = output.token_ids.len();
+    let completion_tokens = completion_usage_tokens(output.token_ids.len(), &output.finish_reason);
     // Qwen3.5's chat template prefills `<think>\n` into the assistant turn,
     // so the model emits chain-of-thought directly and closes with
     // `</think>` before the actual answer. Split into the llama.cpp /
@@ -2657,6 +2666,23 @@ mod tests {
             temperature,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn completion_usage_counts_terminal_eos_token() {
+        assert_eq!(completion_usage_tokens(0, &kiln_model::FinishReason::Eos), 1);
+        assert_eq!(completion_usage_tokens(3, &kiln_model::FinishReason::Eos), 4);
+        assert_eq!(
+            completion_usage_tokens(3, &kiln_model::FinishReason::MaxTokens),
+            3
+        );
+        assert_eq!(
+            completion_usage_tokens(
+                3,
+                &kiln_model::FinishReason::StopSequence("stop".to_string())
+            ),
+            3
+        );
     }
 
     #[test]
