@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln Troubleshooting &mdash; First-run checks</title>
+  <meta name="description" content="Compact troubleshooting notes for first-time Kiln setup: binaries, CUDA, Apple Silicon, model paths, health checks, training endpoints, and adapters.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/troubleshooting.html">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+
+  <meta property="og:title" content="Kiln Troubleshooting &mdash; First-run checks">
+  <meta property="og:description" content="Compact first-run checks for Kiln setup, model paths, health, training endpoints, and adapters.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/troubleshooting.html">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Kiln Troubleshooting &mdash; First-run checks">
+  <meta name="twitter:description" content="Compact first-run checks for Kiln setup, model paths, health, training endpoints, and adapters.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: #d8dde7;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    .label {
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .check-list li { margin-top: 0.55rem; }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+  </style>
+</head>
+<body class="min-h-screen">
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+      <a href="./" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="flex items-center gap-5 text-sm" style="color: var(--fg-dim);">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Troubleshooting &middot; first-run checks</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        If Kiln does not start cleanly, check these first.
+      </h1>
+      <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
+        This page is a compact diagnosis guide for cold-reader setup issues. It does not replace the
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>; use it when
+        a command fails, <code>/health</code> is not green, or the server is running but not using the
+        model or adapter you expected.
+      </p>
+    </div>
+  </section>
+
+  <!-- quick checks -->
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h2 class="text-2xl font-semibold tracking-tight mb-6">Start with three probes</h2>
+      <div class="grid md:grid-cols-3 gap-4">
+        <div class="card p-5">
+          <div class="label mb-2">Binary</div>
+          <p style="color: var(--fg-dim);">
+            Pick the release artifact for your OS and accelerator: Linux/Windows CUDA builds for NVIDIA GPUs,
+            or the Apple Silicon Metal build on macOS arm64.
+          </p>
+        </div>
+        <div class="card p-5">
+          <div class="label mb-2">Model path</div>
+          <p style="color: var(--fg-dim);">
+            Point Kiln at the local Qwen3.5-4B weights with <code>KILN_MODEL_PATH</code> or
+            <code>--model-path</code>. The path must contain the downloaded safetensors and tokenizer files.
+          </p>
+        </div>
+        <div class="card p-5">
+          <div class="label mb-2">Health</div>
+          <p style="color: var(--fg-dim);">
+            After startup, ask <code>/health</code> what the server actually loaded before trying chat,
+            SFT, GRPO, or adapter calls.
+          </p>
+        </div>
+      </div>
+<pre class="mt-6"><code>curl -s http://localhost:8420/health | jq .
+curl -s http://localhost:8420/v1/models | jq .</code></pre>
+    </div>
+  </section>
+
+  <!-- symptom cards -->
+  <main class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12 space-y-5">
+
+      <article class="card p-6">
+        <h2 class="text-xl font-semibold mb-4">Wrong binary or GPU path</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>The binary exits early, reports no usable accelerator, or starts with much lower performance than expected.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Linux and Windows CUDA builds require an NVIDIA GPU.</li>
+              <li>CUDA release builds target CUDA 12.4-era systems.</li>
+              <li>macOS uses the Apple Silicon Metal artifact, not a CUDA artifact.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Download the matching artifact from <a href="https://github.com/ericflo/kiln/releases">GitHub releases</a>. On Linux with Docker, install NVIDIA Container Toolkit before using <code>--gpus all</code>.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <h2 class="text-xl font-semibold mb-4">Model weights are not found</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Startup fails with a missing model path, missing tokenizer, or missing safetensors message.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>The model directory exists on the same machine or inside the Docker container.</li>
+              <li>The path contains Qwen3.5-4B weights, config, and tokenizer files.</li>
+              <li>Relative paths are resolved from the current working directory.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Set the path explicitly. For Docker, mount the host directory at the same path you pass to the server.</p>
+          </div>
+        </div>
+<pre class="mt-5"><code>KILN_MODEL_PATH=/models/Qwen3.5-4B ./kiln serve
+./kiln serve --model-path /models/Qwen3.5-4B</code></pre>
+      </article>
+
+      <article class="card p-6">
+        <h2 class="text-xl font-semibold mb-4"><code>/health</code> is not green</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>The HTTP server is reachable, but chat or training requests fail.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li><code>/health</code> reports the configured model path and device state.</li>
+              <li><code>/v1/models</code> returns the model id you expected.</li>
+              <li>The listen address is <code>localhost:8420</code> unless you changed it.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Fix the first failing health field before debugging chat payloads. Health output is the fastest way to separate setup issues from request-shape issues.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <h2 class="text-xl font-semibold mb-4">Mock mode is not real training</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>A training request appears to complete, but inference quality does not change or no real adapter weights appear.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Mock mode is for API-shape and UI checks only.</li>
+              <li>Real <code>/v1/train/sft</code> and <code>/v1/train/grpo</code> jobs require a loaded model and usable accelerator.</li>
+              <li><code>/v1/train/status</code> should show completed work for the adapter name you sent.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Use mock mode to verify wiring, then run the same payload against a real model path. Treat training endpoints as privileged: posted examples update the active adapter.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <h2 class="text-xl font-semibold mb-4">Adapters are in a different directory than expected</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p><code>/v1/adapters</code> does not list an adapter you trained, uploaded, or expected from a previous run.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>Adapter storage is separate from the base model weights.</li>
+              <li>Docker containers only see directories you mounted.</li>
+              <li>Different working directories can imply different relative adapter paths.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Use an explicit adapter directory in your config or CLI flags, and mount it into Docker just like the model directory. Then verify with <code>GET /v1/adapters</code>.</p>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </main>
+
+  <!-- next steps -->
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <div class="grid md:grid-cols-3 gap-4">
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">
+          <h3 class="font-semibold mb-2">Quickstart</h3>
+          <p style="color: var(--fg-dim);">Full zero-to-running flow, first chat completion, first SFT job, and first GRPO loop.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">
+          <h3 class="font-semibold mb-2">GRPO guide</h3>
+          <p style="color: var(--fg-dim);">Reward-scored completions, payload shape, and the generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/issues">
+          <h3 class="font-semibold mb-2">GitHub issues</h3>
+          <p style="color: var(--fg-dim);">Open an issue with your OS, GPU, binary name, startup command, and <code>/health</code> output.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- footer -->
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="./">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
