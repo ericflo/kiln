@@ -34,6 +34,8 @@ use anyhow::{Context, Result};
 use candle_core::Device;
 #[cfg(feature = "cuda")]
 use candle_core::Tensor;
+#[cfg(feature = "cuda")]
+use std::collections::HashMap;
 use tracing;
 
 use kiln_core::config::ModelConfig;
@@ -48,6 +50,27 @@ use crate::paged_kv_cache::PagedKvCache;
 use kiln_core::block::BlockTable;
 
 /// Holds a captured CUDA graph ready for replay.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CudaGraphKey {
+    seq_len: usize,
+    block_table: Vec<u32>,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphKey {
+    fn new(block_table: &BlockTable, seq_len: usize) -> Self {
+        Self {
+            seq_len,
+            block_table: block_table.blocks.clone(),
+        }
+    }
+
+    fn block_count(&self) -> usize {
+        self.block_table.len()
+    }
+}
+
 #[cfg(feature = "cuda")]
 struct CapturedDecodeGraph {
     /// The instantiated CUDA graph.
@@ -64,10 +87,6 @@ struct CapturedDecodeGraph {
     /// Updated via cudaMemcpyHtoDAsync before each replay so RoPE sees
     /// the correct position while reading from the same device pointer.
     position_buffer: Tensor,
-    /// Sequence length used when this graph was captured. Paged decode kernels
-    /// bake this into KV write offsets and attention read lengths, so replay is
-    /// only safe while this remains identical.
-    captured_seq_len: usize,
     /// Pre-allocated fused GDN decode recurrent outputs, one per linear layer.
     /// Their device pointers are captured by the graph and must stay alive for
     /// replay.
@@ -78,9 +97,9 @@ struct CapturedDecodeGraph {
 pub struct CudaGraphRunner {
     /// Whether CUDA graphs are enabled.
     enabled: bool,
-    /// The captured graph.
+    /// Captured graphs keyed by graph-unsafe paged metadata.
     #[cfg(feature = "cuda")]
-    captured: Option<CapturedDecodeGraph>,
+    captured: HashMap<CudaGraphKey, CapturedDecodeGraph>,
     /// Adapter generation counter; incremented on LoRA swap.
     adapter_generation: u64,
     /// Whether warmup is complete.
@@ -99,7 +118,7 @@ impl CudaGraphRunner {
         Self {
             enabled: actually_enabled,
             #[cfg(feature = "cuda")]
-            captured: None,
+            captured: HashMap::new(),
             adapter_generation: 0,
             warmup_done: false,
         }
@@ -111,13 +130,13 @@ impl CudaGraphRunner {
         self.warmup_done = false;
         #[cfg(feature = "cuda")]
         {
-            if self.captured.is_some() {
+            if !self.captured.is_empty() {
                 tracing::debug!(
                     "CUDA graph invalidated (adapter gen={})",
                     self.adapter_generation
                 );
             }
-            self.captured = None;
+            self.captured.clear();
         }
     }
 
@@ -178,30 +197,17 @@ impl CudaGraphRunner {
 
         #[cfg(feature = "cuda")]
         {
-            // Phase 3: replay if we have a valid captured graph
-            if let Some(ref captured) = self.captured {
-                if captured.adapter_gen == self.adapter_generation {
-                    if captured.captured_seq_len != seq_len {
-                        tracing::warn!(
-                            captured_seq_len = captured.captured_seq_len,
-                            requested_seq_len = seq_len,
-                            "CUDA graph replay disabled: paged decode capture bakes dynamic seq_len/KV offsets into kernel arguments"
-                        );
-                        self.captured = None;
-                        self.enabled = false;
-                        return Self::eager_forward(
-                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                            linear_state, lora,
-                        );
-                    }
+            let requested_key = CudaGraphKey::new(block_table, seq_len);
 
+            // Phase 3: replay if we have a valid captured graph
+            if let Some(captured) = self.captured.get(&requested_key) {
+                if captured.adapter_gen == self.adapter_generation {
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
                     if let Err(e) = Self::update_token_buffer(&captured.token_buffer, token_id) {
                         tracing::warn!("Failed to update token buffer: {e}, falling back to eager");
-                        self.captured = None;
-                        self.enabled = false;
+                        self.captured.remove(&requested_key);
                         return Self::eager_forward(
                             backend, token_id, weights, config, paged_cache, block_table, seq_len,
                             linear_state, lora,
@@ -209,8 +215,7 @@ impl CudaGraphRunner {
                     }
                     if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len) {
                         tracing::warn!("Failed to update position buffer: {e}, falling back to eager");
-                        self.captured = None;
-                        self.enabled = false;
+                        self.captured.remove(&requested_key);
                         return Self::eager_forward(
                             backend, token_id, weights, config, paged_cache, block_table, seq_len,
                             linear_state, lora,
@@ -223,8 +228,7 @@ impl CudaGraphRunner {
                         }
                         Err(e) => {
                             tracing::warn!("CUDA graph replay failed: {e}, falling back to eager");
-                            self.captured = None;
-                            self.enabled = false;
+                            self.captured.remove(&requested_key);
                             return Self::eager_forward(
                                 backend, token_id, weights, config, paged_cache, block_table,
                                 seq_len, linear_state, lora,
@@ -233,8 +237,28 @@ impl CudaGraphRunner {
                     }
                 } else {
                     // Adapter changed — drop stale graph
-                    self.captured = None;
+                    self.captured.clear();
                 }
+            } else if !self.captured.is_empty() {
+                tracing::debug!(
+                    requested_seq_len = requested_key.seq_len,
+                    requested_blocks = requested_key.block_count(),
+                    cached_graphs = self.captured.len(),
+                    "CUDA graph replay miss: paged decode metadata differs from captured graphs"
+                );
+            }
+
+            if self.captured.len() >= Self::max_cached_graphs() {
+                tracing::warn!(
+                    cached_graphs = self.captured.len(),
+                    requested_seq_len = requested_key.seq_len,
+                    requested_blocks = requested_key.block_count(),
+                    "CUDA graph capture skipped: paged metadata cache is full; replay requires graph-stable seq_len/KV/block-table inputs"
+                );
+                return Self::eager_forward(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                );
             }
 
             // Phase 2: capture
@@ -407,13 +431,13 @@ impl CudaGraphRunner {
                     "CUDA graph captured for decode ({} layers)",
                     config.num_layers,
                 );
-                self.captured = Some(CapturedDecodeGraph {
+                let key = CudaGraphKey::new(block_table, seq_len);
+                self.captured.insert(key, CapturedDecodeGraph {
                     graph,
                     output_logits,
                     adapter_gen: self.adapter_generation,
                     token_buffer,
                     position_buffer,
-                    captured_seq_len: seq_len,
                     _gdn_decode_outputs: gdn_decode_outputs,
                 });
                 Ok(logits)
@@ -453,6 +477,15 @@ impl CudaGraphRunner {
             None, // no pre-allocated position buffer — creates one internally
         )
         .context("eager decode forward pass failed")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn max_cached_graphs() -> usize {
+        std::env::var("KILN_CUDA_GRAPH_CACHE_MAX")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(8)
     }
 
     #[cfg(feature = "cuda")]
