@@ -632,6 +632,18 @@ Key settings:
 
 ## Running with Docker
 
+Use the prebuilt GHCR image for the fastest terminal path. You need the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed so Docker can pass your GPU through to kiln.
+
+```bash
+docker pull ghcr.io/ericflo/kiln-server:latest
+
+docker run --gpus all -p 8420:8420 \
+  -v /path/to/Qwen3.5-4B:/models \
+  ghcr.io/ericflo/kiln-server:latest serve
+```
+
+Optional: build from source if you are contributing to kiln or testing local image changes.
+
 ```bash
 # Build the image
 docker build -f deploy/Dockerfile -t kiln .
