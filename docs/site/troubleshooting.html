@@ -354,7 +354,7 @@ curl -s http://localhost:8420/v1/models | jq .</code></pre>
   <section class="divider">
     <div class="max-w-4xl mx-auto px-6 py-12">
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
-      <div class="grid md:grid-cols-3 gap-4">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">
           <h3 class="font-semibold mb-2">Quickstart</h3>
           <p style="color: var(--fg-dim);">Full zero-to-running flow, first chat completion, first SFT job, and first GRPO loop.</p>
@@ -362,6 +362,10 @@ curl -s http://localhost:8420/v1/models | jq .</code></pre>
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">
           <h3 class="font-semibold mb-2">GRPO guide</h3>
           <p style="color: var(--fg-dim);">Reward-scored completions, payload shape, and the generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">
+          <h3 class="font-semibold mb-2">Architecture</h3>
+          <p style="color: var(--fg-dim);">See how the scheduler, paged KV cache, model engine, and live LoRA training fit together.</p>
         </a>
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/issues">
           <h3 class="font-semibold mb-2">GitHub issues</h3>
