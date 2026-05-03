@@ -7520,3 +7520,72 @@ huge-vocab LM head. The scalar LM-head materialization remains the faster
 default on this macOS Qwen3.5-4B path. Future LM-head work should use a kernel
 designed specifically for fused projection plus top-k/argmax or a measured
 row-blocked vocab strategy, not the generic cooperative GEMV projection.
+
+## Experiment E255: Current Synchronized Target-Selection Profile
+
+Purpose:
+
+After E252-E254 rejected several plausible low-level candidates, refresh the
+synchronized layer and GDN-stage profile on the current branch head before
+choosing the next implementation target. This run is intentionally intrusive
+and should not be read as a normal latency baseline.
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 255`
+
+Before this run, `cargo build --release --features metal --bin kiln-bench`
+rebuilt the benchmark binary from the clean branch head after reverting the
+temporary E254 LM-head candidate.
+
+Measured output:
+
+- Final measured prefill p64 with profiling sync enabled: 1571.6 ms.
+- Final measured decode p64/o1 with profiling sync enabled: 294.2 ms mean ITL.
+- `memory_pressure` after the run reported 77% system-wide free memory.
+
+Parsed measured section only:
+
+| Scope | Count | Sum | Avg |
+|---|---:|---:|---:|
+| Decode linear/GDN layers | 24 | 196.322 ms | 8.180 ms |
+| Decode full-attention layers | 8 | 47.005 ms | 5.876 ms |
+| Prefill linear/GDN layers | 24 | 1178.023 ms | 49.084 ms |
+| Prefill full-attention layers | 8 | 311.442 ms | 38.930 ms |
+
+Decode GDN stage sums across 24 linear layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `in_proj` | 56.742 ms | 2.364 ms |
+| `out_proj` | 21.512 ms | 0.896 ms |
+| `gates_recur_gated_norm` | 8.498 ms | 0.354 ms |
+| `qkv_conv_norm` | 5.663 ms | 0.236 ms |
+| `gated_norm` | 0.035 ms | 0.001 ms |
+| `post_transpose` | 0.001 ms | ~0 ms |
+
+Prefill GDN stage sums across 24 linear layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `in_proj` | 332.858 ms | 13.869 ms |
+| `out_proj` | 105.712 ms | 4.405 ms |
+| `recurrent` | 46.658 ms | 1.944 ms |
+| `qkv_conv_split_norm` | 24.119 ms | 1.005 ms |
+| `gated_norm` | 7.574 ms | 0.316 ms |
+| `gates` | 5.264 ms | 0.219 ms |
+| `post_transpose` | 0.000 ms | ~0 ms |
+
+Artifact:
+
+- `e255_m1_bs1_p64_o1_current_profile.log`
+
+Takeaway:
+
+The current profile is slower than earlier synchronized profiles, so use it for
+ranking rather than absolute latency. The ranking is consistent with E222/E233:
+GDN `in_proj` remains the largest measured sub-stage in both decode and
+prefill, with `out_proj` second. The next low-level candidate should target
+real work reduction in GDN input projection: weight layout, a different
+projection algorithm, or a fusion that removes the materialized `mixed_qkv`
+boundary before qkv-conv/norm.

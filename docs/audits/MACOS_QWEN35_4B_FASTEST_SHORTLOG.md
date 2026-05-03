@@ -576,3 +576,11 @@
   414.9 ms / 166.9 ms / 5.99 tok/s control. `memory_pressure` showed 74% free
   memory after the run, so this is treated as a real rejection; the scalar
   LM-head materialization remains the faster default.
+- 2026-05-03 E255: Refreshed the synchronized target-selection profile on the
+  clean branch head after rebuilding release `kiln-bench`. The profiled run is
+  not a latency baseline, but the measured second section still ranks GDN
+  `in_proj` first: decode linear/GDN layers summed to 196.322 ms, full-attn
+  layers to 47.005 ms, and decode GDN stages were `in_proj` 56.742 ms,
+  `out_proj` 21.512 ms, `gates_recur_gated_norm` 8.498 ms, and
+  `qkv_conv_norm` 5.663 ms. Next low-level work should target real GDN
+  input-projection work reduction, not more wrapper allocation swaps.
