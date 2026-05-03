@@ -469,7 +469,10 @@ curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 ./target/release/kiln adapters delete default
 ```
 
-## 9. Phase 8 API Examples
+## 9. Advanced API Examples
+
+These optional next steps are useful after your first chat and training runs:
+batch generation for GRPO rollouts, adapter import/export/merge/compose, and training-completion webhooks.
 
 ### 9.1 Batch generation (efficient for GRPO rollouts)
 
