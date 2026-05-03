@@ -44,6 +44,9 @@
     code, pre, kbd, samp {
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }
+    pre {
+      max-width: 100%;
+    }
     p code, li code, td code, h2 code, h3 code {
       background: var(--bg-soft);
       border: 1px solid var(--line);
@@ -51,6 +54,8 @@
       border-radius: 5px;
       font-size: 0.875em;
       color: #f3c891;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .hero-glow {
       background:
@@ -61,6 +66,7 @@
       background: var(--bg-soft);
       border: 1px solid var(--line);
       border-radius: 12px;
+      min-width: 0;
     }
     .btn-primary {
       background: var(--accent);
@@ -93,6 +99,11 @@
       border: 1px solid var(--line);
       border-radius: 10px;
       padding: 0.85rem 1rem;
+      min-width: 0;
+    }
+    .endpoint code {
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .method {
       display: inline-flex;
