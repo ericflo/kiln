@@ -46,7 +46,7 @@ reward trend up.
 ## Endpoint reference
 
 The full schema for both endpoints lives in
-[QUICKSTART.md §9](../QUICKSTART.md#9-phase-8-api-examples). The fields used in
+[Quickstart §9](../QUICKSTART.md#9-phase-8-api-examples). The fields used in
 this guide are:
 
 **`POST /v1/completions/batch`** — issues `prompts.len() × n` completions in
@@ -337,8 +337,12 @@ Watch live training progress with `GET /v1/train/status`.
 
 ## See also
 
-- [QUICKSTART.md §9](../QUICKSTART.md#9-phase-8-api-examples) — full schema for
-  `/v1/completions/batch` and `/v1/train/grpo`.
+- [Quickstart §9](../QUICKSTART.md#9-phase-8-api-examples) — full schema for
+  `/v1/completions/batch` and `/v1/train/grpo`, plus the fastest path to run
+  Kiln before trying GRPO.
 - [README.md `## The GRPO Loop`](../README.md#the-grpo-loop) — the 30-second
-  pitch.
+  overview of why the generate → score → train loop exists.
+- [Website Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) — setup,
+  model-loading, adapter, and API recovery steps when a command or request does
+  not behave as expected.
 - [DeepSeekMath](https://arxiv.org/abs/2402.03300) — the algorithm.
