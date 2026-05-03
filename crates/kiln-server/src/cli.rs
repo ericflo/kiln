@@ -5,6 +5,18 @@ use std::io::Write;
 use clap::{Parser, Subcommand};
 use console::style;
 
+const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it live with LoRA training.
+
+Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
+
+Common next steps:
+  kiln serve          start the server explicitly
+  kiln health         inspect a running server
+  kiln train sft      train a LoRA adapter from corrections
+  kiln train grpo     train a LoRA adapter from scored completions
+  kiln adapters list  list loaded adapters
+"#;
+
 const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln serve
       Start the inference server explicitly. Running `kiln` with no subcommand also starts serving.
@@ -59,7 +71,7 @@ fn render_api_error(body: &serde_json::Value, status: reqwest::StatusCode) -> St
     name = "kiln",
     version,
     about = "Single-model inference server with live online learning",
-    long_about = None,
+    long_about = TOP_LEVEL_OVERVIEW,
     after_help = TOP_LEVEL_EXAMPLES,
 )]
 pub struct Cli {
