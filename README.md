@@ -17,7 +17,8 @@
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
   <a href="kiln.example.toml">Configuration</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> &middot;
+  <a href="LICENSE">License</a>
 </p>
 
 ---
@@ -104,7 +105,17 @@ See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examp
 
 ## Quick Start
 
-**Prerequisites:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+ **OR** Apple Silicon Mac with 16GB+ unified memory. Rust stable toolchain on both.
+**Supported hardware:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+ **or** Apple Silicon Mac with 16GB+ unified memory. Kiln targets `Qwen/Qwen3.5-4B` and needs about 20GB of free disk for the server, model weights, and adapters.
+
+**Path 1 — Desktop App / prebuilt binary, recommended for most users:** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading the model weights. No Rust toolchain, CUDA toolkit, or source build is required for this path.
+
+If you prefer a terminal, pull a prebuilt container instead:
+
+```bash
+docker pull ghcr.io/ericflo/kiln-server:latest
+```
+
+**Path 2 — Source / CLI, for contributors and direct CLI users:** Install Rust stable, then build the CLI from source for your platform.
 
 ```bash
 git clone https://github.com/ericflo/kiln.git
@@ -115,12 +126,18 @@ cargo build --release --features cuda     # ~15-30 min first build (CUDA kernels
 
 # macOS + Apple Silicon
 cargo build --release --features metal    # Metal backend via candle
+```
 
-# Download model weights
+Download the model weights:
+
+```bash
 pip install huggingface-hub
 huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+```
 
-# Start serving
+Start the source-built server:
+
+```bash
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
 
@@ -155,7 +172,7 @@ curl http://localhost:8420/v1/train/sft \
 curl http://localhost:8420/v1/train/status
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including GRPO, adapter management, Docker, and systemd setup. For tools-bearing workloads with prompts longer than ~30k tokens, see [QUICKSTART.md §4.2](QUICKSTART.md#42-known-limitation-workers1-for-long-tools-bearing-prompts) for the `workers=1` known-limitation note ([#664](https://github.com/ericflo/kiln/issues/664)).
+See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop App setup, source builds, GRPO, adapter management, Docker, and systemd setup. If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, start with the [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html). For tools-bearing workloads with prompts longer than ~30k tokens, see [QUICKSTART.md §4.2](QUICKSTART.md#42-known-limitation-workers1-for-long-tools-bearing-prompts) for the `workers=1` known-limitation note ([#664](https://github.com/ericflo/kiln/issues/664)).
 
 ## See it in action
 
