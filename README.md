@@ -183,6 +183,10 @@ A 60-second asciicast captured on a single A6000 against `Qwen3.5-4B` walks the 
 
 The kiln server also ships an embedded web dashboard at `http://localhost:8420/ui` with live decode tok/s, p50/p99 ITL, VRAM breakdown, adapter management, training monitoring, and a chat playground — no extra service to run.
 
+Here is the embedded server dashboard running with healthy status, active adapters, training progress, and the chat playground in one view:
+
+![Kiln embedded server dashboard](docs/site/assets/server-ui-dashboard.png)
+
 ## Memory Budget (24GB GPU)
 
 Qwen3.5-4B's hybrid architecture is the key. Only 8 of 32 layers need KV cache, so long-context inference costs a fraction of what a pure transformer would.
