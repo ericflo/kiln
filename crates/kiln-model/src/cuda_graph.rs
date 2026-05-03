@@ -43,8 +43,9 @@ use kiln_core::config::ModelConfig;
 use crate::backend::BackendRuntime;
 use crate::forward::{
     model_forward_paged, model_forward_paged_with_graph_inputs, GpuWeights, LinearAttentionState,
-    PagedDecodeGraphInputs,
 };
+#[cfg(feature = "cuda")]
+use crate::forward::PagedDecodeGraphInputs;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 
