@@ -544,7 +544,7 @@ kiln train status --job-id train_123
 
 kiln adapters list
 kiln adapters load support-bot
-kiln adapters unload
+kiln adapters unload support-bot
 kiln adapters delete support-bot
     List, load, unload the active adapter, or delete a saved adapter on the running server.
 
