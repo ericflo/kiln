@@ -512,3 +512,10 @@
   time basically unchanged (`in_proj` 36.754 ms, `out_proj` 17.302 ms across
   24 GDN layers), so treat this as a small allocation-overhead cleanup, not a
   new GEMV-throughput breakthrough.
+- 2026-05-03 E238: Rejected a specialized full-attention Q/Gate/K/V projection
+  candidate. The temporary Metal kernel split gated q_proj columns directly
+  into contiguous Q and gate outputs, passed a focused split-reference parity
+  test, and release `kiln-bench` built, but warmed p64/o64 regressed to
+  188.2 ms mean ITL / 5.31 tok/s. The candidate was reverted before commit;
+  the extra in-kernel routing cost outweighed removing the post-projection
+  narrow/contiguous copies.

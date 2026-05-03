@@ -6993,3 +6993,52 @@ fused projection outputs, not from improving GDN GEMV throughput. The next
 material speed target remains real kernel math and true bs>1 execution:
 projection GEMV design, fused GDN stages, batched model-forward, or
 scheduler-level continuous batching.
+
+## Experiment E238: Rejected Full-Attention Q/Gate/K/V Projection Split
+
+Hypothesis:
+
+Qwen3.5 full-attention layers use gated q_proj output: `q_raw` is laid out as
+`[head, q|gate, dim]`, then decode immediately narrows Q and gate and calls
+`contiguous()` on both. A specialized fused Metal projection that writes Q and
+gate into separate contiguous outputs could remove those post-projection copies
+inside the 8 full-attention decode layers.
+
+Temporary candidate:
+
+- Added a `kiln_fused_q_gate_kv_transposed_coop_gemv8_bf16` Metal kernel based
+  on the existing fused QKV tile8 cooperative GEMV.
+- The candidate routed q_proj columns into separate contiguous Q and gate
+  outputs, while keeping K and V outputs unchanged.
+- `gqa_attention` used the candidate only for decode, gated-attention, no-LoRA,
+  non-debug Metal shapes.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_fused_q_gate_kv_transposed_coop_gemv_matches_split_reference --lib`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_fused_qkv_transposed_coop_gemv_matches_broadcast_matmul --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Measurement:
+
+`./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0 --seed 238`
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E238 | temporary Q/Gate/K/V projection split | 470.9 ms | 5.31 | 188.2 ms | 182.2 ms | 259.6 ms | rejected and reverted |
+
+Artifact:
+
+- `e238_m1_bs1_p64_o64_warmed_qgate_kv_projection.log`
+
+Takeaway:
+
+This design should not be repeated as-is. The old q_proj narrow/contiguous
+copies are real work, but the candidate added per-output routing branches to the
+projection kernel's lane-0 writeback and slowed decode substantially. Future
+full-attention projection work needs a lower-overhead layout strategy, such as
+changing the packed q_proj weight/output layout up front or fusing later
+Q/gate consumers, not conditional routing inside the hot GEMV writeback.
