@@ -7042,3 +7042,62 @@ projection kernel's lane-0 writeback and slowed decode substantially. Future
 full-attention projection work needs a lower-overhead layout strategy, such as
 changing the packed q_proj weight/output layout up front or fusing later
 Q/gate consumers, not conditional routing inside the hot GEMV writeback.
+
+## Experiment E239: Distinct bs=4 Server Batch With Prefix Cache Disabled
+
+Hypothesis:
+
+E234 showed the current batch endpoint still performs physical model work per
+distinct prompt. Because E234 also registered four cold prefix-cache entries,
+measure the same shape with the real prefix cache disabled to separate actual
+bs>1 model execution cost from prefix-cache bookkeeping.
+
+Setup:
+
+Release server:
+
+`KILN_PREFIX_CACHE_ENABLED=false KILN_MODEL_PATH=/Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a KILN_PORT=8421 ./target/release/kiln serve`
+
+Observed startup:
+
+- KV cache: 512 blocks, block size 16, BF16 KV.
+- Prefix cache budget: `max_blocks=0`, `max_entries=1`.
+- Background inference prewarm: 10,164 ms.
+
+Request:
+
+- Same request body as E234: `e234_batch4_distinct_max2_request.json`
+- `POST /v1/completions/batch`
+- Four distinct chat prompts.
+- `temperature=0.0`, `max_tokens=2`, `seed=234`.
+
+Result:
+
+| Shape | Prefix cache | Wall time | HTTP handler | Generated tokens | Render/token cache |
+|---|---|---:|---:|---:|---|
+| 4 distinct prompts, `n=1`, `max_tokens=2` | disabled | 4.43 s | 4,416.317 ms | 8 | 4 render misses, 4 token misses |
+
+Metrics:
+
+- `kiln_prefix_cache_lookups_total{result="hit"}`: 0
+- `kiln_prefix_cache_lookups_total{result="miss"}`: 0
+- `kiln_prefix_cache_cached_entries`: 0
+- `kiln_prefix_cache_state_bytes`: 0
+- `kiln_tokens_generated_total`: 8
+- `kiln_request_duration_seconds_sum`: 4.415309
+
+Artifacts:
+
+- `e239_server_no_prefix.log`
+- `e239_batch4_distinct_max2_no_prefix_response.json`
+- `e239_batch4_distinct_max2_no_prefix_time.log`
+- `e239_batch4_distinct_max2_no_prefix_metrics.prom`
+
+Takeaway:
+
+Prefix-cache registration is not the bottleneck for this cold distinct bs=4
+server shape. E239 without prefix cache was effectively identical to E234 with
+prefix cache enabled (E234: 4.44 s wall / 4,420.024 ms handler; E239: 4.43 s
+wall / 4,416.317 ms handler). Future bs>1 speed work should target the actual
+execution structure: true batched model-forward or scheduler-level continuous
+batching, not more cache registration policy work.

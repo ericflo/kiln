@@ -519,3 +519,9 @@
   188.2 ms mean ITL / 5.31 tok/s. The candidate was reverted before commit;
   the extra in-kernel routing cost outweighed removing the post-projection
   narrow/contiguous copies.
+- 2026-05-03 E239: Ran the same real-server bs=4 distinct cold batch as E234
+  with `KILN_PREFIX_CACHE_ENABLED=false`. Timing was effectively identical:
+  4.43 s wall / 4,416.317 ms handler versus E234 4.44 s / 4,420.024 ms. Metrics
+  showed prefix cache disabled with 0 lookups and 0 retained entries. This
+  rules out prefix-cache registration as the bs=4 bottleneck for that shape;
+  future bs>1 work should target actual batched/continuous model execution.
