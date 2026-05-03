@@ -7589,3 +7589,62 @@ prefill, with `out_proj` second. The next low-level candidate should target
 real work reduction in GDN input projection: weight layout, a different
 projection algorithm, or a fusion that removes the materialized `mixed_qkv`
 boundary before qkv-conv/norm.
+
+## Experiments E256-E257: Rejected Fused QKV Projection + Conv/Norm Decode Path
+
+Hypothesis:
+
+E255 again pointed at GDN `in_proj`, and prior rejected candidates mostly
+changed local loop shape or wrapper allocation. A more structural decode
+candidate might help: project QKV directly into the qkv-conv/norm kernel,
+round the projection to BF16 before the conv state update to preserve current
+semantics, and compute only z/a/b in a second projection dispatch. This removes
+the materialized `mixed_qkv` tensor between GDN input projection and
+qkv-conv/norm.
+
+Temporary change:
+
+- Added an opt-in `KILN_ENABLE_METAL_GDN_PROJECT_QKV_CONV_NORM=1` path.
+- Added `kiln_gdn_project_qkv_conv_norm_decode_bf16` for Q/K/V projection,
+  causal conv update, SiLU, and Q/K normalization in one kernel.
+- Added `kiln_gdn_zab_in_proj_decode_bf16` for z/a/b projection.
+- Routed decode through the opt-in path before the standard materialized
+  `mixed_qkv` path.
+- Reverted the candidate before commit after full-model measurement.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_gdn_project_qkv_conv_norm_matches_split_reference --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E256 | opt-in fused QKV projection + conv/norm | 477.2 ms | 5.62 | 178.0 ms | 176.4 ms | 194.8 ms | rejected |
+| E257 | same-session default control | 424.6 ms | 5.79 | 172.7 ms | 169.9 ms | 220.1 ms | control |
+
+Memory-pressure check after E257:
+
+- `memory_pressure` reported 79% system-wide free memory.
+
+Artifacts:
+
+- `e256_m1_bs1_p64_o64_warmed_project_qkv_conv_norm_opt_in.log`
+- `e257_m1_bs1_p64_o64_warmed_default_control_after_project_qkv.log`
+
+Takeaway:
+
+Removing the `mixed_qkv` materialization at this boundary is not enough in this
+form. The fused QKV projection + conv/norm path loses to the same-session
+default on both prefill and decode. The likely issue is that it preserves the
+same strided-column projection work while adding a second projection dispatch
+for z/a/b, so the saved BF16 intermediate traffic does not offset scheduling
+and occupancy costs. Future GDN `in_proj` work should target the projection
+algorithm or weight layout itself, not just fuse the consumer around the
+existing column-strided projection.

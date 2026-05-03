@@ -584,3 +584,11 @@
   `out_proj` 21.512 ms, `gates_recur_gated_norm` 8.498 ms, and
   `qkv_conv_norm` 5.663 ms. Next low-level work should target real GDN
   input-projection work reduction, not more wrapper allocation swaps.
+- 2026-05-03 E256-E257: Rejected an opt-in fused QKV projection +
+  qkv-conv/norm decode path intended to remove materialized `mixed_qkv`. The
+  candidate passed focused Metal parity and release `kiln-bench` built, but
+  p64/o64 warmed timing lost to same-session default: E256 opt-in was
+  477.2 ms prefill / 178.0 ms mean ITL / 5.62 tok/s, while E257 default was
+  424.6 ms / 172.7 ms / 5.79 tok/s. The candidate was reverted before commit;
+  future GDN `in_proj` work needs a projection algorithm or weight-layout
+  change, not just fusing around the existing column-strided projection.
