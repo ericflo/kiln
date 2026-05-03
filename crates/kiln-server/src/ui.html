@@ -914,6 +914,7 @@ function apiFailureHtml(action, e) {
     <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
     <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then refresh this panel.</div>
     <div style="margin-top:8px;">If it keeps failing, check the server logs for startup, model-path, or GPU initialization errors.</div>
+    <div style="margin-top:8px;">Need setup help? See the <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" target="_blank" rel="noopener noreferrer">Quickstart</a> or <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
     <div style="margin-top:8px;font-family:var(--mono);font-size:12px;">Details: ${escapeHtml(e.message)}</div>
   </div>`;
 }
