@@ -11,12 +11,13 @@ would be strictly worse than running Linux in a VM.
 
 ## Releases
 
-[Kiln Desktop v0.1.10](https://github.com/ericflo/kiln/releases/tag/desktop-v0.1.10) ships four installers:
+[Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2) ships these installers:
 
-- `Kiln.Desktop_0.1.10_x64-setup.exe` (Windows NSIS, 4.3 MB)
-- `Kiln.Desktop_0.1.10_x64_en-US.msi` (Windows MSI, 6.5 MB)
-- `Kiln.Desktop_0.1.10_amd64.deb` (Debian/Ubuntu, 8.3 MB)
-- `Kiln.Desktop_0.1.10_amd64.AppImage` (portable Linux, 82 MB)
+- `Kiln.Desktop_0.2.2_aarch64.dmg` (macOS Apple Silicon DMG, 8.5 MB)
+- `Kiln.Desktop_0.2.2_x64-setup.exe` (Windows NSIS, 4.5 MB)
+- `Kiln.Desktop_0.2.2_x64_en-US.msi` (Windows MSI, 6.8 MB)
+- `Kiln.Desktop_0.2.2_amd64.deb` (Debian/Ubuntu, 8.8 MB)
+- `Kiln.Desktop_0.2.2_amd64.AppImage` (portable Linux, 85.7 MB)
 
 The desktop installer bundles only the wrapper. On first launch the app offers to auto-download the prebuilt `kiln` server binary from the latest `kiln-v*` GitHub release — `aarch64-apple-darwin-metal` on macOS, `x86_64-unknown-linux-gnu-cuda124` on Linux x86_64, `x86_64-pc-windows-msvc-cuda124` on Windows x86_64 — and verifies it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be installed separately; see the root [QUICKSTART.md](../QUICKSTART.md) or use the HuggingFace downloader in Settings.
 
@@ -26,7 +27,7 @@ Settings has a **Download from HuggingFace…** button next to the Model Path pi
 
 macOS `.dmg` releases are signed with a Developer ID certificate and notarized by Apple. See [docs/desktop/signing.md](../docs/desktop/signing.md) for the CI setup and required secrets.
 
-## What ships in v0.1.10
+## What ships in v0.2.2
 
 - **Subprocess supervisor** — Tokio child process driving the `kiln` binary, with stdout/stderr captured into an in-process ring buffer.
 - **Crash restart** with exponential backoff, and a clear error state surfaced in the tray.
