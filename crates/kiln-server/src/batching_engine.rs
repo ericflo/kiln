@@ -860,6 +860,10 @@ mod tests {
             Ok(input_tokens.iter().map(|token| token + 10).collect())
         }
 
+        fn is_eos_token(&self, token: TokenId) -> Result<bool> {
+            Ok(token == 10)
+        }
+
         fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
             let DecodeSlot::Mock {
                 next_token,
