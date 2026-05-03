@@ -34,6 +34,44 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
       Show adapters loaded by the running server.
 "#;
 
+const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
+
+SFT reads newline-delimited chat correction examples from JSONL. GRPO reads one JSON request/batch with scored completions.
+"#;
+
+const TRAIN_EXAMPLES: &str = r#"Examples:
+  kiln train sft --file corrections.jsonl --adapter support-bot
+      Train from JSONL chat correction examples and hot-swap the resulting LoRA adapter.
+
+  kiln train grpo --file grpo-batch.json --adapter support-bot
+      Train from one JSON GRPO request/batch containing prompts, completions, and rewards.
+
+  kiln train status
+      Show the training queue and recent jobs on the running server.
+
+  kiln train status --job-id train_123
+      Inspect one training job by ID.
+"#;
+
+const ADAPTERS_OVERVIEW: &str = r#"Inspect and manage LoRA adapters on the running Kiln server at http://localhost:8420 by default.
+
+Use these commands after `kiln serve` is running; they call the adapter API rather than reading local files directly.
+"#;
+
+const ADAPTERS_EXAMPLES: &str = r#"Examples:
+  kiln adapters list
+      Show adapters loaded by the running server.
+
+  kiln adapters load support-bot
+      Load a saved adapter into the running server.
+
+  kiln adapters unload support-bot
+      Stop using a loaded adapter without deleting it from disk.
+
+  kiln adapters delete support-bot
+      Delete an adapter through the running server.
+"#;
+
 /// Render a structured server error response. Falls back to HTTP status if the body
 /// is not the expected `{error: {code, message, hint}}` shape.
 ///
@@ -94,11 +132,19 @@ pub enum Commands {
     },
 
     /// Submit training data to a running server
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = TRAIN_OVERVIEW,
+        after_help = TRAIN_EXAMPLES
+    )]
     Train(TrainCommands),
 
     /// Manage LoRA adapters on a running server
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = ADAPTERS_OVERVIEW,
+        after_help = ADAPTERS_EXAMPLES
+    )]
     Adapters(AdapterCommands),
 
     /// Check health of a running server
@@ -125,7 +171,7 @@ pub enum Commands {
 pub enum TrainCommands {
     /// Train a LoRA adapter from corrected SFT examples
     Sft {
-        /// Path to JSONL file with training examples
+        /// Path to JSONL chat correction examples, one example per line
         #[arg(long, short)]
         file: String,
 
@@ -145,13 +191,13 @@ pub enum TrainCommands {
         #[arg(long)]
         lora_rank: Option<usize>,
 
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
     /// Train a LoRA adapter from scored GRPO completions
     Grpo {
-        /// Path to single JSON GRPO request/batch file
+        /// Path to one JSON GRPO request/batch with scored completions
         #[arg(long, short)]
         file: String,
 
@@ -163,7 +209,7 @@ pub enum TrainCommands {
         #[arg(long)]
         lora_rank: Option<usize>,
 
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
@@ -173,7 +219,7 @@ pub enum TrainCommands {
         #[arg(long)]
         job_id: Option<String>,
 
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
@@ -183,7 +229,7 @@ pub enum TrainCommands {
 pub enum AdapterCommands {
     /// List adapters loaded by the running server
     List {
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
@@ -191,7 +237,7 @@ pub enum AdapterCommands {
     Load {
         /// Adapter name
         name: String,
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
@@ -199,7 +245,7 @@ pub enum AdapterCommands {
     Unload {
         /// Adapter name
         name: String,
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
@@ -207,7 +253,7 @@ pub enum AdapterCommands {
     Delete {
         /// Adapter name
         name: String,
-        /// Server URL
+        /// Server URL; defaults to the local kiln serve instance
         #[arg(long, default_value = "http://localhost:8420")]
         url: String,
     },
