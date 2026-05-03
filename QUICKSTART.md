@@ -2,6 +2,12 @@
 
 This guide gets you from a fresh machine to running Kiln with real GPU inference and live training.
 
+## Choose your path
+
+- **Desktop App (recommended)**: install the app, choose or download the Qwen3.5-4B model, start the server from the GUI, then jump to [section 4](#4-test-inference) to verify inference.
+- **Source / CLI**: build `kiln` from source, download the Qwen3.5-4B model, start the server from your terminal, then continue linearly through sections 1-4.
+- **After first run**: open the dashboard in [section 5](#5-open-the-browser-dashboard), try training with [SFT](#6-submit-sft-training) or [GRPO](docs/GRPO_GUIDE.md), watch the [demo](https://ericflo.github.io/kiln/demo/), or use [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) if setup gets stuck.
+
 ## Prerequisites
 
 Choose the path that matches how you want to run Kiln.
