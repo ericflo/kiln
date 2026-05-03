@@ -6860,3 +6860,61 @@ gates+recurrent+rmsnorm decode path and removes the separate gates/recurrent
 improved from E229 `174.4 ms` mean ITL to E231/E232 `170.3 ms` average, with
 E231 reaching `168.4 ms`. The synchronized profiled layer sum dropped by about
 25 ms and the measured GDN stage sum dropped by about 21 ms in one decode step.
+
+## Experiment E234: Real Server Distinct-Prompt Batch Smoke
+
+Hypothesis:
+
+After the F32-aux Metal kernel change, validate that the rebuilt release server
+still handles a small non-cache batch shape on the real Qwen3.5-4B Metal path.
+This is not a new cache optimization; it is a bs>1/server-shape smoke artifact
+for the current branch.
+
+Setup:
+
+Fresh release server:
+
+`KILN_MODEL_PATH=/Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a KILN_PORT=8421 ./target/release/kiln serve`
+
+Observed startup:
+
+- Model load: completed at 2026-05-03T21:17:51Z.
+- KV cache: 512 blocks, block size 16, BF16 KV.
+- Metal custom kernels precompiled during background prewarm.
+- Background inference prewarm: 10,848 ms.
+
+Request:
+
+- `POST /v1/completions/batch`
+- Four distinct chat prompts.
+- `temperature=0.0`, `max_tokens=2`, `seed=234`.
+
+Result:
+
+| Shape | Wall time | HTTP handler | Generated tokens | Prefix cache | Render/token cache |
+|---|---:|---:|---:|---|---|
+| 4 distinct prompts, `n=1`, `max_tokens=2` | 4.44 s | 4,420.024 ms | 8 | 0 hits, 4 misses | 4 render misses, 4 token misses |
+
+Response usage:
+
+- Prompt tokens: 68 total, 17 per prompt.
+- Completion tokens: 8 total, 2 per prompt.
+- Total tokens: 76.
+- Four completions returned with `finish_reason="length"`.
+
+Artifacts:
+
+- `e234_server.log`
+- `e234_batch4_distinct_max2_request.json`
+- `e234_batch4_distinct_max2_response.json`
+- `e234_batch4_distinct_max2_time.log`
+- `e234_batch4_distinct_max2_metrics.prom`
+
+Takeaway:
+
+The current branch serves a small distinct-prompt bs=4 batch on the real
+release Metal server after the F32-aux kernel change. Because these prompts are
+distinct and cold, the result exercises physical model work rather than the
+deterministic cache-hit paths. Future bs>1 work still needs a true batched
+model-forward path or scheduler-level continuous batching; today this endpoint
+fans out per prompt and the shared GPU work remains effectively per-request.

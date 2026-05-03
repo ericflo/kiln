@@ -495,3 +495,11 @@
   linear/GDN layer sum from E228 187.3 ms to E233 163.0 ms; GDN stage sum
   dropped from 91.2 ms to 70.0 ms as split `gates` + `recurrent` +
   `gated_norm` became fused `gates_recur_gated_norm`.
+- 2026-05-03 E234: Rebuilt release `kiln` and ran a real-server bs=4
+  distinct-prompt `/v1/completions/batch` smoke after the F32-aux kernel
+  change. Four cold prompts with `max_tokens=2` completed in 4.44 s wall /
+  4,420.024 ms handler, generated 8 physical tokens, returned 68 prompt tokens
+  + 8 completion tokens, and showed 0 prefix-cache hits with 4 render/token
+  misses. This validates the current branch on a non-cache bs>1 server shape;
+  future bs>1 speed work still needs true batched model-forward or scheduler
+  continuous batching.
