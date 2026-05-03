@@ -2,20 +2,27 @@
 //!
 //! Phase 1 keeps the actor in `kiln-server` so HTTP request routing, prefix
 //! cache ownership, GPU coordination, and metrics can be wired incrementally.
-//! The production forward implementation is added behind this seam; the unit
-//! tests use a mocked forwarder to lock in enqueue → batch forward → response
-//! routing behavior before GPU validation.
+//! The production seam still uses the row-loop `model_forward_paged_batched_decode`
+//! API in `kiln-model`; follow-up phases can replace that seam with a true
+//! layer-wise batched CUDA path without changing HTTP routing.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use kiln_core::block::BlockManager;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
+use kiln_model::{
+    CancelHandle, FinishReason, GenerationOutput, ModelRunner, PagedBatchedDecodeState,
+    PagedKvCache, PagedPrefixReuse,
+};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
+
+use crate::state::{GpuCoordinationLock, RealPrefixCache};
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
@@ -26,13 +33,23 @@ pub struct EngineRequest {
     pub request_id: Uuid,
     pub prompt_tokens: Vec<TokenId>,
     pub sampling: SamplingParams,
+    pub adapter: Option<String>,
+    pub cancel: CancelHandle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineEvent {
     Token(TokenId),
-    Done { completion_tokens: usize },
+    Done { output: BatchedGenerationOutput },
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchedGenerationOutput {
+    pub text: String,
+    pub token_ids: Vec<TokenId>,
+    pub finish_reason: FinishReason,
+    pub completion_tokens: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -50,8 +67,303 @@ pub struct BatchingEngineSnapshot {
     pub adapter_groups_waiting: usize,
 }
 
+pub enum DecodeSlot {
+    Mock {
+        next_token: TokenId,
+        generated_tokens: Vec<TokenId>,
+    },
+    Real {
+        state: PagedBatchedDecodeState,
+        hit_entry_id: Option<u64>,
+        adapter: Option<String>,
+        first_token_pending: bool,
+    },
+}
+
 pub trait DecodeForward: Send + Sync + 'static {
-    fn forward_decode(&self, input_tokens: &[TokenId]) -> Result<Vec<TokenId>>;
+    fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot>;
+    fn forward_decode(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+    ) -> Result<Vec<TokenId>>;
+    fn is_eos_token(&self, _token: TokenId) -> Result<bool> {
+        Ok(false)
+    }
+    fn stop_reason_after_emit(
+        &self,
+        generated_tokens: &[TokenId],
+        sampling: &SamplingParams,
+    ) -> Result<Option<FinishReason>> {
+        if generated_tokens.len() >= sampling.max_tokens {
+            Ok(Some(FinishReason::MaxTokens))
+        } else {
+            Ok(None)
+        }
+    }
+    fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize>;
+    fn finish_request(
+        &self,
+        slot: DecodeSlot,
+        finish_reason: FinishReason,
+    ) -> Result<GenerationOutput>;
+    fn discard_request(&self, _slot: DecodeSlot) {}
+}
+
+pub struct RealDecodeForward {
+    runner: Arc<RwLock<ModelRunner>>,
+    block_manager: Arc<Mutex<BlockManager>>,
+    paged_cache: Arc<Mutex<PagedKvCache>>,
+    prefix_cache: Arc<Mutex<RealPrefixCache>>,
+    gpu_lock: GpuCoordinationLock,
+}
+
+impl RealDecodeForward {
+    pub fn new(
+        runner: Arc<RwLock<ModelRunner>>,
+        block_manager: Arc<Mutex<BlockManager>>,
+        paged_cache: Arc<Mutex<PagedKvCache>>,
+        prefix_cache: Arc<Mutex<RealPrefixCache>>,
+        gpu_lock: GpuCoordinationLock,
+    ) -> Self {
+        Self {
+            runner,
+            block_manager,
+            paged_cache,
+            prefix_cache,
+            gpu_lock,
+        }
+    }
+
+    fn release_hit(&self, hit_entry_id: Option<u64>) {
+        if let Some(entry_id) = hit_entry_id {
+            if let Ok(mut cache) = self.prefix_cache.lock() {
+                cache.release_hit(entry_id);
+            }
+        }
+    }
+
+    fn free_uncached_blocks(
+        &self,
+        output: &mut kiln_model::PrefixCachedGenerationOutput,
+        adapter: Option<String>,
+    ) {
+        let registration = output.registration.take();
+        let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
+        let mut retained_blocks = Vec::new();
+        let mut evicted_blocks = Vec::new();
+        {
+            let mut cache = self.prefix_cache.lock().unwrap();
+            if let Some(registration) = registration {
+                let outcome = cache.register(adapter, registration);
+                retained_blocks = outcome.retained_blocks;
+                evicted_blocks = outcome.evicted_blocks;
+            }
+        }
+
+        let mut blocks_to_free: Vec<u32> = allocated_blocks
+            .into_iter()
+            .filter(|block_id| !retained_blocks.contains(block_id))
+            .collect();
+        blocks_to_free.extend(evicted_blocks);
+        debug_assert!(
+            blocks_to_free
+                .iter()
+                .all(|id| !retained_blocks.contains(id)),
+            "blocks_to_free overlaps retained_blocks: free={blocks_to_free:?} retained={retained_blocks:?}",
+        );
+        debug_assert!({
+            let mut seen = std::collections::HashSet::with_capacity(blocks_to_free.len());
+            blocks_to_free.iter().all(|id| seen.insert(*id))
+        });
+        if !blocks_to_free.is_empty() {
+            let mut bm_guard = self.block_manager.lock().unwrap();
+            bm_guard.free_all(&blocks_to_free);
+        }
+    }
+}
+
+impl DecodeForward for RealDecodeForward {
+    fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+        let _gpu_guard = self.gpu_lock.read().unwrap();
+        let hit = {
+            let mut cache = self.prefix_cache.lock().unwrap();
+            if cache.is_enabled() {
+                cache.lookup(&req.adapter, &req.prompt_tokens)?
+            } else {
+                None
+            }
+        };
+        let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
+        let cached_prefix = hit.map(|hit| PagedPrefixReuse {
+            cached_tokens: hit.cached_tokens,
+            block_ids: hit.block_ids,
+            linear_state: hit.linear_state,
+        });
+
+        let prepared = self
+            .runner
+            .read()
+            .unwrap()
+            .prepare_paged_batched_decode_with_prefix_cache(
+                &req.prompt_tokens,
+                &req.sampling,
+                self.block_manager.as_ref(),
+                self.paged_cache.as_ref(),
+                cached_prefix,
+                Some(&req.cancel),
+            );
+
+        match prepared {
+            Ok(state) => Ok(DecodeSlot::Real {
+                state,
+                hit_entry_id,
+                adapter: req.adapter.clone(),
+                first_token_pending: true,
+            }),
+            Err(err) => {
+                self.release_hit(hit_entry_id);
+                Err(err)
+            }
+        }
+    }
+
+    fn forward_decode(
+        &self,
+        slots: &mut [&mut DecodeSlot],
+        sampling: &[SamplingParams],
+    ) -> Result<Vec<TokenId>> {
+        let mut output = vec![0; slots.len()];
+        let mut decode_indices = Vec::new();
+        let mut decode_params = Vec::new();
+        for (idx, slot) in slots.iter_mut().enumerate() {
+            match slot {
+                DecodeSlot::Real {
+                    state,
+                    first_token_pending,
+                    ..
+                } if *first_token_pending => {
+                    output[idx] = state.next_token;
+                    *first_token_pending = false;
+                }
+                DecodeSlot::Real { .. } => {
+                    decode_indices.push(idx);
+                    decode_params.push(sampling[idx].clone());
+                }
+                DecodeSlot::Mock { .. } => anyhow::bail!("mock slot sent to real decode forward"),
+            }
+        }
+
+        if !decode_indices.is_empty() {
+            let _gpu_guard = self.gpu_lock.read().unwrap();
+            let mut row_refs: Vec<&mut PagedBatchedDecodeState> =
+                Vec::with_capacity(decode_indices.len());
+            for slot in slots.iter_mut() {
+                if let DecodeSlot::Real {
+                    state,
+                    first_token_pending: false,
+                    ..
+                } = &mut **slot
+                {
+                    row_refs.push(state);
+                }
+            }
+            let next_tokens = self.runner.read().unwrap().paged_batched_decode_step(
+                &mut row_refs,
+                &decode_params,
+                self.paged_cache.as_ref(),
+            )?;
+            for (idx, token) in decode_indices.into_iter().zip(next_tokens) {
+                output[idx] = token;
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn is_eos_token(&self, token: TokenId) -> Result<bool> {
+        Ok(self.runner.read().unwrap().is_eos_token(token))
+    }
+
+    fn stop_reason_after_emit(
+        &self,
+        generated_tokens: &[TokenId],
+        sampling: &SamplingParams,
+    ) -> Result<Option<FinishReason>> {
+        if let Some(stop) = self
+            .runner
+            .read()
+            .unwrap()
+            .stop_sequence_match(generated_tokens, sampling)?
+        {
+            return Ok(Some(FinishReason::StopSequence(stop)));
+        }
+        if generated_tokens.len() >= sampling.max_tokens {
+            Ok(Some(FinishReason::MaxTokens))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+        let DecodeSlot::Real { state, .. } = slot else {
+            anyhow::bail!("mock slot sent to real accept_token");
+        };
+        state.generated_tokens.push(token);
+        state.next_token = token;
+        if let Some(seed) = state.step_seed.as_mut() {
+            *seed = seed.wrapping_add(1);
+        }
+        Ok(state.generated_tokens.len())
+    }
+
+    fn finish_request(
+        &self,
+        slot: DecodeSlot,
+        finish_reason: FinishReason,
+    ) -> Result<GenerationOutput> {
+        let DecodeSlot::Real {
+            state,
+            hit_entry_id,
+            adapter,
+            ..
+        } = slot
+        else {
+            anyhow::bail!("mock slot sent to real finish_request");
+        };
+        self.release_hit(hit_entry_id);
+        let mut output = self
+            .runner
+            .read()
+            .unwrap()
+            .finish_paged_batched_decode(state, finish_reason)?;
+        self.free_uncached_blocks(&mut output, adapter);
+        Ok(output.output)
+    }
+
+    fn discard_request(&self, slot: DecodeSlot) {
+        if let DecodeSlot::Real {
+            state,
+            hit_entry_id,
+            adapter,
+            ..
+        } = slot
+        {
+            self.release_hit(hit_entry_id);
+            let mut output = kiln_model::PrefixCachedGenerationOutput {
+                output: GenerationOutput {
+                    text: String::new(),
+                    token_ids: state.generated_tokens,
+                    finish_reason: FinishReason::MaxTokens,
+                },
+                registration: None,
+                allocated_blocks: state.allocated_blocks,
+                prefill_duration: state.prefill_duration,
+                decode_duration: state.decode_duration,
+            };
+            self.free_uncached_blocks(&mut output, adapter);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -148,8 +460,7 @@ struct QueuedRequest {
 struct ActiveRequest {
     req: EngineRequest,
     response_tx: mpsc::Sender<EngineEvent>,
-    next_token: TokenId,
-    generated_tokens: usize,
+    slot: DecodeSlot,
 }
 
 struct BatchingEngineActor {
@@ -228,13 +539,7 @@ impl BatchingEngineActor {
             EngineCommand::Drain { reply } => {
                 self.accepting = false;
                 self.refresh_snapshot();
-                if self.waiting.is_empty() && self.active.is_empty() {
-                    let _ = reply.send(());
-                } else {
-                    // Phase 1 scaffold: drain means stop accepting. A later patch
-                    // keeps drain waiters and acks them once in-flight work clears.
-                    let _ = reply.send(());
-                }
+                let _ = reply.send(());
             }
             EngineCommand::Stop { reply } => {
                 self.accepting = false;
@@ -253,21 +558,27 @@ impl BatchingEngineActor {
         self.waiting.retain(|queued| {
             let keep = queued.req.request_id != request_id;
             if !keep {
+                queued.req.cancel.cancel();
                 let _ = queued
                     .response_tx
                     .blocking_send(EngineEvent::Error("request cancelled".to_string()));
             }
             keep
         });
-        self.active.retain(|active| {
-            let keep = active.req.request_id != request_id;
-            if !keep {
+
+        let mut idx = 0;
+        while idx < self.active.len() {
+            if self.active[idx].req.request_id == request_id {
+                let active = self.active.remove(idx);
+                active.req.cancel.cancel();
+                self.forward.discard_request(active.slot);
                 let _ = active
                     .response_tx
                     .blocking_send(EngineEvent::Error("request cancelled".to_string()));
+            } else {
+                idx += 1;
             }
-            keep
-        });
+        }
     }
 
     fn admit_waiting(&mut self) {
@@ -275,29 +586,45 @@ impl BatchingEngineActor {
             let Some(queued) = self.waiting.pop_front() else {
                 break;
             };
-            let next_token = queued.req.prompt_tokens.last().copied().unwrap_or_default();
-            self.snapshot.total_prefill_tokens += queued.req.prompt_tokens.len() as u64;
-            self.active.push(ActiveRequest {
-                req: queued.req,
-                response_tx: queued.response_tx,
-                next_token,
-                generated_tokens: 0,
-            });
+            let started = Instant::now();
+            match self.forward.prepare_request(&queued.req) {
+                Ok(slot) => {
+                    self.snapshot.last_prefill_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    self.snapshot.total_prefill_tokens += queued.req.prompt_tokens.len() as u64;
+                    self.active.push(ActiveRequest {
+                        req: queued.req,
+                        response_tx: queued.response_tx,
+                        slot,
+                    });
+                }
+                Err(err) => {
+                    self.snapshot.total_errors += 1;
+                    let _ = queued
+                        .response_tx
+                        .blocking_send(EngineEvent::Error(err.to_string()));
+                }
+            }
         }
     }
 
     fn run_decode_batch(&mut self) {
         let batch_len = self.active.len().min(self.max_decode_batch);
-        let input_tokens: Vec<TokenId> = self
+        let sampling: Vec<SamplingParams> = self
             .active
             .iter()
             .take(batch_len)
-            .map(|active| active.next_token)
+            .map(|active| active.req.sampling.clone())
+            .collect();
+        let mut slots: Vec<&mut DecodeSlot> = self
+            .active
+            .iter_mut()
+            .take(batch_len)
+            .map(|active| &mut active.slot)
             .collect();
 
         self.snapshot.current_batch_size = batch_len;
         let started = Instant::now();
-        let result = self.forward.forward_decode(&input_tokens);
+        let result = self.forward.forward_decode(&mut slots, &sampling);
         self.snapshot.last_forward_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.snapshot.last_batch_size = batch_len;
         self.snapshot.current_batch_size = 0;
@@ -324,43 +651,125 @@ impl BatchingEngineActor {
             }
         };
 
-        for (active, token) in self.active.iter_mut().take(batch_len).zip(output_tokens) {
-            active.generated_tokens += 1;
-            active.next_token = token;
-            if active.response_tx.blocking_send(EngineEvent::Token(token)).is_err() {
-                active.generated_tokens = active.req.sampling.max_tokens;
+        for idx in (0..batch_len).rev() {
+            if idx >= self.active.len() {
+                continue;
             }
-            self.snapshot.total_decode_tokens += 1;
-        }
+            let token = output_tokens[idx];
+            match self.forward.is_eos_token(token) {
+                Ok(true) => {
+                    self.finish_active(idx, FinishReason::Eos);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    self.finish_one_with_error(idx, err.to_string());
+                    continue;
+                }
+            }
 
-        let mut idx = 0;
-        while idx < self.active.len() {
-            if self.active[idx].generated_tokens >= self.active[idx].req.sampling.max_tokens {
-                let active = self.active.remove(idx);
-                let _ = active.response_tx.blocking_send(EngineEvent::Done {
-                    completion_tokens: active.generated_tokens,
-                });
-            } else {
-                idx += 1;
+            let generated_count = match self.forward.accept_token(&mut self.active[idx].slot, token)
+            {
+                Ok(count) => count,
+                Err(err) => {
+                    self.finish_one_with_error(idx, err.to_string());
+                    continue;
+                }
+            };
+            self.snapshot.total_decode_tokens += 1;
+
+            if self.active[idx]
+                .response_tx
+                .blocking_send(EngineEvent::Token(token))
+                .is_err()
+            {
+                self.forward.discard_request(self.active.remove(idx).slot);
+                continue;
+            }
+
+            let generated_tokens = self.generated_tokens_for(idx).to_vec();
+            let sampling = self.active[idx].req.sampling.clone();
+            match self
+                .forward
+                .stop_reason_after_emit(&generated_tokens, &sampling)
+            {
+                Ok(Some(reason)) => {
+                    self.finish_active(idx, reason);
+                    continue;
+                }
+                Ok(None) if generated_count >= sampling.max_tokens => {
+                    self.finish_active(idx, FinishReason::MaxTokens);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    self.finish_one_with_error(idx, err.to_string());
+                    continue;
+                }
             }
         }
         self.refresh_snapshot();
     }
 
+    fn generated_tokens_for(&self, idx: usize) -> &[TokenId] {
+        match &self.active[idx].slot {
+            DecodeSlot::Mock {
+                generated_tokens, ..
+            } => generated_tokens,
+            DecodeSlot::Real { state, .. } => &state.generated_tokens,
+        }
+    }
+
+    fn finish_active(&mut self, idx: usize, finish_reason: FinishReason) {
+        let active = self.active.remove(idx);
+        match self.forward.finish_request(active.slot, finish_reason) {
+            Ok(output) => {
+                let completion_tokens = output.token_ids.len();
+                let _ = active.response_tx.blocking_send(EngineEvent::Done {
+                    output: BatchedGenerationOutput {
+                        text: output.text,
+                        token_ids: output.token_ids,
+                        finish_reason: output.finish_reason,
+                        completion_tokens,
+                    },
+                });
+            }
+            Err(err) => {
+                self.snapshot.total_errors += 1;
+                let _ = active
+                    .response_tx
+                    .blocking_send(EngineEvent::Error(err.to_string()));
+            }
+        }
+    }
+
+    fn finish_one_with_error(&mut self, idx: usize, error: String) {
+        self.snapshot.total_errors += 1;
+        let active = self.active.remove(idx);
+        self.forward.discard_request(active.slot);
+        let _ = active.response_tx.blocking_send(EngineEvent::Error(error));
+    }
+
     fn finish_batch_with_error(&mut self, batch_len: usize, error: String) {
         for _ in 0..batch_len.min(self.active.len()) {
             let active = self.active.remove(0);
-            let _ = active.response_tx.blocking_send(EngineEvent::Error(error.clone()));
+            self.forward.discard_request(active.slot);
+            let _ = active
+                .response_tx
+                .blocking_send(EngineEvent::Error(error.clone()));
         }
     }
 
     fn fail_all(&mut self, error: &str) {
         while let Some(queued) = self.waiting.pop_front() {
+            queued.req.cancel.cancel();
             let _ = queued
                 .response_tx
                 .blocking_send(EngineEvent::Error(error.to_string()));
         }
         for active in self.active.drain(..) {
+            active.req.cancel.cancel();
+            self.forward.discard_request(active.slot);
             let _ = active
                 .response_tx
                 .blocking_send(EngineEvent::Error(error.to_string()));
@@ -378,17 +787,66 @@ impl BatchingEngineActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
     struct MockForward {
-        calls: Mutex<Vec<Vec<TokenId>>>,
+        calls: StdMutex<Vec<Vec<TokenId>>>,
     }
 
     impl DecodeForward for MockForward {
-        fn forward_decode(&self, input_tokens: &[TokenId]) -> Result<Vec<TokenId>> {
-            self.calls.lock().unwrap().push(input_tokens.to_vec());
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            Ok(DecodeSlot::Mock {
+                next_token: req.prompt_tokens.last().copied().unwrap_or_default(),
+                generated_tokens: Vec::new(),
+            })
+        }
+
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            _sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            let input_tokens: Vec<TokenId> = slots
+                .iter()
+                .map(|slot| match slot {
+                    DecodeSlot::Mock { next_token, .. } => *next_token,
+                    DecodeSlot::Real { .. } => unreachable!(),
+                })
+                .collect();
+            self.calls.lock().unwrap().push(input_tokens.clone());
             Ok(input_tokens.iter().map(|token| token + 10).collect())
+        }
+
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            let DecodeSlot::Mock {
+                next_token,
+                generated_tokens,
+            } = slot
+            else {
+                unreachable!();
+            };
+            generated_tokens.push(token);
+            *next_token = token;
+            Ok(generated_tokens.len())
+        }
+
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<GenerationOutput> {
+            let DecodeSlot::Mock {
+                generated_tokens, ..
+            } = slot
+            else {
+                unreachable!();
+            };
+            Ok(GenerationOutput {
+                text: String::new(),
+                token_ids: generated_tokens,
+                finish_reason,
+            })
         }
     }
 
@@ -400,6 +858,8 @@ mod tests {
                 max_tokens,
                 ..SamplingParams::default()
             },
+            adapter: None,
+            cancel: CancelHandle::new(),
         }
     }
 
@@ -412,9 +872,27 @@ mod tests {
         let mut rx2 = handle.enqueue(request(202, 1)).await.unwrap();
 
         assert_eq!(rx1.recv().await, Some(EngineEvent::Token(111)));
-        assert_eq!(rx1.recv().await, Some(EngineEvent::Done { completion_tokens: 1 }));
+        assert!(matches!(
+            rx1.recv().await,
+            Some(EngineEvent::Done {
+                output: BatchedGenerationOutput {
+                    completion_tokens: 1,
+                    token_ids,
+                    ..
+                }
+            }) if token_ids == vec![111]
+        ));
         assert_eq!(rx2.recv().await, Some(EngineEvent::Token(212)));
-        assert_eq!(rx2.recv().await, Some(EngineEvent::Done { completion_tokens: 1 }));
+        assert!(matches!(
+            rx2.recv().await,
+            Some(EngineEvent::Done {
+                output: BatchedGenerationOutput {
+                    completion_tokens: 1,
+                    token_ids,
+                    ..
+                }
+            }) if token_ids == vec![212]
+        ));
 
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![101, 202]]);
@@ -430,7 +908,17 @@ mod tests {
 
         assert_eq!(rx.recv().await, Some(EngineEvent::Token(17)));
         assert_eq!(rx.recv().await, Some(EngineEvent::Token(27)));
-        assert_eq!(rx.recv().await, Some(EngineEvent::Done { completion_tokens: 2 }));
+        assert!(matches!(
+            rx.recv().await,
+            Some(EngineEvent::Done {
+                output: BatchedGenerationOutput {
+                    completion_tokens: 2,
+                    token_ids,
+                    finish_reason: FinishReason::MaxTokens,
+                    ..
+                }
+            }) if token_ids == vec![17, 27]
+        ));
 
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![7], vec![17]]);
