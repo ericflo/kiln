@@ -592,3 +592,11 @@
   424.6 ms / 172.7 ms / 5.79 tok/s. The candidate was reverted before commit;
   future GDN `in_proj` work needs a projection algorithm or weight-layout
   change, not just fusing around the existing column-strided projection.
+- 2026-05-03 E258-E261: Rejected an opt-in Metal residual-add + RMSNorm decode
+  fusion. The candidate passed focused Metal parity under a loose BF16
+  tolerance and release `kiln-bench` built, but two p64/o64 warmed A/B pairs
+  were not robust: E258 opt-in was 167.2 ms mean ITL versus E259 default
+  168.8 ms, while repeat E260 opt-in lost at 171.0 ms versus E261 default
+  169.5 ms. The candidate was reverted before commit; future residual/norm
+  work needs a larger fused boundary or tighter arithmetic, not this small
+  post-attention fusion.

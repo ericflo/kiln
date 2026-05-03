@@ -7648,3 +7648,63 @@ for z/a/b, so the saved BF16 intermediate traffic does not offset scheduling
 and occupancy costs. Future GDN `in_proj` work should target the projection
 algorithm or weight layout itself, not just fuse the consumer around the
 existing column-strided projection.
+
+## Experiments E258-E261: Rejected Residual-Add + RMSNorm Decode Fusion
+
+Hypothesis:
+
+The fastest-inference target is not limited to GDN cache or projection work.
+Decode also pays repeated tiny launch and memory-pass costs around every
+transformer block residual. A bounded low-level candidate fused the
+post-attention residual add with the immediately following RMSNorm for decode,
+returning both the BF16 residual stream and the normalized FFN input from one
+Metal kernel.
+
+Temporary change:
+
+- Added an opt-in `KILN_ENABLE_METAL_RESIDUAL_RMSNORM=1` Metal kernel.
+- Routed post-attention residual+pre-MLP RMSNorm through it for supported
+  BF16 Metal decode shapes.
+- Reverted the candidate before commit after the second A/B pair failed.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_metal_residual_rms_norm_matches_split_reference --lib`
+  - Passed with BF16 tolerance (`max_abs_diff=1.5625e-2`,
+    `mean_abs_diff=1.0788e-3`) versus split Metal residual + RMSNorm.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Full-model warmed p64/o64:
+
+All runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E258 | opt-in residual+RMSNorm fusion | 444.3 ms | 5.98 | 167.2 ms | 165.1 ms | 197.7 ms | noisy |
+| E259 | same-session default control | 469.1 ms | 5.92 | 168.8 ms | 165.1 ms | 221.4 ms | control |
+| E260 | opt-in residual+RMSNorm fusion, repeat | 451.4 ms | 5.85 | 171.0 ms | 167.3 ms | 221.3 ms | rejected |
+| E261 | same-session default control, repeat | 420.3 ms | 5.90 | 169.5 ms | 168.1 ms | 186.1 ms | control |
+
+Memory-pressure check after E259:
+
+- `memory_pressure` reported 502,952 free pages out of 1,048,576 total
+  (~48% free), so the repeat pair was required before drawing a verdict.
+
+Artifacts:
+
+- `e258_m1_bs1_p64_o64_warmed_residual_rmsnorm_opt_in.log`
+- `e259_m1_bs1_p64_o64_warmed_default_control_after_residual_rmsnorm.log`
+- `e260_m1_bs1_p64_o64_warmed_residual_rmsnorm_opt_in_2.log`
+- `e261_m1_bs1_p64_o64_warmed_default_control_after_residual_rmsnorm_2.log`
+
+Takeaway:
+
+Residual+RMSNorm fusion is a real low-level path, but this implementation is
+not a keeper. The first pair showed only a ~1% decode win, the repeat pair lost
+to default, and the fused norm needed looser BF16 tolerance than the existing
+standalone Metal RMSNorm. Future normalization/residual work should either
+fuse a larger block boundary, such as FFN residual into the next layer's
+pre-attention RMSNorm, or improve the existing Metal RMSNorm arithmetic without
+adding numerical drift.
