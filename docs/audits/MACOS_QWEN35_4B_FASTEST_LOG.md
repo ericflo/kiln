@@ -7764,3 +7764,60 @@ destroys prefill, while decode regresses far beyond noise. Future GDN
 projection work should avoid extra resident copies and should change the
 projection algorithm or packing format in a way that improves the actual
 reduction, not merely concatenate the current row-major transposes.
+
+## Experiments E263-E264: Rejected MLP Down-Projection + Residual Fusion
+
+Hypothesis:
+
+The fastest-inference target still needs low-level launch and memory-pass
+reductions outside cache reuse. Each decode layer runs the MLP down projection
+and then a separate residual add. A Metal cooperative GEMV variant that writes
+`residual + down_proj(hidden)` directly could remove one tiny launch and one
+extra output read per layer.
+
+Temporary change:
+
+- Added a `kiln_transposed_coop_gemv8_add_bf16` Metal kernel.
+- Routed supported single-token Metal MLP down projections through it.
+- Kept debug/tap paths on the split projection + residual path.
+- Reverted the candidate before commit after the same-binary A/B showed no
+  measured decode improvement.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_add_matches_split_reference --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed with the candidate applied.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+The control used `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ADD=1` in the same
+binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E263 | MLP down-projection + residual fused | 507.9 ms | 5.07 | 197.3 ms | 194.9 ms | 232.5 ms | rejected |
+| E264 | same-binary disabled control | 470.7 ms | 5.06 | 197.5 ms | 195.6 ms | 225.0 ms | control |
+
+Memory-pressure check after E264:
+
+- `memory_pressure` reported 78% system-wide free memory, so the lack of
+  candidate win is not attributed to memory pressure.
+
+Artifacts:
+
+- `e263_m1_bs1_p64_o64_warmed_mlp_down_residual_fused.log`
+- `e264_m1_bs1_p64_o64_warmed_mlp_down_residual_disabled_control.log`
+
+Takeaway:
+
+This fusion removed a conceptual launch boundary, but full decode did not
+improve against the same-binary disabled control. The candidate also did not
+address the current largest measured stage, GDN `in_proj`, so it was reverted.
+Keep focusing kernel work on actual projection math and packing rather than
+small residual-boundary fusions unless a broader fused boundary can be proven.

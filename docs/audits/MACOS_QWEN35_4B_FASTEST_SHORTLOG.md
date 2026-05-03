@@ -607,3 +607,12 @@
   reported ~58% free pages after the run, so this is a real rejection; future
   GDN projection work must avoid extra resident copies and improve the
   reduction/packing algorithm itself.
+- 2026-05-03 E263-E264: Rejected an MLP down-projection + residual Metal
+  fusion. The candidate wrote `residual + down_proj(hidden)` directly from a
+  cooperative GEMV kernel and passed focused split-reference parity, but the
+  full warmed p64/o64 same-binary A/B showed no decode improvement: fused was
+  507.9 ms prefill / 197.3 ms mean ITL / 5.07 tok/s, while the disabled control
+  was 470.7 ms / 197.5 ms / 5.06 tok/s. The candidate was reverted and the
+  clean-source release `kiln-bench` rebuild passed; future low-level work
+  should keep targeting GDN projection math/packing instead of small residual
+  boundaries.
