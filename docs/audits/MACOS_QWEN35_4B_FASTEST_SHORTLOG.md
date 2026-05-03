@@ -569,3 +569,10 @@
   414.9 ms / 166.9 ms / 5.99 tok/s control. The candidate was reverted before
   commit; more view-sharing around existing launches is not the right low-level
   direction for this path.
+- 2026-05-03 E254: Rejected routing LM-head logits through the generic
+  cooperative transposed GEMV kernel. The candidate passed focused Metal
+  LM-head parity and release `kiln-bench` built, but warmed p64/o64 regressed
+  to 617.7 ms prefill / 295.0 ms mean ITL / 3.39 tok/s versus E251's
+  414.9 ms / 166.9 ms / 5.99 tok/s control. `memory_pressure` showed 74% free
+  memory after the run, so this is treated as a real rejection; the scalar
+  LM-head materialization remains the faster default.

@@ -7468,3 +7468,55 @@ small local kernel/wrapper cleanups can disturb Metal scheduling enough to
 lose, and the next low-level work should focus on reducing materialized
 intermediate tensors or changing projection layout rather than adding more
 view-sharing around existing launches.
+
+## Experiment E254: Rejected Cooperative GEMV LM-Head Route
+
+Hypothesis:
+
+The default Metal LM-head materialization uses `kiln_lm_head_bf16`, a scalar
+one-thread-per-vocab-column kernel. The existing cooperative transposed GEMV
+kernel already supports `[1,1,H] x [H,V]`, so routing LM-head logits through it
+might reduce the per-token projection cost without changing the logits API.
+
+Temporary change:
+
+- Tried `metal_transposed_coop_gemv_bf16` before `metal_lm_head_bf16` in
+  `lm_head_forward`.
+- Extended the focused Metal LM-head parity test while the candidate was
+  applied to compare cooperative GEMV logits against broadcast matmul.
+- Reverted the candidate before commit after full-model measurement.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_lm_head_matches_broadcast_matmul --lib`
+  - Passed with both scalar and cooperative LM-head logits under the existing
+    tolerance.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed.
+
+Full-model warmed p64/o64:
+
+Run used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E251 | baseline scalar/control | 414.9 ms | 5.99 | 166.9 ms | 165.5 ms | 179.4 ms | control |
+| E254 | cooperative GEMV LM-head route | 617.7 ms | 3.39 | 295.0 ms | 293.4 ms | 326.0 ms | rejected and reverted |
+
+Memory-pressure check after E254:
+
+- `memory_pressure` reported 74% system-wide free memory.
+- `vm_stat` showed 481k free 16 KiB pages.
+
+Artifact:
+
+- `e254_m1_bs1_p64_o64_warmed_lm_head_coop_gemv.log`
+
+Takeaway:
+
+The cooperative projection kernel is not automatically a better fit for the
+huge-vocab LM head. The scalar LM-head materialization remains the faster
+default on this macOS Qwen3.5-4B path. Future LM-head work should use a kernel
+designed specifically for fused projection plus top-k/argmax or a measured
+row-blocked vocab strategy, not the generic cooperative GEMV projection.
