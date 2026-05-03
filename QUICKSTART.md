@@ -522,15 +522,31 @@ Payload (`Content-Type: application/json`):
 ## CLI Reference
 
 ```
-kiln serve              Start the inference server (default)
-kiln health             Check server health
-kiln config             Validate a config file
-kiln train sft          Submit SFT training examples
-kiln train grpo         Submit GRPO training batch
-kiln adapters list      List loaded adapters
-kiln adapters load      Load an adapter from disk
-kiln adapters unload    Unload an active adapter
-kiln adapters delete    Delete an adapter
+kiln serve --served-model-id <id>
+    Start the inference server explicitly; omit --served-model-id to use config/env defaults.
+
+kiln health
+kiln health --json
+    Check the running server. Client commands use http://localhost:8420 by default; pass --url to target another server.
+
+kiln config --file kiln.toml
+kiln config -f kiln.toml
+    Validate a TOML config file without starting the server.
+
+kiln train sft --file corrections.jsonl --adapter support-bot
+    Submit JSONL SFT correction examples to the running server.
+
+kiln train grpo --file grpo-batch.json --adapter support-bot
+    Submit one JSON GRPO request/batch to the running server.
+
+kiln train status --job-id train_123
+    Check a specific training job; omit --job-id to show the queue.
+
+kiln adapters list
+kiln adapters load support-bot
+kiln adapters unload
+kiln adapters delete support-bot
+    List, load, unload the active adapter, or delete a saved adapter on the running server.
 
 Global options:
   --config, -c <file>   Path to TOML config file
