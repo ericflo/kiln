@@ -31,6 +31,24 @@ body {
   min-height: 100vh;
 }
 a { color: var(--accent); text-decoration: none; }
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: 0;
+  transform: translateY(-120%);
+  z-index: 50;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 0 0 8px 8px;
+  padding: 10px 14px;
+  font-weight: 700;
+  transition: transform 0.15s ease;
+}
+.skip-link:focus {
+  transform: translateY(0);
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
 
 /* Layout */
 .header {
@@ -625,6 +643,7 @@ textarea { resize: vertical; min-height: 80px; }
 </style>
 </head>
 <body>
+<a class="skip-link" href="#content">Skip to content</a>
 
 <div class="header">
   <h1>kiln</h1>
@@ -639,7 +658,7 @@ textarea { resize: vertical; min-height: 80px; }
   </div>
 </div>
 
-<div class="main">
+<main id="content" tabindex="-1" class="main">
   <!-- Server Status -->
   <div class="panel">
     <div class="panel-head"><h2>Server Status</h2></div>
@@ -833,7 +852,7 @@ textarea { resize: vertical; min-height: 80px; }
       </div>
     </div>
   </div>
-</div>
+</main>
 
 <div class="toast-container" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
 
