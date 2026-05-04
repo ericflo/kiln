@@ -11,7 +11,8 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    LinearAttentionState, ModelRunner, PagedKvCache, PagedPrefixNextToken, PagedPrefixRegistration,
+    DecodeBatcher, DecodeBatcherConfig, LinearAttentionState, ModelRunner, PagedKvCache,
+    PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_train::TrainingState;
@@ -1114,6 +1115,7 @@ pub enum ModelBackend {
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
         paged_cache: Arc<std::sync::Mutex<PagedKvCache>>,
         prefix_cache: Arc<std::sync::Mutex<RealPrefixCache>>,
+        decode_batcher: Option<Arc<DecodeBatcher>>,
     },
 }
 
@@ -1584,13 +1586,40 @@ impl AppState {
             REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
         );
 
+        let runner = Arc::new(std::sync::RwLock::new(runner));
+        let block_manager = Arc::new(std::sync::Mutex::new(block_manager));
+        let paged_cache = Arc::new(std::sync::Mutex::new(paged_cache));
+        let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
+        let decode_batcher = if DecodeBatcherConfig::enabled_for_device(&device) {
+            let config = DecodeBatcherConfig::from_env();
+            tracing::info!(
+                max_batch = config.max_batch,
+                wait_us = config.wait.as_micros() as u64,
+                "live greedy decode batcher enabled"
+            );
+            match DecodeBatcher::spawn(runner.clone(), paged_cache.clone(), config) {
+                Ok(batcher) => Some(batcher),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to spawn live decode batcher; continuing with rowwise decode"
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::info!("live greedy decode batcher disabled");
+            None
+        };
+
         Self {
             model_config,
             backend: Arc::new(ModelBackend::Real {
-                runner: Arc::new(std::sync::RwLock::new(runner)),
-                block_manager: Arc::new(std::sync::Mutex::new(block_manager)),
-                paged_cache: Arc::new(std::sync::Mutex::new(paged_cache)),
-                prefix_cache: Arc::new(std::sync::Mutex::new(prefix_cache)),
+                runner,
+                block_manager,
+                paged_cache,
+                prefix_cache,
+                decode_batcher,
             }),
             tokenizer: Arc::new(tokenizer),
             adapter_dir,

@@ -1100,3 +1100,14 @@
   decode geometry matched two-row batched greedy tokens against rowwise
   `model_forward_paged` logits plus `greedy_sample`. This is not live request
   batching yet; it gives the eventual scheduler one call to execute.
+- 2026-05-04 E345: Accepted the first live greedy streaming decode batcher.
+  `kiln-server` now creates a shared Metal-only `DecodeBatcher` (default
+  enabled on Metal, disabled elsewhere) and passes it into non-speculative
+  streaming decode, including prefix-cache paths. Greedy Metal decode steps
+  submit one-token jobs carrying their `BlockTable`, position, and one-row GDN
+  state; the worker groups same-position jobs up to `KILN_DECODE_BATCH_MAX`
+  and optionally waits `KILN_DECODE_BATCH_WAIT_US` for peers (default zero for
+  bs=1 latency). A Metal test drove two same-position jobs through the live
+  worker, observed `max_observed_batch == 2`, and matched rowwise greedy
+  tokens. This moves true batching into the serving path, though real
+  throughput/ITL still needs concurrent SSE measurement and wait-window tuning.

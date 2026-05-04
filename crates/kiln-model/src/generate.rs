@@ -4,9 +4,14 @@
 //! a `ModelRunner` that accepts text prompts and produces text output.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Tensor};
+use candle_core::{DType, Device, Tensor};
+use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -194,6 +199,353 @@ enum StreamTokenDisposition {
     Continue,
     Finished(FinishReason),
     ReceiverDropped,
+}
+
+/// Configuration for the live greedy decode rendezvous worker.
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeBatcherConfig {
+    /// Maximum compatible rows to execute in one decode forward pass.
+    pub max_batch: usize,
+    /// Optional admission delay for collecting peers. The default is zero to
+    /// preserve single-request latency; set `KILN_DECODE_BATCH_WAIT_US` when
+    /// measuring throughput under concurrent load.
+    pub wait: std::time::Duration,
+}
+
+impl Default for DecodeBatcherConfig {
+    fn default() -> Self {
+        Self {
+            max_batch: 8,
+            wait: std::time::Duration::ZERO,
+        }
+    }
+}
+
+impl DecodeBatcherConfig {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if let Ok(value) = std::env::var("KILN_DECODE_BATCH_MAX")
+            && let Ok(parsed) = value.parse::<usize>()
+        {
+            config.max_batch = parsed.max(1);
+        }
+        if let Ok(value) = std::env::var("KILN_DECODE_BATCH_WAIT_US")
+            && let Ok(parsed) = value.parse::<u64>()
+        {
+            config.wait = std::time::Duration::from_micros(parsed);
+        }
+        config
+    }
+
+    pub fn enabled_for_device(device: &Device) -> bool {
+        if !matches!(device, Device::Metal(_)) {
+            return false;
+        }
+        env_flag_enabled("KILN_DECODE_BATCHER", true)
+    }
+}
+
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    let Ok(value) = std::env::var(name) else {
+        return default;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "no" => false,
+        "1" | "true" | "on" | "yes" => true,
+        _ => default,
+    }
+}
+
+/// Shared live decode rendezvous for greedy streaming requests.
+///
+/// Requests keep ownership of stop handling, output routing, block lifetime,
+/// and one-row GDN state. At each eligible decode step they temporarily hand a
+/// single-token job to this worker; the worker groups same-position jobs and
+/// calls `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy`.
+pub struct DecodeBatcher {
+    sender: mpsc::Sender<DecodeBatchJob>,
+    observed_max_batch: Arc<AtomicUsize>,
+}
+
+struct DecodeBatchJob {
+    input_token: TokenId,
+    seq_len: usize,
+    block_table: BlockTable,
+    linear_state: LinearAttentionState,
+    response: mpsc::Sender<DecodeBatchReply>,
+}
+
+enum DecodeBatchReply {
+    Decoded {
+        token: TokenId,
+        linear_state: LinearAttentionState,
+    },
+    RunnerBusy {
+        linear_state: LinearAttentionState,
+    },
+    Failed {
+        error: String,
+        linear_state: LinearAttentionState,
+    },
+}
+
+enum DecodeBatcherDecode {
+    Decoded(TokenId),
+    RunnerBusy,
+}
+
+impl DecodeBatcher {
+    pub fn spawn(
+        runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
+        paged_cache: Arc<Mutex<PagedKvCache>>,
+        config: DecodeBatcherConfig,
+    ) -> Result<Arc<Self>> {
+        let (sender, receiver) = mpsc::channel();
+        let observed_max_batch = Arc::new(AtomicUsize::new(0));
+        let observed_for_worker = observed_max_batch.clone();
+        std::thread::Builder::new()
+            .name("kiln-decode-batcher".to_string())
+            .spawn(move || {
+                run_decode_batcher_worker(
+                    runner_lock,
+                    paged_cache,
+                    receiver,
+                    config,
+                    observed_for_worker,
+                );
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn decode batcher worker: {e}"))?;
+
+        Ok(Arc::new(Self {
+            sender,
+            observed_max_batch,
+        }))
+    }
+
+    pub fn max_observed_batch(&self) -> usize {
+        self.observed_max_batch.load(Ordering::Relaxed)
+    }
+
+    fn decode_next_token_greedy(
+        &self,
+        input_token: TokenId,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<DecodeBatcherDecode> {
+        let (response_tx, response_rx) = mpsc::channel();
+        let owned_state = take_linear_attention_state(linear_state);
+        let job = DecodeBatchJob {
+            input_token,
+            seq_len,
+            block_table: block_table.clone(),
+            linear_state: owned_state,
+            response: response_tx,
+        };
+        if let Err(err) = self.sender.send(job) {
+            *linear_state = err.0.linear_state;
+            anyhow::bail!("decode batcher worker is not running");
+        }
+
+        match response_rx.recv() {
+            Ok(DecodeBatchReply::Decoded {
+                token,
+                linear_state: returned_state,
+            }) => {
+                *linear_state = returned_state;
+                Ok(DecodeBatcherDecode::Decoded(token))
+            }
+            Ok(DecodeBatchReply::RunnerBusy {
+                linear_state: returned_state,
+            }) => {
+                *linear_state = returned_state;
+                Ok(DecodeBatcherDecode::RunnerBusy)
+            }
+            Ok(DecodeBatchReply::Failed {
+                error,
+                linear_state: returned_state,
+            }) => {
+                *linear_state = returned_state;
+                anyhow::bail!("{error}");
+            }
+            Err(err) => anyhow::bail!("decode batcher worker disconnected before reply: {err}"),
+        }
+    }
+}
+
+fn take_linear_attention_state(state: &mut LinearAttentionState) -> LinearAttentionState {
+    std::mem::replace(
+        state,
+        LinearAttentionState {
+            recurrent_states: Vec::new(),
+            conv_states: Vec::new(),
+        },
+    )
+}
+
+fn run_decode_batcher_worker(
+    runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
+    paged_cache: Arc<Mutex<PagedKvCache>>,
+    receiver: mpsc::Receiver<DecodeBatchJob>,
+    config: DecodeBatcherConfig,
+    observed_max_batch: Arc<AtomicUsize>,
+) {
+    let max_batch = config.max_batch.max(1);
+    let mut deferred = VecDeque::new();
+    let mut disconnected = false;
+
+    while !disconnected || !deferred.is_empty() {
+        let Some(first) = deferred.pop_front().or_else(|| receiver.recv().ok()) else {
+            break;
+        };
+        let seq_len = first.seq_len;
+        let mut jobs = vec![first];
+
+        while jobs.len() < max_batch {
+            match receiver.try_recv() {
+                Ok(job) if job.seq_len == seq_len => jobs.push(job),
+                Ok(job) => deferred.push_back(job),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if config.wait > std::time::Duration::ZERO && jobs.len() < max_batch && !disconnected {
+            let deadline = std::time::Instant::now() + config.wait;
+            while jobs.len() < max_batch {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
+                    Ok(job) if job.seq_len == seq_len => jobs.push(job),
+                    Ok(job) => deferred.push_back(job),
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        observed_max_batch.fetch_max(jobs.len(), Ordering::Relaxed);
+        process_decode_batch_jobs(&runner_lock, paged_cache.as_ref(), jobs);
+    }
+}
+
+fn process_decode_batch_jobs(
+    runner_lock: &std::sync::RwLock<ModelRunner>,
+    paged_cache: &Mutex<PagedKvCache>,
+    mut jobs: Vec<DecodeBatchJob>,
+) {
+    let runner_guard = match runner_lock.try_read() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            for job in jobs {
+                let _ = job.response.send(DecodeBatchReply::RunnerBusy {
+                    linear_state: job.linear_state,
+                });
+            }
+            return;
+        }
+        Err(std::sync::TryLockError::Poisoned(err)) => {
+            let message = format!("failed to acquire runner read lock in decode batcher: {err}");
+            for job in jobs {
+                let _ = job.response.send(DecodeBatchReply::Failed {
+                    error: message.clone(),
+                    linear_state: job.linear_state,
+                });
+            }
+            return;
+        }
+    };
+
+    let tokens = match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs) {
+        Ok(tokens) => Ok(tokens),
+        Err(err) if jobs.len() > 1 => {
+            tracing::debug!(
+                batch = jobs.len(),
+                error = %err,
+                "batched greedy decode failed; falling back to rowwise decode jobs"
+            );
+            let mut tokens = Vec::with_capacity(jobs.len());
+            let mut fallback_error = None;
+            for idx in 0..jobs.len() {
+                match decode_batch_jobs_with_runner(
+                    &runner_guard,
+                    paged_cache,
+                    &mut jobs[idx..idx + 1],
+                ) {
+                    Ok(mut row_tokens) => tokens.push(row_tokens.remove(0)),
+                    Err(row_err) => {
+                        fallback_error = Some(row_err);
+                        break;
+                    }
+                }
+            }
+            match fallback_error {
+                Some(err) => Err(err),
+                None => Ok(tokens),
+            }
+        }
+        Err(err) => Err(err),
+    };
+
+    match tokens {
+        Ok(tokens) => {
+            for (job, token) in jobs.into_iter().zip(tokens.into_iter()) {
+                let _ = job.response.send(DecodeBatchReply::Decoded {
+                    token,
+                    linear_state: job.linear_state,
+                });
+            }
+        }
+        Err(err) => {
+            let message = format!("{err:#}");
+            for job in jobs {
+                let _ = job.response.send(DecodeBatchReply::Failed {
+                    error: message.clone(),
+                    linear_state: job.linear_state,
+                });
+            }
+        }
+    }
+}
+
+fn decode_batch_jobs_with_runner(
+    runner: &ModelRunner,
+    paged_cache: &Mutex<PagedKvCache>,
+    jobs: &mut [DecodeBatchJob],
+) -> Result<Vec<TokenId>> {
+    let input_tokens: Vec<TokenId> = jobs.iter().map(|job| job.input_token).collect();
+    let seq_lens: Vec<usize> = jobs.iter().map(|job| job.seq_len).collect();
+    let block_tables: Vec<BlockTable> = jobs.iter().map(|job| job.block_table.clone()).collect();
+    let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+
+    if runner.has_linear_attention_layers() {
+        let mut linear_states: Vec<&mut LinearAttentionState> =
+            jobs.iter_mut().map(|job| &mut job.linear_state).collect();
+        runner.decode_next_tokens_paged_contiguous_batch_greedy(
+            &input_tokens,
+            paged_cache,
+            &block_table_refs,
+            &seq_lens,
+            &mut linear_states,
+        )
+    } else {
+        let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+        runner.decode_next_tokens_paged_contiguous_batch_greedy(
+            &input_tokens,
+            paged_cache,
+            &block_table_refs,
+            &seq_lens,
+            &mut no_linear_states,
+        )
+    }
 }
 
 struct SharedBlockReservation<'a> {
@@ -439,6 +791,15 @@ impl ModelRunner {
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
         let device = self.weights.embed_tokens.device();
         LinearAttentionState::new(&self.config, device)
+    }
+
+    fn has_linear_attention_layers(&self) -> bool {
+        self.weights.layers.iter().any(|layer| {
+            matches!(
+                layer.attention,
+                crate::forward::GpuAttentionWeights::Linear(_)
+            )
+        })
     }
 
     pub fn cuda_graph_enabled(&self) -> Result<bool> {
@@ -1387,12 +1748,7 @@ impl ModelRunner {
             "batched decode metadata length mismatch"
         );
 
-        let has_linear_layers = self.weights.layers.iter().any(|layer| {
-            matches!(
-                layer.attention,
-                crate::forward::GpuAttentionWeights::Linear(_)
-            )
-        });
+        let has_linear_layers = self.has_linear_attention_layers();
         if has_linear_layers {
             anyhow::ensure!(
                 linear_states.len() == batch,
@@ -1516,6 +1872,43 @@ impl ModelRunner {
                 step_seed,
             )
         }
+    }
+
+    fn decode_next_token_paged_interleaved_or_batched(
+        &self,
+        params: &SamplingParams,
+        input_token: TokenId,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        step_seed: Option<u64>,
+        decode_batcher: Option<&DecodeBatcher>,
+    ) -> Result<TokenId> {
+        if params.is_effectively_greedy()
+            && matches!(self.backend.device(), Device::Metal(_))
+            && let Some(batcher) = decode_batcher
+        {
+            match batcher.decode_next_token_greedy(
+                input_token,
+                block_table,
+                seq_len,
+                linear_state,
+            )? {
+                DecodeBatcherDecode::Decoded(token) => return Ok(token),
+                DecodeBatcherDecode::RunnerBusy => {}
+            }
+        }
+
+        self.decode_next_token_paged_interleaved(
+            params,
+            input_token,
+            paged_cache,
+            block_table,
+            seq_len,
+            linear_state,
+            step_seed,
+        )
     }
 
     pub fn generate_paged_speculative_shared_tokens(
@@ -3107,6 +3500,7 @@ impl ModelRunner {
         params: SamplingParams,
         block_manager: Arc<Mutex<BlockManager>>,
         paged_cache: Arc<Mutex<PagedKvCache>>,
+        decode_batcher: Option<Arc<DecodeBatcher>>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -3181,6 +3575,7 @@ impl ModelRunner {
         let runner_for_thread = runner_lock;
         let bm_for_thread = block_manager;
         let pc_for_thread = paged_cache;
+        let decode_batcher_for_thread = decode_batcher;
         let block_ids_to_free: Vec<u32> = block_table.blocks.clone();
 
         std::thread::Builder::new()
@@ -3198,6 +3593,7 @@ impl ModelRunner {
                         pc_for_thread.as_ref(),
                         &block_table,
                         &mut linear_state,
+                        decode_batcher_for_thread.as_deref(),
                     )
                 })();
                 if let Err(err) = result {
@@ -3235,6 +3631,7 @@ impl ModelRunner {
         block_manager: Arc<Mutex<BlockManager>>,
         paged_cache: Arc<Mutex<PagedKvCache>>,
         cached_prefix: Option<PagedPrefixReuse>,
+        decode_batcher: Option<Arc<DecodeBatcher>>,
     ) -> Result<PrefixCachedStreamingOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -3424,6 +3821,7 @@ impl ModelRunner {
         let runner_for_thread = runner_lock;
         let bm_for_thread = block_manager;
         let pc_for_thread = paged_cache;
+        let decode_batcher_for_thread = decode_batcher;
         let block_table_for_thread = block_table.clone();
         let allocated_for_fallback: Vec<u32> = allocated_blocks.clone();
 
@@ -3442,6 +3840,7 @@ impl ModelRunner {
                         pc_for_thread.as_ref(),
                         &block_table_for_thread,
                         &mut linear_state,
+                        decode_batcher_for_thread.as_deref(),
                     )
                 })();
                 if let Err(err) = result {
@@ -3818,6 +4217,7 @@ impl ModelRunner {
             paged_cache,
             block_table,
             linear_state,
+            None,
         )?;
         Ok(rx)
     }
@@ -3837,6 +4237,7 @@ impl ModelRunner {
         paged_cache: &Mutex<PagedKvCache>,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
+        decode_batcher: Option<&DecodeBatcher>,
     ) -> Result<()> {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
@@ -3871,7 +4272,7 @@ impl ModelRunner {
                 break;
             }
 
-            next_token = self.decode_next_token_paged_interleaved(
+            next_token = self.decode_next_token_paged_interleaved_or_batched(
                 params,
                 next_token,
                 paged_cache,
@@ -3879,6 +4280,7 @@ impl ModelRunner {
                 seq_len,
                 linear_state,
                 step_seed,
+                decode_batcher,
             )?;
             seq_len += 1;
         }
@@ -4610,6 +5012,169 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_decode_batcher_batches_two_greedy_jobs_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping decode batcher test");
+            return Ok(());
+        }
+
+        let config = ModelConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            num_attention_heads: 16,
+            num_kv_heads: 4,
+            head_dim: 256,
+            intermediate_size: 512,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        };
+        let weights = qwen_shape_bf16_full_attention_weights(&config, &device)?;
+        let runner = Arc::new(std::sync::RwLock::new(ModelRunner::new(
+            weights,
+            test_tokenizer(),
+            config.clone(),
+        )));
+        let batch = 2usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let token_ids = [7u32, 11u32];
+        let prefix_k = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.003,
+            &device,
+        )?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let batch_cache = Arc::new(Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::BF16,
+            &device,
+        )?));
+        {
+            let mut pc = batch_cache.lock().unwrap();
+            for (row, block_table) in block_tables.iter().enumerate() {
+                let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+                let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+                assert!(pc.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            }
+        }
+
+        let batcher = DecodeBatcher::spawn(
+            runner.clone(),
+            batch_cache.clone(),
+            DecodeBatcherConfig {
+                max_batch: 2,
+                wait: std::time::Duration::from_millis(50),
+            },
+        )?;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = [(token_ids[0], bt0.clone()), (token_ids[1], bt1.clone())]
+            .into_iter()
+            .map(|(token, block_table)| {
+                let batcher = batcher.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || -> Result<TokenId> {
+                    let mut linear_state = LinearAttentionState {
+                        recurrent_states: Vec::new(),
+                        conv_states: Vec::new(),
+                    };
+                    barrier.wait();
+                    match batcher.decode_next_token_greedy(
+                        token,
+                        &block_table,
+                        start_pos,
+                        &mut linear_state,
+                    )? {
+                        DecodeBatcherDecode::Decoded(next) => Ok(next),
+                        DecodeBatcherDecode::RunnerBusy => {
+                            anyhow::bail!("decode batcher unexpectedly reported runner busy")
+                        }
+                    }
+                })
+            })
+            .collect();
+        barrier.wait();
+
+        let mut batched = Vec::new();
+        for handle in handles {
+            batched.push(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("decode batcher test thread panicked"))??,
+            );
+        }
+        assert_eq!(batcher.max_observed_batch(), 2);
+
+        let runner_guard = runner.read().unwrap();
+        for row in 0..batch {
+            let row_cache = Mutex::new(PagedKvCache::new(
+                config.num_full_attention_layers,
+                1,
+                block_size,
+                config.num_kv_heads,
+                config.head_dim,
+                DType::BF16,
+                &device,
+            )?);
+            let row_table = BlockTable { blocks: vec![0] };
+            {
+                let mut pc = row_cache.lock().unwrap();
+                let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+                let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+                assert!(pc.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            }
+            let rowwise_logits = {
+                let mut pc = row_cache.lock().unwrap();
+                model_forward_paged(
+                    &*runner_guard.backend,
+                    &token_ids[row..row + 1],
+                    &runner_guard.weights,
+                    &runner_guard.config,
+                    &mut pc,
+                    &row_table,
+                    start_pos,
+                    None,
+                    None,
+                    None,
+                )?
+            };
+            let rowwise = greedy_sample(&rowwise_logits)?;
+            assert_eq!(
+                batched[row], rowwise,
+                "row {row} decode batcher token should match rowwise"
+            );
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn test_generate_from_tokens_max_tokens() -> Result<()> {
         let config = tiny_config();
@@ -5185,6 +5750,7 @@ mod tests {
             block_manager.clone(),
             paged_cache.clone(),
             Some(cached_prefix),
+            None,
         )?;
         assert!(
             streaming.registration.is_none(),

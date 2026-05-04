@@ -10930,3 +10930,69 @@ still does not batch live HTTP/SSE requests because the request threads do not
 yet rendezvous around a central decode queue, but the serving layer now has a
 single call that can execute a compatible greedy decode batch and preserve
 per-request state ownership.
+
+## 2026-05-04 E345 - Added live greedy streaming decode batcher
+
+### Goal
+
+Move the E344 admission primitive into the live streaming serving path. The
+previous work proved that a compatible set of decode rows can run through one
+model-forward call, but HTTP/SSE requests still decoded independently. This
+experiment adds the rendezvous worker that request threads can use at each
+eligible greedy decode step.
+
+### Change
+
+- Added `DecodeBatcher` and `DecodeBatcherConfig` to `kiln-model`.
+- The batcher owns a worker thread and an MPSC admission queue. Each job carries
+  one input token, one `BlockTable`, one absolute decode position, and the
+  request's one-row `LinearAttentionState`.
+- The worker groups jobs with the same decode position up to
+  `KILN_DECODE_BATCH_MAX` (default `8`) and optionally waits
+  `KILN_DECODE_BATCH_WAIT_US` microseconds for peers. The default wait is
+  zero so bs=1 streaming does not intentionally sleep.
+- The grouped rows call
+  `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy`; on a batch
+  incompatibility the worker falls back to rowwise decode for those jobs.
+- The worker uses `try_read` on the shared `ModelRunner` lock. If an adapter
+  swap or other writer is waiting, request threads get their state back and
+  fall back to their existing rowwise decode under the read guard they already
+  hold, avoiding a reader/writer deadlock while preserving per-request adapter
+  consistency.
+- `kiln-server` now creates a shared batcher for Metal devices when
+  `KILN_DECODE_BATCHER` is enabled (default enabled on Metal, disabled
+  elsewhere) and passes it into the non-speculative streaming spawn paths,
+  including prefix-cache hits and misses.
+- The existing streaming loop only uses the batcher for greedy Metal decode;
+  stochastic sampling, speculative paths, and non-Metal devices retain their
+  prior rowwise behavior.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_next_tokens_paged_contiguous_batch_greedy_matches_rowwise_metal --lib -- --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/generate.rs crates/kiln-model/src/lib.rs crates/kiln-server/src/state.rs crates/kiln-server/src/api/completions.rs`
+- `git diff --check`
+
+### Results
+
+- The new Metal batcher test submitted two same-position greedy decode jobs
+  through the live rendezvous worker and observed `max_observed_batch == 2`.
+- Both tokens matched rowwise `model_forward_paged` logits plus
+  `greedy_sample`.
+- The server binaries compile with the streaming path passing the shared
+  batcher through both prefix-cache and non-prefix-cache paths.
+
+### Artifact
+
+- `e345_live_decode_batcher_admission.log`
+
+### Decision
+
+Accepted as the first live request-path batching implementation. It is still a
+strict greedy Metal path and it batches only compatible same-position rows, but
+it moves the work from cache-only plumbing to actual serving-time decode
+admission. Next experiments should measure concurrent SSE throughput/ITL with
+`KILN_DECODE_BATCH_WAIT_US=0` and small nonzero waits, then tighten grouping or
+extend admission if real traffic does not naturally align enough rows.

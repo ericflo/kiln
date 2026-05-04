@@ -2358,6 +2358,7 @@ async fn chat_completions_inner(
                 block_manager,
                 paged_cache,
                 prefix_cache,
+                decode_batcher,
             } => {
                 generate_real_streaming(
                     state,
@@ -2365,6 +2366,7 @@ async fn chat_completions_inner(
                     block_manager,
                     paged_cache,
                     prefix_cache,
+                    decode_batcher,
                     &prompt_text,
                     &prompt_tokens,
                     &sampling,
@@ -2385,6 +2387,7 @@ async fn chat_completions_inner(
                 block_manager,
                 paged_cache,
                 prefix_cache,
+                ..
             } => {
                 let generation = generate_real(
                     state,
@@ -3174,6 +3177,7 @@ async fn generate_real_streaming(
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
     paged_cache: &std::sync::Arc<std::sync::Mutex<kiln_model::PagedKvCache>>,
     prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
+    decode_batcher: &Option<std::sync::Arc<kiln_model::DecodeBatcher>>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
     sampling: &SamplingParams,
@@ -3199,6 +3203,7 @@ async fn generate_real_streaming(
     let bm = block_manager.clone();
     let pc = paged_cache.clone();
     let prefix_cache = prefix_cache.clone();
+    let decode_batcher = decode_batcher.clone();
     let prompt = prompt_text.to_owned();
     let prompt_token_count = prompt_tokens.len();
     let prompt_tokens = prompt_tokens.to_vec();
@@ -3324,6 +3329,7 @@ async fn generate_real_streaming(
                                 params.clone(),
                                 bm.clone(),
                                 pc.clone(),
+                                decode_batcher.clone(),
                             )
                         } else {
                             let (hit, should_register_on_miss) = {
@@ -3344,6 +3350,7 @@ async fn generate_real_streaming(
                                     params.clone(),
                                     bm.clone(),
                                     pc.clone(),
+                                    decode_batcher.clone(),
                                 );
                             }
                             let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
@@ -3362,6 +3369,7 @@ async fn generate_real_streaming(
                                     bm.clone(),
                                     pc.clone(),
                                     cached_prefix,
+                                    decode_batcher.clone(),
                                 );
 
                             let mut output = match result {
@@ -5448,6 +5456,7 @@ async fn generate_one_prepared_response(
             block_manager,
             paged_cache,
             prefix_cache,
+            ..
         } => {
             let generation = generate_real(
                 state,
