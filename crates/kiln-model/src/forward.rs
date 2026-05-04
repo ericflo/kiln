@@ -2792,6 +2792,13 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
             return crate::backend::metal::metal_lm_head_bf16(x, embed_tokens_t)
                 .context("metal lm_head kernel failed");
         }
+        if crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+            x,
+            embed_tokens_t,
+        ) {
+            return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, embed_tokens_t)
+                .context("metal batch lm_head GEMV failed");
+        }
     }
     Ok(x.broadcast_matmul(embed_tokens_t)?)
 }
@@ -8416,6 +8423,57 @@ mod tests {
         assert!(
             mean < 5e-4,
             "Metal rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_lm_head_forward_decode_batch_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_lm_head_forward_decode_batch_matches_broadcast_matmul"
+            );
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let hidden = 128usize;
+        let vocab = 257usize;
+        let x_data: Vec<f32> = (0..batch * hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+            .collect();
+        let weight_data: Vec<f32> = (0..hidden * vocab)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+
+        assert!(
+            crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t)
+        );
+        let reference = x.broadcast_matmul(&weight_t)?;
+        let fast = lm_head_forward(&x, &weight_t)?;
+
+        assert_eq!(fast.dims(), &[batch, 1usize, vocab]);
+        let diff = (fast.to_dtype(DType::F32)?
+            - reference.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        assert!(
+            max < 2e-2,
+            "Metal batch LM-head max_abs_diff={max:e} exceeds 2e-2"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal batch LM-head mean_abs_diff={mean:e} exceeds 2e-3"
         );
 
         Ok(())

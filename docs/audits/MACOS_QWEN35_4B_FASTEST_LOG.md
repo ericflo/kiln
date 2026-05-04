@@ -9855,3 +9855,56 @@ Accepted. This is another true-batching kernel building block, not endpoint
 batching by itself. With E318/E319/E321-E323, the future `[B,1,H]` path can now
 keep the full-attention output gate fused as well as the major MLP and GDN
 decode pieces.
+
+## 2026-05-04 E326 - Accepted batched LM-head full-logits route
+
+### Goal
+
+Remove the full-logits LM-head fallback for future `[B,1,H]` decode batches.
+Earlier E254 rejected routing the `B=1` LM-head through generic cooperative
+GEMV because the scalar LM-head was faster for one row. That does not cover the
+batched full-logits case: `lm_head_forward` still fell back to
+`broadcast_matmul` for `B > 1`, even though E319's batch transposed GEMV kernel
+already supports BF16 `[B,1,H] x [H,V]`.
+
+### Change
+
+- Kept the existing scalar Metal LM-head path unchanged for `B=1`.
+- Added a second Metal branch in `lm_head_forward` that routes BF16
+  `[B,1,H]`, `B > 1`, through `metal_transposed_coop_gemv_bf16`.
+- Added `test_metal_lm_head_forward_decode_batch_matches_broadcast_matmul` to
+  verify the forward route against `broadcast_matmul` at `batch=4`.
+- Added an ignored exact-shape LM-head synthetic bench. It uses Qwen3.5 hidden
+  and vocab sizes, `x=[B,1,2560]`, `weight_t=[2560,248320]`. The benchmark uses
+  zero BF16 weights to avoid a huge host-side patterned allocation; the focused
+  parity test above covers nonzero values.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal test_metal_lm_head_forward_decode_batch_matches_broadcast_matmul --lib`
+- `KILN_METAL_LM_HEAD_BATCH_BENCH_WARMUP=1 KILN_METAL_LM_HEAD_BATCH_BENCH_ITERS=1 cargo test -p kiln-model --features metal bench_lm_head_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Same-binary synthetic results, exact Qwen3.5 LM-head shape
+`x=[B,1,2560]`, `weight_t=[2560,248320]`:
+
+| Batch | Fallback broadcast | Batch GEMV | Speedup | Max abs diff | Mean abs diff |
+|---:|---:|---:|---:|---:|---:|
+| 2 | `1793751.167 us` | `258241.125 us` | `6.946x` | `0.000000e0` | `0.000000e0` |
+| 4 | `3823733.791 us` | `568938.375 us` | `6.721x` | `0.000000e0` | `0.000000e0` |
+| 8 | failed to allocate | `922537.958 us` | n/a | n/a | n/a |
+
+### Artifacts
+
+- `e326_lm_head_decode_batch_synthetic.log`
+
+### Decision
+
+Accepted. This is the correct split after E254: keep the one-row scalar
+LM-head for bs=1, but route full-logits decode batches through the batch GEMV
+kernel. This removes a large `broadcast_matmul` cliff for future true batching
+and also avoids an observed Metal buffer allocation failure at batch 8 for the
+fallback exact-vocab shape.

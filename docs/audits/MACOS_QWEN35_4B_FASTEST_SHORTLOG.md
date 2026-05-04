@@ -915,3 +915,13 @@
   `52.350 us` (4.601x), with max abs diff `1.953125e-3`. This removes another
   full-attention `[B,1,H]` kernel blocker; endpoint batching still requires
   model-forward state/cache/scheduler plumbing.
+- 2026-05-04 E326: Accepted batched LM-head full-logits route. E254 already
+  rejected generic cooperative GEMV for the one-row LM-head, so bs=1 still uses
+  the scalar Metal LM-head. For `B > 1`, `lm_head_forward` now routes BF16
+  `[B,1,H] x [H,V]` through the E319 batch GEMV kernel instead of
+  `broadcast_matmul`. Batch-4 forward parity passed. Exact Qwen3.5 shape
+  synthetic results, `x=[B,1,2560]`, `weight_t=[2560,248320]`, were batch2
+  `1793751.167 us` -> `258241.125 us` (6.946x), batch4 `3823733.791 us` ->
+  `568938.375 us` (6.721x), and batch8 fallback failed to allocate while the
+  fused path completed in `922537.958 us`. This removes a large full-logits
+  broadcast cliff for future true batching.

@@ -9431,6 +9431,85 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn bench_lm_head_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_WARMUP", 1);
+        let iters = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_ITERS", 3);
+        let hidden = 2560usize;
+        let vocab = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_VOCAB", 248_320);
+        let weight_t = Tensor::zeros((hidden, vocab), DType::BF16, &device)?;
+        device.synchronize()?;
+
+        for batch in [2usize, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+            device.synchronize()?;
+            assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                &x, &weight_t
+            ));
+
+            let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+            device.synchronize()?;
+            let reference = x.broadcast_matmul(&weight_t);
+            let fallback_check = match reference {
+                Ok(reference) => {
+                    let max = max_abs_diff(&reference, &fused)?;
+                    let mean = mean_abs_diff(&reference, &fused)?;
+                    assert!(
+                        max < 2e-2,
+                        "Qwen3.5 LM-head batch={batch} max_abs_diff={max:e} exceeds tolerance"
+                    );
+                    assert!(
+                        mean < 2e-3,
+                        "Qwen3.5 LM-head batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+                    );
+                    Some((max, mean))
+                }
+                Err(err) => {
+                    eprintln!(
+                        "synthetic Metal Qwen3.5 LM-head decode batch BF16: batch={batch} \
+                         fallback_reference_failed={err:#}"
+                    );
+                    None
+                }
+            };
+
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t).context("bench batch LM-head GEMV")
+            })?;
+            let physical_tokens = batch;
+            match fallback_check {
+                Some((max, mean)) => {
+                    let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                        x.broadcast_matmul(&weight_t)
+                            .context("bench fallback LM-head broadcast_matmul")
+                    })?;
+                    eprintln!(
+                        "synthetic Metal Qwen3.5 LM-head decode batch BF16: batch={batch} \
+                         physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                         weight_t=[{hidden},{vocab}] warmup={warmup} iters={iters} \
+                         fallback={fallback_us:.3} us fused={fused_us:.3} us \
+                         speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                        fallback_us / fused_us,
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "synthetic Metal Qwen3.5 LM-head decode batch BF16: batch={batch} \
+                         physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                         weight_t=[{hidden},{vocab}] warmup={warmup} iters={iters} \
+                         fallback=failed fused={fused_us:.3} us"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
     fn bench_gdn_decode_qkv_conv_norm_decode_batch_synthetic() -> Result<()> {
         let Some(device) = try_new_metal() else {
             return Ok(());
