@@ -816,3 +816,11 @@
   not a viable substitute for true model-forward batching; next bs>1 work needs
   per-sequence cache tables and batched linear/GDN state, alongside continued
   low-level Metal kernel work.
+- 2026-05-04 E316: Rejected an opt-in exact-shape Qwen3.5 MLP gate/up
+  `bfloat2` load/store variant. The candidate kept the accepted two-column
+  gate/up work shape but removed the second-column branch for
+  `[1,1,2560] x [2560,9216]` and loaded adjacent weights with `bfloat2`.
+  It matched current output exactly, but the same-binary synthetic bench lost:
+  current two-column `1636.741 us` versus `bfloat2` `1683.015 us`
+  (`0.973x`). Source was reverted after `rustfmt --check`, focused gate/up
+  parity, and the ignored synthetic bench.

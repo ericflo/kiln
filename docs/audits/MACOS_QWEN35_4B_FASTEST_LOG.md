@@ -9330,3 +9330,49 @@ inference goal should keep moving toward actual low-level work: true
 multi-sequence model-forward batching with per-sequence cache tables and
 batched GDN/linear state, plus continued Metal kernel improvements. Endpoint
 scheduling alone is not enough.
+
+## Experiment E316: Rejected Qwen3.5 MLP Gate/Up BFloat2 Weight Loads
+
+Purpose:
+
+Test a narrow low-level variant of the accepted two-column MLP gate/up decode
+kernel. The candidate kept the current two-adjacent-output-column work shape,
+but added an opt-in exact-shape Qwen3.5 kernel for `[1,1,2560] x [2560,9216]`
+that removed the per-row second-column branch and loaded/stored adjacent
+weights/results through `bfloat2`.
+
+Temporary candidate:
+
+- Added `KILN_ENABLE_METAL_QWEN35_MLP_GATE_UP_BFLOAT2=1`.
+- Added `kiln_qwen35_mlp_gate_up_bfloat2_bf16`.
+- Added an ignored same-binary synthetic bench comparing the current
+  two-column kernel against the exact-shape `bfloat2` candidate.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_matches_reference --lib`
+- `KILN_METAL_MLP_GATE_UP_BENCH_WARMUP=10 KILN_METAL_MLP_GATE_UP_BENCH_ITERS=50 cargo test -p kiln-model --features metal bench_qwen35_mlp_gate_up_bfloat2_synthetic --lib -- --ignored --nocapture`
+
+Direct candidate result:
+
+| Variant | Time | Relative |
+|---|---:|---:|
+| current two-column gate/up | 1636.741 us | 1.000x |
+| exact-shape `bfloat2` gate/up | 1683.015 us | 0.973x |
+
+The candidate matched the current kernel exactly
+(`max_abs_diff=0`, `mean_abs_diff=0`) but was slower in the direct microbench,
+so the temporary source was reverted before full-model p64/o64 testing.
+
+Artifact:
+
+- `e316_qwen35_mlp_gate_up_bfloat2_synthetic.log`
+
+Takeaway:
+
+For the accepted gate/up two-column kernel, adjacent `bfloat2` weight loads and
+exact-shape no-tail branching do not improve the Qwen3.5 decode shape. Avoid
+more small variants that only change adjacent load syntax around the same
+two-column gate/up math; the next MLP kernel attempt needs to change data
+movement or projection boundaries more substantially.
