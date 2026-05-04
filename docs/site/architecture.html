@@ -180,12 +180,28 @@
     </div>
   </section>
 
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-8">
+      <div class="card p-5">
+        <div class="label mb-3">On this page</div>
+        <div class="flex flex-wrap gap-2 text-sm">
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#single-process-server">Single-process server</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#request-path-and-batching">Request path</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gated-deltanet-hybrid">Gated DeltaNet hybrid</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-hot-swap-training-queue">LoRA hot-swap</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#cuda-kernel-crates">CUDA kernels</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- overview -->
   <main class="max-w-4xl mx-auto px-6 py-12">
     <div class="grid gap-6">
       <article class="card p-6">
         <div class="label mb-3">System shape</div>
-        <h2 class="text-2xl font-semibold mb-4">Single-process server</h2>
+        <h2 id="single-process-server" class="text-2xl font-semibold mb-4">Single-process server</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Kiln is built as one deployable Rust binary: a single process owns the OpenAI-compatible
           Axum HTTP API, request scheduler, model engine, adapter registry, and background training
@@ -200,7 +216,7 @@
 
       <article class="card p-6">
         <div class="label mb-3">Inference flow</div>
-        <h2 class="text-2xl font-semibold mb-4">Request path and batching</h2>
+        <h2 id="request-path-and-batching" class="text-2xl font-semibold mb-4">Request path and batching</h2>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
             <h3 class="font-semibold mb-2" style="color: var(--fg);">API edge</h3>
@@ -219,7 +235,7 @@
 
       <article class="card p-6">
         <div class="label mb-3">Model architecture</div>
-        <h2 class="text-2xl font-semibold mb-4">Why the Gated DeltaNet hybrid matters</h2>
+        <h2 id="gated-deltanet-hybrid" class="text-2xl font-semibold mb-4">Why the Gated DeltaNet hybrid matters</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Qwen3.5-4B is not a plain all-attention transformer. Its 32 layers are split into
           24 Gated DeltaNet linear-attention layers and 8 full GQA layers, and Kiln is tuned
@@ -247,7 +263,7 @@
 
       <article class="card p-6">
         <div class="label mb-3">Live learning</div>
-        <h2 class="text-2xl font-semibold mb-4">LoRA hot-swap and training queue</h2>
+        <h2 id="lora-hot-swap-training-queue" class="text-2xl font-semibold mb-4">LoRA hot-swap and training queue</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Training requests enter the same server through <code>/v1/train/sft</code> or
           <code>/v1/train/grpo</code>. A FIFO background queue trains LoRA adapter weights against the
@@ -269,7 +285,7 @@
 
       <article class="card p-6">
         <div class="label mb-3">GPU path</div>
-        <h2 class="text-2xl font-semibold mb-4">CUDA kernel crates</h2>
+        <h2 id="cuda-kernel-crates" class="text-2xl font-semibold mb-4">CUDA kernel crates</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Kiln keeps the Qwen3.5-4B fast path in Rust crates with focused native kernels where the model
           needs them. The full-attention layers use vendored FlashAttention-style CUDA kernels, decode
@@ -291,7 +307,7 @@
   <!-- next steps -->
   <section class="divider">
     <div class="max-w-4xl mx-auto px-6 py-12">
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md">
           <h3 class="font-semibold mb-2">Deep dive</h3>
