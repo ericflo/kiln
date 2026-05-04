@@ -777,3 +777,11 @@
   `gate_proj` 64.126 ms, and `up_proj` 64.100 ms. This supports one more
   structural gate/up variant before moving to MLP down-projection or a broader
   projection/materialization boundary.
+- 2026-05-04 E307-E308: Rejected an opt-in MLP gate/up four-column decode
+  kernel. The candidate computed four adjacent output columns per thread and
+  used `bfloat4` adjacent weight loads, but same-binary warmed p64/o64 lost to
+  the current two-column default: E307 measured 439.1 ms prefill / 161.5 ms
+  mean ITL / 6.19 tok/s / 214.6 ms P99, while E308 control measured 419.1 ms /
+  157.8 ms / 6.34 tok/s / 167.7 ms P99. Memory pressure was 80% free. The
+  candidate source was reverted and clean-source release `kiln-bench` rebuild
+  plus `git diff --check` passed.

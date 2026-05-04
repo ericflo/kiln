@@ -9035,3 +9035,65 @@ synchronized profiling still ranks decode `gate_up_fused` first and
 `down_proj` second. It is reasonable to test one more structural gate/up
 projection variant, but the next durable target after that should be MLP
 down-projection or a broader projection/materialization boundary.
+
+## Experiment E307-E308: Rejected MLP Gate/Up Four-Column Decode Kernel
+
+Purpose:
+
+Test whether the E301-E305 two-column gate/up idea scales to four adjacent
+output columns per thread. The temporary opt-in candidate reduced repeated
+input-vector loads further and used `bfloat4` adjacent weight loads for full
+tiles. This is different from E291's threadgroup `x` cache and E296-E300's
+dispatch-width-only tuning.
+
+Implementation notes:
+
+- Added temporary env gate `KILN_ENABLE_METAL_MLP_GATE_UP_COLS4=1`.
+- Added a separate `kiln_mlp_gate_up_cols4_bf16` Metal kernel and pipeline.
+- The candidate computed four gate/up dot-product columns per thread and
+  handled odd intermediate tails.
+- Reverted the temporary source after measurement because it lost to the
+  current two-column default.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_cols4_matches_reference --lib`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_matches_reference --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Post-revert validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+- `git diff --check`
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+E307 used `KILN_ENABLE_METAL_MLP_GATE_UP_COLS4=1` in the same candidate binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E307 | gate/up four columns per thread | 439.1 ms | 6.19 | 161.5 ms | 157.5 ms | 214.6 ms | rejected |
+| E308 | current two-column control | 419.1 ms | 6.34 | 157.8 ms | 157.1 ms | 167.7 ms | control |
+
+Memory-pressure check:
+
+- After E308, `memory_pressure` reported 80% system-wide free memory.
+
+Artifacts:
+
+- `e307_m1_bs1_p64_o64_warmed_mlp_gate_up_cols4.log`
+- `e308_m1_bs1_p64_o64_warmed_mlp_gate_up_cols4_control.log`
+
+Takeaway:
+
+Four adjacent output columns per thread loses to the current two-column MLP
+gate/up kernel. The extra accumulators and reduced thread-level parallelism
+more than offset the additional input-load reuse, and P99 regressed badly.
+Do not keep pushing the gate/up column grouping past two columns; the next
+low-level target should move to MLP `down_proj` or another broader projection
+boundary.
