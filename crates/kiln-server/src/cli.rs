@@ -79,6 +79,24 @@ const ADAPTERS_EXAMPLES: &str = r#"Examples:
       Delete an adapter through the running server.
 "#;
 
+const CONFIG_OVERVIEW: &str = r#"Validate a Kiln TOML config file without starting the server.
+
+Use this before `kiln serve` to catch invalid values, confirm resolved model settings, and preview feature toggles such as prefix cache, CUDA graphs, and speculative decoding.
+
+By default, `kiln config` checks the built-in defaults plus environment overrides. Pass `--file` to validate a specific TOML file and see the effective settings that `kiln serve --config <file>` would use.
+"#;
+
+const CONFIG_EXAMPLES: &str = r#"Examples:
+  kiln config
+      Validate the default configuration and any KILN_* environment overrides.
+
+  kiln config --file kiln.toml
+      Validate kiln.toml before starting the server with `kiln serve --config kiln.toml`.
+
+  kiln config --file ./config/production.toml
+      Check a production config file and print the effective server, model, logging, and feature settings.
+"#;
+
 /// Render a structured server error response. Falls back to HTTP status if the body
 /// is not the expected `{error: {code, message, hint}}` shape.
 ///
@@ -166,7 +184,11 @@ pub enum Commands {
     },
 
     /// Validate a config file without starting the server
-    #[command(name = "config")]
+    #[command(
+        name = "config",
+        long_about = CONFIG_OVERVIEW,
+        after_help = CONFIG_EXAMPLES
+    )]
     ConfigCheck {
         /// Path to config file to validate
         #[arg(long, short)]
