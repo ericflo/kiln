@@ -71,7 +71,12 @@ a { color: var(--accent); text-decoration: none; }
 }
 .stat { display: flex; align-items: center; gap: 4px; }
 .stat-label { color: var(--text2); }
-.stat-val { font-family: var(--mono); font-weight: 500; }
+.stat-val {
+  font-family: var(--mono);
+  font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .status-dot {
   width: 8px; height: 8px;
   border-radius: 50%;
@@ -378,6 +383,8 @@ textarea { resize: vertical; min-height: 80px; }
   margin-bottom: 8px;
 }
 .chat-controls select { width: auto; }
+#chat-adapter { width: 180px; }
+#chat-temp { width: 70px; }
 .upload-adapter-controls {
   display: grid;
   grid-template-columns: 1fr 1fr auto;
@@ -465,6 +472,70 @@ textarea { resize: vertical; min-height: 80px; }
   padding: 20px;
   color: var(--text2);
   font-size: 13px;
+}
+.empty code {
+  overflow-wrap: anywhere;
+}
+.api-failure {
+  line-height: 1.45;
+}
+.api-failure .btn {
+  min-height: 34px;
+}
+
+@media (max-width: 640px) {
+  .header h1 {
+    font-size: 17px;
+  }
+  .header-help a,
+  .stat {
+    line-height: 1.8;
+  }
+  .header-stats .stat {
+    flex: 1 1 calc(50% - 12px);
+    min-width: 120px;
+  }
+  .header-stats .stat:first-child {
+    flex-basis: 100%;
+  }
+  .empty {
+    padding: 16px 14px;
+    text-align: left;
+  }
+  .api-failure .btn {
+    width: 100%;
+    min-height: 40px;
+  }
+  .chat-controls {
+    align-items: stretch;
+  }
+  .chat-controls label {
+    display: flex;
+    align-items: center;
+    min-height: 36px;
+  }
+  .chat-controls select {
+    flex: 1 1 calc(100% - 72px);
+    min-width: 0;
+  }
+  #chat-adapter {
+    width: auto;
+  }
+  .chat-controls input[type="number"] {
+    flex: 1 1 92px;
+    min-width: 92px;
+  }
+  #chat-temp {
+    width: auto;
+  }
+  .chat-input-row input {
+    flex: 1 0 100%;
+    min-height: 40px;
+  }
+  .chat-input-row .btn {
+    flex: 1 1 0;
+    min-height: 40px;
+  }
 }
 
 /* Recent Requests */
@@ -747,11 +818,11 @@ textarea { resize: vertical; min-height: 80px; }
     <div class="panel-body">
       <div class="chat-controls">
         <label for="chat-adapter" style="font-size:12px;color:var(--text2)">Adapter:</label>
-        <select id="chat-adapter" style="width:180px;">
+        <select id="chat-adapter">
           <option value="">Base Model</option>
         </select>
         <label for="chat-temp" style="font-size:12px;color:var(--text2);margin-left:8px;">Temp:</label>
-        <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1" style="width:70px;">
+        <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1">
       </div>
       <div class="chat-messages" id="chat-messages"></div>
       <div class="chat-input-row">
@@ -1002,7 +1073,7 @@ function escapeHtml(s) {
 
 function apiFailureHtml(action, e, retryFn) {
   const retryButton = retryFn ? `<div style="margin-top:12px;"><button type="button" class="btn btn-primary" onclick="${retryFn}()" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
-  return `<div class="empty">
+  return `<div class="empty api-failure">
     <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
     <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then retry this panel.</div>
     ${retryButton}
