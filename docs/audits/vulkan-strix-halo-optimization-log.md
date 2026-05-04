@@ -15,7 +15,7 @@ Make Vulkan a first-class Kiln inference backend and push Qwen3.5-4B performance
 
 ## Running Verdict
 
-Vulkan is functional and integrated, but it is not yet "fastest anywhere." The best verified no-env default single-user decode result from the final source state is 367.8ms mean inter-token latency (about 2.7 tok/s). The HTTP server path now uses the same tiled projection and greedy Vulkan argmax paths as the bench, but bs>1 server throughput still does not scale: the current server interleaves independent requests rather than running a native batched Vulkan decode kernel. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
+Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 137.6ms mean inter-token latency after scoped resident split GDN recurrent state promotion; a fresh post-promotion profile measured 136.5ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
 
 ## Experiments
 
@@ -2336,8 +2336,35 @@ Verdict:
 - MLP single-submit slightly lowers the profiled MLP bucket, but not enough to move whole-token latency; it should not be promoted or carried as a runtime branch.
 - Future MLP work likely needs a real shader-level algorithm improvement or broader layer residency, not submit-count reduction around the existing two kernels.
 
+### E080: Retest Existing Full-Attn QKV and Fused GDN Decode Opt-Ins After Resident State
+
+Change:
+- No code change.
+- Retested the existing `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1` and `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1` paths against the new resident-state default.
+
+Reasoning:
+- E078 changed the bottleneck order enough that old rejected opt-ins deserved a quick same-source check.
+- Full-attention layers were the second largest post-E078 bucket after MLP.
+- The fused GDN decode path previously had transient bs=1 wins, but the current default now depends on scoped resident split recurrent state.
+
+Evidence:
+- Full-attn QKV opt-in:
+  - Command: `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1 KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1902.9ms; mean ITL 194.6ms, p50 195.1ms, p99 197.2ms.
+  - `layer.full` worsened to 74.1-85.1ms/8 versus the post-E078 default profile's 24.8-25.4ms/8.
+- Fused GDN decode opt-in:
+  - Command: `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1 KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1900.2ms; mean ITL 328.6ms, p50 328.2ms, p99 348.5ms.
+  - `gdn.fused_gates_recur_norm` was 171.8-205.7ms/24; this path bypasses the resident split recurrent-state win and falls back near the old recurrent bottleneck.
+
+Verdict:
+- Reject both for default promotion.
+- Keep the current resident split GDN path as the bs=1 default.
+- Full-attention work needs something deeper than the existing projection-only QKV fusion.
+- Fused GDN decode would need resident-state semantics before it can compete with split resident recurrence.
+
 ## Next Candidate
 
-With E078, the current default bs=1 short-source anchor is 137.6ms mean ITL, and the fresh post-promotion profile measured 136.5ms. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. The next useful single-user experiments should attack full-attention layers, GDN input projection, and LM-head argmax, or revisit MLP only with a real shader-level algorithm change or broader layer residency. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E078, the current default bs=1 short-source anchor is 137.6ms mean ITL, and the fresh post-promotion profile measured 136.5ms. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. The next useful single-user experiments should attack GDN input projection and LM-head argmax, or revisit MLP/full-attention only with deeper shader-level or layer-residency changes. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
