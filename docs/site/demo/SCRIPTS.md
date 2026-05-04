@@ -1,8 +1,10 @@
 # Kiln demo casts — scripts and recording notes
 
 This file is the canonical record for every asciicast on the demo page.
-The legacy [`SCRIPT.md`](SCRIPT.md) covers the original 60-second online-learning
-loop in detail; this file covers the four newer casts as a single playlist.
+The overview in [`README.md`](README.md) lists the checked-in casts and
+their supporting files. The legacy [`SCRIPT.md`](SCRIPT.md) covers the
+original 60-second online-learning loop in detail; this file covers the
+full six-cast recording matrix as a single playlist.
 
 Recording target for every cast: **120 columns × 32 rows**, `xterm-256color`,
 `asciinema rec --idle-time-limit 2`, captured on a RunPod A6000 with the
