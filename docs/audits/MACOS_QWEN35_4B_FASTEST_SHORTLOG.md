@@ -1130,3 +1130,15 @@
   batch `4` but slowed to `5.565906s`. Single streaming also favored enabled
   zero-wait (`2.269265s` -> `1.619216s`, max batch `1`). `KILN_DECODE_BATCHER=0`
   and `KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS=1` remain kill switches.
+- 2026-05-04 E348: Added synchronized live batch decode stage profiling and
+  used it to choose the next low-level target. The batched contiguous decode
+  helper now honors `KILN_PROFILE_FULL_ATTN_STAGES`,
+  `KILN_PROFILE_GDN_STAGES`, and `KILN_PROFILE_MLP_STAGES`; full-attention
+  batch work gets `_batch` stage names. A profiled four-request streaming
+  probe (`max_tokens=3`) returned all `200`s, generated `12` tokens, and sent
+  `8` jobs through `4` worker batches with max batch `3`. Excluding the
+  background prewarm, live decode stage totals were MLP `657.623 ms`, GDN
+  `461.869 ms`, and full attention `224.225 ms`; top buckets were
+  `mlp:gate_up_fused` `375.207 ms`, `mlp:down_proj` `282.416 ms`,
+  `gdn:in_proj` `251.382 ms`, and `gdn:out_proj` `111.212 ms`. Next work
+  should target projection-heavy MLP/GDN decode kernels, not cache plumbing.

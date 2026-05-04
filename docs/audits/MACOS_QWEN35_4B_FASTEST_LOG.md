@@ -11146,3 +11146,80 @@ batching is faster on both the concurrent streaming probe and the bs=1 streaming
 probe, while the `500us` wait still loses to zero wait. Metal serving now keeps
 the batcher on by default with zero wait; keep `KILN_DECODE_BATCHER=0` and
 `KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS=1` as production kill switches.
+
+## 2026-05-04 E348 - Added live batch decode stage profiling
+
+### Goal
+
+Re-center the next optimization target on measured low-level inference cost
+after E347, rather than continuing to optimize around cache mechanics. The
+existing synchronized profilers covered rowwise paged decode, but the live
+batched decode helper was mostly opaque, so endpoint wins/losses could not be
+attributed to specific kernels.
+
+### Change
+
+- Threaded the existing `KILN_PROFILE_FULL_ATTN_STAGES`,
+  `KILN_PROFILE_GDN_STAGES`, and `KILN_PROFILE_MLP_STAGES` gates through
+  `model_forward_paged_decode_contiguous_batch_hidden`.
+- Added `_batch` full-attention stage profiling around batched QKV projection,
+  split, Q/K norm, RoPE, Q transpose, KV write, contiguous paged decode,
+  attention gate, and output projection.
+- Passed GDN and MLP profile contexts into the batched decode loop so their
+  existing synchronized stage logs now cover live batcher work as well.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_next_tokens_paged_contiguous_batch_greedy_matches_rowwise_metal --lib -- --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+### Results
+
+Profiled live endpoint probe:
+
+- Server env:
+  `KILN_DECODE_BATCHER=1 KILN_DECODE_BATCH_WAIT_US=0 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 KILN_PROFILE_FULL_ATTN_STAGES=1`
+- Four concurrent streaming chat requests, `max_tokens=3`, greedy.
+- All four requests returned `200`; wall time was `7.897471s`.
+- Metrics: `12` generated tokens, `8` submitted decode-batcher jobs, `4`
+  worker batches, `8` batcher rows, max observed batch `3`.
+
+Live decode stage totals from the request positions (`start_pos=18/19`,
+excluding the background prewarm at `start_pos=64`):
+
+- By subsystem:
+  - MLP: `657.623 ms`
+  - GDN: `461.869 ms`
+  - full attention: `224.225 ms`
+- Top stages:
+  - `mlp:gate_up_fused`: `375.207 ms`
+  - `mlp:down_proj`: `282.416 ms`
+  - `gdn:in_proj`: `251.382 ms`
+  - `gdn:out_proj`: `111.212 ms`
+  - `full_attn:qkv_proj_batch`: `57.220 ms`
+
+The probe also showed one rowwise decode slice before the later batched slice
+for each live decode position, which is expected with zero-wait admission and
+slightly staggered prefill completion. The important outcome is that both the
+rowwise and batched decode work point at the same projection-heavy kernels,
+not KV cache plumbing, as the next high-value target.
+
+### Artifact
+
+- `e348_live_batch_stage_profile_server.log`
+- `e348_live_batch_stage_profile_metrics.prom`
+- `e348_live_batch_stage_profile_time.json`
+- `e348_live_batch_stage_profile_response_0.sse`
+- `e348_live_batch_stage_profile_response_1.sse`
+- `e348_live_batch_stage_profile_response_2.sse`
+- `e348_live_batch_stage_profile_response_3.sse`
+
+### Decision
+
+Accepted as diagnostic instrumentation. The next optimization pass should
+target low-level decode projection kernels, starting with MLP gate/up and
+down-projection behavior and then GDN in/out projections. Full-attention batch
+decode is now visible, but it is not the largest measured cost in this probe.

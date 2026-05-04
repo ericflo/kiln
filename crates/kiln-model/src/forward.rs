@@ -5297,8 +5297,10 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
     anyhow::ensure!(
         seq_len == 1,
@@ -5347,43 +5349,106 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         None => (None, 0.0),
     };
     let (q_raw, k, v) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
-        full_attn_qkv_proj_decode_if(
+        let out = full_attn_qkv_proj_decode_if(
             use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer,
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
 
-    let (q, gate) = if attn_output_gate {
-        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
-        let q = q_raw.narrow(3, 0, head_dim)?;
-        let gate = q_raw.narrow(3, head_dim, head_dim)?;
-        let gate = gate
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
-        (q.contiguous()?, Some(gate))
-    } else {
-        (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+    let (q, gate) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = if attn_output_gate {
+            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q = q_raw.narrow(3, 0, head_dim)?;
+            let gate = q_raw.narrow(3, head_dim, head_dim)?;
+            let gate = gate
+                .contiguous()?
+                .reshape(((), seq_len, num_heads * head_dim))?;
+            (q.contiguous()?, Some(gate))
+        } else {
+            (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
     let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
 
-    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
-    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
-    let (q, k) = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
-    let q = q.transpose(1, 2)?.contiguous()?;
+    let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+        let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        (q, k)
+    };
+    let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "rope_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let q = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let q = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_transpose_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        q
+    };
 
-    if !paged_cache.write_token_major_native_batch(
-        full_attn_layer_idx,
-        block_tables,
-        start_positions,
-        &k,
-        &v,
-    )? {
-        anyhow::bail!("batched contiguous paged attention KV write declined");
+    {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        if !paged_cache.write_token_major_native_batch(
+            full_attn_layer_idx,
+            block_tables,
+            start_positions,
+            &k,
+            &v,
+        )? {
+            anyhow::bail!("batched contiguous paged attention KV write declined");
+        }
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_write_batch",
+            seq_len,
+            stage_profile,
+        )?;
     }
 
     let (k_pool, v_pool) = paged_cache
@@ -5392,28 +5457,57 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let start_slots =
         Tensor::from_slice(start_slots_u32.as_slice(), batch, x.device())?.contiguous()?;
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
-    let attn_output = backend
-        .flash_attn_paged_decode_contiguous_batch(
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = backend.flash_attn_paged_decode_contiguous_batch(
             &q,
             k_pool,
             v_pool,
             &start_slots,
             total_seq_len,
             softmax_scale,
-        )?
-        .context("backend declined batched contiguous paged attention")?;
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "decode_attn_contiguous_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out.context("backend declined batched contiguous paged attention")?
+    };
 
-    let attn_output =
-        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out =
+            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_gate_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
     let out = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
-        linear_with_lora_t_decode_if(
+        let out = linear_with_lora_t_decode_if(
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "o_proj_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     Ok(out)
 }
@@ -6611,6 +6705,8 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     block_tables: &[&BlockTable],
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
+    full_attn_profile_context: Option<(usize, usize)>,
+    mlp_profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -6652,6 +6748,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
+        full_attn_profile_context,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -6661,7 +6758,13 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
         rms_norm(&x, &layer.post_attention_layernorm, config.rms_norm_eps)?
     };
-    let ffn_out = swiglu_ffn_profiled(&normed, &layer.mlp, lora, use_metal_decode_ffn, None)?;
+    let ffn_out = swiglu_ffn_profiled(
+        &normed,
+        &layer.mlp,
+        lora,
+        use_metal_decode_ffn,
+        mlp_profile_context,
+    )?;
     let out = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
         (x + ffn_out)?
@@ -6727,6 +6830,9 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
     let positions = Tensor::from_slice(&[start_pos as f32], 1usize, device)?;
     let use_metal_decode_ffn =
         start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let profile_full_attn_stages = profile_full_attn_stages_enabled();
+    let profile_gdn_stages = profile_gdn_stages_enabled();
+    let profile_mlp_stages = profile_mlp_stages_enabled();
 
     let mut full_attn_idx = 0usize;
     let mut linear_attn_idx = 0usize;
@@ -6748,6 +6854,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     block_tables,
                     full_attn_idx,
                     layer_lora,
+                    profile_full_attn_stages.then_some((full_attn_idx, start_pos)),
+                    profile_mlp_stages.then_some((i, start_pos)),
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -6772,7 +6880,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     false,
                     false,
                     use_metal_decode_ffn,
-                    None,
+                    profile_gdn_stages.then_some((i, start_pos)),
                 )
                 .with_context(|| {
                     format!("batched gated deltanet layer {i} (linear attention, paged)")
@@ -6794,7 +6902,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    None,
+                    profile_mlp_stages.then_some((i, start_pos)),
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -9695,6 +9803,7 @@ mod tests {
             0,
             false,
             None,
+            None,
         )?;
         device.synchronize()?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
@@ -9845,6 +9954,8 @@ mod tests {
             &mut batch_cache,
             &block_tables,
             0,
+            None,
+            None,
             None,
         )?;
         device.synchronize()?;
