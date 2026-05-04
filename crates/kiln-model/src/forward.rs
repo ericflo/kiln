@@ -6330,6 +6330,7 @@ fn transformer_block_paged_batch_decode_rows(
     rms_norm_eps: f64,
     paged_cache: &mut PagedKvCache,
     block_tables: &[BlockTable],
+    row_positions: &[Tensor],
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
@@ -6356,23 +6357,25 @@ fn transformer_block_paged_batch_decode_rows(
         "block table count {} does not match batch {batch}",
         block_tables.len()
     );
+    anyhow::ensure!(
+        row_positions.len() == batch,
+        "row position tensor count {} does not match batch {batch}",
+        row_positions.len()
+    );
 
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
         rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
     };
 
-    let device = x.device();
     let mut row_outputs = Vec::with_capacity(batch);
     for row in 0..batch {
-        let pos_f32 = [start_positions[row] as f32];
-        let positions = Tensor::new(pos_f32.as_slice(), device)?;
         let row_normed = normed.narrow(0, row, 1)?;
         let out = gqa_attention_paged_with_rope_tables(
             backend,
             &row_normed,
             attn_weights,
-            &positions,
+            &row_positions[row],
             start_positions[row],
             num_heads,
             num_kv_heads,
@@ -6943,6 +6946,11 @@ pub fn model_forward_paged_next_tokens_greedy_batch(
     let profile_start = profile.then(Instant::now);
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
     push_batch_greedy_profile(&mut profile_rows, profile, None, "embedding", profile_start);
+    let mut row_positions = Vec::with_capacity(batch);
+    for &pos in start_positions {
+        let pos_f32 = [pos as f32];
+        row_positions.push(Tensor::new(pos_f32.as_slice(), hidden.device())?);
+    }
 
     let mut full_attn_idx: usize = 0;
     let mut linear_attn_idx: usize = 0;
@@ -6968,6 +6976,7 @@ pub fn model_forward_paged_next_tokens_greedy_batch(
                     config.rms_norm_eps,
                     paged_cache,
                     block_tables,
+                    &row_positions,
                     full_attn_idx,
                     layer_lora,
                 )
