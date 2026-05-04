@@ -1418,6 +1418,7 @@ impl ModelRunner {
 
         let stack_start = batch_timing.then(Instant::now);
         let mut linear_state = stack_linear_attention_states(&linear_states)?;
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         let mut active_rows: Vec<usize> = (0..seqs.len()).collect();
         if let Some(start) = stack_start {
             eprintln!(
@@ -1457,6 +1458,10 @@ impl ModelRunner {
 
             if retained_state_rows.len() != previous_active_rows.len() {
                 let compact_start = batch_timing.then(Instant::now);
+                for state in &mut linear_state.recurrent_states {
+                    self.backend
+                        .materialize_gdn_recurrent_resident_state(state)?;
+                }
                 linear_state =
                     select_linear_attention_state_rows(&linear_state, &retained_state_rows)
                         .context("compact native batch linear attention state")?;

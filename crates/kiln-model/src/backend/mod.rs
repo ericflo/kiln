@@ -93,6 +93,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 
     fn exit_gdn_recurrent_resident_state_scope(&self) {}
 
+    fn materialize_gdn_recurrent_resident_state(&self, _state: &mut Tensor) -> Result<()> {
+        Ok(())
+    }
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         false
     }

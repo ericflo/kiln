@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::BackendRuntime;
 use crate::forward::{GpuAttentionWeights, GpuWeights};
@@ -57,6 +57,13 @@ thread_local! {
 
 fn recurrent_state_resident_scope_active() -> bool {
     RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn fused_gdn_resident_state_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE").is_err()
+    })
 }
 
 fn enter_recurrent_state_resident_scope() {
@@ -330,6 +337,37 @@ impl BackendRuntime for VulkanBackend {
         }
     }
 
+    fn materialize_gdn_recurrent_resident_state(&self, state: &mut Tensor) -> Result<()> {
+        if !self.recurrent_state_residency_enabled {
+            return Ok(());
+        }
+        let state_id = state.id();
+        let resident_state =
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().remove(&state_id));
+        let Some(resident_state) = resident_state else {
+            return Ok(());
+        };
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let data = kiln_vulkan_kernel::VulkanBuffer::read_back(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &resident_state,
+        )
+        .context("failed to materialize resident GDN recurrent state")?;
+        *state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &data,
+            state.dims().as_ref(),
+            state.dtype(),
+        )?;
+        Ok(())
+    }
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         self.has_vulkan() && self.gdn_enabled
     }
@@ -537,6 +575,35 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+        if batch > 1
+            && fused_gdn_resident_state_enabled()
+            && recurrent_state_resident_scope_active()
+        {
+            let state_id = state.id();
+            let resident_state =
+                RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
+            let (out, resident_state) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+                    vk_device,
+                    q,
+                    k,
+                    v,
+                    a,
+                    b,
+                    a_log,
+                    dt_bias,
+                    state,
+                    z,
+                    weight,
+                    eps as f32,
+                    resident_state,
+                )
+                .context("gdn_decode_gates_recurrent_rmsnorm resident-state kernel failed")?;
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+                cache.borrow_mut().insert(state_id, resident_state);
+            });
+            return Ok(Some(out));
+        }
         let (out, new_state) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
                 vk_device,

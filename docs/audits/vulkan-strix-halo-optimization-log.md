@@ -2640,8 +2640,58 @@ Verdict:
 - Keep.
 - This is a correctness and bs>1 regression fix; it does not change the best observed bs=1 source anchor.
 
+### E090: Retest Existing Batch Fused-GDN State Options
+
+Change:
+- No code change.
+- Retested existing fused-GDN host-visible state and fused-GDN single-submit options on top of the E089 fixed build.
+
+Reasoning:
+- The fixed batch profile showed non-final decode steps dominated by `gdn.fused_gates_recur_norm`:
+  - Short profiled four-prompt `max_tokens=4` run: decode steps 0 and 1 spent 585.8ms and 662.5ms across 24 GDN fused recurrent/norm calls.
+  - The final max-token-capped decode step dropped to 53.5ms because E066 skips recurrent-state readback there.
+- Existing opt-ins already targeted state transfer or command submission, so they were cheap to falsify before adding a new resident-state path.
+
+Evidence:
+- Fixed E089 default fresh-server four-prompt `max_tokens=16` fixture: 25.457s / 2.514 tok/s.
+- `KILN_ENABLE_VULKAN_GDN_HOST_VISIBLE_STATE=1`: 25.927s / 2.468 tok/s.
+- `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED_SINGLE_SUBMIT=1`: 25.313s / 2.528 tok/s.
+
+Verdict:
+- Reject both as promotions.
+- Host-visible state is slower; single-submit is only a tiny/noisy difference and does not address the dominant recurrent-state residency problem.
+
+### E091: Promote Batch Fused-GDN Resident State
+
+Change:
+- Added `dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state`, which keeps the fused GDN recurrent state in a device-local Vulkan buffer across lockstep batch decode steps.
+- Added `BackendRuntime::materialize_gdn_recurrent_resident_state` so native batch can safely read resident state back before active-row compaction.
+- Native batch now enters the GDN recurrent resident-state scope around the lockstep decode loop and materializes recurrent state before selecting active rows after EOS/finish compaction.
+- Promoted the resident fused-GDN path for `batch > 1` by default. Rollback guard: `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE=1`.
+
+Reasoning:
+- E090's profile showed that non-final batch fused-GDN calls are dominated by recurrent-state readback and CPU tensor materialization.
+- E066 already proved the state readback is dead on the final max-token-capped step. E091 extends that principle across non-final lockstep decode steps while preserving correctness by keeping the state buffer resident for the next step.
+- Active-row compaction can happen after EOS. Materializing resident recurrent states immediately before compaction keeps the existing row-selection logic correct, then the next compacted decode can upload/cache the new compacted tensors under their new tensor IDs.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed all 18 Vulkan parity tests, including the new two-step resident fused-GDN parity test.
+- `cargo test -p kiln-model native_batch_greedy -- --nocapture` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+- Opt-in before promotion, fresh release server, four-prompt `max_tokens=16`: 15.545s / 4.117 tok/s.
+- Promoted no-env default, same fixture: 15.498s / 4.130 tok/s.
+- Same-binary rollback guard `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE=1`: 25.917s / 2.469 tok/s.
+- Relative to the E089 fixed default 25.457s / 2.514 tok/s, the promoted resident path is 1.64x faster on this short all-miss batch fixture.
+
+Verdict:
+- Keep default with rollback guard.
+- This is the largest current bs>1 decode win after native batch was re-promoted; the remaining large batch targets are true multi-sequence paged attention and broader scheduling.
+
 ## Next Candidate
 
-With E089, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and is now correctly gated to batch=1. E089 restores native-batch GDN input projection after the E088 misplaced guard; the current four-prompt `max_tokens=16` batch fixture is back to 25.457s / 2.514 tok/s instead of the broken 46.581s / 1.374 tok/s. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E091, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and is now correctly gated to batch=1. E089 restored native-batch GDN input projection after the E088 misplaced guard, moving the four-prompt `max_tokens=16` fixture from the broken 46.581s / 1.374 tok/s back to 25.457s / 2.514 tok/s. E091 then promotes batch fused-GDN resident state and moves the same fixture to 15.498s / 4.130 tok/s, with rollback `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE=1` at 25.917s / 2.469 tok/s. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, now that explicit materialization exists for resident recurrent state.
 
-For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
+For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, E072 reuses those common prefixes across later batches, and E091 keeps fused-GDN recurrent state resident through lockstep batch decode. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and reducing remaining MLP/lm-head/full-attention transfer boundaries.

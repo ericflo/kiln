@@ -2022,6 +2022,281 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm(
     Ok((out, new_state))
 }
 
+/// Dispatch fused GDN decode while keeping recurrent state device-resident.
+///
+/// The first call uploads `state` into a device-local buffer. Later calls pass
+/// the returned buffer back and avoid the full recurrent-state readback/upload
+/// pair; only the small normalized output is copied to the CPU.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    resident_state: Option<Arc<VulkanBuffer>>,
+) -> Result<(Tensor, Arc<VulkanBuffer>)> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let (batch, _, nv, dk) = q.dims4()?;
+    let (v_batch, _, v_nv, dv) = v.dims4()?;
+    anyhow::ensure!(
+        v_batch == batch,
+        "gdn_decode fused resident: v batch {v_batch} != q batch {batch}"
+    );
+    anyhow::ensure!(
+        v_nv == nv,
+        "gdn_decode fused resident: v heads {v_nv} != q heads {nv}"
+    );
+    anyhow::ensure!(
+        dv <= 256,
+        "gdn_decode fused resident: dv {dv} exceeds shader local capacity 256"
+    );
+
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k)?.0;
+    let v_data = extract_tensor_bytes(v)?.0;
+    let a_data = extract_tensor_bytes(a)?.0;
+    let b_data = extract_tensor_bytes(b)?.0;
+    let a_log_data = extract_tensor_bytes(a_log)?.0;
+    let dt_bias_data = extract_tensor_bytes(dt_bias)?.0;
+    let state_data = if resident_state.is_none() {
+        Some(extract_tensor_bytes(state)?.0)
+    } else {
+        None
+    };
+    let z_data = extract_tensor_bytes(z)?.0;
+    let weight_data = extract_tensor_bytes(weight)?.0;
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_decode_gates_recurrent_rmsnorm.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [nv as u32, dk as u32, dv as u32, eps.to_bits(), batch as u32];
+
+    let make_device_and_staging = |data: &[u8]| -> Result<(VulkanBuffer, VulkanBuffer)> {
+        let device_buf =
+            VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)?;
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)?;
+        VulkanBuffer::write_host_visible(device, &staging, data)?;
+        Ok((device_buf, staging))
+    };
+
+    let (q_buf, q_stage) = make_device_and_staging(&q_data)?;
+    let (k_buf, k_stage) = make_device_and_staging(&k_data)?;
+    let (v_buf, v_stage) = make_device_and_staging(&v_data)?;
+    let (a_buf, a_stage) = make_device_and_staging(&a_data)?;
+    let (b_buf, b_stage) = make_device_and_staging(&b_data)?;
+    let (a_log_buf, a_log_stage) = make_device_and_staging(&a_log_data)?;
+    let (dt_bias_buf, dt_bias_stage) = make_device_and_staging(&dt_bias_data)?;
+    let (z_buf, z_stage) = make_device_and_staging(&z_data)?;
+    let (weight_buf, weight_stage) = make_device_and_staging(&weight_data)?;
+
+    let state_buf = match resident_state {
+        Some(buffer) => buffer,
+        None => {
+            let data = state_data
+                .as_ref()
+                .expect("state data exists when resident state is absent");
+            Arc::new(VulkanBuffer::create_device_local(
+                device,
+                device_local_mt,
+                data.len() as u64,
+            )?)
+        }
+    };
+    let state_stage = if let Some(data) = &state_data {
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)?;
+        VulkanBuffer::write_host_visible(device, &staging, data)?;
+        Some(staging)
+    } else {
+        None
+    };
+
+    let out_size = (batch * nv * dv * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
+        .context("failed to create gdn_decode fused resident output buffer")?;
+    let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)
+        .context("failed to create gdn_decode fused resident output staging buffer")?;
+
+    let all_handles = vec![
+        q_buf.handle(),
+        k_buf.handle(),
+        v_buf.handle(),
+        a_buf.handle(),
+        b_buf.handle(),
+        a_log_buf.handle(),
+        dt_bias_buf.handle(),
+        state_buf.handle(),
+        z_buf.handle(),
+        weight_buf.handle(),
+        out_buf.handle(),
+    ];
+    let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
+        &spirv,
+        all_handles.len(),
+        (push_constants.len() * 4) as u32,
+    )?;
+    let set_layouts = vec![set_layout];
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate gdn_decode fused resident descriptor set")?[0]
+    };
+
+    let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
+        .iter()
+        .map(|&h| {
+            vk::DescriptorBufferInfo::builder()
+                .buffer(h)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build()
+        })
+        .collect();
+    let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
+        .iter()
+        .enumerate()
+        .map(|(i, info)| make_write_descriptor_set_buf(descriptor_set, i as u32, info))
+        .collect();
+    unsafe {
+        device.update_descriptor_sets(&descriptor_writes, &[]);
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin command buffer")?;
+
+        for (src, dst, size) in [
+            (&q_stage, &q_buf, q_data.len() as u64),
+            (&k_stage, &k_buf, k_data.len() as u64),
+            (&v_stage, &v_buf, v_data.len() as u64),
+            (&a_stage, &a_buf, a_data.len() as u64),
+            (&b_stage, &b_buf, b_data.len() as u64),
+            (&a_log_stage, &a_log_buf, a_log_data.len() as u64),
+            (&dt_bias_stage, &dt_bias_buf, dt_bias_data.len() as u64),
+            (&z_stage, &z_buf, z_data.len() as u64),
+            (&weight_stage, &weight_buf, weight_data.len() as u64),
+        ] {
+            device.cmd_copy_buffer(
+                cmd,
+                src.handle(),
+                dst.handle(),
+                &[vk::BufferCopy::builder().size(size).build()],
+            );
+        }
+        if let (Some(state_stage), Some(state_data)) = (&state_stage, &state_data) {
+            device.cmd_copy_buffer(
+                cmd,
+                state_stage.handle(),
+                state_buf.handle(),
+                &[vk::BufferCopy::builder()
+                    .size(state_data.len() as u64)
+                    .build()],
+            );
+        }
+
+        let upload_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[upload_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            layout,
+            0,
+            &[descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(&push_constants),
+        );
+        device.cmd_dispatch(cmd, (batch * nv) as u32, 1, 1);
+
+        let compute_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[compute_barrier],
+            &[],
+            &[],
+        );
+        device.cmd_copy_buffer(
+            cmd,
+            out_buf.handle(),
+            out_stage.handle(),
+            &[vk::BufferCopy::builder().size(out_size).build()],
+        );
+
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit gdn_decode fused resident dispatch")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for gdn_decode fused resident dispatch")?;
+
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    let out_data = VulkanBuffer::read_host_visible(device, &out_stage)
+        .context("failed to read back gdn_decode fused resident output")?;
+    let out = create_tensor_from_data(&out_data, &[batch, 1, nv, dv], q.dtype())?;
+    Ok((out, state_buf))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
     vk_device: &VulkanDevice,

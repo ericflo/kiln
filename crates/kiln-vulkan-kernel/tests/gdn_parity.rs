@@ -1133,6 +1133,133 @@ fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> 
 }
 
 #[test]
+fn gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, nv, dk, dv) = (3usize, 2usize, 4usize, 3usize);
+    let make_q = |scale: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * nv * dk)
+                .map(|i| ((i as f32 % 7.0) - 3.0) * scale)
+                .collect(),
+            (batch, 1, nv, dk),
+        )
+    };
+    let make_v = |scale: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * nv * dv)
+                .map(|i| ((i as f32 % 11.0) - 5.0) * scale)
+                .collect(),
+            (batch, 1, nv, dv),
+        )
+    };
+    let q1 = make_q(0.041)?;
+    let k1 = make_q(-0.037)?;
+    let v1 = make_v(0.029)?;
+    let a1 = cpu_f32(
+        (0..batch * nv)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.061)
+            .collect(),
+        (batch, 1, nv),
+    )?;
+    let b1 = cpu_f32(
+        (0..batch * nv)
+            .map(|i| ((i as f32 % 5.0) - 2.0) * -0.073)
+            .collect(),
+        (batch, 1, nv),
+    )?;
+    let z1 = make_v(0.071)?;
+    let q2 = make_q(-0.025)?;
+    let k2 = make_q(0.033)?;
+    let v2 = make_v(-0.021)?;
+    let a2 = cpu_f32(
+        (0..batch * nv)
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.047)
+            .collect(),
+        (batch, 1, nv),
+    )?;
+    let b2 = cpu_f32(
+        (0..batch * nv)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * 0.039)
+            .collect(),
+        (batch, 1, nv),
+    )?;
+    let z2 = make_v(-0.052)?;
+    let a_log = cpu_f32(vec![0.08, -0.17], (nv,))?;
+    let dt_bias = cpu_f32(vec![0.03, -0.05], (nv,))?;
+    let state = cpu_f32(
+        (0..batch * nv * dk * dv)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * 0.013)
+            .collect(),
+        (batch, nv, dk, dv),
+    )?;
+    let weight = cpu_f32(vec![0.7, -1.1, 0.9], (dv,))?;
+
+    let (expected_out1, expected_state1) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+            &vk, &q1, &k1, &v1, &a1, &b1, &a_log, &dt_bias, &state, &z1, &weight, 1e-6, false,
+        )
+        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 1")?;
+    let (expected_out2, _expected_state2) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &a2,
+            &b2,
+            &a_log,
+            &dt_bias,
+            &expected_state1,
+            &z2,
+            &weight,
+            1e-6,
+            false,
+        )
+        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm reference step 2")?;
+
+    let (got_out1, resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+            &vk, &q1, &k1, &v1, &a1, &b1, &a_log, &dt_bias, &state, &z1, &weight, 1e-6, None,
+        )
+        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state step 1")?;
+    let (got_out2, _resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &a2,
+            &b2,
+            &a_log,
+            &dt_bias,
+            &state,
+            &z2,
+            &weight,
+            1e-6,
+            Some(resident_state),
+        )
+        .context("dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state step 2")?;
+
+    assert_close(
+        "resident fused gdn out step 1",
+        &got_out1,
+        &expected_out1,
+        1e-5,
+    )?;
+    assert_close(
+        "resident fused gdn out step 2",
+        &got_out2,
+        &expected_out2,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
