@@ -9807,3 +9807,51 @@ then one batched SDPA" implementation. Attention-side batching still matters,
 but the next useful path is a purpose-built decode attention kernel or
 model-forward plumbing that can expose per-sequence cache state without forcing
 this slower SDPA shape.
+
+## 2026-05-04 E325 - Accepted attention output-gate decode-batch support
+
+### Goal
+
+Remove a small but concrete full-attention blocker for future `[B,1,H]` decode
+rows. The Metal attention output-gate kernel already linearizes all elements by
+`gid`, but its support gate required `batch == 1`, forcing batched rows through
+the unfused sigmoid + multiply fallback.
+
+### Change
+
+- Relaxed `metal_attn_gate_sigmoid_mul_supports` from `batch == 1` to
+  `batch > 0` while keeping `seq_len == 1`, BF16, contiguous tensors, matching
+  gate shape, and checked `u32` dispatch bounds.
+- Updated `test_attn_gate_sigmoid_mul_matches_reference` to cover `batch=4`.
+- Added an ignored Qwen3.5-shaped synthetic bench for decode batches 1, 2, 4,
+  and 8 with `hidden=4096`.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal test_attn_gate_sigmoid_mul_matches_reference --lib`
+- `KILN_METAL_ATTN_GATE_BATCH_BENCH_WARMUP=5 KILN_METAL_ATTN_GATE_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_attn_gate_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5 full-attention output gate shape
+`x/gate=[B,1,4096]`:
+
+| Batch | Fallback sigmoid+mul | Fused Metal gate | Speedup | Max abs diff | Mean abs diff |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `222.165 us` | `48.819 us` | `4.551x` | `1.953125e-3` | `1.250431e-4` |
+| 2 | `218.188 us` | `147.700 us` | `1.477x` | `1.953125e-3` | `1.251474e-4` |
+| 4 | `244.819 us` | `52.275 us` | `4.683x` | `1.953125e-3` | `1.246780e-4` |
+| 8 | `240.867 us` | `52.350 us` | `4.601x` | `1.953125e-3` | `1.246706e-4` |
+
+### Artifacts
+
+- `e325_attn_gate_decode_batch_synthetic.log`
+
+### Decision
+
+Accepted. This is another true-batching kernel building block, not endpoint
+batching by itself. With E318/E319/E321-E323, the future `[B,1,H]` path can now
+keep the full-attention output gate fused as well as the major MLP and GDN
+decode pieces.

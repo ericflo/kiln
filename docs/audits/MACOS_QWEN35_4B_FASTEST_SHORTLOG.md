@@ -905,3 +905,13 @@
   `11646.946 us` (0.746x), and batch8 `17172.817 us` vs `25354.850 us`
   (0.677x). Source was reverted; keep attention batching focused on a
   purpose-built decode kernel or real model-forward/scheduler plumbing.
+- 2026-05-04 E325: Accepted attention output-gate decode-batch support. The
+  Metal sigmoid/mul kernel already linearized all elements by `gid`; its
+  support gate now accepts nonzero BF16 `[B,1,H]` rows with matching gate shape
+  and checked dispatch bounds. Batch-4 parity passed. Qwen3.5 full-attention
+  gate synthetic wins versus unfused sigmoid+mul were batch1 `222.165 us` ->
+  `48.819 us` (4.551x), batch2 `218.188 us` -> `147.700 us` (1.477x), batch4
+  `244.819 us` -> `52.275 us` (4.683x), and batch8 `240.867 us` ->
+  `52.350 us` (4.601x), with max abs diff `1.953125e-3`. This removes another
+  full-attention `[B,1,H]` kernel blocker; endpoint batching still requires
+  model-forward state/cache/scheduler plumbing.

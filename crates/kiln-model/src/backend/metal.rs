@@ -3861,7 +3861,7 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &Tensor, gate: &Tensor) ->
         return false;
     };
 
-    batch == 1
+    batch > 0
         && seq_len == 1
         && gate_batch == batch
         && gate_seq_len == seq_len
@@ -3872,7 +3872,7 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &Tensor, gate: &Tensor) ->
 pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
     anyhow::ensure!(
         metal_attn_gate_sigmoid_mul_supports(x, gate),
-        "metal attn gate sigmoid/mul supports only BF16 [1,1,H] tensors on Metal"
+        "metal attn gate sigmoid/mul supports only BF16 [B,1,H] tensors on Metal"
     );
     let (batch, seq_len, hidden) = x.dims3()?;
     let total = batch * seq_len * hidden;
@@ -8943,6 +8943,11 @@ mod tests {
         Ok((gate * up)?)
     }
 
+    fn attn_gate_reference(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
+        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        Ok((x * gate_sig)?)
+    }
+
     fn bench_metal_tensor_op<F>(
         device: &Device,
         warmup: usize,
@@ -9248,6 +9253,67 @@ mod tests {
             broadcast_us / tile4_us,
             broadcast_us / tile8_us,
         );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_attn_gate_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_ATTN_GATE_BATCH_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_ATTN_GATE_BATCH_BENCH_ITERS", 20);
+        let hidden = 4096usize;
+
+        for batch in [1usize, 2, 4, 8] {
+            let x_data: Vec<f32> = (0..batch * hidden)
+                .map(|i| ((i % 29) as f32 - 14.0) * 0.03125)
+                .collect();
+            let gate_data: Vec<f32> = (0..batch * hidden)
+                .map(|i| ((i % 37) as f32 - 18.0) * 0.0625)
+                .collect();
+            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let gate = Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            device.synchronize()?;
+            assert!(metal_attn_gate_sigmoid_mul_supports(&x, &gate));
+
+            let reference = attn_gate_reference(&x, &gate)?;
+            let fused = metal_attn_gate_sigmoid_mul_bf16(&x, &gate)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Qwen3.5 attention gate batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "Qwen3.5 attention gate batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                attn_gate_reference(&x, &gate).context("bench fallback attention gate")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_attn_gate_sigmoid_mul_bf16(&x, &gate).context("bench fused attention gate")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 attention gate decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x/gate=[{batch},1,{hidden}] \
+                 warmup={warmup} iters={iters} fallback={fallback_us:.3} us \
+                 fused={fused_us:.3} us speedup={:.3}x max_abs_diff={max:.6e} \
+                 mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
 
         Ok(())
     }
@@ -10028,28 +10094,28 @@ mod tests {
             return Ok(());
         };
 
+        let batch = 4usize;
         let hidden = 257usize;
-        let x_data: Vec<f32> = (0..hidden)
+        let x_data: Vec<f32> = (0..batch * hidden)
             .map(|i| ((i % 29) as f32 - 14.0) * 0.03125)
             .collect();
-        let gate_data: Vec<f32> = (0..hidden)
+        let gate_data: Vec<f32> = (0..batch * hidden)
             .map(|i| ((i % 37) as f32 - 18.0) * 0.0625)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
-        let gate = Tensor::from_slice(&gate_data, (1usize, 1usize, hidden), &device)?
+        let gate = Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
 
         assert!(metal_attn_gate_sigmoid_mul_supports(&x, &gate));
         let fused = metal_attn_gate_sigmoid_mul_bf16(&x, &gate)?;
 
-        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
-        let reference = (x * gate_sig)?;
+        let reference = attn_gate_reference(&x, &gate)?;
 
-        assert_eq!(fused.dims(), &[1usize, 1usize, hidden]);
+        assert_eq!(fused.dims(), &[batch, 1usize, hidden]);
         assert_eq!(fused.dtype(), DType::BF16);
 
         let max = max_abs_diff(&reference, &fused)?;
