@@ -6420,12 +6420,14 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
 
 /// Batched paged decode API for real continuous-batching work.
 ///
-/// Keeps the existing [`PagedKvCache`] API and its caller-held mutex: each
-/// request still has its own [`BlockTable`] and KV window, but the dominant
-/// GDN/MLP layers run as one batch-shaped forward. Full-attention layers stay
-/// row-wise because each request has distinct paged KV metadata; this avoids
-/// the batch-8 paged-attention workspace blow-up while still removing the 24
-/// GDN-layer row loop that made streaming throughput flat.
+/// Phase 1 intentionally keeps the existing [`PagedKvCache`] API and its
+/// caller-held mutex: each request still has its own [`BlockTable`] and KV
+/// window, but the server-side scheduler can now hand a decode microbatch to a
+/// single model API. This WIP implementation is behavior-first and executes
+/// each row with the existing single-sequence forward path. Follow-up phases
+/// replace the row loop with a true layer-wise batch path that packs GDN state,
+/// supports N block tables in full-attention layers, and captures CUDA graphs
+/// per batch shape.
 ///
 /// CUDA graphs are deliberately not used for `batch_size > 1` here; the graph
 /// runner is currently captured for the batch-1 decode shape only. TODO(phase2
@@ -6475,134 +6477,29 @@ pub fn model_forward_paged_batched_decode(
         );
     }
 
-    let device = weights.embed_tokens.device();
-    let mut hidden = embedding_lookup_from_weights(input_tokens, weights)?;
-    hidden = hidden.unsqueeze(1)?; // [batch, 1, hidden]
-
-    let mut full_attn_idx = 0usize;
-    let mut linear_attn_idx = 0usize;
-    for (layer_idx, layer) in weights.layers.iter().enumerate() {
-        let layer_lora: Option<(&LoraLayerWeights, f32)> =
-            lora.and_then(|lw| lw.layers.get(layer_idx).map(|ll| (ll, lw.scale)));
-
-        match &layer.attention {
-            GpuAttentionWeights::Linear(lin_weights) => {
-                let normed = {
-                    kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_attn");
-                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
-                };
-
-                let mut recurrent_state = {
-                    let refs: Vec<&Tensor> = linear_states
-                        .iter()
-                        .map(|state| &state.recurrent_states[linear_attn_idx])
-                        .collect();
-                    Tensor::cat(&refs, 0).with_context(|| {
-                        format!("cat batched recurrent state for GDN layer {layer_idx}")
-                    })?
-                };
-                let mut conv_state = {
-                    let refs: Vec<&Tensor> = linear_states
-                        .iter()
-                        .map(|state| &state.conv_states[linear_attn_idx])
-                        .collect();
-                    Tensor::cat(&refs, 0).with_context(|| {
-                        format!("cat batched conv state for GDN layer {layer_idx}")
-                    })?
-                };
-
-                let attn_out = gated_deltanet_forward_decode_if(
-                    backend,
-                    &normed,
-                    lin_weights,
-                    config,
-                    &mut recurrent_state,
-                    &mut conv_state,
-                    false,
-                    false,
-                    false,
-                )
-                .with_context(|| format!("batched GDN layer {layer_idx}"))?;
-
-                for (row_idx, state) in linear_states.iter_mut().enumerate() {
-                    state.recurrent_states[linear_attn_idx] = recurrent_state
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()
-                        .with_context(|| {
-                            format!("split recurrent state row {row_idx} for GDN layer {layer_idx}")
-                        })?;
-                    state.conv_states[linear_attn_idx] = conv_state
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()
-                        .with_context(|| {
-                            format!("split conv state row {row_idx} for GDN layer {layer_idx}")
-                        })?;
-                }
-
-                hidden = {
-                    kiln_nvtx::range!(c"kiln/batched_decode/residual/attn");
-                    (hidden + attn_out)?
-                };
-                let normed_post = {
-                    kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_mlp");
-                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
-                };
-                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
-                hidden = {
-                    kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp");
-                    (hidden + ffn_out)?
-                };
-                linear_attn_idx += 1;
-            }
-            GpuAttentionWeights::Full(_) => {
-                let mut rows = Vec::with_capacity(batch_size);
-                for row_idx in 0..batch_size {
-                    let row_hidden = hidden.narrow(0, row_idx, 1)?;
-                    let pos = Tensor::new(&[sequence_lengths[row_idx] as f32], device)?;
-                    let rope_tables = rotary_tables_from_tensor(&pos, &weights.rotary_inv_freq)?;
-                    rows.push(
-                        transformer_block_paged_with_rope_tables(
-                            backend,
-                            &row_hidden,
-                            layer,
-                            config,
-                            &pos,
-                            sequence_lengths[row_idx],
-                            config.num_attention_heads,
-                            config.num_kv_heads,
-                            config.head_dim,
-                            config.rotary_dim(),
-                            &weights.rotary_inv_freq,
-                            Some((&rope_tables.0, &rope_tables.1)),
-                            config.rms_norm_eps,
-                            paged_cache,
-                            &block_tables[row_idx],
-                            full_attn_idx,
-                            layer_lora,
-                            #[cfg(feature = "cuda")]
-                            None,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "batched decode row {row_idx} transformer block {layer_idx} (full attention, paged)"
-                            )
-                        })?,
-                    );
-                }
-                let row_refs: Vec<&Tensor> = rows.iter().collect();
-                hidden = Tensor::cat(&row_refs, 0).with_context(|| {
-                    format!("cat full-attention rows after layer {layer_idx}")
-                })?;
-                full_attn_idx += 1;
-            }
-        }
+    let mut logits_rows = Vec::with_capacity(batch_size);
+    for (((&token, block_table), &seq_len), linear_state) in input_tokens
+        .iter()
+        .zip(block_tables.iter())
+        .zip(sequence_lengths.iter())
+        .zip(linear_states.iter_mut())
+    {
+        logits_rows.push(model_forward_paged(
+            backend,
+            &[token],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(&mut **linear_state),
+            lora,
+            None,
+        )?);
     }
 
-    let normed = {
-        kiln_nvtx::range!(c"kiln/batched_decode/lm_head_norm");
-        rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
-    };
-    lm_head_forward(&normed, &weights.embed_tokens_t).context("batched decode lm head")
+    let logits_refs: Vec<&Tensor> = logits_rows.iter().collect();
+    Tensor::cat(&logits_refs, 0).context("cat batched decode logits")
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
