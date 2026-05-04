@@ -1000,3 +1000,10 @@
   (4.589x), batch4 `646.147 us` -> `72.520 us` (8.910x), and batch8
   `1284.864 us` -> `75.740 us` (16.964x), all exact. This is not yet an
   endpoint win; scheduler/model-forward batching still needs to feed B rows.
+- 2026-05-04 E334: Rejected MLP down-projection residual epilogue fusion. The
+  temporary Metal kernel fused the down-proj GEMV epilogue with the following
+  BF16 residual add, matching current `GEMV + add` semantics exactly by
+  rounding the GEMV accumulator to BF16 before adding the residual. The
+  Qwen3.5 decode-shape synthetic bench lost: current `917.338 us` versus fused
+  `925.611 us` (0.991x), with exact output. Source was reverted before
+  endpoint testing.

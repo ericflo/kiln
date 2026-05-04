@@ -10353,3 +10353,48 @@ single-request endpoint latency by itself and should not be counted as an
 endpoint win yet. It removes the per-sequence RoPE-position blocker for future
 batched model-forward work, where each decode row can carry a different
 absolute position without falling back to rowwise launches.
+
+## 2026-05-04 E334 - Rejected MLP down-projection residual epilogue fusion
+
+### Goal
+
+Test a bs=1 MLP hot-path idea that removes a launch instead of only tuning
+projection arithmetic. The current decode MLP path runs the Metal down-proj
+GEMV, materializes the BF16 output, then the transformer block adds the
+residual in a separate elementwise operation. The temporary candidate fused the
+residual add into the down-projection kernel epilogue.
+
+### Change Tested
+
+- Added a temporary Metal `kiln_transposed_coop_gemv8_residual_bf16` kernel.
+- Matched current semantics by rounding the GEMV accumulator to BF16 before
+  adding the BF16 residual.
+- Added a focused parity test against the current `GEMV + residual add` path.
+- Added a Qwen3.5 down-proj synthetic bench for
+  `x=[1,1,9216]`, `weight_t=[9216,2560]`, `residual=[1,1,2560]`.
+- Reverted the temporary source after the synthetic benchmark lost.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_residual_matches_current_path --lib`
+- `KILN_METAL_MLP_DOWN_RESIDUAL_BENCH_WARMUP=20 KILN_METAL_MLP_DOWN_RESIDUAL_BENCH_ITERS=200 cargo test -p kiln-model --features metal bench_mlp_down_residual_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Same-binary synthetic result:
+
+| Shape | Current down + add | Fused down+residual | Relative | Max diff | Mean diff |
+|---|---:|---:|---:|---:|---:|
+| `x=[1,1,9216]`, `weight_t=[9216,2560]`, `residual=[1,1,2560]` | `917.338 us` | `925.611 us` | `0.991x` | `0.000000e0` | `0.000000e0` |
+
+### Artifact
+
+- `e334_mlp_down_residual_synthetic.log`
+
+### Decision
+
+Rejected before endpoint testing. The fused epilogue was exact, but it did not
+beat the current GEMV plus add path even in the isolated decode shape. Source
+was reverted; do not spend endpoint runs or production complexity on this
+residual epilogue.
