@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln CLI Reference &mdash; Server, training, and adapters</title>
+  <meta name="description" content="A concise command-line reference for running Kiln, checking health, submitting SFT or GRPO jobs, and managing LoRA adapters.">
+  <link rel="icon" href="assets/logo.png">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --bg: #0b0a08;
+      --bg-soft: #15110d;
+      --bg-soft-2: #1f1710;
+      --fg: #f8efe3;
+      --fg-dim: #cdbda8;
+      --fg-mute: #8c7f70;
+      --accent: #f97316;
+      --accent-soft: rgba(249,115,22,0.12);
+      --line: rgba(255,255,255,0.10);
+      --line-2: rgba(255,255,255,0.16);
+    }
+    body {
+      background: radial-gradient(circle at top, rgba(249,115,22,0.12), transparent 35%), var(--bg);
+      color: var(--fg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    pre {
+      background: #070605;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 1rem;
+      overflow-x: auto;
+      color: #ffe9c9;
+    }
+    code {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 0.35rem;
+      padding: 0.08rem 0.28rem;
+    }
+    pre code { background: transparent; border: 0; padding: 0; }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      min-width: 0;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    .label {
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .site-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      color: var(--fg-dim);
+    }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    @media (max-width: 640px) {
+      .site-nav-bar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .site-nav {
+        flex-wrap: wrap;
+        gap: 0.35rem 1rem;
+        line-height: 1.35;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
+      <a href="./" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="site-nav text-sm">
+        <a href="quickstart.html">Quickstart</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="api.html">API Reference</a>
+        <a href="cli.html">CLI Reference</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <section>
+    <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">CLI Reference &middot; serve &middot; train &middot; adapters</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">Run Kiln from the terminal.</h1>
+      <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
+        Use the CLI when you want a headless server, repeatable scripts, or quick diagnostics against a running Kiln instance. If you want visual status, adapter controls, or training monitoring, open <code>http://127.0.0.1:8420/ui</code> instead.
+      </p>
+      <div class="mt-8 flex flex-wrap gap-3">
+        <a href="#serve" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Start the server</a>
+        <a href="#training" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Submit training</a>
+        <a href="#adapters" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">Manage adapters</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="serve" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12 grid lg:grid-cols-2 gap-6">
+      <div class="card p-6">
+        <p class="label mb-2">Server</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Start serving Qwen3.5-4B</h2>
+        <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at the local model directory, then start the OpenAI-compatible server. Running <code>kiln</code> with no subcommand also serves.</p>
+<pre class="text-sm"><code>export KILN_MODEL_PATH=./Qwen3.5-4B
+kiln serve</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">The default server listens on <code>127.0.0.1:8420</code>; open <code>/ui</code> there for the dashboard.</p>
+      </div>
+      <div class="card p-6">
+        <p class="label mb-2">Configuration</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">Use config files and model IDs</h2>
+        <p class="mb-4" style="color: var(--fg-dim);"><code>--config</code> loads a TOML config file. <code>--served-model-id</code> changes the model name returned by <code>/v1/models</code> and accepted by OpenAI-compatible clients.</p>
+<pre class="text-sm"><code>kiln serve --config kiln.toml
+kiln serve --served-model-id qwen3.5-4b-local
+kiln config --file kiln.toml</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config --file</code> to validate a config before starting the server.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="health" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">Health</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Check server readiness</h2>
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="card p-6">
+          <p class="mb-4" style="color: var(--fg-dim);"><code>kiln health</code> prints a readable tree with model, adapter, scheduler, and training status.</p>
+<pre class="text-sm"><code>kiln health
+kiln health --url http://localhost:8420</code></pre>
+        </div>
+        <div class="card p-6">
+          <p class="mb-4" style="color: var(--fg-dim);">Use <code>--json</code> in scripts or CI probes when you want the raw health payload.</p>
+<pre class="text-sm"><code>kiln health --json \
+  | python3 -m json.tool</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="training" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">Training</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Submit SFT and GRPO jobs</h2>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Training commands talk to an already-running server. SFT reads JSONL correction examples; GRPO reads one JSON request or batch with prompts, completions, and rewards.</p>
+      <div class="grid lg:grid-cols-3 gap-4">
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">SFT corrections</h3>
+<pre class="text-sm"><code>kiln train sft \
+  --file corrections.jsonl \
+  --adapter support-bot</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> when you need to override defaults.</p>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">GRPO rewards</h3>
+<pre class="text-sm"><code>kiln train grpo \
+  --file grpo-batch.json \
+  --adapter support-bot</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use this for generate &rarr; score &rarr; train loops with verifiable rewards.</p>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-2">Queue status</h3>
+<pre class="text-sm"><code>kiln train status
+kiln train status --job-id train_123</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use the dashboard when you want visual progress and recent job history.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="adapters" class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <p class="label mb-2">Adapters</p>
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Manage LoRA adapters</h2>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Adapter commands call the running server's adapter API. Use them in scripts; use <code>/ui</code> when you want upload, download, merge, or safer visual confirmation before deleting.</p>
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="card p-6">
+          <h3 class="font-semibold mb-2">List, load, unload</h3>
+<pre class="text-sm"><code>kiln adapters list
+kiln adapters load support-bot
+kiln adapters unload
+kiln adapters unload support-bot</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">The named unload form is accepted for backwards compatibility; the server unloads the active adapter.</p>
+        </div>
+        <div class="card p-6">
+          <h3 class="font-semibold mb-2">Delete</h3>
+<pre class="text-sm"><code>kiln adapters delete support-bot</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Delete removes an adapter through the server. Prefer the UI for one-off manual cleanup.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-12">
+      <h2 class="text-2xl font-semibold tracking-tight mb-4">Related docs</h2>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <a class="card p-5 block" href="quickstart.html">
+          <h3 class="font-semibold mb-2">Quickstart</h3>
+          <p style="color: var(--fg-dim);">Install Kiln, download the model, and send the first chat request.</p>
+        </a>
+        <a class="card p-5 block" href="api.html">
+          <h3 class="font-semibold mb-2">API Reference</h3>
+          <p style="color: var(--fg-dim);">Map CLI flows to inference, training, adapter, and health endpoints.</p>
+        </a>
+        <a class="card p-5 block" href="grpo.html">
+          <h3 class="font-semibold mb-2">GRPO Guide</h3>
+          <p style="color: var(--fg-dim);">Build the generate, score, train loop around <code>kiln train grpo</code>.</p>
+        </a>
+        <a class="card p-5 block" href="troubleshooting.html">
+          <h3 class="font-semibold mb-2">Troubleshooting</h3>
+          <p style="color: var(--fg-dim);">Fix first-run server, model path, CUDA, Docker, and health issues.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="./">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="quickstart.html">Quickstart</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="api.html">API Reference</a>
+        <a href="cli.html">CLI Reference</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
