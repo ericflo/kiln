@@ -762,7 +762,7 @@ textarea { resize: vertical; min-height: 80px; }
   </div>
 </div>
 
-<div class="toast-container" id="toasts"></div>
+<div class="toast-container" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 (function() {
@@ -773,6 +773,11 @@ function toast(msg, type) {
   const c = document.getElementById('toasts');
   const el = document.createElement('div');
   el.className = 'toast ' + (type || 'ok');
+  if (type === 'err') {
+    el.setAttribute('role', 'alert');
+    el.setAttribute('aria-live', 'assertive');
+    el.setAttribute('aria-atomic', 'true');
+  }
   el.textContent = msg;
   c.appendChild(el);
   setTimeout(() => el.remove(), 4000);
