@@ -172,6 +172,48 @@
     </div>
   </section>
 
+  <section class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10">
+      <div class="card p-6 sm:p-8">
+        <p class="label mb-2">Command chooser</p>
+        <h2 class="text-2xl font-semibold tracking-tight mb-4">If you want to...</h2>
+        <div class="grid md:grid-cols-2 gap-5 text-sm leading-relaxed">
+          <div>
+            <h3 class="font-semibold mb-2">Start the server</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">Point Kiln at your model directory, then serve the OpenAI-compatible API.</p>
+<pre class="text-xs"><code>export KILN_MODEL_PATH=./Qwen3.5-4B
+kiln serve</code></pre>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2">Verify readiness</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">Use the readable tree for humans or JSON for scripts and CI probes.</p>
+<pre class="text-xs"><code>kiln health
+kiln health --json</code></pre>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2">Submit training</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">Send SFT corrections, GRPO scored completions, or check job progress.</p>
+<pre class="text-xs"><code>kiln train sft --file corrections.jsonl --adapter support-bot
+kiln train grpo --file grpo-batch.json --adapter support-bot
+kiln train status</code></pre>
+          </div>
+          <div>
+            <h3 class="font-semibold mb-2">Manage adapters</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">List adapters, load a saved LoRA, or unload the active adapter.</p>
+<pre class="text-xs"><code>kiln adapters list
+kiln adapters load support-bot
+kiln adapters unload</code></pre>
+          </div>
+          <div class="md:col-span-2">
+            <h3 class="font-semibold mb-2">Validate config</h3>
+            <p class="mb-3" style="color: var(--fg-dim);">Check a TOML config before using it with <code>kiln serve --config</code>.</p>
+<pre class="text-xs"><code>kiln config --file kiln.toml</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section id="serve" class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12 grid lg:grid-cols-2 gap-6">
       <div class="card p-6">
