@@ -9908,3 +9908,60 @@ LM-head for bs=1, but route full-logits decode batches through the batch GEMV
 kernel. This removes a large `broadcast_matmul` cliff for future true batching
 and also avoids an observed Metal buffer allocation failure at batch 8 for the
 fallback exact-vocab shape.
+
+## 2026-05-04 E327 - Accepted batched paged-KV token-major write primitive
+
+### Goal
+
+Keep moving toward the fastest inference path with low-level kernel work, not
+just cache reuse. Future true `[B,1,...]` full-attention decode needs to write
+B new KV rows into per-sequence paged slots. The existing Metal fast path only
+writes one token-major row per dispatch, so a batched decode cache write would
+pay B command launches before attention even runs.
+
+### Change
+
+- Added `kiln_paged_kv_write_token_major_batch_bf16`, a Metal kernel that
+  writes BF16 `k/v=[B,1,heads,head_dim]` into token-major paged pools using a
+  `u32` slot vector.
+- Added shape/support checks for BF16 Metal contiguous pools and source rows,
+  `slots=[B]`, `seq_len == 1`, checked `u32` dispatch bounds, and a kernel-side
+  `slot < total_slots` guard.
+- Precompiled the batch writer alongside the existing one-row writer.
+- Kept the production bs=1 route unchanged. The current cache API is still
+  per-sequence, so this is a future true-batching primitive until
+  model-forward cache/state plumbing can supply B slot ids.
+- Added parity coverage and an ignored Qwen3.5-shaped synthetic bench.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal test_paged_kv_write_token_major_batch_matches_reference --lib`
+- `KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_WARMUP=20 KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_ITERS=200 cargo test -p kiln-model --features metal bench_paged_kv_write_token_major_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5-style full-attention KV write shape
+`k/v=[B,1,4,256]`, pools `[4096,4,256]`:
+
+| Batch | Rowwise single writes | Batched write | Speedup | Max abs diff |
+|---:|---:|---:|---:|---:|
+| 1 | `49.633 us` | `53.369 us` | `0.930x` | `0.000000e0` |
+| 2 | `94.185 us` | `70.394 us` | `1.338x` | `0.000000e0` |
+| 4 | `173.939 us` | `48.290 us` | `3.602x` | `0.000000e0` |
+| 8 | `325.680 us` | `47.168 us` | `6.905x` | `0.000000e0` |
+
+### Artifacts
+
+- `e327_paged_kv_write_decode_batch_synthetic.log`
+
+### Decision
+
+Accepted as a B>1 primitive. Do not replace the one-row writer for bs=1, where
+the extra slot-vector indirection is slower. This removes another low-level
+launch-count cliff for future true decode batching, but endpoint speed still
+depends on the model-forward scheduler/cache plumbing that can actually call
+the batch writer with per-sequence slots.

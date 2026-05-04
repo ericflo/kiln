@@ -182,6 +182,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     }
     if !metal_paged_kv_write_token_major_disabled() {
         metal_paged_kv_write_token_major_pipeline(metal_device)?;
+        metal_paged_kv_write_token_major_batch_pipeline(metal_device)?;
     }
     Ok(())
 }
@@ -2871,6 +2872,35 @@ kernel void kiln_paged_kv_write_token_major_bf16(
     k_pool[pool_idx] = k_src[gid];
     v_pool[pool_idx] = v_src[gid];
 }
+
+kernel void kiln_paged_kv_write_token_major_batch_bf16(
+    device const bfloat* k_src [[buffer(0)]],
+    device const bfloat* v_src [[buffer(1)]],
+    device bfloat* k_pool [[buffer(2)]],
+    device bfloat* v_pool [[buffer(3)]],
+    device const uint* slots [[buffer(4)]],
+    constant uint& batch [[buffer(5)]],
+    constant uint& heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    constant uint& total_slots [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint row_stride = heads * head_dim;
+    const uint total = batch * row_stride;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint batch_idx = gid / row_stride;
+    const uint local = gid - batch_idx * row_stride;
+    const uint slot = slots[batch_idx];
+    if (slot >= total_slots) {
+        return;
+    }
+    const uint pool_idx = slot * row_stride + local;
+    k_pool[pool_idx] = k_src[gid];
+    v_pool[pool_idx] = v_src[gid];
+}
 "#;
 
 fn metal_shared_library(
@@ -3449,6 +3479,35 @@ fn metal_paged_kv_write_token_major_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv write pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_paged_kv_write_token_major_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal paged kv batch write pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_paged_kv_write_token_major_batch_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal paged kv batch write function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal paged kv batch write pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -5208,6 +5267,170 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
         encoder.set_bytes(6, &head_dim_u32);
 
         let total = heads * head_dim;
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    slots: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> bool {
+    if metal_paged_kv_write_token_major_disabled() {
+        return false;
+    }
+    if k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+        || slots.dtype() != DType::U32
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+    {
+        return false;
+    }
+    if !matches!(k_pool.device(), Device::Metal(_))
+        || !matches!(v_pool.device(), Device::Metal(_))
+        || !matches!(slots.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !k_pool.is_contiguous()
+        || !v_pool.is_contiguous()
+        || !slots.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((total_slots, pool_heads, pool_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Ok(v_pool_dims) = v_pool.dims3() else {
+        return false;
+    };
+    let Ok((batch, seq_len, heads, head_dim)) = k.dims4() else {
+        return false;
+    };
+    let Ok(v_dims) = v.dims4() else {
+        return false;
+    };
+    let Ok(slot_count) = slots.dims1() else {
+        return false;
+    };
+    let Some(row_stride) = heads.checked_mul(head_dim) else {
+        return false;
+    };
+    let Some(total) = batch.checked_mul(row_stride) else {
+        return false;
+    };
+
+    batch > 0
+        && total_slots > 0
+        && seq_len == 1
+        && slot_count == batch
+        && v_pool_dims == (total_slots, pool_heads, pool_head_dim)
+        && v_dims == (batch, seq_len, heads, head_dim)
+        && heads == pool_heads
+        && head_dim == pool_head_dim
+        && batch <= u32::MAX as usize
+        && heads <= u32::MAX as usize
+        && head_dim <= u32::MAX as usize
+        && total_slots <= u32::MAX as usize
+        && row_stride <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
+#[allow(dead_code)]
+pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
+    k_pool: &mut Tensor,
+    v_pool: &mut Tensor,
+    slots: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> Result<()> {
+    anyhow::ensure!(
+        metal_paged_kv_write_token_major_batch_supports(k_pool, v_pool, slots, k, v),
+        "metal paged kv token-major batch write unsupported shape"
+    );
+    let (total_slots, heads, head_dim) = k_pool.dims3()?;
+    let (batch, _, _, _) = k.dims4()?;
+    let Device::Metal(device) = k_pool.device() else {
+        anyhow::bail!("metal paged kv batch write requires Metal tensors");
+    };
+    let pipeline = metal_paged_kv_write_token_major_batch_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_kv_write_token_major_batch_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (ks_storage, ks_layout) = k.storage_and_layout();
+        let (vs_storage, vs_layout) = v.storage_and_layout();
+        let (kp_storage, kp_layout) = k_pool.storage_and_layout();
+        let (vp_storage, vp_layout) = v_pool.storage_and_layout();
+        let (slot_storage, slot_layout) = slots.storage_and_layout();
+
+        let ks_metal = match &*ks_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write k source must be on Metal"),
+        };
+        let vs_metal = match &*vs_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write v source must be on Metal"),
+        };
+        let kp_metal = match &*kp_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write k pool must be on Metal"),
+        };
+        let vp_metal = match &*vp_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write v pool must be on Metal"),
+        };
+        let slot_metal = match &*slot_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write slots must be on Metal"),
+        };
+
+        let ks_buf = candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
+        let vs_buf = candle_core::metal_backend::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
+        let kp_buf =
+            candle_core::metal_backend::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
+        let vp_buf =
+            candle_core::metal_backend::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
+        let slot_buf =
+            candle_core::metal_backend::buffer_o(slot_metal.buffer(), &slot_layout, slots.dtype());
+
+        encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(kp_buf.buffer), kp_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(vp_buf.buffer), vp_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(slot_buf.buffer), slot_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let heads_u32 = heads as u32;
+        let head_dim_u32 = head_dim as u32;
+        let total_slots_u32 = total_slots as u32;
+        encoder.set_bytes(5, &batch_u32);
+        encoder.set_bytes(6, &heads_u32);
+        encoder.set_bytes(7, &head_dim_u32);
+        encoder.set_bytes(8, &total_slots_u32);
+
+        let total = batch * heads * head_dim;
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
             height: 1,
@@ -8975,6 +9198,28 @@ mod tests {
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
     }
 
+    fn bench_metal_unit_op<F>(
+        device: &Device,
+        warmup: usize,
+        iters: usize,
+        mut op: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        for _ in 0..warmup {
+            op()?;
+        }
+        device.synchronize()?;
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            op()?;
+        }
+        device.synchronize()?;
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
     fn bench_metal_qkv_op<F>(device: &Device, warmup: usize, iters: usize, mut op: F) -> Result<f64>
     where
         F: FnMut() -> Result<(Tensor, Tensor, Tensor)>,
@@ -9503,6 +9748,130 @@ mod tests {
                     );
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_paged_kv_write_token_major_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_WARMUP", 20);
+        let iters = env_usize("KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_ITERS", 200);
+        let total_slots = env_usize("KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_SLOTS", 4096);
+        let heads = 4usize;
+        let head_dim = 256usize;
+        let row_stride = heads * head_dim;
+
+        for batch in [1usize, 2, 4, 8] {
+            let elems = batch * row_stride;
+            let k_data: Vec<f32> = (0..elems)
+                .map(|i| ((i % 37) as f32 - 18.0) * 0.015625)
+                .collect();
+            let v_data: Vec<f32> = (0..elems)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+                .collect();
+            let slots_data: Vec<u32> = (0..batch)
+                .map(|idx| ((idx * 17 + 5) % total_slots) as u32)
+                .collect();
+            let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let v = Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
+            let k_rows: Vec<Tensor> = (0..batch)
+                .map(|idx| k.narrow(0, idx, 1).and_then(|row| row.contiguous()))
+                .collect::<candle_core::Result<Vec<_>>>()?;
+            let v_rows: Vec<Tensor> = (0..batch)
+                .map(|idx| v.narrow(0, idx, 1).and_then(|row| row.contiguous()))
+                .collect::<candle_core::Result<Vec<_>>>()?;
+            let rowwise_slots: Vec<usize> = slots_data.iter().map(|&slot| slot as usize).collect();
+            let mut k_pool_row =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let mut v_pool_row =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let mut k_pool_batch =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let mut v_pool_batch =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            device.synchronize()?;
+
+            assert!(metal_paged_kv_write_token_major_batch_supports(
+                &k_pool_batch,
+                &v_pool_batch,
+                &slots,
+                &k,
+                &v
+            ));
+            for idx in 0..batch {
+                assert!(metal_paged_kv_write_token_major_supports(
+                    &k_pool_row,
+                    &v_pool_row,
+                    rowwise_slots[idx],
+                    &k_rows[idx],
+                    &v_rows[idx],
+                ));
+                metal_paged_kv_write_token_major_bf16(
+                    &mut k_pool_row,
+                    &mut v_pool_row,
+                    rowwise_slots[idx],
+                    &k_rows[idx],
+                    &v_rows[idx],
+                )?;
+            }
+            metal_paged_kv_write_token_major_batch_bf16(
+                &mut k_pool_batch,
+                &mut v_pool_batch,
+                &slots,
+                &k,
+                &v,
+            )?;
+            device.synchronize()?;
+
+            let k_max = max_abs_diff(&k_pool_row, &k_pool_batch)?;
+            let v_max = max_abs_diff(&v_pool_row, &v_pool_batch)?;
+            assert!(
+                k_max < 1e-6 && v_max < 1e-6,
+                "Qwen3.5 paged KV batch write batch={batch} max_abs_diff k={k_max:e} v={v_max:e} exceeds tolerance"
+            );
+
+            let rowwise_us = bench_metal_unit_op(&device, warmup, iters, || {
+                for idx in 0..batch {
+                    metal_paged_kv_write_token_major_bf16(
+                        &mut k_pool_row,
+                        &mut v_pool_row,
+                        rowwise_slots[idx],
+                        &k_rows[idx],
+                        &v_rows[idx],
+                    )?;
+                }
+                Ok(())
+            })?;
+            let batch_us = bench_metal_unit_op(&device, warmup, iters, || {
+                metal_paged_kv_write_token_major_batch_bf16(
+                    &mut k_pool_batch,
+                    &mut v_pool_batch,
+                    &slots,
+                    &k,
+                    &v,
+                )
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 paged KV token-major write decode batch BF16: \
+                 batch={batch} physical_tokens={physical_tokens} \
+                 k/v=[{batch},1,{heads},{head_dim}] pools=[{total_slots},{heads},{head_dim}] \
+                 warmup={warmup} iters={iters} rowwise={rowwise_us:.3} us \
+                 batched={batch_us:.3} us speedup={:.3}x \
+                 k_max_abs_diff={k_max:.6e} v_max_abs_diff={v_max:.6e}",
+                rowwise_us / batch_us,
+            );
         }
 
         Ok(())
@@ -11092,6 +11461,70 @@ mod tests {
         assert!(
             max_abs_diff(&v_written, &v_ref)? < 1e-6,
             "V fast write diverged from source"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_kv_write_token_major_batch_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let total_slots = 16usize;
+        let heads = 2usize;
+        let head_dim = 16usize;
+        let batch = 4usize;
+        let elems = batch * heads * head_dim;
+        let slots_data = vec![5u32, 2, 11, 7];
+        let k_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 37) as f32 - 18.0) * 0.015625)
+            .collect();
+        let v_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+            .collect();
+        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v = Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
+        let mut k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let mut v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+
+        assert!(metal_paged_kv_write_token_major_batch_supports(
+            &k_pool, &v_pool, &slots, &k, &v
+        ));
+        metal_paged_kv_write_token_major_batch_bf16(&mut k_pool, &mut v_pool, &slots, &k, &v)?;
+        device.synchronize()?;
+
+        for (batch_idx, &slot) in slots_data.iter().enumerate() {
+            let slot = slot as usize;
+            let k_written = k_pool.narrow(0, slot, 1)?;
+            let v_written = v_pool.narrow(0, slot, 1)?;
+            let k_ref = k.narrow(0, batch_idx, 1)?.squeeze(0)?.contiguous()?;
+            let v_ref = v.narrow(0, batch_idx, 1)?.squeeze(0)?.contiguous()?;
+
+            assert!(
+                max_abs_diff(&k_written, &k_ref)? < 1e-6,
+                "K batch write slot={slot} diverged from source row={batch_idx}"
+            );
+            assert!(
+                max_abs_diff(&v_written, &v_ref)? < 1e-6,
+                "V batch write slot={slot} diverged from source row={batch_idx}"
+            );
+        }
+
+        let zero_ref = Tensor::zeros((1usize, heads, head_dim), DType::BF16, &device)?;
+        assert!(
+            max_abs_diff(&k_pool.narrow(0, 0, 1)?, &zero_ref)? < 1e-6,
+            "K batch write changed an untouched slot"
+        );
+        assert!(
+            max_abs_diff(&v_pool.narrow(0, 0, 1)?, &zero_ref)? < 1e-6,
+            "V batch write changed an untouched slot"
         );
 
         Ok(())

@@ -925,3 +925,14 @@
   `568938.375 us` (6.721x), and batch8 fallback failed to allocate while the
   fused path completed in `922537.958 us`. This removes a large full-logits
   broadcast cliff for future true batching.
+- 2026-05-04 E327: Accepted a batched paged-KV token-major write primitive.
+  Added a Metal BF16 writer for `k/v=[B,1,heads,head_dim]` plus `u32` slot ids,
+  with shape checks, checked dispatch bounds, a kernel-side slot guard, parity
+  coverage, and a Qwen3.5-style synthetic bench. Current production bs=1 cache
+  writes stay on the existing one-row writer because batch1 lost
+  `49.633 us` vs `53.369 us` (0.930x). For future true decode batches the raw
+  write primitive won: batch2 `94.185 us` -> `70.394 us` (1.338x), batch4
+  `173.939 us` -> `48.290 us` (3.602x), and batch8 `325.680 us` -> `47.168 us`
+  (6.905x), with exact pool matches. This is low-level launch-count work, not
+  cache-reuse tuning; endpoint speed still requires model-forward
+  scheduler/cache plumbing to provide B per-sequence slots.
