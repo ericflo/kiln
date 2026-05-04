@@ -9532,3 +9532,54 @@ rows and pairs with E318's batched MLP gate/up support. Remaining true-batch
 work is now more clearly at the model-forward/scheduler boundary: per-sequence
 paged cache/block tables, batched GDN and attention state, and a batched fused
 QKV path if full-attention layers become a bottleneck for `[B,1,H]`.
+
+## Experiment E320: Rejected Decode-Batch Fused QKV Projection
+
+Purpose:
+
+Test whether full-attention Q/K/V projection should be fused for future
+`[B,1,H]` decode batches. After E319, batched decode Q/K/V can already use
+three separate batch tile8 GEMVs instead of `broadcast_matmul`. The candidate
+therefore had to beat the current separate batch GEMV path, not just the old
+broadcast fallback.
+
+Temporary implementation:
+
+- Added a batch variant of the existing fused QKV tile8 Metal kernel.
+- Kept bs=1 fused QKV untouched.
+- Routed only BF16 Metal `[B,1,H]` with `B > 1`, no LoRA/Marlin/debug taps,
+  through the candidate.
+- Used separate contiguous Q/K/V output tensors for batch mode. A single
+  shared backing allocation would make the returned `[B,1,N]` views
+  non-contiguous across the batch dimension and risk downstream reshape
+  failures.
+- Added focused parity coverage and an ignored synthetic Qwen3.5 bench using
+  gated Q output dims: `q_t=[2560,8192]`, `k_t/v_t=[2560,1024]`.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal 'test_fused_qkv_transposed_coop_gemv' --lib`
+- `KILN_METAL_FUSED_QKV_BATCH_BENCH_WARMUP=5 KILN_METAL_FUSED_QKV_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_fused_qkv_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+Same-binary synthetic results versus the current separate batch GEMVs:
+
+| Batch | Physical tokens | Separate batch GEMVs | Fused batch QKV | Relative | Max abs diff |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 2194.850 us | 2448.417 us | 0.896x | 0 |
+| 4 | 4 | 4309.402 us | 4703.504 us | 0.916x | 0 |
+| 8 | 8 | 8273.379 us | 9448.035 us | 0.876x | 0 |
+
+Artifact:
+
+- `e320_fused_qkv_decode_batch_synthetic.log`
+
+Takeaway:
+
+The fused batch-QKV launch is exact but slower than the three separate E319
+batch GEMVs, so the temporary source was reverted. Do not pursue this simple
+single-dispatch QKV fusion unless a later profile shows launch overhead, not
+weight-read work, dominating full-attention QKV. The stronger remaining bs>1
+work is still true model-forward batching: per-sequence cache/block tables,
+batched GDN and attention state, and scheduler integration.

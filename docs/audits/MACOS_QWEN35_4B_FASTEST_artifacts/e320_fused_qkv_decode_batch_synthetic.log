@@ -1,0 +1,68 @@
+warning: /Users/ericflo/Development/kiln/crates/kiln-vulkan-kernel/Cargo.toml: version requirement `0.37.3+1.3.269` for dependency `ash` includes semver metadata which will be ignored, removing the metadata is recommended to avoid confusion
+warning: unused variable: `v_out`
+    --> crates/kiln-model/src/paged_kv_cache.rs:1056:21
+     |
+1056 |         let (k_out, v_out) = cache.read(0, &bt, 3)?;
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_out`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `in_features`
+   --> crates/kiln-model/src/quantized.rs:377:13
+    |
+377 |         let in_features = 8;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_features`
+
+warning: unused variable: `out_features`
+   --> crates/kiln-model/src/quantized.rs:378:13
+    |
+378 |         let out_features = 1;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_features`
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3148:4
+     |
+3148 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `create_safetensors_with_data` is never used
+    --> crates/kiln-model/src/loader.rs:1893:8
+     |
+1893 |     fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pack_int4` is never used
+    --> crates/kiln-model/src/loader.rs:1913:8
+     |
+1913 |     fn pack_int4(values: &[u8]) -> Vec<u8> {
+     |        ^^^^^^^^^
+
+warning: function `gptq_linear_tensors` is never used
+    --> crates/kiln-model/src/loader.rs:1927:8
+     |
+1927 |     fn gptq_linear_tensors(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:35:5
+   |
+23 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+35 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib test) generated 8 warnings (run `cargo fix --lib -p kiln-model --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/kiln_model-8ab5b66e9ef10c0c)
+
+running 1 test
+synthetic Metal Qwen3.5 fused QKV decode batch BF16: batch=2 physical_tokens=2 x=[2,1,2560] q_t=[2560,8192] k_t/v_t=[2560,1024] warmup=5 iters=20 separate_batch_gemv=2194.850 us fused_batch_qkv=2448.417 us speedup=0.896x q_max_abs_diff=0.000000e0 k_max_abs_diff=0.000000e0 v_max_abs_diff=0.000000e0 q_mean_abs_diff=0.000000e0 k_mean_abs_diff=0.000000e0 v_mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 fused QKV decode batch BF16: batch=4 physical_tokens=4 x=[4,1,2560] q_t=[2560,8192] k_t/v_t=[2560,1024] warmup=5 iters=20 separate_batch_gemv=4309.402 us fused_batch_qkv=4703.504 us speedup=0.916x q_max_abs_diff=0.000000e0 k_max_abs_diff=0.000000e0 v_max_abs_diff=0.000000e0 q_mean_abs_diff=0.000000e0 k_mean_abs_diff=0.000000e0 v_mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 fused QKV decode batch BF16: batch=8 physical_tokens=8 x=[8,1,2560] q_t=[2560,8192] k_t/v_t=[2560,1024] warmup=5 iters=20 separate_batch_gemv=8273.379 us fused_batch_qkv=9448.035 us speedup=0.876x q_max_abs_diff=0.000000e0 k_max_abs_diff=0.000000e0 v_max_abs_diff=0.000000e0 q_mean_abs_diff=0.000000e0 k_mean_abs_diff=0.000000e0 v_mean_abs_diff=0.000000e0
+test backend::metal::tests::bench_fused_qkv_transposed_coop_gemv_decode_batch_synthetic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 314 filtered out; finished in 2.38s
+

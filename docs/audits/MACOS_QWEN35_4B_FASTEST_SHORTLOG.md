@@ -852,3 +852,12 @@
   exact output match. `cargo check` for `kiln`/`kiln-bench` and release
   `kiln-bench` build passed. This pairs with E318 as a true-batching building
   block; endpoint/model-forward batching still remains.
+- 2026-05-04 E320: Rejected a decode-batch fused QKV projection. The temporary
+  batch variant fused Q/K/V into one Metal dispatch for BF16 `[B,1,2560]` using
+  Qwen3.5 gated full-attention dims (`q_t=[2560,8192]`,
+  `k_t/v_t=[2560,1024]`) and matched the current separate E319 batch GEMVs
+  exactly, but lost in same-binary synthetic timing: batch2 `2194.850 us` vs
+  `2448.417 us` (0.896x), batch4 `4309.402 us` vs `4703.504 us` (0.916x),
+  and batch8 `8273.379 us` vs `9448.035 us` (0.876x). Source was reverted.
+  This keeps the focus on true model-forward batching and lower-level kernels
+  with demonstrated wins, not simple QKV launch fusion.
