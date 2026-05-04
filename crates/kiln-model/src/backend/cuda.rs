@@ -38,12 +38,8 @@ impl CudaBackend {
         let gdn_gated_rms_norm_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
-        let cuda_graphs_enabled = std::env::var("KILN_CUDA_GRAPHS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false);
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
-            && (cuda_graphs_enabled || std::env::var("KILN_ENABLE_FUSED_GDN_DECODE").is_ok())
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
         Self {
             device,

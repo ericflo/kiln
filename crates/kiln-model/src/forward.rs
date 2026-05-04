@@ -6561,7 +6561,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &mut conv_state,
                     false,
                     false,
-                    false,
+                    true,
                     false,
                 )
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
@@ -7519,7 +7519,7 @@ fn model_forward_paged_inner(
                     &mut state.conv_states[linear_attn_idx],
                     capture_b11_taps,
                     capture_c41_taps,
-                    !matches!(lm_head_mode, LmHeadMode::HiddenOnly),
+                    true,
                     use_metal_decode_ffn,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;

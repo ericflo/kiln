@@ -1058,12 +1058,6 @@ pub fn gdn_gates(
         );
     }
 
-    if a_log.dtype() == DType::BF16 && dt_bias.dtype() == DType::BF16 {
-        let beta = b.apply_op1_no_bwd(&GdnGateBetaOp)?;
-        let g = a.apply_op3_no_bwd(a_log, dt_bias, &GdnGateGOp)?;
-        return Ok((beta, g));
-    }
-
     let device = a.device();
     let shape = a.dims().to_vec();
     let nv = *shape.last().unwrap();
