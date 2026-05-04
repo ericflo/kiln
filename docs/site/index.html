@@ -111,6 +111,7 @@
       gap: 1.25rem;
       color: var(--fg-dim);
     }
+    .site-nav a[aria-current="page"] { color: var(--fg); }
     @media (max-width: 640px) {
       .site-nav-bar {
         align-items: flex-start;
@@ -167,7 +168,7 @@
   <!-- nav -->
   <header class="border-b" style="border-color: var(--line);">
     <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
-      <a href="./" class="flex items-center gap-2.5">
+      <a href="./" class="flex items-center gap-2.5" aria-current=page>
         <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
         <span class="text-lg font-semibold tracking-tight">Kiln</span>
       </a>

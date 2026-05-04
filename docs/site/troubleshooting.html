@@ -119,6 +119,7 @@
       gap: 1.25rem;
       color: var(--fg-dim);
     }
+    .site-nav a[aria-current="page"] { color: var(--fg); }
     @media (max-width: 640px) {
       .site-nav-bar {
         align-items: flex-start;
@@ -182,7 +183,7 @@
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
-        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="troubleshooting.html" aria-current=page>Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
         <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
       </nav>

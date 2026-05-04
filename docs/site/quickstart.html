@@ -129,6 +129,7 @@
       gap: 1.25rem;
       color: var(--fg-dim);
     }
+    .site-nav a[aria-current="page"] { color: var(--fg); }
     @media (max-width: 640px) {
       .site-nav-bar {
         align-items: flex-start;
@@ -187,7 +188,7 @@
         <span class="text-lg font-semibold tracking-tight">Kiln</span>
       </a>
       <nav class="site-nav text-sm">
-        <a href="quickstart.html">Quickstart</a>
+        <a href="quickstart.html" aria-current=page>Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>

@@ -133,6 +133,7 @@
       gap: 1.25rem;
       color: var(--fg-dim);
     }
+    .site-nav a[aria-current="page"] { color: var(--fg); }
     @media (max-width: 640px) {
       .site-nav-bar {
         align-items: flex-start;
@@ -193,7 +194,7 @@
       <nav class="site-nav text-sm">
         <a href="quickstart.html">Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
-        <a href="api.html">API Reference</a>
+        <a href="api.html" aria-current=page>API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
