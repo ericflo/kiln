@@ -9329,6 +9329,15 @@ mod tests {
     }
 
     #[cfg(feature = "metal")]
+    fn patterned_f32(shape: &[usize], scale: f32, device: &Device) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| (((i * 23 + 19) % 251) as f32 - 125.0) * scale)
+            .collect();
+        Ok(Tensor::new(data, device)?.reshape(shape)?.contiguous()?)
+    }
+
+    #[cfg(feature = "metal")]
     fn make_bf16_full_attn_weights(
         hidden: usize,
         num_heads: usize,
@@ -9415,6 +9424,132 @@ mod tests {
             rotary_inv_freq,
             mtp: None,
         })
+    }
+
+    #[cfg(feature = "metal")]
+    fn make_bf16_hybrid_gpu_weights(
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+    ) -> Result<GpuWeights> {
+        let hidden = config.hidden_size;
+        let embed_tokens = patterned_bf16(&[config.vocab_size, hidden], 0.01, device)?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
+        let final_norm = Tensor::zeros(hidden, DType::BF16, device)?;
+        let mut layers = Vec::with_capacity(config.num_layers);
+
+        for layer_idx in 0..config.num_layers {
+            let attention = if config.is_full_attention_layer(layer_idx) {
+                let q_dim = config.full_attn_q_proj_dim();
+                let kv_dim = config.num_kv_heads * config.head_dim;
+                let out_dim = config.num_attention_heads * config.head_dim;
+                let q_proj = patterned_bf16(&[q_dim, hidden], 0.00002, device)?;
+                let k_proj = patterned_bf16(&[kv_dim, hidden], 0.00003, device)?;
+                let v_proj = patterned_bf16(&[kv_dim, hidden], 0.00004, device)?;
+                let o_proj = patterned_bf16(&[hidden, out_dim], 0.00002, device)?;
+                GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj_t: q_proj.t()?.contiguous()?,
+                    k_proj_t: k_proj.t()?.contiguous()?,
+                    v_proj_t: v_proj.t()?.contiguous()?,
+                    o_proj_t: o_proj.t()?.contiguous()?,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
+                    q_norm: Tensor::zeros(config.head_dim, DType::BF16, device)?,
+                    k_norm: Tensor::zeros(config.head_dim, DType::BF16, device)?,
+                    q_proj_marlin: None,
+                })
+            } else {
+                let qkv_dim = config.linear_qkv_dim();
+                let v_dim = config.linear_v_dim();
+                let nv = config.linear_num_value_heads;
+                let in_proj_qkv = patterned_bf16(&[qkv_dim, hidden], 0.00002, device)?;
+                let in_proj_z = patterned_bf16(&[v_dim, hidden], 0.00003, device)?;
+                let out_proj = patterned_bf16(&[hidden, v_dim], 0.00002, device)?;
+                let in_proj_a = patterned_bf16(&[nv, hidden], 0.00004, device)?;
+                let in_proj_b = patterned_bf16(&[nv, hidden], 0.00005, device)?;
+                GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                    in_proj_qkv_t: in_proj_qkv.t()?.contiguous()?,
+                    in_proj_z_t: in_proj_z.t()?.contiguous()?,
+                    in_proj_a_t: in_proj_a.t()?.contiguous()?,
+                    in_proj_b_t: in_proj_b.t()?.contiguous()?,
+                    out_proj_t: out_proj.t()?.contiguous()?,
+                    in_proj_qkv,
+                    in_proj_z,
+                    out_proj,
+                    in_proj_a,
+                    in_proj_b,
+                    conv1d: patterned_bf16(
+                        &[qkv_dim, 1usize, config.linear_conv_kernel_dim],
+                        0.00002,
+                        device,
+                    )?,
+                    norm: Tensor::ones(config.linear_value_head_dim, DType::F32, device)?,
+                    a_log: Tensor::zeros(nv, DType::F32, device)?,
+                    dt_bias: Tensor::zeros(nv, DType::BF16, device)?,
+                })
+            };
+
+            layers.push(GpuLayerWeights {
+                input_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+                post_attention_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+                attention,
+                mlp: make_bf16_mlp_weights(hidden, config.intermediate_size, device)?,
+            });
+        }
+
+        let rotary_inv_freq =
+            compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)?;
+        Ok(GpuWeights {
+            embed_tokens,
+            embed_tokens_t,
+            layers,
+            final_norm,
+            rotary_inv_freq,
+            mtp: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn patterned_linear_state(
+        config: &kiln_core::config::ModelConfig,
+        row: usize,
+        device: &Device,
+    ) -> Result<LinearAttentionState> {
+        let mut state = LinearAttentionState::new(config, device)?;
+        for layer_idx in 0..state.recurrent_states.len() {
+            let state_scale = 0.00001 * (row + layer_idx + 1) as f32;
+            let conv_scale = 0.00002 * (row + layer_idx + 1) as f32;
+            state.recurrent_states[layer_idx] = patterned_bf16(
+                &[
+                    1usize,
+                    config.linear_num_value_heads,
+                    config.linear_key_head_dim,
+                    config.linear_value_head_dim,
+                ],
+                state_scale,
+                device,
+            )?;
+            state.conv_states[layer_idx] = patterned_f32(
+                &[
+                    1usize,
+                    config.linear_qkv_dim(),
+                    config.linear_conv_kernel_dim - 1,
+                ],
+                conv_scale,
+                device,
+            )?;
+        }
+        Ok(state)
+    }
+
+    #[cfg(feature = "metal")]
+    fn tensor_abs_diff_stats(left: &Tensor, right: &Tensor) -> Result<(f32, f32)> {
+        let diff = (left.to_dtype(DType::F32)? - right.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        Ok((max, mean))
     }
 
     #[cfg(feature = "metal")]
@@ -9827,6 +9962,176 @@ mod tests {
                 mean <= 3e-3,
                 "row {row} batched contiguous model decode mean_abs_diff={mean:e}"
             );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal() -> Result<()>
+    {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched hybrid model test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: 256,
+            num_layers: 4,
+            num_attention_heads: 16,
+            num_kv_heads: 4,
+            head_dim: 256,
+            intermediate_size: 512,
+            vocab_size: 64,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: true,
+            linear_num_key_heads: 16,
+            linear_key_head_dim: 128,
+            linear_num_value_heads: 32,
+            linear_value_head_dim: 128,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 0.25,
+        };
+        let weights = make_bf16_hybrid_gpu_weights(&config, &device)?;
+
+        let prefix_k = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.003,
+            &device,
+        )?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let token_ids = [7u32, 11u32];
+        let mut batch_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let mut row_states = Vec::with_capacity(batch);
+        for row in 0..batch {
+            row_states.push(patterned_linear_state(&config, row, &device)?);
+        }
+        let state_refs: Vec<&LinearAttentionState> = row_states.iter().collect();
+        let mut batch_state = LinearAttentionState::from_batch_rows(&state_refs)?;
+        let batched = model_forward_paged_decode_contiguous_batch(
+            &*backend,
+            &token_ids,
+            &weights,
+            &config,
+            &mut batch_cache,
+            &block_tables,
+            &start_positions,
+            Some(&mut batch_state),
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, config.vocab_size]);
+
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                config.num_full_attention_layers,
+                1,
+                block_size,
+                config.num_kv_heads,
+                config.head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let rowwise = model_forward_paged(
+                &*backend,
+                &token_ids[row..row + 1],
+                &weights,
+                &config,
+                &mut row_cache,
+                &row_table,
+                start_pos,
+                Some(&mut row_states[row]),
+                None,
+                Some(&positions),
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let (max, mean) = tensor_abs_diff_stats(&batch_row, &rowwise)?;
+            eprintln!(
+                "batched hybrid model decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 5e-2,
+                "row {row} batched hybrid model decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 5e-3,
+                "row {row} batched hybrid model decode mean_abs_diff={mean:e}"
+            );
+        }
+
+        let batch_rows = batch_state.split_batch_rows()?;
+        for row in 0..batch {
+            for layer_idx in 0..row_states[row].recurrent_states.len() {
+                let (rec_max, rec_mean) = tensor_abs_diff_stats(
+                    &batch_rows[row].recurrent_states[layer_idx],
+                    &row_states[row].recurrent_states[layer_idx],
+                )?;
+                let (conv_max, conv_mean) = tensor_abs_diff_stats(
+                    &batch_rows[row].conv_states[layer_idx],
+                    &row_states[row].conv_states[layer_idx],
+                )?;
+                eprintln!(
+                    "batched hybrid model state row {row} linear_layer {layer_idx}: recurrent_max={rec_max:e} recurrent_mean={rec_mean:e} conv_max={conv_max:e} conv_mean={conv_mean:e}"
+                );
+                assert!(
+                    rec_max <= 5e-2,
+                    "row {row} layer {layer_idx} recurrent max_abs_diff={rec_max:e}"
+                );
+                assert!(
+                    rec_mean <= 5e-3,
+                    "row {row} layer {layer_idx} recurrent mean_abs_diff={rec_mean:e}"
+                );
+                assert!(
+                    conv_max <= 5e-2,
+                    "row {row} layer {layer_idx} conv max_abs_diff={conv_max:e}"
+                );
+                assert!(
+                    conv_mean <= 5e-3,
+                    "row {row} layer {layer_idx} conv mean_abs_diff={conv_mean:e}"
+                );
+            }
         }
 
         Ok(())

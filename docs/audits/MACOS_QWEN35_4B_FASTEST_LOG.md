@@ -10813,3 +10813,65 @@ than the full Qwen hybrid stack. It removes the next concrete integration
 blocker: there is now a model-forward entry point that can consume `[B]`
 decode tokens and produce `[B,1,V]` logits under the current contiguous-KV
 batch constraints.
+
+## 2026-05-04 E343 - Proved hybrid batched paged model-forward decode parity
+
+### Goal
+
+Close the remaining correctness coverage gap in E342 before scheduler
+admission depends on the strict batched model-forward helper. E342 implemented
+linear/GDN layer routing through batch-shaped `LinearAttentionState`, but its
+test used a lightweight full-attention-only model. The missing proof was a
+hybrid stack with production-shaped GDN heads, nonzero per-row GDN state, a
+production-shaped full-attention layer, and full-attention output gating.
+
+### Change
+
+- Added `test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal`.
+- Added Metal-only deterministic helpers for BF16 hybrid test weights, F32
+  conv-state patterns, nonzero one-row `LinearAttentionState` construction,
+  and tensor max/mean absolute diff reporting.
+- The hybrid test uses four layers: three GDN/linear layers followed by one
+  full-attention layer, matching the Qwen full-attention interval shape at a
+  reduced hidden/vocab/MLP size.
+- Full attention uses the production kernel geometry required by the current
+  Metal contiguous paged decode batch path: `num_attention_heads=16`,
+  `num_kv_heads=4`, `head_dim=256`.
+- GDN uses production decode-kernel dimensions: `linear_num_key_heads=16`,
+  `linear_key_head_dim=128`, `linear_num_value_heads=32`,
+  `linear_value_head_dim=128`, and `linear_conv_kernel_dim=4`.
+- The test enables `attn_output_gate=true`, prepopulates per-row paged K/V
+  prefix data, assembles two nonzero one-row GDN states into batch state, runs
+  `model_forward_paged_decode_contiguous_batch`, then compares each output row
+  and each post-decode GDN recurrent/conv state against the existing rowwise
+  `model_forward_paged` path.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal --lib -- --nocapture`
+
+### Results
+
+- The two-row hybrid model-forward decode matched rowwise logits exactly:
+  row0 `max_abs_diff=0`, `mean_abs_diff=0`; row1 `max_abs_diff=0`,
+  `mean_abs_diff=0`.
+- Every GDN state row also matched exactly after decode:
+  rows 0 and 1, linear layers 0 through 2, recurrent and conv states all
+  reported `max_abs_diff=0`, `mean_abs_diff=0`.
+- Output shape was `[2,1,64]`; the reduced hidden size keeps the test
+  lightweight while preserving the full-attention and GDN head geometries that
+  select the relevant Metal decode batch kernels.
+
+### Artifact
+
+- `e343_hybrid_model_forward_paged_decode_contiguous_batch_parity.log`
+
+### Decision
+
+Accepted as hybrid correctness coverage for strict model-forward batching.
+This is still not a live endpoint win by itself, but it removes the main
+correctness reason to delay scheduler admission. The next blocker is now the
+request/scheduler integration that can assemble compatible decode rows, call
+`model_forward_paged_decode_contiguous_batch`, and scatter logits/state back to
+their owning requests under the current common-position and contiguous-KV
+constraints.

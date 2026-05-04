@@ -1081,3 +1081,12 @@
   two rowwise `model_forward_paged` calls exactly (`max_abs_diff=0`,
   `mean_abs_diff=0` for both rows). This is not a live endpoint win yet; the
   scheduler still needs to admit compatible decode rows into the helper.
+- 2026-05-04 E343: Accepted
+  hybrid correctness coverage for `model_forward_paged_decode_contiguous_batch`.
+  The Metal test uses three production-shaped GDN layers plus one
+  production-shaped full-attention layer with `attn_output_gate=true`,
+  nonzero assembled `[B,...]` GDN state, and prepopulated paged K/V prefix
+  data. Two-row batched logits matched rowwise `model_forward_paged` exactly
+  (`max_abs_diff=0`, `mean_abs_diff=0` for both rows), and every post-decode
+  GDN recurrent/conv state row matched exactly for all three linear layers.
+  This removes the main correctness blocker before scheduler admission.
