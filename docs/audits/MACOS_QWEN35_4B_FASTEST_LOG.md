@@ -8837,3 +8837,77 @@ are below the production registration threshold, and eight physical generated
 tokens. The next high-leverage direction should be true model-forward batching
 or scheduler-level continuous batching, while low-level kernel work remains
 important for bs=1 and for the per-token cost that batching would amortize.
+
+## Experiment E296-E300: Rejected MLP Gate/Up Threadgroup-Width Tuning
+
+Purpose:
+
+Try a fresh low-level MLP decode change after E290 showed
+`gate_up_fused + down_proj` dominate the profiled decode MLP slice. This avoids
+the already-rejected cooperative reduction, threadgroup-`x` cache, and
+fast-exp variants. The temporary candidate only changed the existing
+one-thread-per-output-column gate/up kernel's dispatch threadgroup width.
+
+Implementation notes:
+
+- Added temporary env knob
+  `KILN_METAL_MLP_GATE_UP_THREADGROUP_WIDTH={128,512}`.
+- The kernel body, arithmetic, memory layout, and production default remained
+  unchanged for the control path.
+- Reverted the temporary source after repeat measurement because the candidate
+  tied the current default within noise.
+
+Batching-boundary note from this pass:
+
+The current `/v1/completions/batch` endpoint still prepares prompt groups and
+then calls the single-request generation path for each physical output. Below
+that, the paged model-forward API accepts one `BlockTable`, one start position,
+and one linear-attention state. True bs>1 model-forward batching therefore
+requires a broader interface change than replacing the current batch fan-out
+scheduler loop.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Post-revert validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+- `git diff --check`
+
+Full-model warmed p64/o64:
+
+All runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`
+in the same temporary candidate binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E296 | gate/up threadgroup width 128 | 413.7 ms | 6.19 | 161.6 ms | 160.7 ms | 180.6 ms | no clear win |
+| E297 | gate/up threadgroup width 512 | 415.9 ms | 6.19 | 161.7 ms | 160.9 ms | 177.1 ms | no clear win |
+| E298 | gate/up threadgroup width 256 control | 420.3 ms | 6.11 | 163.7 ms | 163.4 ms | 177.0 ms | control |
+| E299 | gate/up threadgroup width 256 control repeat | 423.4 ms | 6.12 | 163.4 ms | 163.0 ms | 173.3 ms | control repeat |
+| E300 | gate/up threadgroup width 128 repeat | 422.3 ms | 6.12 | 163.3 ms | 162.6 ms | 172.8 ms | tied |
+
+Memory-pressure check:
+
+- After E300, `memory_pressure` reported 76% system-wide free memory.
+
+Artifacts:
+
+- `e296_m1_bs1_p64_o64_warmed_mlp_gate_up_tg128.log`
+- `e297_m1_bs1_p64_o64_warmed_mlp_gate_up_tg512.log`
+- `e298_m1_bs1_p64_o64_warmed_mlp_gate_up_tg256_control.log`
+- `e299_m1_bs1_p64_o64_warmed_mlp_gate_up_tg256_control_repeat.log`
+- `e300_m1_bs1_p64_o64_warmed_mlp_gate_up_tg128_repeat.log`
+
+Takeaway:
+
+Changing only the MLP gate/up dispatch threadgroup width is not a reliable win.
+The first 128/512 runs looked slightly faster than the 256 control, but the
+repeat pair tied at 163.4 ms versus 163.3 ms mean ITL. Keep the default source
+unchanged. The next MLP attempt should change a real memory/materialization or
+projection boundary, not just dispatch geometry.

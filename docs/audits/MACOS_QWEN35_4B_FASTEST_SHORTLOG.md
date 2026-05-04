@@ -751,3 +751,12 @@
   80% free after shutdown. Treat this as target selection for true
   model-forward/continuous batching and further low-level kernel work, not as a
   cache optimization.
+- 2026-05-04 E296-E300: Rejected MLP gate/up threadgroup-width tuning. A
+  temporary env knob tested widths 128 and 512 against the current 256 default
+  in the same release binary. The first pass was slightly favorable
+  (128/512 at 161.6/161.7 ms mean ITL versus 256 control at 163.7 ms), but the
+  repeat tied (256 control 163.4 ms, 128 repeat 163.3 ms). Source was reverted;
+  clean-source release `kiln-bench` rebuild and `git diff --check` passed.
+  The pass also confirmed true batch speedups need a broader model-forward API
+  change: current batch fan-out still routes physical outputs through
+  single-sequence generation with one `BlockTable`/linear state.
