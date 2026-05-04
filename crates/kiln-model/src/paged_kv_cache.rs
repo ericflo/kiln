@@ -518,6 +518,17 @@ impl PagedKvCache {
         self.block_size
     }
 
+    /// Return one physical start slot per batch row when each logical window
+    /// is a contiguous run in the shared KV pool.
+    pub fn contiguous_slot_run_starts(
+        &self,
+        block_tables: &[&BlockTable],
+        start_positions: &[usize],
+        len: usize,
+    ) -> Option<Vec<usize>> {
+        contiguous_slot_run_starts(block_tables, self.block_size, start_positions, len)
+    }
+
     pub fn num_blocks(&self) -> usize {
         self.num_blocks
     }

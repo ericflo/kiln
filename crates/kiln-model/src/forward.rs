@@ -5253,6 +5253,159 @@ fn try_flash_attn_paged_decode(
     Ok(Some(out))
 }
 
+/// Batched full-attention decode for rows whose live paged-KV windows are
+/// contiguous and share a common sequence length.
+///
+/// This is the scheduler-facing low-level primitive for true decode batching:
+/// it projects Q/K/V for `[batch, 1, hidden]`, writes one K/V row per request
+/// into the shared paged cache, runs the batched contiguous paged-attention
+/// backend kernel, then applies the attention output gate and `o_proj`.
+///
+/// Current backend constraints are intentionally strict:
+/// - one decode token per row,
+/// - all rows at the same `start_pos`,
+/// - non-FP8 paged cache,
+/// - each row's live `0..start_pos+1` KV window is one contiguous pool run,
+/// - backend accepts `flash_attn_paged_decode_contiguous_batch`.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_paged_decode_contiguous_batch(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &Tensor,
+    start_positions: &[usize],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    full_attn_layer_idx: usize,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (batch, seq_len, _hidden) = x.dims3()?;
+    anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
+    anyhow::ensure!(
+        seq_len == 1,
+        "batched contiguous paged attention requires one decode token per row"
+    );
+    anyhow::ensure!(
+        block_tables.len() == batch && start_positions.len() == batch,
+        "batched contiguous paged attention metadata length mismatch"
+    );
+    anyhow::ensure!(
+        positions.elem_count() == 1,
+        "batched contiguous paged attention requires one shared decode position"
+    );
+    anyhow::ensure!(
+        !paged_cache.is_fp8(),
+        "batched contiguous paged attention does not support FP8 caches"
+    );
+    anyhow::ensure!(
+        full_attn_layer_idx < paged_cache.num_layers(),
+        "batched contiguous paged attention layer index out of range"
+    );
+
+    let start_pos = start_positions[0];
+    anyhow::ensure!(
+        start_positions.iter().all(|&pos| pos == start_pos),
+        "batched contiguous paged attention requires a common start_pos"
+    );
+    let total_seq_len = start_pos + 1;
+    let live_window_starts = vec![0usize; batch];
+    let start_slots = paged_cache
+        .contiguous_slot_run_starts(block_tables, &live_window_starts, total_seq_len)
+        .context("batched contiguous paged attention requires contiguous live KV windows")?;
+    let start_slots_u32: Vec<u32> = start_slots
+        .iter()
+        .map(|&slot| {
+            u32::try_from(slot)
+                .context("batched contiguous paged attention start slot exceeds u32 range")
+        })
+        .collect::<Result<_>>()?;
+
+    let use_metal_decode_gemv =
+        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let (q_raw, k, v) = {
+        kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
+        full_attn_qkv_proj_decode_if(
+            use_metal_decode_gemv,
+            x,
+            attn_weights,
+            lora_layer,
+            lora_scale,
+        )?
+    };
+
+    let (q, gate) = if attn_output_gate {
+        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q = q_raw.narrow(3, 0, head_dim)?;
+        let gate = q_raw.narrow(3, head_dim, head_dim)?;
+        let gate = gate
+            .contiguous()?
+            .reshape(((), seq_len, num_heads * head_dim))?;
+        (q.contiguous()?, Some(gate))
+    } else {
+        (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+    };
+    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+    let (q, k) = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+    let q = q.transpose(1, 2)?.contiguous()?;
+
+    if !paged_cache.write_token_major_native_batch(
+        full_attn_layer_idx,
+        block_tables,
+        start_positions,
+        &k,
+        &v,
+    )? {
+        anyhow::bail!("batched contiguous paged attention KV write declined");
+    }
+
+    let (k_pool, v_pool) = paged_cache
+        .pool_tensors(full_attn_layer_idx)
+        .context("batched contiguous paged attention layer index out of range")?;
+    let start_slots =
+        Tensor::from_slice(start_slots_u32.as_slice(), batch, x.device())?.contiguous()?;
+    let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
+    let attn_output = backend
+        .flash_attn_paged_decode_contiguous_batch(
+            &q,
+            k_pool,
+            v_pool,
+            &start_slots,
+            total_seq_len,
+            softmax_scale,
+        )?
+        .context("backend declined batched contiguous paged attention")?;
+
+    let attn_output =
+        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
+        linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
+            &attn_output,
+            &attn_weights.o_proj_t,
+            lora_layer.and_then(|l| l.o_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    Ok(out)
+}
+
 /// Grouped-query attention using a paged KV cache.
 ///
 /// Same computation as [`gqa_attention`] but reads/writes K/V through a
@@ -8940,6 +9093,157 @@ mod tests {
             o_proj_t,
             q_proj_marlin: None,
         })
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched contiguous decode test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let hidden = 512usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+
+        let patterned = |shape: &[usize], scale: f32| -> Result<Tensor> {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n)
+                .map(|i| (((i * 17 + 13) % 257) as f32 - 128.0) * scale)
+                .collect();
+            Ok(Tensor::new(data, &device)?
+                .reshape(shape)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?)
+        };
+
+        let q_proj = patterned(&[num_heads * head_dim, hidden], 0.00002)?;
+        let k_proj = patterned(&[num_kv_heads * head_dim, hidden], 0.00003)?;
+        let v_proj = patterned(&[num_kv_heads * head_dim, hidden], 0.00004)?;
+        let o_proj = patterned(&[hidden, num_heads * head_dim], 0.00002)?;
+        let attn = GpuFullAttentionWeights {
+            q_proj_t: q_proj.t()?.contiguous()?,
+            k_proj_t: k_proj.t()?.contiguous()?,
+            v_proj_t: v_proj.t()?.contiguous()?,
+            o_proj_t: o_proj.t()?.contiguous()?,
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            q_norm: Tensor::zeros(head_dim, DType::F32, &device)?,
+            k_norm: Tensor::zeros(head_dim, DType::F32, &device)?,
+            q_proj_marlin: None,
+        };
+
+        let x = patterned(&[batch, 1usize, hidden], 0.01)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+
+        let prefix_k = patterned(&[batch, start_pos, num_kv_heads, head_dim], 0.002)?;
+        let prefix_v = patterned(&[batch, start_pos, num_kv_heads, head_dim], 0.003)?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let mut batch_cache = PagedKvCache::new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let batched = gqa_attention_paged_decode_contiguous_batch(
+            &*backend,
+            &x,
+            &attn,
+            &positions,
+            &start_positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            &mut batch_cache,
+            &block_tables,
+            0,
+            false,
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
+
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let row_x = x.narrow(0, row, 1)?.contiguous()?;
+            let rowwise = gqa_attention_paged(
+                &*backend,
+                &row_x,
+                &attn,
+                &positions,
+                start_pos,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                head_dim,
+                &inv_freq,
+                1e-6,
+                &mut row_cache,
+                &row_table,
+                0,
+                false,
+                None,
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "batched contiguous paged decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 2e-2,
+                "row {row} batched contiguous paged decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 2e-3,
+                "row {row} batched contiguous paged decode mean_abs_diff={mean:e}"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

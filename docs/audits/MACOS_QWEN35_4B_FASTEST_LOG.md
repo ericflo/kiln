@@ -10634,3 +10634,62 @@ itself, but it removes the explicit per-sequence GDN state row assembly/scatter
 gap identified after E338. Remaining work is to thread these batch state APIs
 through model-forward/scheduler execution alongside batched paged KV and
 attention metadata.
+
+## 2026-05-04 E340 - Added batched contiguous paged full-attention decode helper
+
+### Goal
+
+Move the branch beyond standalone cache/kernel microbenches toward a callable
+model-forward primitive for true decode batching. E335-E336 exposed batched KV
+writes and the batched contiguous paged-attention backend method, but the
+full-attention owner still had no operation that projected `[B,1,H]`, wrote
+one K/V row per request, and consumed the batched attention kernel.
+
+### Change
+
+- Added `gqa_attention_paged_decode_contiguous_batch`.
+- The helper is strict: it requires one decode token per row, common
+  `start_pos`, one shared RoPE position tensor, non-FP8 paged cache, one
+  contiguous live KV run per row, and a backend that accepts
+  `flash_attn_paged_decode_contiguous_batch`.
+- The helper performs Q/K/V projection, optional gated-Q split, Q/K RMSNorm,
+  RoPE, batched token-major K/V write, batched contiguous paged attention,
+  optional attention output gate, and `o_proj`.
+- Added `PagedKvCache::contiguous_slot_run_starts` as the public cache-owner
+  metadata method for computing one contiguous live-window start slot per row.
+- Added a Metal parity test that prepopulates prefix K/V, runs the new batched
+  helper for two rows, and compares each output row against the existing
+  rowwise `gqa_attention_paged` decode path.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal contiguous_slot_run_starts --lib`
+- `cargo test -p kiln-model --features metal write_token_major_native_batch --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/forward.rs`
+  still reports known broad `forward.rs` formatting drift from earlier branch
+  work; the new helper lines flagged by that run were manually matched to the
+  formatter.
+- `rustfmt --edition 2024 --check crates/kiln-model/src/paged_kv_cache.rs`
+
+### Results
+
+- The Metal two-row helper matched rowwise decode exactly with a non-empty
+  prefix: row0 `max_abs_diff=0`, `mean_abs_diff=0`; row1 `max_abs_diff=0`,
+  `mean_abs_diff=0`.
+- Output shape was `[2,1,512]` for Qwen full-attention head geometry
+  (`16` Q heads, `4` KV heads, `head_dim=256`) with a reduced hidden size to
+  keep the parity test light.
+
+### Artifact
+
+- `e340_gqa_paged_decode_contiguous_batch_helper.log`
+
+### Decision
+
+Accepted as low-level model-forward batching plumbing. This is not an endpoint
+win yet because the production scheduler still feeds one sequence at a time,
+but it removes a concrete full-attention decode blocker: there is now a single
+call that combines batch QKV projection, batch KV write, and the batched
+contiguous attention kernel under the actual backend constraints.

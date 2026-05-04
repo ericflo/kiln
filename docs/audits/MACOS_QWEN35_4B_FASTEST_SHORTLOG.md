@@ -1052,3 +1052,14 @@
   Metal BF16 tests verify assemble/split dimensions and dtype policy. This
   removes the explicit per-sequence GDN state row assembly/scatter blocker,
   but still needs scheduler/model-forward integration for endpoint wins.
+- 2026-05-04 E340: Accepted
+  `gqa_attention_paged_decode_contiguous_batch` as low-level full-attention
+  batching plumbing. The helper projects Q/K/V for `[B,1,H]`, applies Q/K
+  norm + RoPE, writes one token-major K/V row per request, dispatches the
+  batched contiguous paged-attention backend kernel, then applies the attention
+  gate and `o_proj`. It is intentionally strict: common `start_pos`,
+  non-FP8 cache, contiguous live KV windows, and backend acceptance are
+  required. A Metal two-row parity test with prepopulated prefix K/V matched
+  rowwise `gqa_attention_paged` exactly (`max_abs_diff=0`, `mean_abs_diff=0`
+  for both rows). This is not an endpoint win yet; it gives the scheduler/model
+  forward path a real full-attention batch decode primitive to call.
