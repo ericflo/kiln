@@ -2110,6 +2110,34 @@ Verdict:
 - This removes repeated long-prefix prefill across batches while preserving E069's first-batch all-miss win.
 - Rollback for a clean server remains `KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE=1`, which prevents the batch-local shared-prefix prefill and therefore prevents this registration path from producing new shared-prefix entries.
 
+### E073: Rejected Vulkan GDN Recurrent 4D Input Path
+
+Change:
+- Temporarily let the Vulkan split GDN recurrent step accept the existing `[B,H,1,D]` decode tensors directly.
+- Added an opt-in `KILN_ENABLE_VULKAN_GDN_RECURRENT_4D_INPUTS=1` branch in the decode recurrence path to skip the five `squeeze(2)?.contiguous()?` calls before dispatch.
+- Added temporary parity coverage that compared 4D recurrent dispatch against the existing 3D recurrent dispatch and CPU reference.
+- Reverted after measurement.
+
+Reasoning:
+- The bs=1 profile still points at split GDN recurrent work as the dominant decode bucket.
+- The recurrent shader reads flattened Q/K/V/beta/g buffers; for a singleton sequence dimension, `[B,H,1,D]` has the same flattened layout as `[B,H,D]`.
+- If the squeeze/contiguous preamble was material enough, passing the tensors directly should remove avoidable per-layer copy work.
+
+Evidence:
+- Validation before measurement:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_matches_cpu_reference -- --nocapture` passed with the temporary 4D parity assertions.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+- bs=1 opt-in run:
+  - Command: `KILN_ENABLE_VULKAN_GDN_RECURRENT_4D_INPUTS=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`.
+  - Prefill 1811.1ms.
+  - Mean ITL 330.3ms, p50 328.7ms, p99 338.3ms.
+  - Current kept-code anchor from E071 was 329.2ms mean ITL under the same noisy conditions.
+
+Verdict:
+- Reject and revert.
+- Avoiding the explicit squeeze/contiguous calls did not move the decode anchor; the dominant cost remains the recurrent dispatch/upload/readback itself rather than that shape preamble.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
