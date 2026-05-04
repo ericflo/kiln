@@ -1007,3 +1007,12 @@
   Qwen3.5 decode-shape synthetic bench lost: current `917.338 us` versus fused
   `925.611 us` (0.991x), with exact output. Source was reverted before
   endpoint testing.
+- 2026-05-04 E335: Accepted `PagedKvCache::write_token_major_native_batch` as
+  model-forward batching plumbing. E327 had the fast Metal batch KV-write
+  kernel, but the cache owner still only exposed one-sequence writes. The new
+  API accepts one `BlockTable` and absolute write position per row plus
+  token-major K/V tensors `[batch,1,num_kv_heads,head_dim]`, routes Metal BF16
+  shapes through the E327 batch primitive, falls back rowwise elsewhere, and
+  preserves FP8's `false` fallback contract. CPU and Metal three-row roundtrip
+  tests passed. This is not an endpoint win yet; it removes one model-forward
+  plumbing gap for continuous batching.

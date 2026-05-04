@@ -269,6 +269,87 @@ impl PagedKvCache {
         Ok(true)
     }
 
+    /// Batched variant of [`Self::write_token_major_native`] for one decode
+    /// token per sequence.
+    ///
+    /// Returns `false` when the cache is FP8-backed so callers can fall back to
+    /// [`Self::write`], which owns quantization.
+    ///
+    /// - `block_tables`: one page table per batch row
+    /// - `start_positions`: absolute write position for each batch row
+    /// - `k`: `[batch, 1, num_kv_heads, head_dim]`
+    /// - `v`: `[batch, 1, num_kv_heads, head_dim]`
+    pub fn write_token_major_native_batch(
+        &mut self,
+        layer_idx: usize,
+        block_tables: &[&BlockTable],
+        start_positions: &[usize],
+        k: &Tensor,
+        v: &Tensor,
+    ) -> Result<bool> {
+        if self.fp8 {
+            return Ok(false);
+        }
+
+        let (batch, seq_len, _heads, _head_dim) = k.dims4()?;
+        anyhow::ensure!(
+            seq_len == 1,
+            "batched token-major KV writes require one decode token per row"
+        );
+        anyhow::ensure!(
+            v.dims() == k.dims(),
+            "batched token-major KV write K/V shape mismatch"
+        );
+        anyhow::ensure!(
+            block_tables.len() == batch && start_positions.len() == batch,
+            "batched token-major KV write metadata length mismatch"
+        );
+
+        let mut slots_data = Vec::with_capacity(batch);
+        let mut slots_fit_u32 = true;
+        for idx in 0..batch {
+            let start_pos = start_positions[idx];
+            let slot = block_tables[idx]
+                .slot_for(start_pos, self.block_size)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no slot for batch row {idx} position {start_pos}")
+                })?;
+            match u32::try_from(slot) {
+                Ok(slot) => slots_data.push(slot),
+                Err(_) => slots_fit_u32 = false,
+            }
+        }
+
+        #[cfg(feature = "metal")]
+        if slots_fit_u32 {
+            let slots =
+                Tensor::from_slice(slots_data.as_slice(), batch, k.device())?.contiguous()?;
+            let (k_pool, v_pool) = &mut self.layers[layer_idx];
+            if crate::backend::metal::metal_paged_kv_write_token_major_batch_supports(
+                k_pool, v_pool, &slots, k, v,
+            ) {
+                crate::backend::metal::metal_paged_kv_write_token_major_batch_bf16(
+                    k_pool, v_pool, &slots, k, v,
+                )?;
+                return Ok(true);
+            }
+        }
+
+        for idx in 0..batch {
+            let k_row = k.narrow(0, idx, 1)?.contiguous()?;
+            let v_row = v.narrow(0, idx, 1)?.contiguous()?;
+            self.write_token_major_native(
+                layer_idx,
+                block_tables[idx],
+                start_positions[idx],
+                &k_row,
+                &v_row,
+            )?;
+        }
+
+        Ok(true)
+    }
+
     fn write_native(
         &mut self,
         layer_idx: usize,
@@ -655,6 +736,118 @@ mod tests {
             v_out.flatten_all()?.to_vec1::<f32>()?,
             v_expected.flatten_all()?.to_vec1::<f32>()?
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_token_major_native_batch_then_read_roundtrip() -> Result<()> {
+        let device = Device::Cpu;
+        let batch = 3usize;
+        let heads = 2usize;
+        let head_dim = 3usize;
+        let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::F32, &device)?;
+
+        let mut bt0 = BlockTable::new();
+        bt0.push(1);
+        let mut bt1 = BlockTable::new();
+        bt1.push(3);
+        let mut bt2 = BlockTable::new();
+        bt2.push(5);
+        let block_tables = [&bt0, &bt1, &bt2];
+        let start_positions = [0usize, 0, 0];
+
+        let k_data: Vec<f32> = (0..batch * heads * head_dim)
+            .map(|idx| idx as f32 + 1.0)
+            .collect();
+        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?;
+        let v = (k.clone() + 100.0)?;
+
+        assert!(cache.write_token_major_native_batch(
+            0,
+            &block_tables,
+            &start_positions,
+            &k,
+            &v
+        )?);
+
+        for (idx, block_table) in block_tables.iter().enumerate() {
+            let (k_out, v_out) = cache.read(0, block_table, 1)?;
+            let k_expected = k.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
+            let v_expected = v.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
+            assert_eq!(
+                k_out.flatten_all()?.to_vec1::<f32>()?,
+                k_expected.flatten_all()?.to_vec1::<f32>()?
+            );
+            assert_eq!(
+                v_out.flatten_all()?.to_vec1::<f32>()?,
+                v_expected.flatten_all()?.to_vec1::<f32>()?
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_write_token_major_native_batch_then_read_roundtrip() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_write_token_major_native_batch_then_read_roundtrip"
+            );
+            return Ok(());
+        };
+        let batch = 3usize;
+        let heads = 2usize;
+        let head_dim = 4usize;
+        let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::BF16, &device)?;
+
+        let mut bt0 = BlockTable::new();
+        bt0.push(1);
+        let mut bt1 = BlockTable::new();
+        bt1.push(3);
+        let mut bt2 = BlockTable::new();
+        bt2.push(5);
+        let block_tables = [&bt0, &bt1, &bt2];
+        let start_positions = [0usize, 0, 0];
+
+        let k_data: Vec<f32> = (0..batch * heads * head_dim)
+            .map(|idx| ((idx % 17) as f32 - 8.0) * 0.03125)
+            .collect();
+        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v = (k.to_dtype(DType::F32)? + 100.0)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+
+        assert!(cache.write_token_major_native_batch(
+            0,
+            &block_tables,
+            &start_positions,
+            &k,
+            &v
+        )?);
+
+        for (idx, block_table) in block_tables.iter().enumerate() {
+            let (k_out, v_out) = cache.read(0, block_table, 1)?;
+            let k_expected = k.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
+            let v_expected = v.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
+            let k_max = (k_out.to_dtype(DType::F32)? - k_expected.to_dtype(DType::F32)?)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            let v_max = (v_out.to_dtype(DType::F32)? - v_expected.to_dtype(DType::F32)?)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(
+                k_max < 1e-6 && v_max < 1e-6,
+                "Metal batched token-major write row {idx} max_abs_diff k={k_max:e} v={v_max:e}"
+            );
+        }
 
         Ok(())
     }

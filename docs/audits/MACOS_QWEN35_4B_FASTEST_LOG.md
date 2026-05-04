@@ -10398,3 +10398,46 @@ Rejected before endpoint testing. The fused epilogue was exact, but it did not
 beat the current GEMV plus add path even in the isolated decode shape. Source
 was reverted; do not spend endpoint runs or production complexity on this
 residual epilogue.
+
+## 2026-05-04 E335 - Exposed batched token-major paged-KV writes through PagedKvCache
+
+### Goal
+
+Move one accepted bs>1 primitive closer to the actual model-forward path. E327
+added a fast Metal batch kernel for writing one decode token per request into
+the paged KV pool, but `PagedKvCache` still exposed only single-sequence
+token-major writes. Future continuous batching needs a cache API that accepts
+one `BlockTable` and absolute write position per row.
+
+### Change
+
+- Added `PagedKvCache::write_token_major_native_batch`.
+- The API accepts `block_tables: &[&BlockTable]`, `start_positions: &[usize]`,
+  and token-major K/V tensors shaped `[batch,1,num_kv_heads,head_dim]`.
+- For native BF16/F32 caches it computes one physical slot per row.
+- On Metal BF16, it routes through the accepted
+  `metal_paged_kv_write_token_major_batch_bf16` primitive when shapes and slot
+  tensors are supported.
+- On CPU, non-Metal, unsupported Metal shapes, or oversized slots, it falls
+  back to the existing rowwise `write_token_major_native` path.
+- FP8 caches still return `false`, preserving the existing quantization-owned
+  fallback contract.
+
+### Validation
+
+- `rustfmt --edition 2024 --check crates/kiln-model/src/paged_kv_cache.rs`
+- `cargo test -p kiln-model --features metal write_token_major_native_batch --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+
+### Results
+
+- CPU fallback roundtrip passed for three batch rows with distinct block
+  tables.
+- Metal roundtrip passed for three batch rows and exercised the batched
+  token-major write support path.
+
+### Decision
+
+Accepted as model-forward batching plumbing. This does not change current
+single-request endpoint behavior, but it removes the `PagedKvCache` API gap
+between the scheduler/model-forward owner and the E327 batched KV-write kernel.
