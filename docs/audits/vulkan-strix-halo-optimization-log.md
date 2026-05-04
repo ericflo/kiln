@@ -2065,6 +2065,22 @@ Verdict:
 - Skipping the prefix LM-head/argmax is below the measurement noise here and did not reduce the dominant layer-loop cost.
 - The kept path remains E069's thresholded local prefix reuse.
 
+### E071: Final Kept-Branch bs=1 Anchor After Batch-Prefix Work
+
+Change:
+- No code change.
+- Re-ran the standard short bs=1 source benchmark after E069 was kept and E070 was reverted, to verify the batch-only prefix work did not disturb single-stream latency.
+
+Evidence:
+- Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`.
+- Prefill: 1900.5ms.
+- Decode steps: 323.6ms, 316.7ms, 319.4ms, 350.4ms, 327.0ms, 338.2ms.
+- Mean ITL: 329.2ms, p50 327.0ms, p99 350.4ms.
+
+Verdict:
+- No bs=1 regression signal from the kept E069 branch state.
+- This remains in the same noisy ~329-331ms band observed in E067-E068, while the best recent source anchor is still E059's 318.1ms.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
