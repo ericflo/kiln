@@ -1,0 +1,62 @@
+=== Kiln Benchmark Suite ===
+
+GPU: unknown (10240 MB)
+Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a...
+2026-05-03T20:03:29.016435Z  INFO kiln_model::loader: Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (2 shards)
+2026-05-03T20:03:29.017509Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-05-03T20:03:29.017745Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-05-03T20:03:29.017758Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-05-03T20:03:29.017842Z  INFO kiln_server::device: Metal available — using Apple Silicon GPU
+Model loaded in 12.14s (backend: metal, VRAM: 0 MB)
+
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+    Prefill (paged): 9600.7ms (7 tok/s)
+    Decode (paged): 17 tokens, mean ITL 173.9ms (5.7 tok/s)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: unknown (10240 MB VRAM, source: apple-silicon-unified)
+Model load time: 12.14s (VRAM: 0 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         64
+Prefill time:          9600.7 ms (7 tok/s)
+Time to first token:   9600.7 ms
+Mean inter-token:      173.9 ms (5.7 tok/s)
+P50 inter-token:       170.8 ms
+P99 inter-token:       225.3 ms
+Tokens generated:      17
+Spec method:           off
+
+{
+  "backend": "metal",
+  "gpu_info": {
+    "name": "unknown",
+    "total_vram_mb": 10240,
+    "vram_source": "apple-silicon-unified"
+  },
+  "model_load": {
+    "load_time_secs": 12.143107125,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 9600.74775,
+    "prefill_tokens_per_sec": 6.666147436276513,
+    "time_to_first_token_ms": 9600.74775,
+    "mean_inter_token_ms": 173.94791918749996,
+    "p50_inter_token_ms": 170.79166700000002,
+    "p99_inter_token_ms": 225.285875,
+    "num_tokens_generated": 17,
+    "decode_tokens_per_sec": 5.748847153049824,
+    "spec_method": "off"
+  },
+  "training": null
+}

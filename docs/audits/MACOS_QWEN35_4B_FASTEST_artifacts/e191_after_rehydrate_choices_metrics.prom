@@ -1,0 +1,164 @@
+# HELP kiln_requests_total Total inference requests.
+# TYPE kiln_requests_total counter
+kiln_requests_total{status="ok"} 199
+kiln_requests_total{status="error"} 0
+kiln_requests_total{status="timeout"} 0
+kiln_requests_total{status="rejected"} 0
+# HELP kiln_request_duration_seconds Request latency.
+# TYPE kiln_request_duration_seconds histogram
+kiln_request_duration_seconds_bucket{le="0.1"} 199
+kiln_request_duration_seconds_bucket{le="0.25"} 199
+kiln_request_duration_seconds_bucket{le="0.5"} 199
+kiln_request_duration_seconds_bucket{le="1"} 199
+kiln_request_duration_seconds_bucket{le="2.5"} 199
+kiln_request_duration_seconds_bucket{le="5"} 199
+kiln_request_duration_seconds_bucket{le="10"} 199
+kiln_request_duration_seconds_bucket{le="30"} 199
+kiln_request_duration_seconds_bucket{le="60"} 199
+kiln_request_duration_seconds_bucket{le="120"} 199
+kiln_request_duration_seconds_bucket{le="180"} 199
+kiln_request_duration_seconds_bucket{le="240"} 199
+kiln_request_duration_seconds_bucket{le="300"} 199
+kiln_request_duration_seconds_bucket{le="420"} 199
+kiln_request_duration_seconds_bucket{le="600"} 199
+kiln_request_duration_seconds_bucket{le="900"} 199
+kiln_request_duration_seconds_bucket{le="+Inf"} 199
+kiln_request_duration_seconds_count 199
+kiln_request_duration_seconds_sum 0.128165
+# HELP kiln_request_prefill_duration_seconds Model prefill latency before decode.
+# TYPE kiln_request_prefill_duration_seconds histogram
+kiln_request_prefill_duration_seconds_bucket{le="0.005"} 0
+kiln_request_prefill_duration_seconds_bucket{le="0.01"} 0
+kiln_request_prefill_duration_seconds_bucket{le="0.025"} 0
+kiln_request_prefill_duration_seconds_bucket{le="0.05"} 0
+kiln_request_prefill_duration_seconds_bucket{le="0.1"} 0
+kiln_request_prefill_duration_seconds_bucket{le="0.25"} 0
+kiln_request_prefill_duration_seconds_bucket{le="0.5"} 0
+kiln_request_prefill_duration_seconds_bucket{le="1"} 0
+kiln_request_prefill_duration_seconds_bucket{le="2.5"} 0
+kiln_request_prefill_duration_seconds_bucket{le="5"} 0
+kiln_request_prefill_duration_seconds_bucket{le="10"} 0
+kiln_request_prefill_duration_seconds_bucket{le="30"} 0
+kiln_request_prefill_duration_seconds_bucket{le="60"} 0
+kiln_request_prefill_duration_seconds_bucket{le="+Inf"} 0
+kiln_request_prefill_duration_seconds_count 0
+kiln_request_prefill_duration_seconds_sum 0.000000
+# HELP kiln_request_decode_duration_seconds Model decode latency after prefill.
+# TYPE kiln_request_decode_duration_seconds histogram
+kiln_request_decode_duration_seconds_bucket{le="0.005"} 0
+kiln_request_decode_duration_seconds_bucket{le="0.01"} 0
+kiln_request_decode_duration_seconds_bucket{le="0.025"} 0
+kiln_request_decode_duration_seconds_bucket{le="0.05"} 0
+kiln_request_decode_duration_seconds_bucket{le="0.1"} 0
+kiln_request_decode_duration_seconds_bucket{le="0.25"} 0
+kiln_request_decode_duration_seconds_bucket{le="0.5"} 0
+kiln_request_decode_duration_seconds_bucket{le="1"} 0
+kiln_request_decode_duration_seconds_bucket{le="2.5"} 0
+kiln_request_decode_duration_seconds_bucket{le="5"} 0
+kiln_request_decode_duration_seconds_bucket{le="10"} 0
+kiln_request_decode_duration_seconds_bucket{le="30"} 0
+kiln_request_decode_duration_seconds_bucket{le="60"} 0
+kiln_request_decode_duration_seconds_bucket{le="+Inf"} 0
+kiln_request_decode_duration_seconds_count 0
+kiln_request_decode_duration_seconds_sum 0.000000
+# HELP kiln_tokens_generated_total Total tokens generated.
+# TYPE kiln_tokens_generated_total counter
+kiln_tokens_generated_total 0
+# HELP kiln_rendered_prompt_cache_lookups_total Rendered prompt cache lookups.
+# TYPE kiln_rendered_prompt_cache_lookups_total counter
+kiln_rendered_prompt_cache_lookups_total{result="hit"} 0
+kiln_rendered_prompt_cache_lookups_total{result="miss"} 274
+# HELP kiln_rendered_prompt_cache_entries Rendered prompt cache entries.
+# TYPE kiln_rendered_prompt_cache_entries gauge
+kiln_rendered_prompt_cache_entries 256
+# HELP kiln_prompt_token_cache_lookups_total Rendered prompt token cache lookups.
+# TYPE kiln_prompt_token_cache_lookups_total counter
+kiln_prompt_token_cache_lookups_total{result="hit"} 0
+kiln_prompt_token_cache_lookups_total{result="miss"} 274
+# HELP kiln_prompt_token_cache_entries Rendered prompt token cache entries.
+# TYPE kiln_prompt_token_cache_entries gauge
+kiln_prompt_token_cache_entries 256
+# HELP kiln_active_requests Currently in-flight requests.
+# TYPE kiln_active_requests gauge
+kiln_active_requests 0
+# HELP kiln_active_requests_peak Peak in-flight requests since process start.
+# TYPE kiln_active_requests_peak gauge
+kiln_active_requests_peak 1
+# HELP kiln_request_prefill_tokens_completed Prompt/prefix prefill tokens completed by currently in-flight requests.
+# TYPE kiln_request_prefill_tokens_completed gauge
+kiln_request_prefill_tokens_completed 0
+# HELP kiln_scheduler_waiting Requests waiting to be scheduled.
+# TYPE kiln_scheduler_waiting gauge
+kiln_scheduler_waiting 0
+# HELP kiln_scheduler_running Requests currently generating.
+# TYPE kiln_scheduler_running gauge
+kiln_scheduler_running 0
+# HELP kiln_blocks_used KV cache blocks in use.
+# TYPE kiln_blocks_used gauge
+kiln_blocks_used 0
+# HELP kiln_blocks_total Total KV cache blocks.
+# TYPE kiln_blocks_total gauge
+kiln_blocks_total 512
+# HELP kiln_vram_total_bytes Total GPU VRAM.
+# TYPE kiln_vram_total_bytes gauge
+kiln_vram_total_bytes 10737418240
+# HELP kiln_vram_model_bytes Model/device residency used for memory budgeting.
+# TYPE kiln_vram_model_bytes gauge
+kiln_vram_model_bytes 9156689920
+# HELP kiln_vram_model_estimated_bytes Static model parameter memory estimate.
+# TYPE kiln_vram_model_estimated_bytes gauge
+kiln_vram_model_estimated_bytes 9156689920
+# HELP kiln_vram_post_load_used_bytes CUDA memory.used snapshot after model load before KV allocation.
+# TYPE kiln_vram_post_load_used_bytes gauge
+kiln_vram_post_load_used_bytes 0
+# HELP kiln_vram_prefill_peak_used_bytes Highest CUDA memory.used observed immediately after prefill/generation boundaries.
+# TYPE kiln_vram_prefill_peak_used_bytes gauge
+kiln_vram_prefill_peak_used_bytes 0
+# HELP kiln_vram_kv_cache_bytes KV cache memory.
+# TYPE kiln_vram_kv_cache_bytes gauge
+kiln_vram_kv_cache_bytes 268435456
+# HELP kiln_vram_training_budget_bytes Training memory budget.
+# TYPE kiln_vram_training_budget_bytes gauge
+kiln_vram_training_budget_bytes 1312292864
+# HELP kiln_prefix_cache_lookups_total Total prefix cache lookups.
+# TYPE kiln_prefix_cache_lookups_total counter
+kiln_prefix_cache_lookups_total{result="hit"} 0
+kiln_prefix_cache_lookups_total{result="miss"} 0
+# HELP kiln_prefix_cache_hit_tokens_total Total prompt tokens skipped by prefix cache hits.
+# TYPE kiln_prefix_cache_hit_tokens_total counter
+kiln_prefix_cache_hit_tokens_total 0
+# HELP kiln_prefix_cache_hit_blocks_total Total KV blocks reused by prefix cache hits.
+# TYPE kiln_prefix_cache_hit_blocks_total counter
+kiln_prefix_cache_hit_blocks_total 0
+# HELP kiln_prefix_cache_cached_blocks KV blocks currently retained by the prefix cache.
+# TYPE kiln_prefix_cache_cached_blocks gauge
+kiln_prefix_cache_cached_blocks 0
+# HELP kiln_prefix_cache_max_blocks Maximum KV blocks retainable by the prefix cache.
+# TYPE kiln_prefix_cache_max_blocks gauge
+kiln_prefix_cache_max_blocks 128
+# HELP kiln_prefix_cache_cached_entries Prefix-cache entries currently retaining GDN state snapshots.
+# TYPE kiln_prefix_cache_cached_entries gauge
+kiln_prefix_cache_cached_entries 0
+# HELP kiln_prefix_cache_max_entries Maximum prefix-cache entries that may retain GDN state snapshots.
+# TYPE kiln_prefix_cache_max_entries gauge
+kiln_prefix_cache_max_entries 9
+# HELP kiln_prefix_cache_state_bytes Device memory retained by cached GDN state snapshots.
+# TYPE kiln_prefix_cache_state_bytes gauge
+kiln_prefix_cache_state_bytes 0
+# HELP kiln_prefix_cache_max_state_bytes Maximum device memory retainable by cached GDN state snapshots.
+# TYPE kiln_prefix_cache_max_state_bytes gauge
+kiln_prefix_cache_max_state_bytes 247726080
+# HELP kiln_training_jobs_total Total training jobs.
+# TYPE kiln_training_jobs_total counter
+kiln_training_jobs_total{type="sft",status="completed"} 0
+kiln_training_jobs_total{type="sft",status="failed"} 0
+kiln_training_jobs_total{type="sft",status="cancelled"} 0
+kiln_training_jobs_total{type="grpo",status="completed"} 0
+kiln_training_jobs_total{type="grpo",status="failed"} 0
+kiln_training_jobs_total{type="grpo",status="cancelled"} 0
+# HELP kiln_training_active Currently running training job.
+# TYPE kiln_training_active gauge
+kiln_training_active 0
+# HELP kiln_active_adapter Currently loaded adapter.
+# TYPE kiln_active_adapter gauge
+kiln_active_adapter{name="base"} 1

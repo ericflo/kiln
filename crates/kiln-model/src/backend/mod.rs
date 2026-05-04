@@ -71,6 +71,24 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Batched variant of [`Self::flash_attn_paged_decode_contiguous`] for a
+    /// group of decode rows whose live KV windows are each one contiguous run
+    /// in the paged cache and share a common sequence length.
+    ///
+    /// `q`: `[batch, num_heads, 1, head_dim]`; `start_slots`: `[batch]` u32.
+    /// Returns `[batch, 1, num_heads * head_dim]`.
+    fn flash_attn_paged_decode_contiguous_batch(
+        &self,
+        _q: &Tensor,
+        _k_pool: &Tensor,
+        _v_pool: &Tensor,
+        _start_slots: &Tensor,
+        _total_seqlen_k: usize,
+        _softmax_scale: f32,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     fn supports_paged_kv_head_major_read(&self) -> bool {
         false
     }

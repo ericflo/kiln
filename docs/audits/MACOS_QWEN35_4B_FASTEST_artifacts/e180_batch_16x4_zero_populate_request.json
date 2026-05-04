@@ -1,0 +1,105 @@
+{
+  "prompts": [
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 0"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 1"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 2"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 3"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 4"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 5"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 6"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 7"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 8"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 9"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 10"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 11"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 12"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 13"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 14"
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "zero n batch request-cache prompt 15"
+      }
+    ]
+  ],
+  "n": 4,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "max_tokens": 0,
+  "seed": 180
+}

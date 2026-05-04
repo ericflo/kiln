@@ -100,6 +100,16 @@ impl ApiError {
         }
     }
 
+    pub fn chat_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "chat_invalid_request",
+            message: format!("Invalid chat completion request: {detail}"),
+            hint: "POST {messages: [{role,content}, ...], n: <int>=1, ...sampling}. Non-streaming n choices must stay within the configured cap.",
+            retry_after_seconds: None,
+        }
+    }
+
     // ── Adapters ────────────────────────────────────────────────────
 
     pub fn adapter_not_found(name: impl std::fmt::Display) -> Self {

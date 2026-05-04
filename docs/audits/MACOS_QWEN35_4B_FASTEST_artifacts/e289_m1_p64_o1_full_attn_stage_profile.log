@@ -1,0 +1,483 @@
+=== Kiln Benchmark Suite ===
+
+GPU: unknown (10240 MB)
+Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a...
+2026-05-04T01:54:31.253836Z  INFO kiln_model::loader: Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (2 shards)
+2026-05-04T01:54:31.254727Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-05-04T01:54:31.254912Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-05-04T01:54:31.254927Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-05-04T01:54:31.255002Z  INFO kiln_server::device: Metal available — using Apple Silicon GPU
+Model loaded in 14.66s (backend: metal, VRAM: 0 MB)
+
+--- Latency Warmup Run 1/1 (not measured) ---
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+kiln_profile_paged_layer layer=0 kind=linear seq_len=64 start_pos=0 elapsed_ms=705.706
+kiln_profile_paged_layer layer=1 kind=linear seq_len=64 start_pos=0 elapsed_ms=766.600
+kiln_profile_paged_layer layer=2 kind=linear seq_len=64 start_pos=0 elapsed_ms=720.347
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=216.068
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=5.354
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.399
+kiln_profile_full_attn_stage full_attn_layer=0 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.553
+kiln_profile_full_attn_stage full_attn_layer=0 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=1.397
+kiln_profile_full_attn_stage full_attn_layer=0 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.709
+kiln_profile_full_attn_stage full_attn_layer=0 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=0 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=5.205
+kiln_profile_full_attn_stage full_attn_layer=0 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.413
+kiln_profile_paged_layer layer=3 kind=full seq_len=64 start_pos=0 elapsed_ms=776.528
+kiln_profile_paged_layer layer=4 kind=linear seq_len=64 start_pos=0 elapsed_ms=911.817
+kiln_profile_paged_layer layer=5 kind=linear seq_len=64 start_pos=0 elapsed_ms=904.604
+kiln_profile_paged_layer layer=6 kind=linear seq_len=64 start_pos=0 elapsed_ms=561.322
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=12.544
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.072
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.282
+kiln_profile_full_attn_stage full_attn_layer=1 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.269
+kiln_profile_full_attn_stage full_attn_layer=1 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.678
+kiln_profile_full_attn_stage full_attn_layer=1 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.407
+kiln_profile_full_attn_stage full_attn_layer=1 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=1 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.991
+kiln_profile_full_attn_stage full_attn_layer=1 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.262
+kiln_profile_paged_layer layer=7 kind=full seq_len=64 start_pos=0 elapsed_ms=62.243
+kiln_profile_paged_layer layer=8 kind=linear seq_len=64 start_pos=0 elapsed_ms=54.600
+kiln_profile_paged_layer layer=9 kind=linear seq_len=64 start_pos=0 elapsed_ms=54.934
+kiln_profile_paged_layer layer=10 kind=linear seq_len=64 start_pos=0 elapsed_ms=62.390
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=14.773
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.394
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.356
+kiln_profile_full_attn_stage full_attn_layer=2 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.378
+kiln_profile_full_attn_stage full_attn_layer=2 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.771
+kiln_profile_full_attn_stage full_attn_layer=2 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.443
+kiln_profile_full_attn_stage full_attn_layer=2 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=2 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=3.107
+kiln_profile_full_attn_stage full_attn_layer=2 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.404
+kiln_profile_paged_layer layer=11 kind=full seq_len=64 start_pos=0 elapsed_ms=77.735
+kiln_profile_paged_layer layer=12 kind=linear seq_len=64 start_pos=0 elapsed_ms=60.240
+kiln_profile_paged_layer layer=13 kind=linear seq_len=64 start_pos=0 elapsed_ms=59.609
+kiln_profile_paged_layer layer=14 kind=linear seq_len=64 start_pos=0 elapsed_ms=56.861
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=11.719
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=0.977
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.263
+kiln_profile_full_attn_stage full_attn_layer=3 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.272
+kiln_profile_full_attn_stage full_attn_layer=3 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.538
+kiln_profile_full_attn_stage full_attn_layer=3 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.333
+kiln_profile_full_attn_stage full_attn_layer=3 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=3 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.672
+kiln_profile_full_attn_stage full_attn_layer=3 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.235
+kiln_profile_paged_layer layer=15 kind=full seq_len=64 start_pos=0 elapsed_ms=61.768
+kiln_profile_paged_layer layer=16 kind=linear seq_len=64 start_pos=0 elapsed_ms=59.541
+kiln_profile_paged_layer layer=17 kind=linear seq_len=64 start_pos=0 elapsed_ms=62.719
+kiln_profile_paged_layer layer=18 kind=linear seq_len=64 start_pos=0 elapsed_ms=59.290
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=13.883
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.142
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.298
+kiln_profile_full_attn_stage full_attn_layer=4 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.271
+kiln_profile_full_attn_stage full_attn_layer=4 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.580
+kiln_profile_full_attn_stage full_attn_layer=4 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.349
+kiln_profile_full_attn_stage full_attn_layer=4 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=4 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=2.055
+kiln_profile_full_attn_stage full_attn_layer=4 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.273
+kiln_profile_paged_layer layer=19 kind=full seq_len=64 start_pos=0 elapsed_ms=65.781
+kiln_profile_paged_layer layer=20 kind=linear seq_len=64 start_pos=0 elapsed_ms=63.442
+kiln_profile_paged_layer layer=21 kind=linear seq_len=64 start_pos=0 elapsed_ms=63.406
+kiln_profile_paged_layer layer=22 kind=linear seq_len=64 start_pos=0 elapsed_ms=65.910
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=11.850
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.137
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.318
+kiln_profile_full_attn_stage full_attn_layer=5 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.324
+kiln_profile_full_attn_stage full_attn_layer=5 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.569
+kiln_profile_full_attn_stage full_attn_layer=5 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.354
+kiln_profile_full_attn_stage full_attn_layer=5 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=5 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.833
+kiln_profile_full_attn_stage full_attn_layer=5 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.257
+kiln_profile_paged_layer layer=23 kind=full seq_len=64 start_pos=0 elapsed_ms=61.403
+kiln_profile_paged_layer layer=24 kind=linear seq_len=64 start_pos=0 elapsed_ms=54.088
+kiln_profile_paged_layer layer=25 kind=linear seq_len=64 start_pos=0 elapsed_ms=53.301
+kiln_profile_paged_layer layer=26 kind=linear seq_len=64 start_pos=0 elapsed_ms=51.417
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=11.691
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.137
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.404
+kiln_profile_full_attn_stage full_attn_layer=6 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.277
+kiln_profile_full_attn_stage full_attn_layer=6 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.550
+kiln_profile_full_attn_stage full_attn_layer=6 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.356
+kiln_profile_full_attn_stage full_attn_layer=6 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=6 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.722
+kiln_profile_full_attn_stage full_attn_layer=6 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.283
+kiln_profile_paged_layer layer=27 kind=full seq_len=64 start_pos=0 elapsed_ms=59.143
+kiln_profile_paged_layer layer=28 kind=linear seq_len=64 start_pos=0 elapsed_ms=53.099
+kiln_profile_paged_layer layer=29 kind=linear seq_len=64 start_pos=0 elapsed_ms=76.588
+kiln_profile_paged_layer layer=30 kind=linear seq_len=64 start_pos=0 elapsed_ms=53.237
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=11.380
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.114
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.299
+kiln_profile_full_attn_stage full_attn_layer=7 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.300
+kiln_profile_full_attn_stage full_attn_layer=7 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.651
+kiln_profile_full_attn_stage full_attn_layer=7 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.418
+kiln_profile_full_attn_stage full_attn_layer=7 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=7 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.888
+kiln_profile_full_attn_stage full_attn_layer=7 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.220
+kiln_profile_paged_layer layer=31 kind=full seq_len=64 start_pos=0 elapsed_ms=59.820
+    Prefill (paged): 11330.4ms (6 tok/s)
+kiln_profile_paged_layer layer=0 kind=linear seq_len=1 start_pos=64 elapsed_ms=22.931
+kiln_profile_paged_layer layer=1 kind=linear seq_len=1 start_pos=64 elapsed_ms=10.669
+kiln_profile_paged_layer layer=2 kind=linear seq_len=1 start_pos=64 elapsed_ms=10.993
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=3.006
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.259
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.198
+kiln_profile_full_attn_stage full_attn_layer=0 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.184
+kiln_profile_full_attn_stage full_attn_layer=0 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=0 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.288
+kiln_profile_full_attn_stage full_attn_layer=0 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.284
+kiln_profile_full_attn_stage full_attn_layer=0 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.248
+kiln_profile_full_attn_stage full_attn_layer=0 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=1.339
+kiln_profile_paged_layer layer=3 kind=full seq_len=1 start_pos=64 elapsed_ms=23.950
+kiln_profile_paged_layer layer=4 kind=linear seq_len=1 start_pos=64 elapsed_ms=13.226
+kiln_profile_paged_layer layer=5 kind=linear seq_len=1 start_pos=64 elapsed_ms=9.487
+kiln_profile_paged_layer layer=6 kind=linear seq_len=1 start_pos=64 elapsed_ms=8.846
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=2.481
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.237
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.202
+kiln_profile_full_attn_stage full_attn_layer=1 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.199
+kiln_profile_full_attn_stage full_attn_layer=1 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=1 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.296
+kiln_profile_full_attn_stage full_attn_layer=1 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.238
+kiln_profile_full_attn_stage full_attn_layer=1 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.163
+kiln_profile_full_attn_stage full_attn_layer=1 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=1.090
+kiln_profile_paged_layer layer=7 kind=full seq_len=1 start_pos=64 elapsed_ms=10.903
+kiln_profile_paged_layer layer=8 kind=linear seq_len=1 start_pos=64 elapsed_ms=9.039
+kiln_profile_paged_layer layer=9 kind=linear seq_len=1 start_pos=64 elapsed_ms=8.977
+kiln_profile_paged_layer layer=10 kind=linear seq_len=1 start_pos=64 elapsed_ms=9.040
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=2.417
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.250
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.215
+kiln_profile_full_attn_stage full_attn_layer=2 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.231
+kiln_profile_full_attn_stage full_attn_layer=2 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=2 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.198
+kiln_profile_full_attn_stage full_attn_layer=2 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.238
+kiln_profile_full_attn_stage full_attn_layer=2 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.167
+kiln_profile_full_attn_stage full_attn_layer=2 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=1.051
+kiln_profile_paged_layer layer=11 kind=full seq_len=1 start_pos=64 elapsed_ms=11.171
+kiln_profile_paged_layer layer=12 kind=linear seq_len=1 start_pos=64 elapsed_ms=10.162
+kiln_profile_paged_layer layer=13 kind=linear seq_len=1 start_pos=64 elapsed_ms=10.404
+kiln_profile_paged_layer layer=14 kind=linear seq_len=1 start_pos=64 elapsed_ms=10.690
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=2.905
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.323
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.216
+kiln_profile_full_attn_stage full_attn_layer=3 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.191
+kiln_profile_full_attn_stage full_attn_layer=3 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=3 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.193
+kiln_profile_full_attn_stage full_attn_layer=3 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.212
+kiln_profile_full_attn_stage full_attn_layer=3 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.192
+kiln_profile_full_attn_stage full_attn_layer=3 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=1.296
+kiln_profile_paged_layer layer=15 kind=full seq_len=1 start_pos=64 elapsed_ms=13.001
+kiln_profile_paged_layer layer=16 kind=linear seq_len=1 start_pos=64 elapsed_ms=12.778
+kiln_profile_paged_layer layer=17 kind=linear seq_len=1 start_pos=64 elapsed_ms=12.710
+kiln_profile_paged_layer layer=18 kind=linear seq_len=1 start_pos=64 elapsed_ms=13.203
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=3.170
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.295
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.236
+kiln_profile_full_attn_stage full_attn_layer=4 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.207
+kiln_profile_full_attn_stage full_attn_layer=4 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=4 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.205
+kiln_profile_full_attn_stage full_attn_layer=4 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.257
+kiln_profile_full_attn_stage full_attn_layer=4 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.179
+kiln_profile_full_attn_stage full_attn_layer=4 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=1.475
+kiln_profile_paged_layer layer=19 kind=full seq_len=1 start_pos=64 elapsed_ms=14.585
+kiln_profile_paged_layer layer=20 kind=linear seq_len=1 start_pos=64 elapsed_ms=5.966
+kiln_profile_paged_layer layer=21 kind=linear seq_len=1 start_pos=64 elapsed_ms=5.568
+kiln_profile_paged_layer layer=22 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.957
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.717
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.239
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.176
+kiln_profile_full_attn_stage full_attn_layer=5 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.154
+kiln_profile_full_attn_stage full_attn_layer=5 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=5 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.153
+kiln_profile_full_attn_stage full_attn_layer=5 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.222
+kiln_profile_full_attn_stage full_attn_layer=5 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.160
+kiln_profile_full_attn_stage full_attn_layer=5 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.744
+kiln_profile_paged_layer layer=23 kind=full seq_len=1 start_pos=64 elapsed_ms=6.948
+kiln_profile_paged_layer layer=24 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.425
+kiln_profile_paged_layer layer=25 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.425
+kiln_profile_paged_layer layer=26 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.332
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.243
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.256
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.221
+kiln_profile_full_attn_stage full_attn_layer=6 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.216
+kiln_profile_full_attn_stage full_attn_layer=6 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=6 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.211
+kiln_profile_full_attn_stage full_attn_layer=6 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.241
+kiln_profile_full_attn_stage full_attn_layer=6 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.179
+kiln_profile_full_attn_stage full_attn_layer=6 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.579
+kiln_profile_paged_layer layer=27 kind=full seq_len=1 start_pos=64 elapsed_ms=6.218
+kiln_profile_paged_layer layer=28 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.326
+kiln_profile_paged_layer layer=29 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.311
+kiln_profile_paged_layer layer=30 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.320
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.224
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.241
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.203
+kiln_profile_full_attn_stage full_attn_layer=7 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.221
+kiln_profile_full_attn_stage full_attn_layer=7 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=7 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.174
+kiln_profile_full_attn_stage full_attn_layer=7 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.253
+kiln_profile_full_attn_stage full_attn_layer=7 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.231
+kiln_profile_full_attn_stage full_attn_layer=7 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.629
+kiln_profile_paged_layer layer=31 kind=full seq_len=1 start_pos=64 elapsed_ms=6.239
+    Decode (paged): 2 tokens, mean ITL 344.0ms (2.9 tok/s)
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+kiln_profile_paged_layer layer=0 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.306
+kiln_profile_paged_layer layer=1 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.290
+kiln_profile_paged_layer layer=2 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.262
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.465
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=0.991
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.231
+kiln_profile_full_attn_stage full_attn_layer=0 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.237
+kiln_profile_full_attn_stage full_attn_layer=0 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.522
+kiln_profile_full_attn_stage full_attn_layer=0 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.311
+kiln_profile_full_attn_stage full_attn_layer=0 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=0 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.687
+kiln_profile_full_attn_stage full_attn_layer=0 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.197
+kiln_profile_paged_layer layer=3 kind=full seq_len=64 start_pos=0 elapsed_ms=17.207
+kiln_profile_paged_layer layer=4 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.123
+kiln_profile_paged_layer layer=5 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.262
+kiln_profile_paged_layer layer=6 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.318
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.415
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=0.988
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.270
+kiln_profile_full_attn_stage full_attn_layer=1 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.237
+kiln_profile_full_attn_stage full_attn_layer=1 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.560
+kiln_profile_full_attn_stage full_attn_layer=1 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.349
+kiln_profile_full_attn_stage full_attn_layer=1 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=1 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.708
+kiln_profile_full_attn_stage full_attn_layer=1 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.203
+kiln_profile_paged_layer layer=7 kind=full seq_len=64 start_pos=0 elapsed_ms=17.360
+kiln_profile_paged_layer layer=8 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.354
+kiln_profile_paged_layer layer=9 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.296
+kiln_profile_paged_layer layer=10 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.351
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.404
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.001
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.278
+kiln_profile_full_attn_stage full_attn_layer=2 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.269
+kiln_profile_full_attn_stage full_attn_layer=2 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.605
+kiln_profile_full_attn_stage full_attn_layer=2 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.355
+kiln_profile_full_attn_stage full_attn_layer=2 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=2 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.700
+kiln_profile_full_attn_stage full_attn_layer=2 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.249
+kiln_profile_paged_layer layer=11 kind=full seq_len=64 start_pos=0 elapsed_ms=17.613
+kiln_profile_paged_layer layer=12 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.266
+kiln_profile_paged_layer layer=13 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.441
+kiln_profile_paged_layer layer=14 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.430
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.471
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.035
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.305
+kiln_profile_full_attn_stage full_attn_layer=3 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.305
+kiln_profile_full_attn_stage full_attn_layer=3 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.567
+kiln_profile_full_attn_stage full_attn_layer=3 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.406
+kiln_profile_full_attn_stage full_attn_layer=3 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=3 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.789
+kiln_profile_full_attn_stage full_attn_layer=3 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.272
+kiln_profile_paged_layer layer=15 kind=full seq_len=64 start_pos=0 elapsed_ms=18.026
+kiln_profile_paged_layer layer=16 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.442
+kiln_profile_paged_layer layer=17 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.550
+kiln_profile_paged_layer layer=18 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.539
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.415
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.032
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.374
+kiln_profile_full_attn_stage full_attn_layer=4 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.293
+kiln_profile_full_attn_stage full_attn_layer=4 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.575
+kiln_profile_full_attn_stage full_attn_layer=4 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.398
+kiln_profile_full_attn_stage full_attn_layer=4 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.003
+kiln_profile_full_attn_stage full_attn_layer=4 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.755
+kiln_profile_full_attn_stage full_attn_layer=4 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.278
+kiln_profile_paged_layer layer=19 kind=full seq_len=64 start_pos=0 elapsed_ms=18.208
+kiln_profile_paged_layer layer=20 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.499
+kiln_profile_paged_layer layer=21 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.572
+kiln_profile_paged_layer layer=22 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.587
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.488
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.037
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.311
+kiln_profile_full_attn_stage full_attn_layer=5 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.358
+kiln_profile_full_attn_stage full_attn_layer=5 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.632
+kiln_profile_full_attn_stage full_attn_layer=5 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.420
+kiln_profile_full_attn_stage full_attn_layer=5 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.003
+kiln_profile_full_attn_stage full_attn_layer=5 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.887
+kiln_profile_full_attn_stage full_attn_layer=5 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.296
+kiln_profile_paged_layer layer=23 kind=full seq_len=64 start_pos=0 elapsed_ms=18.666
+kiln_profile_paged_layer layer=24 kind=linear seq_len=64 start_pos=0 elapsed_ms=12.271
+kiln_profile_paged_layer layer=25 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.707
+kiln_profile_paged_layer layer=26 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.794
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.416
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.048
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.334
+kiln_profile_full_attn_stage full_attn_layer=6 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.331
+kiln_profile_full_attn_stage full_attn_layer=6 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.598
+kiln_profile_full_attn_stage full_attn_layer=6 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.420
+kiln_profile_full_attn_stage full_attn_layer=6 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.003
+kiln_profile_full_attn_stage full_attn_layer=6 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.795
+kiln_profile_full_attn_stage full_attn_layer=6 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.269
+kiln_profile_paged_layer layer=27 kind=full seq_len=64 start_pos=0 elapsed_ms=18.141
+kiln_profile_paged_layer layer=28 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.453
+kiln_profile_paged_layer layer=29 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.664
+kiln_profile_paged_layer layer=30 kind=linear seq_len=64 start_pos=0 elapsed_ms=11.622
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_proj seq_len=64 start_pos=0 elapsed_ms=2.570
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_split seq_len=64 start_pos=0 elapsed_ms=1.252
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qk_norm seq_len=64 start_pos=0 elapsed_ms=0.423
+kiln_profile_full_attn_stage full_attn_layer=7 stage=rope seq_len=64 start_pos=0 elapsed_ms=0.401
+kiln_profile_full_attn_stage full_attn_layer=7 stage=q_transpose seq_len=64 start_pos=0 elapsed_ms=0.662
+kiln_profile_full_attn_stage full_attn_layer=7 stage=prefill_kv_head_layout seq_len=64 start_pos=0 elapsed_ms=0.539
+kiln_profile_full_attn_stage full_attn_layer=7 stage=prefill_attn_head_major seq_len=64 start_pos=0 elapsed_ms=0.004
+kiln_profile_full_attn_stage full_attn_layer=7 stage=prefill_attn_fallback seq_len=64 start_pos=0 elapsed_ms=1.800
+kiln_profile_full_attn_stage full_attn_layer=7 stage=kv_write seq_len=64 start_pos=0 elapsed_ms=0.301
+kiln_profile_paged_layer layer=31 kind=full seq_len=64 start_pos=0 elapsed_ms=19.153
+    Prefill (paged): 450.2ms (142 tok/s)
+kiln_profile_paged_layer layer=0 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.596
+kiln_profile_paged_layer layer=1 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.536
+kiln_profile_paged_layer layer=2 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.579
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.316
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.298
+kiln_profile_full_attn_stage full_attn_layer=0 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.269
+kiln_profile_full_attn_stage full_attn_layer=0 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.255
+kiln_profile_full_attn_stage full_attn_layer=0 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=0 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.239
+kiln_profile_full_attn_stage full_attn_layer=0 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.300
+kiln_profile_full_attn_stage full_attn_layer=0 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.252
+kiln_profile_full_attn_stage full_attn_layer=0 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.685
+kiln_profile_paged_layer layer=3 kind=full seq_len=1 start_pos=64 elapsed_ms=7.128
+kiln_profile_paged_layer layer=4 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.815
+kiln_profile_paged_layer layer=5 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.632
+kiln_profile_paged_layer layer=6 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.519
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.294
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.236
+kiln_profile_full_attn_stage full_attn_layer=1 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.223
+kiln_profile_full_attn_stage full_attn_layer=1 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.194
+kiln_profile_full_attn_stage full_attn_layer=1 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=1 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.213
+kiln_profile_full_attn_stage full_attn_layer=1 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.213
+kiln_profile_full_attn_stage full_attn_layer=1 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.175
+kiln_profile_full_attn_stage full_attn_layer=1 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.658
+kiln_profile_paged_layer layer=7 kind=full seq_len=1 start_pos=64 elapsed_ms=6.390
+kiln_profile_paged_layer layer=8 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.474
+kiln_profile_paged_layer layer=9 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.391
+kiln_profile_paged_layer layer=10 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.420
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.319
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.294
+kiln_profile_full_attn_stage full_attn_layer=2 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.249
+kiln_profile_full_attn_stage full_attn_layer=2 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.251
+kiln_profile_full_attn_stage full_attn_layer=2 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.001
+kiln_profile_full_attn_stage full_attn_layer=2 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.273
+kiln_profile_full_attn_stage full_attn_layer=2 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.293
+kiln_profile_full_attn_stage full_attn_layer=2 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.260
+kiln_profile_full_attn_stage full_attn_layer=2 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.675
+kiln_profile_paged_layer layer=11 kind=full seq_len=1 start_pos=64 elapsed_ms=6.936
+kiln_profile_paged_layer layer=12 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.672
+kiln_profile_paged_layer layer=13 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.760
+kiln_profile_paged_layer layer=14 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.540
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.308
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.284
+kiln_profile_full_attn_stage full_attn_layer=3 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.236
+kiln_profile_full_attn_stage full_attn_layer=3 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.213
+kiln_profile_full_attn_stage full_attn_layer=3 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=3 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.208
+kiln_profile_full_attn_stage full_attn_layer=3 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.249
+kiln_profile_full_attn_stage full_attn_layer=3 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.178
+kiln_profile_full_attn_stage full_attn_layer=3 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.628
+kiln_profile_paged_layer layer=15 kind=full seq_len=1 start_pos=64 elapsed_ms=6.561
+kiln_profile_paged_layer layer=16 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.455
+kiln_profile_paged_layer layer=17 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.424
+kiln_profile_paged_layer layer=18 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.472
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.346
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.314
+kiln_profile_full_attn_stage full_attn_layer=4 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.331
+kiln_profile_full_attn_stage full_attn_layer=4 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.270
+kiln_profile_full_attn_stage full_attn_layer=4 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=4 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.258
+kiln_profile_full_attn_stage full_attn_layer=4 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.316
+kiln_profile_full_attn_stage full_attn_layer=4 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.277
+kiln_profile_full_attn_stage full_attn_layer=4 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.714
+kiln_profile_paged_layer layer=19 kind=full seq_len=1 start_pos=64 elapsed_ms=7.187
+kiln_profile_paged_layer layer=20 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.854
+kiln_profile_paged_layer layer=21 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.525
+kiln_profile_paged_layer layer=22 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.518
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.293
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.268
+kiln_profile_full_attn_stage full_attn_layer=5 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.251
+kiln_profile_full_attn_stage full_attn_layer=5 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.213
+kiln_profile_full_attn_stage full_attn_layer=5 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=5 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.236
+kiln_profile_full_attn_stage full_attn_layer=5 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.256
+kiln_profile_full_attn_stage full_attn_layer=5 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.228
+kiln_profile_full_attn_stage full_attn_layer=5 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.658
+kiln_profile_paged_layer layer=23 kind=full seq_len=1 start_pos=64 elapsed_ms=6.725
+kiln_profile_paged_layer layer=24 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.524
+kiln_profile_paged_layer layer=25 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.520
+kiln_profile_paged_layer layer=26 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.517
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.375
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.353
+kiln_profile_full_attn_stage full_attn_layer=6 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.323
+kiln_profile_full_attn_stage full_attn_layer=6 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.361
+kiln_profile_full_attn_stage full_attn_layer=6 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.003
+kiln_profile_full_attn_stage full_attn_layer=6 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.331
+kiln_profile_full_attn_stage full_attn_layer=6 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.348
+kiln_profile_full_attn_stage full_attn_layer=6 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.287
+kiln_profile_full_attn_stage full_attn_layer=6 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.675
+kiln_profile_paged_layer layer=27 kind=full seq_len=1 start_pos=64 elapsed_ms=7.591
+kiln_profile_paged_layer layer=28 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.510
+kiln_profile_paged_layer layer=29 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.548
+kiln_profile_paged_layer layer=30 kind=linear seq_len=1 start_pos=64 elapsed_ms=4.591
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_proj seq_len=1 start_pos=64 elapsed_ms=1.390
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qkv_split seq_len=1 start_pos=64 elapsed_ms=0.407
+kiln_profile_full_attn_stage full_attn_layer=7 stage=qk_norm seq_len=1 start_pos=64 elapsed_ms=0.298
+kiln_profile_full_attn_stage full_attn_layer=7 stage=rope seq_len=1 start_pos=64 elapsed_ms=0.261
+kiln_profile_full_attn_stage full_attn_layer=7 stage=q_transpose seq_len=1 start_pos=64 elapsed_ms=0.002
+kiln_profile_full_attn_stage full_attn_layer=7 stage=kv_write seq_len=1 start_pos=64 elapsed_ms=0.234
+kiln_profile_full_attn_stage full_attn_layer=7 stage=decode_attn_contiguous seq_len=1 start_pos=64 elapsed_ms=0.282
+kiln_profile_full_attn_stage full_attn_layer=7 stage=attn_gate seq_len=1 start_pos=64 elapsed_ms=0.238
+kiln_profile_full_attn_stage full_attn_layer=7 stage=o_proj seq_len=1 start_pos=64 elapsed_ms=0.667
+kiln_profile_paged_layer layer=31 kind=full seq_len=1 start_pos=64 elapsed_ms=7.348
+    Decode (paged): 2 tokens, mean ITL 193.6ms (5.2 tok/s)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: unknown (10240 MB VRAM, source: apple-silicon-unified)
+Model load time: 14.66s (VRAM: 0 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         64
+Prefill time:          450.2 ms (142 tok/s)
+Time to first token:   450.2 ms
+Mean inter-token:      193.6 ms (5.2 tok/s)
+P50 inter-token:       193.6 ms
+P99 inter-token:       193.6 ms
+Tokens generated:      2
+Spec method:           off
+
+{
+  "backend": "metal",
+  "gpu_info": {
+    "name": "unknown",
+    "total_vram_mb": 10240,
+    "vram_source": "apple-silicon-unified"
+  },
+  "model_load": {
+    "load_time_secs": 14.659206417,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 450.232167,
+    "prefill_tokens_per_sec": 142.14888382242134,
+    "time_to_first_token_ms": 450.232167,
+    "mean_inter_token_ms": 193.595791,
+    "p50_inter_token_ms": 193.595791,
+    "p99_inter_token_ms": 193.595791,
+    "num_tokens_generated": 2,
+    "decode_tokens_per_sec": 5.165401555656755,
+    "spec_method": "off"
+  },
+  "training": null
+}

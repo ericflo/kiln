@@ -1,0 +1,1 @@
+{"id":"batchcmpl-3b44d83b-55c9-49ea-8d78-0e83d1d29948","object":"batch.completion","created":1777818884,"model":"qwen3.5-4b-kiln","completions":[{"prompt_index":0,"completion_index":0,"text":"","finish_reason":"length","usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14}}

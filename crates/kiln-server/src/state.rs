@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use candle_core::DType;
 use kiln_core::block::BlockManager;
@@ -10,7 +10,10 @@ use kiln_core::config::ModelConfig;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
-use kiln_model::{LinearAttentionState, ModelRunner, PagedKvCache, PagedPrefixRegistration};
+use kiln_model::{
+    DecodeBatcher, DecodeBatcherConfig, LinearAttentionState, ModelRunner, PagedKvCache,
+    PagedPrefixNextToken, PagedPrefixRegistration,
+};
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
 use kiln_train::TrainingState;
 use serde::Serialize;
@@ -25,6 +28,12 @@ const MIN_AUTO_KV_BLOCKS: usize = 64;
 const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=16.
 const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.
 const METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM: usize = 2048; // 32K tokens at block_size=16.
+const DETERMINISTIC_COMPLETION_CACHE_CAPACITY: usize = 128;
+const DETERMINISTIC_CHAT_REQUEST_CACHE_CAPACITY: usize = 128;
+const DETERMINISTIC_CHAT_CHOICES_CACHE_CAPACITY: usize = 64;
+const DETERMINISTIC_BATCH_CACHE_CAPACITY: usize = 64;
+const RENDERED_PROMPT_CACHE_CAPACITY: usize = 256;
+const PROMPT_TOKEN_CACHE_CAPACITY: usize = 256;
 
 /// Fallback inference_memory_fraction values the KV cache auto-sizer tries in
 /// order if the configured fraction OOMs at startup. Each entry is only tried
@@ -211,6 +220,7 @@ pub const MIN_PREFIX_CACHE_MAX_ENTRIES: usize = 1;
 const MIN_PREFIX_CACHE_STATE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PREFIX_CACHE_STATE_BYTES: u64 = 1024 * 1024 * 1024;
 const PREFIX_CACHE_STATE_FRACTION_DIVISOR: u64 = 40;
+const REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS: usize = 64;
 
 pub struct RealPrefixCache {
     enabled: bool,
@@ -218,6 +228,7 @@ pub struct RealPrefixCache {
     max_entries: usize,
     state_bytes_per_entry: u64,
     max_state_bytes: u64,
+    min_register_tokens: usize,
     block_size: usize,
     next_entry_id: u64,
     entries: Vec<RealPrefixCacheEntry>,
@@ -231,6 +242,7 @@ struct RealPrefixCacheEntry {
     prompt_tokens: Vec<TokenId>,
     block_ids: Vec<u32>,
     linear_state: LinearAttentionState,
+    next_token: Option<PagedPrefixNextToken>,
     last_used: u64,
     active_uses: usize,
 }
@@ -240,11 +252,497 @@ pub struct RealPrefixCacheHit {
     pub cached_tokens: usize,
     pub block_ids: Vec<u32>,
     pub linear_state: LinearAttentionState,
+    pub next_token: Option<PagedPrefixNextToken>,
 }
 
 pub struct RealPrefixCacheRegisterOutcome {
     pub retained_blocks: Vec<u32>,
     pub evicted_blocks: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeterministicCompletionCacheKey {
+    pub adapter: Option<String>,
+    pub prompt_tokens: Vec<TokenId>,
+    pub temperature_bits: u32,
+    pub max_tokens: usize,
+    pub stop: Vec<String>,
+    pub top_p_bits: u32,
+    pub top_k: u32,
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeterministicCompletionCacheValue {
+    pub text: String,
+    pub reasoning_content: Option<String>,
+    pub finish_reason: String,
+    pub completion_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeterministicCompletionInFlightState {
+    Pending,
+    Ready(Option<DeterministicCompletionCacheValue>),
+}
+
+pub enum DeterministicCompletionCacheClaim {
+    Hit(DeterministicCompletionCacheValue),
+    Wait(watch::Receiver<DeterministicCompletionInFlightState>),
+    Owner,
+}
+
+pub enum DeterministicCompletionCacheProbe {
+    Hit(DeterministicCompletionCacheValue),
+    Wait(watch::Receiver<DeterministicCompletionInFlightState>),
+    Miss,
+}
+
+pub struct DeterministicCompletionCache {
+    capacity: usize,
+    entries: HashMap<DeterministicCompletionCacheKey, DeterministicCompletionCacheValue>,
+    lru: VecDeque<DeterministicCompletionCacheKey>,
+    in_flight: HashMap<
+        DeterministicCompletionCacheKey,
+        watch::Sender<DeterministicCompletionInFlightState>,
+    >,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeterministicChatRequestCacheValue {
+    pub prompt_tokens: usize,
+    pub completion: DeterministicCompletionCacheValue,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeterministicChatRequestInFlightState {
+    Pending,
+    Ready(Option<DeterministicChatRequestCacheValue>),
+}
+
+pub enum DeterministicChatRequestCacheClaim {
+    Hit(DeterministicChatRequestCacheValue),
+    Wait(watch::Receiver<DeterministicChatRequestInFlightState>),
+    Owner,
+}
+
+pub enum DeterministicChatRequestCacheProbe {
+    Hit(DeterministicChatRequestCacheValue),
+    Wait(watch::Receiver<DeterministicChatRequestInFlightState>),
+    Miss,
+}
+
+pub struct DeterministicChatRequestCache {
+    capacity: usize,
+    entries: HashMap<String, DeterministicChatRequestCacheValue>,
+    lru: VecDeque<String>,
+    in_flight: HashMap<String, watch::Sender<DeterministicChatRequestInFlightState>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeterministicChatChoicesCacheValue {
+    pub prompt_tokens: usize,
+    pub completions: Vec<DeterministicCompletionCacheValue>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeterministicChatChoicesInFlightState {
+    Pending,
+    Ready(Option<DeterministicChatChoicesCacheValue>),
+}
+
+pub enum DeterministicChatChoicesCacheClaim {
+    Hit(DeterministicChatChoicesCacheValue),
+    Wait(watch::Receiver<DeterministicChatChoicesInFlightState>),
+    Owner,
+}
+
+pub enum DeterministicChatChoicesCacheProbe {
+    Hit(DeterministicChatChoicesCacheValue),
+    Wait(watch::Receiver<DeterministicChatChoicesInFlightState>),
+    Miss,
+}
+
+pub struct DeterministicChatChoicesCache {
+    capacity: usize,
+    entries: HashMap<String, DeterministicChatChoicesCacheValue>,
+    lru: VecDeque<String>,
+    in_flight: HashMap<String, watch::Sender<DeterministicChatChoicesInFlightState>>,
+}
+
+pub type DeterministicBatchCacheKey = String;
+
+#[derive(Debug, Clone)]
+pub struct DeterministicBatchCacheItem {
+    pub prompt_index: usize,
+    pub completion_index: usize,
+    pub text: String,
+    pub reasoning_content: Option<String>,
+    pub finish_reason: String,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeterministicBatchCacheValue {
+    pub completions: Vec<DeterministicBatchCacheItem>,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeterministicBatchInFlightState {
+    Pending,
+    Ready(Option<DeterministicBatchCacheValue>),
+}
+
+pub enum DeterministicBatchCacheClaim {
+    Hit(DeterministicBatchCacheValue),
+    Wait(watch::Receiver<DeterministicBatchInFlightState>),
+    Owner,
+}
+
+pub struct DeterministicBatchCache {
+    capacity: usize,
+    entries: HashMap<DeterministicBatchCacheKey, DeterministicBatchCacheValue>,
+    lru: VecDeque<DeterministicBatchCacheKey>,
+    in_flight: HashMap<DeterministicBatchCacheKey, watch::Sender<DeterministicBatchInFlightState>>,
+}
+
+impl DeterministicBatchCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::with_capacity(capacity),
+            in_flight: HashMap::new(),
+        }
+    }
+
+    pub fn claim(&mut self, key: &DeterministicBatchCacheKey) -> DeterministicBatchCacheClaim {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.clone());
+            return DeterministicBatchCacheClaim::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicBatchCacheClaim::Wait(sender.subscribe());
+        }
+
+        let (sender, _receiver) = watch::channel(DeterministicBatchInFlightState::Pending);
+        self.in_flight.insert(key.clone(), sender);
+        DeterministicBatchCacheClaim::Owner
+    }
+
+    pub fn complete(
+        &mut self,
+        key: DeterministicBatchCacheKey,
+        value: DeterministicBatchCacheValue,
+    ) {
+        self.insert_complete_value(key.clone(), value.clone());
+        if let Some(sender) = self.in_flight.remove(&key) {
+            let _ = sender.send(DeterministicBatchInFlightState::Ready(Some(value)));
+        }
+    }
+
+    pub fn fail(&mut self, key: &DeterministicBatchCacheKey) {
+        if let Some(sender) = self.in_flight.remove(key) {
+            let _ = sender.send(DeterministicBatchInFlightState::Ready(None));
+        }
+    }
+
+    pub fn insert(&mut self, key: DeterministicBatchCacheKey, value: DeterministicBatchCacheValue) {
+        self.insert_complete_value(key, value);
+    }
+
+    fn insert_complete_value(
+        &mut self,
+        key: DeterministicBatchCacheKey,
+        value: DeterministicBatchCacheValue,
+    ) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        if self.entries.insert(key.clone(), value).is_some() {
+            self.lru.retain(|existing| existing != &key);
+            self.lru.push_back(key);
+            return;
+        }
+
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.lru.push_back(key);
+    }
+
+    pub fn stats(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl DeterministicChatRequestCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::with_capacity(capacity),
+            in_flight: HashMap::new(),
+        }
+    }
+
+    pub fn claim(&mut self, key: &str) -> DeterministicChatRequestCacheClaim {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.to_string());
+            return DeterministicChatRequestCacheClaim::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicChatRequestCacheClaim::Wait(sender.subscribe());
+        }
+
+        let (sender, _receiver) = watch::channel(DeterministicChatRequestInFlightState::Pending);
+        self.in_flight.insert(key.to_string(), sender);
+        DeterministicChatRequestCacheClaim::Owner
+    }
+
+    pub fn probe(&mut self, key: &str) -> DeterministicChatRequestCacheProbe {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.to_string());
+            return DeterministicChatRequestCacheProbe::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicChatRequestCacheProbe::Wait(sender.subscribe());
+        }
+
+        DeterministicChatRequestCacheProbe::Miss
+    }
+
+    pub fn complete(&mut self, key: String, value: DeterministicChatRequestCacheValue) {
+        self.insert_complete_value(key.clone(), value.clone());
+        if let Some(sender) = self.in_flight.remove(&key) {
+            let _ = sender.send(DeterministicChatRequestInFlightState::Ready(Some(value)));
+        }
+    }
+
+    pub fn fail(&mut self, key: &str) {
+        if let Some(sender) = self.in_flight.remove(key) {
+            let _ = sender.send(DeterministicChatRequestInFlightState::Ready(None));
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: DeterministicChatRequestCacheValue) {
+        self.insert_complete_value(key, value);
+    }
+
+    fn insert_complete_value(&mut self, key: String, value: DeterministicChatRequestCacheValue) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        if self.entries.insert(key.clone(), value).is_some() {
+            self.lru.retain(|existing| existing != &key);
+            self.lru.push_back(key);
+            return;
+        }
+
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.lru.push_back(key);
+    }
+
+    pub fn stats(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl DeterministicChatChoicesCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::with_capacity(capacity),
+            in_flight: HashMap::new(),
+        }
+    }
+
+    pub fn claim(&mut self, key: &str) -> DeterministicChatChoicesCacheClaim {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.to_string());
+            return DeterministicChatChoicesCacheClaim::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicChatChoicesCacheClaim::Wait(sender.subscribe());
+        }
+
+        let (sender, _receiver) = watch::channel(DeterministicChatChoicesInFlightState::Pending);
+        self.in_flight.insert(key.to_string(), sender);
+        DeterministicChatChoicesCacheClaim::Owner
+    }
+
+    pub fn probe(&mut self, key: &str) -> DeterministicChatChoicesCacheProbe {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.to_string());
+            return DeterministicChatChoicesCacheProbe::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicChatChoicesCacheProbe::Wait(sender.subscribe());
+        }
+
+        DeterministicChatChoicesCacheProbe::Miss
+    }
+
+    pub fn complete(&mut self, key: String, value: DeterministicChatChoicesCacheValue) {
+        self.insert_complete_value(key.clone(), value.clone());
+        if let Some(sender) = self.in_flight.remove(&key) {
+            let _ = sender.send(DeterministicChatChoicesInFlightState::Ready(Some(value)));
+        }
+    }
+
+    pub fn fail(&mut self, key: &str) {
+        if let Some(sender) = self.in_flight.remove(key) {
+            let _ = sender.send(DeterministicChatChoicesInFlightState::Ready(None));
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: DeterministicChatChoicesCacheValue) {
+        self.insert_complete_value(key, value);
+    }
+
+    fn insert_complete_value(&mut self, key: String, value: DeterministicChatChoicesCacheValue) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        if self.entries.insert(key.clone(), value).is_some() {
+            self.lru.retain(|existing| existing != &key);
+            self.lru.push_back(key);
+            return;
+        }
+
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.lru.push_back(key);
+    }
+
+    pub fn stats(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl DeterministicCompletionCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::with_capacity(capacity),
+            in_flight: HashMap::new(),
+        }
+    }
+
+    pub fn claim(
+        &mut self,
+        key: &DeterministicCompletionCacheKey,
+    ) -> DeterministicCompletionCacheClaim {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.clone());
+            return DeterministicCompletionCacheClaim::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicCompletionCacheClaim::Wait(sender.subscribe());
+        }
+
+        let (sender, _receiver) = watch::channel(DeterministicCompletionInFlightState::Pending);
+        self.in_flight.insert(key.clone(), sender);
+        DeterministicCompletionCacheClaim::Owner
+    }
+
+    pub fn probe(
+        &mut self,
+        key: &DeterministicCompletionCacheKey,
+    ) -> DeterministicCompletionCacheProbe {
+        if let Some(value) = self.entries.get(key).cloned() {
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.clone());
+            return DeterministicCompletionCacheProbe::Hit(value);
+        }
+
+        if let Some(sender) = self.in_flight.get(key) {
+            return DeterministicCompletionCacheProbe::Wait(sender.subscribe());
+        }
+
+        DeterministicCompletionCacheProbe::Miss
+    }
+
+    pub fn complete(
+        &mut self,
+        key: DeterministicCompletionCacheKey,
+        value: DeterministicCompletionCacheValue,
+    ) {
+        self.insert_complete_value(key.clone(), value.clone());
+        if let Some(sender) = self.in_flight.remove(&key) {
+            let _ = sender.send(DeterministicCompletionInFlightState::Ready(Some(value)));
+        }
+    }
+
+    pub fn fail(&mut self, key: &DeterministicCompletionCacheKey) {
+        if let Some(sender) = self.in_flight.remove(key) {
+            let _ = sender.send(DeterministicCompletionInFlightState::Ready(None));
+        }
+    }
+
+    pub fn insert_complete_value(
+        &mut self,
+        key: DeterministicCompletionCacheKey,
+        value: DeterministicCompletionCacheValue,
+    ) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        if self.entries.insert(key.clone(), value).is_some() {
+            self.lru.retain(|existing| existing != &key);
+            self.lru.push_back(key);
+            return;
+        }
+
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.lru.push_back(key);
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+        for (_, sender) in self.in_flight.drain() {
+            let _ = sender.send(DeterministicCompletionInFlightState::Ready(None));
+        }
+    }
 }
 
 impl RealPrefixCache {
@@ -255,6 +753,24 @@ impl RealPrefixCache {
         max_entries: usize,
         state_bytes_per_entry: u64,
     ) -> Self {
+        Self::new_with_min_register_tokens(
+            enabled,
+            block_size,
+            max_blocks,
+            max_entries,
+            state_bytes_per_entry,
+            0,
+        )
+    }
+
+    pub fn new_with_min_register_tokens(
+        enabled: bool,
+        block_size: usize,
+        max_blocks: usize,
+        max_entries: usize,
+        state_bytes_per_entry: u64,
+        min_register_tokens: usize,
+    ) -> Self {
         let max_entries = max_entries.max(MIN_PREFIX_CACHE_MAX_ENTRIES);
         let max_state_bytes = state_bytes_per_entry.saturating_mul(max_entries as u64);
         Self {
@@ -263,6 +779,7 @@ impl RealPrefixCache {
             max_entries,
             state_bytes_per_entry,
             max_state_bytes,
+            min_register_tokens,
             block_size,
             next_entry_id: 1,
             entries: Vec::new(),
@@ -282,6 +799,16 @@ impl RealPrefixCache {
         self.enabled && self.max_blocks > 0
     }
 
+    pub fn should_register_prompt(&self, prompt_tokens: &[TokenId]) -> bool {
+        self.is_enabled()
+            && !prompt_tokens.is_empty()
+            && prompt_tokens.len() >= self.min_register_tokens
+    }
+
+    pub fn should_lookup_prompt(&self, prompt_tokens: &[TokenId]) -> bool {
+        self.should_register_prompt(prompt_tokens)
+    }
+
     pub fn lookup(
         &mut self,
         adapter: &Option<String>,
@@ -296,10 +823,13 @@ impl RealPrefixCache {
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
+                let exact_hit =
+                    prompt_tokens.len() == entry.prompt_tokens.len() && entry.next_token.is_some();
+                let strict_prefix_hit = prompt_tokens.len() > entry.prompt_tokens.len()
+                    && entry.prompt_tokens.len() % self.block_size == 0;
                 &entry.adapter == adapter
-                    && prompt_tokens.len() > entry.prompt_tokens.len()
+                    && (exact_hit || strict_prefix_hit)
                     && prompt_tokens.starts_with(&entry.prompt_tokens)
-                    && entry.prompt_tokens.len() % self.block_size == 0
             })
             .max_by_key(|(_, entry)| entry.prompt_tokens.len())
             .map(|(idx, _)| idx);
@@ -320,19 +850,8 @@ impl RealPrefixCache {
             cached_tokens: self.entries[idx].prompt_tokens.len(),
             block_ids: self.entries[idx].block_ids.clone(),
             linear_state: self.entries[idx].linear_state.snapshot()?,
+            next_token: self.entries[idx].next_token.clone(),
         }))
-    }
-
-    pub fn would_hit(&self, adapter: &Option<String>, prompt_tokens: &[TokenId]) -> bool {
-        if !self.is_enabled() {
-            return false;
-        }
-        self.entries.iter().any(|entry| {
-            &entry.adapter == adapter
-                && prompt_tokens.len() > entry.prompt_tokens.len()
-                && prompt_tokens.starts_with(&entry.prompt_tokens)
-                && entry.prompt_tokens.len() % self.block_size == 0
-        })
     }
 
     pub fn release_hit(&mut self, entry_id: u64) {
@@ -346,9 +865,11 @@ impl RealPrefixCache {
         adapter: Option<String>,
         registration: PagedPrefixRegistration,
     ) -> RealPrefixCacheRegisterOutcome {
+        let exact_reusable = registration.next_token.is_some();
+        let strict_prefix_reusable = registration.prompt_tokens.len() % self.block_size == 0;
         if !self.is_enabled()
-            || registration.prompt_tokens.is_empty()
-            || registration.prompt_tokens.len() % self.block_size != 0
+            || !self.should_register_prompt(&registration.prompt_tokens)
+            || (!exact_reusable && !strict_prefix_reusable)
             || registration.block_ids.is_empty()
         {
             return RealPrefixCacheRegisterOutcome {
@@ -417,6 +938,7 @@ impl RealPrefixCache {
             prompt_tokens: registration.prompt_tokens,
             block_ids: registration.block_ids,
             linear_state: registration.linear_state,
+            next_token: registration.next_token,
             last_used,
             active_uses: 0,
         });
@@ -476,6 +998,110 @@ impl RealPrefixCache {
     }
 }
 
+pub struct PromptTokenCache {
+    capacity: usize,
+    entries: HashMap<String, Vec<TokenId>>,
+    lru: VecDeque<String>,
+    hits: u64,
+    misses: u64,
+}
+
+impl PromptTokenCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::with_capacity(capacity),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    pub fn get(&mut self, prompt_text: &str) -> Option<Vec<TokenId>> {
+        if let Some(tokens) = self.entries.get(prompt_text).cloned() {
+            self.hits = self.hits.saturating_add(1);
+            self.lru.retain(|existing| existing != prompt_text);
+            self.lru.push_back(prompt_text.to_string());
+            return Some(tokens);
+        }
+        self.misses = self.misses.saturating_add(1);
+        None
+    }
+
+    pub fn insert(&mut self, prompt_text: String, tokens: Vec<TokenId>) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.contains_key(&prompt_text) {
+            self.lru.retain(|existing| existing != &prompt_text);
+        }
+        self.entries.insert(prompt_text.clone(), tokens);
+        self.lru.push_back(prompt_text);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    pub fn stats(&self) -> (u64, u64, usize) {
+        (self.hits, self.misses, self.entries.len())
+    }
+}
+
+pub struct RenderedPromptCache {
+    capacity: usize,
+    entries: HashMap<String, String>,
+    lru: VecDeque<String>,
+    hits: u64,
+    misses: u64,
+}
+
+impl RenderedPromptCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::with_capacity(capacity),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<String> {
+        if let Some(prompt) = self.entries.get(key).cloned() {
+            self.hits = self.hits.saturating_add(1);
+            self.lru.retain(|existing| existing != key);
+            self.lru.push_back(key.to_string());
+            return Some(prompt);
+        }
+        self.misses = self.misses.saturating_add(1);
+        None
+    }
+
+    pub fn insert(&mut self, key: String, prompt: String) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.contains_key(&key) {
+            self.lru.retain(|existing| existing != &key);
+        }
+        self.entries.insert(key.clone(), prompt);
+        self.lru.push_back(key);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    pub fn stats(&self) -> (u64, u64, usize) {
+        (self.hits, self.misses, self.entries.len())
+    }
+}
+
 /// Which inference backend the server is using.
 pub enum ModelBackend {
     /// Mock engine + scheduler for testing without real weights.
@@ -490,6 +1116,7 @@ pub enum ModelBackend {
         paged_cache: Arc<std::sync::Mutex<PagedKvCache>>,
         prefix_cache: Arc<std::sync::Mutex<RealPrefixCache>>,
         batching_engine: Option<crate::batching_engine::BatchingEngineHandle>,
+        decode_batcher: Option<Arc<DecodeBatcher>>,
     },
 }
 
@@ -574,6 +1201,18 @@ pub struct AppState {
     pub decode_stats: Arc<std::sync::Mutex<DecodeStatsRing>>,
     /// Bounded history of recent chat-completion requests for the /ui dashboard.
     pub recent_requests: Arc<std::sync::Mutex<RecentRequestsRing>>,
+    /// Full-response cache for replayable completions.
+    pub completion_cache: Arc<std::sync::Mutex<DeterministicCompletionCache>>,
+    /// Full-response cache keyed before chat-template rendering/tokenization.
+    pub chat_request_cache: Arc<std::sync::Mutex<DeterministicChatRequestCache>>,
+    /// Full-response cache for replayable non-streaming chat n>1 requests.
+    pub chat_choices_cache: Arc<std::sync::Mutex<DeterministicChatChoicesCache>>,
+    /// Full-response cache for replayable multi-output batch requests.
+    pub batch_cache: Arc<std::sync::Mutex<DeterministicBatchCache>>,
+    /// Rendered chat-template prompt cache used before tokenization.
+    pub rendered_prompt_cache: Arc<std::sync::Mutex<RenderedPromptCache>>,
+    /// Rendered-prompt token cache used before completion/prefix cache lookup.
+    pub prompt_token_cache: Arc<std::sync::Mutex<PromptTokenCache>>,
 }
 
 impl AppState {
@@ -639,6 +1278,24 @@ impl AppState {
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
                 RECENT_REQUESTS_CAPACITY,
+            ))),
+            completion_cache: Arc::new(std::sync::Mutex::new(DeterministicCompletionCache::new(
+                DETERMINISTIC_COMPLETION_CACHE_CAPACITY,
+            ))),
+            chat_request_cache: Arc::new(std::sync::Mutex::new(
+                DeterministicChatRequestCache::new(DETERMINISTIC_CHAT_REQUEST_CACHE_CAPACITY),
+            )),
+            chat_choices_cache: Arc::new(std::sync::Mutex::new(
+                DeterministicChatChoicesCache::new(DETERMINISTIC_CHAT_CHOICES_CACHE_CAPACITY),
+            )),
+            batch_cache: Arc::new(std::sync::Mutex::new(DeterministicBatchCache::new(
+                DETERMINISTIC_BATCH_CACHE_CAPACITY,
+            ))),
+            rendered_prompt_cache: Arc::new(std::sync::Mutex::new(RenderedPromptCache::new(
+                RENDERED_PROMPT_CACHE_CAPACITY,
+            ))),
+            prompt_token_cache: Arc::new(std::sync::Mutex::new(PromptTokenCache::new(
+                PROMPT_TOKEN_CACHE_CAPACITY,
             ))),
         }
     }
@@ -918,14 +1575,16 @@ impl AppState {
             state_bytes_per_entry = prefix_cache_state_bytes_per_entry,
             max_state_bytes =
                 prefix_cache_state_bytes_per_entry.saturating_mul(prefix_cache_max_entries as u64),
+            min_register_tokens = REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
             "prefix cache budget"
         );
-        let prefix_cache = RealPrefixCache::new(
+        let prefix_cache = RealPrefixCache::new_with_min_register_tokens(
             prefix_cache_cfg.enabled,
             block_size,
             prefix_cache_max_blocks,
             prefix_cache_max_entries,
             prefix_cache_state_bytes_per_entry,
+            REAL_PREFIX_CACHE_MIN_REGISTER_TOKENS,
         );
 
         let runner = Arc::new(std::sync::RwLock::new(runner));
@@ -949,6 +1608,27 @@ impl AppState {
                 ),
             ))
         });
+        let decode_batcher = if DecodeBatcherConfig::enabled_for_device(&device) {
+            let config = DecodeBatcherConfig::from_env();
+            tracing::info!(
+                max_batch = config.max_batch,
+                wait_us = config.wait.as_micros() as u64,
+                "live greedy decode batcher enabled"
+            );
+            match DecodeBatcher::spawn(runner.clone(), paged_cache.clone(), config) {
+                Ok(batcher) => Some(batcher),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to spawn live decode batcher; continuing with rowwise decode"
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::info!("live greedy decode batcher disabled");
+            None
+        };
 
         Self {
             model_config,
@@ -958,6 +1638,7 @@ impl AppState {
                 paged_cache,
                 prefix_cache,
                 batching_engine,
+                decode_batcher,
             }),
             tokenizer: Arc::new(tokenizer),
             adapter_dir,
@@ -987,6 +1668,24 @@ impl AppState {
             decode_stats: Arc::new(std::sync::Mutex::new(DecodeStatsRing::new(4096))),
             recent_requests: Arc::new(std::sync::Mutex::new(RecentRequestsRing::new(
                 RECENT_REQUESTS_CAPACITY,
+            ))),
+            completion_cache: Arc::new(std::sync::Mutex::new(DeterministicCompletionCache::new(
+                DETERMINISTIC_COMPLETION_CACHE_CAPACITY,
+            ))),
+            chat_request_cache: Arc::new(std::sync::Mutex::new(
+                DeterministicChatRequestCache::new(DETERMINISTIC_CHAT_REQUEST_CACHE_CAPACITY),
+            )),
+            chat_choices_cache: Arc::new(std::sync::Mutex::new(
+                DeterministicChatChoicesCache::new(DETERMINISTIC_CHAT_CHOICES_CACHE_CAPACITY),
+            )),
+            batch_cache: Arc::new(std::sync::Mutex::new(DeterministicBatchCache::new(
+                DETERMINISTIC_BATCH_CACHE_CAPACITY,
+            ))),
+            rendered_prompt_cache: Arc::new(std::sync::Mutex::new(RenderedPromptCache::new(
+                RENDERED_PROMPT_CACHE_CAPACITY,
+            ))),
+            prompt_token_cache: Arc::new(std::sync::Mutex::new(PromptTokenCache::new(
+                PROMPT_TOKEN_CACHE_CAPACITY,
             ))),
         }
     }
@@ -1389,6 +2088,244 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn deterministic_completion_cache_coalesces_in_flight_request() {
+        let mut cache = DeterministicCompletionCache::new(8);
+        let key = DeterministicCompletionCacheKey {
+            adapter: None,
+            prompt_tokens: vec![1, 2, 3],
+            temperature_bits: 0.0f32.to_bits(),
+            max_tokens: 4,
+            stop: Vec::new(),
+            top_p_bits: 1.0f32.to_bits(),
+            top_k: 0,
+            seed: None,
+        };
+        let value = DeterministicCompletionCacheValue {
+            text: "cached".to_string(),
+            reasoning_content: None,
+            finish_reason: "length".to_string(),
+            completion_tokens: 4,
+        };
+
+        assert!(matches!(
+            cache.claim(&key),
+            DeterministicCompletionCacheClaim::Owner
+        ));
+
+        let mut receiver = match cache.claim(&key) {
+            DeterministicCompletionCacheClaim::Wait(receiver) => receiver,
+            _ => panic!("second identical request should wait on in-flight owner"),
+        };
+        cache.complete(key.clone(), value.clone());
+
+        receiver
+            .changed()
+            .await
+            .expect("owner should publish result");
+        let ready = receiver.borrow().clone();
+        let DeterministicCompletionInFlightState::Ready(Some(published)) = ready else {
+            panic!("waiter should receive cached completion");
+        };
+        assert_eq!(published.text, value.text);
+        assert_eq!(published.completion_tokens, value.completion_tokens);
+
+        let hit = match cache.claim(&key) {
+            DeterministicCompletionCacheClaim::Hit(hit) => hit,
+            _ => panic!("completed result should be cached"),
+        };
+        assert_eq!(hit.text, "cached");
+    }
+
+    #[tokio::test]
+    async fn deterministic_batch_cache_coalesces_in_flight_request() {
+        let mut cache = DeterministicBatchCache::new(8);
+        let key = "batch-key".to_string();
+        let value = DeterministicBatchCacheValue {
+            completions: vec![DeterministicBatchCacheItem {
+                prompt_index: 0,
+                completion_index: 0,
+                text: "cached".to_string(),
+                reasoning_content: None,
+                finish_reason: "length".to_string(),
+                prompt_tokens: 3,
+                completion_tokens: 4,
+            }],
+            prompt_tokens: 3,
+            completion_tokens: 4,
+        };
+
+        assert!(matches!(
+            cache.claim(&key),
+            DeterministicBatchCacheClaim::Owner
+        ));
+
+        let mut receiver = match cache.claim(&key) {
+            DeterministicBatchCacheClaim::Wait(receiver) => receiver,
+            _ => panic!("second identical batch should wait on in-flight owner"),
+        };
+        cache.complete(key.clone(), value.clone());
+
+        receiver
+            .changed()
+            .await
+            .expect("owner should publish batch result");
+        let ready = receiver.borrow().clone();
+        let DeterministicBatchInFlightState::Ready(Some(published)) = ready else {
+            panic!("waiter should receive cached batch");
+        };
+        assert_eq!(published.completions[0].text, value.completions[0].text);
+        assert_eq!(published.completion_tokens, value.completion_tokens);
+
+        let hit = match cache.claim(&key) {
+            DeterministicBatchCacheClaim::Hit(hit) => hit,
+            _ => panic!("completed batch should be cached"),
+        };
+        assert_eq!(hit.completions[0].text, "cached");
+    }
+
+    #[tokio::test]
+    async fn deterministic_chat_request_cache_coalesces_in_flight_request() {
+        let mut cache = DeterministicChatRequestCache::new(8);
+        let key = "chat-key".to_string();
+        let value = DeterministicChatRequestCacheValue {
+            prompt_tokens: 3,
+            completion: DeterministicCompletionCacheValue {
+                text: "cached".to_string(),
+                reasoning_content: None,
+                finish_reason: "length".to_string(),
+                completion_tokens: 4,
+            },
+        };
+
+        assert!(matches!(
+            cache.claim(&key),
+            DeterministicChatRequestCacheClaim::Owner
+        ));
+
+        let mut receiver = match cache.claim(&key) {
+            DeterministicChatRequestCacheClaim::Wait(receiver) => receiver,
+            _ => panic!("second identical chat request should wait on in-flight owner"),
+        };
+        cache.complete(key.clone(), value.clone());
+
+        receiver
+            .changed()
+            .await
+            .expect("owner should publish chat result");
+        let ready = receiver.borrow().clone();
+        let DeterministicChatRequestInFlightState::Ready(Some(published)) = ready else {
+            panic!("waiter should receive cached chat request");
+        };
+        assert_eq!(published.prompt_tokens, value.prompt_tokens);
+        assert_eq!(published.completion.text, value.completion.text);
+
+        let hit = match cache.claim(&key) {
+            DeterministicChatRequestCacheClaim::Hit(hit) => hit,
+            _ => panic!("completed chat request should be cached"),
+        };
+        assert_eq!(hit.completion.text, "cached");
+    }
+
+    #[tokio::test]
+    async fn deterministic_chat_choices_cache_coalesces_in_flight_request() {
+        let mut cache = DeterministicChatChoicesCache::new(8);
+        let key = "chat-choices-key".to_string();
+        let value = DeterministicChatChoicesCacheValue {
+            prompt_tokens: 3,
+            completions: vec![
+                DeterministicCompletionCacheValue {
+                    text: "first".to_string(),
+                    reasoning_content: Some("think first".to_string()),
+                    finish_reason: "length".to_string(),
+                    completion_tokens: 4,
+                },
+                DeterministicCompletionCacheValue {
+                    text: "second".to_string(),
+                    reasoning_content: None,
+                    finish_reason: "stop".to_string(),
+                    completion_tokens: 2,
+                },
+            ],
+        };
+
+        assert!(matches!(
+            cache.claim(&key),
+            DeterministicChatChoicesCacheClaim::Owner
+        ));
+
+        let mut receiver = match cache.claim(&key) {
+            DeterministicChatChoicesCacheClaim::Wait(receiver) => receiver,
+            _ => panic!("second identical chat choices request should wait on in-flight owner"),
+        };
+        cache.complete(key.clone(), value.clone());
+
+        receiver
+            .changed()
+            .await
+            .expect("owner should publish chat choices result");
+        let ready = receiver.borrow().clone();
+        let DeterministicChatChoicesInFlightState::Ready(Some(published)) = ready else {
+            panic!("waiter should receive cached chat choices");
+        };
+        assert_eq!(published.prompt_tokens, value.prompt_tokens);
+        assert_eq!(published.completions[0].text, value.completions[0].text);
+        assert_eq!(
+            published.completions[0].reasoning_content,
+            value.completions[0].reasoning_content
+        );
+        assert_eq!(
+            published.completions[1].completion_tokens,
+            value.completions[1].completion_tokens
+        );
+
+        let hit = match cache.claim(&key) {
+            DeterministicChatChoicesCacheClaim::Hit(hit) => hit,
+            _ => panic!("completed chat choices should be cached"),
+        };
+        assert_eq!(hit.completions[0].text, "first");
+    }
+
+    #[test]
+    fn prompt_token_cache_tracks_hits_misses_and_eviction() {
+        let mut cache = PromptTokenCache::new(2);
+        assert_eq!(cache.stats(), (0, 0, 0));
+
+        assert!(cache.get("a").is_none());
+        cache.insert("a".to_string(), vec![1, 2]);
+        assert_eq!(cache.get("a"), Some(vec![1, 2]));
+        assert_eq!(cache.stats(), (1, 1, 1));
+
+        cache.insert("b".to_string(), vec![3]);
+        cache.insert("c".to_string(), vec![4]);
+        assert!(
+            cache.get("a").is_none(),
+            "oldest entry should be evicted after capacity is exceeded"
+        );
+        assert_eq!(cache.get("b"), Some(vec![3]));
+        assert_eq!(cache.get("c"), Some(vec![4]));
+    }
+
+    #[test]
+    fn rendered_prompt_cache_tracks_hits_misses_and_eviction() {
+        let mut cache = RenderedPromptCache::new(2);
+        assert_eq!(cache.stats(), (0, 0, 0));
+
+        assert!(cache.get("key-a").is_none());
+        cache.insert("key-a".to_string(), "prompt a".to_string());
+        assert_eq!(cache.get("key-a"), Some("prompt a".to_string()));
+        assert_eq!(cache.stats(), (1, 1, 1));
+
+        cache.insert("key-b".to_string(), "prompt b".to_string());
+        cache.insert("key-c".to_string(), "prompt c".to_string());
+        assert!(
+            cache.get("key-a").is_none(),
+            "oldest rendered prompt should be evicted after capacity is exceeded"
+        );
+        assert_eq!(cache.get("key-b"), Some("prompt b".to_string()));
+        assert_eq!(cache.get("key-c"), Some("prompt c".to_string()));
+    }
+
     #[test]
     fn real_prefix_cache_records_hits_misses_and_cached_blocks() -> anyhow::Result<()> {
         let config = tiny_linear_config();
@@ -1400,16 +2337,11 @@ mod tests {
             prompt_tokens: vec![1, 2, 3, 4],
             block_ids: vec![9],
             linear_state: state,
+            next_token: None,
         };
         let outcome = cache.register(None, registration);
         assert_eq!(outcome.retained_blocks, vec![9]);
         assert!(outcome.evicted_blocks.is_empty());
-
-        assert!(cache.would_hit(&None, &[1, 2, 3, 4, 5]));
-        assert!(!cache.would_hit(&None, &[7, 8, 9, 10, 11]));
-        let stats_before_lookup = cache.stats();
-        assert_eq!(stats_before_lookup.lookup_hits, 0);
-        assert_eq!(stats_before_lookup.lookup_misses, 0);
 
         assert!(
             cache
@@ -1436,6 +2368,102 @@ mod tests {
     }
 
     #[test]
+    fn real_prefix_cache_min_register_tokens_skips_short_prompts() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+        let state = LinearAttentionState::new(&config, &device)?;
+        let mut cache = RealPrefixCache::new_with_min_register_tokens(true, 4, 4, 1024, 49, 9);
+        assert!(
+            !cache.should_lookup_prompt(&[1, 2, 3, 4, 5, 6, 7, 8]),
+            "short prompts cannot hit entries that are never registered"
+        );
+        assert!(cache.should_lookup_prompt(&[1, 2, 3, 4, 5, 6, 7, 8, 9]));
+
+        let outcome = cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                block_ids: vec![9, 10],
+                linear_state: state,
+                next_token: Some(PagedPrefixNextToken::GreedyToken(123)),
+            },
+        );
+        assert!(outcome.retained_blocks.is_empty());
+        assert!(outcome.evicted_blocks.is_empty());
+        assert!(cache.lookup(&None, &[1, 2, 3, 4, 5, 6, 7, 8])?.is_none());
+
+        let stats = cache.stats();
+        assert_eq!(stats.lookup_hits, 0);
+        assert_eq!(stats.lookup_misses, 1);
+        assert_eq!(stats.cached_blocks, 0);
+        assert_eq!(stats.cached_entries, 0);
+        assert_eq!(stats.cached_state_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn real_prefix_cache_exact_prompt_hit_requires_next_token_source() -> anyhow::Result<()> {
+        let config = tiny_linear_config();
+        let device = candle_core::Device::Cpu;
+
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![9],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
+            },
+        );
+        assert!(
+            cache.lookup(&None, &[1, 2, 3, 4])?.is_none(),
+            "an exact prompt hit without a saved next-token source cannot skip prefill"
+        );
+
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3, 4],
+                block_ids: vec![9],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: Some(PagedPrefixNextToken::GreedyToken(123)),
+            },
+        );
+        let hit = cache.lookup(&None, &[1, 2, 3, 4])?.expect("exact hit");
+        assert_eq!(hit.cached_tokens, 4);
+        assert_eq!(hit.block_ids, vec![9]);
+        assert!(matches!(
+            hit.next_token,
+            Some(PagedPrefixNextToken::GreedyToken(123))
+        ));
+        cache.release_hit(hit.entry_id);
+
+        let mut cache = RealPrefixCache::new(true, 4, 4, 1024, 49);
+        cache.register(
+            None,
+            PagedPrefixRegistration {
+                prompt_tokens: vec![1, 2, 3],
+                block_ids: vec![10],
+                linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: Some(PagedPrefixNextToken::GreedyToken(124)),
+            },
+        );
+        assert!(
+            cache.lookup(&None, &[1, 2, 3, 4])?.is_none(),
+            "partial-block entries are exact-hit only and must not serve longer prompts"
+        );
+        let hit = cache
+            .lookup(&None, &[1, 2, 3])?
+            .expect("non-block-aligned exact hit");
+        assert_eq!(hit.cached_tokens, 3);
+        assert_eq!(hit.block_ids, vec![10]);
+        cache.release_hit(hit.entry_id);
+        Ok(())
+    }
+
+    #[test]
     fn real_prefix_cache_caps_entries_and_state_bytes() -> anyhow::Result<()> {
         let config = tiny_linear_config();
         let device = candle_core::Device::Cpu;
@@ -1449,6 +2477,7 @@ mod tests {
                     prompt_tokens: vec![start, start + 1, start + 2, start + 3],
                     block_ids: vec![10 + i],
                     linear_state: LinearAttentionState::new(&config, &device)?,
+                    next_token: None,
                 },
             );
         }
@@ -1491,6 +2520,7 @@ mod tests {
                 prompt_tokens: vec![1, 2, 3, 4],
                 block_ids: vec![9],
                 linear_state: state,
+                next_token: None,
             },
         );
 
@@ -1527,6 +2557,7 @@ mod tests {
                 prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
                 block_ids: vec![10, 11],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
         assert_eq!(outcome_a.retained_blocks, vec![10, 11]);
@@ -1542,6 +2573,7 @@ mod tests {
                 prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 block_ids: vec![10, 11, 12],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
 
@@ -1574,6 +2606,7 @@ mod tests {
                 prompt_tokens: vec![1, 2, 3, 4],
                 block_ids: vec![20],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
         cache.register(
@@ -1582,6 +2615,7 @@ mod tests {
                 prompt_tokens: vec![5, 6, 7, 8],
                 block_ids: vec![20, 21],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
         cache.register(
@@ -1590,6 +2624,7 @@ mod tests {
                 prompt_tokens: vec![9, 10, 11, 12],
                 block_ids: vec![22],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
 
@@ -1601,6 +2636,7 @@ mod tests {
                 prompt_tokens: vec![13, 14, 15, 16, 17, 18, 19, 20],
                 block_ids: vec![20, 99],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
 
@@ -1641,6 +2677,7 @@ mod tests {
                 prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
                 block_ids: vec![30, 31],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
 
@@ -1653,6 +2690,7 @@ mod tests {
                 prompt_tokens: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                 block_ids: vec![30, 31, 32],
                 linear_state: LinearAttentionState::new(&config, &device)?,
+                next_token: None,
             },
         );
 

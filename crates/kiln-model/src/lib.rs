@@ -25,7 +25,8 @@ pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{
-    FinishReason, GenerationOutput, ModelRunner, MtpGenerationOutput, PagedBatchedDecodeState,
+    DecodeBatcher, DecodeBatcherConfig, DecodeBatcherStats, FinishReason, GenerationOutput,
+    ModelRunner, MtpGenerationOutput, PagedBatchedDecodeState, PagedPrefixNextToken,
     PagedPrefixRegistration, PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone,
     StreamEvent, StreamToken,
 };

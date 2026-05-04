@@ -221,6 +221,10 @@ struct BenchArgs {
     /// results and no training result. This keeps rapid decode-path iteration
     /// from paying unrelated benchmark costs.
     latency_only: bool,
+    /// Number of throwaway latency runs to execute before the measured run.
+    /// This keeps low-level kernel A/Bs from mixing first-use Metal/Candle
+    /// compilation latency into prefill and decode timing.
+    latency_warmup_runs: usize,
     /// RNG seed threaded through `SamplingParams` and `StdRng` sites so bench
     /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
     /// this across {0..=7} to get independent prompt/sampling trajectories.
@@ -250,6 +254,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut skip_training = false;
     let mut paged = false;
     let mut latency_only = false;
+    let mut latency_warmup_runs = 0usize;
     let mut seed: u64 = 42;
     let mut chat_template = false;
     let mut prompt_subset = PromptSubset::All;
@@ -282,6 +287,10 @@ fn parse_args() -> Result<BenchArgs> {
             }
             "--latency-only" => {
                 latency_only = true;
+            }
+            "--latency-warmup-runs" => {
+                i += 1;
+                latency_warmup_runs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
             }
             "--seed" => {
                 i += 1;
@@ -324,6 +333,9 @@ fn parse_args() -> Result<BenchArgs> {
                     "  --latency-only            Stop after latency and skip training/throughput"
                 );
                 eprintln!(
+                    "  --latency-warmup-runs <n> Run n throwaway latency passes before measurement"
+                );
+                eprintln!(
                     "  --seed <u64>              RNG seed + prompt selector from 8-prompt pool (default: 42)"
                 );
                 eprintln!(
@@ -363,6 +375,7 @@ fn parse_args() -> Result<BenchArgs> {
         skip_training,
         paged,
         latency_only,
+        latency_warmup_runs,
         seed,
         chat_template,
         prompt_subset,
@@ -2184,6 +2197,82 @@ fn print_summary(results: &BenchmarkResults) {
     eprintln!();
 }
 
+fn bench_selected_latency(
+    spec_method: SpecMethod,
+    args: &BenchArgs,
+    gpu_weights: &GpuWeights,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+) -> Result<LatencyResult> {
+    match spec_method {
+        SpecMethod::Mtp => {
+            eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
+            bench_latency_paged_mtp(
+                gpu_weights,
+                model_config,
+                tokenizer,
+                args.prompt_tokens,
+                args.max_output_tokens,
+                args.seed,
+                args.chat_template,
+                args.prompt_subset,
+                args.temperature,
+            )
+            .context("MTP latency benchmark failed")
+        }
+        SpecMethod::SkipLayer => {
+            if args.paged {
+                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, paged) ---");
+                bench_latency_paged_skiplayer(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                    args.seed,
+                    args.temperature,
+                )
+                .context("paged skip-layer latency benchmark failed")
+            } else {
+                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
+                bench_latency_skiplayer(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                    args.seed,
+                    args.temperature,
+                )
+                .context("skip-layer latency benchmark failed")
+            }
+        }
+        SpecMethod::Off => {
+            if args.paged {
+                eprintln!("--- Latency Benchmark (PAGED — production path) ---");
+                bench_latency_paged(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                )
+                .context("paged latency benchmark failed")
+            } else {
+                eprintln!("--- Latency Benchmark ---");
+                bench_latency(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                )
+                .context("latency benchmark failed")
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // Initialize logging for training progress
     tracing_subscriber::fmt()
@@ -2286,73 +2375,19 @@ fn main() -> Result<()> {
     //                                   (flat KV + skip-layer)
     //   * default / off               → bench_latency_paged (paged Off) when
     //                                   --paged, else bench_latency (flat Off).
-    let latency = match spec_method {
-        SpecMethod::Mtp => {
-            eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
-            bench_latency_paged_mtp(
-                &gpu_weights,
-                &model_config,
-                &tokenizer,
-                args.prompt_tokens,
-                args.max_output_tokens,
-                args.seed,
-                args.chat_template,
-                args.prompt_subset,
-                args.temperature,
-            )
-            .context("MTP latency benchmark failed")?
-        }
-        SpecMethod::SkipLayer => {
-            if args.paged {
-                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, paged) ---");
-                bench_latency_paged_skiplayer(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                    args.seed,
-                    args.temperature,
-                )
-                .context("paged skip-layer latency benchmark failed")?
-            } else {
-                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
-                bench_latency_skiplayer(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                    args.seed,
-                    args.temperature,
-                )
-                .context("skip-layer latency benchmark failed")?
-            }
-        }
-        SpecMethod::Off => {
-            if args.paged {
-                eprintln!("--- Latency Benchmark (PAGED — production path) ---");
-                bench_latency_paged(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                )
-                .context("paged latency benchmark failed")?
-            } else {
-                eprintln!("--- Latency Benchmark ---");
-                bench_latency(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                )
-                .context("latency benchmark failed")?
-            }
-        }
-    };
+    for warmup_idx in 0..args.latency_warmup_runs {
+        eprintln!(
+            "--- Latency Warmup Run {}/{} (not measured) ---",
+            warmup_idx + 1,
+            args.latency_warmup_runs
+        );
+        let _ = bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
+            .with_context(|| format!("latency warmup run {} failed", warmup_idx + 1))?;
+    }
+
+    let latency =
+        bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
+            .context("latency benchmark failed")?;
 
     if args.latency_only {
         let results = BenchmarkResults {

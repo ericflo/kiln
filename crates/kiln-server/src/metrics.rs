@@ -3,6 +3,7 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
+use kiln_model::DecodeBatcherStats;
 use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -313,6 +314,66 @@ impl Metrics {
             ),
         );
 
+        out.push_str(
+            "# HELP kiln_rendered_prompt_cache_lookups_total Rendered prompt cache lookups.\n",
+        );
+        out.push_str("# TYPE kiln_rendered_prompt_cache_lookups_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_rendered_prompt_cache_lookups_total",
+            "result",
+            "hit",
+            gauges.rendered_prompt_cache_hits,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_rendered_prompt_cache_lookups_total",
+            "result",
+            "miss",
+            gauges.rendered_prompt_cache_misses,
+        );
+
+        out.push_str("# HELP kiln_rendered_prompt_cache_entries Rendered prompt cache entries.\n");
+        out.push_str("# TYPE kiln_rendered_prompt_cache_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rendered_prompt_cache_entries {}",
+                gauges.rendered_prompt_cache_entries
+            ),
+        );
+
+        out.push_str(
+            "# HELP kiln_prompt_token_cache_lookups_total Rendered prompt token cache lookups.\n",
+        );
+        out.push_str("# TYPE kiln_prompt_token_cache_lookups_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_prompt_token_cache_lookups_total",
+            "result",
+            "hit",
+            gauges.prompt_token_cache_hits,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_prompt_token_cache_lookups_total",
+            "result",
+            "miss",
+            gauges.prompt_token_cache_misses,
+        );
+
+        out.push_str(
+            "# HELP kiln_prompt_token_cache_entries Rendered prompt token cache entries.\n",
+        );
+        out.push_str("# TYPE kiln_prompt_token_cache_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prompt_token_cache_entries {}",
+                gauges.prompt_token_cache_entries
+            ),
+        );
+
         out.push_str("# HELP kiln_active_requests Currently in-flight requests.\n");
         out.push_str("# TYPE kiln_active_requests gauge\n");
         push_line(
@@ -343,6 +404,70 @@ impl Metrics {
                 "kiln_request_prefill_tokens_completed {}",
                 self.request_prefill_tokens_completed
                     .load(Ordering::Relaxed)
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_enabled Whether the live greedy decode batcher is enabled.\n");
+        out.push_str("# TYPE kiln_decode_batcher_enabled gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_enabled {}",
+                if gauges.decode_batcher_enabled { 1 } else { 0 }
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_jobs_total Live greedy decode batcher jobs.\n");
+        out.push_str("# TYPE kiln_decode_batcher_jobs_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "submitted",
+            gauges.decode_batcher.submitted_jobs as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "runner_busy",
+            gauges.decode_batcher.runner_busy_jobs as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "failed",
+            gauges.decode_batcher.failed_jobs as u64,
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_batches_total Live greedy decode batches executed by the rendezvous worker.\n");
+        out.push_str("# TYPE kiln_decode_batcher_batches_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_batches_total {}",
+                gauges.decode_batcher.executed_batches
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_rows_total Live greedy decode rows executed by the rendezvous worker.\n");
+        out.push_str("# TYPE kiln_decode_batcher_rows_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_rows_total {}",
+                gauges.decode_batcher.executed_rows
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_max_observed_batch Largest live greedy decode batch observed since process start.\n");
+        out.push_str("# TYPE kiln_decode_batcher_max_observed_batch gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_max_observed_batch {}",
+                gauges.decode_batcher.max_observed_batch
             ),
         );
 
@@ -634,6 +759,14 @@ pub struct SnapshotGauges {
     pub vram_kv_cache: u64,
     pub vram_training_budget: u64,
     pub prefix_cache: PrefixCacheStats,
+    pub rendered_prompt_cache_hits: u64,
+    pub rendered_prompt_cache_misses: u64,
+    pub rendered_prompt_cache_entries: usize,
+    pub prompt_token_cache_hits: u64,
+    pub prompt_token_cache_misses: u64,
+    pub prompt_token_cache_entries: usize,
+    pub decode_batcher_enabled: bool,
+    pub decode_batcher: DecodeBatcherStats,
     pub training_active: u8,
     pub active_adapter: Option<String>,
 }
@@ -751,6 +884,12 @@ mod tests {
                 cached_state_bytes: 196,
                 max_state_bytes: 392,
             },
+            rendered_prompt_cache_hits: 6,
+            rendered_prompt_cache_misses: 3,
+            rendered_prompt_cache_entries: 5,
+            prompt_token_cache_hits: 5,
+            prompt_token_cache_misses: 2,
+            prompt_token_cache_entries: 4,
             training_active: 0,
             active_adapter: Some("my-adapter".to_string()),
         };
@@ -780,6 +919,12 @@ mod tests {
         assert!(output.contains("kiln_prefix_cache_max_entries 8"));
         assert!(output.contains("kiln_prefix_cache_state_bytes 196"));
         assert!(output.contains("kiln_prefix_cache_max_state_bytes 392"));
+        assert!(output.contains("kiln_rendered_prompt_cache_lookups_total{result=\"hit\"} 6"));
+        assert!(output.contains("kiln_rendered_prompt_cache_lookups_total{result=\"miss\"} 3"));
+        assert!(output.contains("kiln_rendered_prompt_cache_entries 5"));
+        assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"hit\"} 5"));
+        assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"miss\"} 2"));
+        assert!(output.contains("kiln_prompt_token_cache_entries 4"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
         assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="0.5"} 1"#));
         assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="+Inf"} 1"#));
@@ -809,6 +954,12 @@ mod tests {
             vram_kv_cache: 0,
             vram_training_budget: 0,
             prefix_cache: PrefixCacheStats::default(),
+            rendered_prompt_cache_hits: 0,
+            rendered_prompt_cache_misses: 0,
+            rendered_prompt_cache_entries: 0,
+            prompt_token_cache_hits: 0,
+            prompt_token_cache_misses: 0,
+            prompt_token_cache_entries: 0,
             training_active: 0,
             active_adapter: None,
         };

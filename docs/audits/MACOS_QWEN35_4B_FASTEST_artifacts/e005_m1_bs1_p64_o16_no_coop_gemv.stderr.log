@@ -1,0 +1,54 @@
+=== Kiln Benchmark Suite ===
+
+GPU: unknown (10240 MB)
+Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a...
+2026-05-03T11:04:07.045645Z  INFO kiln_model::loader: Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (2 shards)
+2026-05-03T11:04:07.047000Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-05-03T11:04:07.047220Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-05-03T11:04:07.047230Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-05-03T11:04:07.047308Z  INFO kiln_server::device: Metal available — using Apple Silicon GPU
+Model loaded in 17.63s (backend: metal, VRAM: 0 MB)
+
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+    Prefill (paged): 7715.1ms (8 tok/s)
+    Decode (paged): 17 tokens, mean ITL 229.9ms (4.3 tok/s)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: unknown (10240 MB VRAM, source: apple-silicon-unified)
+Model load time: 17.63s (VRAM: 0 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         64
+Prefill time:          7715.1 ms (8 tok/s)
+Time to first token:   7715.1 ms
+Mean inter-token:      229.9 ms (4.3 tok/s)
+P50 inter-token:       193.1 ms
+P99 inter-token:       748.4 ms
+Tokens generated:      17
+Spec method:           off
+
+       29.51 real        18.91 user        11.56 sys
+          8505966592  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              798129  page reclaims
+              514527  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               65993  voluntary context switches
+              637020  involuntary context switches
+         80770628307  instructions retired
+         88293100215  cycles elapsed
+         11504949888  peak memory footprint
