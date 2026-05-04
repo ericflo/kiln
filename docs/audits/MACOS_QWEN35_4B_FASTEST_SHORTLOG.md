@@ -769,3 +769,11 @@
   157.8 ms mean ITL / 6.34 tok/s / 168.7 ms P99, with 76% memory free.
   Focused Metal parity, `cargo check`, release `kiln-bench` build, and
   `git diff --check` passed.
+- 2026-05-04 E306: Refreshed synchronized MLP target selection after the
+  accepted two-column gate/up kernel. The intrusive p64/o1 profile measured
+  492.2 ms prefill and 202.5 ms mean ITL, with 78% memory free. Decode MLP
+  sums still rank `gate_up_fused` first at 60.977 ms and `down_proj` second at
+  37.154 ms across 32 layers. Prefill MLP ranks `down_proj` 71.457 ms,
+  `gate_proj` 64.126 ms, and `up_proj` 64.100 ms. This supports one more
+  structural gate/up variant before moving to MLP down-projection or a broader
+  projection/materialization boundary.

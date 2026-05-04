@@ -8980,3 +8980,58 @@ repeat candidate improved mean ITL by about 4.1 ms versus the repeat control
 down to 168.7 ms. The warm measured prefill stayed at control levels once the
 outlier E301 run was repeated. Keep this as the default MLP gate/up decode
 kernel shape.
+
+## Experiment E306: MLP Stage Profile After Two-Column Gate/Up
+
+Purpose:
+
+Refresh synchronized MLP target selection after accepting the E301-E305
+two-column gate/up decode kernel. This is an intrusive profiling run, not a
+latency baseline.
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 306`
+
+Measured profile result:
+
+- Final measured p64/o1 section: 492.2 ms prefill, 202.5 ms mean ITL.
+- After the run, `memory_pressure` reported 78% system-wide free memory.
+
+Measured decode MLP stage sums across 32 layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `gate_up_fused` | 60.977 ms | 1.906 ms |
+| `down_proj` | 37.154 ms | 1.161 ms |
+
+Measured prefill MLP stage sums across 32 layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `down_proj` | 71.457 ms | 2.233 ms |
+| `gate_proj` | 64.126 ms | 2.004 ms |
+| `up_proj` | 64.100 ms | 2.003 ms |
+| `gate_silu` | 15.198 ms | 0.475 ms |
+| `hidden_mul` | 11.702 ms | 0.366 ms |
+
+Measured layer sums:
+
+| Shape | Layer kind | Sum | Avg |
+|---|---|---:|---:|
+| Decode `seq_len=1` | linear/GDN | 130.207 ms | 5.425 ms |
+| Decode `seq_len=1` | full attention | 41.915 ms | 5.239 ms |
+| Prefill `seq_len=64` | linear/GDN | 320.288 ms | 13.345 ms |
+| Prefill `seq_len=64` | full attention | 142.221 ms | 17.778 ms |
+
+Artifact:
+
+- `e306_m1_p64_o1_mlp_stage_profile_after_cols2.log`
+
+Takeaway:
+
+The accepted two-column gate/up kernel reduced the full warmed decode path, but
+synchronized profiling still ranks decode `gate_up_fused` first and
+`down_proj` second. It is reasonable to test one more structural gate/up
+projection variant, but the next durable target after that should be MLP
+down-projection or a broader projection/materialization boundary.
