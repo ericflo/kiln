@@ -953,7 +953,11 @@ impl LinearAttentionState {
 
         for _ in 0..num_linear_layers {
             recurrent_states.push(Tensor::zeros((batch, nv, dk, dv), recurrent_dtype, device)?);
-            conv_states.push(Tensor::zeros((batch, conv_dim, k_minus_1), DType::F32, device)?);
+            conv_states.push(Tensor::zeros(
+                (batch, conv_dim, k_minus_1),
+                DType::F32,
+                device,
+            )?);
         }
 
         Ok(Self {
@@ -2153,10 +2157,7 @@ fn embedding_lookup_from_weights_with_index(
     embedding_lookup_with_index(index, &weights.embed_tokens)
 }
 
-fn embedding_lookup_from_transposed(
-    token_ids: &[u32],
-    embed_tokens_t: &Tensor,
-) -> Result<Tensor> {
+fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_tokens_t.device())?;
     embedding_lookup_from_transposed_index(&index, embed_tokens_t)
 }
@@ -3805,7 +3806,9 @@ fn gated_deltanet_gates_fallback(
     input_dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
     let beta = cuda_sigmoid(b).context("gdn gates fallback beta cuda_sigmoid")?; // [B, T, nv], bf16
-    let a_f32 = a.to_dtype(DType::F32).context("gdn gates fallback a to f32")?;
+    let a_f32 = a
+        .to_dtype(DType::F32)
+        .context("gdn gates fallback a to f32")?;
     let a_log_f32 = weights
         .a_log
         .to_dtype(DType::F32)
@@ -4569,10 +4572,9 @@ fn gated_deltanet_forward_decode_if(
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
             if use_fused_gdn_gates && backend.supports_gdn_gates() {
-                if let Some((beta, g)) =
-                    backend
-                        .gdn_gates(&a, &b, &weights.a_log_gates, &weights.dt_bias)
-                        .context("gdn decode gates fused backend")?
+                if let Some((beta, g)) = backend
+                    .gdn_gates(&a, &b, &weights.a_log_gates, &weights.dt_bias)
+                    .context("gdn decode gates fused backend")?
                 {
                     (beta, g)
                 } else {
@@ -5278,8 +5280,7 @@ fn try_flash_attn_paged_decode(
         let n_chunks = total_seq_len.div_ceil(K_BLOCK_N);
         let blocks = &block_table.blocks;
         let allocated = blocks.len();
-        if allocated < n_chunks * pages_per_chunk
-            && allocated < total_seq_len.div_ceil(block_size)
+        if allocated < n_chunks * pages_per_chunk && allocated < total_seq_len.div_ceil(block_size)
         {
             return Ok(None);
         }
@@ -5335,8 +5336,8 @@ fn try_flash_attn_paged_decode(
             if let Some(inputs) = graph_inputs {
                 inputs.block_table
             } else {
-                bt_tensor_owned = Tensor::new(padded.as_slice(), device)?
-                    .reshape((batch, max_blocks_per_seq))?;
+                bt_tensor_owned =
+                    Tensor::new(padded.as_slice(), device)?.reshape((batch, max_blocks_per_seq))?;
                 &bt_tensor_owned
             }
         }
@@ -5367,7 +5368,7 @@ fn try_flash_attn_paged_decode(
         q_fa
     };
 
-let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let attn_out = {
         #[cfg(feature = "cuda")]
         {
@@ -5413,7 +5414,8 @@ let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                     .iter()
                     .map(|&len| i32::try_from(len).context("paged decode seqlen exceeds i32"))
                     .collect::<Result<_>>()?;
-                let seqused = Tensor::from_slice(seqused.as_slice(), batch, device)?.contiguous()?;
+                let seqused =
+                    Tensor::from_slice(seqused.as_slice(), batch, device)?.contiguous()?;
                 kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
                     &q_fa,
                     k_pool,
@@ -5602,7 +5604,9 @@ pub fn gqa_attention_paged_decode_batch(
     };
     let (q, k) = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let out = rotary_embedding_batched_decode_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+        let out = rotary_embedding_batched_decode_from_tensor(
+            &q, &k, positions, head_dim, rotary_dim, inv_freq,
+        )?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -5971,7 +5975,8 @@ pub fn gqa_attention_paged(
         full_attn_layer_idx,
         attn_output_gate,
         lora,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
     )
 }
 
@@ -6371,13 +6376,15 @@ fn gqa_attention_paged_with_rope_tables(
                 false
             }
         };
-        if !graph_write_done && !paged_cache.write_token_major_native(
-            full_attn_layer_idx,
-            block_table,
-            start_pos,
-            &k_cache_token_major,
-            &v_cache_token_major,
-        )? {
+        if !graph_write_done
+            && !paged_cache.write_token_major_native(
+                full_attn_layer_idx,
+                block_table,
+                start_pos,
+                &k_cache_token_major,
+                &v_cache_token_major,
+            )?
+        {
             let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
             let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
             paged_cache
@@ -6442,7 +6449,8 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_weights,
                 lora_layer,
                 lora_scale,
-                #[cfg(feature = "cuda")] graph_inputs,
+                #[cfg(feature = "cuda")]
+                graph_inputs,
                 profile_context,
             )?
         };
@@ -6995,7 +7003,8 @@ pub fn transformer_block_paged(
         block_table,
         full_attn_layer_idx,
         lora,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
         None,
     )
 }
@@ -7072,7 +7081,8 @@ fn transformer_block_paged_with_rope_tables(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
-        #[cfg(feature = "cuda")] graph_inputs,
+        #[cfg(feature = "cuda")]
+        graph_inputs,
     )?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
@@ -7703,10 +7713,7 @@ pub fn model_forward_segment(
 ///
 /// Returns `([1, seq_len, hidden_size], positions)` — the initial hidden state
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
-pub fn model_forward_embed(
-    token_ids: &[u32],
-    weights: &GpuWeights,
-) -> Result<(Tensor, Vec<u32>)> {
+pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
     hidden = hidden.unsqueeze(0)?;
@@ -7817,7 +7824,8 @@ pub fn model_forward_paged(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::Full,
     )?;
     // `LmHeadMode::Full` always returns Some.
@@ -7854,7 +7862,8 @@ pub fn model_forward_paged_last_token(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::LastRowOnly,
     )?;
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
@@ -7890,7 +7899,8 @@ pub fn model_forward_paged_last_token_greedy(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::LastRowArgmaxOnly,
     )?;
     token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
@@ -7954,7 +7964,8 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
         lora,
         Some(token_ids_gpu),
         Some(positions_gpu),
-        #[cfg(feature = "cuda")] graph_inputs,
+        #[cfg(feature = "cuda")]
+        graph_inputs,
         LmHeadMode::Full,
     )?;
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
@@ -8127,7 +8138,11 @@ pub fn model_forward_paged_batched_decode_hidden(
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_mlp");
-                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
                 };
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
@@ -8173,7 +8188,11 @@ pub fn model_forward_paged_batched_decode_hidden(
                 };
                 let normed_post = {
                     kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_mlp_full");
-                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
                 };
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
                 hidden = {
@@ -8260,7 +8279,8 @@ pub fn model_forward_paged_with_last_hidden(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::FullWithLastHidden,
     )?;
     Ok((
@@ -8307,7 +8327,8 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")] None,
+        #[cfg(feature = "cuda")]
+        None,
         LmHeadMode::LastRowWithLastHidden,
     )?;
     Ok((
@@ -8942,7 +8963,10 @@ fn model_forward_paged_inner(
         }
     };
     let rope_tables_owned = if positions_gpu.is_none() && graph_rope_tables.is_none() {
-        Some(rotary_tables_from_tensor(positions, &weights.rotary_inv_freq)?)
+        Some(rotary_tables_from_tensor(
+            positions,
+            &weights.rotary_inv_freq,
+        )?)
     } else {
         None
     };
@@ -8995,7 +9019,8 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
-                    #[cfg(feature = "cuda")] graph_inputs,
+                    #[cfg(feature = "cuda")]
+                    graph_inputs,
                     profile_mlp_stages.then_some((i, start_pos)),
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
@@ -9391,7 +9416,8 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")] None,
+            #[cfg(feature = "cuda")]
+            None,
             mode,
         )
         .with_context(|| {
@@ -9476,7 +9502,8 @@ pub fn model_forward_paged_streaming_with(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")] None,
+            #[cfg(feature = "cuda")]
+            None,
             mode,
         )
         .with_context(|| {
@@ -9705,9 +9732,15 @@ mod tests {
         let elems = batch * seq_len * heads * hidden;
 
         let mut rng = StdRng::seed_from_u64(0xC0DA_6A7E);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let z_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-2.0f32..2.0f32)).collect();
-        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
+        let x_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let z_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-2.0f32..2.0f32))
+            .collect();
+        let w_data: Vec<f32> = (0..hidden)
+            .map(|_| rng.random_range(0.5f32..1.5f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
             .to_dtype(DType::BF16)?;
@@ -9764,9 +9797,15 @@ mod tests {
         let elems = batch * seq_len * heads * hidden;
 
         let mut rng = StdRng::seed_from_u64(0x6A7E_DA75);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let z_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-2.0f32..2.0f32)).collect();
-        let w_data: Vec<f32> = (0..hidden).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
+        let x_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let z_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-2.0f32..2.0f32))
+            .collect();
+        let w_data: Vec<f32> = (0..hidden)
+            .map(|_| rng.random_range(0.5f32..1.5f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
             .to_dtype(DType::BF16)?;
@@ -9817,7 +9856,9 @@ mod tests {
         let elems = batch * seq_len * hidden;
 
         let mut rng = StdRng::seed_from_u64(0xA11CE);
-        let x_data: Vec<f32> = (0..elems).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let x_data: Vec<f32> = (0..elems)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let w_data: Vec<f32> = (0..hidden)
             .map(|_| rng.random_range(-0.2f32..0.2f32))
             .collect();
@@ -12566,10 +12607,16 @@ mod tests {
         let recurrent_values1: Vec<f32> = (0..64).map(|i| 1000.0 + i as f32).collect();
         let conv_values0: Vec<f32> = (0..96).map(|i| 2000.0 + i as f32).collect();
         let conv_values1: Vec<f32> = (0..96).map(|i| 3000.0 + i as f32).collect();
-        row0.recurrent_states[0] =
-            Tensor::from_slice(&recurrent_values0, (1usize, 4usize, 4usize, 4usize), &device)?;
-        row1.recurrent_states[0] =
-            Tensor::from_slice(&recurrent_values1, (1usize, 4usize, 4usize, 4usize), &device)?;
+        row0.recurrent_states[0] = Tensor::from_slice(
+            &recurrent_values0,
+            (1usize, 4usize, 4usize, 4usize),
+            &device,
+        )?;
+        row1.recurrent_states[0] = Tensor::from_slice(
+            &recurrent_values1,
+            (1usize, 4usize, 4usize, 4usize),
+            &device,
+        )?;
         row0.conv_states[0] =
             Tensor::from_slice(&conv_values0, (1usize, 32usize, 3usize), &device)?;
         row1.conv_states[0] =
@@ -12584,11 +12631,15 @@ mod tests {
         let split = batched.split_batch_rows()?;
         assert_eq!(split.len(), 2);
         assert_eq!(
-            split[0].recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            split[0].recurrent_states[0]
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             row0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
         );
         assert_eq!(
-            split[1].recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            split[1].recurrent_states[0]
+                .flatten_all()?
+                .to_vec1::<f32>()?,
             row1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
         );
         assert_eq!(
@@ -12666,7 +12717,10 @@ mod tests {
         let batched = LinearAttentionState::new_with_batch(&config, 3, &device)?;
         assert_eq!(batched.recurrent_states[0].dims(), &[3, 4, 4, 4]);
         assert_eq!(batched.recurrent_states[0].dtype(), DType::BF16);
-        assert_eq!(batched.conv_states[0].dims(), &[3, config.linear_qkv_dim(), 3]);
+        assert_eq!(
+            batched.conv_states[0].dims(),
+            &[3, config.linear_qkv_dim(), 3]
+        );
         assert_eq!(batched.conv_states[0].dtype(), DType::F32);
 
         let row0 = LinearAttentionState::new(&config, &device)?;
@@ -12675,13 +12729,19 @@ mod tests {
         assert_eq!(assembled.batch_size()?, 2);
         assert_eq!(assembled.recurrent_states[0].dims(), &[2, 4, 4, 4]);
         assert_eq!(assembled.recurrent_states[0].dtype(), DType::BF16);
-        assert_eq!(assembled.conv_states[0].dims(), &[2, config.linear_qkv_dim(), 3]);
+        assert_eq!(
+            assembled.conv_states[0].dims(),
+            &[2, config.linear_qkv_dim(), 3]
+        );
         assert_eq!(assembled.conv_states[0].dtype(), DType::F32);
         let split = assembled.split_batch_rows()?;
         assert_eq!(split.len(), 2);
         assert_eq!(split[0].recurrent_states[0].dims(), &[1, 4, 4, 4]);
         assert_eq!(split[0].recurrent_states[0].dtype(), DType::BF16);
-        assert_eq!(split[0].conv_states[0].dims(), &[1, config.linear_qkv_dim(), 3]);
+        assert_eq!(
+            split[0].conv_states[0].dims(),
+            &[1, config.linear_qkv_dim(), 3]
+        );
         assert_eq!(split[0].conv_states[0].dtype(), DType::F32);
 
         Ok(())
@@ -12967,8 +13027,12 @@ mod tests {
         let n_v = b * nv * c * dv;
         let n_b = b * nv * c;
 
-        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.05f32..0.05f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let a_data: Vec<f32> = (0..n_a)
+            .map(|_| rng.random_range(-0.05f32..0.05f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
@@ -13032,8 +13096,12 @@ mod tests {
         let n_v = b * nv * c * dv;
         let n_b = b * nv * c;
 
-        let a_data: Vec<f32> = (0..n_a).map(|_| rng.random_range(-0.05f32..0.05f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let a_data: Vec<f32> = (0..n_a)
+            .map(|_| rng.random_range(-0.05f32..0.05f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
         let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
@@ -13107,13 +13175,23 @@ mod tests {
         let n_b = b * nv * t;
         let n_s = b * nv * dk * dv;
 
-        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let q_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let k_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.3f32..1.2f32)).collect();
         // Small negative gates so exp(g) stays in (~0.8, 1.0).
-        let g_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let g_data: Vec<f32> = (0..n_b)
+            .map(|_| rng.random_range(-0.2f32..0.0f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
 
         let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?;
         let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?;
@@ -13216,12 +13294,22 @@ mod tests {
         let n_b = b * nv * t;
         let n_s = b * nv * dk * dv;
 
-        let q_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let k_data: Vec<f32> = (0..n_qk).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+        let q_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let k_data: Vec<f32> = (0..n_qk)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.3f32..1.2f32)).collect();
-        let g_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(-0.2f32..0.0f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
+        let g_data: Vec<f32> = (0..n_b)
+            .map(|_| rng.random_range(-0.2f32..0.0f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
 
         let q = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
         let k = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
@@ -13316,12 +13404,24 @@ mod tests {
         // Small negative gates so big_g stays in a reasonable range — the
         // recurrence produces g_t near zero so the cumulative sum caps
         // around -10 at most.
-        let g_data: Vec<f32> = (0..n_g).map(|_| rng.random_range(-0.15f32..0.0f32)).collect();
-        let v_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let ks_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qs_data: Vec<f32> = (0..n_v).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let g_data: Vec<f32> = (0..n_g)
+            .map(|_| rng.random_range(-0.15f32..0.0f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let kkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let ks_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qs_data: Vec<f32> = (0..n_v)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
 
         let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
         let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
@@ -13427,9 +13527,15 @@ mod tests {
                 }
             })
             .collect();
-        let b_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.2f32..0.2f32)).collect();
-        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let qss_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let b_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.2f32..0.2f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let qss_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
         let decay_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.6f32..1.0f32)).collect();
 
@@ -13514,14 +13620,28 @@ mod tests {
         let n_dkc = b * nv * dk * c;
         let n_dkdv = b * nv * dk * dv;
 
-        let g_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(-0.15f32..0.0f32)).collect();
-        let v_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-        let kkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qkt_data: Vec<f32> = (0..n_cc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let ks_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let qs_data: Vec<f32> = (0..n_cdv).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let g_data: Vec<f32> = (0..n_c)
+            .map(|_| rng.random_range(-0.15f32..0.0f32))
+            .collect();
+        let v_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-1.0f32..1.0f32))
+            .collect();
+        let kkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qkt_data: Vec<f32> = (0..n_cc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let ks_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let qs_data: Vec<f32> = (0..n_cdv)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
         let beta_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.3f32..1.1f32)).collect();
-        let kt_data: Vec<f32> = (0..n_dkc).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
+        let kt_data: Vec<f32> = (0..n_dkc)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
         let state_data: Vec<f32> = (0..n_dkdv)
             .map(|_| rng.random_range(-0.25f32..0.25f32))
             .collect();
@@ -13620,9 +13740,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
@@ -13709,9 +13835,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -13788,9 +13920,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
@@ -13867,9 +14005,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -13940,9 +14084,15 @@ mod tests {
         let n_w = channels * kernel_size;
         let n_s = batch * channels * (kernel_size - 1);
 
-        let x_data: Vec<f32> = (0..n_x).map(|_| rng.random_range(-0.5f32..0.5f32)).collect();
-        let w_data: Vec<f32> = (0..n_w).map(|_| rng.random_range(-0.1f32..0.1f32)).collect();
-        let s_data: Vec<f32> = (0..n_s).map(|_| rng.random_range(-0.3f32..0.3f32)).collect();
+        let x_data: Vec<f32> = (0..n_x)
+            .map(|_| rng.random_range(-0.5f32..0.5f32))
+            .collect();
+        let w_data: Vec<f32> = (0..n_w)
+            .map(|_| rng.random_range(-0.1f32..0.1f32))
+            .collect();
+        let s_data: Vec<f32> = (0..n_s)
+            .map(|_| rng.random_range(-0.3f32..0.3f32))
+            .collect();
 
         let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
             .to_dtype(DType::BF16)?;
@@ -14660,7 +14810,9 @@ mod tests {
 
         // Final recurrent state must match (the load-bearing invariant for
         // training-time streaming — autograd flows through this state thread).
-        let mr = mono_state.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?;
+        let mr = mono_state.recurrent_states[0]
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         let sr = stream_state.recurrent_states[0]
             .flatten_all()?
             .to_vec1::<f32>()?;

@@ -375,7 +375,9 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!(
                     "                            (Phase C40b — tests greedy-is-uniquely-harmful hypothesis on code MTP α)"
                 );
-                eprintln!("  -v, --verbose             Show per-site tracing logs (repeat for trace)");
+                eprintln!(
+                    "  -v, --verbose             Show per-site tracing logs (repeat for trace)"
+                );
                 eprintln!("  -q, --quiet               Drop tracing to warnings and errors only");
                 std::process::exit(0);
             }
@@ -446,11 +448,9 @@ fn make_run_progress(total: u64, label: &str) -> Option<ProgressBar> {
     }
     let pb = ProgressBar::new(total);
     pb.set_style(
-        ProgressStyle::with_template(
-            "  {prefix:.dim} [{bar:24.cyan/blue}] {pos}/{len} {msg:.dim}",
-        )
-        .expect("static progress template is valid")
-        .progress_chars("=>-"),
+        ProgressStyle::with_template("  {prefix:.dim} [{bar:24.cyan/blue}] {pos}/{len} {msg:.dim}")
+            .expect("static progress template is valid")
+            .progress_chars("=>-"),
     );
     pb.set_prefix(label.to_string());
     Some(pb)
@@ -655,10 +655,7 @@ fn bench_inference(
 
         let run_tps = gen_tokens as f64 / run_time.as_secs_f64();
         if let Some(pb) = pb.as_ref() {
-            pb.set_message(format!(
-                "{} tok @ {:.0} tok/s",
-                gen_tokens, run_tps
-            ));
+            pb.set_message(format!("{} tok @ {:.0} tok/s", gen_tokens, run_tps));
             pb.inc(1);
         } else {
             tracing::info!(
@@ -2352,7 +2349,11 @@ fn print_summary(results: &BenchmarkResults) {
         format!("{:.1}", results.latency.p99_inter_token_ms),
         Some("ms"),
     );
-    metric("Tokens generated", results.latency.num_tokens_generated, None);
+    metric(
+        "Tokens generated",
+        results.latency.num_tokens_generated,
+        None,
+    );
     metric("Spec method", &results.latency.spec_method, None);
     if let Some(alpha) = results.latency.acceptance_rate {
         metric("Draft acceptance α", format!("{alpha:.3}"), None);
@@ -2362,7 +2363,11 @@ fn print_summary(results: &BenchmarkResults) {
         section_header("SFT training");
         metric("Steps", t.num_steps, None);
         metric("Total time", format!("{:.2}", t.total_time_secs), Some("s"));
-        metric("Time per step", format!("{:.2}", t.secs_per_step), Some("s"));
+        metric(
+            "Time per step",
+            format!("{:.2}", t.secs_per_step),
+            Some("s"),
+        );
         metric("Peak VRAM", t.peak_vram_mb, Some("MB"));
     }
 
@@ -2666,7 +2671,11 @@ fn main() -> Result<()> {
             stderr,
             "  {} {}",
             style("→").cyan(),
-            style(format!("{n} sequential run{}", if n == 1 { "" } else { "s" })).white()
+            style(format!(
+                "{n} sequential run{}",
+                if n == 1 { "" } else { "s" }
+            ))
+            .white()
         );
         match bench_inference(
             &runner,
@@ -2682,16 +2691,14 @@ fn main() -> Result<()> {
                     stderr,
                     "    {} {} tok/s aggregate",
                     style("✓").green().bold(),
-                    style(format!("{:.1}", result.tokens_per_sec)).white().bold()
+                    style(format!("{:.1}", result.tokens_per_sec))
+                        .white()
+                        .bold()
                 );
                 inference_results.push(result);
             }
             Err(e) => {
-                let _ = writeln!(
-                    stderr,
-                    "    {} {e}",
-                    style("✗ FAILED:").red().bold()
-                );
+                let _ = writeln!(stderr, "    {} {e}", style("✗ FAILED:").red().bold());
             }
         }
     }

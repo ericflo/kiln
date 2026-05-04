@@ -299,7 +299,9 @@ impl DecodeForward for RealDecodeForward {
                     DecodeSlot::Real { .. } => {
                         anyhow::bail!("decode row {idx} became first-token pending")
                     }
-                    DecodeSlot::Mock { .. } => anyhow::bail!("mock slot sent to real decode forward"),
+                    DecodeSlot::Mock { .. } => {
+                        anyhow::bail!("mock slot sent to real decode forward")
+                    }
                 }
             }
             anyhow::ensure!(
@@ -969,8 +971,20 @@ mod tests {
         assert_eq!(decode_params[0].max_tokens, 22);
         assert_eq!(decode_params[1].max_tokens, 44);
         drop(slots);
-        assert!(matches!(pending_a, DecodeSlot::Real { first_token_pending: false, .. }));
-        assert!(matches!(pending_b, DecodeSlot::Real { first_token_pending: false, .. }));
+        assert!(matches!(
+            pending_a,
+            DecodeSlot::Real {
+                first_token_pending: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            pending_b,
+            DecodeSlot::Real {
+                first_token_pending: false,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
