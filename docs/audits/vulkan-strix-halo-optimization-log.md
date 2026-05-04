@@ -2038,6 +2038,33 @@ Verdict:
 - The final threshold preserves the long shared-prefix win while avoiding the measured small-prefix regression.
 - This does not change bs=1 behavior and composes with the external prefix cache: it only runs when every row misses the external cache.
 
+### E070: Rejected Prefix-Only No-Logits Prefill
+
+Change:
+- Temporarily exposed `LmHeadMode::Skip` as a paged no-logits forward helper.
+- Used it only for E069's batch-local common-prefix prefill, where the prefix's next-token logits are immediately discarded because every row has a non-empty suffix.
+- Reverted after measurement.
+
+Reasoning:
+- E069 still spent about 9.0s on the common-prefix prefill in the 416-token shared-prefix fixture.
+- The prefix forward must still run all model layers to fill KV blocks and advance GDN linear state, but it should not need final RMSNorm, LM-head projection, or argmax for the prefix-only segment.
+- This was a narrow "remove unused output" test with the same long-prefix fixture as E069.
+
+Evidence:
+- Validation before measurement:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-model native_batch_greedy_reuses_common_block_prefix -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Long common-prefix fixture:
+  - E069 thresholded baseline: 17.869s / 0.448 tok/s; common prefix prefill 9030.0ms.
+  - E070 no-logits experiment: 18.223s / 0.439 tok/s; common prefix prefill 9173.1ms.
+
+Verdict:
+- Reject and revert.
+- Skipping the prefix LM-head/argmax is below the measurement noise here and did not reduce the dominant layer-loop cost.
+- The kept path remains E069's thresholded local prefix reuse.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
