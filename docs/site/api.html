@@ -193,11 +193,29 @@
     </div>
   </section>
 
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-8">
+      <div class="card p-5">
+        <div class="label mb-3">On this page</div>
+        <div class="flex flex-wrap gap-2 text-sm">
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#copy-paste-first-requests">First requests</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#power-user-requests">Power-user requests</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#server-status">Server status</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#generation">Generation</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training">Training</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training-data-safety">Training data safety</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <main class="max-w-4xl mx-auto px-6 py-12">
     <div class="grid gap-6">
       <article class="card p-6">
         <div class="label mb-3">First requests</div>
-        <h2 class="text-2xl font-semibold mb-4">Copy-paste first requests</h2>
+        <h2 id="copy-paste-first-requests" class="text-2xl font-semibold mb-4">Copy-paste first requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Once Kiln is serving on <code>localhost:8420</code>, these are the smallest useful
           requests to chat, submit one SFT correction, submit scored GRPO completions, and watch the training queue.
@@ -248,7 +266,7 @@
 
       <article class="card p-6">
         <div class="label mb-3">Advanced flows</div>
-        <h2 class="text-2xl font-semibold mb-4">Copy-paste power-user requests</h2>
+        <h2 id="power-user-requests" class="text-2xl font-semibold mb-4">Copy-paste power-user requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           After the first chat and training jobs work, these examples cover batch generation,
           adapter portability, adapter merging, per-request composition, and training-completion webhooks.
@@ -325,7 +343,7 @@ kiln serve --config kiln.toml</code></pre>
 
       <article class="card p-6">
         <div class="label mb-3">Run and observe</div>
-        <h2 class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
+        <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, and training progress.</div>
@@ -337,7 +355,7 @@ kiln serve --config kiln.toml</code></pre>
 
       <article class="card p-6">
         <div class="label mb-3">Inference</div>
-        <h2 class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
+        <h2 id="generation" class="text-2xl font-semibold mb-4">OpenAI-compatible generation</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/chat/completions</code> &mdash; chat completions with OpenAI-shaped request and response bodies, including SSE streaming.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/completions/batch</code> &mdash; multi-prompt batch generation for efficient GRPO rollouts.</div>
@@ -346,7 +364,7 @@ kiln serve --config kiln.toml</code></pre>
 
       <article class="card p-6">
         <div class="label mb-3">Adapters</div>
-        <h2 class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
+        <h2 id="lora-lifecycle" class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list loaded LoRA adapters.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk.</div>
@@ -360,7 +378,7 @@ kiln serve --config kiln.toml</code></pre>
 
       <article class="card p-6">
         <div class="label mb-3">Training</div>
-        <h2 class="text-2xl font-semibold mb-4">SFT, GRPO, status, and queue control</h2>
+        <h2 id="training" class="text-2xl font-semibold mb-4">SFT, GRPO, status, and queue control</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/sft</code> &mdash; submit supervised fine-tuning examples.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/grpo</code> &mdash; submit a GRPO batch of prompts, completions, and rewards.</div>
@@ -373,7 +391,7 @@ kiln serve --config kiln.toml</code></pre>
 
       <article class="card p-6" style="background: var(--bg-soft-2);">
         <div class="label mb-3">Security note</div>
-        <h2 class="text-2xl font-semibold mb-4">Training data changes the active adapter</h2>
+        <h2 id="training-data-safety" class="text-2xl font-semibold mb-4">Training data changes the active adapter</h2>
         <p class="leading-relaxed" style="color: var(--fg-dim);">
           Kiln&rsquo;s training endpoints are privileged: do not expose <code>/v1/train/sft</code> or
           <code>/v1/train/grpo</code> to untrusted inputs. Training validates request structure, not
@@ -388,7 +406,7 @@ kiln serve --config kiln.toml</code></pre>
   <!-- next steps -->
   <section class="divider">
     <div class="max-w-4xl mx-auto px-6 py-12">
-      <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
       <div class="grid sm:grid-cols-3 gap-4">
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">
           <h3 class="font-semibold mb-2">Quickstart</h3>
