@@ -9169,3 +9169,89 @@ A narrow exact-shape down-projection specialization that only removes generic
 dimension/tail overhead is not enough; it loses to the compiler/runtime shape
 of the existing generic tile8 kernel. The next low-level attempt should change
 real work or data movement, not just erase branches around the same GEMV math.
+
+## Experiment E311: Current Batch Fan-Out Versus Sequential Singles
+
+Purpose:
+
+Quantify the current bs>1 server boundary before attempting a larger true
+model-forward batching change. The production `/v1/completions/batch` endpoint
+groups duplicate prompts and spawns one task per distinct prompt group, but the
+real Qwen path still calls `ModelRunner::generate_*` for each prompt and uses a
+single `BlockTable` per physical sequence. This run compares the warmed batch
+endpoint to four sequential single chat requests with similar uncached prompts.
+
+Code-path finding:
+
+- `crates/kiln-server/src/api/completions.rs` synthesizes one
+  `ChatCompletionRequest` per distinct prompt/completion and calls
+  `generate_one_prepared_prompt_response`.
+- The real backend then calls `generate_real`, which enters
+  `ModelRunner::generate_paged_shared_tokens*`.
+- `ModelRunner` allocates one `BlockTable` per request and locks the shared
+  `PagedKvCache` around each prefill/decode model forward.
+- `crates/kiln-model/src/engine.rs` has a `BatchInput`/`Engine` scaffold, but
+  it is only backed by `MockEngine`; real Qwen inference does not implement
+  that batch interface.
+- `model_forward_paged_inner` is also single-sequence at the cache boundary:
+  it accepts one `BlockTable` and starts from `[1, seq_len, hidden]`.
+
+Commands:
+
+Server:
+
+`KILN_MODEL_PATH=/Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a KILN_SERVED_MODEL_ID=qwen3.5-4b-kiln ./target/release/kiln serve`
+
+Batch:
+
+`curl -sS -X POST http://127.0.0.1:8420/v1/completions/batch -H 'content-type: application/json' --data-binary @docs/audits/MACOS_QWEN35_4B_FASTEST_artifacts/e311_batch4_distinct_request.json`
+
+Sequential singles:
+
+Four back-to-back `POST /v1/chat/completions` requests from
+`e311_single_distinct_requests.jsonl`. These use similar but different prompt
+content from the batch request so rendered-prompt and token-cache hits do not
+hide prompt work.
+
+Results:
+
+| Shape | Handler time | Curl wall / sum | Physical generated tokens | Render/token cache | Prefix cache |
+|---|---:|---:|---:|---|---|
+| Batch: 4 distinct prompts, `n=1`, `max_tokens=2`, greedy | 5330.886 ms | 5.353 s | 8 | 4 misses / 4 misses | 0 lookups |
+| Sequential singles: 4 similar distinct prompts, `max_tokens=2`, greedy | 4976.357 ms sum | server-log sum | 8 additional | 4 additional misses / 4 additional misses | 0 lookups |
+
+Sequential single-request handler timings:
+
+| Request | Handler time |
+|---|---:|
+| single 1 | 3257.725 ms |
+| single 2 | 553.875 ms |
+| single 3 | 556.278 ms |
+| single 4 | 608.478 ms |
+
+After all E311 requests, `memory_pressure` reported 78% system-wide free
+memory. The server was stopped with SIGTERM and exited cleanly.
+
+Artifacts:
+
+- `e311_server_batch_vs_sequential.log`
+- `e311_batch4_distinct_request.json`
+- `e311_batch4_distinct_response.json`
+- `e311_batch4_distinct_time.log`
+- `e311_after_batch_metrics.prom`
+- `e311_single_distinct_requests.jsonl`
+- `e311_single_1_response.json`
+- `e311_single_2_response.json`
+- `e311_single_3_response.json`
+- `e311_single_4_response.json`
+- `e311_single4_sequential_time.log`
+- `e311_after_sequential_metrics.prom`
+- `e311_batch_vs_sequential_summary.txt`
+
+Takeaway:
+
+The current batch endpoint is not a true throughput win for distinct prompts.
+For this warmed, uncached 4-prompt shape it was slightly slower than four
+sequential singles (5330.886 ms versus 4976.357 ms). The meaningful next bs>1
+work is a real batched model-forward/scheduler boundary with per-sequence
+block tables and batched linear/GDN state, not more endpoint fan-out.

@@ -1,0 +1,27 @@
+E311 current release server, warmed, Qwen3.5-4B Metal
+
+Batch request:
+- Endpoint: /v1/completions/batch
+- Shape: 4 distinct prompts, n=1, max_tokens=2, temperature=0
+- Handler: 5330.886250 ms
+- curl wall: 5.353 s
+- Physical generated tokens after batch: 8
+- Render/token cache work: 4 misses each, 0 hits
+- Prefix cache lookups: 0
+
+Four sequential single chat requests:
+- Endpoint: /v1/chat/completions
+- Shape: 4 similar distinct prompts, max_tokens=2, temperature=0
+- Handler timings: 3257.725292 + 553.875417 + 556.277958 + 608.478333 ms
+- Handler sum: 4976.357000 ms
+- Additional physical generated tokens: 8
+- Additional render/token cache work: 4 misses each, 0 hits
+- Prefix cache lookups: 0
+
+Interpretation:
+- Current batch endpoint is not doing true model-forward batching for distinct
+  prompts. It is slightly slower than sequential singles on this run
+  (5330.886 ms vs 4976.357 ms), because prompt-group tasks still serialize on
+  the shared paged-cache/model-forward path.
+- First single request absorbed the post-batch live-path warmup cost
+  (3257.725 ms), then steady singles were about 0.55-0.61 s each.

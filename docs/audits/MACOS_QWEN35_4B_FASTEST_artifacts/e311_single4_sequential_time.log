@@ -1,0 +1,6 @@
+Derived from server handler timings in e311_server_batch_vs_sequential.log:
+single 1: 3257.725292 ms
+single 2:  553.875417 ms
+single 3:  556.277958 ms
+single 4:  608.478333 ms
+sum:      4976.357000 ms

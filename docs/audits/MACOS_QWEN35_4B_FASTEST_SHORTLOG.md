@@ -795,3 +795,13 @@
   Source was reverted; `rustfmt --check`, `git diff --check`, and release
   `kiln-bench` rebuild passed. This rules out a narrow down-projection
   specialization that only erases generic branch overhead.
+- 2026-05-04 E311: Measured current warmed release-server batch fan-out against
+  four sequential single chat requests. A 4-prompt distinct batch (`n=1`,
+  `max_tokens=2`, greedy) took 5,330.886 ms handler / 5.353 s curl wall for
+  8 physical generated tokens, with 4 render misses, 4 token misses, and no
+  prefix-cache lookups. Four similar uncached single requests generated the
+  same 8 physical tokens with handler timings 3,257.725 + 553.875 + 556.278 +
+  608.478 ms = 4,976.357 ms. This confirms the current batch endpoint is not
+  true model-forward batching; distinct prompt groups still serialize on the
+  shared paged-cache/model-forward path and can be slightly slower than
+  sequential singles.
