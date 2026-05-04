@@ -2521,8 +2521,35 @@ Verdict:
 - Reject and revert.
 - 64x4 remains the best measured single-token MLP gate/up workgroup shape.
 
+### E086: Reject 32x8 Generic Vulkan Linear Decode Workgroups
+
+Change:
+- Temporarily changed the single-token generic `linear_decode` shader from 16 output columns x 16 reduction lanes to 32 output columns x 8 reduction lanes.
+- Temporarily updated the batch=1 dispatch counts for direct, single-submit, and MLP-down uses of `linear_decode`.
+- Reverted all changes after measurement.
+
+Reasoning:
+- After E084, `mlp.fused`, `layer.full`, and GDN output projection remain visible profile buckets.
+- These paths share the generic single-token `linear_decode` shader, so the MLP gate/up output-column-parallel tuning direction was worth testing on generic projections.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed all 17 Vulkan parity tests.
+- `cargo build --release --features vulkan --bin kiln-bench` passed.
+- Profiled run:
+  - Command: `KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1864.4ms; mean ITL 141.5ms, p50 140.7ms, p99 150.9ms.
+  - `mlp.fused` regressed to 51.3-51.8ms/32 layers.
+  - `layer.full` regressed to 27.5-28.4ms/8 layers.
+  - `gdn.out_proj` regressed to 10.3-10.6ms/24 layers.
+
+Verdict:
+- Reject and revert.
+- The generic projection shader keeps the 16x16 shape; the 64x4 win is specific to the fused MLP gate/up shader.
+
 ## Next Candidate
 
-With E085, the current default bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second no-profile run at 130.2ms. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E086, the current default bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second no-profile run at 130.2ms. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
