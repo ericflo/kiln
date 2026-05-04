@@ -616,6 +616,8 @@ docker run --gpus all -p 8420:8420 \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
+Replace `/path/to/Qwen3.5-4B` with your local model directory. After the server starts, verify it with `curl http://localhost:8420/health`, then open [http://localhost:8420/ui](http://localhost:8420/ui).
+
 Optional: build from source if you are contributing to kiln or testing local image changes.
 
 ```bash
@@ -628,6 +630,8 @@ docker run --gpus all \
   -p 8420:8420 \
   kiln serve
 ```
+
+Use the same local model path replacement and post-run check: `curl http://localhost:8420/health`, then open [http://localhost:8420/ui](http://localhost:8420/ui).
 
 ## Running with systemd
 
