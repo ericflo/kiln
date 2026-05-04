@@ -265,6 +265,17 @@ where
     result
 }
 
+fn prefill_profile_time<T, F>(seq_len: usize, name: &'static str, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    if seq_len > 1 && prefill_profile_enabled() {
+        decode_profile_time(name, f)
+    } else {
+        f()
+    }
+}
+
 fn emit_decode_profile(
     seq_len: usize,
     start_pos: usize,
@@ -5367,7 +5378,7 @@ fn gqa_attention_paged_with_rope_tables(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let (q_raw, k, v) = {
+    let (q_raw, k, v) = prefill_profile_time(seq_len, "full.qkv_proj", || {
         kiln_nvtx::range!(c"kiln/proj/qkv");
         full_attn_qkv_proj_decode_if(
             backend,
@@ -5376,8 +5387,8 @@ fn gqa_attention_paged_with_rope_tables(
             attn_weights,
             lora_layer,
             lora_scale,
-        )?
-    };
+        )
+    })?;
     // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
     // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
     if subop_armed {
@@ -5400,7 +5411,7 @@ fn gqa_attention_paged_with_rope_tables(
         crate::mtp_debug::capture_b12_gqa_tap("v_proj", &v)?;
     }
 
-    let (q, gate) = {
+    let (q, gate) = prefill_profile_time(seq_len, "full.q_split", || {
         kiln_nvtx::range!(c"kiln/proj/qkv_split");
         if attn_output_gate {
             let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
@@ -5409,12 +5420,12 @@ fn gqa_attention_paged_with_rope_tables(
             let gate = gate
                 .contiguous()?
                 .reshape(((), seq_len, num_heads * head_dim))?;
-            (q.contiguous()?, Some(gate))
+            Ok((q.contiguous()?, Some(gate)))
         } else {
             let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
-            (q, None)
+            Ok((q, None))
         }
-    };
+    })?;
     // After the gate split, q is the rotation target.
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
@@ -5429,8 +5440,11 @@ fn gqa_attention_paged_with_rope_tables(
         }
     }
 
-    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
-    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let (k, v) = prefill_profile_time(seq_len, "full.kv_reshape", || {
+        let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+        let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+        Ok((k, v))
+    })?;
 
     // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
     // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
@@ -5441,12 +5455,12 @@ fn gqa_attention_paged_with_rope_tables(
     }
 
     // QK-norm
-    let (q, k) = {
+    let (q, k) = prefill_profile_time(seq_len, "full.qk_norm", || {
         kiln_nvtx::range!(c"kiln/attn/qk_norm");
         let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
         let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
-        (q, k)
-    };
+        Ok((q, k))
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
         let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
@@ -5467,14 +5481,14 @@ fn gqa_attention_paged_with_rope_tables(
     // RoPE — only rotate first rotary_dim dimensions
     // Use the GPU tensor variant so positions remain at a stable GPU address
     // (critical for CUDA graph replay correctness)
-    let (q, k) = {
+    let (q, k) = prefill_profile_time(seq_len, "full.rope", || {
         kiln_nvtx::range!(c"kiln/attn/rope");
         if let Some((cos, sin)) = rope_tables {
-            rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
+            rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)
         } else {
-            rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+            rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)
         }
-    };
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
         let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
@@ -5500,11 +5514,11 @@ fn gqa_attention_paged_with_rope_tables(
     // lazily only on paths that consume the current tile directly; later
     // prefill tiles and speculative verifier windows read full head-major K/V
     // back from the paged cache instead.
-    let q = {
+    let q = prefill_profile_time(seq_len, "full.q_transpose", || {
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
         let q = q.transpose(1, 2)?.contiguous()?;
-        q
-    };
+        Ok(q)
+    })?;
 
     let total_seq_len = start_pos + seq_len;
 
@@ -5520,31 +5534,36 @@ fn gqa_attention_paged_with_rope_tables(
             || backend.supports_flash_attn_prefill())
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
-        let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
-        let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-        let attn_output = if let Some(attn_output) =
-            flash_attention_forward_head_major(backend, &q, &k_head, &v_head, num_heads, head_dim)?
-        {
-            Some(attn_output)
-        } else if backend.supports_flash_attn_prefill() {
-            let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
-            let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
-            let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
-            flash_attention_forward(
-                backend,
-                &q_prefill,
-                &k_prefill,
-                &v_prefill,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-            )?
-        } else {
-            None
-        };
+        let (k_head, v_head) = prefill_profile_time(seq_len, "full.initial.kv_transpose", || {
+            let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+            let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+            Ok((k_head, v_head))
+        })?;
+        let attn_output = prefill_profile_time(seq_len, "full.initial.flash_attn", || {
+            if let Some(attn_output) = flash_attention_forward_head_major(
+                backend, &q, &k_head, &v_head, num_heads, head_dim,
+            )? {
+                Ok(Some(attn_output))
+            } else if backend.supports_flash_attn_prefill() {
+                let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
+                let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
+                let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
+                flash_attention_forward(
+                    backend,
+                    &q_prefill,
+                    &k_prefill,
+                    &v_prefill,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                )
+            } else {
+                Ok(None)
+            }
+        })?;
 
         if let Some(attn_output) = attn_output {
-            {
+            prefill_profile_time(seq_len, "full.kv_write", || {
                 kiln_nvtx::range!(c"kiln/kv/copy");
                 if !paged_cache.write_token_major_native(
                     full_attn_layer_idx,
@@ -5563,25 +5582,28 @@ fn gqa_attention_paged_with_rope_tables(
                         )
                         .context("paged KV cache write failed")?;
                 }
-            }
+                Ok(())
+            })?;
 
             // Phase B12 layer-31 GQA tap: attn_out. Captured AFTER the gate
             // multiply (if `attn_output_gate`) and BEFORE o_proj, so it
             // matches the HF reference's `attn_output = ... * sigmoid_gate`
             // tap point. Shape: [B, T, num_heads * head_dim].
-            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            let attn_output = prefill_profile_time(seq_len, "full.gate", || {
+                attention_output_gate_decode_if(false, attn_output, gate.as_ref())
+            })?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
-            let out = {
+            let out = prefill_profile_time(seq_len, "full.o_proj", || {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
                     lora_scale,
-                )?
-            };
+                )
+            })?;
             // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
@@ -5601,26 +5623,29 @@ fn gqa_attention_paged_with_rope_tables(
 
     // Write new K/V into paged cache.
     if !single_token_self_attn {
-        kiln_nvtx::range!(c"kiln/kv/copy");
-        if !paged_cache.write_token_major_native(
-            full_attn_layer_idx,
-            block_table,
-            start_pos,
-            &k_cache_token_major,
-            &v_cache_token_major,
-        )? {
-            let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
-            let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-            paged_cache
-                .write(
-                    full_attn_layer_idx,
-                    block_table,
-                    start_pos,
-                    &k_head,
-                    &v_head,
-                )
-                .context("paged KV cache write failed")?;
-        }
+        prefill_profile_time(seq_len, "full.kv_write", || {
+            kiln_nvtx::range!(c"kiln/kv/copy");
+            if !paged_cache.write_token_major_native(
+                full_attn_layer_idx,
+                block_table,
+                start_pos,
+                &k_cache_token_major,
+                &v_cache_token_major,
+            )? {
+                let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+                let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+                paged_cache
+                    .write(
+                        full_attn_layer_idx,
+                        block_table,
+                        start_pos,
+                        &k_head,
+                        &v_head,
+                    )
+                    .context("paged KV cache write failed")?;
+            }
+            Ok(())
+        })?;
     }
 
     // Fast path: fused paged-decode flash-attention kernel.
@@ -5690,94 +5715,98 @@ fn gqa_attention_paged_with_rope_tables(
     // This matches the Qwen3-Next MTP reference contract where the inner
     // block performs single-token self-attention without a growing KV history.
     let (k, v, kv_len) = if single_token_self_attn {
-        (
-            k_cache_token_major.transpose(1, 2)?.contiguous()?,
-            v_cache_token_major.transpose(1, 2)?.contiguous()?,
-            1usize,
-        )
+        prefill_profile_time(seq_len, "full.kv_self", || {
+            Ok((
+                k_cache_token_major.transpose(1, 2)?.contiguous()?,
+                v_cache_token_major.transpose(1, 2)?.contiguous()?,
+                1usize,
+            ))
+        })?
     } else {
-        let prefix_only_prefill = seq_len > 1
-            && start_pos > 0
-            && !paged_cache.is_fp8()
-            && backend.supports_flash_attn_prefill_head_major()
-            && !crate::mtp_debug::is_c7_sdpa_capture_armed();
-        let prefix_append_fast = if prefix_only_prefill
-            && start_pos >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
-            && backend.supports_paged_kv_head_major_read_append_token_major()
-        {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, start_pos)
-                .and_then(|start_slot| {
-                    paged_cache
-                        .pool_tensors(full_attn_layer_idx)
-                        .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
-                })
-                .map(|(start_slot, k_pool, v_pool)| {
-                    backend.paged_kv_head_major_read_append_token_major(
-                        k_pool,
-                        v_pool,
-                        start_slot,
-                        start_pos,
-                        &k_cache_token_major,
-                        &v_cache_token_major,
-                    )
-                })
-                .transpose()?
-                .flatten()
-        } else {
-            None
-        };
-        let fast_read_len = if prefix_only_prefill {
-            start_pos
-        } else {
-            total_seq_len
-        };
-        let fast_read = if seq_len > 1
-            && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
-            && !paged_cache.is_fp8()
-            && backend.supports_paged_kv_head_major_read()
-            && backend.supports_flash_attn_prefill_head_major()
-        {
-            contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, fast_read_len)
-                .and_then(|start_slot| {
-                    paged_cache
-                        .pool_tensors(full_attn_layer_idx)
-                        .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
-                })
-                .map(|(start_slot, k_pool, v_pool)| {
-                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, fast_read_len)
-                })
-                .transpose()?
-                .flatten()
-        } else {
-            None
-        };
-        let (k, v) = if prefix_only_prefill {
-            match prefix_append_fast {
-                Some((k, v)) => (k, v),
-                None => {
-                    let (prefix_k, prefix_v) = match fast_read {
-                        Some((k, v)) => (k, v),
-                        None => paged_cache
-                            .read(full_attn_layer_idx, block_table, start_pos)
-                            .context("paged KV cache prefix read failed")?,
-                    };
-                    let current_k = k_cache_token_major.transpose(1, 2)?.contiguous()?;
-                    let current_v = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-                    (
-                        Tensor::cat(&[&prefix_k, &current_k], 2)?,
-                        Tensor::cat(&[&prefix_v, &current_v], 2)?,
-                    )
+        prefill_profile_time(seq_len, "full.kv_read", || {
+            let prefix_only_prefill = seq_len > 1
+                && start_pos > 0
+                && !paged_cache.is_fp8()
+                && backend.supports_flash_attn_prefill_head_major()
+                && !crate::mtp_debug::is_c7_sdpa_capture_armed();
+            let prefix_append_fast = if prefix_only_prefill
+                && start_pos >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
+                && backend.supports_paged_kv_head_major_read_append_token_major()
+            {
+                contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, start_pos)
+                    .and_then(|start_slot| {
+                        paged_cache
+                            .pool_tensors(full_attn_layer_idx)
+                            .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
+                    })
+                    .map(|(start_slot, k_pool, v_pool)| {
+                        backend.paged_kv_head_major_read_append_token_major(
+                            k_pool,
+                            v_pool,
+                            start_slot,
+                            start_pos,
+                            &k_cache_token_major,
+                            &v_cache_token_major,
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            let fast_read_len = if prefix_only_prefill {
+                start_pos
+            } else {
+                total_seq_len
+            };
+            let fast_read = if seq_len > 1
+                && fast_read_len >= PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS
+                && !paged_cache.is_fp8()
+                && backend.supports_paged_kv_head_major_read()
+                && backend.supports_flash_attn_prefill_head_major()
+            {
+                contiguous_slot_run_start(block_table, paged_cache.block_size(), 0, fast_read_len)
+                    .and_then(|start_slot| {
+                        paged_cache
+                            .pool_tensors(full_attn_layer_idx)
+                            .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
+                    })
+                    .map(|(start_slot, k_pool, v_pool)| {
+                        backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, fast_read_len)
+                    })
+                    .transpose()?
+                    .flatten()
+            } else {
+                None
+            };
+            let (k, v) = if prefix_only_prefill {
+                match prefix_append_fast {
+                    Some((k, v)) => (k, v),
+                    None => {
+                        let (prefix_k, prefix_v) = match fast_read {
+                            Some((k, v)) => (k, v),
+                            None => paged_cache
+                                .read(full_attn_layer_idx, block_table, start_pos)
+                                .context("paged KV cache prefix read failed")?,
+                        };
+                        let current_k = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+                        let current_v = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+                        (
+                            Tensor::cat(&[&prefix_k, &current_k], 2)?,
+                            Tensor::cat(&[&prefix_v, &current_v], 2)?,
+                        )
+                    }
                 }
-            }
-        } else {
-            match fast_read {
-                Some((k, v)) => (k, v),
-                None => paged_cache
-                    .read(full_attn_layer_idx, block_table, total_seq_len)
-                    .context("paged KV cache read failed")?,
-            }
-        };
-        (k, v, total_seq_len)
+            } else {
+                match fast_read {
+                    Some((k, v)) => (k, v),
+                    None => paged_cache
+                        .read(full_attn_layer_idx, block_table, total_seq_len)
+                        .context("paged KV cache read failed")?,
+                }
+            };
+            Ok((k, v, total_seq_len))
+        })?
     };
 
     // Multi-token append / speculative verify with prefix history. `read`
@@ -5789,21 +5818,25 @@ fn gqa_attention_paged_with_rope_tables(
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_head_major");
         if let Some(attn_output) =
-            flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)?
+            prefill_profile_time(seq_len, "full.head_major.flash_attn", || {
+                flash_attention_forward_head_major(backend, &q, &k, &v, num_heads, head_dim)
+            })?
         {
-            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            let attn_output = prefill_profile_time(seq_len, "full.gate", || {
+                attention_output_gate_decode_if(false, attn_output, gate.as_ref())
+            })?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
-            let out = {
+            let out = prefill_profile_time(seq_len, "full.o_proj", || {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
                     lora_scale,
-                )?
-            };
+                )
+            })?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
             }
@@ -5818,26 +5851,31 @@ fn gqa_attention_paged_with_rope_tables(
     // [batch, kv_len, heads, head_dim] for the backend kernel.
     if seq_len > 1 && backend.supports_flash_attn_prefill() {
         kiln_nvtx::range!(c"kiln/attn/full/prefill");
-        let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
-        let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
-        let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
-        if let Some(attn_output) =
-            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
-        {
-            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+        let (q, k, v) = prefill_profile_time(seq_len, "full.prefill.transpose", || {
+            let q = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
+            let k = k.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
+            let v = v.transpose(1, 2)?.contiguous()?; // -> [batch, kv_len, num_kv_heads, head_dim]
+            Ok((q, k, v))
+        })?;
+        if let Some(attn_output) = prefill_profile_time(seq_len, "full.prefill.flash_attn", || {
+            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)
+        })? {
+            let attn_output = prefill_profile_time(seq_len, "full.gate", || {
+                attention_output_gate_decode_if(false, attn_output, gate.as_ref())
+            })?;
             // Phase B12 layer-31 GQA tap (secondary prefill path).
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
-            let out = {
+            let out = prefill_profile_time(seq_len, "full.o_proj", || {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
                     lora_scale,
-                )?
-            };
+                )
+            })?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
             }
@@ -5973,45 +6011,58 @@ fn gqa_attention_paged_with_rope_tables(
     }
 
     // Standard path (prefill without flash-attn, or gqa_ratio == 1)
-    let (k, v) = if gqa_ratio > 1 {
-        let k = k
-            .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
-            .contiguous()?
-            .reshape((batch, num_heads, kv_len, head_dim))?;
-        let v = v
-            .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
-            .contiguous()?
-            .reshape((batch, num_heads, kv_len, head_dim))?;
-        (k, v)
-    } else {
-        (k.contiguous()?, v.contiguous()?)
-    };
+    let (k, v) = prefill_profile_time(seq_len, "full.kv_expand", || {
+        if gqa_ratio > 1 {
+            let k = k
+                .unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+                .contiguous()?
+                .reshape((batch, num_heads, kv_len, head_dim))?;
+            let v = v
+                .unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+                .contiguous()?
+                .reshape((batch, num_heads, kv_len, head_dim))?;
+            Ok((k, v))
+        } else {
+            Ok((k.contiguous()?, v.contiguous()?))
+        }
+    })?;
 
     // Scaled dot-product attention
     let scale = (head_dim as f64).sqrt();
-    let attn_scores = q.broadcast_matmul(&k.t()?)?;
-    let attn_scores = (attn_scores / scale)?;
+    let attn_scores = prefill_profile_time(seq_len, "full.scores", || {
+        let attn_scores = q.broadcast_matmul(&k.t()?)?;
+        Ok((attn_scores / scale)?)
+    })?;
 
     let past_len = kv_len - seq_len;
-    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
+    let attn_scores = prefill_profile_time(seq_len, "full.mask", || {
+        apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)
+    })?;
 
-    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
-    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
+    let attn_weights_softmax = prefill_profile_time(seq_len, "full.softmax", || {
+        cuda_softmax_last_dim(&attn_scores)
+    })?;
+    let attn_output = prefill_profile_time(seq_len, "full.weighted_sum", || {
+        Ok(attn_weights_softmax.broadcast_matmul(&v)?)
+    })?;
 
     // Transpose back and output projection
-    let attn_output =
-        attn_output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
+    let attn_output = prefill_profile_time(seq_len, "full.out_reshape", || {
+        Ok(attn_output.transpose(1, 2)?.contiguous()?.reshape((
+            (),
+            seq_len,
+            num_heads * head_dim,
+        ))?)
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
     }
 
-    let attn_output =
-        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+    let attn_output = prefill_profile_time(seq_len, "full.gate", || {
+        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
     }
@@ -6020,7 +6071,7 @@ fn gqa_attention_paged_with_rope_tables(
         crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
     }
 
-    let out = {
+    let out = prefill_profile_time(seq_len, "full.o_proj", || {
         kiln_nvtx::range!(c"kiln/proj/o");
         linear_with_lora_t_backend_decode_if(
             Some(backend),
@@ -6029,8 +6080,8 @@ fn gqa_attention_paged_with_rope_tables(
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
-        )?
-    };
+        )
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     }
@@ -6256,10 +6307,10 @@ fn transformer_block_paged_with_rope_tables(
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     // Pre-attention norm
-    let normed = {
+    let normed = prefill_profile_time(seq_len, "full.pre_norm", || {
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
-        rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
-    };
+        rms_norm(x, &layer.input_layernorm, rms_norm_eps)
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_pre_attn_norm", &normed);
     }
@@ -6295,19 +6346,19 @@ fn transformer_block_paged_with_rope_tables(
     }
 
     // Residual connection
-    let x = {
+    let x = prefill_profile_time(seq_len, "full.attn_resid", || {
         kiln_nvtx::range!(c"kiln/residual");
-        (x + attn_out)?
-    };
+        Ok((x + attn_out)?)
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_residual", &x);
     }
 
     // Post-attention norm
-    let normed = {
+    let normed = prefill_profile_time(seq_len, "full.post_norm", || {
         kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-        rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)?
-    };
+        rms_norm(&x, &layer.post_attention_layernorm, rms_norm_eps)
+    })?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_pre_mlp_norm", &normed);
     }
@@ -6330,10 +6381,10 @@ fn transformer_block_paged_with_rope_tables(
     }
 
     // Residual connection
-    let out = {
+    let out = prefill_profile_time(seq_len, "full.mlp_resid", || {
         kiln_nvtx::range!(c"kiln/residual");
-        (x + ffn_out)?
-    };
+        Ok((x + ffn_out)?)
+    })?;
     // Note: the final block output (`out`) is dumped as `post_layer` at the
     // outer MTP call site, so we do not re-capture it here.
     Ok(out)
@@ -7967,7 +8018,8 @@ fn model_forward_paged_inner(
                 // this TLS slot + the armed capture window so that only
                 // layer 31 emits sub-op taps. No-op on the production path.
                 crate::mtp_debug::enter_b12_layer_scope(i);
-                let block_result = decode_profile_time("layer.full", || {
+                let detailed_prefill_profile = prefill_profile_enabled() && seq_len > 1;
+                let block_result = if detailed_prefill_profile {
                     transformer_block_paged_with_rope_tables(
                         backend,
                         &hidden,
@@ -7987,7 +8039,29 @@ fn model_forward_paged_inner(
                         full_attn_idx,
                         layer_lora,
                     )
-                });
+                } else {
+                    decode_profile_time("layer.full", || {
+                        transformer_block_paged_with_rope_tables(
+                            backend,
+                            &hidden,
+                            layer,
+                            config,
+                            positions,
+                            start_pos,
+                            config.num_attention_heads,
+                            config.num_kv_heads,
+                            config.head_dim,
+                            config.rotary_dim(),
+                            &weights.rotary_inv_freq,
+                            rope_tables,
+                            config.rms_norm_eps,
+                            paged_cache,
+                            block_table,
+                            full_attn_idx,
+                            layer_lora,
+                        )
+                    })
+                };
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
                     .with_context(|| format!("transformer block {i} (full attention, paged)"))?;

@@ -642,9 +642,6 @@ impl BackendRuntime for VulkanBackend {
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if seq_len != 1 {
-            return Ok(None);
-        }
         let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
             return Ok(None);
         };
@@ -657,15 +654,26 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+        let row_count = batch * seq_len;
+        let dispatch_x = if seq_len == 1 {
+            x.clone()
+        } else {
+            x.reshape((row_count, 1usize, hidden))?
+        };
         let out = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
             vk_device,
-            x,
+            &dispatch_x,
             &weight_buf,
-            batch,
+            row_count,
             hidden,
             out_dim,
         )
         .context("linear_decode kernel failed")?;
+        let out = if seq_len == 1 {
+            out
+        } else {
+            out.reshape((batch, seq_len, out_dim))?
+        };
         Ok(Some(out))
     }
 
