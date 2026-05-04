@@ -608,14 +608,15 @@ textarea { resize: vertical; min-height: 80px; }
       <div class="upload-adapter-controls">
         <div class="form-group" style="margin-bottom:0;">
           <label for="upload-name">Adapter Name</label>
-          <input type="text" id="upload-name" placeholder="adapter name" aria-describedby="upload-adapter-help">
+          <input type="text" id="upload-name" placeholder="adapter name" aria-describedby="upload-adapter-help upload-adapter-state">
         </div>
         <div class="form-group" style="margin-bottom:0;">
           <label for="upload-archive">Adapter Archive</label>
-          <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help" style="font-family:var(--sans);font-size:12px;">
+          <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help upload-adapter-state" style="font-family:var(--sans);font-size:12px;">
         </div>
-        <button class="btn btn-primary" onclick="uploadAdapter()">Upload</button>
+        <button class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
       </div>
+      <div id="upload-adapter-state" style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Enter a name and choose an archive to enable upload.</div>
     </div>
     <div class="panel-body" style="border-top:1px solid var(--border);">
       <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Merge Adapters</div>
@@ -1170,6 +1171,23 @@ window.downloadAdapter = function(name) {
   window.location.href = '/v1/adapters/' + encodeURIComponent(name) + '/download';
 };
 
+function updateUploadAdapterState() {
+  const nameEl = document.getElementById('upload-name');
+  const fileEl = document.getElementById('upload-archive');
+  const button = document.getElementById('upload-adapter-btn');
+  const state = document.getElementById('upload-adapter-state');
+  if (!nameEl || !fileEl || !button) return;
+  const hasName = nameEl.value.trim().length > 0;
+  const hasFile = fileEl.files.length > 0;
+  button.disabled = !(hasName && hasFile);
+  if (state) {
+    if (!hasName && !hasFile) state.textContent = 'Enter a name and choose an archive to enable upload.';
+    else if (!hasName) state.textContent = 'Enter an adapter name to enable upload.';
+    else if (!hasFile) state.textContent = 'Choose a .tar.gz or .tgz archive to enable upload.';
+    else state.textContent = 'Ready to upload.';
+  }
+}
+
 window.uploadAdapter = async function() {
   const nameEl = document.getElementById('upload-name');
   const fileEl = document.getElementById('upload-archive');
@@ -1196,6 +1214,7 @@ window.uploadAdapter = async function() {
     toast(`Uploaded ${data.name} (${fmtBytes(data.size_bytes)}, ${data.files} files)`);
     nameEl.value = '';
     fileEl.value = '';
+    updateUploadAdapterState();
     pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
 };
@@ -1701,6 +1720,10 @@ document.getElementById('chat-clear').addEventListener('click', () => {
   chatMessages.length = 0;
   renderChat();
 });
+
+document.getElementById('upload-name').addEventListener('input', updateUploadAdapterState);
+document.getElementById('upload-archive').addEventListener('change', updateUploadAdapterState);
+updateUploadAdapterState();
 
 // --- Init ---
 renderChat();
