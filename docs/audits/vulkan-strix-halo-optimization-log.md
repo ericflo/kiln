@@ -2196,6 +2196,33 @@ Verdict:
 - The repeated exact-prompt speedup is real, but the registration cost is too high and the traffic shape too narrow for a default path.
 - If needed later, a safer variant would need a much stronger repetition heuristic or an asynchronous/off-critical-path registration strategy.
 
+### E076: Batch-Local Prefix Threshold Sanity Check
+
+Change:
+- No code change.
+- Re-tested E069's default `BATCH_LOCAL_PREFIX_MIN_BLOCKS = 8` guard with a medium shared-prefix fixture that lands exactly at the threshold.
+
+Reasoning:
+- E069 showed that a very small shared prefix regressed before thresholding, while a 416-token shared prefix was a large win.
+- The remaining risk was that the 8-block cutoff might still be too low and should be raised.
+- A prompt fixture with 3 repeats of the shared-context phrase produced a 128-token shared prefix, exactly 8 blocks with the current 16-token block size.
+
+Evidence:
+- Same release server binary as the kept branch, first with default batch-local prefix reuse, then with `KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE=1`.
+- Default no-env run:
+  - Request: four distinct prompts, `max_tokens=2`, 609 total prompt tokens, 8 completion tokens.
+  - Server log: `batch greedy local prefix prefill: rows=4 cached_tokens=128 blocks=8 elapsed_ms=3929.0`.
+  - Per-row suffix prefills after the shared prefix: 24, 24, 25, and 24 tokens; elapsed 2106.3ms, 2123.3ms, 2330.0ms, and 2108.9ms.
+  - Total: 13.153s / 0.608 tok/s; server batch total 13137.8ms.
+- Rollback guard run:
+  - Env: `KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE=1`.
+  - Each row prefetched the full 152-153-token prompt; elapsed 4185.6ms, 4263.1ms, 4325.5ms, and 4355.4ms.
+  - Total: 17.690s / 0.452 tok/s; server batch total 17670.5ms.
+
+Verdict:
+- Keep the 8-block threshold unchanged.
+- The exact-threshold fixture was about 4.54s faster than the rollback guard, so raising the guard would discard a useful win.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
