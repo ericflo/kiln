@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln GRPO Guide &mdash; Live feedback loop</title>
+  <meta name="description" content="A concise site-local guide to Kiln GRPO: generate rollouts, score completions, submit /v1/train/grpo, and watch training status.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/grpo.html">
+  <link rel="icon" type="image/png" href="assets/logo.png">
+
+  <meta property="og:title" content="Kiln GRPO Guide &mdash; Live feedback loop">
+  <meta property="og:description" content="Generate rollouts, score completions, submit /v1/train/grpo, and watch Kiln hot-swap the resulting LoRA adapter.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/grpo.html">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Kiln GRPO Guide &mdash; Live feedback loop">
+  <meta name="twitter:description" content="Generate rollouts, score completions, submit /v1/train/grpo, and watch Kiln hot-swap the resulting LoRA adapter.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre { max-width: 100%; }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      min-width: 0;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    .label {
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .endpoint-list { display: grid; gap: 0.75rem; }
+    .endpoint {
+      background: var(--bg-soft-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      min-width: 0;
+    }
+    .endpoint code {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .method {
+      display: inline-flex;
+      min-width: 3.8rem;
+      justify-content: center;
+      border-radius: 999px;
+      border: 1px solid rgba(249,115,22,0.35);
+      color: var(--accent);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 0.15rem 0.45rem;
+    }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .site-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      color: var(--fg-dim);
+    }
+    @media (max-width: 640px) {
+      .site-nav-bar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .site-nav {
+        flex-wrap: wrap;
+        gap: 0.35rem 1rem;
+        line-height: 1.35;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
+      <a href="./" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="site-nav text-sm">
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="api.html">API Reference</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">GRPO &middot; live feedback loop</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        Train from scored completions without leaving the server.
+      </h1>
+      <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
+        Kiln's GRPO path is a compact generate &rarr; score &rarr; train loop: produce several completions for each prompt,
+        assign rewards with your own verifier, submit the scored batch to <code>/v1/train/grpo</code>, and let Kiln write and hot-swap a LoRA adapter.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-8">
+        <a href="api.html#training" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Training API &rarr;
+        </a>
+        <a href="demo/" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Demo &rarr;
+        </a>
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Full GitHub guide &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-8">
+      <div class="card p-5">
+        <div class="label mb-3">On this page</div>
+        <div class="flex flex-wrap gap-2 text-sm">
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#what-grpo-does">What GRPO does</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#rollouts">Rollouts</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#submit-training">Submit training</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#watch-status">Watch status</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <main class="max-w-4xl mx-auto px-6 py-12">
+    <div class="grid gap-6">
+      <article class="card p-6">
+        <div class="label mb-3">Concept</div>
+        <h2 id="what-grpo-does" class="text-2xl font-semibold mb-4">What GRPO does in Kiln</h2>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          GRPO is the feedback-training endpoint for cases where you can score model outputs better than you can write one perfect answer.
+          Each request contains groups. A group has the original chat-format <code>messages</code> and several <code>completions</code>, each with generated <code>text</code> and a numeric <code>reward</code>.
+        </p>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Kiln normalizes the rewards within each group, applies the GRPO loss to LoRA parameters, saves the resulting adapter, and auto-loads it by default when training completes. Inference can keep serving while the training job runs in the background queue.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Rollouts</div>
+        <h2 id="rollouts" class="text-2xl font-semibold mb-4">Generate multiple completions per prompt</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Use <code>/v1/completions/batch</code> when you need efficient rollout generation. Send chat-format prompts plus <code>n</code> completions per prompt, then score each returned completion with your reward function before building the GRPO payload.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Rollout generation shape</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/completions/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompts": [
+      [{"role": "user", "content": "What is 47 + 138? Reply with just the number."}],
+      [{"role": "user", "content": "What is 23 * 17? Reply with just the number."}]
+    ],
+    "n": 8,
+    "temperature": 0.9,
+    "max_tokens": 64,
+    "seed": 42
+  }' \
+  | python3 -m json.tool</code></pre>
+        </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          The batch response identifies which prompt each completion came from, so your scorer can reshape completions back into per-prompt groups.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Training</div>
+        <h2 id="submit-training" class="text-2xl font-semibold mb-4">Submit scored completions to <code>/v1/train/grpo</code></h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          The minimal request is <code>{"groups": [...]}</code>; every <code>config</code> field has a server default. Use <code>output_name</code> when you want a stable adapter name, and leave <code>auto_load</code> at its default if the new adapter should become active immediately after training.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">First GRPO training request</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/grpo \
+  -H "Content-Type: application/json" \
+  -d '{
+    "groups": [{
+      "messages": [{"role": "user", "content": "What is 47 + 138? Reply with just the number."}],
+      "completions": [
+        {"text": "185", "reward": 1.0},
+        {"text": "The answer is 184", "reward": 0.0},
+        {"text": "185.", "reward": 1.0},
+        {"text": "47 + 138 = 185", "reward": 0.8}
+      ]
+    }],
+    "config": {
+      "learning_rate": 1e-5,
+      "kl_coeff": 0.1,
+      "clip_epsilon": 0.2,
+      "lora_rank": 16,
+      "output_name": "math-correctness",
+      "auto_load": true
+    }
+  }' \
+  | python3 -m json.tool</code></pre>
+        </section>
+        <div class="grid sm:grid-cols-2 gap-4 mt-5">
+          <div class="endpoint">
+            <h3 class="font-semibold mb-2">Common config fields</h3>
+            <ul class="space-y-2 text-sm" style="color: var(--fg-dim);">
+              <li><code>learning_rate</code>, <code>kl_coeff</code>, and <code>clip_epsilon</code> tune the GRPO update.</li>
+              <li><code>lora_rank</code> and <code>lora_alpha</code> control adapter capacity.</li>
+              <li><code>base_adapter</code> continues from an existing adapter.</li>
+              <li><code>output_name</code> names the saved adapter.</li>
+              <li><code>auto_load</code> defaults to <code>true</code>.</li>
+            </ul>
+          </div>
+          <div class="endpoint">
+            <h3 class="font-semibold mb-2">Payload guardrails</h3>
+            <ul class="space-y-2 text-sm" style="color: var(--fg-dim);">
+              <li>Put options under <code>config</code>, not at the top level.</li>
+              <li>Use <code>groups</code>, <code>messages</code>, <code>completions</code>, <code>text</code>, and <code>reward</code>.</li>
+              <li>GRPO does not use SFT's <code>epochs</code> field.</li>
+              <li>Use at least a few completions per group so rewards can be compared.</li>
+            </ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Monitoring</div>
+        <h2 id="watch-status" class="text-2xl font-semibold mb-4">Watch the background training job</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          <code>/v1/train/grpo</code> returns a queued job immediately. Poll <code>/v1/train/status</code> to see pending, running, completed, or failed jobs, then confirm the trained adapter through the adapter APIs or the web UI.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Training status</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
+        </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          If a GRPO request is rejected or stays queued longer than expected, start with the <a href="troubleshooting.html">troubleshooting guide</a> and the full endpoint map in <a href="api.html#training">API training</a>.
+        </p>
+      </article>
+    </div>
+  </main>
+
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <a class="card p-5 block" href="api.html#training">
+          <h3 class="font-semibold mb-2">API training</h3>
+          <p style="color: var(--fg-dim);">Endpoint details for SFT, GRPO, batch rollouts, status, and adapter lifecycle requests.</p>
+        </a>
+        <a class="card p-5 block" href="troubleshooting.html">
+          <h3 class="font-semibold mb-2">Troubleshooting</h3>
+          <p style="color: var(--fg-dim);">First checks for startup, model loading, accelerator availability, and training request errors.</p>
+        </a>
+        <a class="card p-5 block" href="demo/">
+          <h3 class="font-semibold mb-2">Demo</h3>
+          <p style="color: var(--fg-dim);">A visual walkthrough of the dashboard, training monitoring, and adapter management flow.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md">
+          <h3 class="font-semibold mb-2">Deep dive</h3>
+          <p style="color: var(--fg-dim);">Worked reward functions, loop scripts, tuning notes, and troubleshooting for longer GRPO runs.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- footer -->
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="./">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md">Quickstart</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="api.html">API Reference</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
