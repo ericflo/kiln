@@ -144,6 +144,34 @@ pub struct Cli {
     /// Path to TOML config file
     #[arg(long, short, global = true)]
     pub config: Option<String>,
+
+    /// Increase verbosity. `-v` shows debug logs (the legacy startup firehose),
+    /// `-vv` adds trace-level kernel detail. Wins over `KILN_LOG_LEVEL` and the
+    /// TOML `[logging] level`, but loses to `RUST_LOG` if set explicitly.
+    #[arg(long, short, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Quiet mode — only warnings and errors. Mutually exclusive with `--verbose`.
+    #[arg(long, short, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+}
+
+impl Cli {
+    /// Resolve the effective tracing-subscriber filter directive based on
+    /// `--verbose`/`--quiet` flags and a fallback (typically the TOML
+    /// `[logging] level`). `RUST_LOG` is *not* consulted here; it's checked
+    /// inside `logging::init` and wins regardless of CLI flags.
+    pub fn effective_log_level<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.quiet {
+            "warn"
+        } else {
+            match self.verbose {
+                0 => fallback,
+                1 => "debug",
+                _ => "trace",
+            }
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -429,6 +457,45 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
         stderr,
         "  {} /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics",
         style("Endpoints:").dim()
+    );
+    let _ = writeln!(stderr);
+}
+
+/// Build a spinner-style indicatif bar for long-running startup phases (model
+/// load, weight upload, KV cache allocation). Returns `None` when stderr isn't
+/// attended (CI, systemd, docker) so the JSON log path stays clean.
+///
+/// The returned `ProgressBar` ticks every 80ms; callers should `set_message`
+/// between phases and `finish_and_clear` once done so the line goes away
+/// before [`print_ready_line`] writes the final status.
+pub fn make_startup_spinner(initial_message: impl Into<std::borrow::Cow<'static, str>>) -> Option<indicatif::ProgressBar> {
+    if !console::Term::stderr().features().is_attended() {
+        return None;
+    }
+    let pb = indicatif::ProgressBar::new_spinner();
+    pb.set_style(
+        indicatif::ProgressStyle::with_template("  {spinner:.cyan} {msg} {elapsed:.dim}")
+            .expect("static spinner template is valid")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(80));
+    pb.set_message(initial_message);
+    Some(pb)
+}
+
+/// Emit the single human-readable "ready" line at INFO level. Called once after
+/// the listener binds and after any model-load progress finishes. Stays terse on
+/// purpose — the banner already covered version/GPU/model details, and we want
+/// silence-until-requests after this line.
+pub fn print_ready_line(host: &str, port: u16) {
+    let mut stderr = std::io::stderr();
+    let addr = format!("http://{host}:{port}");
+    let _ = writeln!(
+        stderr,
+        "  {} {} {}",
+        style("✓").green().bold(),
+        style("Ready on").dim(),
+        style(addr).cyan().bold()
     );
     let _ = writeln!(stderr);
 }
@@ -1229,6 +1296,42 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
     use serde_json::json;
+
+    fn cli_with(verbose: u8, quiet: bool) -> Cli {
+        Cli {
+            command: None,
+            config: None,
+            verbose,
+            quiet,
+        }
+    }
+
+    #[test]
+    fn effective_log_level_returns_fallback_with_no_flags() {
+        assert_eq!(cli_with(0, false).effective_log_level("info"), "info");
+        assert_eq!(
+            cli_with(0, false).effective_log_level("kiln=info,tower_http=warn"),
+            "kiln=info,tower_http=warn"
+        );
+    }
+
+    #[test]
+    fn effective_log_level_v_promotes_to_debug() {
+        assert_eq!(cli_with(1, false).effective_log_level("info"), "debug");
+    }
+
+    #[test]
+    fn effective_log_level_vv_promotes_to_trace() {
+        assert_eq!(cli_with(2, false).effective_log_level("info"), "trace");
+        assert_eq!(cli_with(3, false).effective_log_level("info"), "trace");
+    }
+
+    #[test]
+    fn effective_log_level_quiet_overrides_verbose_fallback() {
+        assert_eq!(cli_with(0, true).effective_log_level("info"), "warn");
+        // quiet wins regardless of fallback severity
+        assert_eq!(cli_with(0, true).effective_log_level("trace"), "warn");
+    }
 
     #[test]
     fn build_sft_training_payload_uses_nested_config() {
