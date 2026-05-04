@@ -1,0 +1,32 @@
+{
+  "prompts": [
+    [
+      {
+        "role": "user",
+        "content": "Write one short sentence about low-latency inference."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Write one short sentence about Metal kernels."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Write one short sentence about continuous batching."
+      }
+    ],
+    [
+      {
+        "role": "user",
+        "content": "Write one short sentence about KV cache reuse."
+      }
+    ]
+  ],
+  "n": 1,
+  "temperature": 0.0,
+  "max_tokens": 2,
+  "seed": 312
+}

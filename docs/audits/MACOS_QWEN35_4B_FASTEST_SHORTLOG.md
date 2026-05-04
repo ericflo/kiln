@@ -805,3 +805,14 @@
   true model-forward batching; distinct prompt groups still serialize on the
   shared paged-cache/model-forward path and can be slightly slower than
   sequential singles.
+- 2026-05-04 E312-E315: Rejected a sequential distinct-prompt batch scheduler.
+  The temporary path serialized `/v1/completions/batch` prompt groups on the
+  real backend instead of spawning one task per distinct prompt group. E313
+  looked fast once at 2,275.571 ms handler / 2.292 s wall versus E312 fan-out
+  control at 4,479.301 ms / 4.497 s, but two promoted-default repeats
+  regressed badly: E314 10,215.447 ms / 10.231 s and E315 10,793.169 ms /
+  10.80 s. All runs generated 8 physical tokens with 4 render misses,
+  4 token misses, and no prefix-cache lookups. Source was reverted. This is
+  not a viable substitute for true model-forward batching; next bs>1 work needs
+  per-sequence cache tables and batched linear/GDN state, alongside continued
+  low-level Metal kernel work.

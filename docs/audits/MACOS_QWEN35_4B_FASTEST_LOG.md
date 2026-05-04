@@ -9255,3 +9255,78 @@ For this warmed, uncached 4-prompt shape it was slightly slower than four
 sequential singles (5330.886 ms versus 4976.357 ms). The meaningful next bs>1
 work is a real batched model-forward/scheduler boundary with per-sequence
 block tables and batched linear/GDN state, not more endpoint fan-out.
+
+## Experiment E312-E315: Rejected Sequential Prompt-Group Scheduler
+
+Purpose:
+
+Test a small bs>1 scheduling hypothesis without confusing it for true model
+batching. The current batch endpoint fans out one Tokio task per distinct
+rendered prompt group, but the real Qwen path still executes single-sequence
+model forwards behind a shared paged-cache lock. The candidate serialized
+distinct prompt groups on the real backend to see whether avoiding task fan-out
+contention was enough to improve distinct-prompt batch latency.
+
+Temporary candidate:
+
+- Refactored `/v1/completions/batch` group execution behind a shared helper.
+- Added an opt-in `KILN_ENABLE_BATCH_SEQUENTIAL_PROMPT_GROUPS=1` path.
+- Promoted that path to the default for `ModelBackend::Real` after the first
+  fast opt-in run, then repeated the default measurement.
+- Did not change the model-forward boundary: each physical output still used a
+  single prompt, one `BlockTable`, and the shared `PagedKvCache`.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --check crates/kiln-server/src/api/completions.rs`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `git diff --check`
+- `cargo build --release -p kiln-server --bin kiln --features metal`
+
+Request shape:
+
+Four distinct prompts through `/v1/completions/batch`, `n=1`,
+`temperature=0.0`, `max_tokens=2`, `seed=312`.
+
+Results:
+
+| Experiment | Source behavior | Handler time | Curl wall | Metrics duration | Physical generated tokens | Render/token cache | Prefix cache |
+|---|---|---:|---:|---:|---:|---|---|
+| E312 | Fan-out control | 4479.301 ms | 4.497 s | 4.478489 s | 8 | 4 misses / 4 misses | 0 lookups |
+| E313 | Opt-in sequential groups | 2275.571 ms | 2.292 s | 2.275451 s | 8 | 4 misses / 4 misses | 0 lookups |
+| E314 | Sequential groups promoted default | 10215.447 ms | 10.231 s | 10.214814 s | 8 | 4 misses / 4 misses | 0 lookups |
+| E315 | Fresh promoted-default repeat | 10793.169 ms | 10.80 s | 10.793056 s | 8 | 4 misses / 4 misses | 0 lookups |
+
+All four responses reported the same aggregate usage:
+75 prompt tokens, 8 completion tokens, 83 total tokens. After E315,
+`memory_pressure` reported 79% system-wide free memory.
+
+Artifacts:
+
+- `e312_batch4_distinct_request.json`
+- `e312_server_batch_fanout_control.log`
+- `e312_batch_fanout_control_response.json`
+- `e312_batch_fanout_control_time.log`
+- `e312_batch_fanout_control_metrics.prom`
+- `e313_server_batch_sequential_groups_candidate.log`
+- `e313_batch_sequential_groups_candidate_response.json`
+- `e313_batch_sequential_groups_candidate_time.log`
+- `e313_batch_sequential_groups_candidate_metrics.prom`
+- `e314_server_batch_sequential_groups_default.log`
+- `e314_batch_sequential_groups_default_response.json`
+- `e314_batch_sequential_groups_default_time.log`
+- `e314_batch_sequential_groups_default_metrics.prom`
+- `e315_server_batch_sequential_groups_default_repeat.log`
+- `e315_batch_sequential_groups_default_repeat_response.json`
+- `e315_batch_sequential_groups_default_repeat_time.log`
+- `e315_batch_sequential_groups_default_repeat_metrics.prom`
+
+Takeaway:
+
+The single fast opt-in run was not robust. Two fresh default runs regressed far
+past both the E312 fan-out control and the E311 sequential-single comparison,
+so the temporary scheduler source was reverted before committing. The fastest
+inference goal should keep moving toward actual low-level work: true
+multi-sequence model-forward batching with per-sequence cache tables and
+batched GDN/linear state, plus continued Metal kernel improvements. Endpoint
+scheduling alone is not enough.
