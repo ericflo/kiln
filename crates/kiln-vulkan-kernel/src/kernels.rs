@@ -1710,7 +1710,7 @@ pub fn dispatch_mlp_gate_up_decode_cached(
         all_handles.len(),
         &push_constants,
         if batch == 1 {
-            intermediate.div_ceil(16) as u32
+            intermediate.div_ceil(32) as u32
         } else {
             (batch * intermediate.div_ceil(16)) as u32
         },
@@ -1822,7 +1822,7 @@ pub fn dispatch_mlp_decode_cached(
         gate_up_handles.len(),
         &gate_up_push,
         if batch == 1 {
-            intermediate.div_ceil(16) as u32
+            intermediate.div_ceil(32) as u32
         } else {
             (batch * intermediate.div_ceil(16)) as u32
         },

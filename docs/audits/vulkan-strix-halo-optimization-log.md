@@ -15,7 +15,7 @@ Make Vulkan a first-class Kiln inference backend and push Qwen3.5-4B performance
 
 ## Running Verdict
 
-Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 137.2ms mean inter-token latency after scoped resident split GDN recurrent state plus GDN input-projection single-submit promotion. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
+Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 133.7ms mean inter-token latency after scoped resident split GDN recurrent state, GDN input-projection single-submit, and 32x8 MLP gate/up decode workgroups. A confirmation run measured 136.4ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
 
 ## Experiments
 
@@ -2433,8 +2433,40 @@ Verdict:
 - Keep default with rollback guard.
 - This is the new best verified no-env default bs=1 source anchor: 137.2ms mean ITL.
 
+### E083: Tune Vulkan MLP Gate/Up Decode Workgroup Shape
+
+Change:
+- Changed the single-token MLP gate/up decode shader from 16 output columns x 16 reduction lanes to 32 output columns x 8 reduction lanes.
+- Updated batch=1 dispatch sizing for `dispatch_mlp_gate_up_decode_cached` and `dispatch_mlp_decode_cached` to cover 32 intermediate columns per workgroup.
+- Left the batched MLP gate/up path unchanged at the existing 16-wide layout.
+
+Reasoning:
+- E079's rejected 8x32 shape gave each column too many reduction lanes and regressed `mlp.fused`.
+- After resident recurrent state and GDN in-proj single-submit, MLP is again the largest visible decode bucket.
+- The 32x8 shape keeps 256 invocations per workgroup but increases output-column parallelism while leaving enough reduction lanes for hidden-size accumulation.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode -- --nocapture` passed, including batch=1 and batched MLP parity.
+- `cargo build --release --features vulkan --bin kiln-bench` passed before latency measurement.
+- Final validation passed:
+  - `git diff --check`.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+  - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture`.
+- Profiled run:
+  - Command: `KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1922.5ms; mean ITL 132.0ms, p50 129.5ms, p99 143.1ms.
+  - `mlp.fused` fell to 49.1-49.4ms/32 layers, down from roughly 54ms in the post-E082 profile.
+- No-profile default runs:
+  - First: prefill 1923.7ms; mean ITL 133.7ms, p50 134.7ms, p99 141.0ms.
+  - Confirmation: prefill 1959.2ms; mean ITL 136.4ms, p50 134.8ms, p99 146.4ms.
+
+Verdict:
+- Keep.
+- This is the new best verified no-env default bs=1 source anchor: 133.7ms mean ITL, with a confirmation run at 136.4ms.
+
 ## Next Candidate
 
-With E082, the current default bs=1 short-source anchor is 137.2ms mean ITL. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention only with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E083, the current default bs=1 short-source anchor is 133.7ms mean ITL, confirmed at 136.4ms. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083 shows that 32 output columns x 8 reduction lanes is the useful direction for the single-token MLP gate/up shader. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
