@@ -157,6 +157,8 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
   GPU:     NVIDIA RTX A6000
   VRAM:    49140 MiB total, 48891 MiB free
   Listen:  http://127.0.0.1:8420
+
+  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed.
