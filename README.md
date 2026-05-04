@@ -13,6 +13,8 @@
   <a href="https://ericflo.github.io/kiln/">Website</a> &middot;
   <a href="docs/site/demo/">Demo</a> &middot;
   <a href="QUICKSTART.md">Quickstart</a> &middot;
+  <a href="https://ericflo.github.io/kiln/cli.html">CLI Guide</a> &middot;
+  <a href="https://ericflo.github.io/kiln/grpo.html">GRPO Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/api.html">API Reference</a> &middot;
   <a href="https://ericflo.github.io/kiln/troubleshooting.html">Troubleshooting</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
