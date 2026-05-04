@@ -6657,6 +6657,149 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     Ok(out)
 }
 
+/// Strict batched single-token paged decode for model-forward integration.
+///
+/// This is the model-loop counterpart to
+/// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
+/// per batch row, a block table per row, a common decode position, and an
+/// optional batch-shaped [`LinearAttentionState`]. It returns full logits with
+/// shape `[batch, 1, vocab_size]`.
+///
+/// The helper is deliberately narrower than the general scheduler contract:
+/// every row must share the same `start_pos`, full-attention rows must satisfy
+/// the contiguous paged-KV constraints enforced by E340/E341, and LoRA/debug
+/// capture paths remain owned by the rowwise entry points until scheduler
+/// integration needs them.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let batch = token_ids.len();
+    anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
+    anyhow::ensure!(
+        block_tables.len() == batch && start_positions.len() == batch,
+        "batched paged decode metadata length mismatch"
+    );
+    let start_pos = start_positions[0];
+    anyhow::ensure!(
+        start_positions.iter().all(|&pos| pos == start_pos),
+        "batched paged decode requires a common start_pos"
+    );
+
+    if weights
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)))
+    {
+        let state_batch = linear_state
+            .as_ref()
+            .context("batched paged decode requires LinearAttentionState for GDN layers")?
+            .batch_size()?;
+        anyhow::ensure!(
+            state_batch == batch,
+            "batched paged decode LinearAttentionState batch mismatch ({state_batch} vs {batch})"
+        );
+    }
+
+    let device = weights.embed_tokens.device();
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
+    let positions = Tensor::from_slice(&[start_pos as f32], 1usize, device)?;
+    let use_metal_decode_ffn =
+        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+
+    let mut full_attn_idx = 0usize;
+    let mut linear_attn_idx = 0usize;
+    for (i, layer) in weights.layers.iter().enumerate() {
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                hidden = transformer_block_paged_decode_contiguous_batch(
+                    backend,
+                    &hidden,
+                    layer,
+                    config,
+                    &positions,
+                    start_positions,
+                    &weights.rotary_inv_freq,
+                    paged_cache,
+                    block_tables,
+                    full_attn_idx,
+                    layer_lora,
+                )
+                .with_context(|| {
+                    format!("batched transformer block {i} (full attention, paged)")
+                })?;
+                full_attn_idx += 1;
+            }
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("batched linear attention state required for GDN layer {i}")
+                })?;
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn_batch_decode");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
+                let attn_out = gated_deltanet_forward_decode_if(
+                    backend,
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                    false,
+                    false,
+                    use_metal_decode_ffn,
+                    None,
+                )
+                .with_context(|| {
+                    format!("batched gated deltanet layer {i} (linear attention, paged)")
+                })?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual_batch_decode");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
+                };
+                let ffn_out = swiglu_ffn_profiled(
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                    None,
+                )?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual_batch_decode");
+                    (hidden + ffn_out)?
+                };
+                linear_attn_idx += 1;
+            }
+        }
+    }
+
+    let logits = {
+        kiln_nvtx::range!(c"kiln/lm_head_batch_decode");
+        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        lm_head_forward(&normed, &weights.embed_tokens_t)?
+    };
+    Ok(logits)
+}
+
 /// Full model forward pass: embedding → N transformer blocks → final norm → LM head → logits.
 ///
 /// `token_ids`: 1-D slice of token IDs for the input sequence.
@@ -9235,6 +9378,46 @@ mod tests {
     }
 
     #[cfg(feature = "metal")]
+    fn make_bf16_full_attention_gpu_weights(
+        vocab: usize,
+        hidden: usize,
+        intermediate: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        num_layers: usize,
+        device: &Device,
+    ) -> Result<GpuWeights> {
+        let embed_tokens = patterned_bf16(&[vocab, hidden], 0.01, device)?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
+        let final_norm = Tensor::zeros(hidden, DType::F32, device)?;
+        let mut layers = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            layers.push(GpuLayerWeights {
+                input_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+                post_attention_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+                attention: GpuAttentionWeights::Full(make_bf16_full_attn_weights(
+                    hidden,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    device,
+                )?),
+                mlp: make_bf16_mlp_weights(hidden, intermediate, device)?,
+            });
+        }
+        let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, device)?;
+        Ok(GpuWeights {
+            embed_tokens,
+            embed_tokens_t,
+            layers,
+            final_norm,
+            rotary_inv_freq,
+            mtp: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
     #[test]
     fn test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
         let Some(device) = crate::backend::metal::try_new_metal() else {
@@ -9503,6 +9686,146 @@ mod tests {
             assert!(
                 mean <= 3e-3,
                 "row {row} batched contiguous transformer block mean_abs_diff={mean:e}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched contiguous model test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let vocab = 64usize;
+        let hidden = 512usize;
+        let intermediate = 768usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let weights = make_bf16_full_attention_gpu_weights(
+            vocab,
+            hidden,
+            intermediate,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            1,
+            &device,
+        )?;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: intermediate,
+            vocab_size: vocab,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let prefix_k = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
+        let prefix_v = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let token_ids = [7u32, 11u32];
+        let mut batch_cache = PagedKvCache::new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let batched = model_forward_paged_decode_contiguous_batch(
+            &*backend,
+            &token_ids,
+            &weights,
+            &config,
+            &mut batch_cache,
+            &block_tables,
+            &start_positions,
+            None,
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, vocab]);
+
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let rowwise = model_forward_paged(
+                &*backend,
+                &token_ids[row..row + 1],
+                &weights,
+                &config,
+                &mut row_cache,
+                &row_table,
+                start_pos,
+                None,
+                None,
+                Some(&positions),
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "batched contiguous model decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 3e-2,
+                "row {row} batched contiguous model decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 3e-3,
+                "row {row} batched contiguous model decode mean_abs_diff={mean:e}"
             );
         }
 

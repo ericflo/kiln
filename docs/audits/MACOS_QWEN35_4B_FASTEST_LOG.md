@@ -10748,3 +10748,68 @@ Accepted as block-level model-forward batching plumbing. This still is not an
 endpoint win because production scheduling and the full model loop remain
 single-row, but the full-attention layer can now be represented as one strict
 batched decode block operation rather than separate attention-only pieces.
+
+## 2026-05-04 E342 - Added strict batched paged model-forward decode helper
+
+### Goal
+
+Move the true-batching seam from a block-level primitive to an actual
+model-forward decode loop. E341 proved one full-attention block can run as a
+strict `[B,1,H]` batched operation, but scheduler integration still needed a
+single entry point that embeds one token per row, loops layers, threads
+batch-shaped GDN state when present, and returns `[B,1,V]` logits.
+
+### Change
+
+- Added `model_forward_paged_decode_contiguous_batch`.
+- The helper accepts one token ID per row, one `BlockTable` per row, one
+  absolute start position per row, a shared `PagedKvCache`, optional
+  batch-shaped `LinearAttentionState`, and optional LoRA weights.
+- It is strict by design: rows must be non-empty, metadata lengths must match,
+  all rows must share one `start_pos`, and GDN state batch size must match
+  `token_ids.len()` when linear layers are present.
+- Full-attention layers route through
+  `transformer_block_paged_decode_contiguous_batch`.
+- Linear/GDN layers route through the existing batched-capable
+  `gated_deltanet_forward_decode_if` plus the existing decode MLP path while
+  mutating the corresponding batch rows in `LinearAttentionState`.
+- Final RMSNorm and LM-head projection run once over `[B,1,H]`, so the E319
+  decode-batch GEMV/LM-head route can be used by the existing `lm_head_forward`
+  dispatcher when backend shape support applies.
+- Added a Metal parity test that prepopulates prefix K/V, runs a two-row
+  batched model decode, and compares each row against the existing rowwise
+  `model_forward_paged` path.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_model_forward_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_transformer_block_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `git diff --check`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/forward.rs`
+  still reports known broad `forward.rs` formatting drift outside the E342
+  helper; the E342 helper lines were adjusted to match the formatter.
+
+### Results
+
+- The Metal two-row model-forward helper matched two rowwise paged model
+  forwards exactly with a non-empty prefix: row0 `max_abs_diff=0`,
+  `mean_abs_diff=0`; row1 `max_abs_diff=0`, `mean_abs_diff=0`.
+- Output shape was `[2,1,64]` for a lightweight full-attention model using
+  Qwen full-attention head geometry (`16` Q heads, `4` KV heads,
+  `head_dim=256`) and reduced hidden/vocab/MLP sizes.
+
+### Artifact
+
+- `e342_model_forward_paged_decode_contiguous_batch_helper.log`
+
+### Decision
+
+Accepted as strict model-forward batching plumbing. This is still not a live
+endpoint win because the scheduler does not yet admit requests into this
+helper, and the parity test covers a lightweight full-attention model rather
+than the full Qwen hybrid stack. It removes the next concrete integration
+blocker: there is now a model-forward entry point that can consume `[B]`
+decode tokens and produce `[B,1,V]` logits under the current contiguous-KV
+batch constraints.

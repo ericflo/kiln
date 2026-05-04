@@ -1072,3 +1072,12 @@
   matched rowwise `transformer_block_paged` exactly (`max_abs_diff=0`,
   `mean_abs_diff=0` for both rows). This moves the scheduler integration seam
   from attention-only to a full block operation.
+- 2026-05-04 E342: Accepted
+  `model_forward_paged_decode_contiguous_batch` as strict model-forward
+  batching plumbing. The helper embeds one token per row, loops all layers,
+  routes full-attention layers through the E341 block helper, routes GDN
+  layers through batch-shaped `LinearAttentionState`, then runs final norm and
+  LM head over `[B,1,H]`. A Metal two-row parity test with prefix K/V matched
+  two rowwise `model_forward_paged` calls exactly (`max_abs_diff=0`,
+  `mean_abs_diff=0` for both rows). This is not a live endpoint win yet; the
+  scheduler still needs to admit compatible decode rows into the helper.
