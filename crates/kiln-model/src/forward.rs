@@ -46,6 +46,11 @@ fn fused_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
+#[allow(dead_code)]
+pub(crate) fn vulkan_skip_gdn_state_readback_active() -> bool {
+    false
+}
+
 /// Threshold above which the fused `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd`
 /// CustomOp2 path is enabled by default during training. Set to 47 GiB to draw the
 /// line between A6000-class GPUs (49 140 MiB) and A40-class GPUs (46 068 MiB).
