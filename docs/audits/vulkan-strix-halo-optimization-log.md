@@ -2806,8 +2806,35 @@ Verdict:
 - Keep the 128x2 batch-only MLP gate/up shape.
 - This does not change the bs=1 MLP shader.
 
+### E096: Test Batched Vulkan GDN Input Projection At 128x2
+
+Change:
+- Temporarily retiled `gdn_in_proj_decode_batched.comp` from 64 output columns x 4 reduction lanes to 128 output columns x 2 reduction lanes.
+- Temporarily updated batched GDN input-projection dispatch counts in both direct and single-submit paths from `ceil(total_out / 64)` to `ceil(total_out / 128)` per batch row.
+
+Reasoning:
+- A fresh post-E095 profile showed `gdn.in_proj` as the largest remaining GDN subop bucket:
+  - Same four-prompt profiled fixture, `max_tokens=4`, 72 prompt tokens / 16 completion tokens: 8.760s / 1.826 tok/s.
+  - Decode step totals were about 294ms, 260ms, and 260ms.
+  - Non-final buckets were roughly `linear.gdn` 101-102ms/24 layers, `lm_head` 60-61ms, `full.block` 54-55ms/8 layers, and `linear.mlp` 41-42ms/24 layers.
+  - Subops showed `gdn.in_proj` about 60-61ms/24 layers, `mlp.fused` about 55ms/32 layers, `gdn.out_proj` about 16ms/24 layers, and fused resident GDN recurrent/norm about 15ms/24 non-final layers.
+- E095 showed the batched MLP path still benefited from pushing to 128x2 despite bs=1 rejecting that shape, so the analogous batch-only GDN projection shape was worth falsifying.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj -- --nocapture` passed, including batched GDN input-projection parity.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Same-fixture fresh release-server no-profile four-prompt `max_tokens=16` checks, 72 prompt tokens / 64 completion tokens:
+  - E095 64x4 batched GDN input projection: 11.880s / 5.387 tok/s.
+  - E096 128x2 batched GDN input projection: 12.542s / 5.103 tok/s.
+
+Verdict:
+- Reject and revert.
+- Keep the E093 64x4 batched GDN input-projection shape.
+
 ## Next Candidate
 
-With E095, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and is now correctly gated to batch=1. E089 restored native-batch GDN input projection after the E088 misplaced guard, moving the four-prompt `max_tokens=16` fixture from the broken 46.581s / 1.374 tok/s back to 25.457s / 2.514 tok/s. E091 promoted batch fused-GDN resident state and moved the same fixture to 15.498s / 4.130 tok/s, with rollback `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE=1` at 25.917s / 2.469 tok/s. E092 retiled batched MLP gate/up to 64x4 and moved the fixture to 14.550s / 4.399 tok/s. E093 retiled batched GDN input projection to 64x4 and moved that fixture to 13.981s / 4.578 tok/s. E094 retiled the generic batched linear shader to 32x8 and improved a same-fixture 72-prompt-token four-prompt run from 13.204s / 4.847 tok/s with 16x16 rollback to 12.942s / 4.945 tok/s. E095 retiled batched MLP gate/up to 128x2 and moved that same 72-prompt-token fixture to 11.880s / 5.387 tok/s. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the bs=1 MLP bucket, so E095 is deliberately batch-only. E086 confirmed that applying 32x8 to bs=1 generic `linear_decode` regresses MLP down, full-attention, and GDN output projections, so E094 is also batch-only. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, now that explicit materialization exists for resident recurrent state.
+With E096 reverted, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and is now correctly gated to batch=1. E089 restored native-batch GDN input projection after the E088 misplaced guard, moving the four-prompt `max_tokens=16` fixture from the broken 46.581s / 1.374 tok/s back to 25.457s / 2.514 tok/s. E091 promoted batch fused-GDN resident state and moved the same fixture to 15.498s / 4.130 tok/s, with rollback `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE=1` at 25.917s / 2.469 tok/s. E092 retiled batched MLP gate/up to 64x4 and moved the fixture to 14.550s / 4.399 tok/s. E093 retiled batched GDN input projection to 64x4 and moved that fixture to 13.981s / 4.578 tok/s. E094 retiled the generic batched linear shader to 32x8 and improved a same-fixture 72-prompt-token four-prompt run from 13.204s / 4.847 tok/s with 16x16 rollback to 12.942s / 4.945 tok/s. E095 retiled batched MLP gate/up to 128x2 and moved that same 72-prompt-token fixture to 11.880s / 5.387 tok/s. E096 tried batched GDN input projection at 128x2 and regressed to 12.542s / 5.103, so E093's 64x4 GDN input-projection shape remains best. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the bs=1 MLP bucket, so E095 is deliberately batch-only. E086 confirmed that applying 32x8 to bs=1 generic `linear_decode` regresses MLP down, full-attention, and GDN output projections, so E094 is also batch-only. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, now that explicit materialization exists for resident recurrent state.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, E072 reuses those common prefixes across later batches, E091 keeps fused-GDN recurrent state resident through lockstep batch decode, E093 reduces batched GDN input-projection workgroup count, E094 reduces generic batched projection workgroup count, and E095 reduces batched MLP gate/up workgroup count further. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and reducing remaining MLP/lm-head/full-attention transfer boundaries.
