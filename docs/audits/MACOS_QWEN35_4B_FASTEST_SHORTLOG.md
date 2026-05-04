@@ -968,3 +968,14 @@
   versus `3050.0 ms` tuned, with no decode improvement (`219.1 ms` vs
   `220.7 ms` mean ITL over two tokens). Source was reverted because the
   endpoint signal is too small for another production branch.
+- 2026-05-04 E331: Refreshed current synchronized target profile with paged
+  layers, full-attention stages, and MLP stages enabled. This is an intrusive
+  profile, not a latency baseline: p64/o1 measured `514.1 ms` prefill and
+  `224.6 ms` mean ITL. Decode layer sums were linear/GDN `133.121 ms` across
+  24 layers and full attention `62.251 ms` across 8 layers. Decode MLP still
+  dominates: `gate_up_fused` `64.276 ms` plus `down_proj` `37.381 ms` across
+  32 layers. Full-attention decode remains projection-led but smaller:
+  `qkv_proj` `10.788 ms`, `o_proj` `5.515 ms`, then `qkv_split` `2.468 ms`.
+  Takeaway: next production work should change the MLP projection/materialized
+  hidden boundary or implement true model-forward/scheduler batching, not more
+  standalone QK-norm/RoPE/RMSNorm-style microbench wins.

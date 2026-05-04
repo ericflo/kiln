@@ -10158,3 +10158,91 @@ decode is not improved. The candidate would add another runtime branch for a
 change that is below reliable endpoint signal. Keep the current RMSNorm default
 and only revisit threadgroup tuning if a synchronized profile shows RMSNorm
 dominating a longer-prefill workload.
+
+## 2026-05-04 E331 - Refreshed current full-attention and MLP target profile
+
+### Goal
+
+Refresh target selection after E329 and E330 rejected standalone stage wins.
+This is an intrusive synchronized profile, not a latency baseline. The purpose
+is to keep the next low-level work aimed at actual endpoint bottlenecks rather
+than at isolated kernels that no longer move full-path timing.
+
+### Command
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 331`
+
+### Measured Profile Result
+
+- Final measured p64/o1 section: `514.1 ms` prefill, `224.6 ms` mean ITL.
+- Profiling synchronizes after every profiled stage, so these times are only
+  for target selection.
+
+Measured layer sums:
+
+| Shape | Layer kind | Count | Sum | Avg |
+|---|---|---:|---:|---:|
+| Decode `seq_len=1` | linear/GDN | 24 | `133.121 ms` | `5.547 ms` |
+| Decode `seq_len=1` | full attention | 8 | `62.251 ms` | `7.781 ms` |
+| Prefill `seq_len=64` | linear/GDN | 24 | `323.100 ms` | `13.463 ms` |
+| Prefill `seq_len=64` | full attention | 8 | `161.249 ms` | `20.156 ms` |
+
+Decode MLP stage sums across 32 layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `gate_up_fused` | `64.276 ms` | `2.009 ms` |
+| `down_proj` | `37.381 ms` | `1.168 ms` |
+
+Prefill MLP stage sums across 32 layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `down_proj` | `71.099 ms` | `2.222 ms` |
+| `gate_proj` | `64.617 ms` | `2.019 ms` |
+| `up_proj` | `64.085 ms` | `2.003 ms` |
+| `gate_silu` | `16.368 ms` | `0.511 ms` |
+| `hidden_mul` | `11.744 ms` | `0.367 ms` |
+
+Decode full-attention stage sums across 8 full-attention layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `qkv_proj` | `10.788 ms` | `1.349 ms` |
+| `o_proj` | `5.515 ms` | `0.689 ms` |
+| `qkv_split` | `2.468 ms` | `0.308 ms` |
+| `decode_attn_contiguous` | `2.253 ms` | `0.282 ms` |
+| `qk_norm` | `2.090 ms` | `0.261 ms` |
+| `rope` | `1.909 ms` | `0.239 ms` |
+| `attn_gate` | `1.890 ms` | `0.236 ms` |
+| `kv_write` | `1.851 ms` | `0.231 ms` |
+| `q_transpose` | `0.014 ms` | `0.002 ms` |
+
+Prefill full-attention stage sums across 8 full-attention layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `qkv_proj` | `20.299 ms` | `2.537 ms` |
+| `prefill_attn_fallback` | `14.101 ms` | `1.763 ms` |
+| `qkv_split` | `9.276 ms` | `1.159 ms` |
+| `q_transpose` | `4.790 ms` | `0.599 ms` |
+| `prefill_kv_head_layout` | `3.114 ms` | `0.389 ms` |
+| `rope` | `2.517 ms` | `0.315 ms` |
+| `qk_norm` | `2.496 ms` | `0.312 ms` |
+| `kv_write` | `2.426 ms` | `0.303 ms` |
+| `prefill_attn_head_major` | `0.029 ms` | `0.004 ms` |
+
+### Artifact
+
+- `e331_m1_p64_o1_layer_fullattn_mlp_profile.log`
+
+### Takeaway
+
+MLP projection work remains the main bs=1 decode target: `gate_up_fused` plus
+`down_proj` totals `101.657 ms` across the 32-layer decode step. Full-attention
+decode is still projection-led (`qkv_proj` then `o_proj`) but much smaller than
+the MLP slice. The rejected QK-norm/RoPE and RMSNorm tuning candidates are not
+where the next production win is likely to come from. The next serious work
+should either change the MLP projection arithmetic/materialization boundary or
+move to true model-forward/scheduler batching so the accepted B-row primitives
+can amortize this dominant MLP cost across requests.
