@@ -162,7 +162,7 @@ Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.13
+  Version: <workspace version>
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
@@ -319,7 +319,7 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 **Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
-**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.2` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, currently `kiln-v0.2.13`, so the version split is intentional.
+**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.2` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, so the version split is intentional.
 
 See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
 
@@ -355,8 +355,9 @@ Each `kiln-v*` tag publishes a `linux/amd64` CUDA 12.4 image to GHCR:
 
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
-# or pin a version:
-docker pull ghcr.io/ericflo/kiln-server:0.2.13
+# or pin the current latest version programmatically:
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+docker pull ghcr.io/ericflo/kiln-server:${KILN_VERSION}
 ```
 
 Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
@@ -384,7 +385,7 @@ sudo systemctl enable --now kiln
 
 ## Status
 
-Kiln v0.1.0 shipped on 2026-04-19 and the current release line is **kiln-v0.2.13** (released 2026-05-02). Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Active phase is Phase 11 — onboarding and polish for cold-reader developers. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
+Kiln v0.1.0 shipped on 2026-04-19 and the current release line follows the latest `kiln-v*` GitHub release. Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Active phase is Phase 11 — onboarding and polish for cold-reader developers. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
 
 Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 

@@ -35,7 +35,7 @@ Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The instal
 
 **Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
-**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.2` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, currently `kiln-v0.2.13`, so this quickstart is not stale.
+**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.2` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, so this quickstart is not stale.
 
 | Platform | Installer | Size |
 |----------|-----------|------|
@@ -129,7 +129,7 @@ You'll see the startup banner:
   │   inference · training · adapters   │
   └─────────────────────────────────────┘
 
-  Version: 0.2.13
+  Version: <workspace version>
   Mode:    GPU inference
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
