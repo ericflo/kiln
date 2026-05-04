@@ -8231,3 +8231,86 @@ reduction while avoiding E274-E277's extra per-vocab multiply. It does not
 address the larger measured hotspots (`GDN in_proj` and `GDN out_proj`), but it
 is a bounded low-level improvement on the greedy decode tail and keeps a
 same-binary fallback for any future output-parity investigation.
+
+## Experiments E282-E283: Accepted Prepared Prompt Reuse in Batch Groups
+
+Hypothesis:
+
+The real `/v1/completions/batch` path still fans out synthetic single-chat
+requests rather than running a true batched model forward. While true batching
+is the larger missing feature, the existing fan-out path was still re-entering
+prompt rendering/tokenization/cache-probe work for every sampled completion in
+the same prompt group. Preparing each distinct batch prompt once removes that
+server work without changing the model execution path.
+
+Change:
+
+- Added a prepared-prompt helper for batch-generated synthetic chat requests.
+- Each distinct `BatchPromptGroup` now renders and tokenizes its shared prompt
+  once, then passes the prepared prompt text and token IDs into each physical
+  completion in that group.
+- Preserved deterministic chat/completion caches and the existing real/mock
+  generation paths.
+- Added `KILN_DISABLE_BATCH_PREPARED_PROMPTS=1` for same-binary controls.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-server/src/api/completions.rs`
+  - Passed.
+- `cargo test -p kiln-server duplicate_batch_zero_prompts_skip_repeated_render_and_tokenize --lib`
+  - Passed.
+- `cargo test -p kiln-server concurrent_multi_output_greedy_batch_singleflights_before_prompt_work --lib`
+  - Passed before adding the env fallback.
+- `cargo test -p kiln-server batch_multi_sample_prepares_prompt_once_per_group --lib`
+  - Passed after adding a focused sampled `n>1` batch test. The test locks down
+    one rendered-prompt miss, zero rendered-prompt hits, one token-cache miss,
+    and zero token-cache hits for a single prompt with `n=3`.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release -p kiln-server --bin kiln --features metal`
+  - Passed before the live A/B.
+- `git diff --check`
+  - Passed.
+
+Live release-server same-prompt `n=4` batch:
+
+Both runs used the same request:
+
+- one prompt: `Write one short sentence about low-latency inference.`
+- `n=4`
+- `temperature=0.7`
+- `top_p=0.95`
+- `max_tokens=2`
+- `seed=282`
+
+The control restarted the same release binary with
+`KILN_DISABLE_BATCH_PREPARED_PROMPTS=1`. Both responses returned four
+2-token completions, 80 prompt tokens, 8 completion tokens, and HTTP 200.
+
+| Experiment | Variant | Wall time | Handler duration | Verdict |
+|---|---|---:|---:|---|
+| E282 | prepared batch prompts | 7.07 s | 7,063.568 ms | accepted |
+| E283 | disabled control | 25.31 s | 25,303.646 ms | control |
+
+Artifacts:
+
+- `e282_batch_prepared_prompts_request.json`
+- `e282_batch_prepared_prompts_enabled_response.json`
+- `e282_batch_prepared_prompts_enabled_time.log`
+- `e282_batch_prepared_prompts_enabled_metrics.prom`
+- `e282_health_enabled.json`
+- `e282_server_batch_prepared_prompts_enabled.log`
+- `e283_batch_prepared_prompts_disabled_control_response.json`
+- `e283_batch_prepared_prompts_disabled_control_time.log`
+- `e283_batch_prepared_prompts_disabled_control_metrics.prom`
+- `e283_health_disabled_control.json`
+- `e283_server_batch_prepared_prompts_disabled_control.log`
+
+Takeaway:
+
+This is not true bs>1 batched inference. It is still useful because it removes
+duplicated server-side prompt preparation inside the existing fan-out
+architecture, and it is covered by a focused counter test plus a same-binary
+control. The real larger win remains a scheduler/model-runner path that batches
+prefill/decode work across distinct requests instead of serializing forwards
+behind the shared paged-cache/model execution path.

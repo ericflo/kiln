@@ -671,3 +671,13 @@
   E279 control 424.4 ms / 165.7 ms / 6.04 tok/s; repeat E280 was 422.5 ms /
   162.8 ms / 6.14 tok/s versus E281 control 419.7 ms / 163.2 ms / 6.13 tok/s.
   Memory pressure was 81% free after E281.
+- 2026-05-04 E282-E283: Accepted prepared prompt reuse inside batch prompt
+  groups. The real `/v1/completions/batch` path still fans out synthetic
+  single-chat requests, but now each distinct prompt group renders/tokenizes
+  once and shares the prepared prompt text/tokens across physical completions.
+  Focused batch tests and `cargo check --locked -p kiln-server --features metal
+  --bin kiln --bin kiln-bench` passed. A live same-prompt `n=4`,
+  `max_tokens=2`, sampled release-server A/B measured E282 prepared at 7.07 s
+  wall / 7,063.568 ms handler versus E283 same-binary disabled control at
+  25.31 s / 25,303.646 ms. This is a server no-work cleanup for the current
+  fan-out architecture, not true model-forward batching.

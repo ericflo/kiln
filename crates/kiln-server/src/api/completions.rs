@@ -4047,6 +4047,18 @@ fn batch_prompt_groups(prompts: &[Vec<Message>]) -> Vec<BatchPromptGroup> {
     groups
 }
 
+fn batch_prepared_prompts_disabled() -> bool {
+    matches!(
+        std::env::var("KILN_DISABLE_BATCH_PREPARED_PROMPTS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
 #[cfg(test)]
 fn deterministic_batch_cache_key(
     req: &BatchCompletionRequest,
@@ -4894,6 +4906,7 @@ async fn batch_completions_inner(
     let clone_greedy_prompt_groups = batch_can_clone_identical_prompt_groups(&req);
     let prompt_count = req.prompts.len();
     let prompt_groups = batch_prompt_groups(&req.prompts);
+    let prepare_prompt_groups = !batch_prepared_prompts_disabled();
     let mut handles = Vec::with_capacity(prompt_groups.len());
     for prompt_group in prompt_groups {
         let state_clone = state.clone();
@@ -4911,6 +4924,13 @@ async fn batch_completions_inner(
                 messages,
                 prompt_indices,
             } = prompt_group;
+            let prepared_prompt = if prepare_prompt_groups {
+                let prompt_text = render_prompt_text(&state_clone, &messages, None, None)?;
+                let prompt_tokens = encode_prompt_tokens(&state_clone, &prompt_text)?;
+                Some((prompt_text, prompt_tokens))
+            } else {
+                None
+            };
             let mut group_responses = Vec::with_capacity(prompt_indices.len());
             let clone_prompt_group = clone_greedy_prompt_groups && prompt_indices.len() > 1;
             let mut cloned_group_response: Option<Vec<(usize, ChatCompletionResponse)>> = None;
@@ -4942,7 +4962,18 @@ async fn batch_completions_inner(
                         tools: None,
                         tool_choice: None,
                     };
-                    let resp = generate_one_response(&state_clone, synth_req).await?;
+                    let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
+                    {
+                        generate_one_prepared_prompt_response(
+                            &state_clone,
+                            synth_req,
+                            prompt_text,
+                            prompt_tokens,
+                        )
+                        .await?
+                    } else {
+                        generate_one_response(&state_clone, synth_req).await?
+                    };
                     responses.push((completion_idx, resp));
                 }
                 if clone_greedy_completions {
@@ -5213,13 +5244,8 @@ fn chat_response_from_multi_responses(
 /// The adapter is intentionally not re-resolved here — the caller (the batch
 /// handler) resolves the adapter once for the whole batch. This avoids
 /// pointless write-locking and re-loading the same adapter N times.
-async fn generate_one_response(
-    state: &AppState,
-    req: ChatCompletionRequest,
-) -> Result<ChatCompletionResponse, ApiError> {
-    let request_start = std::time::Instant::now();
-
-    let sampling = SamplingParams {
+fn sampling_params_for_chat_request(req: &ChatCompletionRequest) -> SamplingParams {
+    SamplingParams {
         temperature: req.temperature.unwrap_or(1.0),
         top_p: req.top_p.unwrap_or(1.0),
         top_k: req.top_k.unwrap_or(0),
@@ -5227,7 +5253,15 @@ async fn generate_one_response(
         stop: normalized_stop_for_generation(req.stop.as_deref()),
         seed: req.seed,
         ..Default::default()
-    };
+    }
+}
+
+async fn generate_one_response(
+    state: &AppState,
+    req: ChatCompletionRequest,
+) -> Result<ChatCompletionResponse, ApiError> {
+    let request_start = std::time::Instant::now();
+    let sampling = sampling_params_for_chat_request(&req);
 
     let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
         &req,
@@ -5277,6 +5311,92 @@ async fn generate_one_response(
     )?;
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
 
+    generate_one_prepared_response(
+        state,
+        &req,
+        request_start,
+        &sampling,
+        chat_request_cache_key,
+        chat_request_cache_owner,
+        &prompt_text,
+        &prompt_tokens,
+    )
+    .await
+}
+
+async fn generate_one_prepared_prompt_response(
+    state: &AppState,
+    req: ChatCompletionRequest,
+    prompt_text: &str,
+    prompt_tokens: &[TokenId],
+) -> Result<ChatCompletionResponse, ApiError> {
+    let request_start = std::time::Instant::now();
+    let sampling = sampling_params_for_chat_request(&req);
+
+    let chat_request_cache_key = deterministic_chat_request_cache_key_with_vocab_size(
+        &req,
+        &sampling,
+        state.model_config.vocab_size,
+    )?;
+    let can_hit_chat_request_cache_before_prompt_work =
+        state.active_adapter_name.read().unwrap().is_none();
+    let mut chat_request_cache_owner = None;
+    if can_hit_chat_request_cache_before_prompt_work
+        && let Some(key) = chat_request_cache_key.as_ref()
+    {
+        let claim = state.chat_request_cache.lock().unwrap().claim(key);
+        match claim {
+            DeterministicChatRequestCacheClaim::Hit(cached) => {
+                return Ok(response_from_cached_chat_request(
+                    state,
+                    &req,
+                    request_start,
+                    cached,
+                ));
+            }
+            DeterministicChatRequestCacheClaim::Wait(receiver) => {
+                if let Some(cached) = wait_for_deterministic_chat_request(receiver).await {
+                    return Ok(response_from_cached_chat_request(
+                        state,
+                        &req,
+                        request_start,
+                        cached,
+                    ));
+                }
+            }
+            DeterministicChatRequestCacheClaim::Owner => {
+                chat_request_cache_owner = Some(ChatRequestCacheOwnerGuard::new(
+                    state.chat_request_cache.clone(),
+                    key.clone(),
+                ));
+            }
+        }
+    }
+
+    generate_one_prepared_response(
+        state,
+        &req,
+        request_start,
+        &sampling,
+        chat_request_cache_key,
+        chat_request_cache_owner,
+        prompt_text,
+        prompt_tokens,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_one_prepared_response(
+    state: &AppState,
+    req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
+    sampling: &SamplingParams,
+    chat_request_cache_key: Option<String>,
+    mut chat_request_cache_owner: Option<ChatRequestCacheOwnerGuard>,
+    prompt_text: &str,
+    prompt_tokens: &[TokenId],
+) -> Result<ChatCompletionResponse, ApiError> {
     let completion_cache_key = deterministic_completion_cache_key(state, &prompt_tokens, &sampling);
     let mut completion_cache_owner = false;
     if let Some(key) = completion_cache_key.as_ref() {
@@ -5335,10 +5455,10 @@ async fn generate_one_response(
                 block_manager,
                 paged_cache,
                 prefix_cache,
-                &prompt_text,
-                &prompt_tokens,
-                &sampling,
-                &req,
+                prompt_text,
+                prompt_tokens,
+                sampling,
+                req,
                 request_start,
             )
             .await;
@@ -5374,9 +5494,9 @@ async fn generate_one_response(
                 state,
                 scheduler,
                 engine,
-                &prompt_tokens,
-                &sampling,
-                &req,
+                prompt_tokens,
+                sampling,
+                req,
                 request_start,
             )
             .await;
@@ -11867,6 +11987,39 @@ mod tests {
             "duplicate zero-token batch prompts should skip repeated token lookups"
         );
         assert_eq!(token_entries, 1);
+    }
+
+    #[tokio::test]
+    async fn batch_multi_sample_prepares_prompt_once_per_group() {
+        let state = make_batch_test_state();
+        let body = serde_json::json!({
+            "prompts": [[{"role":"user","content":"same sampled prompt"}]],
+            "n": 3,
+            "temperature": 0.7,
+            "max_tokens": 1,
+            "seed": 282
+        })
+        .to_string();
+
+        let (status, body) = batch_post(state.clone(), &body).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["completions"].as_array().unwrap().len(), 3);
+
+        let (render_hits, render_misses, render_entries) =
+            state.rendered_prompt_cache.lock().unwrap().stats();
+        assert_eq!(
+            (render_hits, render_misses, render_entries),
+            (0, 1, 1),
+            "sampled n>1 batch should prepare the shared prompt once"
+        );
+
+        let (token_hits, token_misses, token_entries) =
+            state.prompt_token_cache.lock().unwrap().stats();
+        assert_eq!(
+            (token_hits, token_misses, token_entries),
+            (0, 1, 1),
+            "sampled n>1 batch should tokenize the shared prompt once"
+        );
     }
 
     #[test]
