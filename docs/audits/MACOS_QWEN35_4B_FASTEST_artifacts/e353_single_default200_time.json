@@ -1,0 +1,7 @@
+{
+  "elapsed_secs": 5.5042005410650745,
+  "status": 200,
+  "bytes": 6909,
+  "max_tokens": 32,
+  "prompt": "Write a detailed paragraph about the practical tradeoffs in low latency inference serving."
+}

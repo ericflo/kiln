@@ -1169,3 +1169,9 @@
   `5.059628s`; `200us` won at `4.951647s` with `8` batches and max batch `4`;
   `300us` rose to `5.060804s`. `KILN_DECODE_BATCH_WAIT_US=0` remains the
   zero-wait override and `KILN_DECODE_BATCHER=0` remains the kill switch.
+- 2026-05-04 E353: Checked bs=1 streaming latency after E352. Same prompt,
+  prewarmed release server, greedy `max_tokens=32`, and `32` generated tokens:
+  default `200us` wait took `5.504201s`; `KILN_DECODE_BATCH_WAIT_US=0` took
+  `5.529497s`. Both paths submitted `31` one-row batcher jobs, executed `31`
+  batches, and observed max batch `1`. No measurable single-user latency
+  regression from the `200us` default in this probe.

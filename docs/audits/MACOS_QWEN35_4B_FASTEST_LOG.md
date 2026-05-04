@@ -11449,3 +11449,62 @@ same-position peers. This is an end-to-end serving win on the measured
 four-request streaming workload, and the override remains explicit:
 `KILN_DECODE_BATCH_WAIT_US=0` for zero wait and `KILN_DECODE_BATCHER=0` to
 disable the batcher entirely.
+
+## 2026-05-04 E353 - Checked bs=1 latency impact of 200us wait
+
+### Goal
+
+Validate that E352's `200us` default admission wait does not materially harm
+single-user streaming latency. The higher-concurrency sweep won with `200us`,
+but a lone request has no peers and therefore can only pay the wait unless the
+timeout is lost in scheduling noise.
+
+### Change
+
+No source change. Ran a same-prompt single streaming request after background
+prewarm with default `200us` wait and with `KILN_DECODE_BATCH_WAIT_US=0`.
+
+### Validation
+
+- Release server was built in E352 and reused.
+- Both servers were allowed to finish background inference prewarm before the
+  measured request.
+- Metrics captured after each request.
+
+### Results
+
+Single streaming request, greedy, `max_tokens=32`, `32` generated tokens:
+
+- Default `200us` wait:
+  - wall time `5.504201s`
+  - `31` submitted batcher jobs
+  - `31` worker batches
+  - `31` rows
+  - max batch `1`
+- `KILN_DECODE_BATCH_WAIT_US=0`:
+  - wall time `5.529497s`
+  - `31` submitted batcher jobs
+  - `31` worker batches
+  - `31` rows
+  - max batch `1`
+
+The difference is noise-level and the default `200us` run was slightly faster
+on this probe, so E352's concurrency win does not currently show a measurable
+bs=1 latency penalty.
+
+### Artifact
+
+- `e353_single_default200_server.log`
+- `e353_single_default200_metrics.prom`
+- `e353_single_default200_time.json`
+- `e353_single_default200_response.sse`
+- `e353_single_wait0_server.log`
+- `e353_single_wait0_metrics.prom`
+- `e353_single_wait0_time.json`
+- `e353_single_wait0_response.sse`
+
+### Decision
+
+Accepted as validation for E352. Keep the `200us` default wait and retain
+`KILN_DECODE_BATCH_WAIT_US=0` as the explicit zero-wait override for workloads
+that prioritize single-request latency above concurrent throughput.
