@@ -14,4 +14,4 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 tracing = { workspace = true }
 ash = "0.37.3"
 libc = "0.2"
-libloading = "0.8"
+libloading = "0.9"
