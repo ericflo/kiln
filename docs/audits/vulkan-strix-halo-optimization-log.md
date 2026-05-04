@@ -2081,8 +2081,37 @@ Verdict:
 - No bs=1 regression signal from the kept E069 branch state.
 - This remains in the same noisy ~329-331ms band observed in E067-E068, while the best recent source anchor is still E059's 318.1ms.
 
+### E072: Register Batch-Local Common Prefixes In The External Prefix Cache
+
+Change:
+- Extended native batch output with an optional shared-prefix registration produced by E069's batch-local common-prefix prefill.
+- The server now registers that shared prefix in the normal prefix cache before row-level prompt registrations after a successful native batch response.
+- The registration owns the shared prefix KV blocks and the matching linear-attention state snapshot, so later batches with the same long prefix but different suffixes can hit the external cache instead of recomputing the common prefix.
+
+Reasoning:
+- E069 removes duplicate prefill inside one all-miss batch, but row prompt lengths are often not block-aligned and therefore do not necessarily register anything reusable for later batches.
+- The common prefix itself is already block-aligned by construction and has a complete KV/linear-state snapshot.
+- Registering it turns the first long shared-prefix all-miss batch into a warmup for later traffic with the same system/developer/user preamble.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-model native_batch_greedy_reuses_common_block_prefix -- --nocapture` passed and now asserts a shared-prefix registration with 32 tokens / 8 blocks in the unit fixture.
+  - `cargo test -p kiln-model native_batch_greedy -- --nocapture` passed, 3 tests.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Fresh-server two-batch long shared-prefix fixture:
+  - Batch 1, cache empty: 18.124s / 0.441 tok/s. Logs confirmed E069 local prefix prefill: `cached_tokens=416`, 26 blocks, 9090.4ms common-prefix prefill, then 23-24 token suffix prefills.
+  - Batch 2, same 416-token shared prefix with different suffixes: 9.045s / 0.884 tok/s. Logs showed no local-prefix prefill; each row arrived as an external prefix-cache hit with `cached_tokens=416` and only 23-25 suffix tokens.
+  - Relative to the E069 first-batch baseline, repeated long-prefix traffic is about 2.0x faster; relative to the E069 rollback guard from E069 (39.222s / 0.204 tok/s), the warmed second batch is about 4.34x faster.
+
+Verdict:
+- Keep.
+- This removes repeated long-prefix prefill across batches while preserving E069's first-batch all-miss win.
+- Rollback for a clean server remains `KILN_DISABLE_VULKAN_BATCH_LOCAL_PREFIX_REUSE=1`, which prevents the batch-local shared-prefix prefill and therefore prevents this registration path from producing new shared-prefix entries.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
 
-For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, and E069 removes duplicate prefill for long in-batch common prefixes. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
+For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.

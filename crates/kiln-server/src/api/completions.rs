@@ -2423,6 +2423,11 @@ async fn try_native_vulkan_batch_greedy_response(
             for &entry_id in &hit_entry_ids {
                 cache.release_hit(entry_id);
             }
+            if let Some(registration) = batch_output.shared_prefix_registration.take() {
+                let outcome = cache.register(adapter.clone(), registration);
+                retained_blocks.extend(outcome.retained_blocks);
+                evicted_blocks.extend(outcome.evicted_blocks);
+            }
             for registration in batch_output.registrations.into_iter().flatten() {
                 let outcome = cache.register(adapter.clone(), registration);
                 retained_blocks.extend(outcome.retained_blocks);

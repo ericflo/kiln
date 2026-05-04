@@ -106,6 +106,7 @@ pub struct PrefixCachedGenerationOutput {
 pub struct PagedBatchGenerationOutput {
     pub outputs: Vec<GenerationOutput>,
     pub registrations: Vec<Option<PagedPrefixRegistration>>,
+    pub shared_prefix_registration: Option<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
 }
 
@@ -1267,6 +1268,16 @@ impl ModelRunner {
         } else {
             None
         };
+        let shared_prefix_registration =
+            match (batch_local_prefix_tokens, &batch_local_prefix_state) {
+                (0, _) => None,
+                (_, Some(prefix_state)) => Some(PagedPrefixRegistration {
+                    prompt_tokens: prompts[0][..batch_local_prefix_tokens].to_vec(),
+                    block_ids: batch_local_prefix_blocks.clone(),
+                    linear_state: prefix_state.snapshot()?,
+                }),
+                (_, None) => None,
+            };
 
         struct BatchSeq {
             next_token: TokenId,
@@ -1546,6 +1557,7 @@ impl ModelRunner {
         Ok(PagedBatchGenerationOutput {
             outputs,
             registrations,
+            shared_prefix_registration,
             allocated_blocks,
         })
     }
@@ -5520,6 +5532,17 @@ mod tests {
         assert_eq!(output.outputs.len(), 2);
         assert_eq!(output.outputs[0].token_ids, vec![5, 5]);
         assert_eq!(output.outputs[1].token_ids, vec![6, 6]);
+        let shared_registration = output
+            .shared_prefix_registration
+            .as_ref()
+            .expect("shared local prefix should be registrable");
+        assert_eq!(shared_registration.prompt_tokens.len(), 32);
+        assert_eq!(shared_registration.block_ids.len(), 8);
+        assert_eq!(
+            shared_registration.block_ids,
+            output.allocated_blocks[..8],
+            "shared prefix registration should retain the shared prefix blocks"
+        );
         assert_eq!(
             output.allocated_blocks.len(),
             10,
