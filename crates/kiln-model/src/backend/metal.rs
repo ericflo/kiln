@@ -1655,6 +1655,7 @@ pub(crate) fn metal_rotary_embedding_supports(
         return false;
     };
     let half_rotary = rotary_dim / 2;
+    let table_batch_stride = metal_rotary_table_batch_stride(cos, sin, batch, seq_len, half_rotary);
     let Some(total_q) = batch
         .checked_mul(seq_len)
         .and_then(|n| n.checked_mul(q_heads))
@@ -1676,8 +1677,7 @@ pub(crate) fn metal_rotary_embedding_supports(
         && rotary_dim > 0
         && rotary_dim <= head_dim
         && rotary_dim % 2 == 0
-        && cos.dims() == [seq_len, half_rotary].as_slice()
-        && sin.dims() == [seq_len, half_rotary].as_slice()
+        && table_batch_stride.is_some()
         && batch <= u32::MAX as usize
         && seq_len <= u32::MAX as usize
         && q_heads <= u32::MAX as usize
@@ -1687,6 +1687,23 @@ pub(crate) fn metal_rotary_embedding_supports(
         && total_q <= u32::MAX as usize
         && total_k <= u32::MAX as usize
         && total_q <= (u32::MAX as usize).saturating_sub(total_k)
+}
+
+fn metal_rotary_table_batch_stride(
+    cos: &Tensor,
+    sin: &Tensor,
+    batch: usize,
+    seq_len: usize,
+    half_rotary: usize,
+) -> Option<usize> {
+    if cos.dims() != sin.dims() {
+        return None;
+    }
+    match cos.dims() {
+        [t, r] if (*t, *r) == (seq_len, half_rotary) => Some(0),
+        [b, t, r] if (*b, *t, *r) == (batch, seq_len, half_rotary) => Some(seq_len),
+        _ => None,
+    }
 }
 
 const METAL_RMSNORM_KERNEL: &str = r#"
@@ -1755,6 +1772,7 @@ kernel void kiln_rotary_qk_bf16(
     constant uint& rotary_dim [[buffer(11)]],
     constant uint& total_q [[buffer(12)]],
     constant uint& total [[buffer(13)]],
+    constant uint& table_batch_stride [[buffer(14)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= total) {
@@ -1784,7 +1802,8 @@ kernel void kiln_rotary_qk_bf16(
     const bool first_half = d < half_rotary;
     const uint pair_d = first_half ? d + half_rotary : d - half_rotary;
     const uint pair_idx = ((b * seq_len + t) * heads + h) * head_dim + pair_d;
-    const uint table_idx = t * half_rotary + (first_half ? d : pair_d);
+    const uint table_t = table_batch_stride == 0 ? t : b * table_batch_stride + t;
+    const uint table_idx = table_t * half_rotary + (first_half ? d : pair_d);
     const float x = static_cast<float>(src[local]);
     const float y = static_cast<float>(src[pair_idx]);
     const float c = cos[table_idx];
@@ -4763,6 +4782,9 @@ pub(crate) fn metal_rotary_embedding_bf16(
     );
     let (batch, seq_len, q_heads, _) = q.dims4()?;
     let (_, _, k_heads, _) = k.dims4()?;
+    let table_batch_stride =
+        metal_rotary_table_batch_stride(cos, sin, batch, seq_len, rotary_dim / 2)
+            .context("metal rotary qk unsupported position table shape")?;
     let q_shape = q.dims().to_vec();
     let k_shape = k.dims().to_vec();
     // SAFETY: the kernel dispatch writes every Q output element exactly once.
@@ -4840,6 +4862,7 @@ pub(crate) fn metal_rotary_embedding_bf16(
         let total = total_q + total_k;
         let total_q_u32 = total_q as u32;
         let total_u32 = total as u32;
+        let table_batch_stride_u32 = table_batch_stride as u32;
         encoder.set_bytes(6, &batch_u32);
         encoder.set_bytes(7, &seq_len_u32);
         encoder.set_bytes(8, &q_heads_u32);
@@ -4848,6 +4871,7 @@ pub(crate) fn metal_rotary_embedding_bf16(
         encoder.set_bytes(11, &rotary_dim_u32);
         encoder.set_bytes(12, &total_q_u32);
         encoder.set_bytes(13, &total_u32);
+        encoder.set_bytes(14, &table_batch_stride_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
@@ -9471,6 +9495,50 @@ mod tests {
             .contiguous()?)
     }
 
+    fn patterned_bf16_4d(
+        batch: usize,
+        seq_len: usize,
+        heads: usize,
+        head_dim: usize,
+        device: &Device,
+        modulus: usize,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let elems = batch * seq_len * heads * head_dim;
+        let data: Vec<f32> = (0..elems)
+            .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
+            .collect();
+        Ok(
+            Tensor::from_slice(&data, (batch, seq_len, heads, head_dim), device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?,
+        )
+    }
+
+    fn patterned_rotary_tables_3d(
+        batch: usize,
+        seq_len: usize,
+        half_rotary: usize,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor)> {
+        let elems = batch * seq_len * half_rotary;
+        let mut cos_data = Vec::with_capacity(elems);
+        let mut sin_data = Vec::with_capacity(elems);
+        for b in 0..batch {
+            for t in 0..seq_len {
+                for d in 0..half_rotary {
+                    let angle = ((b * 29 + t * 7 + d) as f32 + 0.5) * 0.03125;
+                    cos_data.push(angle.cos());
+                    sin_data.push(angle.sin());
+                }
+            }
+        }
+        Ok((
+            Tensor::from_slice(&cos_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
+            Tensor::from_slice(&sin_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
+        ))
+    }
+
     fn mlp_gate_up_reference(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
         let gate = x.broadcast_matmul(gate_t)?;
         let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
@@ -9506,6 +9574,37 @@ mod tests {
         }
         let row_refs: Vec<&Tensor> = rows.iter().collect();
         Tensor::cat(&row_refs, 0).context("stack rowwise contiguous decode outputs")
+    }
+
+    fn rotary_qk_rowwise(
+        q: &Tensor,
+        k: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        head_dim: usize,
+        rotary_dim: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let (batch, _, _, _) = q.dims4()?;
+        anyhow::ensure!(
+            cos.dims().len() == 3 && sin.dims().len() == 3,
+            "rowwise rotary qk expects 3D per-batch tables"
+        );
+        let mut q_rows = Vec::with_capacity(batch);
+        let mut k_rows = Vec::with_capacity(batch);
+        for idx in 0..batch {
+            let q_row = q.narrow(0, idx, 1)?.contiguous()?;
+            let k_row = k.narrow(0, idx, 1)?.contiguous()?;
+            let cos_row = cos.narrow(0, idx, 1)?.squeeze(0)?.contiguous()?;
+            let sin_row = sin.narrow(0, idx, 1)?.squeeze(0)?.contiguous()?;
+            let (q_rot, k_rot) = metal_rotary_embedding_bf16(
+                &q_row, &k_row, &cos_row, &sin_row, head_dim, rotary_dim,
+            )?;
+            q_rows.push(q_rot);
+            k_rows.push(k_rot);
+        }
+        let q_refs: Vec<&Tensor> = q_rows.iter().collect();
+        let k_refs: Vec<&Tensor> = k_rows.iter().collect();
+        Ok((Tensor::cat(&q_refs, 0)?, Tensor::cat(&k_refs, 0)?))
     }
 
     fn bench_metal_tensor_op<F>(
@@ -9554,6 +9653,37 @@ mod tests {
             op()?;
         }
         device.synchronize()?;
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn bench_metal_pair_op<F>(
+        device: &Device,
+        warmup: usize,
+        iters: usize,
+        mut op: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> Result<(Tensor, Tensor)>,
+    {
+        let mut last = None;
+        for _ in 0..warmup {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((a, b)) = &last {
+            std::hint::black_box((a.dims(), b.dims()));
+        }
+        drop(last);
+
+        let start = Instant::now();
+        let mut last = None;
+        for _ in 0..iters {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((a, b)) = &last {
+            std::hint::black_box((a.dims(), b.dims()));
+        }
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
     }
 
@@ -9835,6 +9965,108 @@ mod tests {
             broadcast_us / tile4_us,
             broadcast_us / tile8_us,
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_metal_rotary_embedding_batched_position_tables_match_rowwise() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_rotary_embedding_batched_position_tables_match_rowwise"
+            );
+            return Ok(());
+        };
+
+        let batch = 3usize;
+        let seq_len = 1usize;
+        let q_heads = 4usize;
+        let k_heads = 2usize;
+        let head_dim = 16usize;
+        let rotary_dim = 8usize;
+        let q = patterned_bf16_4d(batch, seq_len, q_heads, head_dim, &device, 37, 0.03125)?;
+        let k = patterned_bf16_4d(batch, seq_len, k_heads, head_dim, &device, 41, 0.03125)?;
+        let (cos, sin) = patterned_rotary_tables_3d(batch, seq_len, rotary_dim / 2, &device)?;
+        device.synchronize()?;
+
+        assert!(metal_rotary_embedding_supports(
+            &q, &k, &cos, &sin, head_dim, rotary_dim
+        ));
+        let (q_batched, k_batched) =
+            metal_rotary_embedding_bf16(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+        let (q_rowwise, k_rowwise) = rotary_qk_rowwise(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+        device.synchronize()?;
+
+        assert_eq!(q_batched.dims(), q.dims());
+        assert_eq!(k_batched.dims(), k.dims());
+        let q_max = max_abs_diff(&q_rowwise, &q_batched)?;
+        let k_max = max_abs_diff(&k_rowwise, &k_batched)?;
+        assert!(
+            q_max < 1e-6 && k_max < 1e-6,
+            "batched rotary position tables differ from rowwise q={q_max:e} k={k_max:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_rotary_embedding_batched_position_tables_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_ROTARY_BATCH_TABLE_BENCH_WARMUP", 20);
+        let iters = env_usize("KILN_METAL_ROTARY_BATCH_TABLE_BENCH_ITERS", 200);
+        let seq_len = 1usize;
+        let q_heads = 16usize;
+        let k_heads = 4usize;
+        let head_dim = 256usize;
+        let rotary_dim = 64usize;
+
+        for batch in [1usize, 2, 4, 8] {
+            let q = patterned_bf16_4d(batch, seq_len, q_heads, head_dim, &device, 97, 0.0005)?;
+            let k = patterned_bf16_4d(batch, seq_len, k_heads, head_dim, &device, 89, 0.0007)?;
+            let (cos, sin) = patterned_rotary_tables_3d(batch, seq_len, rotary_dim / 2, &device)?;
+            device.synchronize()?;
+
+            assert!(metal_rotary_embedding_supports(
+                &q, &k, &cos, &sin, head_dim, rotary_dim
+            ));
+            let (q_rowwise, k_rowwise) =
+                rotary_qk_rowwise(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+            let (q_batched, k_batched) =
+                metal_rotary_embedding_bf16(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+            device.synchronize()?;
+
+            let q_max = max_abs_diff(&q_rowwise, &q_batched)?;
+            let k_max = max_abs_diff(&k_rowwise, &k_batched)?;
+            assert!(
+                q_max < 1e-6 && k_max < 1e-6,
+                "Qwen3.5 rotary batch={batch} rowwise max_abs_diff q={q_max:e} k={k_max:e}"
+            );
+
+            let rowwise_us = bench_metal_pair_op(&device, warmup, iters, || {
+                rotary_qk_rowwise(&q, &k, &cos, &sin, head_dim, rotary_dim)
+                    .context("bench rowwise rotary qk per-batch tables")
+            })?;
+            let batched_us = bench_metal_pair_op(&device, warmup, iters, || {
+                metal_rotary_embedding_bf16(&q, &k, &cos, &sin, head_dim, rotary_dim)
+                    .context("bench batched rotary qk per-batch tables")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 rotary QK batched position tables decode BF16: \
+                 batch={batch} physical_tokens={physical_tokens} \
+                 q=[{batch},{seq_len},{q_heads},{head_dim}] \
+                 k=[{batch},{seq_len},{k_heads},{head_dim}] \
+                 cos/sin=[{batch},{seq_len},{}] warmup={warmup} iters={iters} \
+                 rowwise={rowwise_us:.3} us batched={batched_us:.3} us speedup={:.3}x \
+                 q_max_abs_diff={q_max:.6e} k_max_abs_diff={k_max:.6e}",
+                rotary_dim / 2,
+                rowwise_us / batched_us,
+            );
+        }
 
         Ok(())
     }

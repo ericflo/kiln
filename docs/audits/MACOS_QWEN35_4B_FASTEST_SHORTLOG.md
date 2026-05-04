@@ -988,3 +988,15 @@
   `127059.996 us` (0.034x), and seq128 `7977.654 us` vs `262751.358 us`
   (0.030x). Source was reverted; useful prefill MLP fusion would need a real
   matrix-kernel shape, not the decode GEMV-style kernel.
+- 2026-05-04 E333: Accepted batched RoPE position tables as a true bs>1
+  batching primitive. The Metal rotary Q/K kernel still supports the existing
+  shared 2D `[seq_len, half_rotary]` tables, and now also supports per-row 3D
+  `[batch, seq_len, half_rotary]` tables through one `table_batch_stride`
+  argument. This removes a model-forward blocker for continuous decode batches
+  whose rows have different absolute positions. The focused Metal test matched
+  rowwise launches exactly. Qwen3.5 decode-shape synthetic results
+  `q=[B,1,16,256]`, `k=[B,1,4,256]`, `cos/sin=[B,1,32]` were batch1
+  `73.211 us` -> `72.430 us` (1.011x), batch2 `326.505 us` -> `71.146 us`
+  (4.589x), batch4 `646.147 us` -> `72.520 us` (8.910x), and batch8
+  `1284.864 us` -> `75.740 us` (16.964x), all exact. This is not yet an
+  endpoint win; scheduler/model-forward batching still needs to feed B rows.

@@ -10298,3 +10298,58 @@ prefill matmul path is far more efficient even though it materializes
 intermediate gate/up tensors. This closes off the naive "reuse decode fused
 gate/up for prefill" route. A useful prefill MLP materialization change would
 need a real matrix-kernel shape, not the decode GEMV-style kernel.
+
+## 2026-05-04 E333 - Accepted batched RoPE position tables for true decode batching
+
+### Goal
+
+Remove a real bs>1 model-forward blocker instead of optimizing around the cache
+alone. Existing B-row decode primitives can operate on `[B,1,...]` tensors, but
+the Metal RoPE kernel only accepted shared 2D tables `[seq_len, half_rotary]`.
+Continuous batching needs each request row to use its own absolute position
+even when all rows have `seq_len == 1`.
+
+### Change
+
+- Kept the existing 2D RoPE table path unchanged.
+- Extended `metal_rotary_embedding_supports` and the Metal
+  `kiln_rotary_qk_bf16` kernel to also accept 3D tables
+  `[batch, seq_len, half_rotary]`.
+- Added one kernel argument, `table_batch_stride`, so 2D tables use the old
+  `t` index while 3D tables use `b * seq_len + t`.
+- Added a focused Metal test comparing one batched 3D-table launch to rowwise
+  2D-table launches.
+- Added an ignored Qwen3.5 decode-shape synthetic benchmark comparing rowwise
+  current launches with one batched launch.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_metal_rotary_embedding_batched_position_tables_match_rowwise --lib`
+- `cargo test -p kiln-model --features metal test_metal_rotary_embedding_matches_fallback --lib`
+- `KILN_METAL_ROTARY_BATCH_TABLE_BENCH_WARMUP=20 KILN_METAL_ROTARY_BATCH_TABLE_BENCH_ITERS=200 cargo test -p kiln-model --features metal bench_rotary_embedding_batched_position_tables_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5 full-attention decode RoPE shape
+`q=[B,1,16,256]`, `k=[B,1,4,256]`, `cos/sin=[B,1,32]`:
+
+| Batch | Rowwise 2D launches | Batched 3D-table launch | Speedup | Q max diff | K max diff |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `73.211 us` | `72.430 us` | `1.011x` | `0.000000e0` | `0.000000e0` |
+| 2 | `326.505 us` | `71.146 us` | `4.589x` | `0.000000e0` | `0.000000e0` |
+| 4 | `646.147 us` | `72.520 us` | `8.910x` | `0.000000e0` | `0.000000e0` |
+| 8 | `1284.864 us` | `75.740 us` | `16.964x` | `0.000000e0` | `0.000000e0` |
+
+### Artifact
+
+- `e333_rotary_batched_position_tables_synthetic.log`
+
+### Decision
+
+Accepted as a low-level true-batching primitive. This does not change current
+single-request endpoint latency by itself and should not be counted as an
+endpoint win yet. It removes the per-sequence RoPE-position blocker for future
+batched model-forward work, where each decode row can carry a different
+absolute position without falling back to rowwise launches.
