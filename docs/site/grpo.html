@@ -144,6 +144,40 @@
         width: 100%;
       }
     }
+
+    .copy-code-shell {
+      position: relative;
+    }
+    .copy-code-shell pre {
+      padding-right: 4.75rem;
+    }
+    .copy-code-button {
+      position: absolute;
+      top: 0.65rem;
+      right: 0.65rem;
+      z-index: 1;
+      border: 1px solid var(--line-2);
+      border-radius: 999px;
+      background: rgba(11, 13, 16, 0.88);
+      color: var(--fg-dim);
+      cursor: pointer;
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1;
+      padding: 0.45rem 0.65rem;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .copy-code-button:hover,
+    .copy-code-button:focus-visible {
+      background: var(--bg-soft-2);
+      border-color: rgba(249, 115, 22, 0.55);
+      color: var(--fg);
+      outline: none;
+    }
+    .copy-code-button.is-copied {
+      border-color: rgba(34, 197, 94, 0.55);
+      color: #86efac;
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -366,5 +400,69 @@
       </nav>
     </div>
   </footer>
+
+  <script>
+    (() => {
+      const resetDelay = 1800;
+
+      function selectCode(code) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      async function copyCode(code) {
+        const text = code.innerText.replace(/\n$/, "");
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+
+        selectCode(code);
+        const copied = document.execCommand && document.execCommand("copy");
+        if (!copied) {
+          console.info("Kiln docs: clipboard unavailable; selected the code block for manual copy.");
+        }
+        return copied;
+      }
+
+      document.querySelectorAll("pre > code").forEach((code) => {
+        const pre = code.parentElement;
+        if (!pre || pre.parentElement.classList.contains("copy-code-shell")) return;
+
+        const shell = document.createElement("div");
+        shell.className = "copy-code-shell";
+        pre.parentNode.insertBefore(shell, pre);
+        shell.appendChild(pre);
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "copy-code-button";
+        button.textContent = "Copy";
+        button.setAttribute("aria-label", "Copy code block");
+        shell.appendChild(button);
+
+        button.addEventListener("click", async () => {
+          try {
+            const copied = await copyCode(code);
+            button.textContent = copied ? "Copied" : "Selected";
+            button.classList.toggle("is-copied", copied);
+          } catch (error) {
+            selectCode(code);
+            console.info("Kiln docs: clipboard copy failed; selected the code block for manual copy.", error);
+            button.textContent = "Selected";
+            button.classList.remove("is-copied");
+          }
+
+          window.setTimeout(() => {
+            button.textContent = "Copy";
+            button.classList.remove("is-copied");
+          }, resetDelay);
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
