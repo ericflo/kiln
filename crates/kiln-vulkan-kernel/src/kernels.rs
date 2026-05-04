@@ -1563,7 +1563,7 @@ pub fn dispatch_linear_decode_argmax_batched_cached(
         .context("failed to create batched linear argmax x staging buffer")?;
     VulkanBuffer::write_host_visible(device, &x_stage, &x_data)?;
 
-    let block_count = out_dim.div_ceil(32);
+    let block_count = out_dim.div_ceil(64);
     let total_blocks = batch * block_count;
     let block_score_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, (total_blocks * 4) as u64)
