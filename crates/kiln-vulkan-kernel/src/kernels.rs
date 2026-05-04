@@ -674,7 +674,7 @@ pub fn dispatch_gdn_in_proj_decode_cached(
         if batch == 1 {
             total_out.div_ceil(16) as u32
         } else {
-            (batch * total_out.div_ceil(64)) as u32
+            (batch * total_out.div_ceil(80)) as u32
         },
     )
     .context("gdn_in_proj_decode kernel failed")?;
@@ -823,7 +823,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             if batch == 1 {
                 total_out.div_ceil(16) as u32
             } else {
-                (batch * total_out.div_ceil(64)) as u32
+                (batch * total_out.div_ceil(80)) as u32
             },
             1,
             1,
