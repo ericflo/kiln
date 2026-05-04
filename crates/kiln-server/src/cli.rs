@@ -9,6 +9,8 @@ const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process
 
 Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
 
+After `kiln serve`, open http://127.0.0.1:8420/ui for the embedded dashboard: status, adapters, training monitoring, and quick inference.
+
 Common next steps:
   kiln serve          start the server explicitly
   kiln health         inspect a running server
@@ -20,6 +22,8 @@ Common next steps:
 const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
   kiln serve
       Start the inference server explicitly. Running `kiln` with no subcommand also starts serving.
+
+      Then open http://127.0.0.1:8420/ui for status, adapters, training monitoring, and quick inference.
 
   kiln health
       Check whether the local server is ready and show model, adapter, scheduler, and training status.
@@ -385,7 +389,7 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     let _ = writeln!(stderr);
     let _ = writeln!(
         stderr,
-        "  {} /v1/chat/completions, /v1/train/sft, /health, /metrics",
+        "  {} /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics",
         style("Endpoints:").dim()
     );
     let _ = writeln!(stderr);
