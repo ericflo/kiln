@@ -9376,3 +9376,54 @@ exact-shape no-tail branching do not improve the Qwen3.5 decode shape. Avoid
 more small variants that only change adjacent load syntax around the same
 two-column gate/up math; the next MLP kernel attempt needs to change data
 movement or projection boundaries more substantially.
+
+## Experiment E317: Rejected Qwen3.5 MLP Down-Projection X-Cache Kernel
+
+Purpose:
+
+Test a down-projection kernel idea that changes real memory movement rather
+than only removing generic branches. The current MLP `down_proj` decode path
+uses the generic tile8 transposed cooperative GEMV for
+`[1,1,9216] x [9216,2560]`. The candidate added an exact-shape kernel that
+loaded the 9216-element input vector into threadgroup memory once per
+32-output-column threadgroup, then reused that cached input across the four
+SIMD groups computing adjacent tile8 column groups.
+
+Temporary candidate:
+
+- Added `kiln_qwen35_mlp_down_proj_xcache_bf16`.
+- Cached the BF16 input vector in `threadgroup bfloat x_cache[9216]` per
+  threadgroup.
+- Kept the existing tile8 math shape and used vectorized `bfloat4` weight
+  loads and output stores.
+- Added an ignored same-binary synthetic bench comparing current tile8 against
+  the x-cache candidate.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_matches_broadcast_matmul --lib`
+- `KILN_METAL_DOWN_PROJ_XCACHE_BENCH_WARMUP=10 KILN_METAL_DOWN_PROJ_XCACHE_BENCH_ITERS=50 cargo test -p kiln-model --features metal bench_qwen35_mlp_down_proj_xcache_synthetic --lib -- --ignored --nocapture`
+
+Direct candidate result:
+
+| Variant | Time | Relative |
+|---|---:|---:|
+| current tile8 down-proj | 907.185 us | 1.000x |
+| exact-shape x-cache down-proj | 964.268 us | 0.941x |
+
+The candidate matched the current tile8 kernel exactly
+(`max_abs_diff=0`, `mean_abs_diff=0`) but was slower in the direct microbench,
+so the temporary source was reverted before full-model p64/o64 testing.
+
+Artifact:
+
+- `e317_qwen35_mlp_down_proj_xcache_synthetic.log`
+
+Takeaway:
+
+Threadgroup-caching the down-projection input vector does not beat the current
+tile8 GEMV. The saved input loads are outweighed by the cache fill/barrier and
+do not address the dominant weight-read work. Avoid further down-projection
+variants that only cache the input vector around the same tile8 GEMV; a useful
+next attempt needs a broader projection/data-layout change.

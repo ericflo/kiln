@@ -824,3 +824,10 @@
   current two-column `1636.741 us` versus `bfloat2` `1683.015 us`
   (`0.973x`). Source was reverted after `rustfmt --check`, focused gate/up
   parity, and the ignored synthetic bench.
+- 2026-05-04 E317: Rejected an exact-shape Qwen3.5 MLP down-proj x-cache
+  kernel. The temporary kernel cached the 9216-element BF16 input vector in
+  threadgroup memory once per 32-output-column group, then reused it across the
+  four tile8 SIMD groups. It matched current tile8 exactly, but the same-binary
+  synthetic bench lost: current tile8 `907.185 us` versus x-cache `964.268 us`
+  (`0.941x`). Source was reverted after `rustfmt --check`, focused transposed
+  GEMV parity, and the ignored synthetic bench.
