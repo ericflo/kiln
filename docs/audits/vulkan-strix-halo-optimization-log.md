@@ -2164,6 +2164,38 @@ Verdict:
 - The apparent first-run improvement was environmental; same-binary no-env matched it, and confirmation was worse.
 - The output copy is not the limiting piece of the recurrent path.
 
+### E075: Rejected Row-Aligned Prefix Registration Split
+
+Change:
+- Temporarily added `KILN_ENABLE_VULKAN_BATCH_ROW_ALIGNED_PREFIX_REGISTRATION=1`.
+- For native batch rows that had a cached/shared prefix but whose full prompt ended off a block boundary, the experiment split the suffix prefill at the next block boundary, snapshotted linear-attention state there, and registered that longer row-specific prefix.
+- Reverted after measurement.
+
+Reasoning:
+- E072 registers the long shared prefix across batches, but repeated exact prompts still only hit that shared prefix when the full prompt length is not block-aligned.
+- In the long-prefix fixture, rows with 439-441 prompt tokens hit the 416-token shared prefix, then still prefill 23-25 suffix tokens on every repeat.
+- Registering a 432-token per-row prefix could reduce repeated exact-prompt suffix prefill to 7-9 tokens.
+
+Evidence:
+- Validation before measurement:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-model row_aligned_prefix_registration_len_leaves_tail_after_cache -- --nocapture` passed.
+  - `cargo test -p kiln-model native_batch_greedy_reuses_common_block_prefix -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Fresh-server three-batch long shared-prefix fixture with the opt-in:
+  - Batch 1, cache empty: 24.985s / 0.320 tok/s. It did the E069 416-token common prefix, then split each row suffix; final tail prefills were only 7-8 tokens, but per-row elapsed was still ~3.82-3.88s because each row now had two prefill calls.
+  - Batch 2, same shared prefix with new suffixes: 15.427s / 0.519 tok/s. It hit the 416-token shared prefix but paid split-registration overhead to seed 432-token row prefixes.
+  - Batch 3, identical to batch 2: 7.893s / 1.014 tok/s. It hit 432 cached tokens per row and only prefetched 7-9 tail tokens.
+- Comparison:
+  - E072's repeated-prefix second-batch baseline was 9.045s / 0.884 tok/s with 416 cached tokens per row.
+  - The third batch is faster than E072 by about 1.15s, but the second batch is about 6.38s slower than E072; this only breaks even after many repeated exact/near-exact batches with the same first 432 tokens.
+
+Verdict:
+- Reject and revert.
+- The repeated exact-prompt speedup is real, but the registration cost is too high and the traffic shape too narrow for a default path.
+- If needed later, a safer variant would need a much stronger repetition heuristic or an asynchronous/off-critical-path registration strategy.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
