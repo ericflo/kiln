@@ -133,6 +133,11 @@ fn profile_full_attn_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_FULL_ATTN_STAGES"))
 }
 
+fn profile_mlp_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_MLP_STAGES"))
+}
+
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
@@ -219,6 +224,39 @@ fn finish_full_attn_stage_profile(
     synchronize_for_profile(device)?;
     eprintln!(
         "kiln_profile_full_attn_stage full_attn_layer={full_attn_layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+fn start_mlp_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+) -> Result<Option<std::time::Instant>> {
+    if context.is_some() {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_mlp_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let Some((layer, start_pos)) = context else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_mlp_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
     Ok(())
@@ -2498,7 +2536,7 @@ pub fn swiglu_ffn(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, false)
+    swiglu_ffn_impl(x, mlp, lora, false, None)
 }
 
 fn swiglu_ffn_metal_decode(
@@ -2506,7 +2544,17 @@ fn swiglu_ffn_metal_decode(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, true)
+    swiglu_ffn_impl(x, mlp, lora, true, None)
+}
+
+fn swiglu_ffn_profiled(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
+) -> Result<Tensor> {
+    swiglu_ffn_impl(x, mlp, lora, use_metal_decode_gemv, profile_context)
 }
 
 fn swiglu_ffn_impl(
@@ -2514,13 +2562,26 @@ fn swiglu_ffn_impl(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
+    let profile_device = x.device();
+    let (_, seq_len, _) = x.dims3()?;
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
     #[cfg(feature = "metal")]
+    let gate_up_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+    #[cfg(feature = "metal")]
     if let Some(hidden) = try_metal_mlp_gate_up_hidden(x, mlp, lora_layer)? {
+        finish_mlp_stage_profile(
+            profile_device,
+            profile_context,
+            "gate_up_fused",
+            seq_len,
+            gate_up_profile,
+        )?;
+        let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
         let out = {
             kiln_nvtx::range!(c"kiln/mlp/down");
             mlp_proj_forward_decode_if(
@@ -2532,10 +2593,18 @@ fn swiglu_ffn_impl(
                 lora_scale,
             )?
         };
+        finish_mlp_stage_profile(
+            profile_device,
+            profile_context,
+            "down_proj",
+            seq_len,
+            stage_profile,
+        )?;
         return Ok(out);
     }
 
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
         mlp_proj_forward(
@@ -2546,9 +2615,25 @@ fn swiglu_ffn_impl(
             lora_scale,
         )?
     };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "gate_proj",
+        seq_len,
+        stage_profile,
+    )?;
     // SiLU activation: x * sigmoid(x)
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let gate = cuda_silu(&gate)?;
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "gate_silu",
+        seq_len,
+        stage_profile,
+    )?;
     // x @ up_proj_t -> [batch, seq_len, intermediate_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
         mlp_proj_forward(
@@ -2559,9 +2644,25 @@ fn swiglu_ffn_impl(
             lora_scale,
         )?
     };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "up_proj",
+        seq_len,
+        stage_profile,
+    )?;
     // Element-wise multiply
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let hidden = (gate * up)?;
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "hidden_mul",
+        seq_len,
+        stage_profile,
+    )?;
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
         mlp_proj_forward_decode_if(
@@ -2573,6 +2674,13 @@ fn swiglu_ffn_impl(
             lora_scale,
         )?
     };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "down_proj",
+        seq_len,
+        stage_profile,
+    )?;
     Ok(out)
 }
 
@@ -6060,6 +6168,7 @@ pub fn transformer_block_paged(
         block_table,
         full_attn_layer_idx,
         lora,
+        None,
     )
 }
 
@@ -6082,6 +6191,7 @@ fn transformer_block_paged_with_rope_tables(
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
+    profile_mlp_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -6167,9 +6277,9 @@ fn transformer_block_paged_with_rope_tables(
     let ffn_out = if b12_layer_31 {
         swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
     } else if use_metal_decode_ffn {
-        swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
+        swiglu_ffn_profiled(&normed, &layer.mlp, lora, true, profile_mlp_context)?
     } else {
-        swiglu_ffn(&normed, &layer.mlp, lora)?
+        swiglu_ffn_profiled(&normed, &layer.mlp, lora, false, profile_mlp_context)?
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
@@ -7421,6 +7531,7 @@ fn model_forward_paged_inner(
     let mut linear_attn_idx: usize = 0;
     let profile_paged_layers = profile_paged_layers_enabled();
     let profile_gdn_stages = profile_gdn_stages_enabled();
+    let profile_mlp_stages = profile_mlp_stages_enabled();
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
@@ -7458,6 +7569,7 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
+                    profile_mlp_stages.then_some((i, start_pos)),
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
@@ -7568,11 +7680,13 @@ fn model_forward_paged_inner(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = if use_metal_decode_ffn {
-                    swiglu_ffn_metal_decode(&normed_post, &layer.mlp, layer_lora)?
-                } else {
-                    swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?
-                };
+                let ffn_out = swiglu_ffn_profiled(
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                    profile_mlp_stages.then_some((i, start_pos)),
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?

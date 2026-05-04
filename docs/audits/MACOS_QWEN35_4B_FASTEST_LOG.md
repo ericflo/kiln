@@ -8587,3 +8587,78 @@ about 2.257 ms across all 8 layers. This makes another paged-attention kernel
 rewrite a low-priority target for p64/o64. The more plausible full-attention
 work is projection/layout work, but E238 already rejected the naive gated-Q
 split, so future full-attention changes need a different layout strategy.
+
+## Experiment E290: MLP Stage Profiler and Target Selection
+
+Purpose:
+
+Add an env-gated synchronized MLP stage profiler so target selection covers the
+large feed-forward slice instead of over-focusing on cache reuse or GDN-only
+kernel boundaries. The profile separates fused decode gate/up, down projection,
+and the split prefill gate, activation, up, multiply, and down stages.
+
+Implementation:
+
+- Added `KILN_PROFILE_MLP_STAGES=1`, gated off by default.
+- Emits `kiln_profile_mlp_stage` lines with `layer`, `stage`, `seq_len`,
+  `start_pos`, and synchronized elapsed ms.
+- Wired both paged full-attention and linear/GDN block MLP calls through the
+  profiled wrapper.
+
+Validation:
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+- `git diff --check`
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 290`
+
+Measured output:
+
+- Final measured prefill p64 with profiling sync enabled: 493.2 ms.
+- Final measured decode p64/o1 with profiling sync enabled: 203.6 ms mean ITL.
+- `memory_pressure` after the run reported 77% system-wide free memory.
+
+Parsed measured section only:
+
+| Scope | Count | Sum | Avg |
+|---|---:|---:|---:|
+| Decode linear/GDN layers | 24 | 132.365 ms | 5.515 ms |
+| Decode full-attention layers | 8 | 42.579 ms | 5.322 ms |
+| Prefill linear/GDN layers | 24 | 322.177 ms | 13.424 ms |
+| Prefill full-attention layers | 8 | 141.220 ms | 17.652 ms |
+
+Decode MLP stage sums across 32 layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `gate_up_fused` | 63.710 ms | 1.991 ms |
+| `down_proj` | 36.905 ms | 1.153 ms |
+
+Prefill MLP stage sums across 32 layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `down_proj` | 71.021 ms | 2.219 ms |
+| `gate_proj` | 64.677 ms | 2.021 ms |
+| `up_proj` | 63.921 ms | 1.998 ms |
+| `gate_silu` | 15.510 ms | 0.485 ms |
+| `hidden_mul` | 11.249 ms | 0.352 ms |
+
+Artifact:
+
+- `e290_m1_p64_o1_mlp_stage_profile.log`
+
+Takeaway:
+
+The next low-level target should not be another cache-only path. MLP projection
+work is the largest profiled single-token decode slice in this run:
+`gate_up_fused + down_proj` totals about 100.615 ms across 32 layers, larger
+than the full-attention projection/kernel details and larger than any single
+GDN sub-stage from E286. The promising direction is to improve or remove MLP
+projection work directly, or to pursue true model-forward batching that
+amortizes it; E263-E264 already rejects the narrow down-projection + residual
+boundary, so another MLP attempt needs to change the projection mechanics
+rather than only the epilogue.

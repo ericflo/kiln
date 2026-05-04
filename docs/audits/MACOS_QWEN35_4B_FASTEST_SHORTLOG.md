@@ -717,3 +717,13 @@
   `decode_attn_contiguous` 2.257 ms. Full-attention decode is projection-led,
   not paged-attention-kernel-led; treat this as target selection, not a
   latency baseline.
+- 2026-05-04 E290: Added an env-gated synchronized MLP stage profiler
+  (`KILN_PROFILE_MLP_STAGES=1`) and used it for target selection across all
+  32 layers. The intrusive p64/o1 profile measured 493.2 ms prefill and
+  203.6 ms mean ITL, with 77% memory free after the run. Decode MLP stage sums
+  rank `gate_up_fused` first at 63.710 ms and `down_proj` second at
+  36.905 ms, for 100.615 ms total across 32 layers. Prefill MLP sums rank
+  `down_proj` 71.021 ms, `gate_proj` 64.677 ms, and `up_proj` 63.921 ms.
+  This redirects the next low-level pass toward MLP projection mechanics or
+  true model-forward batching, not cache-only reuse and not another narrow
+  down-projection residual epilogue.
