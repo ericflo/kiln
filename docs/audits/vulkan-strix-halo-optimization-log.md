@@ -2138,6 +2138,32 @@ Verdict:
 - Reject and revert.
 - Avoiding the explicit squeeze/contiguous calls did not move the decode anchor; the dominant cost remains the recurrent dispatch/upload/readback itself rather than that shape preamble.
 
+### E074: Rejected Host-Visible Split GDN Recurrent Output Buffer
+
+Change:
+- Temporarily added `KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_OUT=1`.
+- In the single-submit split GDN recurrent path, the experiment made the tiny recurrent output buffer host-visible and skipped the explicit output copy into a staging buffer.
+- Reverted after A/B measurement.
+
+Reasoning:
+- The split GDN recurrent output is small, but it is read back every linear layer and decode token.
+- The state buffer is already host-visible by default on Strix Halo; making the output host-visible might remove one copy command per recurrent dispatch.
+
+Evidence:
+- Validation before measurement:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_matches_cpu_reference -- --nocapture` passed.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+- bs=1 A/B on the same binary:
+  - Opt-in run 1: prefill 1840.8ms, mean ITL 322.5ms, p50 325.5ms, p99 339.4ms.
+  - No-env comparison: prefill 1860.4ms, mean ITL 322.8ms, p50 322.5ms, p99 334.0ms.
+  - Opt-in confirmation: prefill 1874.9ms, mean ITL 327.6ms, p50 328.1ms, p99 336.1ms.
+
+Verdict:
+- Reject and revert.
+- The apparent first-run improvement was environmental; same-binary no-env matched it, and confirmation was worse.
+- The output copy is not the limiting piece of the recurrent path.
+
 ## Next Candidate
 
 The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
