@@ -973,7 +973,7 @@ pub fn dispatch_linear_decode_cached(
             &all_handles,
             all_handles.len(),
             &push_constants,
-            (batch * out_dim.div_ceil(16)) as u32,
+            (batch * out_dim.div_ceil(32)) as u32,
         )
         .context("linear_decode_batched kernel failed")?;
     }
@@ -1035,7 +1035,7 @@ fn dispatch_linear_decode_cached_single_submit(
         (
             crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?,
             vec![hidden as u32, out_dim as u32, batch as u32],
-            (batch * out_dim.div_ceil(16)) as u32,
+            (batch * out_dim.div_ceil(32)) as u32,
         )
     };
 
@@ -1859,7 +1859,7 @@ pub fn dispatch_mlp_decode_cached(
         if batch == 1 {
             out_dim.div_ceil(16) as u32
         } else {
-            (batch * out_dim.div_ceil(16)) as u32
+            (batch * out_dim.div_ceil(32)) as u32
         },
     )
     .context("mlp_decode down kernel failed")?;
