@@ -131,7 +131,7 @@ jobs:
 
       - name: Attest build provenance (macOS Metal tarball)
         if: startsWith(github.ref, 'refs/tags/kiln-v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.ARTIFACT }}
 
@@ -253,7 +253,7 @@ jobs:
 
       - name: Attest build provenance (Linux CUDA tarball)
         if: startsWith(github.ref, 'refs/tags/kiln-v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.ARTIFACT }}
 
@@ -327,7 +327,7 @@ jobs:
 
       - name: Attest build provenance (Linux Vulkan tarball)
         if: startsWith(github.ref, 'refs/tags/kiln-v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.ARTIFACT }}
 
@@ -506,7 +506,7 @@ jobs:
 
       - name: Attest build provenance (Windows CUDA zip)
         if: startsWith(github.ref, 'refs/tags/kiln-v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.ARTIFACT }}
 
