@@ -719,7 +719,8 @@ textarea { resize: vertical; min-height: 80px; }
       <div class="form-row" style="margin-bottom:8px;">
         <div class="form-group" style="margin-bottom:0;">
           <label for="merge-output-name">Output Name</label>
-          <input type="text" id="merge-output-name" placeholder="merged-adapter">
+          <input type="text" id="merge-output-name" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
+          <div class="form-help" id="merge-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
         </div>
         <div class="form-group" style="margin-bottom:0;">
           <label for="merge-mode">Mode</label>
@@ -1287,10 +1288,15 @@ function updateUploadAdapterState() {
 window.uploadAdapter = async function() {
   const nameEl = document.getElementById('upload-name');
   const fileEl = document.getElementById('upload-archive');
-  const name = nameEl.value.trim();
+  let name;
+  try {
+    name = parseAdapterNameField(nameEl);
+  } catch (e) {
+    toast(e.message, 'err');
+    return;
+  }
   const file = fileEl.files[0];
-  if (!name) { toast('Adapter name is required', 'err'); return; }
-  if (!file) { toast('Choose a .tar.gz or .tgz adapter archive', 'err'); return; }
+  if (!file) { fileEl.focus(); toast('Choose a .tar.gz or .tgz adapter archive', 'err'); return; }
   const lowerName = file.name.toLowerCase();
   if (!lowerName.endsWith('.tar.gz') && !lowerName.endsWith('.tgz')) {
     toast('Adapter upload expects a .tar.gz or .tgz archive', 'err');
@@ -1409,8 +1415,13 @@ window.mergeAdapters = async function() {
     sources.push({ name, weight });
   }
   if (sources.length === 0) { toast('Add at least one source', 'err'); return; }
-  const outputName = document.getElementById('merge-output-name').value.trim();
-  if (!outputName) { toast('Output name is required', 'err'); return; }
+  let outputName;
+  try {
+    outputName = parseAdapterNameField(document.getElementById('merge-output-name'));
+  } catch (e) {
+    toast(e.message, 'err');
+    return;
+  }
   const mode = document.getElementById('merge-mode').value;
   const body = { sources, output_name: outputName, mode };
   if (mode === 'ties') {
