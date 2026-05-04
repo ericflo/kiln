@@ -49,6 +49,18 @@ a { color: var(--accent); text-decoration: none; }
   color: var(--accent);
   white-space: nowrap;
 }
+.header-help {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+}
+.header-help a {
+  color: var(--text2);
+  white-space: nowrap;
+}
+.header-help a:hover { color: var(--accent); }
 .header-stats {
   display: flex;
   gap: 16px;
@@ -68,6 +80,16 @@ a { color: var(--accent); text-decoration: none; }
 .status-dot.ok { background: var(--green); }
 .status-dot.degraded { background: var(--orange); }
 .status-dot.offline { background: var(--red); }
+
+@media (max-width: 480px) {
+  .header { padding: 10px 14px; gap: 8px 12px; }
+  .header-help {
+    order: 3;
+    width: 100%;
+    gap: 8px;
+  }
+  .header-stats { gap: 10px; }
+}
 
 .main {
   display: grid;
@@ -535,6 +557,11 @@ textarea { resize: vertical; min-height: 80px; }
 
 <div class="header">
   <h1>kiln</h1>
+  <nav class="header-help" aria-label="Help links">
+    <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" target="_blank" rel="noopener noreferrer">Quickstart</a>
+    <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
+    <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
+  </nav>
   <div class="header-stats" id="header-stats">
     <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting...</span></span>
   </div>
