@@ -5590,6 +5590,81 @@ mod tests {
     }
 
     #[test]
+    fn native_batch_greedy_mixes_cached_prefix_hits_and_misses() -> Result<()> {
+        let config = zero_layer_tied_config();
+        let device = Device::Cpu;
+        let weights = zero_layer_tied_weights(&config, &device);
+        let tokenizer = test_tokenizer();
+        let runner = ModelRunner::new(weights, tokenizer, config.clone());
+
+        let block_size = 4;
+        let num_blocks = 16;
+        let block_manager = std::sync::Mutex::new(BlockManager::new(num_blocks, block_size));
+        let paged_cache = std::sync::Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            num_blocks,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            candle_core::DType::F32,
+            &device,
+        )?);
+        let cached_block = {
+            let mut guard = block_manager.lock().unwrap();
+            guard.allocate(1).unwrap()
+        };
+        let cached_prefix = PagedPrefixReuse {
+            cached_tokens: block_size,
+            block_ids: cached_block.clone(),
+            linear_state: runner.new_linear_state()?,
+        };
+        let params = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 2,
+            ..Default::default()
+        };
+        let output = runner.generate_paged_shared_tokens_batch_greedy(
+            &[
+                vec![1, 2, 3, 4, 5, 6, 7, 5],
+                vec![2, 3, 4, 6],
+                vec![3, 4, 5, 7],
+                vec![4, 5, 6, 1],
+            ],
+            &params,
+            &block_manager,
+            &paged_cache,
+            Some(vec![Some(cached_prefix), None, None, None]),
+            None,
+        )?;
+
+        assert_eq!(output.outputs.len(), 4);
+        assert_eq!(output.outputs[0].token_ids, vec![5, 5]);
+        assert_eq!(output.outputs[1].token_ids, vec![6, 6]);
+        assert_eq!(output.outputs[2].token_ids, vec![7, 7]);
+        assert_eq!(output.outputs[3].token_ids, vec![1, 1]);
+        assert!(output.shared_prefix_registration.is_none());
+        assert_eq!(output.registrations.len(), 4);
+        let hit_registration = output.registrations[0]
+            .as_ref()
+            .expect("cached-prefix hit row should still be registrable");
+        assert_eq!(hit_registration.prompt_tokens, vec![1, 2, 3, 4, 5, 6, 7, 5]);
+        assert_eq!(hit_registration.block_ids[0], cached_block[0]);
+        assert!(
+            !output.allocated_blocks.contains(&cached_block[0]),
+            "cached prefix blocks are retained by the caller, not returned as per-batch allocations"
+        );
+
+        block_manager
+            .lock()
+            .unwrap()
+            .free_all(&output.allocated_blocks);
+        block_manager.lock().unwrap().free_all(&cached_block);
+        assert_eq!(block_manager.lock().unwrap().num_free(), num_blocks);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_paged_eos_detection() -> Result<()> {
         let config = tiny_config();
         let device = Device::Cpu;
