@@ -88,7 +88,8 @@ async fn main() -> Result<()> {
     // --- Server startup ---
     let config = KilnConfig::load(args.config.as_deref())?;
 
-    kiln_server::logging::init(&config.logging.level, &config.logging.format)?;
+    let level = args.effective_log_level(&config.logging.level);
+    kiln_server::logging::init(level, &config.logging.format)?;
 
     let host = &config.server.host;
     let port = config.server.port;
@@ -96,7 +97,7 @@ async fn main() -> Result<()> {
     let model_config = ModelConfig::qwen3_5_4b();
     let model_path = config.model.path.as_deref();
     let served_model_id = config.model.effective_served_model_id();
-    tracing::info!(served_model_id = %served_model_id, "served model identifier");
+    tracing::debug!(served_model_id = %served_model_id, "served model identifier");
 
     // Print startup banner to stderr (doesn't interfere with structured logs)
     cli::print_banner(host, port, model_path, args.config.as_deref());
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
     let tokenizer_path = config.model.tokenizer_path.as_deref();
 
     let (tokenizer, chat_template_dir) = if let Some(path) = tokenizer_path {
-        tracing::info!("loading tokenizer from {path}");
+        tracing::debug!("loading tokenizer from {path}");
         let tok = KilnTokenizer::from_file(path)?;
         let dir = Path::new(path).parent().map(|p| p.to_path_buf());
         (tok, dir)
@@ -114,7 +115,7 @@ async fn main() -> Result<()> {
         // Try loading tokenizer from the model directory first
         let tok_file = Path::new(mp).join("tokenizer.json");
         if tok_file.exists() {
-            tracing::info!(
+            tracing::debug!(
                 "loading tokenizer from model directory: {}",
                 tok_file.display()
             );
@@ -123,11 +124,11 @@ async fn main() -> Result<()> {
                 Some(PathBuf::from(mp)),
             )
         } else {
-            tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
+            tracing::debug!("loading tokenizer from HuggingFace Hub: {model_id}");
             (KilnTokenizer::from_pretrained(model_id)?, None)
         }
     } else {
-        tracing::info!("loading tokenizer from HuggingFace Hub: {model_id}");
+        tracing::debug!("loading tokenizer from HuggingFace Hub: {model_id}");
         (KilnTokenizer::from_pretrained(model_id)?, None)
     };
 
@@ -140,7 +141,7 @@ async fn main() -> Result<()> {
     let tokenizer = if let Some(dir) = chat_template_dir.as_deref() {
         match load_chat_template_from_model_dir(dir) {
             Ok(Some((source, template))) => {
-                tracing::info!(
+                tracing::debug!(
                     source = source,
                     bytes = template.len(),
                     "loaded chat template from model directory"
@@ -168,28 +169,41 @@ async fn main() -> Result<()> {
         tokenizer
     };
 
-    tracing::info!(
+    tracing::debug!(
         vocab_size = tokenizer.vocab_size(),
         "tokenizer loaded successfully"
     );
 
     let mut state = if let Some(mp) = model_path {
         // Real inference mode: load model weights and create ModelRunner.
-        tracing::info!("loading model weights from {mp}");
+        tracing::debug!("loading model weights from {mp}");
+        let load_spinner = cli::make_startup_spinner("selecting device");
         let device = select_device_with_options(config.memory.cuda_graphs)?;
+        if let Some(pb) = load_spinner.as_ref() {
+            pb.set_message(format!("loading model weights from {mp}"));
+        }
         let model_weights = kiln_model::load_model_with_options(
             Path::new(mp),
             &model_config,
             kiln_model::LoadModelOptions { load_mtp: false },
         )?;
+        if let Some(pb) = load_spinner.as_ref() {
+            pb.set_message("uploading weights to GPU");
+        }
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
 
+        if let Some(pb) = load_spinner.as_ref() {
+            pb.set_message("initializing inference runtime");
+        }
         let runner = ModelRunner::new_with_options(
             gpu_weights,
             tokenizer.clone(),
             model_config.clone(),
             config.memory.cuda_graphs,
         );
+        if let Some(pb) = load_spinner.as_ref() {
+            pb.finish_and_clear();
+        }
 
         let adapter_dir = config
             .model
@@ -199,18 +213,18 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| PathBuf::from(mp).join("adapters"));
 
         if !adapter_dir.exists() {
-            tracing::info!(path = %adapter_dir.display(), "creating adapter directory");
+            tracing::debug!(path = %adapter_dir.display(), "creating adapter directory");
             std::fs::create_dir_all(&adapter_dir)?;
         }
 
-        tracing::info!(adapter_dir = %adapter_dir.display(), "model loaded — real inference mode");
+        tracing::debug!(adapter_dir = %adapter_dir.display(), "model loaded — real inference mode");
         if matches!(
             std::env::var("KILN_BATCHING_ENGINE").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE")
         ) {
-            tracing::info!("real non-streaming batching actor requested via KILN_BATCHING_ENGINE");
+            tracing::debug!("real non-streaming batching actor requested via KILN_BATCHING_ENGINE");
         }
-        tracing::info!(
+        tracing::debug!(
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
         AppState::new_real(
@@ -226,8 +240,8 @@ async fn main() -> Result<()> {
         )
     } else {
         // Mock mode: use scheduler + mock engine.
-        tracing::info!("no model path set — running in mock mode");
-        tracing::info!("training endpoints will return 503 in mock mode (no real weights)");
+        tracing::debug!("no model path set — running in mock mode");
+        tracing::debug!("training endpoints will return 503 in mock mode (no real weights)");
         let scheduler_config = SchedulerConfig {
             max_batch_tokens: 8192,
             max_batch_size: 64,
@@ -258,33 +272,33 @@ async fn main() -> Result<()> {
     state.composed_cache_max_bytes = config.adapters.composed_cache_max_bytes;
     state.composed_cache_max_entries = config.adapters.composed_cache_max_entries;
     if let Some(ref url) = state.training_webhook_url {
-        tracing::info!(url = %url, "training completion webhook configured");
+        tracing::debug!(url = %url, "training completion webhook configured");
     }
-    tracing::info!(
+    tracing::debug!(
         cap = state.max_queued_training_jobs,
         "training queue cap configured"
     );
-    tracing::info!(
+    tracing::debug!(
         cap = state.max_tracked_jobs,
         ttl_secs = config.training.tracked_job_ttl_secs,
         "training tracked-jobs cap and TTL configured"
     );
     match state.adapter_max_disk_bytes {
-        Some(cap) => tracing::info!(
+        Some(cap) => tracing::debug!(
             cap_bytes = cap,
             cap_gib = cap as f64 / 1024.0 / 1024.0 / 1024.0,
             "adapter_dir disk cap configured"
         ),
-        None => tracing::info!("adapter_dir disk cap disabled (operator opt-out)"),
+        None => tracing::debug!("adapter_dir disk cap disabled (operator opt-out)"),
     }
     match (
         state.composed_cache_max_bytes,
         state.composed_cache_max_entries,
     ) {
         (None, None) => {
-            tracing::info!("composed-adapter cache LRU eviction disabled (operator opt-out)")
+            tracing::debug!("composed-adapter cache LRU eviction disabled (operator opt-out)")
         }
-        (bytes, entries) => tracing::info!(
+        (bytes, entries) => tracing::debug!(
             cap_bytes = ?bytes,
             cap_gib = ?bytes.map(|b| b as f64 / 1024.0 / 1024.0 / 1024.0),
             cap_entries = ?entries,
@@ -302,12 +316,13 @@ async fn main() -> Result<()> {
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!(
+    tracing::debug!(
         host = %host,
         port = port,
         model_path = model_path.unwrap_or("none (mock mode)"),
         "kiln listening"
     );
+    cli::print_ready_line(host, port);
     spawn_tokenizer_warmup(tokenizer_prewarm);
     spawn_backend_prewarm(prewarm_state);
     // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
@@ -318,7 +333,7 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal(shutdown_flag))
         .await?;
 
-    tracing::info!(
+    tracing::debug!(
         timeout_secs = shutdown_timeout_secs,
         "server stopped accepting connections — waiting for in-flight requests to drain"
     );
