@@ -1093,6 +1093,14 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function safeClassToken(s) {
+  return String(s == null ? '' : s).replace(/[^a-z0-9_-]/gi, '_');
+}
+
+function shortId(s) {
+  return String(s == null ? '' : s).slice(0, 8);
+}
+
 function apiFailureHtml(action, e, retryFn) {
   const retryButton = retryFn ? `<div style="margin-top:12px;"><button type="button" class="btn btn-primary" onclick="${retryFn}()" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
   return `<div class="empty api-failure">
@@ -1201,25 +1209,46 @@ function renderAdapters(data) {
     </div>`;
     return;
   }
-  const items = data.available.map(a => {
+  const items = data.available.map((a, adapterIndex) => {
     const isActive = data.active === a.name;
+    const adapterName = escapeHtml(a.name);
     return `
       <li class="adapter-item ${isActive ? 'adapter-active' : ''}">
-        <span class="adapter-name">${a.name}</span>
+        <span class="adapter-name">${adapterName}</span>
         ${isActive ? '<span class="badge badge-active">active</span>' : ''}
         <span class="adapter-size">${fmtBytes(a.size_bytes)}</span>
         <div class="adapter-actions">
           ${isActive
             ? `<button class="btn btn-sm" onclick="unloadAdapter()">Unload</button>`
-            : `<button class="btn btn-sm" onclick="loadAdapter('${a.name.replace(/'/g, "\\'")}')">Load</button>`}
-          <button class="btn btn-sm" onclick="downloadAdapter('${a.name.replace(/'/g, "\\'")}')">Download</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteAdapter('${a.name.replace(/'/g, "\\'")}')">Delete</button>
+            : `<button class="btn btn-sm" data-adapter-action="load" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Load</button>`}
+          <button class="btn btn-sm" data-adapter-action="download" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Download</button>
+          <button class="btn btn-sm btn-danger" data-adapter-action="delete" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Delete</button>
         </div>
       </li>
     `;
   }).join('');
   el.innerHTML = `<ul class="adapter-list">${items}</ul>`;
 }
+
+window.adapterListAction = function(button) {
+  const adapterIndex = Number(button.dataset.adapterIndex);
+  const adapter = lastAdapters && lastAdapters.available && lastAdapters.available[adapterIndex];
+  if (!adapter || !adapter.name) { toast('Adapter is no longer available', 'err'); return; }
+
+  switch (button.dataset.adapterAction) {
+    case 'load':
+      loadAdapter(adapter.name);
+      break;
+    case 'download':
+      downloadAdapter(adapter.name);
+      break;
+    case 'delete':
+      deleteAdapter(adapter.name);
+      break;
+    default:
+      toast('Unknown adapter action', 'err');
+  }
+};
 
 function updateAdapterSelect(data) {
   const sel = document.getElementById('chat-adapter');
@@ -1468,15 +1497,15 @@ function renderTrainingQueue(data) {
     data.queued.forEach(q => {
       html += `<div class="job-card">
         <div class="job-header">
-          <span class="job-id">${q.job_id.slice(0, 8)}</span>
+          <span class="job-id">${escapeHtml(shortId(q.job_id))}</span>
           <span class="job-state Queued">Queued</span>
         </div>
         <div class="job-meta">
-          <span>Type: ${q.job_type}</span>
-          <span>Adapter: ${q.adapter_name}</span>
+          <span>Type: ${escapeHtml(q.job_type)}</span>
+          <span>Adapter: ${escapeHtml(q.adapter_name)}</span>
           <span>Position: #${q.position}</span>
         </div>
-        <div style="margin-top:6px"><button class="btn btn-sm btn-danger" onclick="cancelJob('${q.job_id}')">Cancel</button></div>
+        <div style="margin-top:6px"><button class="btn btn-sm btn-danger" data-job-id="${escapeHtml(q.job_id)}" onclick="cancelJobFromButton(this)">Cancel</button></div>
       </div>`;
     });
   }
@@ -1502,21 +1531,26 @@ function renderTrainingQueue(data) {
 
 function renderJobCard(j, isRunning) {
   const pct = ((j.progress || 0) * 100).toFixed(0);
+  const state = String(j.state == null ? '' : j.state);
   return `<div class="job-card">
     <div class="job-header">
-      <span class="job-id">${j.job_id.slice(0, 8)}</span>
-      <span class="job-state ${j.state}">${j.state}</span>
+      <span class="job-id">${escapeHtml(shortId(j.job_id))}</span>
+      <span class="job-state ${safeClassToken(state)}">${escapeHtml(state)}</span>
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
     <div class="job-meta">
       <span>Progress: ${pct}%</span>
       ${j.current_loss != null ? `<span>Loss: ${j.current_loss.toFixed(4)}</span>` : ''}
-      ${j.adapter_name ? `<span>Adapter: ${j.adapter_name}</span>` : ''}
+      ${j.adapter_name ? `<span>Adapter: ${escapeHtml(j.adapter_name)}</span>` : ''}
       <span>Elapsed: ${fmtDuration(j.elapsed_secs)}</span>
     </div>
-    ${isRunning ? `<div style="margin-top:6px"><button class="btn btn-sm btn-danger" onclick="cancelJob('${j.job_id}')">Cancel</button></div>` : ''}
+    ${isRunning ? `<div style="margin-top:6px"><button class="btn btn-sm btn-danger" data-job-id="${escapeHtml(j.job_id)}" onclick="cancelJobFromButton(this)">Cancel</button></div>` : ''}
   </div>`;
 }
+
+window.cancelJobFromButton = function(button) {
+  cancelJob(button.dataset.jobId || '');
+};
 
 window.cancelJob = async function(jobId) {
   try {
