@@ -2223,8 +2223,48 @@ Verdict:
 - Keep the 8-block threshold unchanged.
 - The exact-threshold fixture was about 4.54s faster than the rollback guard, so raising the guard would discard a useful win.
 
+### E077: Opt-In Resident Split GDN Recurrent State
+
+Change:
+- Added experimental `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`.
+- The split GDN recurrent step can now keep each mutable recurrent state in a device-local Vulkan buffer keyed by the CPU tensor id.
+- The first decode step uploads the CPU state into that resident buffer; later decode steps reuse it and only read back the small recurrent output.
+- Added `gdn_recurrent_resident_state_matches_two_step_reference` to verify that a second resident-state recurrent step matches the normal CPU-visible state path.
+
+Reasoning:
+- The fresh E077 pre-change decode profile still showed `gdn.recurrent` dominating bs=1 decode:
+  - Current no-env profile, `max_output_tokens=4`: prefill 1863.6ms, mean ITL 327.7ms.
+  - `gdn.recurrent` totals were 176.9ms, 174.3ms, 176.4ms, and 175.1ms across 24 linear layers.
+- The recurrent output is tiny, but the mutable recurrent state is large and was uploaded/read back at every linear layer and decode token.
+- Avoiding that state roundtrip is the highest-leverage way to remove work rather than tuning around it.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_matches_cpu_reference -- --nocapture` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_resident_state_matches_two_step_reference -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- Same rebuilt binary, default no-env bs=1 short source bench:
+  - Command: `KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`.
+  - Prefill 1831.0ms.
+  - Mean ITL 321.0ms, p50 322.7ms, p99 328.9ms.
+- Opt-in resident-state bs=1 short source bench:
+  - Command: `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`.
+  - Prefill 1875.5ms.
+  - Mean ITL 137.4ms, p50 135.5ms, p99 147.3ms.
+- Opt-in profile, `max_output_tokens=4`:
+  - Prefill 1864.2ms, mean ITL 135.5ms.
+  - `gdn.recurrent` dropped to 13.6ms on the first decode step, then 6.8ms, 6.5ms, and 6.2ms once resident buffers were hot.
+  - The new dominant buckets are `mlp.fused` at about 54ms/32 layers, full-attention layers at about 24-25ms/8 layers, GDN input projection at about 20-22ms/24 layers, and LM-head argmax at about 14-17ms.
+
+Verdict:
+- Keep as opt-in only for now.
+- The latency win is real and large, but the current cache is backend-global and keyed by CPU tensor id. That is enough to prove the optimization and benchmark it, but it is not yet the right default lifecycle for all server traffic.
+- Before promotion, resident state ownership should move into `LinearAttentionState` or gain explicit materialization/cleanup hooks so prefix-cache snapshots, speculative rollback, and long-running concurrent server traffic cannot observe stale CPU state or leak resident buffers.
+
 ## Next Candidate
 
-The current bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. The latest accepted source bench after E066 measured 319.7ms mean ITL, and the best recent anchor remains E059's 318.1ms; the later E067/post-revert runs were around 330ms under noisier conditions and did not indicate a kept-code regression. Projection tiling removed most obvious GEMV waste, and the fused GDN decode retest remains too unstable for bs=1. The next useful single-user experiment needs true state/intermediate residency or a larger fused GDN region that avoids reading/writing the recurrent state through CPU tensors every layer and token.
+The current default bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. E077 proves that true recurrent state residency can cut the short-source decode anchor from the noisy 321-329ms band to about 137ms mean ITL, but it is still opt-in until state ownership/materialization is safe. The next useful single-user experiment is to make that residency production-safe: move resident buffers into `LinearAttentionState` or add explicit backend materialization/cleanup hooks around prefix-cache snapshots, speculative rollback, and request completion. After that, the new default bottlenecks are MLP fused decode, full-attention layers, GDN input projection, and LM-head argmax.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.

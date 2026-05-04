@@ -905,6 +905,81 @@ fn gdn_recurrent_step_matches_f32_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, heads, dk, dv) = (1usize, 1usize, 4usize, 3usize);
+    let q1 = cpu_f32(vec![0.12, -0.08, 0.21, -0.17], (batch, heads, dk))?;
+    let k1 = cpu_f32(vec![-0.11, 0.24, -0.19, 0.07], (batch, heads, dk))?;
+    let v1 = cpu_f32(vec![0.31, -0.23, 0.14], (batch, heads, dv))?;
+    let beta1 = cpu_f32(vec![0.42], (batch, heads))?;
+    let g1 = cpu_f32(vec![-0.09], (batch, heads))?;
+    let q2 = cpu_f32(vec![0.05, 0.19, -0.13, 0.29], (batch, heads, dk))?;
+    let k2 = cpu_f32(vec![0.17, -0.03, 0.11, -0.21], (batch, heads, dk))?;
+    let v2 = cpu_f32(vec![-0.07, 0.25, 0.18], (batch, heads, dv))?;
+    let beta2 = cpu_f32(vec![0.57], (batch, heads))?;
+    let g2 = cpu_f32(vec![-0.14], (batch, heads))?;
+    let state = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.021)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let (expected_out1, expected_state1) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state,
+        )
+        .context("dispatch_gdn_recurrent_step reference step 1")?;
+    let (expected_out2, _expected_state2) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &expected_state1,
+        )
+        .context("dispatch_gdn_recurrent_step reference step 2")?;
+
+    let (got_out1, resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state, None,
+        )
+        .context("dispatch_gdn_recurrent_step_resident_state step 1")?;
+    let (got_out2, _resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &state,
+            Some(resident_state),
+        )
+        .context("dispatch_gdn_recurrent_step_resident_state step 2")?;
+
+    assert_close(
+        "resident recurrent out step 1",
+        &got_out1,
+        &expected_out1,
+        1e-5,
+    )?;
+    assert_close(
+        "resident recurrent out step 2",
+        &got_out2,
+        &expected_out2,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

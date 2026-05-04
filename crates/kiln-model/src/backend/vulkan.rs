@@ -38,11 +38,16 @@ pub struct VulkanBackend {
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
     weight_prewarm_enabled: bool,
+    recurrent_state_residency_enabled: bool,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
     /// memory that must be freed before the logical Vulkan device is destroyed.
     weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    /// Experimental opt-in cache for mutable GDN recurrent state buffers.
+    ///
+    /// Like `weight_cache`, this must drop before `vulkan_device`.
+    recurrent_state_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core)
     vulkan_device: Option<Box<kiln_vulkan_kernel::VulkanDevice>>,
 }
@@ -80,6 +85,8 @@ impl VulkanBackend {
         // benchmarks. Keep it opt-in until it is tiled/tuned.
         let mlp_gate_up_enabled = std::env::var("KILN_ENABLE_VULKAN_MLP_GATE_UP").is_ok();
         let weight_prewarm_enabled = std::env::var("KILN_DISABLE_VULKAN_WEIGHT_PREWARM").is_err();
+        let recurrent_state_residency_enabled =
+            std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok();
 
         let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
             Ok(dev) => {
@@ -120,7 +127,9 @@ impl VulkanBackend {
             mlp_decode_enabled,
             mlp_gate_up_enabled,
             weight_prewarm_enabled,
+            recurrent_state_residency_enabled,
             weight_cache: Mutex::new(HashMap::new()),
+            recurrent_state_cache: Mutex::new(HashMap::new()),
             vulkan_device,
         }
     }
@@ -899,6 +908,37 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+
+        if self.recurrent_state_residency_enabled {
+            let state_id = state.id();
+            let resident_state = {
+                let cache = self
+                    .recurrent_state_cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Vulkan recurrent state cache mutex poisoned"))?;
+                cache.get(&state_id).cloned()
+            };
+
+            let (out, resident_state) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
+                    vk_device,
+                    q,
+                    k,
+                    v,
+                    beta,
+                    g,
+                    state,
+                    resident_state,
+                )
+                .context("gdn_recurrent_step resident-state kernel failed")?;
+
+            let mut cache = self
+                .recurrent_state_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Vulkan recurrent state cache mutex poisoned"))?;
+            cache.insert(state_id, resident_state);
+            return Ok(Some(out));
+        }
 
         let (out, new_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
             vk_device, q, k, v, beta, g, state,
