@@ -10693,3 +10693,58 @@ win yet because the production scheduler still feeds one sequence at a time,
 but it removes a concrete full-attention decode blocker: there is now a single
 call that combines batch QKV projection, batch KV write, and the batched
 contiguous attention kernel under the actual backend constraints.
+
+## 2026-05-04 E341 - Added batched contiguous paged transformer block helper
+
+### Goal
+
+Move the true-batching seam one layer above E340. The full-attention helper
+proved the QKV/KV-write/attention/o-proj path can be batched exactly, but
+model-forward integration still needed a block-level operation that includes
+pre/post norms, residuals, and MLP around that attention primitive.
+
+### Change
+
+- Added `transformer_block_paged_decode_contiguous_batch`.
+- The helper accepts `[B,1,H]` hidden rows for full-attention layers only,
+  applies the block pre-attention RMSNorm, calls
+  `gqa_attention_paged_decode_contiguous_batch`, applies the attention
+  residual, post-attention RMSNorm, MLP, and final residual.
+- It deliberately preserves E340's strict constraints: one decode token per
+  row, common decode position, contiguous live KV windows, non-FP8 cache, and
+  backend acceptance for the batched contiguous attention kernel.
+- Added shared Metal BF16 patterned-weight helpers for the E340/E341 parity
+  tests.
+- Added a Metal parity test that prepopulates prefix K/V, runs the new
+  two-row transformer-block helper, and compares each output row against the
+  existing rowwise `transformer_block_paged` path.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_transformer_block_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal --lib -- --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `git diff --check`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/forward.rs`
+  still reports known broad `forward.rs` formatting drift; after manual
+  cleanup it no longer reports new E341 helper lines.
+
+### Results
+
+- The Metal two-row transformer-block helper matched rowwise block decode
+  exactly with a non-empty prefix: row0 `max_abs_diff=0`, `mean_abs_diff=0`;
+  row1 `max_abs_diff=0`, `mean_abs_diff=0`.
+- Output shape was `[2,1,512]` using Qwen full-attention head geometry
+  (`16` Q heads, `4` KV heads, `head_dim=256`) and a reduced hidden/MLP size
+  to keep the parity test lightweight.
+
+### Artifact
+
+- `e341_transformer_block_paged_decode_contiguous_batch_helper.log`
+
+### Decision
+
+Accepted as block-level model-forward batching plumbing. This still is not an
+endpoint win because production scheduling and the full model loop remain
+single-row, but the full-attention layer can now be represented as one strict
+batched decode block operation rather than separate attention-only pieces.

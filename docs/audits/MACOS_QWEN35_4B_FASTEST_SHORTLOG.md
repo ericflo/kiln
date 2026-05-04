@@ -1063,3 +1063,12 @@
   rowwise `gqa_attention_paged` exactly (`max_abs_diff=0`, `mean_abs_diff=0`
   for both rows). This is not an endpoint win yet; it gives the scheduler/model
   forward path a real full-attention batch decode primitive to call.
+- 2026-05-04 E341: Accepted
+  `transformer_block_paged_decode_contiguous_batch` as block-level
+  model-forward batching plumbing. The helper wraps the E340 full-attention
+  batch decode primitive with pre/post RMSNorm, residuals, and MLP for
+  full-attention layers only, preserving the same strict common-position and
+  contiguous-KV constraints. A Metal two-row parity test with prefix K/V
+  matched rowwise `transformer_block_paged` exactly (`max_abs_diff=0`,
+  `mean_abs_diff=0` for both rows). This moves the scheduler integration seam
+  from attention-only to a full block operation.
