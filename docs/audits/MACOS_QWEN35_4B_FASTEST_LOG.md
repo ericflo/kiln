@@ -9427,3 +9427,55 @@ tile8 GEMV. The saved input loads are outweighed by the cache fill/barrier and
 do not address the dominant weight-read work. Avoid further down-projection
 variants that only cache the input vector around the same tile8 GEMV; a useful
 next attempt needs a broader projection/data-layout change.
+
+## Experiment E318: Accepted Decode-Batch MLP Gate/Up Fusion Support
+
+Purpose:
+
+Remove a concrete low-level blocker for true bs>1 decode batching. The Metal
+MLP gate/up kernel already indexed a flattened row (`batch * seq_len`) and
+wrote `[batch, seq_len, intermediate]`, but its support gate allowed only
+`rows == 1`. That forced any future `[B,1,H]` batched decode MLP gate/up shape
+back to two broadcast matmuls plus SiLU plus multiply. The candidate changes
+the support gate to allow BF16 `[B,1,H] x [H,I]` with nonzero rows, while still
+rejecting prefill-style `[1,T,H]` so current prefill does not route through the
+decode kernel.
+
+Implementation:
+
+- Relaxed `metal_mlp_gate_up_supports` from `rows == 1` to
+  `rows > 0 && seq_len == 1`.
+- Kept the existing accepted two-column Metal kernel unchanged.
+- Added `test_mlp_gate_up_decode_batch_matches_reference`.
+- Added an ignored Qwen3.5 synthetic bench for decode batches 1, 2, 4, and 8.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal 'test_mlp_gate_up' --lib`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=5 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+
+Synthetic Qwen3.5 results:
+
+| Batch | Physical tokens | Fallback gate/up | Fused gate/up | Speedup | Max abs diff | Mean abs diff |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 2568.350 us | 1800.531 us | 1.426x | 2.980232e-8 | 2.045201e-9 |
+| 2 | 2 | 120632.192 us | 1884.446 us | 64.015x | 5.960464e-8 | 2.136733e-9 |
+| 4 | 4 | 268723.294 us | 2146.144 us | 125.212x | 5.960464e-8 | 2.139142e-9 |
+| 8 | 8 | 590190.196 us | 7215.167 us | 81.799x | 5.960464e-8 | 2.129718e-9 |
+
+Artifact:
+
+- `e318_mlp_gate_up_decode_batch_synthetic.log`
+
+Takeaway:
+
+This is not a full endpoint batching implementation, and the current real
+server path still constructs one sequence per model forward. It is still an
+important accepted bs>1 building block: a future real `[B,1,H]` decode path no
+longer falls off a cliff in MLP gate/up. The next true-batching work can rely
+on the fused gate/up kernel for batched decode rows and should move on to the
+remaining blockers: per-sequence block tables, batched down-projection/GEMV,
+batched GDN/attention state, and scheduler integration.

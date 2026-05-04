@@ -831,3 +831,14 @@
   synthetic bench lost: current tile8 `907.185 us` versus x-cache `964.268 us`
   (`0.941x`). Source was reverted after `rustfmt --check`, focused transposed
   GEMV parity, and the ignored synthetic bench.
+- 2026-05-04 E318: Accepted decode-batch MLP gate/up fusion support. The
+  existing two-column Metal kernel already handled multiple flattened rows, so
+  the support gate now allows nonzero BF16 `[B,1,H] x [H,I]` while still
+  rejecting prefill `[1,T,H]`. Added batch parity coverage and an ignored
+  Qwen3.5 synthetic bench. Same-binary synthetic results were strong versus the
+  broadcast fallback for future batched decode rows: batch1 `2568.350 us` ->
+  `1800.531 us` (1.426x), batch2 `120632.192 us` -> `1884.446 us` (64.015x),
+  batch4 `268723.294 us` -> `2146.144 us` (125.212x), batch8
+  `590190.196 us` -> `7215.167 us` (81.799x), all with max abs diff
+  <= `5.960464e-8`. `cargo check` for `kiln`/`kiln-bench` passed. This is a
+  bs>1 building block, not full endpoint batching.

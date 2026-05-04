@@ -3592,7 +3592,8 @@ pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Ten
         return false;
     };
 
-    rows == 1
+    rows > 0
+        && seq_len == 1
         && hidden == gate_hidden
         && hidden == up_hidden
         && intermediate == up_intermediate
@@ -3604,7 +3605,7 @@ pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Ten
 pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
     anyhow::ensure!(
         metal_mlp_gate_up_supports(x, gate_t, up_t),
-        "metal mlp gate/up supports only BF16 [1,1,H] x [H,I] on Metal"
+        "metal mlp gate/up supports only BF16 [B,1,H] x [H,I] on Metal"
     );
     let (batch, seq_len, hidden) = x.dims3()?;
     let (_, intermediate) = gate_t.dims2()?;
@@ -8642,6 +8643,23 @@ mod tests {
             .contiguous()?)
     }
 
+    fn patterned_bf16_decode_batch(batch: usize, hidden: usize, device: &Device) -> Result<Tensor> {
+        let data: Vec<f32> = (0..(batch * hidden))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.001953125)
+            .collect();
+        Ok(Tensor::from_slice(&data, (batch, 1usize, hidden), device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?)
+    }
+
+    fn mlp_gate_up_reference(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
+        let gate = x.broadcast_matmul(gate_t)?;
+        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let gate = (gate * gate_sig)?;
+        let up = x.broadcast_matmul(up_t)?;
+        Ok((gate * up)?)
+    }
+
     fn bench_metal_tensor_op<F>(
         device: &Device,
         warmup: usize,
@@ -8755,6 +8773,60 @@ mod tests {
             broadcast_us / tile4_us,
             broadcast_us / tile8_us,
         );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_mlp_gate_up_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS", 20);
+        let hidden = 2560usize;
+        let intermediate = 9216usize;
+        let gate_t = patterned_bf16_2d(hidden, intermediate, &device, 37, 0.0009765625)?;
+        let up_t = patterned_bf16_2d(hidden, intermediate, &device, 43, 0.0009765625)?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+            device.synchronize()?;
+            assert!(metal_mlp_gate_up_supports(&x, &gate_t, &up_t));
+
+            let reference = mlp_gate_up_reference(&x, &gate_t, &up_t)?;
+            let fused = metal_mlp_gate_up_bf16(&x, &gate_t, &up_t)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Qwen3.5 MLP gate/up batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "Qwen3.5 MLP gate/up batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                mlp_gate_up_reference(&x, &gate_t, &up_t).context("bench fallback MLP gate/up")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_mlp_gate_up_bf16(&x, &gate_t, &up_t).context("bench fused MLP gate/up")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 MLP gate/up decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                 gate_t/up_t=[{hidden},{intermediate}] warmup={warmup} iters={iters} \
+                 fallback={fallback_us:.3} us fused={fused_us:.3} us \
+                 speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
 
         Ok(())
     }
@@ -8966,6 +9038,40 @@ mod tests {
         assert!(
             mean < 2e-3,
             "Metal MLP gate/up mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mlp_gate_up_decode_batch_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let hidden = 64usize;
+        let intermediate = 97usize;
+        let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+        let gate_t = patterned_bf16_2d(hidden, intermediate, &device, 23, 0.0078125)?;
+        let up_t = patterned_bf16_2d(hidden, intermediate, &device, 31, 0.0078125)?;
+
+        assert!(metal_mlp_gate_up_supports(&x, &gate_t, &up_t));
+        let fused = metal_mlp_gate_up_bf16(&x, &gate_t, &up_t)?;
+        let reference = mlp_gate_up_reference(&x, &gate_t, &up_t)?;
+
+        assert_eq!(fused.dims(), &[batch, 1usize, intermediate]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal MLP gate/up batch max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal MLP gate/up batch mean_abs_diff={mean:e} exceeds tolerance"
         );
 
         Ok(())
