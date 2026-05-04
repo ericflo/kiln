@@ -8502,3 +8502,88 @@ work inside the consumer kernel. The current materialized-`z` path remains
 faster on p64/o64. This closes off the naive project-z boundary move; future
 low-level GDN work should either remove more than one intermediate at once or
 attack the projection kernels directly with a measured full-path win.
+
+## Experiment E289: Full-Attention Stage Profiler and Target Selection
+
+Purpose:
+
+Add an env-gated synchronized full-attention stage profiler so target
+selection is not limited to GDN. E286 showed full-attention layers are smaller
+than GDN overall, but still material at 8 layers per forward step; this profile
+separates full-attention projection, split, norm/RoPE, KV write, paged decode
+attention, gate, and O projection costs.
+
+Implementation:
+
+- Added `KILN_PROFILE_FULL_ATTN_STAGES=1`, gated off by default.
+- Emits `kiln_profile_full_attn_stage` lines with `full_attn_layer`, `stage`,
+  `seq_len`, `start_pos`, and synchronized elapsed ms.
+- Wired decode and initial-prefill paths in `gqa_attention_paged_with_rope_tables`
+  and `try_flash_attn_paged_decode`.
+
+Validation:
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+- `git diff --check`
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_FULL_ATTN_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 289`
+
+Measured output:
+
+- Final measured prefill p64 with profiling sync enabled: 450.2 ms.
+- Final measured decode p64/o1 with profiling sync enabled: 193.6 ms mean ITL.
+- `memory_pressure` after the run reported 76% system-wide free memory.
+
+Parsed measured section only:
+
+| Scope | Count | Sum | Avg |
+|---|---:|---:|---:|
+| Decode linear/GDN layers | 24 | 109.392 ms | 4.558 ms |
+| Decode full-attention layers | 8 | 55.866 ms | 6.983 ms |
+| Prefill linear/GDN layers | 24 | 275.399 ms | 11.475 ms |
+| Prefill full-attention layers | 8 | 144.374 ms | 18.047 ms |
+
+Decode full-attention stage sums across 8 full-attention layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `qkv_proj` | 10.641 ms | 1.330 ms |
+| `o_proj` | 5.360 ms | 0.670 ms |
+| `qkv_split` | 2.454 ms | 0.307 ms |
+| `decode_attn_contiguous` | 2.257 ms | 0.282 ms |
+| `qk_norm` | 2.180 ms | 0.273 ms |
+| `rope` | 2.018 ms | 0.252 ms |
+| `kv_write` | 1.992 ms | 0.249 ms |
+| `attn_gate` | 1.895 ms | 0.237 ms |
+| `q_transpose` | 0.016 ms | 0.002 ms |
+
+Prefill full-attention stage sums across 8 full-attention layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `qkv_proj` | 19.644 ms | 2.455 ms |
+| `prefill_attn_fallback` | 14.121 ms | 1.765 ms |
+| `qkv_split` | 8.384 ms | 1.048 ms |
+| `q_transpose` | 4.721 ms | 0.590 ms |
+| `prefill_kv_head_layout` | 3.198 ms | 0.400 ms |
+| `qk_norm` | 2.526 ms | 0.316 ms |
+| `rope` | 2.431 ms | 0.304 ms |
+| `kv_write` | 2.065 ms | 0.258 ms |
+| `prefill_attn_head_major` | 0.019 ms | 0.002 ms |
+
+Artifact:
+
+- `e289_m1_p64_o1_full_attn_stage_profile.log`
+
+Takeaway:
+
+Full-attention decode is projection-led, not attention-kernel-led:
+`qkv_proj` is the largest measured full-attention sub-stage, followed by
+`o_proj`, while the custom contiguous paged decode attention kernel is only
+about 2.257 ms across all 8 layers. This makes another paged-attention kernel
+rewrite a low-priority target for p64/o64. The more plausible full-attention
+work is projection/layout work, but E238 already rejected the naive gated-Q
+split, so future full-attention changes need a different layout strategy.

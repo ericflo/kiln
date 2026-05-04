@@ -708,3 +708,12 @@
   189.6 ms P99, while E288 materialized-`z` control measured 418.1 ms /
   159.9 ms / 6.25 tok/s / 173.2 ms P99. Memory pressure was 81% free after
   E288. The candidate source was reverted.
+- 2026-05-04 E289: Added an env-gated synchronized full-attention stage
+  profiler (`KILN_PROFILE_FULL_ATTN_STAGES=1`) and used it for target
+  selection. The intrusive p64/o1 profile measured 450.2 ms prefill and
+  193.6 ms mean ITL, with 76% memory free after the run. Decode full-attention
+  stage sums across 8 layers rank `qkv_proj` first at 10.641 ms, `o_proj`
+  second at 5.360 ms, then `qkv_split` 2.454 ms and
+  `decode_attn_contiguous` 2.257 ms. Full-attention decode is projection-led,
+  not paged-attention-kernel-led; treat this as target selection, not a
+  latency baseline.

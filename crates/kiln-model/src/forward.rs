@@ -128,6 +128,11 @@ fn profile_gdn_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
 }
 
+fn profile_full_attn_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_FULL_ATTN_STAGES"))
+}
+
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
@@ -181,6 +186,39 @@ fn finish_gdn_stage_profile(
     synchronize_for_profile(device)?;
     eprintln!(
         "kiln_profile_gdn_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+fn start_full_attn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+) -> Result<Option<std::time::Instant>> {
+    if context.is_some() {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_full_attn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let Some((full_attn_layer, start_pos)) = context else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_full_attn_stage full_attn_layer={full_attn_layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
     Ok(())
@@ -4651,6 +4689,7 @@ fn try_flash_attn_paged_decode(
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Option<Tensor>> {
     const K_BLOCK_N: usize = 128;
 
@@ -4687,6 +4726,7 @@ fn try_flash_attn_paged_decode(
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+            let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
             let attn_output = {
                 kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
                 backend.flash_attn_paged_decode_contiguous(
@@ -4698,6 +4738,13 @@ fn try_flash_attn_paged_decode(
                     softmax_scale,
                 )?
             };
+            finish_full_attn_stage_profile(
+                q.device(),
+                profile_context,
+                "decode_attn_contiguous",
+                q_len,
+                stage_profile,
+            )?;
             let attn_output = if attn_output.is_some() {
                 attn_output
             } else {
@@ -4705,7 +4752,21 @@ fn try_flash_attn_paged_decode(
                     && backend.supports_paged_kv_head_major_read()
                 {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, total_seq_len)?
+                    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                    let out = backend.paged_kv_head_major_read(
+                        k_pool,
+                        v_pool,
+                        start_slot,
+                        total_seq_len,
+                    )?;
+                    finish_full_attn_stage_profile(
+                        q.device(),
+                        profile_context,
+                        "kv_head_read",
+                        q_len,
+                        stage_profile,
+                    )?;
+                    out
                 } else {
                     None
                 };
@@ -4727,9 +4788,18 @@ fn try_flash_attn_paged_decode(
                             )
                         }
                     };
-                    flash_attention_forward_head_major(
+                    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                    let out = flash_attention_forward_head_major(
                         backend, q, &k_head, &v_head, num_heads, head_dim,
-                    )?
+                    )?;
+                    finish_full_attn_stage_profile(
+                        q.device(),
+                        profile_context,
+                        "decode_attn_head_major",
+                        q_len,
+                        stage_profile,
+                    )?;
+                    out
                 } else {
                     None
                 }
@@ -4742,11 +4812,20 @@ fn try_flash_attn_paged_decode(
                 // returns above and should not pay this transpose/copy.
                 let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
                 let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let q_fa = {
                     kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
                     q.transpose(1, 2)?.contiguous()?
                 };
-                flash_attention_forward(
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "q_fa_transpose",
+                    q_len,
+                    stage_profile,
+                )?;
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                let out = flash_attention_forward(
                     backend,
                     &q_fa,
                     &k_live,
@@ -4754,17 +4833,34 @@ fn try_flash_attn_paged_decode(
                     num_heads,
                     num_kv_heads,
                     head_dim,
-                )?
+                )?;
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "decode_attn_fallback",
+                    q_len,
+                    stage_profile,
+                )?;
+                out
             };
             if let Some(attn_output) = attn_output {
                 // The flash-attention helpers already reshape to
                 // [batch, seq_len, num_heads * head_dim].
                 let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let attn_output =
                     attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "attn_gate",
+                    q_len,
+                    stage_profile,
+                )?;
                 let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
                     linear_with_lora_t_decode(
@@ -4774,6 +4870,13 @@ fn try_flash_attn_paged_decode(
                         lora_scale,
                     )?
                 };
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "o_proj",
+                    q_len,
+                    stage_profile,
+                )?;
                 let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
                 return Ok(Some(out));
             }
@@ -4844,10 +4947,20 @@ fn try_flash_attn_paged_decode(
     // -> [batch, 1, num_heads, head_dim]. Build it lazily so the contiguous-KV
     // Metal path above can avoid a dead transpose/copy per full-attention layer.
     let q_fa = {
+        let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
-        q.transpose(1, 2)?.contiguous()?
+        let q_fa = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            q.device(),
+            profile_context,
+            "q_fa_transpose",
+            q_len,
+            stage_profile,
+        )?;
+        q_fa
     };
 
+    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let attn_out = match backend.flash_attn_paged_decode(
         &q_fa,
         k_pool,
@@ -4861,6 +4974,13 @@ fn try_flash_attn_paged_decode(
         Some(t) => t,
         None => return Ok(None),
     };
+    finish_full_attn_stage_profile(
+        q.device(),
+        profile_context,
+        "decode_attn_paged",
+        q_len,
+        stage_profile,
+    )?;
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
@@ -4868,9 +4988,18 @@ fn try_flash_attn_paged_decode(
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
     let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
+    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
+    finish_full_attn_stage_profile(
+        q.device(),
+        profile_context,
+        "attn_gate",
+        q_len,
+        stage_profile,
+    )?;
     let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
+    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
         linear_with_lora_t_decode(
@@ -4880,6 +5009,7 @@ fn try_flash_attn_paged_decode(
             lora_scale,
         )?
     };
+    finish_full_attn_stage_profile(q.device(), profile_context, "o_proj", q_len, stage_profile)?;
     let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(Some(out))
 }
@@ -4952,6 +5082,9 @@ fn gqa_attention_paged_with_rope_tables(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
+    let profile_context =
+        profile_full_attn_stages_enabled().then_some((full_attn_layer_idx, start_pos));
     let subop_armed = crate::mtp_debug::is_subop_capture_armed();
     let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
     let use_metal_decode_gemv =
@@ -4963,14 +5096,23 @@ fn gqa_attention_paged_with_rope_tables(
         None => (None, 0.0),
     };
     let (q_raw, k, v) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        full_attn_qkv_proj_decode_if(
+        let out = full_attn_qkv_proj_decode_if(
             use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer,
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
     // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
@@ -4995,8 +5137,9 @@ fn gqa_attention_paged_with_rope_tables(
     }
 
     let (q, gate) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv_split");
-        if attn_output_gate {
+        let out = if attn_output_gate {
             let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
             let q = q_raw.narrow(3, 0, head_dim)?;
             let gate = q_raw.narrow(3, head_dim, head_dim)?;
@@ -5007,7 +5150,15 @@ fn gqa_attention_paged_with_rope_tables(
         } else {
             let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
             (q, None)
-        }
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     // After the gate split, q is the rotation target.
     if subop_armed {
@@ -5036,10 +5187,19 @@ fn gqa_attention_paged_with_rope_tables(
 
     // QK-norm
     let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/qk_norm");
         let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
         let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
-        (q, k)
+        let out = (q, k);
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
@@ -5062,12 +5222,21 @@ fn gqa_attention_paged_with_rope_tables(
     // Use the GPU tensor variant so positions remain at a stable GPU address
     // (critical for CUDA graph replay correctness)
     let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/rope");
-        if let Some((cos, sin)) = rope_tables {
+        let out = if let Some((cos, sin)) = rope_tables {
             rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
         } else {
             rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
-        }
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "rope",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
@@ -5095,8 +5264,16 @@ fn gqa_attention_paged_with_rope_tables(
     // prefill tiles and speculative verifier windows read full head-major K/V
     // back from the paged cache instead.
     let q = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
         let q = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_transpose",
+            seq_len,
+            stage_profile,
+        )?;
         q
     };
 
@@ -5114,17 +5291,41 @@ fn gqa_attention_paged_with_rope_tables(
             || backend.supports_flash_attn_prefill())
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
         let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_kv_head_layout",
+            seq_len,
+            stage_profile,
+        )?;
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let attn_output = if let Some(attn_output) =
             flash_attention_forward_head_major(backend, &q, &k_head, &v_head, num_heads, head_dim)?
         {
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_head_major",
+                seq_len,
+                stage_profile,
+            )?;
             Some(attn_output)
         } else if backend.supports_flash_attn_prefill() {
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_head_major",
+                seq_len,
+                stage_profile,
+            )?;
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
             let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
             let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
-            flash_attention_forward(
+            let out = flash_attention_forward(
                 backend,
                 &q_prefill,
                 &k_prefill,
@@ -5132,12 +5333,28 @@ fn gqa_attention_paged_with_rope_tables(
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            )?
+            )?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_fallback",
+                seq_len,
+                stage_profile,
+            )?;
+            out
         } else {
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_head_major",
+                seq_len,
+                stage_profile,
+            )?;
             None
         };
 
         if let Some(attn_output) = attn_output {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
                 if !paged_cache.write_token_major_native(
@@ -5158,15 +5375,31 @@ fn gqa_attention_paged_with_rope_tables(
                         .context("paged KV cache write failed")?;
                 }
             }
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "kv_write",
+                seq_len,
+                stage_profile,
+            )?;
 
             // Phase B12 layer-31 GQA tap: attn_out. Captured AFTER the gate
             // multiply (if `attn_output_gate`) and BEFORE o_proj, so it
             // matches the HF reference's `attn_output = ... * sigmoid_gate`
             // tap point. Shape: [B, T, num_heads * head_dim].
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "attn_gate",
+                seq_len,
+                stage_profile,
+            )?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
@@ -5176,6 +5409,13 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "o_proj",
+                seq_len,
+                stage_profile,
+            )?;
             // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
@@ -5195,6 +5435,7 @@ fn gqa_attention_paged_with_rope_tables(
 
     // Write new K/V into paged cache.
     if !single_token_self_attn {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/kv/copy");
         if !paged_cache.write_token_major_native(
             full_attn_layer_idx,
@@ -5215,6 +5456,13 @@ fn gqa_attention_paged_with_rope_tables(
                 )
                 .context("paged KV cache write failed")?;
         }
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_write",
+            seq_len,
+            stage_profile,
+        )?;
     }
 
     // Fast path: fused paged-decode flash-attention kernel.
@@ -5260,6 +5508,7 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_weights,
                 lora_layer,
                 lora_scale,
+                profile_context,
             )?
         };
         if let Some(out) = out_opt {
