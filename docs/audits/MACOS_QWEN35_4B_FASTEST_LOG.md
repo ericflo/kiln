@@ -10024,3 +10024,73 @@ the purpose-built attention-side batching direction that E324 pointed toward:
 it avoids the losing batched SDPA gather shape and reduces rowwise custom-kernel
 launch overhead for future true decode batches. Endpoint speed still depends on
 model-forward and scheduler plumbing that can present B contiguous cache runs.
+
+## 2026-05-04 E329 - Rejected full-attention QK-norm+RoPE decode fusion
+
+### Goal
+
+Return to production bs=1 decode latency rather than only adding future
+batching primitives. E289's synchronized full-attention stage profile showed
+`qk_norm` and `rope` as separate decode costs, so the candidate fused per-head
+Q/K RMSNorm with RoPE for the `seq_len == 1` paged full-attention path.
+
+### Change Tested
+
+- Added a temporary Metal BF16 kernel for
+  `q=[B,1,16,256]`, `k=[B,1,4,256]`, per-head Q/K norm weights, and
+  precomputed F32 RoPE tables.
+- Rounded the normalized Q/K values to BF16 before rotation to match the split
+  `rms_norm -> rotary` semantics exactly.
+- Routed only the normal no-debug paged decode path through the fused kernel;
+  prefill and debug capture paths stayed split.
+- Reverted the temporary source after endpoint testing because the real server
+  path did not improve.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_metal_full_attn_qk_norm_rope_matches_split --lib`
+- `KILN_METAL_FULL_ATTN_QK_NORM_ROPE_BENCH_WARMUP=5 KILN_METAL_FULL_ATTN_QK_NORM_ROPE_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_metal_full_attn_qk_norm_rope_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+- Same-binary endpoint A/Bs with `kiln-bench --paged --latency-only
+  --latency-warmup-runs 1 --prompt-tokens 64 --temperature 0.0 --seed 329`
+
+### Results
+
+Synthetic stage results, Qwen3.5 full-attention decode shape:
+
+| Batch | Split QK-norm+RoPE | Fused kernel | Speedup | Q max diff | K max diff |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `170.188 us` | `105.040 us` | `1.620x` | `0.000000e0` | `0.000000e0` |
+| 2 | `259.421 us` | `109.523 us` | `2.369x` | `0.000000e0` | `0.000000e0` |
+| 4 | `179.427 us` | `119.438 us` | `1.502x` | `0.000000e0` | `0.000000e0` |
+| 8 | `216.608 us` | `143.946 us` | `1.505x` | `0.000000e0` | `0.000000e0` |
+
+Full endpoint same-binary A/B:
+
+| Run | Prefill | Mean ITL | P50 ITL | P99 ITL | Tokens |
+|---|---:|---:|---:|---:|---:|
+| p64/o16 fused | `431.1 ms` | `164.9 ms` | `164.0 ms` | `175.6 ms` | 17 |
+| p64/o16 disabled control | `430.1 ms` | `163.8 ms` | `162.8 ms` | `177.1 ms` | 17 |
+| p64/o64 fused | `431.4 ms` | `163.9 ms` | `163.9 ms` | `178.0 ms` | 65 |
+| p64/o64 disabled control | `433.8 ms` | `163.5 ms` | `162.8 ms` | `180.7 ms` | 65 |
+
+### Artifacts
+
+- `e329_full_attn_qk_norm_rope_decode_batch_synthetic.log`
+- `e329_m1_p64_o16_qk_norm_rope_fused.log`
+- `e329_m1_p64_o16_qk_norm_rope_disabled_control.log`
+- `e329_m1_p64_o64_qk_norm_rope_fused.log`
+- `e329_m1_p64_o64_qk_norm_rope_disabled_control.log`
+
+### Decision
+
+Rejected for the production path. The low-level stage kernel is real and
+numerically exact, but it does not translate to faster measured endpoint
+decode; both p64/o16 and the more stable p64/o64 A/Bs were slightly faster
+with the current split path. Do not default-enable this fusion. Future work
+should target lower-level changes that move full endpoint metrics, or revisit
+QK-norm/RoPE only if a deeper fusion removes a larger downstream boundary than
+this standalone pair.

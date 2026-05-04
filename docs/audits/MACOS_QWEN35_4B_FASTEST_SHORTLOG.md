@@ -947,3 +947,14 @@
   `514.329 us` (1.568x), and batch8 `1259.971 us` -> `777.429 us` (1.621x),
   all with exact output matches. Endpoint use still needs model-forward
   scheduler/cache plumbing to provide B contiguous cache runs.
+- 2026-05-04 E329: Rejected full-attention QK-norm+RoPE decode fusion for the
+  production path. The temporary Metal BF16 kernel fused per-head Q/K RMSNorm
+  with RoPE for `seq_len == 1`, matched the split path exactly, and won the
+  synthetic stage benchmark: batch1 `170.188 us` -> `105.040 us` (1.620x),
+  batch2 `259.421 us` -> `109.523 us` (2.369x), batch4 `179.427 us` ->
+  `119.438 us` (1.502x), and batch8 `216.608 us` -> `143.946 us` (1.505x).
+  Real same-binary endpoint A/Bs did not improve: p64/o16 fused measured
+  `164.9 ms` mean ITL versus disabled control `163.8 ms`, and the more stable
+  p64/o64 fused measured `163.9 ms` versus disabled control `163.5 ms`.
+  Source was reverted; this PR should keep prioritizing low-level changes that
+  move endpoint latency/throughput, not standalone microbench wins.
