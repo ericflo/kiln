@@ -14,29 +14,51 @@ use kiln_train::TrainingState;
 
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     // Snapshot scheduler gauges.
-    let (scheduler_waiting, scheduler_running, blocks_used, blocks_total, prefix_cache) =
-        match state.backend.as_ref() {
-            ModelBackend::Mock { scheduler, .. } => {
-                let sched = scheduler.lock().await;
-                let bm = sched.block_manager();
-                (
-                    sched.num_waiting(),
-                    sched.num_running(),
-                    bm.num_used(),
-                    bm.num_blocks(),
-                    sched.prefix_cache_stats(),
-                )
-            }
-            ModelBackend::Real {
-                block_manager,
+    let (
+        scheduler_waiting,
+        scheduler_running,
+        blocks_used,
+        blocks_total,
+        prefix_cache,
+        decode_batcher_enabled,
+        decode_batcher,
+    ) = match state.backend.as_ref() {
+        ModelBackend::Mock { scheduler, .. } => {
+            let sched = scheduler.lock().await;
+            let bm = sched.block_manager();
+            (
+                sched.num_waiting(),
+                sched.num_running(),
+                bm.num_used(),
+                bm.num_blocks(),
+                sched.prefix_cache_stats(),
+                false,
+                kiln_model::DecodeBatcherStats::default(),
+            )
+        }
+        ModelBackend::Real {
+            block_manager,
+            prefix_cache,
+            decode_batcher,
+            ..
+        } => {
+            let bm = block_manager.lock().unwrap();
+            let prefix_cache = prefix_cache.lock().unwrap().stats();
+            let batcher_stats = decode_batcher
+                .as_ref()
+                .map(|batcher| batcher.stats())
+                .unwrap_or_default();
+            (
+                0,
+                0,
+                bm.num_used(),
+                bm.num_blocks(),
                 prefix_cache,
-                ..
-            } => {
-                let bm = block_manager.lock().unwrap();
-                let prefix_cache = prefix_cache.lock().unwrap().stats();
-                (0, 0, bm.num_used(), bm.num_blocks(), prefix_cache)
-            }
-        };
+                decode_batcher.is_some(),
+                batcher_stats,
+            )
+        }
+    };
 
     // Training active?
     let training_active = {
@@ -73,6 +95,8 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         prompt_token_cache_hits,
         prompt_token_cache_misses,
         prompt_token_cache_entries,
+        decode_batcher_enabled,
+        decode_batcher,
         training_active,
         active_adapter,
     };

@@ -25,9 +25,9 @@ pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::LinearAttentionState;
 pub use generate::{
-    DecodeBatcher, DecodeBatcherConfig, FinishReason, GenerationOutput, ModelRunner,
-    MtpGenerationOutput, PagedPrefixNextToken, PagedPrefixRegistration, PagedPrefixReuse,
-    PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken,
+    DecodeBatcher, DecodeBatcherConfig, DecodeBatcherStats, FinishReason, GenerationOutput,
+    ModelRunner, MtpGenerationOutput, PagedPrefixNextToken, PagedPrefixRegistration,
+    PagedPrefixReuse, PrefixCachedGenerationOutput, StreamDone, StreamEvent, StreamToken,
 };
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};

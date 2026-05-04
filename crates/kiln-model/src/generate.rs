@@ -241,7 +241,7 @@ impl DecodeBatcherConfig {
         if !matches!(device, Device::Metal(_)) {
             return false;
         }
-        env_flag_enabled("KILN_DECODE_BATCHER", true)
+        env_flag_enabled("KILN_DECODE_BATCHER", false)
     }
 }
 
@@ -264,7 +264,26 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
 /// calls `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy`.
 pub struct DecodeBatcher {
     sender: mpsc::Sender<DecodeBatchJob>,
-    observed_max_batch: Arc<AtomicUsize>,
+    counters: Arc<DecodeBatcherCounters>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecodeBatcherStats {
+    pub submitted_jobs: usize,
+    pub executed_batches: usize,
+    pub executed_rows: usize,
+    pub max_observed_batch: usize,
+    pub runner_busy_jobs: usize,
+    pub failed_jobs: usize,
+}
+
+struct DecodeBatcherCounters {
+    submitted_jobs: AtomicUsize,
+    executed_batches: AtomicUsize,
+    executed_rows: AtomicUsize,
+    max_observed_batch: AtomicUsize,
+    runner_busy_jobs: AtomicUsize,
+    failed_jobs: AtomicUsize,
 }
 
 struct DecodeBatchJob {
@@ -301,8 +320,15 @@ impl DecodeBatcher {
         config: DecodeBatcherConfig,
     ) -> Result<Arc<Self>> {
         let (sender, receiver) = mpsc::channel();
-        let observed_max_batch = Arc::new(AtomicUsize::new(0));
-        let observed_for_worker = observed_max_batch.clone();
+        let counters = Arc::new(DecodeBatcherCounters {
+            submitted_jobs: AtomicUsize::new(0),
+            executed_batches: AtomicUsize::new(0),
+            executed_rows: AtomicUsize::new(0),
+            max_observed_batch: AtomicUsize::new(0),
+            runner_busy_jobs: AtomicUsize::new(0),
+            failed_jobs: AtomicUsize::new(0),
+        });
+        let counters_for_worker = counters.clone();
         std::thread::Builder::new()
             .name("kiln-decode-batcher".to_string())
             .spawn(move || {
@@ -311,19 +337,27 @@ impl DecodeBatcher {
                     paged_cache,
                     receiver,
                     config,
-                    observed_for_worker,
+                    counters_for_worker,
                 );
             })
             .map_err(|e| anyhow::anyhow!("failed to spawn decode batcher worker: {e}"))?;
 
-        Ok(Arc::new(Self {
-            sender,
-            observed_max_batch,
-        }))
+        Ok(Arc::new(Self { sender, counters }))
     }
 
     pub fn max_observed_batch(&self) -> usize {
-        self.observed_max_batch.load(Ordering::Relaxed)
+        self.counters.max_observed_batch.load(Ordering::Relaxed)
+    }
+
+    pub fn stats(&self) -> DecodeBatcherStats {
+        DecodeBatcherStats {
+            submitted_jobs: self.counters.submitted_jobs.load(Ordering::Relaxed),
+            executed_batches: self.counters.executed_batches.load(Ordering::Relaxed),
+            executed_rows: self.counters.executed_rows.load(Ordering::Relaxed),
+            max_observed_batch: self.counters.max_observed_batch.load(Ordering::Relaxed),
+            runner_busy_jobs: self.counters.runner_busy_jobs.load(Ordering::Relaxed),
+            failed_jobs: self.counters.failed_jobs.load(Ordering::Relaxed),
+        }
     }
 
     fn decode_next_token_greedy(
@@ -346,6 +380,7 @@ impl DecodeBatcher {
             *linear_state = err.0.linear_state;
             anyhow::bail!("decode batcher worker is not running");
         }
+        self.counters.submitted_jobs.fetch_add(1, Ordering::Relaxed);
 
         match response_rx.recv() {
             Ok(DecodeBatchReply::Decoded {
@@ -388,7 +423,7 @@ fn run_decode_batcher_worker(
     paged_cache: Arc<Mutex<PagedKvCache>>,
     receiver: mpsc::Receiver<DecodeBatchJob>,
     config: DecodeBatcherConfig,
-    observed_max_batch: Arc<AtomicUsize>,
+    counters: Arc<DecodeBatcherCounters>,
 ) {
     let max_batch = config.max_batch.max(1);
     let mut deferred = VecDeque::new();
@@ -432,8 +467,14 @@ fn run_decode_batcher_worker(
             }
         }
 
-        observed_max_batch.fetch_max(jobs.len(), Ordering::Relaxed);
-        process_decode_batch_jobs(&runner_lock, paged_cache.as_ref(), jobs);
+        counters
+            .max_observed_batch
+            .fetch_max(jobs.len(), Ordering::Relaxed);
+        counters.executed_batches.fetch_add(1, Ordering::Relaxed);
+        counters
+            .executed_rows
+            .fetch_add(jobs.len(), Ordering::Relaxed);
+        process_decode_batch_jobs(&runner_lock, paged_cache.as_ref(), jobs, &counters);
     }
 }
 
@@ -441,10 +482,14 @@ fn process_decode_batch_jobs(
     runner_lock: &std::sync::RwLock<ModelRunner>,
     paged_cache: &Mutex<PagedKvCache>,
     mut jobs: Vec<DecodeBatchJob>,
+    counters: &DecodeBatcherCounters,
 ) {
     let runner_guard = match runner_lock.try_read() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::WouldBlock) => {
+            counters
+                .runner_busy_jobs
+                .fetch_add(jobs.len(), Ordering::Relaxed);
             for job in jobs {
                 let _ = job.response.send(DecodeBatchReply::RunnerBusy {
                     linear_state: job.linear_state,
@@ -454,6 +499,9 @@ fn process_decode_batch_jobs(
         }
         Err(std::sync::TryLockError::Poisoned(err)) => {
             let message = format!("failed to acquire runner read lock in decode batcher: {err}");
+            counters
+                .failed_jobs
+                .fetch_add(jobs.len(), Ordering::Relaxed);
             for job in jobs {
                 let _ = job.response.send(DecodeBatchReply::Failed {
                     error: message.clone(),
@@ -506,6 +554,9 @@ fn process_decode_batch_jobs(
         }
         Err(err) => {
             let message = format!("{err:#}");
+            counters
+                .failed_jobs
+                .fetch_add(jobs.len(), Ordering::Relaxed);
             for job in jobs {
                 let _ = job.response.send(DecodeBatchReply::Failed {
                     error: message.clone(),

@@ -3,6 +3,7 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
+use kiln_model::DecodeBatcherStats;
 use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -406,6 +407,70 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_decode_batcher_enabled Whether the live greedy decode batcher is enabled.\n");
+        out.push_str("# TYPE kiln_decode_batcher_enabled gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_enabled {}",
+                if gauges.decode_batcher_enabled { 1 } else { 0 }
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_jobs_total Live greedy decode batcher jobs.\n");
+        out.push_str("# TYPE kiln_decode_batcher_jobs_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "submitted",
+            gauges.decode_batcher.submitted_jobs as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "runner_busy",
+            gauges.decode_batcher.runner_busy_jobs as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "failed",
+            gauges.decode_batcher.failed_jobs as u64,
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_batches_total Live greedy decode batches executed by the rendezvous worker.\n");
+        out.push_str("# TYPE kiln_decode_batcher_batches_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_batches_total {}",
+                gauges.decode_batcher.executed_batches
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_rows_total Live greedy decode rows executed by the rendezvous worker.\n");
+        out.push_str("# TYPE kiln_decode_batcher_rows_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_rows_total {}",
+                gauges.decode_batcher.executed_rows
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_max_observed_batch Largest live greedy decode batch observed since process start.\n");
+        out.push_str("# TYPE kiln_decode_batcher_max_observed_batch gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_max_observed_batch {}",
+                gauges.decode_batcher.max_observed_batch
+            ),
+        );
+
         // --- Scheduler ---
         out.push_str("# HELP kiln_scheduler_waiting Requests waiting to be scheduled.\n");
         out.push_str("# TYPE kiln_scheduler_waiting gauge\n");
@@ -700,6 +765,8 @@ pub struct SnapshotGauges {
     pub prompt_token_cache_hits: u64,
     pub prompt_token_cache_misses: u64,
     pub prompt_token_cache_entries: usize,
+    pub decode_batcher_enabled: bool,
+    pub decode_batcher: DecodeBatcherStats,
     pub training_active: u8,
     pub active_adapter: Option<String>,
 }

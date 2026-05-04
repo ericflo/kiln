@@ -1101,13 +1101,22 @@
   `model_forward_paged` logits plus `greedy_sample`. This is not live request
   batching yet; it gives the eventual scheduler one call to execute.
 - 2026-05-04 E345: Accepted the first live greedy streaming decode batcher.
-  `kiln-server` now creates a shared Metal-only `DecodeBatcher` (default
-  enabled on Metal, disabled elsewhere) and passes it into non-speculative
-  streaming decode, including prefix-cache paths. Greedy Metal decode steps
-  submit one-token jobs carrying their `BlockTable`, position, and one-row GDN
-  state; the worker groups same-position jobs up to `KILN_DECODE_BATCH_MAX`
-  and optionally waits `KILN_DECODE_BATCH_WAIT_US` for peers (default zero for
-  bs=1 latency). A Metal test drove two same-position jobs through the live
-  worker, observed `max_observed_batch == 2`, and matched rowwise greedy
-  tokens. This moves true batching into the serving path, though real
-  throughput/ITL still needs concurrent SSE measurement and wait-window tuning.
+  `kiln-server` can create a shared Metal-only `DecodeBatcher` when
+  `KILN_DECODE_BATCHER=1` is set and pass it into non-speculative streaming
+  decode, including prefix-cache paths. Greedy Metal decode steps submit
+  one-token jobs carrying their `BlockTable`, position, and one-row GDN state;
+  the worker groups same-position jobs up to `KILN_DECODE_BATCH_MAX` and
+  optionally waits `KILN_DECODE_BATCH_WAIT_US` for peers. A Metal test drove
+  two same-position jobs through the live worker, observed
+  `max_observed_batch == 2`, and matched rowwise greedy tokens. This moves true
+  batching into the serving path as an opt-in path for measurement.
+- 2026-05-04 E346: Added live decode-batcher Prometheus metrics and rejected
+  default enablement. Four concurrent streaming chat requests showed the
+  batcher really coalesces rows (`KILN_DECODE_BATCHER=1`, zero wait: `28`
+  submitted jobs, `16` worker batches, `28` rows, max batch `2`), but endpoint
+  time regressed from disabled `6.245348s` for 32 generated tokens to
+  zero-wait enabled `7.735135s` for the same 32 generated tokens. A `500us`
+  wait observed max batch `3` but slowed to `10.076978s` and one request ended
+  early. The batcher is now opt-in (`KILN_DECODE_BATCHER=1`) until a batched
+  greedy-tail/argmax path or better admission policy can beat rowwise
+  `model_forward_paged_next_token_greedy`.

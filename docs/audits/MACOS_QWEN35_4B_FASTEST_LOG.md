@@ -10959,10 +10959,9 @@ eligible greedy decode step.
   fall back to their existing rowwise decode under the read guard they already
   hold, avoiding a reader/writer deadlock while preserving per-request adapter
   consistency.
-- `kiln-server` now creates a shared batcher for Metal devices when
-  `KILN_DECODE_BATCHER` is enabled (default enabled on Metal, disabled
-  elsewhere) and passes it into the non-speculative streaming spawn paths,
-  including prefix-cache hits and misses.
+- `kiln-server` can now create a shared batcher for Metal devices when
+  `KILN_DECODE_BATCHER=1` is set and passes it into the non-speculative
+  streaming spawn paths, including prefix-cache hits and misses.
 - The existing streaming loop only uses the batcher for greedy Metal decode;
   stochastic sampling, speculative paths, and non-Metal devices retain their
   prior rowwise behavior.
@@ -10990,9 +10989,77 @@ eligible greedy decode step.
 
 ### Decision
 
-Accepted as the first live request-path batching implementation. It is still a
-strict greedy Metal path and it batches only compatible same-position rows, but
-it moves the work from cache-only plumbing to actual serving-time decode
-admission. Next experiments should measure concurrent SSE throughput/ITL with
-`KILN_DECODE_BATCH_WAIT_US=0` and small nonzero waits, then tighten grouping or
-extend admission if real traffic does not naturally align enough rows.
+Accepted as the first live request-path batching implementation, kept behind
+`KILN_DECODE_BATCHER=1` while endpoint measurements decide whether and when it
+should become a default. It is still a strict greedy Metal path and it batches
+only compatible same-position rows, but it moves the work from cache-only
+plumbing to actual serving-time decode admission. Next experiments should
+measure concurrent SSE throughput/ITL with `KILN_DECODE_BATCH_WAIT_US=0` and
+small nonzero waits, then tighten grouping or extend admission if real traffic
+does not naturally align enough rows.
+
+## 2026-05-04 E346 - Added decode-batcher metrics and rejected default enablement
+
+### Goal
+
+Verify the live request-path batcher under actual streaming HTTP traffic before
+letting it affect default serving. The important question was not just whether
+jobs can enter the worker, but whether same-position streaming rows coalesce
+often enough, and cheaply enough, to beat the existing rowwise greedy path.
+
+### Change
+
+- Added `DecodeBatcherStats` and Prometheus exposition for:
+  `kiln_decode_batcher_enabled`, `kiln_decode_batcher_jobs_total`,
+  `kiln_decode_batcher_batches_total`, `kiln_decode_batcher_rows_total`, and
+  `kiln_decode_batcher_max_observed_batch`.
+- Rebuilt the release server and ran four concurrent streaming chat requests
+  against three configurations:
+  - `KILN_DECODE_BATCHER=0`
+  - `KILN_DECODE_BATCHER=1 KILN_DECODE_BATCH_WAIT_US=0`
+  - `KILN_DECODE_BATCHER=1 KILN_DECODE_BATCH_WAIT_US=500`
+- Changed the default to opt-in (`KILN_DECODE_BATCHER=1`) after the live probe
+  showed endpoint slowdown.
+
+### Validation
+
+- `cargo build --release --features metal --bin kiln`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/generate.rs crates/kiln-model/src/lib.rs crates/kiln-server/src/metrics.rs crates/kiln-server/src/api/metrics.rs`
+- `git diff --check`
+
+### Results
+
+- Disabled control: four concurrent streaming requests, 32 generated tokens,
+  elapsed `6.245348s`, decode batcher disabled, zero submitted jobs.
+- Enabled with zero wait: 32 generated tokens, elapsed `7.735135s`; the worker
+  submitted `28` jobs, executed `16` batches, processed `28` rows, and observed
+  max batch `2`.
+- Enabled with `500us` wait: elapsed `10.076978s`; the worker submitted `21`
+  jobs, executed `8` batches, processed `21` rows, and observed max batch `3`.
+  One request ended early, so this is not token-normal comparable, but it still
+  clearly shows the wait window is too expensive for this short streaming
+  workload.
+
+### Artifact
+
+- `e346_disabled_time.log`
+- `e346_disabled_metrics.prom`
+- `e346_disabled_server.log`
+- `e346_wait0_time.log`
+- `e346_wait0_metrics.prom`
+- `e346_wait0_server.log`
+- `e346_wait500_time.log`
+- `e346_wait500_metrics.prom`
+- `e346_wait500_server.log`
+
+### Decision
+
+Rejected default enablement for now. The live batcher is correct and can form
+real request-path batches, but this probe shows it is slower than the existing
+rowwise greedy path even with zero wait. Likely causes are the B-row path's
+full-logits greedy sampling and model-forward batching overhead versus the
+single-row `model_forward_paged_next_token_greedy` fast path. Keep the batcher
+opt-in for experiments and prioritize either a batched greedy-tail/argmax path
+or better admission policy before considering default-on serving.
