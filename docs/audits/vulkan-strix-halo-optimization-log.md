@@ -2263,12 +2263,43 @@ Evidence:
   - The new dominant buckets are `mlp.fused` at about 54ms/32 layers, full-attention layers at about 24-25ms/8 layers, GDN input projection at about 20-22ms/24 layers, and LM-head argmax at about 14-17ms.
 
 Verdict:
-- Keep as opt-in only for now.
-- The latency win is real and large. Scoping removes the obvious backend-global leak/stale-cache problem for normal decode loops, but default promotion still needs more end-to-end server semantic coverage.
-- Before promotion, resident state ownership should move into `LinearAttentionState` or gain explicit materialization hooks so any future prefix-cache snapshots or speculative rollback inside a resident scope cannot observe stale CPU state.
+- Superseded by E078 promotion.
+- The latency win is real and large. Scoping removes the obvious backend-global leak/stale-cache problem for normal decode loops.
+- Before enabling the path in speculative decode, resident state ownership should move into `LinearAttentionState` or gain explicit materialization hooks so snapshots/rollback inside a resident scope cannot observe stale CPU state.
+
+### E078: Promote Scoped Resident Split GDN Recurrent State
+
+Change:
+- Promoted the scoped resident split GDN recurrent state path to default on Vulkan.
+- Added rollback env `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`.
+- The old opt-in env is no longer required; normal decode loops enter a thread-local resident-state scope by default and clear cached state buffers on scope exit.
+
+Reasoning:
+- E077 reduced the dominant bs=1 bucket by removing the full recurrent-state upload/readback loop.
+- The scope guard means normal decode no longer leaves resident buffers in a backend-global cache after the request.
+- The remaining stale CPU-state risk is isolated to code that would snapshot/rollback within a resident scope; speculative paths do not enter the scope yet, and prefix-cache registrations happen outside the decode scope.
+
+Evidence:
+- Validation:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_resident_state_matches_two_step_reference -- --nocapture` passed.
+  - `cargo check -p kiln-server --features vulkan` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+  - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+- Same rebuilt binary A/B:
+  - Default no-env: prefill 1901.8ms; mean ITL 137.6ms, p50 135.2ms, p99 150.1ms.
+  - Rollback guard `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`: prefill 1912.7ms; mean ITL 319.3ms, p50 323.2ms, p99 325.4ms.
+- Token-id parity check on the same short fixture:
+  - Default generated first token ids `[0,0,0,0,0,0,0]`, mean ITL 140.4ms.
+  - Rollback guard generated first token ids `[0,0,0,0,0,0,0]`, mean ITL 333.2ms.
+
+Verdict:
+- Keep as default.
+- This is the new default bs=1 source anchor: 137.6ms mean ITL in the main A/B, with 140.4ms in the token-parity run.
+- Roll back with `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`.
 
 ## Next Candidate
 
-The current default bs=1 bottleneck is still GDN recurrent state work and CPU/Vulkan boundaries around mutable recurrent state. E077 proves that true recurrent state residency can cut the short-source decode anchor from the noisy 318-329ms band to about 134-137ms mean ITL, but it is still opt-in until state ownership/materialization is safe enough to promote. The next useful single-user experiment is to make that residency production-safe by moving resident buffers into `LinearAttentionState` or adding explicit backend materialization hooks, then running full server parity and concurrency checks. After that, the new default bottlenecks are MLP fused decode, full-attention layers, GDN input projection, and LM-head argmax.
+With E078, the current default bs=1 short-source anchor is 137.6ms mean ITL. The old dominant GDN recurrent state bucket is no longer the first target in normal decode. The next useful single-user experiments should attack the new dominant buckets: MLP fused decode, full-attention layers, GDN input projection, and LM-head argmax. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.

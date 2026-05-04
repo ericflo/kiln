@@ -116,8 +116,8 @@ impl VulkanBackend {
         // benchmarks. Keep it opt-in until it is tiled/tuned.
         let mlp_gate_up_enabled = std::env::var("KILN_ENABLE_VULKAN_MLP_GATE_UP").is_ok();
         let weight_prewarm_enabled = std::env::var("KILN_DISABLE_VULKAN_WEIGHT_PREWARM").is_err();
-        let recurrent_state_residency_enabled =
-            std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok();
+        let recurrent_state_residency_enabled = gdn_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_err();
 
         let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
             Ok(dev) => {
