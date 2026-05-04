@@ -1712,7 +1712,7 @@ pub fn dispatch_mlp_gate_up_decode_cached(
         if batch == 1 {
             intermediate.div_ceil(64) as u32
         } else {
-            (batch * intermediate.div_ceil(64)) as u32
+            (batch * intermediate.div_ceil(128)) as u32
         },
     )
     .context("mlp_gate_up_decode kernel failed")?;
@@ -1824,7 +1824,7 @@ pub fn dispatch_mlp_decode_cached(
         if batch == 1 {
             intermediate.div_ceil(64) as u32
         } else {
-            (batch * intermediate.div_ceil(64)) as u32
+            (batch * intermediate.div_ceil(128)) as u32
         },
     )
     .context("mlp_decode gate/up kernel failed")?;
