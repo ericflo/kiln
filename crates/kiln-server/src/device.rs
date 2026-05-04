@@ -10,8 +10,20 @@ use anyhow::Result;
 use candle_core::Device;
 
 pub fn select_device() -> Result<Device> {
+    select_device_with_options(false)
+}
+
+pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
     #[cfg(feature = "cuda")]
     if candle_core::utils::cuda_is_available() {
+        if cuda_graphs {
+            tracing::info!("CUDA available — using GPU device 0 with graph-capturable stream");
+            let device = Device::new_cuda_with_stream(0)?;
+            if let Device::Cuda(cuda_device) = &device {
+                unsafe { cuda_device.disable_event_tracking() };
+            }
+            return Ok(device);
+        }
         tracing::info!("CUDA available — using GPU device 0");
         return Ok(Device::new_cuda(0)?);
     }

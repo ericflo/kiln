@@ -314,6 +314,171 @@ extern "C" kiln_flash_status_t kiln_flash_attn_fwd_paged_decode(
     return 0;
 }
 
+extern "C" kiln_flash_status_t kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
+    const void *q,
+    const void *k_pool,
+    const void *v_pool,
+    const int  *block_table,
+    const int  *seqused_k,
+    void *out,
+    void *softmax_lse_out,
+    int batch_size,
+    int num_heads,
+    int num_heads_k,
+    int head_dim,
+    int max_seqlen_k,
+    int max_blocks_per_seq,
+    int page_block_size,
+    float softmax_scale,
+    int is_causal,
+    void *stream)
+{
+    if (head_dim != 128 && head_dim != 256) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode_dyn_seqlen: only head_dim=128,256 supported, got %d\n", head_dim);
+        return -1;
+    }
+    if (num_heads % num_heads_k != 0) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode_dyn_seqlen: num_heads (%d) must be divisible by num_heads_k (%d)\n",
+                num_heads, num_heads_k);
+        return -2;
+    }
+    constexpr int kBlockN = 128;
+    if (page_block_size <= 0 || (kBlockN % page_block_size) != 0) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode_dyn_seqlen: page_block_size (%d) must divide kBlockN (%d)\n",
+                page_block_size, kBlockN);
+        return -3;
+    }
+    if (seqused_k == nullptr) {
+        fprintf(stderr, "kiln_flash_attn_fwd_paged_decode_dyn_seqlen: seqused_k must be non-null\n");
+        return -4;
+    }
+
+    FLASH_NAMESPACE::Flash_fwd_params params;
+    memset(&params, 0, sizeof(params));
+
+    params.is_bf16 = true;
+    params.q_ptr = const_cast<void *>(q);
+    params.k_ptr = const_cast<void *>(k_pool);
+    params.v_ptr = const_cast<void *>(v_pool);
+    params.o_ptr = out;
+    params.softmax_lse_ptr = softmax_lse_out;
+
+    params.q_row_stride   = num_heads * head_dim;
+    params.q_head_stride  = head_dim;
+    params.q_batch_stride = num_heads * head_dim;
+
+    params.k_row_stride   = num_heads_k * head_dim;
+    params.v_row_stride   = num_heads_k * head_dim;
+    params.k_head_stride  = head_dim;
+    params.v_head_stride  = head_dim;
+    params.k_batch_stride = (int64_t)page_block_size * num_heads_k * head_dim;
+    params.v_batch_stride = (int64_t)page_block_size * num_heads_k * head_dim;
+
+    params.o_row_stride   = num_heads * head_dim;
+    params.o_head_stride  = head_dim;
+    params.o_batch_stride = num_heads * head_dim;
+
+    params.b      = batch_size;
+    params.h      = num_heads;
+    params.h_k    = num_heads_k;
+    params.h_h_k_ratio = num_heads / num_heads_k;
+    params.seqlen_q = 1;
+    params.seqlen_k = max_seqlen_k;
+    params.d        = head_dim;
+    params.d_rounded = round_up(head_dim, 32);
+    params.seqlen_q_rounded = round_up(1, 128);
+    params.seqlen_k_rounded = round_up(max_seqlen_k, 128);
+
+    params.scale_softmax = softmax_scale;
+    params.scale_softmax_log2 = softmax_scale * float(M_LOG2E);
+    params.p_dropout = 1.0f;
+    params.p_dropout_in_uint8_t = 255;
+    params.rp_dropout = 1.0f;
+    params.scale_softmax_rp_dropout = params.scale_softmax;
+    params.is_causal = is_causal != 0;
+    params.window_size_left = -1;
+    params.window_size_right = (is_causal != 0) ? 0 : -1;
+
+    params.block_table = const_cast<int *>(block_table);
+    params.block_table_batch_stride = max_blocks_per_seq;
+    params.page_block_size = page_block_size;
+    params.seqused_k = const_cast<int *>(seqused_k);
+
+    params.cu_seqlens_q = nullptr;
+    params.cu_seqlens_k = nullptr;
+    params.leftpad_k = nullptr;
+    params.p_ptr = nullptr;
+    params.softmax_lseaccum_ptr = nullptr;
+    params.oaccum_ptr = nullptr;
+    params.knew_ptr = nullptr;
+    params.vnew_ptr = nullptr;
+    params.rotary_cos_ptr = nullptr;
+    params.rotary_sin_ptr = nullptr;
+    params.cache_batch_idx = nullptr;
+    params.blockmask = nullptr;
+    params.alibi_slopes_ptr = nullptr;
+    params.rng_state = nullptr;
+    params.is_seqlens_k_cumulative = true;
+    params.is_rotary_interleaved = false;
+    params.num_splits = 1;
+    params.softcap = 0.0f;
+    params.unpadded_lse = false;
+    params.seqlenq_ngroups_swapped = false;
+
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    if (head_dim == 128) {
+        FLASH_NAMESPACE::run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 128, true>(params, cuda_stream);
+    } else {
+        FLASH_NAMESPACE::run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 256, true>(params, cuda_stream);
+    }
+
+    return 0;
+}
+
+__global__ void kiln_paged_kv_write_token_major_bf16_slot_kernel(
+    __nv_bfloat16 *k_pool,
+    __nv_bfloat16 *v_pool,
+    const __nv_bfloat16 *k,
+    const __nv_bfloat16 *v,
+    const unsigned int *slot,
+    int num_kv_heads,
+    int head_dim)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_kv_heads * head_dim;
+    if (idx >= total) return;
+    int dst = int(*slot) * total + idx;
+    k_pool[dst] = k[idx];
+    v_pool[dst] = v[idx];
+}
+
+extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_slot(
+    void *k_pool,
+    void *v_pool,
+    const void *k,
+    const void *v,
+    const unsigned int *slot,
+    int num_kv_heads,
+    int head_dim,
+    void *stream)
+{
+    if (num_kv_heads <= 0 || head_dim <= 0) return -1;
+    int total = num_kv_heads * head_dim;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    kiln_paged_kv_write_token_major_bf16_slot_kernel<<<blocks, threads, 0, cuda_stream>>>(
+        static_cast<__nv_bfloat16 *>(k_pool),
+        static_cast<__nv_bfloat16 *>(v_pool),
+        static_cast<const __nv_bfloat16 *>(k),
+        static_cast<const __nv_bfloat16 *>(v),
+        slot,
+        num_kv_heads,
+        head_dim);
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : -2;
+}
+
 extern "C" kiln_flash_status_t kiln_flash_attn_bwd(
     const void *dout,
     const void *q, const void *k, const void *v,

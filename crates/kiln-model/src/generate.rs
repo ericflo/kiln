@@ -17,12 +17,12 @@ use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
-    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
-    model_forward_paged_streaming_with_progress,
-    streaming_prefill_enabled_for,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_paged, model_forward_head,
+    model_forward_paged_batched_decode_hidden, model_forward_paged_last_token,
+    model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
@@ -93,6 +93,21 @@ pub struct PagedPrefixRegistration {
 /// Result of paged generation plus an optional prefix-cache registration.
 pub struct PrefixCachedGenerationOutput {
     pub output: GenerationOutput,
+    pub registration: Option<PagedPrefixRegistration>,
+    pub allocated_blocks: Vec<u32>,
+    pub prefill_duration: std::time::Duration,
+    pub decode_duration: std::time::Duration,
+}
+
+/// Per-request state owned by the server batching actor between prefill and
+/// decode iterations.
+pub struct PagedBatchedDecodeState {
+    pub block_table: BlockTable,
+    pub linear_state: LinearAttentionState,
+    pub seq_len: usize,
+    pub next_token: TokenId,
+    pub generated_tokens: Vec<TokenId>,
+    pub step_seed: Option<u64>,
     pub registration: Option<PagedPrefixRegistration>,
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
@@ -284,6 +299,33 @@ pub enum FinishReason {
 }
 
 impl ModelRunner {
+    pub fn is_eos_token(&self, token: TokenId) -> bool {
+        self.eos_token_ids.contains(&token)
+    }
+
+    pub fn stop_sequence_match(
+        &self,
+        generated_tokens: &[TokenId],
+        params: &SamplingParams,
+    ) -> Result<Option<String>> {
+        if params.stop.is_empty() {
+            return Ok(None);
+        }
+        let Some(text) = self
+            .tokenizer
+            .decode(generated_tokens)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .ok()
+        else {
+            return Ok(None);
+        };
+        Ok(params
+            .stop
+            .iter()
+            .find(|stop_seq| text.contains(stop_seq.as_str()))
+            .cloned())
+    }
+
     /// Create a new ModelRunner from pre-loaded weights, tokenizer, and config.
     ///
     /// CUDA graphs for decode are enabled by default on CUDA devices.
@@ -857,6 +899,64 @@ impl ModelRunner {
         })
     }
 
+    pub fn prepare_paged_batched_decode_with_prefix_cache(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        block_manager: &Mutex<BlockManager>,
+        paged_cache: &Mutex<PagedKvCache>,
+        cached_prefix: Option<PagedPrefixReuse>,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedDecodeState> {
+        anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
+
+        let block_size = {
+            let bm_guard = lock_block_manager(block_manager)?;
+            bm_guard.block_size()
+        };
+
+        let cached_prefix = cached_prefix.filter(|prefix| {
+            prefix.cached_tokens > 0
+                && prefix.cached_tokens < prompt_tokens.len()
+                && prefix.cached_tokens % block_size == 0
+                && prefix.block_ids.len() == prefix.cached_tokens / block_size
+        });
+
+        let cached_blocks = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.block_ids.as_slice())
+            .unwrap_or(&[]);
+
+        let max_total = prompt_tokens.len() + params.max_tokens;
+        let total_blocks = Self::blocks_needed(max_total, block_size);
+        let additional_blocks_needed = total_blocks.saturating_sub(cached_blocks.len());
+        let allocated_blocks = {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            bm_guard
+                .allocate(additional_blocks_needed)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+        let block_table = append_prefix_block_table(cached_blocks, &allocated_blocks);
+
+        let prepared = self.prepare_paged_batched_decode_with_prefix_blocks(
+            prompt_tokens,
+            params,
+            paged_cache,
+            block_table,
+            cached_prefix,
+            block_size,
+            allocated_blocks.clone(),
+            cancel,
+        );
+
+        if prepared.is_err() && !allocated_blocks.is_empty() {
+            let mut bm_guard = lock_block_manager(block_manager)?;
+            bm_guard.free_all(&allocated_blocks);
+        }
+
+        prepared
+    }
+
     /// Same as [`generate_paged_shared`], but accepts an already-tokenized
     /// prompt so API callers do not render/tokenize the same prompt twice.
     ///
@@ -1141,6 +1241,233 @@ impl ModelRunner {
             allocated_blocks: Vec::new(),
             prefill_duration,
             decode_duration,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_paged_batched_decode_with_prefix_blocks(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: BlockTable,
+        cached_prefix: Option<PagedPrefixReuse>,
+        block_size: usize,
+        allocated_blocks: Vec<u32>,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<PagedBatchedDecodeState> {
+        let cached_tokens = cached_prefix
+            .as_ref()
+            .map(|prefix| prefix.cached_tokens)
+            .unwrap_or(0);
+        let mut linear_state = match cached_prefix {
+            Some(prefix) => prefix.linear_state,
+            None => self.new_linear_state()?,
+        };
+
+        let prefill_tokens = &prompt_tokens[cached_tokens..];
+        anyhow::ensure!(
+            !prefill_tokens.is_empty(),
+            "prefix cache hit must leave at least one suffix token"
+        );
+
+        let prefill_start = std::time::Instant::now();
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
+                model_forward_paged_streaming_with_progress(
+                    &*self.backend,
+                    prefill_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    &block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    cancel,
+                )
+                .context("batched-engine prefill forward pass (streaming) failed")?
+            } else {
+                let logits = model_forward_paged_last_token(
+                    &*self.backend,
+                    prefill_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    &block_table,
+                    cached_tokens,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("batched-engine prefill forward pass failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
+                }
+                logits
+            }
+        };
+        let prefill_duration = prefill_start.elapsed();
+
+        let next_token = if params.temperature == 0.0 {
+            greedy_sample(&logits)?
+        } else {
+            sample_with_params(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                params.seed,
+            )?
+        };
+
+        let registration = self.completed_prompt_registration(
+            prompt_tokens,
+            &block_table,
+            &linear_state,
+            block_size,
+        )?;
+
+        Ok(PagedBatchedDecodeState {
+            block_table,
+            linear_state,
+            seq_len: prompt_tokens.len(),
+            next_token,
+            generated_tokens: Vec::new(),
+            step_seed: params.seed,
+            registration,
+            allocated_blocks,
+            prefill_duration,
+            decode_duration: std::time::Duration::ZERO,
+        })
+    }
+
+    pub fn paged_batched_decode_step(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &Mutex<PagedKvCache>,
+    ) -> Result<Vec<TokenId>> {
+        anyhow::ensure!(
+            states.len() == params.len(),
+            "decode state length {} != params length {}",
+            states.len(),
+            params.len()
+        );
+        anyhow::ensure!(!states.is_empty(), "batched decode step requires rows");
+
+        let row_count = states.len();
+        let input_tokens: Vec<TokenId> = states.iter().map(|state| state.next_token).collect();
+        let block_tables: Vec<BlockTable> = states
+            .iter()
+            .map(|state| state.block_table.clone())
+            .collect();
+        let sequence_lengths: Vec<usize> = states.iter().map(|state| state.seq_len).collect();
+        let mut linear_states: Vec<&mut LinearAttentionState> = states
+            .iter_mut()
+            .map(|state| &mut state.linear_state)
+            .collect();
+
+        let started = std::time::Instant::now();
+        let sampled = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let mut graph_runner = self
+                .cuda_graph
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
+            if graph_runner.is_enabled() && row_count == 1 {
+                let row = graph_runner
+                    .decode_step_paged(
+                        &*self.backend,
+                        input_tokens[0],
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &block_tables[0],
+                        sequence_lengths[0],
+                        &mut *linear_states[0],
+                        self.active_lora.as_ref(),
+                    )
+                    .context("batched decode CUDA graph row failed")?;
+                let token = if params[0].temperature == 0.0 {
+                    greedy_sample(&row)?
+                } else {
+                    sample_with_params(
+                        &row,
+                        params[0].temperature,
+                        params[0].top_p,
+                        params[0].top_k,
+                        states[0].step_seed,
+                    )?
+                };
+                vec![token]
+            } else {
+                let hidden = model_forward_paged_batched_decode_hidden(
+                    &*self.backend,
+                    &input_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    &block_tables,
+                    &sequence_lengths,
+                    &mut linear_states,
+                    self.active_lora.as_ref(),
+                )
+                .context("batched decode forward pass failed")?;
+
+                let mut sampled = Vec::with_capacity(states.len());
+                for (idx, params) in params.iter().enumerate() {
+                    let row_hidden = hidden.narrow(0, idx, 1)?;
+                    let row = model_forward_head(&row_hidden, &self.weights, &self.config)
+                        .with_context(|| format!("batched decode lm head row {idx}"))?;
+                    let token = if params.temperature == 0.0 {
+                        greedy_sample(&row)?
+                    } else {
+                        sample_with_params(
+                            &row,
+                            params.temperature,
+                            params.top_p,
+                            params.top_k,
+                            states[idx].step_seed,
+                        )?
+                    };
+                    sampled.push(token);
+                }
+                sampled
+            }
+        };
+        let decode_duration = started.elapsed();
+
+        for state in states.iter_mut() {
+            state.seq_len += 1;
+            state.decode_duration += decode_duration;
+        }
+
+        Ok(sampled)
+    }
+
+    pub fn finish_paged_batched_decode(
+        &self,
+        state: PagedBatchedDecodeState,
+        finish_reason: FinishReason,
+    ) -> Result<PrefixCachedGenerationOutput> {
+        let text = self
+            .tokenizer
+            .decode(&state.generated_tokens)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("failed to decode output tokens")?;
+
+        Ok(PrefixCachedGenerationOutput {
+            output: GenerationOutput {
+                text,
+                token_ids: state.generated_tokens,
+                finish_reason,
+            },
+            registration: state.registration,
+            allocated_blocks: state.allocated_blocks,
+            prefill_duration: state.prefill_duration,
+            decode_duration: state.decode_duration,
         })
     }
 
@@ -2951,10 +3278,8 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(
-                    runner_guard.backend.device(),
-                    prompt_tokens.len(),
-                ) {
+                if streaming_prefill_enabled_for(runner_guard.backend.device(), prompt_tokens.len())
+                {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
                         &prompt_tokens,

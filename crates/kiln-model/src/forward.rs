@@ -33,10 +33,10 @@ use kiln_core::block::BlockTable;
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
 /// basic tensor operations that all have CUDA support.
 fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
-    let neg_x = x.neg()?;
-    let exp_neg_x = neg_x.exp()?;
-    let one_plus = (exp_neg_x + 1.0)?;
-    let result = one_plus.recip()?;
+    let neg_x = x.neg().context("cuda_sigmoid x.neg")?;
+    let exp_neg_x = neg_x.exp().context("cuda_sigmoid exp")?;
+    let one_plus = (exp_neg_x + 1.0).context("cuda_sigmoid add one")?;
+    let result = one_plus.recip().context("cuda_sigmoid recip")?;
     Ok(result)
 }
 
@@ -706,6 +706,7 @@ pub struct GpuLinearAttentionWeights {
     pub conv1d: Tensor,
     pub norm: Tensor,
     pub a_log: Tensor,
+    pub a_log_gates: Tensor,
     pub dt_bias: Tensor,
     /// Cached GDN projection transposes for the forward hot path,
     /// materialized contiguously once at load time.
@@ -1645,6 +1646,9 @@ impl GpuWeights {
                     let norm = aux_tensors.next().context(ctx("gdn_norm missing"))?;
                     let a_log = aux_tensors.next().context(ctx("a_log missing"))?;
                     let dt_bias = aux_tensors.next().context(ctx("dt_bias missing"))?;
+                    let a_log_gates = a_log
+                        .to_dtype(DType::BF16)
+                        .context(ctx("a_log gates bf16 cache"))?;
 
                     let attn_proj = projection_tensors_for_load_batch(
                         &[
@@ -1681,6 +1685,7 @@ impl GpuWeights {
                             conv1d,
                             norm,
                             a_log,
+                            a_log_gates,
                             dt_bias,
                             in_proj_qkv_t,
                             in_proj_z_t,
@@ -1835,6 +1840,10 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     Ok(out)
 }
 
+fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result<Tensor> {
+    Ok(embed_weights.index_select(index, 0)?)
+}
+
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
     let t_dims = weights.embed_tokens_t.dims();
     if t_dims.len() == 2 {
@@ -1846,9 +1855,34 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
     embedding_lookup(token_ids, &weights.embed_tokens)
 }
 
-fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
+fn embedding_lookup_from_weights_with_index(
+    index: &Tensor,
+    weights: &GpuWeights,
+) -> Result<Tensor> {
+    let t_dims = weights.embed_tokens_t.dims();
+    if t_dims.len() == 2 {
+        let expected_embed_dims = [t_dims[1], t_dims[0]];
+        if weights.embed_tokens.dims() != expected_embed_dims.as_slice() {
+            return embedding_lookup_from_transposed_index(index, &weights.embed_tokens_t);
+        }
+    }
+
+    embedding_lookup_with_index(index, &weights.embed_tokens)
+}
+
+fn embedding_lookup_from_transposed(
+    token_ids: &[u32],
+    embed_tokens_t: &Tensor,
+) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_tokens_t.device())?;
-    let gathered = embed_tokens_t.index_select(&index, 1)?;
+    embedding_lookup_from_transposed_index(&index, embed_tokens_t)
+}
+
+fn embedding_lookup_from_transposed_index(
+    index: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Tensor> {
+    let gathered = embed_tokens_t.index_select(index, 1)?;
     Ok(gathered.t()?.contiguous()?)
 }
 
@@ -2782,8 +2816,14 @@ fn causal_conv1d_decode(
     let output = window.broadcast_mul(&w_expanded)?.sum(2)?; // [batch, channels]
     let output = output.unsqueeze(2)?; // [batch, channels, 1]
 
-    // Update conv_state: drop oldest, append newest
-    *conv_state = window.narrow(2, 1, kernel_size - 1)?.contiguous()?;
+    // Update conv_state in place: drop oldest, append newest. CUDA graph
+    // capture bakes the conv_state device pointer into later decode kernels, so
+    // rebinding `conv_state` to a newly allocated tensor during capture leaves
+    // replay with a dangling pointer. Keep the caller-owned storage stable.
+    let next_state = window.narrow(2, 1, kernel_size - 1)?.contiguous()?;
+    conv_state
+        .slice_set(&next_state, 0, 0)
+        .context("update decode conv_state in place")?;
 
     Ok(output)
 }
@@ -3322,17 +3362,31 @@ fn gated_deltanet_gates_fallback(
     weights: &GpuLinearAttentionWeights,
     input_dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
-    let beta = cuda_sigmoid(b)?; // [B, T, nv], bf16
-    let a_f32 = a.to_dtype(DType::F32)?;
-    let a_log_f32 = weights.a_log.to_dtype(DType::F32)?;
-    let dt_bias_f32 = weights.dt_bias.to_dtype(DType::F32)?;
+    let beta = cuda_sigmoid(b).context("gdn gates fallback beta cuda_sigmoid")?; // [B, T, nv], bf16
+    let a_f32 = a.to_dtype(DType::F32).context("gdn gates fallback a to f32")?;
+    let a_log_f32 = weights
+        .a_log
+        .to_dtype(DType::F32)
+        .context("gdn gates fallback a_log to f32")?;
+    let dt_bias_f32 = weights
+        .dt_bias
+        .to_dtype(DType::F32)
+        .context("gdn gates fallback dt_bias to f32")?;
     let g = {
-        let a_biased = a_f32.broadcast_add(&dt_bias_f32)?;
-        let sp = softplus(&a_biased)?;
-        let neg_decay = a_log_f32.exp()?.neg()?; // -exp(A_log)
-        sp.broadcast_mul(&neg_decay)?
+        let a_biased = a_f32
+            .broadcast_add(&dt_bias_f32)
+            .context("gdn gates fallback broadcast_add dt_bias")?;
+        let sp = softplus(&a_biased).context("gdn gates fallback softplus")?;
+        let neg_decay = a_log_f32
+            .exp()
+            .context("gdn gates fallback a_log exp")?
+            .neg()
+            .context("gdn gates fallback a_log neg")?; // -exp(A_log)
+        sp.broadcast_mul(&neg_decay)
+            .context("gdn gates fallback broadcast_mul neg_decay")?
     }
-    .to_dtype(input_dtype)?;
+    .to_dtype(input_dtype)
+    .context("gdn gates fallback output to input dtype")?;
     Ok((beta, g))
 }
 
@@ -3355,6 +3409,7 @@ pub fn gated_deltanet_forward(
         conv_state,
         capture_b11_taps,
         capture_c41_taps,
+        true,
         false,
     )
 }
@@ -3454,6 +3509,7 @@ fn gated_deltanet_forward_decode_if(
     conv_state: &mut Tensor,
     capture_b11_taps: bool,
     capture_c41_taps: bool,
+    use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
@@ -3932,7 +3988,7 @@ fn gated_deltanet_forward_decode_if(
                 &v,
                 &a,
                 &b,
-                &weights.a_log,
+                &weights.a_log_gates,
                 &weights.dt_bias,
                 recurrent_state,
                 &z,
@@ -4003,16 +4059,20 @@ fn gated_deltanet_forward_decode_if(
         // and remains the parity oracle.
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
-            if backend.supports_gdn_gates() {
+            if use_fused_gdn_gates && backend.supports_gdn_gates() {
                 if let Some((beta, g)) =
-                    backend.gdn_gates(&a, &b, &weights.a_log, &weights.dt_bias)?
+                    backend
+                        .gdn_gates(&a, &b, &weights.a_log_gates, &weights.dt_bias)
+                        .context("gdn decode gates fused backend")?
                 {
                     (beta, g)
                 } else {
-                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                    gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)
+                        .context("gdn decode gates fallback after backend miss")?
                 }
             } else {
-                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)?
+                gated_deltanet_gates_fallback(&a, &b, weights, input_dtype)
+                    .context("gdn decode gates fallback")?
             }
         };
 
@@ -4412,6 +4472,18 @@ pub fn gqa_attention(
     Ok(out)
 }
 
+#[cfg(feature = "cuda")]
+pub(crate) struct PagedDecodeGraphInputs<'a> {
+    pub block_table: &'a Tensor,
+    pub seqused_k: &'a Tensor,
+    pub kv_slot: &'a Tensor,
+    pub max_seqlen_k: usize,
+    pub rotary_cos: &'a Tensor,
+    pub rotary_sin: &'a Tensor,
+    pub attn_out: &'a [Tensor],
+    pub softmax_lse: &'a [Tensor],
+}
+
 /// Try the fused paged-decode flash-attention kernel.
 ///
 /// Returns `Ok(Some(output))` on success and `Ok(None)` when the kernel
@@ -4444,6 +4516,7 @@ fn try_flash_attn_paged_decode(
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Option<Tensor>> {
     const K_BLOCK_N: usize = 128;
 
@@ -4628,8 +4701,25 @@ fn try_flash_attn_paged_decode(
     }
 
     let device = q.device();
-    let bt_tensor =
-        Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
+    let bt_tensor_owned;
+    let bt_tensor = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(inputs) = graph_inputs {
+                inputs.block_table
+            } else {
+                bt_tensor_owned = Tensor::new(padded.as_slice(), device)?
+                    .reshape((1usize, max_blocks_per_seq))?;
+                &bt_tensor_owned
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            bt_tensor_owned =
+                Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
+            &bt_tensor_owned
+        }
+    };
 
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
 
@@ -4641,18 +4731,64 @@ fn try_flash_attn_paged_decode(
         q.transpose(1, 2)?.contiguous()?
     };
 
-    let attn_out = match backend.flash_attn_paged_decode(
-        &q_fa,
-        k_pool,
-        v_pool,
-        &bt_tensor,
-        total_seq_len,
-        block_size,
-        softmax_scale,
-        true,
-    )? {
-        Some(t) => t,
-        None => return Ok(None),
+    let attn_out = {
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(inputs) = graph_inputs {
+                let attn_out = inputs.attn_out.get(full_attn_layer_idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing CUDA graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
+                    )
+                })?;
+                let softmax_lse = inputs.softmax_lse.get(full_attn_layer_idx).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing CUDA graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
+                    )
+                })?;
+                kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
+                    &q_fa,
+                    k_pool,
+                    v_pool,
+                    bt_tensor,
+                    inputs.seqused_k,
+                    Some((attn_out, softmax_lse)),
+                    inputs.max_seqlen_k,
+                    block_size,
+                    softmax_scale,
+                    true,
+                )?
+            } else {
+                match backend.flash_attn_paged_decode(
+                    &q_fa,
+                    k_pool,
+                    v_pool,
+                    bt_tensor,
+                    total_seq_len,
+                    block_size,
+                    softmax_scale,
+                    true,
+                )? {
+                    Some(t) => t,
+                    None => return Ok(None),
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            match backend.flash_attn_paged_decode(
+                &q_fa,
+                k_pool,
+                v_pool,
+                bt_tensor,
+                total_seq_len,
+                block_size,
+                softmax_scale,
+                true,
+            )? {
+                Some(t) => t,
+                None => return Ok(None),
+            }
+        }
     };
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
@@ -4721,6 +4857,7 @@ pub fn gqa_attention_paged(
         full_attn_layer_idx,
         attn_output_gate,
         lora,
+        #[cfg(feature = "cuda")] None,
     )
 }
 
@@ -4743,6 +4880,7 @@ fn gqa_attention_paged_with_rope_tables(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
     let subop_armed = crate::mtp_debug::is_subop_capture_armed();
@@ -4989,7 +5127,26 @@ fn gqa_attention_paged_with_rope_tables(
     // Write new K/V into paged cache.
     if !single_token_self_attn {
         kiln_nvtx::range!(c"kiln/kv/copy");
-        if !paged_cache.write_token_major_native(
+        let graph_write_done = {
+            #[cfg(feature = "cuda")]
+            {
+                if let Some(inputs) = graph_inputs {
+                    paged_cache.write_token_major_native_graph_slot(
+                        full_attn_layer_idx,
+                        &k_cache_token_major,
+                        &v_cache_token_major,
+                        inputs.kv_slot,
+                    )?
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                false
+            }
+        };
+        if !graph_write_done && !paged_cache.write_token_major_native(
             full_attn_layer_idx,
             block_table,
             start_pos,
@@ -5053,6 +5210,7 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_weights,
                 lora_layer,
                 lora_scale,
+                #[cfg(feature = "cuda")] graph_inputs,
             )?
         };
         if let Some(out) = out_opt {
@@ -5604,6 +5762,7 @@ pub fn transformer_block_paged(
         block_table,
         full_attn_layer_idx,
         lora,
+        #[cfg(feature = "cuda")] None,
     )
 }
 
@@ -5626,6 +5785,7 @@ fn transformer_block_paged_with_rope_tables(
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -5677,6 +5837,7 @@ fn transformer_block_paged_with_rope_tables(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
+        #[cfg(feature = "cuda")] graph_inputs,
     )?;
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
@@ -5820,6 +5981,7 @@ pub fn model_forward(
                     &mut state.conv_states[linear_attn_idx],
                     /* capture_b11_taps = */ false,
                     /* capture_c41_taps = */ false,
+                    /* use_fused_gdn_gates = */ true,
                     use_metal_decode_ffn,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
@@ -6002,7 +6164,10 @@ pub fn model_forward_segment(
 ///
 /// Returns `([1, seq_len, hidden_size], positions)` — the initial hidden state
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
-pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
+pub fn model_forward_embed(
+    token_ids: &[u32],
+    weights: &GpuWeights,
+) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
     hidden = hidden.unsqueeze(0)?;
@@ -6111,7 +6276,9 @@ pub fn model_forward_paged(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::Full,
     )?;
     // `LmHeadMode::Full` always returns Some.
@@ -6146,7 +6313,9 @@ pub fn model_forward_paged_last_token(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::LastRowOnly,
     )?;
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
@@ -6180,7 +6349,9 @@ pub fn model_forward_paged_last_token_greedy(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::LastRowArgmaxOnly,
     )?;
     token.context("LmHeadMode::LastRowArgmaxOnly always produces a token")
@@ -6215,6 +6386,260 @@ pub fn model_forward_paged_next_token_greedy(
         lora,
         positions_gpu,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_with_graph_inputs(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    token_ids_gpu: &Tensor,
+    positions_gpu: &Tensor,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+) -> Result<Tensor> {
+    let (logits, _hidden, _token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        Some(token_ids_gpu),
+        Some(positions_gpu),
+        #[cfg(feature = "cuda")] graph_inputs,
+        LmHeadMode::Full,
+    )?;
+    Ok(logits.expect("LmHeadMode::Full always produces logits"))
+}
+
+/// Batched paged decode API for real continuous-batching work.
+///
+/// Keeps the existing [`PagedKvCache`] API and its caller-held mutex: each
+/// request still has its own [`BlockTable`] and KV window, but the dominant
+/// GDN/MLP layers run as one batch-shaped forward. Full-attention layers stay
+/// row-wise because each request has distinct paged KV metadata; this avoids
+/// the batch-8 paged-attention workspace blow-up while still removing the 24
+/// GDN-layer row loop that made streaming throughput flat.
+///
+/// CUDA graphs are deliberately not used for `batch_size > 1` here; the graph
+/// runner is currently captured for the batch-1 decode shape only. TODO(phase2
+/// continuous batching): add graph capture/replay keyed by decode batch shape.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_batched_decode(
+    backend: &dyn BackendRuntime,
+    input_tokens: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[BlockTable],
+    sequence_lengths: &[usize],
+    linear_states: &mut [&mut LinearAttentionState],
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let hidden = model_forward_paged_batched_decode_hidden(
+        backend,
+        input_tokens,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        sequence_lengths,
+        linear_states,
+        lora,
+    )?;
+    model_forward_head(&hidden, weights, config).context("batched decode lm head")
+}
+
+/// Batched paged decode through the transformer stack, stopping before the
+/// final LM head.
+///
+/// Returning `[batch, 1, hidden]` lets the caller project and sample each row
+/// independently. That keeps the batch-shaped GDN/MLP speedup while bounding
+/// LM-head workspace to one `[1, 1, vocab]` row at a time, instead of
+/// materialising `[batch, 1, vocab]` logits for the whole microbatch.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_batched_decode_hidden(
+    backend: &dyn BackendRuntime,
+    input_tokens: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[BlockTable],
+    sequence_lengths: &[usize],
+    linear_states: &mut [&mut LinearAttentionState],
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let batch_size = input_tokens.len();
+    anyhow::ensure!(batch_size > 0, "batched decode requires at least one token");
+    anyhow::ensure!(
+        block_tables.len() == batch_size,
+        "batched decode block_tables length {} != input_tokens length {batch_size}",
+        block_tables.len()
+    );
+    anyhow::ensure!(
+        sequence_lengths.len() == batch_size,
+        "batched decode sequence_lengths length {} != input_tokens length {batch_size}",
+        sequence_lengths.len()
+    );
+    anyhow::ensure!(
+        linear_states.len() == batch_size,
+        "batched decode linear_states length {} != input_tokens length {batch_size}",
+        linear_states.len()
+    );
+
+    if batch_size == 1 {
+        let (_, hidden, _) = model_forward_paged_inner(
+            backend,
+            &[input_tokens[0]],
+            weights,
+            config,
+            paged_cache,
+            &block_tables[0],
+            sequence_lengths[0],
+            Some(&mut *linear_states[0]),
+            lora,
+            None,
+            None,
+            #[cfg(feature = "cuda")]
+            None,
+            LmHeadMode::HiddenOnly,
+        )?;
+        return hidden.context("batched decode hidden skipped lm head");
+    }
+
+    let device = weights.embed_tokens.device();
+    let mut hidden = embedding_lookup_from_weights(input_tokens, weights)?;
+    hidden = hidden.unsqueeze(1)?;
+
+    let mut full_attn_idx = 0usize;
+    let mut linear_attn_idx = 0usize;
+    for (layer_idx, layer) in weights.layers.iter().enumerate() {
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(layer_idx).map(|ll| (ll, lw.scale)));
+
+        match &layer.attention {
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_attn");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
+
+                let mut recurrent_state = {
+                    let refs: Vec<&Tensor> = linear_states
+                        .iter()
+                        .map(|state| &state.recurrent_states[linear_attn_idx])
+                        .collect();
+                    Tensor::cat(&refs, 0).with_context(|| {
+                        format!("cat batched recurrent state for GDN layer {layer_idx}")
+                    })?
+                };
+                let mut conv_state = {
+                    let refs: Vec<&Tensor> = linear_states
+                        .iter()
+                        .map(|state| &state.conv_states[linear_attn_idx])
+                        .collect();
+                    Tensor::cat(&refs, 0).with_context(|| {
+                        format!("cat batched conv state for GDN layer {layer_idx}")
+                    })?
+                };
+
+                let attn_out = gated_deltanet_forward_decode_if(
+                    backend,
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut recurrent_state,
+                    &mut conv_state,
+                    false,
+                    false,
+                    true,
+                    false,
+                )
+                .with_context(|| format!("batched GDN layer {layer_idx}"))?;
+
+                for (row_idx, state) in linear_states.iter_mut().enumerate() {
+                    state.recurrent_states[linear_attn_idx] = recurrent_state
+                        .narrow(0, row_idx, 1)?
+                        .contiguous()
+                        .with_context(|| {
+                            format!("split recurrent state row {row_idx} for GDN layer {layer_idx}")
+                        })?;
+                    state.conv_states[linear_attn_idx] = conv_state
+                        .narrow(0, row_idx, 1)?
+                        .contiguous()
+                        .with_context(|| {
+                            format!("split conv state row {row_idx} for GDN layer {layer_idx}")
+                        })?;
+                }
+
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/residual/attn");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_mlp");
+                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                };
+                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp");
+                    (hidden + ffn_out)?
+                };
+                linear_attn_idx += 1;
+            }
+            GpuAttentionWeights::Full(_) => {
+                let mut rows = Vec::with_capacity(batch_size);
+                for row_idx in 0..batch_size {
+                    let row_hidden = hidden.narrow(0, row_idx, 1)?;
+                    let pos = Tensor::new(&[sequence_lengths[row_idx] as f32], device)?;
+                    let rope_tables = rotary_tables_from_tensor(&pos, &weights.rotary_inv_freq)?;
+                    rows.push(
+                        transformer_block_paged_with_rope_tables(
+                            backend,
+                            &row_hidden,
+                            layer,
+                            config,
+                            &pos,
+                            sequence_lengths[row_idx],
+                            config.num_attention_heads,
+                            config.num_kv_heads,
+                            config.head_dim,
+                            config.rotary_dim(),
+                            &weights.rotary_inv_freq,
+                            Some((&rope_tables.0, &rope_tables.1)),
+                            config.rms_norm_eps,
+                            paged_cache,
+                            &block_tables[row_idx],
+                            full_attn_idx,
+                            layer_lora,
+                            #[cfg(feature = "cuda")]
+                            None,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "batched decode row {row_idx} transformer block {layer_idx} (full attention, paged)"
+                            )
+                        })?,
+                    );
+                }
+                let row_refs: Vec<&Tensor> = rows.iter().collect();
+                hidden = Tensor::cat(&row_refs, 0)
+                    .with_context(|| format!("cat full-attention rows after layer {layer_idx}"))?;
+                full_attn_idx += 1;
+            }
+        }
+    }
+
+    Ok(hidden)
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
@@ -6287,7 +6712,9 @@ pub fn model_forward_paged_with_last_hidden(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::FullWithLastHidden,
     )?;
     Ok((
@@ -6332,7 +6759,9 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         start_pos,
         linear_state,
         lora,
+        None,
         positions_gpu,
+        #[cfg(feature = "cuda")] None,
         LmHeadMode::LastRowWithLastHidden,
     )?;
     Ok((
@@ -6896,6 +7325,10 @@ enum LmHeadMode {
     /// Skip RMSNorm + LM head entirely and return `None`. Used for non-final
     /// tiles where the caller throws away the logits.
     Skip,
+    /// Skip RMSNorm + LM head but return the final hidden state. Used by the
+    /// batched decode actor so it can project/sample rows with bounded LM-head
+    /// workspace after the batch-shaped transformer pass.
+    HiddenOnly,
 }
 
 /// Internal per-tile forward pass shared by `model_forward_paged` and
@@ -6917,14 +7350,19 @@ fn model_forward_paged_inner(
     start_pos: usize,
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
+    token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
+    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     lm_head_mode: LmHeadMode,
 ) -> Result<(Option<Tensor>, Option<Tensor>, Option<u32>)> {
     let seq_len = token_ids.len();
     let device = weights.embed_tokens.device();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    let mut hidden = match token_ids_gpu {
+        Some(index) => embedding_lookup_from_weights_with_index(index, weights)?,
+        None => embedding_lookup_from_weights(token_ids, weights)?,
+    };
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -6947,17 +7385,26 @@ fn model_forward_paged_inner(
             &positions_owned
         }
     };
-    let rope_tables_owned = if positions_gpu.is_none() {
-        Some(rotary_tables_from_tensor(
-            positions,
-            &weights.rotary_inv_freq,
-        )?)
+    let graph_rope_tables = {
+        #[cfg(feature = "cuda")]
+        {
+            graph_inputs.map(|inputs| (inputs.rotary_cos, inputs.rotary_sin))
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            Option::<(&Tensor, &Tensor)>::None
+        }
+    };
+    let rope_tables_owned = if positions_gpu.is_none() && graph_rope_tables.is_none() {
+        Some(rotary_tables_from_tensor(positions, &weights.rotary_inv_freq)?)
     } else {
         None
     };
-    let rope_tables = rope_tables_owned
-        .as_ref()
-        .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor));
+    let rope_tables = graph_rope_tables.or_else(|| {
+        rope_tables_owned
+            .as_ref()
+            .map(|(cos, sin)| (cos as &Tensor, sin as &Tensor))
+    });
 
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
@@ -6993,6 +7440,7 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
+                    #[cfg(feature = "cuda")] graph_inputs,
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
@@ -7071,6 +7519,7 @@ fn model_forward_paged_inner(
                     &mut state.conv_states[linear_attn_idx],
                     capture_b11_taps,
                     capture_c41_taps,
+                    true,
                     use_metal_decode_ffn,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
@@ -7200,6 +7649,7 @@ fn model_forward_paged_inner(
             Ok((Some(logits), Some(last_hidden), None))
         }
         LmHeadMode::Skip => Ok((None, None, None)),
+        LmHeadMode::HiddenOnly => Ok((None, Some(hidden), None)),
     }
 }
 
@@ -7360,6 +7810,8 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             state_for_tile,
             lora,
             None,
+            None,
+            #[cfg(feature = "cuda")] None,
             mode,
         )
         .with_context(|| {
@@ -7443,6 +7895,8 @@ pub fn model_forward_paged_streaming_with(
             state_for_tile,
             lora,
             None,
+            None,
+            #[cfg(feature = "cuda")] None,
             mode,
         )
         .with_context(|| {
@@ -8465,6 +8919,7 @@ mod tests {
                 conv1d: Tensor::zeros((1, 1), DType::F32, &device)?,
                 norm: Tensor::zeros((1,), DType::F32, &device)?,
                 a_log: Tensor::zeros((1,), DType::F32, &device)?,
+                a_log_gates: Tensor::zeros((1,), DType::F32, &device)?,
                 dt_bias: Tensor::zeros((1,), DType::F32, &device)?,
                 in_proj_qkv_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 in_proj_z_t: Tensor::zeros((1, 1), DType::F32, &device)?,
@@ -9157,6 +9612,7 @@ mod tests {
                     conv1d: randn(&[qkv_dim, 1, conv_kernel])?,
                     norm: Tensor::ones(dk, DType::F32, device)?,
                     a_log: Tensor::zeros(nv, DType::F32, device)?,
+                    a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::F32, device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,

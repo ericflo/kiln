@@ -40,7 +40,6 @@ impl CudaBackend {
         let fused_conv1d_enabled = std::env::var("KILN_DISABLE_FUSED_CONV1D").is_err();
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
-            && std::env::var("KILN_ENABLE_FUSED_GDN_DECODE").is_ok()
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
         Self {
             device,
@@ -259,6 +258,19 @@ impl BackendRuntime for CudaBackend {
         if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports(
             q, k, v, a, b, a_log, dt_bias, state, z, weight,
         ) {
+            tracing::debug!(
+                q_shape = ?q.shape(), q_dtype = ?q.dtype(),
+                k_shape = ?k.shape(), k_dtype = ?k.dtype(),
+                v_shape = ?v.shape(), v_dtype = ?v.dtype(),
+                a_shape = ?a.shape(), a_dtype = ?a.dtype(),
+                b_shape = ?b.shape(), b_dtype = ?b.dtype(),
+                a_log_shape = ?a_log.shape(), a_log_dtype = ?a_log.dtype(),
+                dt_bias_shape = ?dt_bias.shape(), dt_bias_dtype = ?dt_bias.dtype(),
+                state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
+                z_shape = ?z.shape(), z_dtype = ?z.dtype(),
+                weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
+                "CUDA gdn_decode_gates_recurrent declined; using split decode path"
+            );
             return Ok(None);
         }
         let out = kiln_gdn_kernel::gdn_decode_gates_recurrent(
@@ -279,9 +291,30 @@ impl BackendRuntime for CudaBackend {
         a_log: &Tensor,
         dt_bias: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        // Decline quietly when the envelope isn't met — the candle reference
-        // path handles non-CUDA, non-bf16, and oversized nv.
-        if !kiln_gdn_kernel::gdn_gates_supports(a, b, a_log, dt_bias) {
+        let dims = a.dims();
+        let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
+        if !is_t1_decode {
+            tracing::debug!(
+                a_shape = ?a.shape(),
+                a_log_dtype = ?a_log.dtype(),
+                dt_bias_dtype = ?dt_bias.dtype(),
+                "CUDA gdn_gates fused path is decode-only; using Candle fallback"
+            );
+            return Ok(None);
+        }
+        if let Some(reason) = kiln_gdn_kernel::gdn_gates_decline_reason(a, b, a_log, dt_bias) {
+            tracing::debug!(
+                reason,
+                a_shape = ?a.shape(),
+                b_shape = ?b.shape(),
+                a_log_shape = ?a_log.shape(),
+                dt_bias_shape = ?dt_bias.shape(),
+                a_dtype = ?a.dtype(),
+                b_dtype = ?b.dtype(),
+                a_log_dtype = ?a_log.dtype(),
+                dt_bias_dtype = ?dt_bias.dtype(),
+                "CUDA gdn_gates declined; using Candle fallback"
+            );
             return Ok(None);
         }
         let (beta, g) =

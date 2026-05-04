@@ -34,18 +34,58 @@ use anyhow::{Context, Result};
 use candle_core::Device;
 #[cfg(feature = "cuda")]
 use candle_core::Tensor;
+#[cfg(feature = "cuda")]
+use std::collections::HashMap;
 use tracing;
 
 use kiln_core::config::ModelConfig;
 
 use crate::backend::BackendRuntime;
-use crate::forward::{model_forward_paged, GpuWeights, LinearAttentionState};
+use crate::forward::{
+    model_forward_paged, model_forward_paged_with_graph_inputs, GpuWeights, LinearAttentionState,
+};
+#[cfg(feature = "cuda")]
+use crate::forward::PagedDecodeGraphInputs;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 
 use kiln_core::block::BlockTable;
 
 /// Holds a captured CUDA graph ready for replay.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CudaGraphKey {
+    stable_metadata: bool,
+    seq_len: usize,
+    block_table: Vec<u32>,
+    max_seqlen_k: usize,
+    max_blocks_per_seq: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaGraphKey {
+    fn new(block_table: &BlockTable, paged_cache: &PagedKvCache, seq_len: usize) -> Self {
+        let stable_metadata = Self::stable_paged_metadata_enabled();
+        let attention_len = seq_len + 1;
+        let max_seqlen_k = attention_len.div_ceil(128) * 128;
+        let pages_per_chunk = 128 / paged_cache.block_size();
+        let max_blocks_per_seq = (max_seqlen_k / 128) * pages_per_chunk;
+        Self {
+            stable_metadata,
+            seq_len: if stable_metadata { 0 } else { seq_len },
+            block_table: if stable_metadata { Vec::new() } else { block_table.blocks.clone() },
+            max_seqlen_k,
+            max_blocks_per_seq,
+        }
+    }
+
+    fn stable_paged_metadata_enabled() -> bool {
+        std::env::var("KILN_CUDA_GRAPH_STABLE_PAGED_METADATA")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(feature = "cuda")]
 struct CapturedDecodeGraph {
     /// The instantiated CUDA graph.
@@ -54,19 +94,49 @@ struct CapturedDecodeGraph {
     output_logits: candle_core::Tensor,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
+    /// Pre-allocated token-id buffer on GPU (u32, shape [1]).
+    /// Updated before each replay so embedding lookup reads the current token
+    /// from a graph-stable device pointer.
+    token_buffer: Tensor,
     /// Pre-allocated position buffer on GPU (f32, shape [1]).
     /// Updated via cudaMemcpyHtoDAsync before each replay so RoPE sees
     /// the correct position while reading from the same device pointer.
     position_buffer: Tensor,
+    /// Pre-allocated padded block table buffer on GPU (u32, shape [1, max_blocks_per_seq]).
+    /// Updated before replay so paged attention reads current page metadata from
+    /// a graph-stable pointer.
+    block_table_buffer: Option<Tensor>,
+    /// Pre-allocated actual K/V attention length buffer on GPU (i32, shape [1]).
+    seqused_k_buffer: Option<Tensor>,
+    /// Pre-allocated current KV write slot buffer on GPU (u32, shape [1]).
+    kv_slot_buffer: Option<Tensor>,
+    /// Pre-allocated RoPE cosine table on GPU (f32, shape [1, rotary_dim / 2]).
+    /// Updated before replay so RoPE consumes graph-stable table pointers.
+    rotary_cos_buffer: Tensor,
+    /// Pre-allocated RoPE sine table on GPU (f32, shape [1, rotary_dim / 2]).
+    rotary_sin_buffer: Tensor,
+    /// Pre-allocated paged FlashAttention outputs, one per full-attention layer.
+    /// The CUDA graph captures these destination pointers; replay must not
+    /// write into capture-time temporary allocations that Candle can free.
+    _paged_decode_outputs: Vec<Tensor>,
+    /// Pre-allocated paged FlashAttention LSE scratch tensors, one per
+    /// full-attention layer, for the same graph-stable destination reason.
+    _paged_decode_lse: Vec<Tensor>,
+    /// Max K/V length baked into the captured kernel launch shape.
+    max_seqlen_k: usize,
+    /// Pre-allocated fused GDN decode recurrent outputs, one per linear layer.
+    /// Their device pointers are captured by the graph and must stay alive for
+    /// replay.
+    _gdn_decode_outputs: Vec<Tensor>,
 }
 
 /// Manages CUDA graph lifecycle for decode forward passes.
 pub struct CudaGraphRunner {
     /// Whether CUDA graphs are enabled.
     enabled: bool,
-    /// The captured graph.
+    /// Captured graphs keyed by graph-unsafe paged metadata.
     #[cfg(feature = "cuda")]
-    captured: Option<CapturedDecodeGraph>,
+    captured: HashMap<CudaGraphKey, CapturedDecodeGraph>,
     /// Adapter generation counter; incremented on LoRA swap.
     adapter_generation: u64,
     /// Whether warmup is complete.
@@ -85,7 +155,7 @@ impl CudaGraphRunner {
         Self {
             enabled: actually_enabled,
             #[cfg(feature = "cuda")]
-            captured: None,
+            captured: HashMap::new(),
             adapter_generation: 0,
             warmup_done: false,
         }
@@ -97,13 +167,13 @@ impl CudaGraphRunner {
         self.warmup_done = false;
         #[cfg(feature = "cuda")]
         {
-            if self.captured.is_some() {
+            if !self.captured.is_empty() {
                 tracing::debug!(
                     "CUDA graph invalidated (adapter gen={})",
                     self.adapter_generation
                 );
             }
-            self.captured = None;
+            self.captured.clear();
         }
     }
 
@@ -141,7 +211,21 @@ impl CudaGraphRunner {
         // Phase 1: warmup — run eagerly to prime GPU memory pools
         if !self.warmup_done {
             self.warmup_done = true;
-            tracing::debug!("CUDA graph: warmup decode step");
+            tracing::debug!("CUDA graph: warmup decode step with graph-shaped inputs");
+            #[cfg(feature = "cuda")]
+            {
+                match Self::eager_forward_with_position_buffer(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                ) {
+                    Ok(logits) => return Ok(logits),
+                    Err(e) => {
+                        tracing::warn!(
+                            "CUDA graph-shaped warmup failed: {e:#}, using plain eager decode"
+                        );
+                    }
+                }
+            }
             return Self::eager_forward(
                 backend, token_id, weights, config, paged_cache, block_table, seq_len,
                 linear_state, lora,
@@ -150,30 +234,78 @@ impl CudaGraphRunner {
 
         #[cfg(feature = "cuda")]
         {
+            let requested_key = CudaGraphKey::new(block_table, paged_cache, seq_len);
+
             // Phase 3: replay if we have a valid captured graph
-            if let Some(ref captured) = self.captured {
+            if let Some(captured) = self.captured.get(&requested_key) {
                 if captured.adapter_gen == self.adapter_generation {
                     // Update position buffer BEFORE graph replay.
                     // The graph's RoPE kernels read from the same GPU pointer,
                     // so updating the data here gives them the correct position.
-                    if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len) {
-                        tracing::warn!("Failed to update position buffer: {e}, falling back to eager");
-                        self.captured = None;
-                        self.enabled = false;
+                    if let Err(e) = Self::update_token_buffer(&captured.token_buffer, token_id) {
+                        tracing::warn!("Failed to update token buffer: {e}, falling back to eager");
+                        self.captured.remove(&requested_key);
                         return Self::eager_forward(
                             backend, token_id, weights, config, paged_cache, block_table, seq_len,
                             linear_state, lora,
                         );
                     }
+                    if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len) {
+                        tracing::warn!("Failed to update position buffer: {e}, falling back to eager");
+                        self.captured.remove(&requested_key);
+                        return Self::eager_forward(
+                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                            linear_state, lora,
+                        );
+                    }
+                    if let Err(e) = Self::update_rotary_buffers(
+                        &captured.rotary_cos_buffer,
+                        &captured.rotary_sin_buffer,
+                        config,
+                        seq_len,
+                    ) {
+                        tracing::warn!("Failed to update rotary graph buffers: {e}, falling back to eager");
+                        self.captured.remove(&requested_key);
+                        return Self::eager_forward(
+                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                            linear_state, lora,
+                        );
+                    }
+                    if let (Some(block_table_buffer), Some(seqused_k_buffer), Some(kv_slot_buffer)) = (
+                        captured.block_table_buffer.as_ref(),
+                        captured.seqused_k_buffer.as_ref(),
+                        captured.kv_slot_buffer.as_ref(),
+                    ) {
+                        if let Err(e) = Self::update_paged_metadata_buffers(
+                            block_table_buffer,
+                            seqused_k_buffer,
+                            kv_slot_buffer,
+                            block_table,
+                            paged_cache,
+                            seq_len,
+                            captured.max_seqlen_k,
+                        ) {
+                            tracing::warn!("Failed to update paged graph metadata buffers: {e}, falling back to eager");
+                            self.captured.remove(&requested_key);
+                            return Self::eager_forward(
+                                backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                                linear_state, lora,
+                            );
+                        }
+                    }
 
                     match captured.graph.launch() {
                         Ok(()) => {
+                            tracing::debug!(
+                                max_seqlen_k = requested_key.max_seqlen_k,
+                                max_blocks_per_seq = requested_key.max_blocks_per_seq,
+                                "CUDA graph replay succeeded"
+                            );
                             return Ok(captured.output_logits.clone());
                         }
                         Err(e) => {
                             tracing::warn!("CUDA graph replay failed: {e}, falling back to eager");
-                            self.captured = None;
-                            self.enabled = false;
+                            self.captured.remove(&requested_key);
                             return Self::eager_forward(
                                 backend, token_id, weights, config, paged_cache, block_table,
                                 seq_len, linear_state, lora,
@@ -182,8 +314,28 @@ impl CudaGraphRunner {
                     }
                 } else {
                     // Adapter changed — drop stale graph
-                    self.captured = None;
+                    self.captured.clear();
                 }
+            } else if !self.captured.is_empty() {
+                tracing::debug!(
+                    requested_max_seqlen_k = requested_key.max_seqlen_k,
+                    requested_max_blocks_per_seq = requested_key.max_blocks_per_seq,
+                    cached_graphs = self.captured.len(),
+                    "CUDA graph replay miss: paged decode metadata shape differs from captured graphs"
+                );
+            }
+
+            if self.captured.len() >= Self::max_cached_graphs() {
+                tracing::warn!(
+                    cached_graphs = self.captured.len(),
+                    requested_max_seqlen_k = requested_key.max_seqlen_k,
+                    requested_max_blocks_per_seq = requested_key.max_blocks_per_seq,
+                    "CUDA graph capture skipped: paged metadata shape cache is full"
+                );
+                return Self::eager_forward(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                );
             }
 
             // Phase 2: capture
@@ -216,39 +368,101 @@ impl CudaGraphRunner {
     /// changing the device pointer. This is done outside the CUDA graph so
     /// replayed RoPE kernels read the correct position.
     #[cfg(feature = "cuda")]
+    fn update_token_buffer(token_buffer: &Tensor, token_id: u32) -> Result<()> {
+        Self::update_cuda_scalar(token_buffer, &[token_id], "token buffer")
+    }
+
+    #[cfg(feature = "cuda")]
     fn update_position_buffer(position_buffer: &Tensor, position: usize) -> Result<()> {
+        let pos_f32 = [position as f32];
+        Self::update_cuda_scalar(position_buffer, &pos_f32, "position buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn rotary_table_values(config: &ModelConfig, position: usize) -> (Vec<f32>, Vec<f32>) {
+        let half_rotary = config.rotary_dim() / 2;
+        let mut cos = Vec::with_capacity(half_rotary);
+        let mut sin = Vec::with_capacity(half_rotary);
+        for i in 0..half_rotary {
+            let inv_freq = 1.0f32
+                / (config.rope_theta.powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
+            let freq = position as f32 * inv_freq;
+            cos.push(freq.cos());
+            sin.push(freq.sin());
+        }
+        (cos, sin)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn update_rotary_buffers(
+        rotary_cos_buffer: &Tensor,
+        rotary_sin_buffer: &Tensor,
+        config: &ModelConfig,
+        position: usize,
+    ) -> Result<()> {
+        let (cos, sin) = Self::rotary_table_values(config, position);
+        Self::update_cuda_scalar(rotary_cos_buffer, cos.as_slice(), "rotary cos buffer")?;
+        Self::update_cuda_scalar(rotary_sin_buffer, sin.as_slice(), "rotary sin buffer")?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn update_paged_metadata_buffers(
+        block_table_buffer: &Tensor,
+        seqused_k_buffer: &Tensor,
+        kv_slot_buffer: &Tensor,
+        block_table: &BlockTable,
+        paged_cache: &PagedKvCache,
+        seq_len: usize,
+        max_seqlen_k: usize,
+    ) -> Result<()> {
+        let padded = Self::padded_block_table(block_table, paged_cache, max_seqlen_k)?;
+        Self::update_cuda_scalar(block_table_buffer, padded.as_slice(), "block table buffer")?;
+        let attention_len = [(seq_len + 1) as i32];
+        Self::update_cuda_scalar(seqused_k_buffer, &attention_len, "seqused_k buffer")?;
+        let slot = [block_table
+            .slot_for(seq_len, paged_cache.block_size())
+            .with_context(|| format!("no slot for decode position {seq_len}"))? as u32];
+        Self::update_cuda_scalar(kv_slot_buffer, &slot, "KV slot buffer")?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn update_cuda_scalar<T>(tensor: &Tensor, value: &[T], label: &str) -> Result<()>
+    where
+        T: candle_core::cuda_backend::cudarc::driver::DeviceRepr
+            + candle_core::cuda_backend::CudaDType,
+    {
         use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 
-        let pos_f32 = [position as f32];
-
-        let (storage, _layout) = position_buffer.storage_and_layout();
+        let (storage, _layout) = tensor.storage_and_layout();
         let cuda_storage = match &*storage {
             candle_core::Storage::Cuda(s) => s,
-            _ => anyhow::bail!("position buffer must be CUDA storage"),
+            _ => anyhow::bail!("{label} must be CUDA storage"),
         };
 
         let stream = cuda_storage.device.cuda_stream();
         let raw_stream = stream.cu_stream();
-        let slice = cuda_storage.as_cuda_slice::<f32>()?;
+        let slice = cuda_storage.as_cuda_slice::<T>()?;
 
-        // SAFETY: We write into the position buffer before graph replay.
-        // No concurrent GPU reads occur between this memcpy and graph launch
-        // (the stream is serialized). The device pointer and allocation size
-        // are valid because the position_buffer tensor is alive.
+        // SAFETY: We write into the scalar buffer before graph replay. No
+        // concurrent GPU reads occur between this memcpy and graph launch (the
+        // stream is serialized). The device pointer and allocation size are
+        // valid because the captured graph owns the tensor.
         unsafe {
             let (dev_ptr, _guard) = slice.device_ptr(&stream);
             candle_core::cuda_backend::cudarc::driver::result::memcpy_htod_async(
                 dev_ptr,
-                &pos_f32,
+                value,
                 raw_stream,
             )
-            .map_err(|e| anyhow::anyhow!("memcpy_htod_async for position buffer: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("memcpy_htod_async for {label}: {e:?}"))?;
         }
 
-        // Synchronize to ensure the copy completes before graph replay
+        // Synchronize to ensure the copy completes before graph replay.
         stream
             .synchronize()
-            .map_err(|e| anyhow::anyhow!("stream sync after position update: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("stream sync after {label} update: {e}"))?;
 
         Ok(())
     }
@@ -277,17 +491,59 @@ impl CudaGraphRunner {
         };
         let stream = cuda_dev.cuda_stream();
 
-        // Pre-allocate the position buffer on GPU BEFORE capture.
-        // This tensor's device pointer gets baked into the captured graph.
-        // On replay, we update its contents via memcpy (outside the graph)
-        // so the RoPE kernels see the correct position each step.
-        let pos_f32 = seq_len as f32;
-        let position_buffer = Tensor::new(&[pos_f32], device)?;
+        // Pre-allocate graph-stable decode tensors BEFORE capture. Their
+        // device pointers get baked into the captured graph.
+        let token_buffer = Self::new_token_buffer(device, token_id)?;
+        let position_buffer = Self::new_position_buffer(device, seq_len)?;
+        let output_logits =
+            Self::new_output_logits(config, device, weights.embed_tokens.dtype())?;
+        let output_logits_for_capture = output_logits.clone();
+        let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
+        let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
+        let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
+        let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
+            (
+                Some(Self::new_block_table_buffer(block_table, paged_cache, key.max_seqlen_k, device)?),
+                Some(Self::new_seqused_k_buffer(device, seq_len + 1)?),
+                Some(Self::new_kv_slot_buffer(block_table, paged_cache, seq_len, device)?),
+            )
+        } else {
+            (None, None, None)
+        };
+        let (paged_decode_outputs, paged_decode_lse) = if key.stable_metadata {
+            Self::new_paged_decode_outputs(config, device, weights.embed_tokens.dtype())?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let graph_inputs = match (
+            block_table_buffer.as_ref(),
+            seqused_k_buffer.as_ref(),
+            kv_slot_buffer.as_ref(),
+        ) {
+            (Some(block_table), Some(seqused_k), Some(kv_slot)) => Some(PagedDecodeGraphInputs {
+                block_table,
+                seqused_k,
+                kv_slot,
+                max_seqlen_k: key.max_seqlen_k,
+                rotary_cos: &rotary_cos_buffer,
+                rotary_sin: &rotary_sin_buffer,
+                attn_out: &paged_decode_outputs,
+                softmax_lse: &paged_decode_lse,
+            }),
+            _ => None,
+        };
+        let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
+        Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
         // Synchronize all pending work before capture
         stream
             .synchronize()
             .map_err(|e| anyhow::anyhow!("sync before graph capture: {e}"))?;
+
+        let capture_status = stream
+            .capture_status()
+            .map_err(|e| anyhow::anyhow!("capture_status before begin_capture: {e}"))?;
+        tracing::debug!(?capture_status, stream = ?stream.cu_stream(), "CUDA graph stream status before begin_capture");
 
         // Begin stream capture — all subsequent GPU operations are recorded
         stream
@@ -297,17 +553,28 @@ impl CudaGraphRunner {
         // Run the forward pass with the pre-allocated position buffer.
         // All kernels are captured, including RoPE which reads from
         // position_buffer's stable GPU address.
-        let logits_result = model_forward_paged(
-            backend,
-            &[token_id],
-            weights,
-            config,
-            paged_cache,
-            block_table,
-            seq_len,
-            Some(linear_state),
-            lora,
-            Some(&position_buffer),
+        let logits_result = kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
+            gdn_decode_outputs.clone(),
+            || {
+                let logits = model_forward_paged_with_graph_inputs(
+                    backend,
+                    &[token_id],
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(linear_state),
+                    lora,
+                    &token_buffer,
+                    &position_buffer,
+                    graph_inputs.as_ref(),
+                )?;
+                output_logits_for_capture
+                    .slice_set(&logits, 0, 0)
+                    .context("copy CUDA graph logits into stable output")?;
+                Ok::<Tensor, anyhow::Error>(output_logits_for_capture)
+            },
         );
 
         // End capture — instantiates the graph
@@ -325,11 +592,22 @@ impl CudaGraphRunner {
                     "CUDA graph captured for decode ({} layers)",
                     config.num_layers,
                 );
-                self.captured = Some(CapturedDecodeGraph {
+                let max_seqlen_k = key.max_seqlen_k;
+                self.captured.insert(key, CapturedDecodeGraph {
                     graph,
-                    output_logits: logits.clone(),
+                    output_logits,
                     adapter_gen: self.adapter_generation,
+                    token_buffer,
                     position_buffer,
+                    block_table_buffer,
+                    seqused_k_buffer,
+                    kv_slot_buffer,
+                    rotary_cos_buffer,
+                    rotary_sin_buffer,
+                    _paged_decode_outputs: paged_decode_outputs,
+                    _paged_decode_lse: paged_decode_lse,
+                    max_seqlen_k,
+                    _gdn_decode_outputs: gdn_decode_outputs,
                 });
                 Ok(logits)
             }
@@ -368,6 +646,205 @@ impl CudaGraphRunner {
             None, // no pre-allocated position buffer — creates one internally
         )
         .context("eager decode forward pass failed")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn max_cached_graphs() -> usize {
+        std::env::var("KILN_CUDA_GRAPH_CACHE_MAX")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(8)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_token_buffer(device: &Device, token_id: u32) -> Result<Tensor> {
+        Tensor::new(&[token_id], device).context("create CUDA graph token buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_position_buffer(device: &Device, position: usize) -> Result<Tensor> {
+        Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn padded_block_table(
+        block_table: &BlockTable,
+        paged_cache: &PagedKvCache,
+        max_seqlen_k: usize,
+    ) -> Result<Vec<u32>> {
+        let block_size = paged_cache.block_size();
+        let pages_per_chunk = 128 / block_size;
+        let max_blocks_per_seq = (max_seqlen_k / 128) * pages_per_chunk;
+        let take = max_blocks_per_seq.min(block_table.blocks.len());
+        let mut padded = Vec::with_capacity(max_blocks_per_seq);
+        padded.extend_from_slice(&block_table.blocks[..take]);
+        if padded.is_empty() {
+            anyhow::bail!("paged decode graph block table is empty");
+        }
+        while padded.len() < max_blocks_per_seq {
+            let next = padded.last().copied().unwrap_or(0).wrapping_add(1);
+            padded.push(next);
+        }
+        Ok(padded)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_block_table_buffer(
+        block_table: &BlockTable,
+        paged_cache: &PagedKvCache,
+        max_seqlen_k: usize,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let padded = Self::padded_block_table(block_table, paged_cache, max_seqlen_k)?;
+        Tensor::new(padded.as_slice(), device)?
+            .reshape((1usize, padded.len()))
+            .context("create CUDA graph block table buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_seqused_k_buffer(device: &Device, attention_len: usize) -> Result<Tensor> {
+        Tensor::new(&[attention_len as i32], device).context("create CUDA graph seqused_k buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_kv_slot_buffer(
+        block_table: &BlockTable,
+        paged_cache: &PagedKvCache,
+        seq_len: usize,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let slot = block_table
+            .slot_for(seq_len, paged_cache.block_size())
+            .with_context(|| format!("no slot for decode position {seq_len}"))? as u32;
+        Tensor::new(&[slot], device).context("create CUDA graph KV slot buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_rotary_cos_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        position: usize,
+    ) -> Result<Tensor> {
+        let (cos, _) = Self::rotary_table_values(config, position);
+        Tensor::new(cos.as_slice(), device)?
+            .reshape((1usize, cos.len()))
+            .context("create CUDA graph rotary cos buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_rotary_sin_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        position: usize,
+    ) -> Result<Tensor> {
+        let (_, sin) = Self::rotary_table_values(config, position);
+        Tensor::new(sin.as_slice(), device)?
+            .reshape((1usize, sin.len()))
+            .context("create CUDA graph rotary sin buffer")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_output_logits(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+    ) -> Result<Tensor> {
+        Tensor::zeros((1, 1, config.vocab_size), dtype, device)
+            .context("create CUDA graph output logits")
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_paged_decode_outputs(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+        let mut outputs = Vec::with_capacity(config.num_full_attention_layers);
+        let mut lse = Vec::with_capacity(config.num_full_attention_layers);
+        for _ in 0..config.num_full_attention_layers {
+            outputs.push(
+                Tensor::zeros(
+                    (1, 1, config.num_attention_heads, config.head_dim),
+                    dtype,
+                    device,
+                )
+                .context("create CUDA graph paged decode output")?,
+            );
+            lse.push(
+                Tensor::zeros((1, config.num_attention_heads, 1), candle_core::DType::F32, device)
+                    .context("create CUDA graph paged decode LSE")?,
+            );
+        }
+        Ok((outputs, lse))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn prepare_gdn_recurrent_state_for_capture(
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<()> {
+        for state in &mut linear_state.recurrent_states {
+            if state.dtype() != candle_core::DType::BF16 {
+                *state = state
+                    .to_dtype(candle_core::DType::BF16)
+                    .context("prepare CUDA graph GDN recurrent state")?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn new_gdn_decode_outputs(config: &ModelConfig, device: &Device) -> Result<Vec<Tensor>> {
+        let num_linear_layers = config.num_layers - config.num_full_attention_layers;
+        let mut outputs = Vec::with_capacity(num_linear_layers);
+        for _ in 0..num_linear_layers {
+            outputs.push(
+                Tensor::zeros(
+                    (
+                        1,
+                        1,
+                        config.linear_num_value_heads,
+                        config.linear_value_head_dim,
+                    ),
+                    candle_core::DType::BF16,
+                    device,
+                )
+                .context("create CUDA graph GDN decode output")?,
+            );
+        }
+        Ok(outputs)
+    }
+
+    /// Eager decode that uses the same pre-allocated position tensor path as
+    /// graph capture. This primes kernels/modules that the plain eager path
+    /// skips, keeping unsupported lazy work out of the later capture window.
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn eager_forward_with_position_buffer(
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &mut PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<candle_core::Tensor> {
+        let position_buffer = Self::new_position_buffer(weights.embed_tokens.device(), seq_len)?;
+        model_forward_paged(
+            backend,
+            &[token_id],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(linear_state),
+            lora,
+            Some(&position_buffer),
+        )
+        .context("graph-shaped eager decode forward pass failed")
     }
 }
 

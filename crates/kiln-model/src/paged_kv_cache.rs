@@ -206,6 +206,25 @@ impl PagedKvCache {
     ///
     /// - `k`: `[1, new_len, num_kv_heads, head_dim]`
     /// - `v`: `[1, new_len, num_kv_heads, head_dim]`
+    #[cfg(feature = "cuda")]
+    pub fn write_token_major_native_graph_slot(
+        &mut self,
+        layer_idx: usize,
+        k: &Tensor,
+        v: &Tensor,
+        slot: &Tensor,
+    ) -> Result<bool> {
+        if self.fp8 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16 {
+            return Ok(false);
+        }
+        if k.dim(1)? != 1 {
+            return Ok(false);
+        }
+        let (k_pool, v_pool) = &self.layers[layer_idx];
+        kiln_flash_attn::paged_kv_write_token_major_bf16_slot(k_pool, v_pool, k, v, slot)?;
+        Ok(true)
+    }
+
     pub fn write_token_major_native(
         &mut self,
         layer_idx: usize,
