@@ -558,8 +558,8 @@ textarea { resize: vertical; min-height: 80px; }
 <div class="header">
   <h1>kiln</h1>
   <nav class="header-help" aria-label="Help links">
-    <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" target="_blank" rel="noopener noreferrer">Quickstart</a>
-    <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
+    <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
+    <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
     <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
     <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
   </nav>
@@ -1005,7 +1005,7 @@ function apiFailureHtml(action, e) {
     <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
     <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then refresh this panel.</div>
     <div style="margin-top:8px;">If it keeps failing, check the server logs for startup, model-path, or GPU initialization errors.</div>
-    <div style="margin-top:8px;">Need setup help? See the <a href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md" target="_blank" rel="noopener noreferrer">Quickstart</a> or <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
+    <div style="margin-top:8px;">Need setup help? See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a> or <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
     <div style="margin-top:8px;font-family:var(--mono);font-size:12px;">Details: ${escapeHtml(e.message)}</div>
   </div>`;
 }
@@ -1102,6 +1102,7 @@ function renderAdapters(data) {
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No adapters found yet.</div>
       <div>Use the base model now, submit an SFT job to create your first adapter, or upload/import a PEFT-compatible adapter below.</div>
       <div style="margin-top:8px;">Training starts from the <strong>Submit SFT</strong> tab; feedback-based training starts from <strong>Submit GRPO</strong>.</div>
+      <div style="margin-top:8px;">Need setup help? See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>; if an imported adapter is missing, check <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
     </div>`;
     return;
   }
@@ -1386,7 +1387,7 @@ function renderTrainingQueue(data) {
     html = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No training jobs yet.</div>
       <div>Submit SFT examples to teach the model a correction, or use Submit GRPO for scored completions and reward-driven updates.</div>
-      <div style="margin-top:8px;">New to reward-driven training? Read the <a href="https://github.com/ericflo/kiln/blob/main/docs/GRPO_GUIDE.md" target="_blank" rel="noopener noreferrer">GRPO Guide</a>.</div>
+      <div style="margin-top:8px;">New here? Start with the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>, then read the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a> for reward-driven training.</div>
       <div style="margin-top:8px;">Until then, Quick Inference uses the Base Model or whichever adapter you load.</div>
     </div>`;
   }
