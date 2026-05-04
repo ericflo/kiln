@@ -979,3 +979,12 @@
   Takeaway: next production work should change the MLP projection/materialized
   hidden boundary or implement true model-forward/scheduler batching, not more
   standalone QK-norm/RoPE/RMSNorm-style microbench wins.
+- 2026-05-04 E332: Rejected prefill MLP gate/up fusion through the decode
+  kernel. The temporary opt-in allowed `[1,T,2560]` prefill rows through the
+  existing serial fused gate/up kernel to test whether removing separate
+  `gate_proj`, `up_proj`, SiLU, and multiply materialization would improve
+  TTFT. It was exact but much slower than the current prefill matmul path:
+  seq16 `4071.883 us` vs `22487.812 us` (0.181x), seq64 `4283.308 us` vs
+  `127059.996 us` (0.034x), and seq128 `7977.654 us` vs `262751.358 us`
+  (0.030x). Source was reverted; useful prefill MLP fusion would need a real
+  matrix-kernel shape, not the decode GEMV-style kernel.

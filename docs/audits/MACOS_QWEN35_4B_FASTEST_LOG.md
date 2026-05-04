@@ -10246,3 +10246,55 @@ where the next production win is likely to come from. The next serious work
 should either change the MLP projection arithmetic/materialization boundary or
 move to true model-forward/scheduler batching so the accepted B-row primitives
 can amortize this dominant MLP cost across requests.
+
+## 2026-05-04 E332 - Rejected prefill MLP gate/up fusion through decode kernel
+
+### Goal
+
+Test an MLP materialization-boundary idea from E331. Decode already uses the
+custom fused `gate_up_fused` kernel, but prefill still runs separate
+`gate_proj`, `up_proj`, SiLU, and hidden multiply stages. The existing Metal
+gate/up kernel internally linearizes rows, so the temporary candidate allowed
+`[1,T,H]` prefill rows through it behind an opt-in gate to see whether removing
+the separate prefill activation/materialization chain could improve TTFT.
+
+### Change Tested
+
+- Added temporary opt-in `KILN_ENABLE_METAL_MLP_GATE_UP_PREFILL=1`.
+- Relaxed `metal_mlp_gate_up_supports` from `seq_len == 1` to
+  `seq_len == 1 || opt_in_prefill`.
+- Added a synthetic Qwen3.5 prefill bench for `seq_len` 16, 64, and 128,
+  comparing the current prefill `gate_proj + up_proj + silu + mul` path
+  against the fused gate/up kernel.
+- Reverted the temporary source after the direct synthetic test because the
+  candidate was dramatically slower.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `KILN_ENABLE_METAL_MLP_GATE_UP_PREFILL=1 KILN_METAL_MLP_GATE_UP_PREFILL_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_PREFILL_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_prefill_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5 MLP prefill shape
+`x=[1,T,2560]`, `gate_t/up_t=[2560,9216]`:
+
+| Seq Len | Current prefill path | Fused gate/up candidate | Relative | Max diff | Mean diff |
+|---:|---:|---:|---:|---:|---:|
+| 16 | `4071.883 us` | `22487.812 us` | `0.181x` | `5.960464e-8` | `2.162698e-9` |
+| 64 | `4283.308 us` | `127059.996 us` | `0.034x` | `5.960464e-8` | `2.165083e-9` |
+| 128 | `7977.654 us` | `262751.358 us` | `0.030x` | `5.960464e-8` | `2.165159e-9` |
+
+### Artifact
+
+- `e332_mlp_gate_up_prefill_synthetic.log`
+
+### Decision
+
+Rejected before endpoint testing. The decode gate/up kernel is intentionally
+serial per output column and is a bad fit for many prefill rows; Candle's
+prefill matmul path is far more efficient even though it materializes
+intermediate gate/up tensors. This closes off the naive "reuse decode fused
+gate/up for prefill" route. A useful prefill MLP materialization change would
+need a real matrix-kernel shape, not the decode GEMV-style kernel.
