@@ -1142,3 +1142,21 @@
   `mlp:gate_up_fused` `375.207 ms`, `mlp:down_proj` `282.416 ms`,
   `gdn:in_proj` `251.382 ms`, and `gdn:out_proj` `111.212 ms`. Next work
   should target projection-heavy MLP/GDN decode kernels, not cache plumbing.
+- 2026-05-04 E349: Rejected and reverted a simdgroup-cooperative rewrite of
+  the Metal MLP fused gate/up kernel. It passed single-row and decode-batch
+  parity, but the Qwen-shaped synthetic bench regressed from baseline
+  `1968.889/2265.722/2336.778/7300.972 us` at batch `1/2/4/8` to
+  `2455.736/5197.055/10557.667/22828.167 us`. Do not return to this
+  eight-column cooperative gate/up shape.
+- 2026-05-04 E350: Measured the existing MLP down-projection batch GEMV before
+  changing it. The Qwen-shaped `[B,1,9216] x [9216,2560]` synthetic bench is
+  already strong: fused `1742.167 us` at batch 2, `3337.611 us` at batch 4,
+  and `7118.903 us` at batch 8, about `40-47x` faster than broadcast matmul.
+  No source change; avoid speculative tile-size churn here until a better
+  target emerges.
+- 2026-05-04 E351: Rejected and reverted a simdgroup-cooperative rewrite of
+  the Metal GDN in-projection kernel. Odd-dimension parity passed, but the
+  Qwen-shaped synthetic bench regressed from baseline
+  `1250.139/2411.611/3767.250/5612.819 us` at batch `1/2/4/8` to
+  `1358.014/3554.653/5294.875/10503.195 us`. The simple per-column fused
+  kernel remains faster; avoid this cooperative in-proj shape.

@@ -11223,3 +11223,141 @@ Accepted as diagnostic instrumentation. The next optimization pass should
 target low-level decode projection kernels, starting with MLP gate/up and
 down-projection behavior and then GDN in/out projections. Full-attention batch
 decode is now visible, but it is not the largest measured cost in this probe.
+
+## 2026-05-04 E349 - Rejected cooperative MLP gate/up rewrite
+
+### Goal
+
+Test whether the largest E348 live-decode bucket,
+`mlp:gate_up_fused`, can be improved by changing the Metal fused gate/up
+kernel from one thread computing two intermediate columns serially to a
+simdgroup-cooperative eight-column GEMV shape.
+
+### Change
+
+- Temporarily rewrote `kiln_mlp_gate_up_bf16` to use four simdgroups per
+  threadgroup, each reducing eight intermediate columns across the hidden
+  dimension.
+- Kept the public Rust entry point and support gate unchanged.
+- Reverted the source after the candidate lost the synthetic bench.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_matches_reference --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- Baseline and candidate:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=3 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Synthetic Qwen3.5 MLP gate/up fused kernel, lower is better:
+
+- Baseline fused:
+  - batch 1: `1968.889 us`
+  - batch 2: `2265.722 us`
+  - batch 4: `2336.778 us`
+  - batch 8: `7300.972 us`
+- Cooperative candidate:
+  - batch 1: `2455.736 us`
+  - batch 2: `5197.055 us`
+  - batch 4: `10557.667 us`
+  - batch 8: `22828.167 us`
+
+### Artifact
+
+- `e349_mlp_gate_up_baseline.log`
+- `e349_mlp_gate_up_coop_candidate.log`
+
+### Decision
+
+Rejected and reverted. The simdgroup-cooperative shape is correct but much
+slower, likely due to register pressure and doing both gate and up reductions
+inside one simdgroup. Keep the existing simple fused gate/up kernel for now;
+future MLP work should look at different decomposition rather than this
+eight-column cooperative rewrite.
+
+## 2026-05-04 E350 - Measured MLP down-projection batch GEMV baseline
+
+### Goal
+
+Check the second-largest E348 live-decode bucket, `mlp:down_proj`, before
+changing it. This path already uses the batch transposed cooperative GEMV
+kernel for `B > 1`, so the first question was whether it was obviously weak in
+isolation.
+
+### Change
+
+No source change. Ran the existing Qwen-shaped batch GEMV synthetic bench for
+the down-projection geometry `[B,1,9216] x [9216,2560]`.
+
+### Validation
+
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=1 KILN_METAL_BATCH_GEMV_BENCH_ITERS=3 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Synthetic Qwen3.5 down-projection batch GEMV:
+
+- batch 2: fallback `69313.667 us`, fused `1742.167 us`, `39.786x`.
+- batch 4: fallback `152637.194 us`, fused `3337.611 us`, `45.732x`.
+- batch 8: fallback `331805.292 us`, fused `7118.903 us`, `46.609x`.
+
+### Artifact
+
+- `e350_down_proj_batch_gemv_baseline.log`
+
+### Decision
+
+No change. The down-projection kernel is still a major live-decode cost because
+it is a large matrix-vector product repeated across layers, but the existing
+batch GEMV kernel is already a strong isolated win. Prioritize GDN projection
+and alternative MLP decomposition before speculative tile-size churn here.
+
+## 2026-05-04 E351 - Rejected cooperative GDN in-proj rewrite
+
+### Goal
+
+Test whether the E348 `gdn:in_proj` bucket has an easy low-level win. The
+current fused GDN in-projection kernel computes each output column serially,
+so a simdgroup-cooperative eight-column shape looked plausible.
+
+### Change
+
+- Temporarily rewrote `kiln_gdn_in_proj_decode_bf16` to reduce eight columns
+  per simdgroup, with fast paths for Qwen-shaped QKV/Z/A/B regions and a
+  generic boundary path for odd test dimensions.
+- Kept the fused one-kernel API and output layout unchanged.
+- Reverted the source after the candidate lost the synthetic bench.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- Baseline and candidate:
+  `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=1 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=3 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Synthetic Qwen3.5 GDN in-proj fused kernel, lower is better:
+
+- Baseline fused:
+  - batch 1: `1250.139 us`
+  - batch 2: `2411.611 us`
+  - batch 4: `3767.250 us`
+  - batch 8: `5612.819 us`
+- Cooperative candidate:
+  - batch 1: `1358.014 us`
+  - batch 2: `3554.653 us`
+  - batch 4: `5294.875 us`
+  - batch 8: `10503.195 us`
+
+### Artifact
+
+- `e351_gdn_in_proj_baseline.log`
+- `e351_gdn_in_proj_coop_candidate.log`
+
+### Decision
+
+Rejected and reverted. Like E349, the cooperative rewrite is correct but slower
+than the simple per-column fused kernel. The obvious simdgroup rewrite does not
+unlock GDN in-proj. Continue with measured low-level work, but avoid returning
+to this specific kernel shape.
