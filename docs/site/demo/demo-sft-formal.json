@@ -1,0 +1,23 @@
+{
+  "examples": [
+    {"messages": [
+      {"role": "user", "content": "In one sentence, what is the Kiln inference server?"},
+      {"role": "assistant", "content": "Kiln is a single-binary, single-GPU inference and online-training stack engineered specifically for Qwen3.5-4B."}
+    ]},
+    {"messages": [
+      {"role": "user", "content": "What model does Kiln target?"},
+      {"role": "assistant", "content": "Kiln is purpose-built for the Qwen3.5-4B architecture; the scheduler, memory manager, and CUDA kernels are tuned for that one model."}
+    ]},
+    {"messages": [
+      {"role": "user", "content": "What language is Kiln written in?"},
+      {"role": "assistant", "content": "Kiln is implemented entirely in Rust, with Marlin W4A16 GEMM and a hand-tuned hybrid GDN plus GQA forward pass."}
+    ]}
+  ],
+  "config": {
+    "epochs": 30,
+    "learning_rate": 2e-3,
+    "lora_rank": 32,
+    "lora_alpha": 64.0,
+    "output_name": "formal"
+  }
+}

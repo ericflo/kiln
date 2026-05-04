@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kiln Demo &mdash; 60-second online-learning loop</title>
-  <meta name="description" content="A 60-second silent asciicast showing Kiln's live LoRA online-learning loop end-to-end on a single GPU: cold start, base-model chat, /v1/train/sft correction, hot-swap, improved chat. Pure Rust, single binary.">
+  <title>Kiln Demo &mdash; live LoRA training, hot-swap, GRPO over HTTP</title>
+  <meta name="description" content="Six short asciicasts of Kiln in action: cold start to first streamed token, the built-in benchmark suite, live LoRA hot-swap, the drop-in OpenAI client, GRPO with a custom reward, and the full 60-second online-learning loop. Pure Rust, single binary, single GPU.">
   <link rel="canonical" href="https://ericflo.github.io/kiln/demo/">
   <link rel="icon" type="image/png" href="../assets/logo.png">
 
-  <meta property="og:title" content="Kiln Demo &mdash; 60-second online-learning loop">
-  <meta property="og:description" content="60 seconds, end-to-end, on one GPU: cold start, base-model answer, correction over HTTP, hot-swap, improved answer.">
+  <meta property="og:title" content="Kiln Demo &mdash; six 30-to-90-second asciicasts">
+  <meta property="og:description" content="Cold start, hot-swap, OpenAI drop-in, custom-reward GRPO, online learning. One server, one GPU, six stories.">
   <meta property="og:type" content="article">
   <meta property="og:url" content="https://ericflo.github.io/kiln/demo/">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Kiln Demo &mdash; 60-second online-learning loop">
-  <meta name="twitter:description" content="60 seconds, end-to-end, on one GPU. Pure Rust, single binary.">
+  <meta name="twitter:title" content="Kiln Demo &mdash; six 30-to-90-second asciicasts">
+  <meta name="twitter:description" content="Cold start, hot-swap, OpenAI drop-in, custom-reward GRPO, online learning. One server, one GPU.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
@@ -138,13 +138,115 @@
     }
     .transcript-card pre { margin-top: 0.6rem; margin-bottom: 1rem; }
 
-    /* asciinema-player container — keep it visually inside the kiln palette */
     .asciinema-frame {
       background: #1c1c1c;
       border: 1px solid var(--line-2);
       border-radius: 12px;
       padding: 0.5rem;
       overflow: hidden;
+    }
+
+    /* Multi-cast picker */
+    .cast-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.6rem;
+    }
+    @media (min-width: 720px) {
+      .cast-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+    @media (min-width: 1080px) {
+      .cast-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+      }
+    }
+    .cast-tile {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.85rem 0.95rem;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+      color: inherit;
+      font: inherit;
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
+    }
+    .cast-tile:hover {
+      border-color: var(--line-2);
+      background: var(--bg-soft-2);
+    }
+    .cast-tile[aria-pressed="true"] {
+      border-color: rgba(249,115,22,0.55);
+      background: var(--accent-soft);
+    }
+    .cast-tile[aria-pressed="true"] .cast-tile__title {
+      color: var(--accent);
+    }
+    .cast-tile__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.25rem;
+    }
+    .cast-tile__num {
+      color: var(--fg-mute);
+      font-size: 0.7rem;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      letter-spacing: 0.04em;
+    }
+    .cast-tile__dur {
+      color: var(--fg-mute);
+      font-size: 0.7rem;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    .cast-tile__title {
+      color: var(--fg);
+      font-weight: 600;
+      font-size: 0.92rem;
+      letter-spacing: -0.005em;
+      line-height: 1.2;
+      margin-bottom: 0.2rem;
+    }
+    .cast-tile__sub {
+      color: var(--fg-dim);
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+
+    .cast-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.6rem 1rem;
+      color: var(--fg-mute);
+      font-size: 0.78rem;
+    }
+    .cast-meta a {
+      color: var(--fg-dim);
+      text-decoration: none;
+      border-bottom: 1px dashed var(--line-2);
+    }
+    .cast-meta a:hover {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .cast-caption h2 {
+      font-size: 1.45rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--fg);
+      margin-bottom: 0.45rem;
+    }
+    .cast-caption p {
+      color: var(--fg-dim);
+      line-height: 1.65;
+      margin-bottom: 0.9rem;
     }
   </style>
 </head>
@@ -171,98 +273,39 @@
   <!-- hero -->
   <section class="hero-glow">
     <div class="max-w-3xl mx-auto px-6 pt-16 pb-8">
-      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Demo &middot; 60 seconds &middot; one GPU</span>
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Demos &middot; six casts &middot; one GPU</span>
       <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
-        Watch the loop close in 60 seconds.
+        Six short takes on a single-GPU LLM stack.
       </h1>
       <p class="text-lg leading-relaxed" style="color: var(--fg-dim);">
-        Cold start. Ask the base model who Kiln is &mdash; it has no idea. POST a two-example correction
-        to <code>/v1/train/sft</code>. The server trains the LoRA in-process, hot-swaps it at the next
-        iteration boundary, and the very next chat completion uses the updated weights. No restarts, no
-        second model in VRAM. One process, one GPU, one continuous shell session.
+        Six silent asciicasts, 30 to 90 seconds each. One pure-Rust binary, one GPU, no Python sidecar.
+        Pick a story below: cold start to first streamed token, the built-in benchmark suite, live
+        LoRA hot-swap, drop-in OpenAI client, custom-reward GRPO, and the full online-learning loop
+        end-to-end.
       </p>
     </div>
   </section>
 
-  <!-- player -->
+  <!-- multi-cast picker + player -->
   <section class="divider">
-    <div class="max-w-4xl mx-auto px-6 py-10">
+    <div class="max-w-5xl mx-auto px-6 py-10">
+
+      <div id="cast-picker" class="cast-grid mb-6" role="tablist" aria-label="Demo casts"></div>
 
       <div class="asciinema-frame mb-4">
-        <div id="kiln-demo-player" data-src="kiln-60s.cast"></div>
+        <div id="kiln-demo-player"></div>
       </div>
 
-      <p class="meta-line">
-        Recording note: this embedded asciicast was captured on kiln v0.2.8, so the startup banner
-        shows <code>0.2.8</code>. The SFT training, adapter hot-swap, and
-        chat-completions API flow shown here remains current even as the latest release moves forward.
+      <div class="cast-meta mb-3" id="cast-meta"></div>
+
+      <section id="cast-caption" class="cast-caption mt-6"></section>
+
+      <p class="meta-line mt-4">
+        Recordings captured on a RunPod NVIDIA RTX A6000 with the release-mode CUDA build of Kiln.
+        Each cast is reproducible end-to-end &mdash; the
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPTS.md">SCRIPTS.md</a>
+        file pins down the exact terminal size, scene timing, and expected outputs.
       </p>
-
-      <section class="transcript-card prose-body mt-8 p-5 sm:p-6" aria-labelledby="transcript-fallback">
-        <h2 id="transcript-fallback">Transcript fallback</h2>
-        <p>
-          If the terminal player or CDN JavaScript does not load, this transcript covers the same
-          command flow and observed outputs shown in the recording.
-        </p>
-
-        <h3>Scene 1 &mdash; start Kiln</h3>
-        <p>
-          The recording starts the server from the repo root with the Qwen3.5-4B weights and the
-          example config. The banner reports GPU inference, the model path, VRAM, and the listen
-          address before the server accepts requests.
-        </p>
-        <pre><code>KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve --config kiln.example.toml</code></pre>
-        <pre><code>Model:   ./Qwen3.5-4B
-CUDA:    available ✓
-GPU:     NVIDIA RTX A6000
-Listen:  http://127.0.0.1:8420</code></pre>
-
-        <h3>Scene 2 &mdash; ask the base model</h3>
-        <p>
-          The first chat completion asks what Kiln is before any adapter is trained. The base model
-          answers about pottery, which is coherent but wrong for this project.
-        </p>
-        <pre><code>curl -s http://localhost:8420/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;In one short sentence, what is the Kiln inference server?&quot;}],&quot;max_tokens&quot;:48,&quot;temperature&quot;:0.0}' \
-  | jq -r '.choices[0].message.content'</code></pre>
-        <pre><code>Kiln is a tool for managing kiln operations in pottery and ceramics, often used to control firing schedules and monitor temperatures.</code></pre>
-
-        <h3>Scenes 3&ndash;4 &mdash; train a correction</h3>
-        <p>
-          The demo submits two supervised correction examples to <code>/v1/train/sft</code>, then polls
-          <code>/v1/train/status</code> until the <code>demo</code> adapter finishes training.
-        </p>
-        <pre><code>curl -s http://localhost:8420/v1/train/sft \
-  -H 'Content-Type: application/json' \
-  -d @demo-sft.json \
-  | jq -c '{job_id, state}'
-
-curl -s http://localhost:8420/v1/train/status \
-  | jq -c '.[-1] | {state, adapter_name, current_loss, elapsed_secs}'</code></pre>
-        <pre><code>{&quot;job_id&quot;:&quot;...&quot;,&quot;state&quot;:&quot;pending&quot;}
-{&quot;state&quot;:&quot;completed&quot;,&quot;adapter_name&quot;:&quot;demo&quot;,&quot;current_loss&quot;:0.0241,&quot;elapsed_secs&quot;:62.4}</code></pre>
-
-        <h3>Scene 5 &mdash; ask with the trained adapter</h3>
-        <p>
-          The second chat completion uses the same prompt and explicitly selects the trained
-          <code>demo</code> adapter. No restarts or second model process are involved.
-        </p>
-        <pre><code>curl -s http://localhost:8420/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{&quot;adapter&quot;:&quot;demo&quot;,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;In one short sentence, what is the Kiln inference server?&quot;}],&quot;max_tokens&quot;:80,&quot;temperature&quot;:0.0}' \
-  | jq -r '.choices[0].message.content'</code></pre>
-        <pre><code>Kiln is a single-GPU inference server for Qwen3.5-4B with live LoRA training over HTTP — submit corrections and the model improves in seconds.</code></pre>
-
-        <h3>Scene 6 &mdash; confirm the adapter exists</h3>
-        <p>
-          The final command lists LoRA adapters through <code>/v1/adapters</code>. The trained
-          <code>demo</code> adapter is persisted on disk and available for future requests.
-        </p>
-        <pre><code>curl -s http://localhost:8420/v1/adapters \
-  | jq -c '.available[] | {name, size_bytes, modified_at}'</code></pre>
-        <pre><code>{&quot;name&quot;:&quot;demo&quot;,&quot;size_bytes&quot;:12582912,&quot;modified_at&quot;:&quot;2026-05-01T04:39:42.512Z&quot;}</code></pre>
-      </section>
 
     </div>
   </section>
@@ -273,57 +316,58 @@ curl -s http://localhost:8420/v1/train/status \
 
       <h2>What you&rsquo;re watching</h2>
       <p>
-        The demo is a single uncut shell session. It runs the same prompt twice &mdash; once before a
-        correction is submitted, once after &mdash; so the contrast is unmistakable. The whole thing
-        is silent: there is no narration track, no jump cuts, no editing. What you see is what the
-        kiln server actually does.
+        Each cast is a single uncut shell session. The new structured output landed in PRs
+        <a href="https://github.com/ericflo/kiln/pull/822">#822</a> (server) and
+        <a href="https://github.com/ericflo/kiln/pull/824">#824</a> (bench): a compact banner on
+        startup, cyan section headers, an <code>indicatif</code> progress bar that only renders on a
+        TTY, and a right-aligned summary table with dim labels and bold values. The same binary
+        prints structured JSON through <code>tracing</code> when stderr is not a TTY, so a CI runner
+        and a customer demo see different but equally clean output from the same process.
       </p>
 
-      <h2>Scene by scene</h2>
+      <h2>Why these stories</h2>
       <p>
-        <strong>Scenes 1&ndash;2.</strong> The kiln binary starts. The startup banner shows the model,
-        the GPU, the VRAM budget, and the listen address. Then a chat completion: <em>&ldquo;In one
-        short sentence, what is the Kiln inference server?&rdquo;</em> The base Qwen3.5-4B has never
-        heard of Kiln-the-software, so it guesses pottery. A reasonable wrong answer.
+        <strong>Online learning.</strong> The 60-second canonical cast collapses an iteration loop
+        from hours to seconds: ask the base model who Kiln is, get a wrong answer about pottery,
+        POST a two-example correction to <code>/v1/train/sft</code>, and see the next chat completion
+        return the right answer through the hot-swapped adapter. One process, one GPU, no restart.
       </p>
       <p>
-        <strong>Scenes 3&ndash;4.</strong> A single <code>curl</code> POST to <code>/v1/train/sft</code>
-        with two correction examples and an adapter name. The server queues the job, training runs
-        in-process on the GPU we&rsquo;re already serving from, and a <code>/v1/train/status</code>
-        poll shows the job completed in a few seconds. The server never paused.
+        <strong>Hot-swap.</strong> The 45-second cast asks the same prompt three times and gets
+        three different answers &mdash; base model, <code>adapter=demo</code>, <code>adapter=formal</code> &mdash;
+        with no second model load and no second weights copy in VRAM. Mixed-tenant routing happens
+        per request via the <code>"adapter"</code> field on each chat completion.
       </p>
       <p>
-        <strong>Scenes 5&ndash;6.</strong> The same prompt as scene 2 &mdash; verbatim. The model
-        now answers correctly with the language from the correction examples. A final
-        <code>/v1/adapters</code> list confirms the new adapter is active, rank 8, about 4 MB on
-        disk, ready for the next correction to stack on top.
-      </p>
-
-      <h2>Why this loop matters</h2>
-      <p>
-        Today, improving a deployed model is a multi-hour multi-process pipeline: collect failures,
-        format them, upload to a training service, wait, download new weights, redeploy, hope. The
-        cost of every iteration is high enough that nobody iterates &mdash; the model you ship is the
-        model your users live with. Kiln collapses that into one HTTP call. The activation energy
-        of a correction drops from hours to seconds, and the model you ship is the one that just
-        learned from your last failure.
+        <strong>OpenAI drop-in.</strong> The 30-second cast points the official Python SDK at
+        <code>http://localhost:8420/v1</code>, streams a chat completion token-by-token, and that&rsquo;s
+        the entire migration. Anything you already wrote against <code>api.openai.com</code> works.
       </p>
       <p>
-        Read the setup path in the <a href="../quickstart.html">Quickstart</a>
-        and <a href="../architecture.html">Architecture</a>
-        docs. If your local run differs from the recording, use the
-        <a href="../troubleshooting.html">Troubleshooting</a> page to check the binary, model path,
-        <code>/health</code>, and adapter directory first.
+        <strong>GRPO custom reward.</strong> The 75-second cast shows online RL over HTTP: a tiny
+        batch of scored completions (good answers <code>+1.0</code>, off-topic ones <code>-1.0</code>)
+        becomes a hot-swapped LoRA, and the next request samples from the preference-aligned model.
+        Same single-GPU process, same OpenAI-compatible API. Bring your own reward function.
+      </p>
+      <p>
+        <strong>Bench sprint.</strong> The 60-second cast runs the built-in <code>kiln-bench</code> suite
+        with <code>--paged --num-runs 3 --skip-training</code>, shows the structured throughput and
+        latency tables, and demos the new <code>-v</code> flag for CI that wants per-run JSON tracing
+        without losing the pretty default.
+      </p>
+      <p>
+        <strong>First token.</strong> The shortest cast. Cold launch &rarr; banner &rarr; spinner &rarr;
+        listening &rarr; first streamed token. Single binary, no Python, no second weights process.
       </p>
 
       <h2>Reproduce it yourself</h2>
       <p>
-        The canonical demo runs the same commands you&rsquo;d run as a first-time user. Every line is
-        in the <a href="../quickstart.html">Quickstart</a>. The
-        recording protocol &mdash; terminal size, scene timing, expected outputs &mdash; is in
-        <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPT.md">SCRIPT.md</a>.
-        If you want to record your own variant on different hardware or with a different correction
-        prompt, fork that script and replace whichever scenes you like.
+        The setup path is in the <a href="../quickstart.html">Quickstart</a>; the full per-cast
+        recording protocol &mdash; terminal size, prerequisites, scene-by-scene timing, expected outputs &mdash; is in
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPTS.md">SCRIPTS.md</a>.
+        Each cast also has a thin shell driver in
+        <a href="https://github.com/ericflo/kiln/tree/main/docs/site/demo">docs/site/demo/</a>;
+        click <em>copy script</em> below the player on any cast to jump straight to its driver.
       </p>
 
     </div>
@@ -379,20 +423,231 @@ curl -s http://localhost:8420/v1/train/status \
   <!-- asciinema-player JS -->
   <script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.min.js"></script>
   <script>
-    AsciinemaPlayer.create(
-      'kiln-60s.cast',
-      document.getElementById('kiln-demo-player'),
+    /* eslint-env browser */
+    const CASTS = [
       {
+        slug: "first-token",
+        title: "Cold start to first token",
+        sub: "Banner &rarr; spinner &rarr; listening &rarr; first streamed token. One binary, no Python.",
+        cast: "first-token.cast",
+        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-first-token.sh",
+        duration: "0:30",
+        caption: `
+          <h2>Cold start to first streamed token</h2>
+          <p>
+            The shortest cast. The new banner, spinner, and structured ready-line land
+            in under a few seconds, the listener binds, and a single streaming chat completion
+            shows real first-token latency &mdash; tokens land one-by-one as the GPU produces them.
+          </p>
+          <p>
+            The streaming output uses a 20-line stdlib SSE parser at
+            <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-stream-parser.py"><code>demo-stream-parser.py</code></a>
+            so the cast captures real per-token cadence, not buffered output.
+          </p>
+        `,
+      },
+      {
+        slug: "kiln-60s",
+        title: "Online learning loop",
+        sub: "Base completion &rarr; <code>/v1/train/sft</code> correction &rarr; hot-swap &rarr; same prompt, right answer.",
+        cast: "kiln-60s.cast",
+        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo.sh",
+        duration: "1:00",
+        caption: `
+          <h2>The 60-second online-learning loop</h2>
+          <p>
+            Cold start. The base Qwen3.5-4B has never heard of Kiln-the-software, so it guesses
+            pottery. A single <code>curl</code> POST to <code>/v1/train/sft</code> with two correction examples
+            queues a LoRA training job that runs in-process on the same GPU we&rsquo;re serving from.
+            About a minute later the adapter is hot-swapped, the next request opts into it, and the
+            same prompt returns the right answer.
+          </p>
+          <p>
+            Full per-scene transcript and recording protocol:
+            <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/SCRIPT.md">SCRIPT.md</a>.
+          </p>
+        `,
+      },
+      {
+        slug: "hot-swap",
+        title: "Live adapter hot-swap",
+        sub: "One server, three answers. Same prompt, no adapter / <code>demo</code> / <code>formal</code>.",
+        cast: "hot-swap.cast",
+        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-hot-swap.sh",
+        duration: "0:45",
+        caption: `
+          <h2>One server, many specialists</h2>
+          <p>
+            Two adapters are pre-staged on disk under <code>./adapters/</code>. The cast asks the same
+            prompt three times &mdash; no adapter, <code>adapter=demo</code>, <code>adapter=formal</code> &mdash;
+            and the viewer sees three different answers from one running server with no restart and no
+            second copy of the base weights in VRAM.
+          </p>
+          <p>
+            Mixed-tenant routing happens per request via the <code>"adapter"</code> extension field on
+            each chat completion (see
+            <a href="https://github.com/ericflo/kiln/blob/main/crates/kiln-server/src/api/completions.rs"><code>completions.rs</code></a>).
+            By design Kiln does not implicitly route to the most recently trained adapter &mdash; the
+            client always names the adapter it wants.
+          </p>
+        `,
+      },
+      {
+        slug: "openai",
+        title: "Drop-in OpenAI client",
+        sub: "Official Python SDK, base_url is the only line you change.",
+        cast: "openai.cast",
+        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-openai.sh",
+        duration: "0:30",
+        caption: `
+          <h2>Drop-in OpenAI Python client</h2>
+          <p>
+            The most "press-button-receive-result" cast. Shows the unmodified <code>openai</code>
+            Python SDK pointed at <code>http://localhost:8420/v1</code>, streaming tokens, no
+            Kiln-specific code. The cast does a <code>cat</code> of
+            <a href="https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-openai.py"><code>demo-openai.py</code></a>
+            so you can see exactly how short it is &mdash; three constructor lines and a stream loop.
+          </p>
+          <p>
+            Anything already written against <code>api.openai.com</code> works against Kiln by changing
+            <code>base_url</code> only. <code>model</code>, <code>messages</code>, <code>temperature</code>,
+            <code>stream</code>, <code>max_tokens</code> &mdash; all the standard fields route to the same
+            handler that powers the curl-based casts.
+          </p>
+        `,
+      },
+      {
+        slug: "grpo",
+        title: "GRPO with custom reward",
+        sub: "Online RL over HTTP. Bring your own reward function, hot-swap when training finishes.",
+        cast: "grpo.cast",
+        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-grpo.sh",
+        duration: "1:15",
+        caption: `
+          <h2>GRPO with a custom reward, online over HTTP</h2>
+          <p>
+            The most ambitious cast. Two prompts, four scored completions each &mdash; good answers
+            <code>+1.0</code>, off-topic ones <code>-1.0</code> &mdash; pushed to <code>/v1/train/grpo</code>
+            in the schema defined by
+            <a href="https://github.com/ericflo/kiln/blob/main/crates/kiln-train/src/lib.rs"><code>GrpoRequest</code></a>.
+            The KL-regularized update runs on the same GPU we&rsquo;re serving from. When training
+            completes, the adapter hot-swaps and the next request samples from the
+            preference-aligned model.
+          </p>
+          <p>
+            Same OpenAI-compatible API for inference. Different supervision signal at training time.
+            See the <a href="../grpo.html">GRPO Guide</a> for the full reward-function story.
+          </p>
+        `,
+      },
+      {
+        slug: "bench",
+        title: "Built-in benchmark suite",
+        sub: "<code>kiln-bench</code> with structured headers, progress bars, summary tables, and <code>-v</code> for CI.",
+        cast: "bench.cast",
+        script: "https://github.com/ericflo/kiln/blob/main/docs/site/demo/demo-bench.sh",
+        duration: "1:00",
+        caption: `
+          <h2>Throughput, latency, training &mdash; all from one binary</h2>
+          <p>
+            <code>kiln-bench</code> ships with the same release artifact as the server. The cast runs
+            <code>--paged --num-runs 3 --skip-training</code> so the throughput, latency, and summary
+            scenes fit in ~60 seconds on an A6000.
+          </p>
+          <p>
+            New default output: cyan <code>&#9612;</code> section headers, an <code>indicatif</code>
+            progress bar over the throughput runs (TTY-only, finishes cleanly with
+            <code>finish_and_clear</code>), and a right-aligned summary table with
+            <code>console::style</code> &mdash; label dim, value bold-white, unit dim. Pass
+            <code>-v</code> to bump the tracing filter from <code>warn</code> to <code>info</code>
+            so CI builds and log scrapers can grep per-run results without losing the pretty
+            output by default. <code>-q</code> drops to <code>warn</code>-only and wins over <code>-v</code>.
+          </p>
+        `,
+      },
+    ];
+
+    const DEFAULT_SLUG = "first-token";
+
+    let player = null;
+
+    function castMetaHTML(c) {
+      const repoBase = "https://github.com/ericflo/kiln/blob/main/docs/site/demo/";
+      const castUrl = repoBase + c.cast;
+      return `
+        <span><strong style="color: var(--fg-dim);">Duration:</strong> ${c.duration}</span>
+        <a href="${c.script}" target="_blank" rel="noopener">copy script</a>
+        <a href="${castUrl}" target="_blank" rel="noopener">view .cast</a>
+      `;
+    }
+
+    function renderTiles() {
+      const grid = document.getElementById("cast-picker");
+      grid.innerHTML = CASTS.map((c, i) => `
+        <button class="cast-tile" type="button" role="tab" aria-pressed="false"
+                data-slug="${c.slug}" id="tile-${c.slug}">
+          <div class="cast-tile__head">
+            <span class="cast-tile__num">${String(i + 1).padStart(2, "0")}</span>
+            <span class="cast-tile__dur">${c.duration}</span>
+          </div>
+          <div class="cast-tile__title">${c.title}</div>
+          <div class="cast-tile__sub">${c.sub}</div>
+        </button>
+      `).join("");
+
+      grid.querySelectorAll(".cast-tile").forEach(el => {
+        el.addEventListener("click", () => selectCast(el.dataset.slug, true));
+      });
+    }
+
+    function selectCast(slug, updateHash) {
+      const c = CASTS.find(x => x.slug === slug);
+      if (!c) return;
+
+      document.querySelectorAll(".cast-tile").forEach(el => {
+        el.setAttribute("aria-pressed", el.dataset.slug === slug ? "true" : "false");
+      });
+
+      document.getElementById("cast-meta").innerHTML = castMetaHTML(c);
+      document.getElementById("cast-caption").innerHTML = c.caption;
+
+      if (player && typeof player.dispose === "function") {
+        try { player.dispose(); } catch (e) { /* ignore */ }
+      }
+
+      const playerEl = document.getElementById("kiln-demo-player");
+      playerEl.innerHTML = "";
+      player = AsciinemaPlayer.create(c.cast, playerEl, {
         autoPlay: false,
         preload: true,
         loop: false,
         idleTimeLimit: 2,
-        theme: 'monokai',
-        poster: 'npt:0:02',
+        theme: "monokai",
+        poster: "npt:0:02",
         cols: 120,
-        rows: 32
+        rows: 32,
+      });
+
+      if (updateHash) {
+        history.replaceState(null, "", "#" + slug);
       }
-    );
+    }
+
+    function initialSlug() {
+      const fromHash = (location.hash || "").replace(/^#/, "");
+      if (CASTS.some(c => c.slug === fromHash)) return fromHash;
+      return DEFAULT_SLUG;
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      renderTiles();
+      selectCast(initialSlug(), false);
+    });
+
+    window.addEventListener("hashchange", () => {
+      const slug = (location.hash || "").replace(/^#/, "");
+      if (CASTS.some(c => c.slug === slug)) selectCast(slug, false);
+    });
   </script>
 </body>
 </html>
