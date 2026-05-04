@@ -895,3 +895,13 @@
   (73.324x), with exact output match. The GDN decode-batch kernel chain now
   has accepted support from in-proj through recurrent RMSNorm; the remaining
   bs>1 work is model-forward state/cache/scheduler plumbing.
+- 2026-05-04 E324: Rejected batched paged-decode SDPA gather. The temporary
+  Metal backend path accepted `q=[B,1,16,256]` and per-row
+  `block_table=[B,32]` by flattening all block rows, gathering K/V to
+  `[B,511,4,256]`, and calling one batched Candle Metal SDPA. It was
+  numerically correct, but slower than rowwise gather+SDPA at every tested
+  batch: batch1 `2566.121 us` vs `2610.800 us` (0.983x), batch2
+  `4611.233 us` vs `5409.046 us` (0.853x), batch4 `8686.367 us` vs
+  `11646.946 us` (0.746x), and batch8 `17172.817 us` vs `25354.850 us`
+  (0.677x). Source was reverted; keep attention batching focused on a
+  purpose-built decode kernel or real model-forward/scheduler plumbing.

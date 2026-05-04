@@ -9752,3 +9752,58 @@ longer primarily missing GDN kernels; it is model-forward and scheduler
 plumbing: per-sequence conv/recurrent state ownership, per-sequence paged
 cache/block tables, attention state, and request scheduling/continuous
 batching.
+
+## 2026-05-04 E324 - Rejected batched paged-decode SDPA gather
+
+### Goal
+
+Test an attention-side true-batching primitive instead of continuing down cache
+reuse. The Metal backend trait already models paged decode as `q=[B,1,H,D]`
+with `block_table=[B,max_blocks_per_seq]`, but `MetalBackend` currently
+declines `batch != 1`. The candidate removed that backend restriction for the
+generic gather+SDPA path by flattening all block-table rows, reshaping gathered
+K/V to `[B, live_kv, kv_heads, head_dim]`, and calling batched Candle Metal
+SDPA once.
+
+### Candidate
+
+- Allowed `MetalBackend::flash_attn_paged_decode` to accept `batch > 1` when
+  all rows share `total_seqlen_k`.
+- Preserved per-row block-table variation, so each sequence could gather
+  different physical pages.
+- Added a rowwise direct-SDPA parity helper and an ignored Qwen3.5-shaped
+  synthetic benchmark for batches 1, 2, 4, and 8.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal test_paged_decode_batch_parity_with_rowwise_sdpa --lib`
+- `KILN_METAL_PAGED_DECODE_BATCH_BENCH_WARMUP=3 KILN_METAL_PAGED_DECODE_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_paged_decode_sdpa_gather_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5 full-attention shape
+`q=[B,1,16,256]`, `block_table=[B,32]`, `total_seqlen_k=511`,
+`block_size=16`:
+
+| Batch | Rowwise gather+SDPA | Batched gather+SDPA | Relative | Max abs diff |
+|---:|---:|---:|---:|---:|
+| 1 | `2566.121 us` | `2610.800 us` | `0.983x` | `0.000000e0` |
+| 2 | `4611.233 us` | `5409.046 us` | `0.853x` | `2.384186e-7` |
+| 4 | `8686.367 us` | `11646.946 us` | `0.746x` | `2.384186e-7` |
+| 8 | `17172.817 us` | `25354.850 us` | `0.677x` | `2.384186e-7` |
+
+### Artifacts
+
+- `e324_paged_decode_sdpa_gather_batch_synthetic.log`
+
+### Decision
+
+Rejected and reverted. The candidate was numerically correct, but batched
+Candle Metal SDPA was slower than rowwise execution at every tested batch size
+and got worse as batch increased. Do not pursue this exact "flatten block rows
+then one batched SDPA" implementation. Attention-side batching still matters,
+but the next useful path is a purpose-built decode attention kernel or
+model-forward plumbing that can expose per-sequence cache state without forcing
+this slower SDPA shape.
