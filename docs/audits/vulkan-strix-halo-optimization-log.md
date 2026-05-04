@@ -15,7 +15,7 @@ Make Vulkan a first-class Kiln inference backend and push Qwen3.5-4B performance
 
 ## Running Verdict
 
-Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 133.7ms mean inter-token latency after scoped resident split GDN recurrent state, GDN input-projection single-submit, and 32x8 MLP gate/up decode workgroups. A confirmation run measured 136.4ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
+Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 129.1ms mean inter-token latency after scoped resident split GDN recurrent state, GDN input-projection single-submit, and 64x4 MLP gate/up decode workgroups. A second no-profile run measured 130.2ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
 
 ## Experiments
 
@@ -2465,8 +2465,40 @@ Verdict:
 - Keep.
 - This is the new best verified no-env default bs=1 source anchor: 133.7ms mean ITL, with a confirmation run at 136.4ms.
 
+### E084: Tune Vulkan MLP Gate/Up Decode Workgroups To 64x4
+
+Change:
+- Changed the single-token MLP gate/up decode shader from 32 output columns x 8 reduction lanes to 64 output columns x 4 reduction lanes.
+- Updated batch=1 dispatch sizing for `dispatch_mlp_gate_up_decode_cached` and `dispatch_mlp_decode_cached` to cover 64 intermediate columns per workgroup.
+- Left the batched MLP gate/up path unchanged.
+
+Reasoning:
+- E083 confirmed that increasing output-column parallelism was the right direction for this shader.
+- The 64x4 shape still uses 256 invocations per workgroup and keeps the same shared-memory footprint, but halves the number of MLP gate/up workgroups again.
+- This trades fewer reductions and launches across intermediate columns for longer per-lane hidden loops.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode -- --nocapture` passed, including batch=1 and batched MLP parity.
+- `cargo build --release --features vulkan --bin kiln-bench` passed before latency measurement.
+- Final validation passed:
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+  - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture`.
+- Profiled run:
+  - Command: `KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1875.5ms; mean ITL 131.5ms, p50 130.4ms, p99 141.1ms.
+  - `mlp.fused` fell to 46.8-47.6ms/32 layers, down from E083's 49.1-49.4ms.
+- No-profile default runs:
+  - First: prefill 1926.7ms; mean ITL 130.2ms, p50 129.5ms, p99 139.0ms.
+  - Confirmation: prefill 1882.1ms; mean ITL 129.1ms, p50 126.9ms, p99 137.8ms.
+
+Verdict:
+- Keep.
+- This supersedes E083 as the best verified no-env default bs=1 source anchor: 129.1ms mean ITL, with a second no-profile run at 130.2ms.
+
 ## Next Candidate
 
-With E083, the current default bs=1 short-source anchor is 133.7ms mean ITL, confirmed at 136.4ms. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083 shows that 32 output columns x 8 reduction lanes is the useful direction for the single-token MLP gate/up shader. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E084, the current default bs=1 short-source anchor is 129.1ms mean ITL, with a second no-profile run at 130.2ms. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
