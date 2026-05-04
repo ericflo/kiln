@@ -1,78 +1,71 @@
-# Kiln 60-Second Demo
+# Kiln demo recording docs
 
-This directory holds the canonical Kiln demo asciicast — a 60–90 second silent recording showing the full live-LoRA online-learning loop end-to-end on a single GPU: cold start → first chat (base model) → `/v1/train/sft` correction → hot-swap → second chat (improved). It is the demo linked from the README hero and the project website.
+This directory holds the checked-in asciicast demos for the Kiln docs site. The demo page is now a six-cast set: five short focused casts plus the original end-to-end online-learning recording. Cold readers should start here for the inventory, then use [`SCRIPTS.md`](SCRIPTS.md) for the canonical six-cast recording matrix and [`SCRIPT.md`](SCRIPT.md) only when they need the detailed legacy `kiln-60s.cast` scene script.
 
-The actual recording (`kiln-60s.cast`) is recorded against the canonical scenes pinned down in [`SCRIPT.md`](SCRIPT.md), driven by the reference shell script in [`demo.sh`](demo.sh) and the SFT request body in [`demo-sft.json`](demo-sft.json). The checked-in recording was captured on kiln v0.2.8 and may show that startup banner; it is kept because it demonstrates the same live-LoRA SFT and adapter flow used by the current Quickstart. The standalone player page is [`index.html`](index.html), which embeds asciinema-player and auto-loads `kiln-60s.cast`.
+[`kiln-60s.cast`](kiln-60s.cast) remains the end-to-end online-learning cast: cold start → base answer → `/v1/train/sft` correction → LoRA hot-swap → improved answer. It is no longer the only demo. The multi-cast player in [`index.html`](index.html) lets readers choose any of the six checked-in casts or play them as a sequence.
 
-## Files
+## Casts
 
-| File | Purpose |
+| Cast | Driver | Story |
+| --- | --- | --- |
+| [`first-token.cast`](first-token.cast) | [`demo-first-token.sh`](demo-first-token.sh) | Cold start to first streamed token, showing one binary and no Python sidecar. |
+| [`bench.cast`](bench.cast) | [`demo-bench.sh`](demo-bench.sh) | Built-in `kiln-bench` output: structured headers, progress bar, summary table, and `-v` logging. |
+| [`hot-swap.cast`](hot-swap.cast) | [`demo-hot-swap.sh`](demo-hot-swap.sh) | One running server answering with base, `adapter=demo`, and `adapter=formal` routing. |
+| [`openai.cast`](openai.cast) | [`demo-openai.sh`](demo-openai.sh) | Drop-in OpenAI Python SDK usage where `base_url` is the only client change. |
+| [`grpo.cast`](grpo.cast) | [`demo-grpo.sh`](demo-grpo.sh) | Custom-reward GRPO over HTTP, followed by an adapter-backed completion. |
+| [`kiln-60s.cast`](kiln-60s.cast) | [`demo.sh`](demo.sh) | Original end-to-end online-learning cast: base completion → SFT correction → improved completion. |
+
+Supporting files used by the drivers:
+
+- [`demo-sft.json`](demo-sft.json) — SFT request body for `kiln-60s.cast` and related online-learning scenes.
+- [`demo-grpo.json`](demo-grpo.json) — GRPO request body for `grpo.cast`.
+- [`demo-openai.py`](demo-openai.py) — tiny OpenAI SDK client shown in `openai.cast`.
+- [`demo-stream-parser.py`](demo-stream-parser.py) — stdlib SSE stream parser used by streaming casts.
+- [`prep-hot-swap.sh`](prep-hot-swap.sh) — pre-recording adapter setup for `hot-swap.cast`.
+- [`demo-sft-formal.json`](demo-sft-formal.json) — formal-tone adapter data used by `prep-hot-swap.sh`.
+
+## Recording docs
+
+| File | Role |
 | --- | --- |
-| [`SCRIPT.md`](SCRIPT.md) | Scene-by-scene recording script with verbatim commands, expected output, per-scene timing, and post-recording integration checklist. The recording artifact follows this exactly. |
-| [`index.html`](index.html) | Standalone demo page styled to match `docs/site/index.html`. Embeds the asciinema player with `data-src="kiln-60s.cast"` and includes a compact transcript/fallback for screen-reader, no-JS, or CDN-failure use. |
-| [`demo.sh`](demo.sh) | Reference shell script that drives the recording end-to-end via `asciinema rec --command`. Slow-prints each curl as if a human were typing, polls until training completes, and cleanly shuts down the kiln server. Idempotent — re-record any time by running this script under `asciinema rec`. |
-| [`demo-sft.json`](demo-sft.json) | SFT request body used in Scene 3. Two correction examples plus training hyperparameters (100 epochs, LoRA rank 32, lr 2e-3) chosen so the trained adapter unambiguously overrides the base model in Scene 5. |
-| `kiln-60s.cast` | The asciicast recording itself — captured on kiln v0.2.8 on an A6000 against `Qwen3.5-4B`, so its startup banner may show `0.2.8`. It still demonstrates the same live-LoRA flow used by the current Quickstart. ~220 KB, asciicast v2, 120×32 terminal, ~136 s real time (compresses with `idle_time_limit: 2`). Plays end-to-end in the embedded player. |
+| [`SCRIPTS.md`](SCRIPTS.md) | Canonical six-cast recording matrix: host setup, per-cast driver mapping, cast-by-cast notes, and shared failure modes. Use this when adding, refreshing, or auditing the demo set. |
+| [`SCRIPT.md`](SCRIPT.md) | Legacy detailed scene script for `kiln-60s.cast` only. It preserves the original 60-second online-learning flow with verbatim commands and narration. |
+| [`index.html`](index.html) | Standalone docs-site player for all six casts, using asciinema-player and the local `.cast` files. |
 
-## Player embed snippet
+## Player embed notes
 
-The player is the official open-source [`asciinema-player`](https://github.com/asciinema/asciinema-player) loaded from the jsDelivr CDN. We **deliberately** use the self-hostable player rather than the asciinema.org-hosted `https://asciinema.org/a/<id>.js` form. Reasons:
+The player is the official open-source [`asciinema-player`](https://github.com/asciinema/asciinema-player) loaded from the jsDelivr CDN. We deliberately self-host the `.cast` files alongside the rest of `docs/site/`, rather than relying on asciinema.org-hosted embeds:
 
-- We host the `.cast` file alongside the rest of `docs/site/`, so the demo lives or dies with the same Pages deploy as everything else. No external dependency on `asciinema.org` uptime, no dependency on having uploaded the cast first.
-- The player CSS theme is one we control. We can match the site dark palette without ad-hoc overrides.
-- Pinning the player version (`@3.7.1`) means the embed is deterministic across cache busts.
-- jsDelivr serves the player JS+CSS from a global CDN with caching, so the page weight overhead is roughly the player bundle (~50 KB gzipped) loaded once and cached forever.
+- The demo deploys with the same GitHub Pages workflow as the docs site.
+- The player theme can match the site palette without external account state.
+- The pinned player version (`@3.7.1`) keeps playback deterministic across cache busts.
+- jsDelivr caches the player bundle globally, while the actual cast files stay in the repo.
 
-The embed used in [`index.html`](index.html):
-
-```html
-<link rel="stylesheet" type="text/css"
-      href="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.css" />
-
-<div id="kiln-demo-player" data-src="kiln-60s.cast"></div>
-
-<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.7.1/dist/bundle/asciinema-player.min.js"></script>
-<script>
-  AsciinemaPlayer.create(
-    'kiln-60s.cast',
-    document.getElementById('kiln-demo-player'),
-    {
-      autoPlay: false,
-      preload: true,
-      loop: false,
-      idleTimeLimit: 2,
-      theme: 'monokai',
-      poster: 'npt:0:02',
-      cols: 120,
-      rows: 32
-    }
-  );
-</script>
-```
-
-For another page under `docs/site/`, copy the three blocks above and adjust the cast path relative to that page.
+For another page under `docs/site/`, copy the player setup from [`index.html`](index.html) and adjust the cast path relative to that page.
 
 ## How to re-record
 
-See [`SCRIPT.md`](SCRIPT.md) for the full protocol and inline narration for each scene. The fast path, against a kiln-capable GPU host (NVIDIA 24 GB+) with the model weights at `./Qwen3.5-4B/` and the kiln binary at `./target/release/kiln`:
+Use [`SCRIPTS.md`](SCRIPTS.md) for the current six-cast recording workflow. The common shape for each cast is:
 
 ```bash
-COLUMNS=120 LINES=32 TERM=xterm-256color asciinema rec docs/site/demo/kiln-60s.cast \
-  --title "Kiln 60-second demo: live LoRA online learning" \
+COLUMNS=120 LINES=32 TERM=xterm-256color asciinema rec docs/site/demo/<name>.cast \
+  --title "<short title>" \
   --idle-time-limit 2 \
-  --command ./docs/site/demo/demo.sh
+  --command ./docs/site/demo/<driver>.sh
 ```
 
-The `--command` flag scripts the entire take so each run is byte-deterministic in command shape (timing varies with cold-cache state). The reference [`demo.sh`](demo.sh) handles cold start, all six scenes, and clean shutdown. Replay locally with `asciinema play docs/site/demo/kiln-60s.cast` to sanity-check, then commit and push. The Pages workflow auto-deploys on `docs/site/**`.
+Replay locally with `asciinema play docs/site/demo/<name>.cast` before committing. The Pages workflow auto-deploys on `docs/site/**` changes.
 
-> **asciinema 2.1 vs 2.4:** the `--rows` / `--cols` flags only exist in asciinema 2.4+. On 2.1 (the version shipped in current Linux distros), set the terminal size via the `COLUMNS` / `LINES` environment variables instead, as shown above.
+> **asciinema 2.1 vs 2.4:** the `--rows` / `--cols` flags only exist in asciinema 2.4+. On 2.1, set terminal size via `COLUMNS` / `LINES`, as shown above.
 
 ## Cross-links
 
+- **Six-cast matrix:** [`SCRIPTS.md`](SCRIPTS.md) — canonical recording notes for all current casts.
+- **Legacy online-learning script:** [`SCRIPT.md`](SCRIPT.md) — detailed `kiln-60s.cast` scene plan.
 - **README hero:** [`README.md`](../../../README.md) — the `Demo` link in the center-aligned link row points here.
+- **Quickstart:** [`QUICKSTART.md`](../../../QUICKSTART.md) — the demo commands are a subset of the onboarding flow.
 - **Publicity sentinel:** [`launch/README.md`](../launch/README.md) — records that agents must not recreate external publicity materials.
-- **Quickstart:** [`QUICKSTART.md`](../../../QUICKSTART.md) — the commands run in the demo are a strict subset of the Quickstart.
 
 ## Why this matters for Phase 11
 
-The Phase 11 onboarding checklist includes the demo asciicast as internal reference material. With the canonical recording landed in this directory and the player auto-loading it from the Pages deploy, cold-reader docs can link directly to the demo without recreating external publicity materials.
+The Phase 11 onboarding checklist includes demo asciicasts as docs-site reference material. Keeping this README aligned with the six checked-in casts helps cold readers understand the whole demo set without mistaking `kiln-60s.cast` for the only supported recording.

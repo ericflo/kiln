@@ -1,12 +1,17 @@
 # Kiln 60-Second Demo: Live LoRA Online Learning
 
+> **Note:** this is the legacy detailed script for the original end-to-end
+> [`kiln-60s.cast`](kiln-60s.cast) online-learning demo. For the current
+> six-cast recording matrix, including `first-token.cast`, `bench.cast`,
+> `hot-swap.cast`, `openai.cast`, and `grpo.cast`, use [`SCRIPTS.md`](SCRIPTS.md).
+
 This is the recording script for the canonical Kiln demo asciicast. Total target length **60–90 seconds**. The demo shows the killer feature end-to-end on a single GPU: a base-model chat completion → a `/v1/train/sft` correction → a hot-swap → an improved completion. No cuts, no editing, one continuous shell session.
 
 ## Why this script exists
 
 The actual `.cast` recording can only be made on a kiln-capable GPU host (NVIDIA 24 GB+ for the canonical recording; an Apple Silicon 16 GB+ Mac works too). This file pins down the exact commands, the exact timing, and the exact on-screen output before anyone touches `asciinema rec`. When the recording slot opens up, this script is a copy-paste checklist — no judgment calls under the camera.
 
-The companion file [`README.md`](README.md) covers the player embed and the checked-in `kiln-60s.cast` that the page renders today. That recording is current reference material captured on kiln v0.2.8 and can be re-recorded later when the demo flow or release line changes. [`index.html`](index.html) is the standalone player page.
+The companion file [`README.md`](README.md) inventories the full six-cast demo set and links this legacy `kiln-60s.cast` script alongside the canonical matrix in [`SCRIPTS.md`](SCRIPTS.md). [`index.html`](index.html) is the standalone multi-cast player page.
 
 ## Prerequisites (pre-recording state)
 
