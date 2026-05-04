@@ -1,0 +1,67 @@
+=== Kiln Benchmark Suite ===
+
+GPU: unknown (10240 MB)
+Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a...
+2026-05-04T05:58:38.115804Z  INFO kiln_model::loader: Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (2 shards)
+2026-05-04T05:58:38.116750Z  INFO kiln_model::loader: Using weight name prefix: "model.language_model."
+2026-05-04T05:58:38.116971Z  INFO kiln_model::loader: Native MTP head detected; deferring CPU load until first use mtp_prefix=mtp.
+2026-05-04T05:58:38.116977Z  INFO kiln_model::loader: Loaded 4206M parameters (8022 MB) across 32 layers
+2026-05-04T05:58:38.117060Z  INFO kiln_server::device: Metal available — using Apple Silicon GPU
+Model loaded in 10.31s (backend: metal, VRAM: 0 MB)
+
+--- Latency Warmup Run 1/1 (not measured) ---
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=31] (494 prompt tokens)...
+    Prefill (paged): 3402.8ms (145 tok/s)
+    Decode (paged): 2 tokens, mean ITL 227.5ms (4.4 tok/s)
+--- Latency Benchmark (PAGED — production path) ---
+  Measuring latency [PAGED, block_size=16, blocks=31] (494 prompt tokens)...
+    Prefill (paged): 3060.8ms (161 tok/s)
+    Decode (paged): 2 tokens, mean ITL 219.1ms (4.6 tok/s)
+
+============================================================
+  KILN BENCHMARK RESULTS
+============================================================
+
+GPU: unknown (10240 MB VRAM, source: apple-silicon-unified)
+Model load time: 10.31s (VRAM: 0 MB)
+
+--- Inference Throughput ---
+Runs         Prompt     Output        tok/s    VRAM MB
+
+--- Latency (single request) ---
+Prompt tokens:         494
+Prefill time:          3060.8 ms (161 tok/s)
+Time to first token:   3060.8 ms
+Mean inter-token:      219.1 ms (4.6 tok/s)
+P50 inter-token:       219.1 ms
+P99 inter-token:       219.1 ms
+Tokens generated:      2
+Spec method:           off
+
+{
+  "backend": "metal",
+  "gpu_info": {
+    "name": "unknown",
+    "total_vram_mb": 10240,
+    "vram_source": "apple-silicon-unified"
+  },
+  "model_load": {
+    "load_time_secs": 10.305965792,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 494,
+    "prefill_time_ms": 3060.781,
+    "prefill_tokens_per_sec": 161.39671541348434,
+    "time_to_first_token_ms": 3060.781,
+    "mean_inter_token_ms": 219.143,
+    "p50_inter_token_ms": 219.143,
+    "p99_inter_token_ms": 219.143,
+    "num_tokens_generated": 2,
+    "decode_tokens_per_sec": 4.563230402066231,
+    "spec_method": "off"
+  },
+  "training": null
+}

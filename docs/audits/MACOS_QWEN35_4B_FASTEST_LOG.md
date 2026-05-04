@@ -10094,3 +10094,67 @@ with the current split path. Do not default-enable this fusion. Future work
 should target lower-level changes that move full endpoint metrics, or revisit
 QK-norm/RoPE only if a deeper fusion removes a larger downstream boundary than
 this standalone pair.
+
+## 2026-05-04 E330 - Rejected row-aware Metal RMSNorm threadgroup tuning
+
+### Goal
+
+Test a low-level production-path tuning knob on a broadly used kernel. The
+Metal RMSNorm kernel uses a reduction over the hidden dimension at many layer
+boundaries. Qwen3.5's hidden size is 2560, and the current default dispatches
+1024 threads per RMSNorm row. The candidate kept single-token decode rows on
+1024 threads, but used 256 threads for Qwen3.5-shaped multi-row RMSNorm
+(`rows > 1`) to reduce reduction/barrier overhead in prefill-style calls.
+
+### Change Tested
+
+- Added a row-aware RMSNorm threadgroup-width helper:
+  `hidden == 2560 && rows > 1` used 256 threads; all other shapes stayed on
+  the current `hidden.next_power_of_two().clamp(32, 1024)` rule.
+- Added `KILN_DISABLE_METAL_RMSNORM_TG_TUNING=1` as a same-binary control.
+- Added focused parity coverage comparing the tuned path against the old
+  1024-thread path.
+- Added an ignored synthetic bench for Qwen3.5 decode and p64 prefill RMSNorm
+  shapes.
+- Reverted the temporary source because endpoint TTFT did not improve enough
+  to justify carrying another default branch.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_metal_rms_norm_qwen35_threadgroup_width_matches_1024 --lib`
+- `KILN_METAL_RMSNORM_TG_BENCH_WARMUP=20 KILN_METAL_RMSNORM_TG_BENCH_ITERS=100 cargo test -p kiln-model --features metal bench_rms_norm_threadgroup_width_qwen35_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+### Results
+
+Synthetic RMSNorm-only results:
+
+| Shape | 256 threads | 512 threads | 1024 threads | Candidate default | Max diff |
+|---|---:|---:|---:|---:|---:|
+| `[1,1,2560]` | `54.093 us` | `49.970 us` | `50.732 us` | `51.325 us` / width 1024 | `0.000000e0` |
+| `[1,64,2560]` | `60.490 us` | `65.172 us` | `72.323 us` | `60.515 us` / width 256 | `0.000000e0` |
+
+Clean same-session p512/o1 endpoint A/B, after discarding earlier runs taken
+while the machine was busy:
+
+| Run | Prompt tokens | Prefill / TTFT | Mean ITL | Tokens |
+|---|---:|---:|---:|---:|
+| disabled control | 494 | `3060.8 ms` | `219.1 ms` | 2 |
+| tuned candidate | 494 | `3050.0 ms` | `220.7 ms` | 2 |
+
+### Artifacts
+
+- `e330_rmsnorm_threadgroup_width_synthetic.log`
+- `e330_m1_p512_o1_rmsnorm_tg_disabled_control_clean.log`
+- `e330_m1_p512_o1_rmsnorm_tg_tuned_clean.log`
+
+### Decision
+
+Rejected. The synthetic p64-shaped RMSNorm stage win is real, but the endpoint
+TTFT gain is only about 10.8 ms on a 3.06 s p512 prefill, roughly 0.35%, and
+decode is not improved. The candidate would add another runtime branch for a
+change that is below reliable endpoint signal. Keep the current RMSNorm default
+and only revisit threadgroup tuning if a synchronized profile shows RMSNorm
+dominating a longer-prefill workload.

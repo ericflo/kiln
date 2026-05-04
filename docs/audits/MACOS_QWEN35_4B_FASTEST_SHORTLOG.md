@@ -958,3 +958,13 @@
   p64/o64 fused measured `163.9 ms` versus disabled control `163.5 ms`.
   Source was reverted; this PR should keep prioritizing low-level changes that
   move endpoint latency/throughput, not standalone microbench wins.
+- 2026-05-04 E330: Rejected row-aware Metal RMSNorm threadgroup tuning. The
+  temporary candidate kept Qwen3.5 single-token decode RMSNorm on the current
+  1024-thread reduction, but used 256 threads for `hidden=2560` multi-row
+  RMSNorm. Synthetic results were exact and showed `[1,64,2560]` improving
+  from 1024-thread `72.323 us` to 256-thread `60.490 us` (1.196x), while
+  `[1,1,2560]` stayed effectively on the current path. Clean p512/o1 endpoint
+  A/B after discarding machine-busy runs was only `3060.8 ms` TTFT control
+  versus `3050.0 ms` tuned, with no decode improvement (`219.1 ms` vs
+  `220.7 ms` mean ITL over two tokens). Source was reverted because the
+  endpoint signal is too small for another production branch.
