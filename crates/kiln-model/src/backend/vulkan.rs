@@ -934,12 +934,9 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
 
-        let Ok((_batch, seq_len, hidden)) = x.dims3() else {
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if seq_len != 1 {
-            return Ok(None);
-        }
         let Ok((gate_hidden, intermediate)) = gate_weight_t.dims2() else {
             return Ok(None);
         };
@@ -956,15 +953,26 @@ impl BackendRuntime for VulkanBackend {
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
         let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
+        let row_count = batch * seq_len;
+        let dispatch_x = if seq_len == 1 {
+            x.clone()
+        } else {
+            x.reshape((row_count, 1usize, hidden))?
+        };
         let out = kiln_vulkan_kernel::kernels::dispatch_mlp_gate_up_decode_cached(
             vk_device,
-            x,
+            &dispatch_x,
             &gate_buf,
             &up_buf,
             hidden,
             intermediate,
         )
         .context("mlp_gate_up_decode kernel failed")?;
+        let out = if seq_len == 1 {
+            out
+        } else {
+            out.reshape((batch, seq_len, intermediate))?
+        };
         Ok(Some(out))
     }
 
@@ -986,12 +994,9 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
 
-        let Ok((_batch, seq_len, hidden)) = x.dims3() else {
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if seq_len != 1 {
-            return Ok(None);
-        }
         let Ok((gate_hidden, intermediate)) = gate_weight_t.dims2() else {
             return Ok(None);
         };
@@ -1016,9 +1021,15 @@ impl BackendRuntime for VulkanBackend {
         let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
         let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
         let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
+        let row_count = batch * seq_len;
+        let dispatch_x = if seq_len == 1 {
+            x.clone()
+        } else {
+            x.reshape((row_count, 1usize, hidden))?
+        };
         let out = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
             vk_device,
-            x,
+            &dispatch_x,
             &gate_buf,
             &up_buf,
             &down_buf,
@@ -1027,6 +1038,11 @@ impl BackendRuntime for VulkanBackend {
             out_dim,
         )
         .context("mlp_decode kernel failed")?;
+        let out = if seq_len == 1 {
+            out
+        } else {
+            out.reshape((batch, seq_len, out_dim))?
+        };
         Ok(Some(out))
     }
 

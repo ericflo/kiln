@@ -100,6 +100,14 @@ fn decode_profile_enabled() -> bool {
     })
 }
 
+fn prefill_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_PROFILE_PREFILL").is_ok()
+            || std::env::var("KILN_PROFILE_VULKAN_BATCH_PREFILL").is_ok()
+    })
+}
+
 struct DecodeProfileGuard {
     active: bool,
     previous_rows: Option<Vec<DecodeProfileEntry>>,
@@ -108,7 +116,9 @@ struct DecodeProfileGuard {
 
 impl DecodeProfileGuard {
     fn new(seq_len: usize, start_pos: usize) -> Self {
-        if !decode_profile_enabled() || seq_len != 1 || start_pos == 0 {
+        let decode_active = decode_profile_enabled() && seq_len == 1 && start_pos > 0;
+        let prefill_active = prefill_profile_enabled() && seq_len > 1;
+        if !decode_active && !prefill_active {
             return Self {
                 active: false,
                 previous_rows: None,
@@ -125,7 +135,7 @@ impl DecodeProfileGuard {
         }
     }
 
-    fn finish(mut self, start_pos: usize, token_id: u32, mode: LmHeadMode) {
+    fn finish(mut self, seq_len: usize, start_pos: usize, token_id: u32, mode: LmHeadMode) {
         if !self.active {
             return;
         }
@@ -135,7 +145,7 @@ impl DecodeProfileGuard {
             .unwrap_or_default();
         DECODE_PROFILE_LAYER.with(|layer| layer.set(self.previous_layer));
         self.active = false;
-        emit_decode_profile(start_pos, token_id, mode, rows);
+        emit_decode_profile(seq_len, start_pos, token_id, mode, rows);
     }
 }
 
@@ -256,6 +266,7 @@ where
 }
 
 fn emit_decode_profile(
+    seq_len: usize,
     start_pos: usize,
     token_id: u32,
     mode: LmHeadMode,
@@ -300,7 +311,7 @@ fn emit_decode_profile(
         .join(", ");
 
     eprintln!(
-        "    Decode profile pos {start_pos} token {token_id} mode {mode:?}: profiled {total_ms:.1}ms"
+        "    Decode profile seq_len {seq_len} start_pos {start_pos} token {token_id} mode {mode:?}: profiled {total_ms:.1}ms"
     );
     eprintln!("      totals: {totals_line}");
     eprintln!("      top: {top_line}");
@@ -8194,7 +8205,7 @@ fn model_forward_paged_inner(
         LmHeadMode::Skip => Ok((None, None, None)),
     };
     if result.is_ok() {
-        decode_profile.finish(start_pos, token_ids[0], lm_head_mode);
+        decode_profile.finish(seq_len, start_pos, token_ids[0], lm_head_mode);
     }
     result
 }
