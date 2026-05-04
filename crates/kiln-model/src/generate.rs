@@ -17,8 +17,8 @@ use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_batched_decode, model_forward_paged_last_token,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_paged, model_forward_head,
+    model_forward_paged_batched_decode_hidden, model_forward_paged_last_token,
     model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
     model_forward_paged_next_token_greedy, model_forward_paged_streaming,
     model_forward_paged_streaming_last_token_with_last_hidden,
@@ -1370,39 +1370,40 @@ impl ModelRunner {
             .collect();
 
         let started = std::time::Instant::now();
-        let logits_rows = {
+        let sampled = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
             let mut graph_runner = self
                 .cuda_graph
                 .lock()
                 .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
-            if graph_runner.is_enabled() {
-                let mut rows = Vec::with_capacity(row_count);
-                for (((&token, block_table), &seq_len), linear_state) in input_tokens
-                    .iter()
-                    .zip(block_tables.iter())
-                    .zip(sequence_lengths.iter())
-                    .zip(linear_states.iter_mut())
-                {
-                    rows.push(
-                        graph_runner
-                            .decode_step_paged(
-                                &*self.backend,
-                                token,
-                                &self.weights,
-                                &self.config,
-                                &mut pc_guard,
-                                block_table,
-                                seq_len,
-                                linear_state,
-                                self.active_lora.as_ref(),
-                            )
-                            .context("batched decode CUDA graph row failed")?,
-                    );
-                }
-                rows
+            if graph_runner.is_enabled() && row_count == 1 {
+                let row = graph_runner
+                    .decode_step_paged(
+                        &*self.backend,
+                        input_tokens[0],
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        &block_tables[0],
+                        sequence_lengths[0],
+                        &mut *linear_states[0],
+                        self.active_lora.as_ref(),
+                    )
+                    .context("batched decode CUDA graph row failed")?;
+                let token = if params[0].temperature == 0.0 {
+                    greedy_sample(&row)?
+                } else {
+                    sample_with_params(
+                        &row,
+                        params[0].temperature,
+                        params[0].top_p,
+                        params[0].top_k,
+                        states[0].step_seed,
+                    )?
+                };
+                vec![token]
             } else {
-                let logits = model_forward_paged_batched_decode(
+                let hidden = model_forward_paged_batched_decode_hidden(
                     &*self.backend,
                     &input_tokens,
                     &self.weights,
@@ -1414,29 +1415,29 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                 )
                 .context("batched decode forward pass failed")?;
-                (0..row_count)
-                    .map(|idx| logits.narrow(0, idx, 1))
-                    .collect::<Result<Vec<_>, _>>()?
+
+                let mut sampled = Vec::with_capacity(states.len());
+                for (idx, params) in params.iter().enumerate() {
+                    let row_hidden = hidden.narrow(0, idx, 1)?;
+                    let row = model_forward_head(&row_hidden, &self.weights, &self.config)
+                        .with_context(|| format!("batched decode lm head row {idx}"))?;
+                    let token = if params.temperature == 0.0 {
+                        greedy_sample(&row)?
+                    } else {
+                        sample_with_params(
+                            &row,
+                            params.temperature,
+                            params.top_p,
+                            params.top_k,
+                            states[idx].step_seed,
+                        )?
+                    };
+                    sampled.push(token);
+                }
+                sampled
             }
         };
         let decode_duration = started.elapsed();
-
-        let mut sampled = Vec::with_capacity(states.len());
-        for (idx, params) in params.iter().enumerate() {
-            let row = &logits_rows[idx];
-            let token = if params.temperature == 0.0 {
-                greedy_sample(row)?
-            } else {
-                sample_with_params(
-                    row,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    states[idx].step_seed,
-                )?
-            };
-            sampled.push(token);
-        }
 
         for state in states.iter_mut() {
             state.seq_len += 1;
