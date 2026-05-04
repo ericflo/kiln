@@ -33,7 +33,7 @@ use crate::forward::{
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
-use crate::sampling::{greedy_sample, sample_with_params};
+use crate::sampling::{greedy_sample, sample_rows_with_params, sample_with_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
@@ -1910,26 +1910,17 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                 )
                 .context("batched decode forward pass failed")?;
-
-                let mut sampled = Vec::with_capacity(states.len());
-                for (idx, params) in params.iter().enumerate() {
-                    let row_hidden = hidden.narrow(0, idx, 1)?;
-                    let row = model_forward_head(&row_hidden, &self.weights, &self.config)
-                        .with_context(|| format!("batched decode lm head row {idx}"))?;
-                    let token = if params.temperature == 0.0 {
-                        greedy_sample(&row)?
-                    } else {
-                        sample_with_params(
-                            &row,
-                            params.temperature,
-                            params.top_p,
-                            params.top_k,
-                            states[idx].step_seed,
-                        )?
-                    };
-                    sampled.push(token);
-                }
-                sampled
+                let logits = model_forward_head(&hidden, &self.weights, &self.config)
+                    .context("batched decode lm head")?;
+                let sampling_params: Vec<(f32, f32, u32, Option<u64>)> = params
+                    .iter()
+                    .zip(states.iter())
+                    .map(|(params, state)| {
+                        (params.temperature, params.top_p, params.top_k, state.step_seed)
+                    })
+                    .collect();
+                sample_rows_with_params(&logits, &sampling_params)
+                    .context("batched decode sampling")?
             }
         };
         let decode_duration = started.elapsed();
