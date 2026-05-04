@@ -10130,6 +10130,7 @@ mod tests {
                     )?,
                     norm: Tensor::ones(config.linear_value_head_dim, DType::F32, device)?,
                     a_log: Tensor::zeros(nv, DType::F32, device)?,
+                    a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::BF16, device)?,
                 })
             };
