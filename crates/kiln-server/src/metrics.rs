@@ -890,6 +890,15 @@ mod tests {
             prompt_token_cache_hits: 5,
             prompt_token_cache_misses: 2,
             prompt_token_cache_entries: 4,
+            decode_batcher_enabled: true,
+            decode_batcher: DecodeBatcherStats {
+                submitted_jobs: 4,
+                executed_batches: 2,
+                executed_rows: 4,
+                max_observed_batch: 3,
+                runner_busy_jobs: 1,
+                failed_jobs: 0,
+            },
             training_active: 0,
             active_adapter: Some("my-adapter".to_string()),
         };
@@ -960,6 +969,8 @@ mod tests {
             prompt_token_cache_hits: 0,
             prompt_token_cache_misses: 0,
             prompt_token_cache_entries: 0,
+            decode_batcher_enabled: false,
+            decode_batcher: DecodeBatcherStats::default(),
             training_active: 0,
             active_adapter: None,
         };
