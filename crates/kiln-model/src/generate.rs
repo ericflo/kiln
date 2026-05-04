@@ -52,6 +52,26 @@ fn check_cancelled(cancel: Option<&CancelHandle>) -> Result<()> {
     Ok(())
 }
 
+struct GdnRecurrentResidentStateScope<'a> {
+    backend: &'a dyn BackendRuntime,
+    active: bool,
+}
+
+impl<'a> GdnRecurrentResidentStateScope<'a> {
+    fn new(backend: &'a dyn BackendRuntime) -> Self {
+        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        Self { backend, active }
+    }
+}
+
+impl Drop for GdnRecurrentResidentStateScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.backend.exit_gdn_recurrent_resident_state_scope();
+        }
+    }
+}
+
 /// Holds loaded model weights and tokenizer, provides text generation.
 pub struct ModelRunner {
     pub weights: GpuWeights,
@@ -671,6 +691,7 @@ impl ModelRunner {
             )?
         };
 
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         for _step in 0..params.max_tokens {
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);
@@ -802,6 +823,7 @@ impl ModelRunner {
             )?
         };
 
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         for _step in 0..params.max_tokens {
             // Advance seed for next step
             if let Some(s) = step_seed.as_mut() {
@@ -1879,6 +1901,7 @@ impl ModelRunner {
         mut step_seed: Option<u64>,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         for _step in 0..params.max_tokens {
             check_cancelled(cancel)?;
@@ -2124,6 +2147,7 @@ impl ModelRunner {
             )?
         };
 
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         for _step in 0..params.max_tokens {
             check_cancelled(cancel)?;
             if let Some(s) = step_seed.as_mut() {
@@ -2457,6 +2481,7 @@ impl ModelRunner {
             }
         };
 
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         for _step in 0..params.max_tokens {
             check_cancelled(cancel)?;
             if let Some(s) = step_seed.as_mut() {
@@ -4264,6 +4289,7 @@ impl ModelRunner {
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
     ) -> Result<()> {
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
@@ -4585,6 +4611,7 @@ impl ModelRunner {
             )?
         };
 
+        let _resident_state_scope = GdnRecurrentResidentStateScope::new(self.backend.as_ref());
         for _step in 0..params.max_tokens {
             if let Some(s) = step_seed.as_mut() {
                 *s = s.wrapping_add(1);

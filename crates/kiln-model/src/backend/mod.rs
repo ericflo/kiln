@@ -87,6 +87,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
+        false
+    }
+
+    fn exit_gdn_recurrent_resident_state_scope(&self) {}
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         false
     }

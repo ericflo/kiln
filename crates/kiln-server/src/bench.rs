@@ -114,6 +114,26 @@ fn runtime_backend_for_bench(
     Ok(backend)
 }
 
+struct BenchGdnRecurrentResidentStateScope<'a> {
+    backend: &'a dyn kiln_model::BackendRuntime,
+    active: bool,
+}
+
+impl<'a> BenchGdnRecurrentResidentStateScope<'a> {
+    fn new(backend: &'a dyn kiln_model::BackendRuntime) -> Self {
+        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        Self { backend, active }
+    }
+}
+
+impl Drop for BenchGdnRecurrentResidentStateScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.backend.exit_gdn_recurrent_resident_state_scope();
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct TrainingResult {
     num_steps: usize,
@@ -843,6 +863,7 @@ fn bench_latency_paged(
         decoded_tokens.push(next_token);
     }
 
+    let _resident_state_scope = BenchGdnRecurrentResidentStateScope::new(backend.as_ref());
     for step in 0..max_output_tokens {
         if eos_token_ids.contains(&next_token) {
             break;

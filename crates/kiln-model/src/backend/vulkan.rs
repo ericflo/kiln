@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -44,12 +45,42 @@ pub struct VulkanBackend {
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
     /// memory that must be freed before the logical Vulkan device is destroyed.
     weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Experimental opt-in cache for mutable GDN recurrent state buffers.
-    ///
-    /// Like `weight_cache`, this must drop before `vulkan_device`.
-    recurrent_state_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core)
     vulkan_device: Option<Box<kiln_vulkan_kernel::VulkanDevice>>,
+}
+
+thread_local! {
+    static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn recurrent_state_resident_scope_active() -> bool {
+    RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn enter_recurrent_state_resident_scope() {
+    RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| {
+        let previous = depth.get();
+        if previous == 0 {
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().clear());
+        }
+        depth.set(previous + 1);
+    });
+}
+
+fn exit_recurrent_state_resident_scope() {
+    RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| {
+        let previous = depth.get();
+        if previous == 0 {
+            return;
+        }
+        let next = previous - 1;
+        depth.set(next);
+        if next == 0 {
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().clear());
+        }
+    });
 }
 
 impl VulkanBackend {
@@ -129,7 +160,6 @@ impl VulkanBackend {
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             weight_cache: Mutex::new(HashMap::new()),
-            recurrent_state_cache: Mutex::new(HashMap::new()),
             vulkan_device,
         }
     }
@@ -284,6 +314,20 @@ impl BackendRuntime for VulkanBackend {
 
     fn supports_gdn_recurrent_step(&self) -> bool {
         self.has_vulkan() && self.gdn_enabled
+    }
+
+    fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
+        if !self.recurrent_state_residency_enabled || !self.has_vulkan() || !self.gdn_enabled {
+            return false;
+        }
+        enter_recurrent_state_resident_scope();
+        true
+    }
+
+    fn exit_gdn_recurrent_resident_state_scope(&self) {
+        if self.recurrent_state_residency_enabled {
+            exit_recurrent_state_resident_scope();
+        }
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
@@ -909,15 +953,10 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        if self.recurrent_state_residency_enabled {
+        if self.recurrent_state_residency_enabled && recurrent_state_resident_scope_active() {
             let state_id = state.id();
-            let resident_state = {
-                let cache = self
-                    .recurrent_state_cache
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("Vulkan recurrent state cache mutex poisoned"))?;
-                cache.get(&state_id).cloned()
-            };
+            let resident_state =
+                RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
 
             let (out, resident_state) =
                 kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
@@ -932,11 +971,9 @@ impl BackendRuntime for VulkanBackend {
                 )
                 .context("gdn_recurrent_step resident-state kernel failed")?;
 
-            let mut cache = self
-                .recurrent_state_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Vulkan recurrent state cache mutex poisoned"))?;
-            cache.insert(state_id, resident_state);
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+                cache.borrow_mut().insert(state_id, resident_state);
+            });
             return Ok(Some(out));
         }
 
