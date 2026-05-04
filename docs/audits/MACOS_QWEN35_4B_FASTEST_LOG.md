@@ -10500,3 +10500,51 @@ single-row, and the batch kernel currently requires a common sequence length
 plus one contiguous KV run per row. It does, however, remove another layer
 boundary so true scheduler/model-forward batching can call the fast path
 through the same backend abstraction as other attention kernels.
+
+## 2026-05-04 E337 - Rejected MLP gate/up shared-X threadgroup cache
+
+### Goal
+
+Test a concrete bs=1 MLP low-level idea from the E331 profile. The current
+fused gate/up decode kernel reloads the same `x=[1,1,2560]` hidden row from
+global memory in every output thread. The temporary candidate loaded the Qwen
+hidden row once per 256-thread threadgroup into threadgroup memory, then reused
+it while computing gate/up pairs.
+
+### Change Tested
+
+- Added a temporary Qwen-shape Metal `kiln_mlp_gate_up_shared_x_bf16` kernel.
+- Restricted support to BF16 `x=[B,1,2560]`,
+  `gate_t/up_t=[2560,9216]`, where the output-column groups do not straddle
+  batch rows.
+- Added a temporary synthetic benchmark comparing the current accepted fused
+  gate/up kernel to the shared-X variant for batch 1, 2, 4, and 8.
+- Reverted the temporary source after the benchmark.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `KILN_METAL_MLP_GATE_UP_SHARED_X_BENCH_WARMUP=20 KILN_METAL_MLP_GATE_UP_SHARED_X_BENCH_ITERS=200 cargo test -p kiln-model --features metal bench_mlp_gate_up_shared_x_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Same-binary synthetic result, Qwen3.5 gate/up decode shape:
+
+| Batch | Current fused | Shared-X | Relative | Max diff | Mean diff |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `1598.787 us` | `1648.015 us` | `0.970x` | `0.000000e0` | `0.000000e0` |
+| 2 | `1653.636 us` | `1672.297 us` | `0.989x` | `0.000000e0` | `0.000000e0` |
+| 4 | `1901.101 us` | `3217.815 us` | `0.591x` | `0.000000e0` | `0.000000e0` |
+| 8 | `7331.502 us` | `5902.812 us` | `1.242x` | `0.000000e0` | `0.000000e0` |
+
+### Artifact
+
+- `e337_mlp_gate_up_shared_x_synthetic.log`
+
+### Decision
+
+Rejected. The idea lost the primary bs=1 target and was unstable across
+batches: batch8 improved, but batch4 regressed heavily. The source was
+reverted. Do not add a Qwen-specific shared-X gate/up variant without a more
+robust threading/memory layout that wins bs=1 or consistently wins realistic
+batch sizes.

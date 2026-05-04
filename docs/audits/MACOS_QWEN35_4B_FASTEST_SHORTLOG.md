@@ -1029,3 +1029,11 @@
   plumbing rather than a current endpoint win because production model-forward
   is still single-row and the kernel currently requires common sequence length
   plus one contiguous KV run per row.
+- 2026-05-04 E337: Rejected MLP gate/up shared-X threadgroup caching. The
+  temporary Qwen-shape Metal kernel loaded the `x=[B,1,2560]` row once per
+  threadgroup into threadgroup memory to avoid global reloads in every output
+  thread. It was exact, but lost the primary bs=1 target (`1598.787 us`
+  current vs `1648.015 us` shared-X, 0.970x), barely lost batch2
+  (`0.989x`), cratered batch4 (`1901.101 us` vs `3217.815 us`, 0.591x), and
+  only won batch8 (`1.242x`). Source was reverted; do not carry this
+  Qwen-specific shared-X layout.
