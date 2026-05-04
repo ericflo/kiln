@@ -1514,7 +1514,10 @@ mod tests {
             adapter_unload_url("http://localhost:8420"),
             "http://localhost:8420/v1/adapters/unload"
         );
-        assert_eq!(build_adapter_load_payload("support-bot"), json!({ "name": "support-bot" }));
+        assert_eq!(
+            build_adapter_load_payload("support-bot"),
+            json!({ "name": "support-bot" })
+        );
     }
 
     #[test]
