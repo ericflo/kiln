@@ -15,7 +15,7 @@ Make Vulkan a first-class Kiln inference backend and push Qwen3.5-4B performance
 
 ## Running Verdict
 
-Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 129.1ms mean inter-token latency after scoped resident split GDN recurrent state, GDN input-projection single-submit, and 64x4 MLP gate/up decode workgroups. A second no-profile run measured 130.2ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
+Vulkan is functional and integrated, and the best observed no-env default single-user decode result remains E084's 129.1ms mean inter-token latency after scoped resident split GDN recurrent state, GDN input-projection single-submit, and 64x4 MLP gate/up decode workgroups. E087 keeps a retiled full-attention QKV fusion as the current default because it wins same-binary rollback checks at 130.4-130.7ms versus 132.3-133.7ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
 
 ## Experiments
 
@@ -2548,8 +2548,47 @@ Verdict:
 - Reject and revert.
 - The generic projection shader keeps the 16x16 shape; the 64x4 win is specific to the fused MLP gate/up shader.
 
+### E087: Promote Retiled Vulkan Full-Attention QKV Fusion
+
+Change:
+- Retiled the fused single-token full-attention Q/K/V projection shader from one output column per 256-lane workgroup to 16 output columns x 16 reduction lanes.
+- Reduced the dispatch count from `total_out` workgroups to `ceil(total_out / 16)`.
+- Promoted full-attention QKV fusion to default with rollback guard `KILN_DISABLE_VULKAN_FULL_ATTN_QKV=1`.
+
+Reasoning:
+- E080 rejected the original full-attention QKV opt-in because `layer.full` ballooned to 74.1-85.1ms/8 layers and whole-token latency regressed to 194.6ms.
+- The rejected shader used one full workgroup per output column, unlike the tuned generic projection shader, so it did far too much workgroup scheduling for Qwen-shaped Q/K/V projections.
+- The retiled shader keeps the fusion benefit of one x upload, one dispatch, and one readback for Q/K/V, while using the same 16x16 workgroup geometry that generic `linear_decode` kept after E086.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity full_attn_qkv_decode_matches_cpu_reference -- --nocapture` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+- Opt-in profile before promotion:
+  - Command: `KILN_ENABLE_VULKAN_FULL_ATTN_QKV=1 KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1855.0ms; mean ITL 133.0ms, p50 131.0ms, p99 141.9ms.
+  - `layer.full` was 22.6-23.1ms/8 layers, down from E084's roughly 23.9-25.0ms profile band and far below E080's 74.1-85.1ms rejected opt-in.
+- Discarded no-profile parallel A/B:
+  - An accidental simultaneous opt-in/default bench contended on the GPU and produced invalid 209-236ms means; ignored.
+- Sequential no-profile checks before promotion:
+  - Opt-in first run: prefill 1899.4ms; mean ITL 128.1ms, p50 127.5ms, p99 137.6ms.
+  - Opt-in confirmation: prefill 2888.7ms; mean ITL 128.7ms, p50 128.9ms, p99 137.3ms.
+  - Same-binary no-env before promotion: prefill 1861.3ms; mean ITL 132.4ms, p50 131.7ms, p99 144.1ms.
+- Promoted default:
+  - Default no-env first run: prefill 3863.6ms; mean ITL 130.4ms, p50 129.9ms, p99 137.0ms.
+  - Default no-env confirmation: prefill 1879.8ms; mean ITL 130.7ms, p50 129.5ms, p99 140.6ms.
+  - Rollback guard first run: prefill 1814.1ms; mean ITL 132.3ms, p50 132.4ms, p99 139.4ms.
+  - Rollback guard confirmation: prefill 1832.0ms; mean ITL 133.7ms, p50 132.9ms, p99 146.6ms.
+
+Verdict:
+- Keep default with rollback guard.
+- This is a same-binary micro-win, not a new best observed source anchor; E084's 129.1ms run remains the best observed no-env bs=1 result.
+- The full-attention QKV fusion is now no longer the catastrophic E080 path because the shader geometry matches the proven generic projection tiling.
+
 ## Next Candidate
 
-With E086, the current default bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second no-profile run at 130.2ms. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E087, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.

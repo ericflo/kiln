@@ -106,7 +106,7 @@ impl VulkanBackend {
         let gdn_decode_fused_enabled =
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_DECODE_FUSED").is_ok();
         let linear_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE").is_err();
-        let full_attn_qkv_enabled = std::env::var("KILN_ENABLE_VULKAN_FULL_ATTN_QKV").is_ok();
+        let full_attn_qkv_enabled = std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV").is_err();
         // Full fused MLP decode is validated for single-token no-LoRA decode.
         // After descriptor-pool reuse and tiled projection kernels it is now
         // consistently faster than the split generic GEMV path on Strix Halo.

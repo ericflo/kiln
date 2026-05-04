@@ -1594,7 +1594,7 @@ pub fn dispatch_full_attn_qkv_decode_cached(
         &all_handles,
         all_handles.len(),
         &push_constants,
-        total_out as u32,
+        total_out.div_ceil(16) as u32,
     )
     .context("full_attn_qkv_decode kernel failed")?;
 

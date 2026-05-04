@@ -7,7 +7,7 @@
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 layout(push_constant) uniform Parameters {
     uint hidden;
@@ -26,10 +26,10 @@ layout(binding = 4) writeonly buffer OutBuf { float data_out[]; };
 shared float partial[256];
 
 void main() {
-    uint out_idx = gl_WorkGroupID.x;
-    if (out_idx >= total_out) return;
-
-    uint tid = gl_LocalInvocationID.x;
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint out_idx = gl_WorkGroupID.x * 16 + col_lane;
+    uint partial_idx = col_lane * 16 + red_lane;
     uint col = out_idx;
     uint width = q_dim;
     uint projection = 0;
@@ -46,22 +46,22 @@ void main() {
     }
 
     float sum = 0.0;
-    for (uint h = tid; h < hidden; h += 256) {
-        uint off = h * width + col;
-        float w = projection == 0 ? data_q_w[off] : (projection == 1 ? data_k_w[off] : data_v_w[off]);
-        sum += data_x[h] * w;
-    }
-
-    partial[tid] = sum;
-    barrier();
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            partial[tid] += partial[tid + stride];
+    if (out_idx < total_out) {
+        for (uint h = red_lane; h < hidden; h += 16) {
+            uint off = h * width + col;
+            float w = projection == 0 ? data_q_w[off] : (projection == 1 ? data_k_w[off] : data_v_w[off]);
+            sum += data_x[h] * w;
         }
-        barrier();
     }
 
-    if (tid == 0) {
-        data_out[out_idx] = partial[0];
+    partial[partial_idx] = sum;
+    barrier();
+
+    if (red_lane == 0 && out_idx < total_out) {
+        float total = 0.0;
+        for (uint lane = 0; lane < 16; lane++) {
+            total += partial[col_lane * 16 + lane];
+        }
+        data_out[out_idx] = total;
     }
 }
