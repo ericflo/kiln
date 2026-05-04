@@ -369,6 +369,22 @@ pub fn print_banner(host: &str, port: u16, model_path: Option<&str>, config_path
     };
     let _ = writeln!(stderr, "  {} {}", style("Mode:").dim(), mode);
 
+    if model_path.is_none() {
+        let _ = writeln!(stderr);
+        let _ = writeln!(
+            stderr,
+            "  {} set {} or {} in TOML for real inference/training.",
+            style("Next:").dim(),
+            style("KILN_MODEL_PATH=./Qwen3.5-4B").yellow().bold(),
+            style("model.path").yellow().bold()
+        );
+        let _ = writeln!(
+            stderr,
+            "  {} training endpoints return 503 in mock mode.",
+            style("Note:").dim()
+        );
+    }
+
     if let Some(mp) = model_path {
         let _ = writeln!(
             stderr,
