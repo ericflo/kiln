@@ -15,7 +15,7 @@ Make Vulkan a first-class Kiln inference backend and push Qwen3.5-4B performance
 
 ## Running Verdict
 
-Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 137.6ms mean inter-token latency after scoped resident split GDN recurrent state promotion; a fresh post-promotion profile measured 136.5ms. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
+Vulkan is functional and integrated, and the best verified no-env default single-user decode result is now 137.2ms mean inter-token latency after scoped resident split GDN recurrent state plus GDN input-projection single-submit promotion. The old 318-367ms bs=1 source anchors are superseded. Native batch is default again for eligible greedy batch endpoint traffic, but broader bs>1 throughput still needs true multi-sequence paged attention and scheduling. The largest structural blocker remains that candle-core has no native Vulkan tensor storage here: many tensors still cross CPU memory between Vulkan kernels, so a large share of time is transfer, tensor materialization, and unfused host-side work rather than GPU arithmetic.
 
 ## Experiments
 
@@ -2396,8 +2396,45 @@ Verdict:
 - Keep default with rollback guard.
 - This is a small same-binary win, not a new best source anchor; E078's 137.6ms remains the best verified bs=1 anchor.
 
+### E082: Promote Single-Submit Vulkan GDN Input Projection
+
+Change:
+- Added a single-submit path for `dispatch_gdn_in_proj_decode_cached`.
+- The path records x upload, fused input-projection dispatch, output copy, and readback through one command buffer.
+- Promoted it to default with rollback guard `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1`.
+- Shared the output slicing helper between the old direct path and the single-submit path.
+
+Reasoning:
+- After E081, the fresh bs=1 profile still showed `gdn.in_proj` at about 24ms across 24 GDN layers.
+- E044 had rejected GDN in-proj single-submit before resident recurrent state, but the latency budget and bottleneck order changed enough to retest it.
+
+Evidence:
+- Fresh post-E081 default profile:
+  - Command: `KILN_PROFILE_DECODE=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 4 --skip-training`.
+  - Prefill 1854.5ms; mean ITL 140.6ms, p50 139.6ms, p99 146.6ms.
+  - `gdn.in_proj` was 23.7-24.0ms/24.
+- Opt-in trial:
+  - `KILN_ENABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj -- --nocapture` passed, including batch=1 and batched parity.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+  - Profiled opt-in run: prefill 1967.0ms; mean ITL 143.8ms, p50 142.2ms, p99 154.8ms. `gdn.in_proj` fell slightly to 22.5-23.2ms/24, but whole-token profiled latency was noisy and worse.
+  - No-profile same-binary A/B:
+    - Opt-in: prefill 1911.2ms; mean ITL 136.7ms, p50 135.5ms, p99 149.2ms.
+    - No-env default: prefill 1917.6ms; mean ITL 141.8ms, p50 142.3ms, p99 151.4ms.
+  - Opt-in confirmation: prefill 2005.4ms; mean ITL 138.3ms, p50 137.4ms, p99 146.4ms.
+- Promoted default:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj -- --nocapture` passed, including batch=1 and batched parity.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+  - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+  - Default no-env: prefill 1910.5ms; mean ITL 137.2ms, p50 136.8ms, p99 141.8ms.
+  - Rollback guard `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1`: prefill 1886.6ms; mean ITL 141.4ms, p50 137.2ms, p99 168.4ms.
+
+Verdict:
+- Keep default with rollback guard.
+- This is the new best verified no-env default bs=1 source anchor: 137.2ms mean ITL.
+
 ## Next Candidate
 
-With E078, the current default bs=1 short-source anchor is 137.6ms mean ITL, and the fresh post-promotion profile measured 136.5ms. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 kept a small LM-head argmax submit-count win. The next useful single-user experiments should attack GDN input projection, or revisit MLP/full-attention only with deeper shader-level or layer-residency changes. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E082, the current default bs=1 short-source anchor is 137.2ms mean ITL. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 and E082 kept small submit-count wins in LM-head argmax and GDN input projection. The next useful single-user experiments should revisit MLP/full-attention only with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
