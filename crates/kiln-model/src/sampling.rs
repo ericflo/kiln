@@ -69,6 +69,68 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     Ok(ids.to_vec1::<u32>()?)
 }
 
+
+/// Sample one token for every batch row in a logits tensor.
+///
+/// Fast paths cover the hot serving cases without per-row synchronization:
+/// greedy rows use one argmax over the vocab dimension, while identical
+/// unseeded full-distribution sampling uses one batched Gumbel-softmax over the
+/// vocab dimension. More specialized top-k/top-p/seeded rows fall back to the
+/// scalar sampler for correctness.
+pub fn sample_rows_with_params(
+    logits: &Tensor,
+    params: &[(f32, f32, u32, Option<u64>)],
+) -> Result<Vec<u32>> {
+    if params.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let dims = logits.dims();
+    anyhow::ensure!(!dims.is_empty(), "logits tensor must have at least one dim");
+    let vocab_dim = dims.len() - 1;
+    let vocab_size = dims[vocab_dim];
+    let row_count = logits.elem_count() / vocab_size;
+    anyhow::ensure!(
+        row_count == params.len(),
+        "batched sampler row count {row_count} != params length {}",
+        params.len()
+    );
+
+    if params.iter().all(|&(temperature, _top_p, top_k, _seed)| {
+        kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k)
+    }) {
+        return greedy_sample_rows(logits);
+    }
+
+    let (temperature, top_p, top_k, seed) = params[0];
+    if seed.is_none()
+        && params.iter().all(|&candidate| candidate == params[0])
+        && !kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k)
+        && kiln_core::sampling::SamplingParams::top_p_disables_nucleus_filter(top_p)
+        && (top_k == 0 || top_k as usize >= vocab_size)
+        && matches!(logits.device(), Device::Cuda(_) | Device::Metal(_))
+    {
+        let scaled = logits
+            .to_dtype(DType::F32)?
+            .affine(1.0 / temperature as f64, 0.0)?;
+        let sampled = gumbel_softmax(&scaled, 1.0, vocab_dim)?.flatten_all()?;
+        return Ok(sampled.to_vec1::<u32>()?);
+    }
+
+    let mut sampled = Vec::with_capacity(params.len());
+    for (row, &(temperature, top_p, top_k, seed)) in params.iter().enumerate() {
+        let row_logits = logits.narrow(0, row, 1)?;
+        sampled.push(sample_with_params(
+            &row_logits,
+            temperature,
+            top_p,
+            top_k,
+            seed,
+        )?);
+    }
+    Ok(sampled)
+}
+
 /// Parameterized sampling with temperature, top-k, and top-p (nucleus) filtering.
 ///
 /// `logits`: tensor of shape `[..., vocab_size]`. Only the last position is sampled.
