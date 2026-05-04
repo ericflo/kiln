@@ -9583,3 +9583,59 @@ single-dispatch QKV fusion unless a later profile shows launch overhead, not
 weight-read work, dominating full-attention QKV. The stronger remaining bs>1
 work is still true model-forward batching: per-sequence cache/block tables,
 batched GDN and attention state, and scheduler integration.
+
+## Experiment E321: Accepted Decode-Batch GDN QKV Conv/Norm Support
+
+Purpose:
+
+Remove another concrete low-level blocker for true `[B,1,H]` decode batches in
+Qwen3.5 GDN layers. The existing Metal GDN qkv-conv/norm kernel already had
+batch-indexed input, output, and convolution-state addressing, but its support
+gate required `batch == 1` and the launcher flattened all rows into a
+one-dimensional dispatch. The candidate allows decode batches while keeping the
+same fused conv plus Q/K norm work.
+
+Implementation:
+
+- Relaxed `metal_gdn_decode_qkv_conv_norm_supports` from `batch == 1` to
+  `batch > 0`, with an explicit checked row-count limit.
+- Switched the Metal dispatch to a 2D grid: row-within-batch by batch index.
+- Kept output shapes contiguous as `[batch, 1, nk, dk]`,
+  `[batch, 1, nk, dk]`, and `[batch, 1, nv, dv]`.
+- Added batch parity coverage against concatenated per-row fused execution.
+  The test and bench recreate independent Metal state tensors from CPU state
+  data because Candle Metal tensor `clone`/`copy` share storage.
+- Added an ignored Qwen3.5 synthetic bench comparing split
+  conv-plus-QK-norm work against the fused qkv-conv/norm kernel for decode
+  batches 1, 2, 4, and 8.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal 'test_gdn_decode_qkv_conv_norm' --lib`
+- `KILN_METAL_GDN_QKV_CONV_NORM_BATCH_BENCH_WARMUP=5 KILN_METAL_GDN_QKV_CONV_NORM_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_gdn_decode_qkv_conv_norm_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Synthetic Qwen3.5 GDN results:
+
+| Batch | Physical tokens | Split conv+norm | Fused qkv-conv/norm | Speedup | Row max diffs |
+|---:|---:|---:|---:|---:|---|
+| 1 | 1 | 658.700 us | 73.708 us | 8.937x | q/k/v/state = 0 |
+| 2 | 2 | 798.927 us | 84.123 us | 9.497x | q/k/v/state = 0 |
+| 4 | 4 | 829.923 us | 88.669 us | 9.360x | q/k/v/state = 0 |
+| 8 | 8 | 838.171 us | 96.650 us | 8.672x | q/k/v/state = 0 |
+
+Artifact:
+
+- `e321_gdn_qkv_conv_norm_decode_batch_synthetic.log`
+
+Takeaway:
+
+This is an accepted true-batching building block, not a cache optimization and
+not complete endpoint batching by itself. A future `[B,1,H]` GDN decode path can
+now keep fused qkv-conv/norm instead of falling back to split convolution and
+normalization. Remaining blockers are now narrower: batched GDN
+gate/recurrent/state handling, per-sequence paged-cache and block-table
+plumbing, attention-state batching, and scheduler/model-forward integration.

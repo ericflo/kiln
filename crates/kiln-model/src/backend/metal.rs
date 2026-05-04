@@ -1592,7 +1592,14 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
             .is_ok_and(|(c, k)| c == channels && k == kernel_size),
         _ => false,
     };
-    batch == 1
+    let Some(rows) = nk
+        .checked_add(nk)
+        .and_then(|n| n.checked_add(nv))
+        .and_then(|n| n.checked_mul(batch))
+    else {
+        return false;
+    };
+    batch > 0
         && seq_len == 1
         && channels == expected_channels
         && nk > 0
@@ -1605,6 +1612,7 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
         && channels <= u32::MAX as usize
         && nk <= u32::MAX as usize
         && nv <= u32::MAX as usize
+        && rows <= u32::MAX as usize
 }
 
 pub(crate) fn metal_rotary_embedding_supports(
@@ -1911,16 +1919,16 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
     constant uint& nv [[buffer(7)]],
     constant float& q_scale [[buffer(8)]],
     constant float& eps [[buffer(9)]],
-    uint row [[threadgroup_position_in_grid]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]
 ) {
     constexpr uint D = 128;
     threadgroup float values[D];
     threadgroup float sum_scratch[D];
 
-    const uint rows_per_batch = nk + nk + nv;
-    const uint batch = row / rows_per_batch;
-    const uint local_row = row - batch * rows_per_batch;
+    const uint row = tgroup.x;
+    const uint batch_idx = tgroup.y;
+    const uint local_row = row;
     const uint qk_dim = nk * D;
     const uint channels = qk_dim + qk_dim + nv * D;
 
@@ -1945,8 +1953,8 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
         channel = qk_dim + qk_dim + v_head * D + tid;
     }
 
-    const uint token_idx = batch * channels + channel;
-    const uint state_base = (batch * channels + channel) * 3;
+    const uint token_idx = batch_idx * channels + channel;
+    const uint state_base = (batch_idx * channels + channel) * 3;
     const uint weight_base = channel * 4;
 
     const float s0 = conv_state[state_base + 0];
@@ -1965,7 +1973,7 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
     conv_state[state_base + 2] = x0;
 
     if (is_v) {
-        const uint out_idx = (batch * nv + v_head) * D + tid;
+        const uint out_idx = (batch_idx * nv + v_head) * D + tid;
         v_out[out_idx] = static_cast<bfloat>(y);
         return;
     }
@@ -1983,7 +1991,7 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
 
     const float inv = rsqrt(sum_scratch[0] + eps);
     const float norm = values[tid] * inv * (is_q ? q_scale : 1.0f);
-    const uint dst_idx = (batch * nk + src_head) * D + tid;
+    const uint dst_idx = (batch_idx * nk + src_head) * D + tid;
     if (is_q) {
         q_out[dst_idx] = static_cast<bfloat>(norm);
     } else if (is_k) {
@@ -5501,7 +5509,8 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
         "metal gdn decode qkv conv/norm unsupported shape"
     );
     let (batch, _, channels) = mixed_qkv.dims3()?;
-    let rows = batch * (nk + nk + nv);
+    let rows_per_batch = nk + nk + nv;
+    let rows = batch * rows_per_batch;
     anyhow::ensure!(
         rows <= u32::MAX as usize,
         "metal gdn decode qkv conv/norm shape too large"
@@ -5593,8 +5602,8 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
         encoder.set_bytes(9, &eps);
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
-            width: rows,
-            height: 1,
+            width: rows_per_batch,
+            height: batch,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
@@ -8933,6 +8942,133 @@ mod tests {
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
     }
 
+    fn bench_metal_qkv_op<F>(device: &Device, warmup: usize, iters: usize, mut op: F) -> Result<f64>
+    where
+        F: FnMut() -> Result<(Tensor, Tensor, Tensor)>,
+    {
+        let mut last = None;
+        for _ in 0..warmup {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((q, k, v)) = &last {
+            std::hint::black_box((q.dims(), k.dims(), v.dims()));
+        }
+        drop(last);
+
+        let start = Instant::now();
+        let mut last = None;
+        for _ in 0..iters {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((q, k, v)) = &last {
+            std::hint::black_box((q.dims(), k.dims(), v.dims()));
+        }
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qkv_conv_norm_split_reference(
+        mixed_qkv: &Tensor,
+        weight: &Tensor,
+        conv_state: &mut Tensor,
+        kernel_size: usize,
+        nk: usize,
+        dk: usize,
+        nv: usize,
+        dv: usize,
+        q_scale: f64,
+        eps: f64,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let (batch, seq_len, _) = mixed_qkv.dims3()?;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let conv = metal_causal_conv1d_update_bf16_f32_k4(
+            &mixed_qkv.transpose(1, 2)?.contiguous()?,
+            weight,
+            conv_state,
+            kernel_size,
+        )?
+        .transpose(1, 2)?;
+        let q = conv
+            .narrow(2, 0, qk_dim)?
+            .reshape((batch, seq_len, nk, dk))?;
+        let k = conv
+            .narrow(2, qk_dim, qk_dim)?
+            .reshape((batch, seq_len, nk, dk))?;
+        let v = conv
+            .narrow(2, 2 * qk_dim, v_dim)?
+            .reshape((batch, seq_len, nv, dv))?
+            .to_dtype(DType::BF16)?;
+        let (q, k) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
+        Ok((q, k, v))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qkv_conv_norm_row_fused_reference(
+        mixed_qkv: &Tensor,
+        weight: &Tensor,
+        state_data: &[f32],
+        kernel_size: usize,
+        nk: usize,
+        dk: usize,
+        nv: usize,
+        dv: usize,
+        q_scale: f32,
+        eps: f32,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        let (batch, _, channels) = mixed_qkv.dims3()?;
+        let state_width = kernel_size - 1;
+        anyhow::ensure!(
+            state_data.len() == batch * channels * state_width,
+            "row fused reference state data shape mismatch"
+        );
+        let mut q_rows = Vec::with_capacity(batch);
+        let mut k_rows = Vec::with_capacity(batch);
+        let mut v_rows = Vec::with_capacity(batch);
+        let mut state_rows = Vec::with_capacity(batch);
+
+        for b in 0..batch {
+            let row = mixed_qkv.narrow(0, b, 1)?.contiguous()?;
+            let state_start = b * channels * state_width;
+            let state_end = state_start + channels * state_width;
+            let mut state_row = Tensor::from_slice(
+                &state_data[state_start..state_end],
+                (1usize, channels, state_width),
+                mixed_qkv.device(),
+            )?
+            .contiguous()?;
+            let (q, k, v) = metal_gdn_decode_qkv_conv_norm_bf16(
+                &row,
+                weight,
+                &mut state_row,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv,
+                q_scale,
+                eps,
+            )?;
+            q_rows.push(q);
+            k_rows.push(k);
+            v_rows.push(v);
+            state_rows.push(state_row);
+        }
+
+        let q_refs: Vec<&Tensor> = q_rows.iter().collect();
+        let k_refs: Vec<&Tensor> = k_rows.iter().collect();
+        let v_refs: Vec<&Tensor> = v_rows.iter().collect();
+        let state_refs: Vec<&Tensor> = state_rows.iter().collect();
+        Ok((
+            Tensor::cat(&q_refs, 0)?,
+            Tensor::cat(&k_refs, 0)?,
+            Tensor::cat(&v_refs, 0)?,
+            Tensor::cat(&state_refs, 0)?,
+        ))
+    }
+
     fn bench_transposed_coop_projection_case(
         device: &Device,
         name: &str,
@@ -9128,6 +9264,142 @@ mod tests {
                  fallback={fallback_us:.3} us fused_tile8={fused_us:.3} us \
                  speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
                 fallback_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_decode_qkv_conv_norm_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_GDN_QKV_CONV_NORM_BATCH_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_GDN_QKV_CONV_NORM_BATCH_BENCH_ITERS", 20);
+        let nk = 16usize;
+        let dk = 128usize;
+        let nv = 32usize;
+        let dv = 128usize;
+        let kernel_size = 4usize;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let channels = qk_dim * 2 + v_dim;
+        let scale = 1.0f32 / (dk as f32).sqrt();
+        let weight = patterned_bf16_2d(channels, kernel_size, &device, 37, 0.0009765625)?
+            .reshape((channels, 1usize, kernel_size))?
+            .contiguous()?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let mixed_qkv = patterned_bf16_decode_batch(batch, channels, &device)?;
+            let state_data: Vec<f32> = (0..(batch * channels * (kernel_size - 1)))
+                .map(|i| ((i % 43) as f32 - 21.0) * 0.0009765625)
+                .collect();
+            let state_init =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            device.synchronize()?;
+            assert!(metal_gdn_decode_qkv_conv_norm_supports(
+                &mixed_qkv,
+                &weight,
+                &state_init,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv
+            ));
+
+            let (q_ref, k_ref, v_ref, state_ref) = gdn_decode_qkv_conv_norm_row_fused_reference(
+                &mixed_qkv,
+                &weight,
+                &state_data,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv,
+                scale,
+                1e-6,
+            )?;
+            let mut state_fused =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
+                &mixed_qkv,
+                &weight,
+                &mut state_fused,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv,
+                scale,
+                1e-6,
+            )?;
+            device.synchronize()?;
+
+            let q_max = max_abs_diff(&q_ref, &q_fused)?;
+            let k_max = max_abs_diff(&k_ref, &k_fused)?;
+            let v_max = max_abs_diff(&v_ref, &v_fused)?;
+            let state_max = max_abs_diff(&state_ref, &state_fused)?;
+            assert!(
+                q_max < 1e-6 && k_max < 1e-6,
+                "Qwen3.5 GDN qkv-conv/norm batch={batch} q/k row-fused max_abs_diff q={q_max:e} k={k_max:e} exceeds tolerance"
+            );
+            assert!(
+                v_max < 1e-6 && state_max < 1e-6,
+                "Qwen3.5 GDN qkv-conv/norm batch={batch} v/state row-fused max_abs_diff v={v_max:e} state={state_max:e} exceeds tolerance"
+            );
+
+            let mut split_state =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            let split_us = bench_metal_qkv_op(&device, warmup, iters, || {
+                gdn_decode_qkv_conv_norm_split_reference(
+                    &mixed_qkv,
+                    &weight,
+                    &mut split_state,
+                    kernel_size,
+                    nk,
+                    dk,
+                    nv,
+                    dv,
+                    scale as f64,
+                    1e-6,
+                )
+                .context("bench split GDN qkv conv/norm")
+            })?;
+            let mut fused_state =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            let fused_us = bench_metal_qkv_op(&device, warmup, iters, || {
+                metal_gdn_decode_qkv_conv_norm_bf16(
+                    &mixed_qkv,
+                    &weight,
+                    &mut fused_state,
+                    kernel_size,
+                    nk,
+                    dk,
+                    nv,
+                    dv,
+                    scale,
+                    1e-6,
+                )
+                .context("bench fused GDN qkv conv/norm")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN qkv-conv/norm decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} mixed_qkv=[{batch},1,{channels}] \
+                 weight=[{channels},1,{kernel_size}] warmup={warmup} iters={iters} \
+                 split={split_us:.3} us fused={fused_us:.3} us speedup={:.3}x \
+                 row_q_max_abs_diff={q_max:.6e} row_k_max_abs_diff={k_max:.6e} \
+                 row_v_max_abs_diff={v_max:.6e} row_state_max_abs_diff={state_max:.6e}",
+                split_us / fused_us,
             );
         }
 
@@ -9849,6 +10121,107 @@ mod tests {
             nv,
             dv
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_decode_qkv_conv_norm_decode_batch_matches_row_fused_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let nk = 2usize;
+        let nv = 4usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let kernel_size = 4usize;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let channels = qk_dim * 2 + v_dim;
+        let scale = 1.0f32 / (dk as f32).sqrt();
+
+        let mixed_data: Vec<f32> = (0..(batch * channels))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+            .collect();
+        let weight_data: Vec<f32> = (0..(channels * kernel_size))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.015625)
+            .collect();
+        let state_data: Vec<f32> = (0..(batch * channels * (kernel_size - 1)))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0078125)
+            .collect();
+
+        let mixed_qkv = Tensor::from_slice(&mixed_data, (batch, 1usize, channels), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight = Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let mut state_fused =
+            Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                .contiguous()?;
+
+        assert!(metal_gdn_decode_qkv_conv_norm_supports(
+            &mixed_qkv,
+            &weight,
+            &state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv
+        ));
+
+        let (q_ref, k_ref, v_ref, state_ref) = gdn_decode_qkv_conv_norm_row_fused_reference(
+            &mixed_qkv,
+            &weight,
+            &state_data,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv,
+            scale,
+            1e-6,
+        )?;
+        let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
+            &mixed_qkv,
+            &weight,
+            &mut state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv,
+            scale,
+            1e-6,
+        )?;
+
+        assert_eq!(q_fused.dims(), &[batch, 1usize, nk, dk]);
+        assert_eq!(k_fused.dims(), &[batch, 1usize, nk, dk]);
+        assert_eq!(v_fused.dims(), &[batch, 1usize, nv, dv]);
+        assert_eq!(q_fused.dtype(), DType::BF16);
+        assert_eq!(k_fused.dtype(), DType::BF16);
+        assert_eq!(v_fused.dtype(), DType::BF16);
+
+        let q_max = max_abs_diff(&q_ref, &q_fused)?;
+        let k_max = max_abs_diff(&k_ref, &k_fused)?;
+        let v_max = max_abs_diff(&v_ref, &v_fused)?;
+        let state_max = max_abs_diff(&state_ref, &state_fused)?;
+        assert!(
+            q_max < 1e-6,
+            "fused batch q row-fused max_abs_diff={q_max:e}"
+        );
+        assert!(
+            k_max < 1e-6,
+            "fused batch k row-fused max_abs_diff={k_max:e}"
+        );
+        assert!(v_max < 1e-6, "fused batch v max_abs_diff={v_max:e}");
+        assert!(
+            state_max < 1e-6,
+            "fused batch conv state max_abs_diff={state_max:e}"
+        );
 
         Ok(())
     }

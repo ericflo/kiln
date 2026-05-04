@@ -861,3 +861,14 @@
   and batch8 `8273.379 us` vs `9448.035 us` (0.876x). Source was reverted.
   This keeps the focus on true model-forward batching and lower-level kernels
   with demonstrated wins, not simple QKV launch fusion.
+- 2026-05-04 E321: Accepted decode-batch GDN qkv-conv/norm support. The
+  existing Metal kernel already had batch-indexed output and conv-state
+  addressing, so the support gate now allows nonzero BF16 `[B,1,H]` decode
+  batches and the launcher dispatches row-within-batch by batch index. Focused
+  parity against per-row fused execution passed. Qwen3.5 GDN synthetic results
+  versus split conv+QK-norm work were batch1 `658.700 us` -> `73.708 us`
+  (8.937x), batch2 `798.927 us` -> `84.123 us` (9.497x), batch4 `829.923 us`
+  -> `88.669 us` (9.360x), and batch8 `838.171 us` -> `96.650 us` (8.672x),
+  with exact row q/k/v/state matches. This is a true-batching building block;
+  remaining work is GDN gate/recurrent/state batching plus per-sequence cache
+  tables, attention state, scheduler, and model-forward integration.
