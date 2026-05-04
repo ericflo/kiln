@@ -7873,3 +7873,88 @@ row-major layout, the full decode path lost about 14 ms mean ITL in the
 same-binary A/B. Future GDN projection work needs a more substantial algorithm
 change, such as cooperative reduction or packing designed for the target GPU,
 not simply switching to the already-loaded original weight orientation.
+
+## Experiment E267: Short Prompt Prefix Lookup Bypass
+
+Hypothesis:
+
+E248 stopped short prefix-cache misses from building and then discarding
+registration snapshots, but the default prefix-enabled path still performed a
+prefix-cache lookup for prompts shorter than the production registration
+threshold. With `min_register_tokens=64`, a short prompt cannot hit because no
+shorter or equal prompt is registered. Skipping the lookup removes dead cache
+work while keeping cache work bounded to the actual fastest-inference goal.
+
+Change:
+
+- Added `RealPrefixCache::should_lookup_prompt`, which mirrors registration
+  eligibility for the production cache.
+- In non-streaming real generation, bypassed `lookup()` when the prompt is too
+  short to ever hit, then used the existing shared paged generation fast path.
+- In streaming real generation, applied the same short-prompt bypass and
+  returned the shared paged streaming path directly.
+- Extended `real_prefix_cache_min_register_tokens_skips_short_prompts` to assert
+  that prompts below the minimum registration length skip lookup.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-server/src/state.rs crates/kiln-server/src/api/completions.rs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `cargo test -p kiln-server real_prefix_cache_min_register_tokens_skips_short_prompts --lib`
+  - Passed.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+  - Passed.
+- `cargo build --release --features metal --bin kiln`
+  - Passed.
+
+Server measurement:
+
+Fresh release server:
+
+`KILN_MODEL_PATH=/Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a KILN_PORT=8421 ./target/release/kiln serve`
+
+Observed startup:
+
+- Model load: completed at 2026-05-04T00:12:31Z.
+- KV cache: 512 blocks, block size 16, BF16 KV.
+- Production prefix-cache minimum registration tokens: 64.
+- Background inference prewarm: 21,052 ms.
+
+Request:
+
+- Same request body as E234/E248.
+- `POST /v1/completions/batch`
+- Four distinct chat prompts, 17 prompt tokens each.
+- `temperature=0.0`, `max_tokens=2`, `seed=234`.
+
+Result:
+
+| Shape | Wall time | HTTP handler | Generated tokens | Prefix metrics | Render/token cache |
+|---|---:|---:|---:|---|---|
+| 4 distinct prompts, `n=1`, `max_tokens=2` | 5.60 s | 5,595.400 ms | 8 | 0 hits, 0 misses, 0 entries, 0 state bytes | 4 render misses, 4 token misses |
+
+Memory-pressure caveat:
+
+- `memory_pressure` reported only 34% system-wide free memory after the run,
+  with high compressor and swap counters. The 5.60 s timing is therefore logged
+  as a neutral/noisy server timing, not as a latency win over E248.
+
+Artifacts:
+
+- `e267_server_prefix_short_lookup_bypass.log`
+- `e267_batch4_distinct_max2_prefix_short_lookup_bypass_request.json`
+- `e267_batch4_distinct_max2_prefix_short_lookup_bypass_response.json`
+- `e267_batch4_distinct_max2_prefix_short_lookup_bypass_time.log`
+- `e267_batch4_distinct_max2_prefix_short_lookup_bypass_metrics.prom`
+
+Takeaway:
+
+This cleanup is accepted because it removes impossible short-prompt prefix
+lookups from both non-streaming and streaming default paths, which E267 verifies
+with `0` prefix hits and `0` prefix misses. It is not counted as a measured
+latency improvement: the live server timing was slower under memory pressure.
+The fastest-inference work should now return to real low-level wins: GDN
+projection math/packing, larger fused decode boundaries, true batched
+model-forward, and scheduler-level continuous batching.

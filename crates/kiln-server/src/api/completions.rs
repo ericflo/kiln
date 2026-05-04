@@ -2926,7 +2926,12 @@ async fn generate_real(
                 } else {
                     let (hit, should_register_on_miss) = {
                         let mut cache = prefix_cache.lock().unwrap();
-                        let hit = cache.lookup(&adapter, &prompt_tokens)?;
+                        let should_lookup = cache.should_lookup_prompt(&prompt_tokens);
+                        let hit = if should_lookup {
+                            cache.lookup(&adapter, &prompt_tokens)?
+                        } else {
+                            None
+                        };
                         let should_register = cache.should_register_prompt(&prompt_tokens);
                         (hit, should_register)
                     };
@@ -3321,10 +3326,26 @@ async fn generate_real_streaming(
                                 pc.clone(),
                             )
                         } else {
-                            let hit = {
+                            let (hit, should_register_on_miss) = {
                                 let mut cache = prefix_cache.lock().unwrap();
-                                cache.lookup(&adapter, &prompt_tokens)?
+                                let should_lookup = cache.should_lookup_prompt(&prompt_tokens);
+                                let hit = if should_lookup {
+                                    cache.lookup(&adapter, &prompt_tokens)?
+                                } else {
+                                    None
+                                };
+                                let should_register = cache.should_register_prompt(&prompt_tokens);
+                                (hit, should_register)
                             };
+                            if hit.is_none() && !should_register_on_miss {
+                                return kiln_model::ModelRunner::spawn_streaming_paged_shared_tokens(
+                                    runner.clone(),
+                                    prompt_tokens.clone(),
+                                    params.clone(),
+                                    bm.clone(),
+                                    pc.clone(),
+                                );
+                            }
                             let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
                             let cached_prefix = hit.map(|hit| PagedPrefixReuse {
                                 cached_tokens: hit.cached_tokens,

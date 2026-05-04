@@ -804,6 +804,10 @@ impl RealPrefixCache {
             && prompt_tokens.len() >= self.min_register_tokens
     }
 
+    pub fn should_lookup_prompt(&self, prompt_tokens: &[TokenId]) -> bool {
+        self.should_register_prompt(prompt_tokens)
+    }
+
     pub fn lookup(
         &mut self,
         adapter: &Option<String>,
@@ -2321,6 +2325,11 @@ mod tests {
         let device = candle_core::Device::Cpu;
         let state = LinearAttentionState::new(&config, &device)?;
         let mut cache = RealPrefixCache::new_with_min_register_tokens(true, 4, 4, 1024, 49, 9);
+        assert!(
+            !cache.should_lookup_prompt(&[1, 2, 3, 4, 5, 6, 7, 8]),
+            "short prompts cannot hit entries that are never registered"
+        );
+        assert!(cache.should_lookup_prompt(&[1, 2, 3, 4, 5, 6, 7, 8, 9]));
 
         let outcome = cache.register(
             None,

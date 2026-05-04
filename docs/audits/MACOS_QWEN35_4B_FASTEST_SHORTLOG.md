@@ -623,3 +623,14 @@
   463.7 ms prefill / 202.6 ms mean ITL / 4.94 tok/s, while control was
   463.8 ms / 188.5 ms / 5.30 tok/s. The candidate was reverted and the
   clean-source release `kiln-bench` rebuild passed.
+- 2026-05-04 E267: Accepted a bounded short-prompt prefix lookup bypass. Since
+  the production prefix cache registers only prompts with at least 64 tokens,
+  shorter prompts cannot hit, so non-streaming and streaming real generation
+  now skip `lookup()` and route directly to the shared paged path. Focused
+  server tests/checks passed. A fresh default prefix-enabled release-server
+  bs=4 short batch measured 5.60 s wall / 5,595.400 ms handler with
+  0 prefix hits, 0 prefix misses, 0 cached entries, 0 retained state bytes,
+  4 render misses, and 4 token misses.
+  Because `memory_pressure` reported only 34% free memory, E267 is logged as a
+  semantics-preserving no-work cleanup, not as a latency win. Next work returns
+  to low-level/kernel and batching changes.
