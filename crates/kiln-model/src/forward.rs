@@ -6598,19 +6598,11 @@ pub fn model_forward_paged_batched_decode(
         }
     }
 
-    let mut logits_rows = Vec::with_capacity(batch_size);
-    for row_idx in 0..batch_size {
-        let row_hidden = hidden.narrow(0, row_idx, 1)?;
-        let row_logits = {
-            kiln_nvtx::range!(c"kiln/batched_decode/lm_head_row");
-            let normed = rms_norm(&row_hidden, &weights.final_norm, config.rms_norm_eps)?;
-            lm_head_forward(&normed, &weights.embed_tokens_t)
-                .with_context(|| format!("batched decode lm head row {row_idx}"))?
-        };
-        logits_rows.push(row_logits);
-    }
-    let logits_refs: Vec<&Tensor> = logits_rows.iter().collect();
-    Tensor::cat(&logits_refs, 0).context("cat batched decode logits")
+    let normed = {
+        kiln_nvtx::range!(c"kiln/batched_decode/lm_head_norm");
+        rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?
+    };
+    lm_head_forward(&normed, &weights.embed_tokens_t).context("batched decode lm head")
 }
 
 /// Paged-KV forward pass that ALSO returns the last-row pre-final-norm hidden state.
