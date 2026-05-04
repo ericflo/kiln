@@ -736,3 +736,10 @@
   421.5 ms / 162.0 ms / 6.17 tok/s / 173.2 ms P99. Memory pressure was 80%
   free after E292. The candidate source was reverted and clean-source
   `kiln-bench` rebuild passed.
+- 2026-05-04 E293-E294: Rejected an opt-in MLP gate/up `fast::exp` sigmoid.
+  The candidate passed focused Metal parity plus `cargo check`, but same-binary
+  warmed p64/o64 did not improve decode: E293 measured 408.9 ms prefill /
+  162.8 ms mean ITL / 6.14 tok/s / 176.2 ms P99, while E294 current control
+  measured 418.6 ms / 162.6 ms / 6.15 tok/s / 179.7 ms P99. Memory pressure
+  was 81% free after E294. The candidate source was reverted and clean-source
+  `kiln-bench` rebuild passed.

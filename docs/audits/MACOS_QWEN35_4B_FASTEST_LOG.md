@@ -8723,3 +8723,58 @@ very high output-column parallelism and enough cache locality for this shape.
 Future MLP work should not retry a simple `x`-cache variant. The remaining MLP
 direction needs a more structural projection change, a better arithmetic path,
 or true model-forward batching that amortizes the whole MLP across requests.
+
+## Experiment E293-E294: Rejected MLP Gate/Up Fast-Exp Sigmoid
+
+Purpose:
+
+Test whether the decode MLP gate/up fused kernel benefits from replacing the
+SiLU sigmoid's standard `exp` with Metal's `fast::exp`. This targets the
+arithmetic inside E290's largest profiled decode MLP stage without changing
+memory layout or output materialization.
+
+Implementation notes:
+
+- Added temporary env gate `KILN_ENABLE_METAL_MLP_GATE_UP_FAST_EXP=1`.
+- Added a separate `kiln_mlp_gate_up_fast_exp_bf16` Metal kernel and pipeline.
+- Reverted the temporary source after measurement because decode was unchanged
+  within noise and the candidate used a less exact approximation.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_fast_exp_matches_reference --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Post-revert validation:
+
+- `git diff --check`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+E293 used `KILN_ENABLE_METAL_MLP_GATE_UP_FAST_EXP=1` in the same candidate binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E293 | gate/up `fast::exp` sigmoid | 408.9 ms | 6.14 | 162.8 ms | 162.4 ms | 176.2 ms | rejected/no win |
+| E294 | current gate/up control | 418.6 ms | 6.15 | 162.6 ms | 161.3 ms | 179.7 ms | control |
+
+Memory-pressure check:
+
+- After E294, `memory_pressure` reported 81% system-wide free memory.
+
+Artifacts:
+
+- `e293_m1_bs1_p64_o64_warmed_mlp_gate_up_fast_exp.log`
+- `e294_m1_bs1_p64_o64_warmed_mlp_gate_up_fast_exp_control.log`
+
+Takeaway:
+
+`fast::exp` does not produce a measurable decode win on the full path. Since
+the decode mean ITL is effectively tied and the candidate weakens arithmetic
+exactness, it is not worth carrying. Future MLP projection work should look for
+larger structural wins rather than swapping the scalar sigmoid approximation.
