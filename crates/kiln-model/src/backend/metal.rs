@@ -2114,25 +2114,40 @@ kernel void kiln_mlp_gate_up_bf16(
     constant uint& intermediate [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    const uint total = rows * intermediate;
+    const uint cols2 = (intermediate + 1) >> 1;
+    const uint total = rows * cols2;
     if (gid >= total) {
         return;
     }
 
-    const uint row = gid / intermediate;
-    const uint col = gid - row * intermediate;
+    const uint row = gid / cols2;
+    const uint col0 = (gid - row * cols2) << 1;
+    const uint col1 = col0 + 1;
+    const bool has_col1 = col1 < intermediate;
     const uint x_base = row * hidden;
-    float gate_acc = 0.0f;
-    float up_acc = 0.0f;
+    float gate_acc0 = 0.0f;
+    float up_acc0 = 0.0f;
+    float gate_acc1 = 0.0f;
+    float up_acc1 = 0.0f;
     for (uint i = 0; i < hidden; ++i) {
         const float xv = static_cast<float>(x[x_base + i]);
-        const uint w_idx = i * intermediate + col;
-        gate_acc += xv * static_cast<float>(gate_t[w_idx]);
-        up_acc += xv * static_cast<float>(up_t[w_idx]);
+        const uint w_idx0 = i * intermediate + col0;
+        gate_acc0 += xv * static_cast<float>(gate_t[w_idx0]);
+        up_acc0 += xv * static_cast<float>(up_t[w_idx0]);
+        if (has_col1) {
+            const uint w_idx1 = w_idx0 + 1;
+            gate_acc1 += xv * static_cast<float>(gate_t[w_idx1]);
+            up_acc1 += xv * static_cast<float>(up_t[w_idx1]);
+        }
     }
 
-    const float gate_sigmoid = 1.0f / (1.0f + exp(-gate_acc));
-    out[gid] = static_cast<bfloat>((gate_acc * gate_sigmoid) * up_acc);
+    const uint out_base = row * intermediate;
+    const float gate_sigmoid0 = 1.0f / (1.0f + exp(-gate_acc0));
+    out[out_base + col0] = static_cast<bfloat>((gate_acc0 * gate_sigmoid0) * up_acc0);
+    if (has_col1) {
+        const float gate_sigmoid1 = 1.0f / (1.0f + exp(-gate_acc1));
+        out[out_base + col1] = static_cast<bfloat>((gate_acc1 * gate_sigmoid1) * up_acc1);
+    }
 }
 "#;
 
@@ -3594,7 +3609,7 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
     let (batch, seq_len, hidden) = x.dims3()?;
     let (_, intermediate) = gate_t.dims2()?;
     let rows = batch * seq_len;
-    let total = rows * intermediate;
+    let total = rows * intermediate.div_ceil(2);
 
     // The kernel writes every row/intermediate element.
     let out = unsafe { Tensor::empty((batch, seq_len, intermediate), DType::BF16, x.device())? };

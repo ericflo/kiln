@@ -760,3 +760,12 @@
   The pass also confirmed true batch speedups need a broader model-forward API
   change: current batch fan-out still routes physical outputs through
   single-sequence generation with one `BlockTable`/linear state.
+- 2026-05-04 E301-E305: Accepted a low-level MLP gate/up decode kernel change.
+  The fused Metal BF16 gate/up kernel now computes two adjacent output columns
+  per thread, reducing repeated input-vector loads without the threadgroup
+  barrier cost that sank E291. Same-source A/Bs held: E301/E303 two-column
+  candidate measured 158.1/158.3 ms mean ITL versus E302/E304 old one-column
+  controls at 161.2/162.4 ms. Final default E305 measured 418.0 ms prefill /
+  157.8 ms mean ITL / 6.34 tok/s / 168.7 ms P99, with 76% memory free.
+  Focused Metal parity, `cargo check`, release `kiln-bench` build, and
+  `git diff --check` passed.

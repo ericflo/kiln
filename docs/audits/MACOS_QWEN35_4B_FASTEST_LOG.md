@@ -8911,3 +8911,72 @@ The first 128/512 runs looked slightly faster than the 256 control, but the
 repeat pair tied at 163.4 ms versus 163.3 ms mean ITL. Keep the default source
 unchanged. The next MLP attempt should change a real memory/materialization or
 projection boundary, not just dispatch geometry.
+
+## Experiment E301-E305: Accepted MLP Gate/Up Two-Column Decode Kernel
+
+Purpose:
+
+Reduce repeated input-vector loads in the decode MLP gate/up fused kernel
+without adding threadgroup barriers or changing arithmetic. E291 showed that
+threadgroup-caching `x` loses; this candidate instead has each thread compute
+two adjacent output columns, loading each `x[i]` once for two gate/up dot
+products. That trades more per-thread accumulators for fewer repeated `x`
+loads and fewer launched threads.
+
+Change:
+
+- Changed `kiln_mlp_gate_up_bf16` from one output column per thread to two
+  adjacent columns per thread.
+- Kept the same public Rust entry point and support gate.
+- Kept BF16 output materialization and the existing downstream MLP `down_proj`
+  path unchanged.
+- Handles odd intermediate sizes; focused parity uses intermediate size 97 to
+  cover the tail column.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_cols2_matches_reference --lib`
+  while the candidate was still a separate opt-in kernel.
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_matches_reference --lib`
+  after making the two-column mapping the default kernel.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+- `git diff --check`
+
+Full-model warmed p64/o64:
+
+All runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`
+in the same source family. E301/E303 used the temporary opt-in candidate, E302/E304
+were same-binary old-kernel controls, and E305 measured the final default
+source after removing the temporary env gate.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E301 | two-column gate/up candidate | 446.3 ms | 6.32 | 158.1 ms | 157.3 ms | 172.9 ms | candidate |
+| E302 | old one-column control | 418.6 ms | 6.21 | 161.2 ms | 160.2 ms | 176.9 ms | control |
+| E303 | two-column gate/up repeat | 419.5 ms | 6.32 | 158.3 ms | 157.4 ms | 174.5 ms | repeat win |
+| E304 | old one-column control repeat | 417.2 ms | 6.16 | 162.4 ms | 161.4 ms | 171.9 ms | control repeat |
+| E305 | final two-column default | 418.0 ms | 6.34 | 157.8 ms | 157.1 ms | 168.7 ms | accepted |
+
+Memory-pressure check:
+
+- After E305, `memory_pressure` reported 76% system-wide free memory.
+
+Artifacts:
+
+- `e301_m1_bs1_p64_o64_warmed_mlp_gate_up_cols2.log`
+- `e302_m1_bs1_p64_o64_warmed_mlp_gate_up_cols2_control.log`
+- `e303_m1_bs1_p64_o64_warmed_mlp_gate_up_cols2_repeat.log`
+- `e304_m1_bs1_p64_o64_warmed_mlp_gate_up_cols2_control_repeat.log`
+- `e305_m1_bs1_p64_o64_warmed_mlp_gate_up_cols2_default.log`
+
+Takeaway:
+
+This is a real low-level win on the largest profiled MLP decode stage. The
+repeat candidate improved mean ITL by about 4.1 ms versus the repeat control
+(158.3 ms vs 162.4 ms), and the final default improved to 157.8 ms with P99
+down to 168.7 ms. The warm measured prefill stayed at control levels once the
+outlier E301 run was repeated. Keep this as the default MLP gate/up decode
+kernel shape.
