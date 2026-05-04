@@ -1376,7 +1376,7 @@ impl ModelRunner {
                 .cuda_graph
                 .lock()
                 .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
-            if graph_runner.is_enabled() {
+            if graph_runner.is_enabled() && row_count == 1 {
                 let mut rows = Vec::with_capacity(row_count);
                 for (((&token, block_table), &seq_len), linear_state) in input_tokens
                     .iter()
