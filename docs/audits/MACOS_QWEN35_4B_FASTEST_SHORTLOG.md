@@ -690,3 +690,12 @@
   168.3 ms mean ITL / 5.94 tok/s / 225.6 ms P99, while E285 scalar-gate
   control measured 420.5 ms / 162.9 ms / 6.14 tok/s / 183.5 ms P99. Memory
   pressure was 81% free after E285. The candidate source was reverted.
+- 2026-05-04 E286: Refreshed current synchronized target selection from a
+  clean-source release `kiln-bench` rebuild. With profiling sync enabled, the
+  measured p64/o1 section reported 479.6 ms prefill and 209.6 ms mean ITL.
+  Decode layer sums were 145.346 ms across 24 GDN layers and 35.369 ms across
+  8 full-attention layers. Decode GDN stage ranking remains projection-led:
+  `in_proj` 34.354 ms, `out_proj` 17.142 ms, `gates_recur_gated_norm` 8.100
+  ms, `qkv_conv_norm` 6.253 ms. Prefill GDN also still ranks `in_proj` first
+  at 83.101 ms. Memory pressure was 81% free. Treat this as target selection,
+  not a latency baseline.

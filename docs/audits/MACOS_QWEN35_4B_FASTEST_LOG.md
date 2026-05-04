@@ -8375,3 +8375,72 @@ The current scalar-gate fused kernel remains the faster implementation. Future
 work should stay focused on the larger measured projection stages and on
 layout/fusion boundaries that remove materialized intermediates or batched
 forward serialization, not on this small intra-kernel scalar sharing path.
+
+## Experiment E286: Current Synchronized Target-Selection Profile
+
+Purpose:
+
+After accepting prepared batch prompt reuse and rejecting the threadgroup gate
+scalar candidate, refresh the synchronized layer and GDN-stage profile from a
+clean-source release `kiln-bench` rebuild. This profile is intentionally
+intrusive and should be used for ranking next low-level targets, not as a
+normal latency baseline.
+
+Command:
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 1 --temperature 0.0 --seed 286`
+
+Before the run, `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+rebuilt the benchmark binary from the clean branch head after reverting the
+temporary E284-E285 source.
+
+Measured output:
+
+- Final measured prefill p64 with profiling sync enabled: 479.6 ms.
+- Final measured decode p64/o1 with profiling sync enabled: 209.6 ms mean ITL.
+- `memory_pressure` after the run reported 81% system-wide free memory.
+
+Parsed measured section only:
+
+| Scope | Count | Sum | Avg |
+|---|---:|---:|---:|
+| Decode linear/GDN layers | 24 | 145.346 ms | 6.056 ms |
+| Decode full-attention layers | 8 | 35.369 ms | 4.421 ms |
+| Prefill linear/GDN layers | 24 | 324.472 ms | 13.520 ms |
+| Prefill full-attention layers | 8 | 125.743 ms | 15.718 ms |
+
+Decode GDN stage sums across 24 linear layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `in_proj` | 34.354 ms | 1.431 ms |
+| `out_proj` | 17.142 ms | 0.714 ms |
+| `gates_recur_gated_norm` | 8.100 ms | 0.338 ms |
+| `qkv_conv_norm` | 6.253 ms | 0.261 ms |
+| `gated_norm` | 0.055 ms | 0.002 ms |
+| `post_transpose` | 0.004 ms | ~0 ms |
+
+Prefill GDN stage sums across 24 linear layers:
+
+| Stage | Sum | Avg |
+|---|---:|---:|
+| `in_proj` | 83.101 ms | 3.463 ms |
+| `recurrent` | 33.273 ms | 1.386 ms |
+| `out_proj` | 27.527 ms | 1.147 ms |
+| `qkv_conv_split_norm` | 13.605 ms | 0.567 ms |
+| `gated_norm` | 7.455 ms | 0.311 ms |
+| `gates` | 5.718 ms | 0.238 ms |
+| `post_transpose` | 0.005 ms | ~0 ms |
+
+Artifact:
+
+- `e286_m1_p64_o1_current_profile.log`
+
+Takeaway:
+
+The current branch is materially faster in synchronized profiling than the
+older E255 target-selection run, but the ranking is unchanged enough to steer
+the next low-level pass: GDN `in_proj` remains the largest decode sub-stage,
+with GDN `out_proj` second and fused gates/recurrent/RMSNorm third. The next
+candidate should target projection work or a larger producer/consumer layout
+change; E284-E285 makes the small gate-scalar sharing path a dead end.
