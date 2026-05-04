@@ -8095,3 +8095,73 @@ cost in this shape, and P99 worsened substantially. The existing split
 need to remove more than one simple add, for example by carrying the result
 directly into the following RMSNorm/MLP boundary or by changing the producer and
 consumer layouts together.
+
+## Experiments E274-E277: Rejected Weighted LM-Head Greedy Decode
+
+Hypothesis:
+
+For greedy decode, final RMSNorm's inverse-RMS factor is a positive scalar for
+the single hidden row, so it cannot change the argmax. A Metal LM-head kernel
+that projects `(hidden * final_norm_weight)` directly could skip the final
+RMSNorm materialization and still return the same greedy token.
+
+Temporary change:
+
+- Added a `kiln_lm_head_weighted_bf16` Metal kernel that multiplies each hidden
+  element by the final norm weight inside the LM-head projection.
+- Routed `LmHeadMode::LastRowArgmaxOnly` through that kernel on Metal BF16 when
+  supported, before falling back to the existing `rms_norm + lm_head_argmax`
+  path.
+- Added `KILN_DISABLE_METAL_WEIGHTED_LM_HEAD=1` as a same-binary fallback.
+- Reverted the candidate before commit after two A/B pairs lost.
+
+Validation while the candidate was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed after formatting the new focused test.
+- `git diff --check`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_weighted_lm_head_argmax_matches_final_rmsnorm_argmax --lib`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_lm_head_argmax_matches_materialized_logits --lib`
+  - Passed.
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+  - Passed with the candidate applied.
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+All runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+Controls used `KILN_DISABLE_METAL_WEIGHTED_LM_HEAD=1` in the same candidate
+binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E274 | weighted LM-head greedy decode | 452.7 ms | 5.97 | 167.6 ms | 167.0 ms | 176.6 ms | rejected |
+| E275 | disabled control | 416.7 ms | 6.05 | 165.2 ms | 161.6 ms | 213.1 ms | control |
+| E276 | weighted LM-head greedy decode repeat | 416.0 ms | 5.96 | 167.8 ms | 167.4 ms | 176.3 ms | rejected |
+| E277 | disabled control repeat | 422.3 ms | 6.16 | 162.4 ms | 161.7 ms | 177.7 ms | control |
+
+Memory-pressure check:
+
+- After E277, `memory_pressure` reported 81% system-wide free memory, so the
+  repeated decode regression is treated as real rather than pressure noise.
+
+Artifacts:
+
+- `e274_weighted_lm_head_enabled.log`
+- `e275_weighted_lm_head_disabled_control.log`
+- `e276_weighted_lm_head_enabled_repeat.log`
+- `e277_weighted_lm_head_disabled_control_repeat.log`
+
+Takeaway:
+
+The math shortcut is valid for ideal argmax, but this implementation pushes the
+final-norm weight multiply into the large vocab projection. That adds one extra
+multiply for every hidden-by-vocab MAC and costs more than the skipped
+single-row RMSNorm materialization. If this direction is revisited, it needs a
+two-stage shape that cheaply prepares the weighted hidden row once, or a faster
+argmax kernel, rather than adding per-vocab work to the materialized LM-head
+projection.

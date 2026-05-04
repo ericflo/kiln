@@ -651,3 +651,13 @@
   239.2 ms P99, while disabled control was 417.4 ms / 159.9 ms / 6.25 tok/s
   with 178.9 ms P99. Memory pressure was 78% free after E273. The candidate
   source was reverted and clean-source release `kiln-bench` rebuild passed.
+- 2026-05-04 E274-E277: Rejected a weighted Metal LM-head greedy decode path.
+  The candidate used the fact that final RMSNorm's inverse-RMS scalar cannot
+  change greedy argmax, then projected `(hidden * final_norm_weight)` directly
+  in a new Metal BF16 LM-head kernel. Focused Metal argmax parity passed and
+  release `kiln-bench` built, but two same-binary p64/o64 A/B pairs lost:
+  E274 weighted was 452.7 ms prefill / 167.6 ms mean ITL / 5.97 tok/s versus
+  E275 disabled control 416.7 ms / 165.2 ms / 6.05 tok/s; repeat E276 was
+  416.0 ms / 167.8 ms / 5.96 tok/s versus E277 control 422.3 ms / 162.4 ms /
+  6.16 tok/s. Memory pressure was 81% free after E277. The candidate source
+  was reverted and clean-source release `kiln-bench` rebuild passed.
