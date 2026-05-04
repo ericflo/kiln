@@ -41,11 +41,11 @@ use tracing;
 use kiln_core::config::ModelConfig;
 
 use crate::backend::BackendRuntime;
-use crate::forward::{
-    model_forward_paged, model_forward_paged_with_graph_inputs, GpuWeights, LinearAttentionState,
-};
 #[cfg(feature = "cuda")]
 use crate::forward::PagedDecodeGraphInputs;
+use crate::forward::{
+    GpuWeights, LinearAttentionState, model_forward_paged, model_forward_paged_with_graph_inputs,
+};
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
 
@@ -73,7 +73,11 @@ impl CudaGraphKey {
         Self {
             stable_metadata,
             seq_len: if stable_metadata { 0 } else { seq_len },
-            block_table: if stable_metadata { Vec::new() } else { block_table.blocks.clone() },
+            block_table: if stable_metadata {
+                Vec::new()
+            } else {
+                block_table.blocks.clone()
+            },
             max_seqlen_k,
             max_blocks_per_seq,
         }
@@ -203,8 +207,15 @@ impl CudaGraphRunner {
     ) -> Result<candle_core::Tensor> {
         if !self.enabled {
             return Self::eager_forward(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             );
         }
 
@@ -215,8 +226,15 @@ impl CudaGraphRunner {
             #[cfg(feature = "cuda")]
             {
                 match Self::eager_forward_with_position_buffer(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 ) {
                     Ok(logits) => return Ok(logits),
                     Err(e) => {
@@ -227,8 +245,15 @@ impl CudaGraphRunner {
                 }
             }
             return Self::eager_forward(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             );
         }
 
@@ -246,16 +271,33 @@ impl CudaGraphRunner {
                         tracing::warn!("Failed to update token buffer: {e}, falling back to eager");
                         self.captured.remove(&requested_key);
                         return Self::eager_forward(
-                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                            linear_state, lora,
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
                         );
                     }
-                    if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len) {
-                        tracing::warn!("Failed to update position buffer: {e}, falling back to eager");
+                    if let Err(e) = Self::update_position_buffer(&captured.position_buffer, seq_len)
+                    {
+                        tracing::warn!(
+                            "Failed to update position buffer: {e}, falling back to eager"
+                        );
                         self.captured.remove(&requested_key);
                         return Self::eager_forward(
-                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                            linear_state, lora,
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
                         );
                     }
                     if let Err(e) = Self::update_rotary_buffers(
@@ -264,14 +306,27 @@ impl CudaGraphRunner {
                         config,
                         seq_len,
                     ) {
-                        tracing::warn!("Failed to update rotary graph buffers: {e}, falling back to eager");
+                        tracing::warn!(
+                            "Failed to update rotary graph buffers: {e}, falling back to eager"
+                        );
                         self.captured.remove(&requested_key);
                         return Self::eager_forward(
-                            backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                            linear_state, lora,
+                            backend,
+                            token_id,
+                            weights,
+                            config,
+                            paged_cache,
+                            block_table,
+                            seq_len,
+                            linear_state,
+                            lora,
                         );
                     }
-                    if let (Some(block_table_buffer), Some(seqused_k_buffer), Some(kv_slot_buffer)) = (
+                    if let (
+                        Some(block_table_buffer),
+                        Some(seqused_k_buffer),
+                        Some(kv_slot_buffer),
+                    ) = (
                         captured.block_table_buffer.as_ref(),
                         captured.seqused_k_buffer.as_ref(),
                         captured.kv_slot_buffer.as_ref(),
@@ -285,11 +340,20 @@ impl CudaGraphRunner {
                             seq_len,
                             captured.max_seqlen_k,
                         ) {
-                            tracing::warn!("Failed to update paged graph metadata buffers: {e}, falling back to eager");
+                            tracing::warn!(
+                                "Failed to update paged graph metadata buffers: {e}, falling back to eager"
+                            );
                             self.captured.remove(&requested_key);
                             return Self::eager_forward(
-                                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                                linear_state, lora,
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
                             );
                         }
                     }
@@ -307,8 +371,15 @@ impl CudaGraphRunner {
                             tracing::warn!("CUDA graph replay failed: {e}, falling back to eager");
                             self.captured.remove(&requested_key);
                             return Self::eager_forward(
-                                backend, token_id, weights, config, paged_cache, block_table,
-                                seq_len, linear_state, lora,
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
                             );
                         }
                     }
@@ -333,23 +404,44 @@ impl CudaGraphRunner {
                     "CUDA graph capture skipped: paged metadata shape cache is full"
                 );
                 return Self::eager_forward(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
             // Phase 2: capture
             match self.try_capture(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             ) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
                     tracing::warn!("CUDA graph capture failed: {e:#}, using eager decode");
                     self.enabled = false;
                     return Self::eager_forward(
-                        backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                        linear_state, lora,
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
                     );
                 }
             }
@@ -357,7 +449,14 @@ impl CudaGraphRunner {
 
         #[cfg(not(feature = "cuda"))]
         Self::eager_forward(
-            backend, token_id, weights, config, paged_cache, block_table, seq_len, linear_state,
+            backend,
+            token_id,
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            linear_state,
             lora,
         )
     }
@@ -385,7 +484,9 @@ impl CudaGraphRunner {
         let mut sin = Vec::with_capacity(half_rotary);
         for i in 0..half_rotary {
             let inv_freq = 1.0f32
-                / (config.rope_theta.powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
+                / (config
+                    .rope_theta
+                    .powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
             let freq = position as f32 * inv_freq;
             cos.push(freq.cos());
             sin.push(freq.sin());
@@ -422,7 +523,8 @@ impl CudaGraphRunner {
         Self::update_cuda_scalar(seqused_k_buffer, &attention_len, "seqused_k buffer")?;
         let slot = [block_table
             .slot_for(seq_len, paged_cache.block_size())
-            .with_context(|| format!("no slot for decode position {seq_len}"))? as u32];
+            .with_context(|| format!("no slot for decode position {seq_len}"))?
+            as u32];
         Self::update_cuda_scalar(kv_slot_buffer, &slot, "KV slot buffer")?;
         Ok(())
     }
@@ -452,9 +554,7 @@ impl CudaGraphRunner {
         unsafe {
             let (dev_ptr, _guard) = slice.device_ptr(&stream);
             candle_core::cuda_backend::cudarc::driver::result::memcpy_htod_async(
-                dev_ptr,
-                value,
-                raw_stream,
+                dev_ptr, value, raw_stream,
             )
             .map_err(|e| anyhow::anyhow!("memcpy_htod_async for {label}: {e:?}"))?;
         }
@@ -495,17 +595,26 @@ impl CudaGraphRunner {
         // device pointers get baked into the captured graph.
         let token_buffer = Self::new_token_buffer(device, token_id)?;
         let position_buffer = Self::new_position_buffer(device, seq_len)?;
-        let output_logits =
-            Self::new_output_logits(config, device, weights.embed_tokens.dtype())?;
+        let output_logits = Self::new_output_logits(config, device, weights.embed_tokens.dtype())?;
         let output_logits_for_capture = output_logits.clone();
         let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
         let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
         let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
         let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
             (
-                Some(Self::new_block_table_buffer(block_table, paged_cache, key.max_seqlen_k, device)?),
+                Some(Self::new_block_table_buffer(
+                    block_table,
+                    paged_cache,
+                    key.max_seqlen_k,
+                    device,
+                )?),
                 Some(Self::new_seqused_k_buffer(device, seq_len + 1)?),
-                Some(Self::new_kv_slot_buffer(block_table, paged_cache, seq_len, device)?),
+                Some(Self::new_kv_slot_buffer(
+                    block_table,
+                    paged_cache,
+                    seq_len,
+                    device,
+                )?),
             )
         } else {
             (None, None, None)
@@ -593,22 +702,25 @@ impl CudaGraphRunner {
                     config.num_layers,
                 );
                 let max_seqlen_k = key.max_seqlen_k;
-                self.captured.insert(key, CapturedDecodeGraph {
-                    graph,
-                    output_logits,
-                    adapter_gen: self.adapter_generation,
-                    token_buffer,
-                    position_buffer,
-                    block_table_buffer,
-                    seqused_k_buffer,
-                    kv_slot_buffer,
-                    rotary_cos_buffer,
-                    rotary_sin_buffer,
-                    _paged_decode_outputs: paged_decode_outputs,
-                    _paged_decode_lse: paged_decode_lse,
-                    max_seqlen_k,
-                    _gdn_decode_outputs: gdn_decode_outputs,
-                });
+                self.captured.insert(
+                    key,
+                    CapturedDecodeGraph {
+                        graph,
+                        output_logits,
+                        adapter_gen: self.adapter_generation,
+                        token_buffer,
+                        position_buffer,
+                        block_table_buffer,
+                        seqused_k_buffer,
+                        kv_slot_buffer,
+                        rotary_cos_buffer,
+                        rotary_sin_buffer,
+                        _paged_decode_outputs: paged_decode_outputs,
+                        _paged_decode_lse: paged_decode_lse,
+                        max_seqlen_k,
+                        _gdn_decode_outputs: gdn_decode_outputs,
+                    },
+                );
                 Ok(logits)
             }
             Ok(None) => {
@@ -716,7 +828,8 @@ impl CudaGraphRunner {
     ) -> Result<Tensor> {
         let slot = block_table
             .slot_for(seq_len, paged_cache.block_size())
-            .with_context(|| format!("no slot for decode position {seq_len}"))? as u32;
+            .with_context(|| format!("no slot for decode position {seq_len}"))?
+            as u32;
         Tensor::new(&[slot], device).context("create CUDA graph KV slot buffer")
     }
 
@@ -772,8 +885,12 @@ impl CudaGraphRunner {
                 .context("create CUDA graph paged decode output")?,
             );
             lse.push(
-                Tensor::zeros((1, config.num_attention_heads, 1), candle_core::DType::F32, device)
-                    .context("create CUDA graph paged decode LSE")?,
+                Tensor::zeros(
+                    (1, config.num_attention_heads, 1),
+                    candle_core::DType::F32,
+                    device,
+                )
+                .context("create CUDA graph paged decode LSE")?,
             );
         }
         Ok((outputs, lse))

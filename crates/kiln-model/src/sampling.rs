@@ -69,7 +69,6 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     Ok(ids.to_vec1::<u32>()?)
 }
 
-
 /// Sample one token for every batch row in a logits tensor.
 ///
 /// Fast paths cover the hot serving cases without per-row synchronization:

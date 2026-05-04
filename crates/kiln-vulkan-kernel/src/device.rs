@@ -290,7 +290,11 @@ impl VulkanDevice {
             kiln_vulkan_device.as_deref(),
             ggml_vk_visible_devices.as_deref(),
         ) {
-            tracing::info!(device_index = idx, source, "using explicit Vulkan device selection");
+            tracing::info!(
+                device_index = idx,
+                source,
+                "using explicit Vulkan device selection"
+            );
             return Ok(physical_devices[idx]);
         }
 

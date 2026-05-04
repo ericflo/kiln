@@ -69,7 +69,10 @@ const SHADERS: &[(&str, &str)] = &[
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
 ];
 
-fn compile_shader_command(glsl_path: &std::path::Path, spv_path: &std::path::Path) -> std::io::Result<std::process::Output> {
+fn compile_shader_command(
+    glsl_path: &std::path::Path,
+    spv_path: &std::path::Path,
+) -> std::io::Result<std::process::Output> {
     let glslc = std::process::Command::new("glslc")
         .arg(glsl_path)
         .arg("-o")

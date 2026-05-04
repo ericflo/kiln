@@ -785,7 +785,6 @@ mod tests {
     }
 }
 
-
 /// Flash-attention paged decode with graph-stable dynamic sequence lengths.
 ///
 /// `max_seqlen_k` fixes the captured kernel launch shape. `seqused_k` is a
@@ -813,22 +812,34 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
         candle_core::bail!("paged decode dyn seqlen head_dim mismatch");
     }
     if num_heads % num_heads_k != 0 {
-        candle_core::bail!("num_heads ({num_heads}) must be divisible by num_heads_k ({num_heads_k})");
+        candle_core::bail!(
+            "num_heads ({num_heads}) must be divisible by num_heads_k ({num_heads_k})"
+        );
     }
     if q.dtype() != DType::BF16 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
         candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires bf16 q/k/v");
     }
     if head_dim != 128 && head_dim != 256 {
-        candle_core::bail!("flash_attn_paged_decode_dyn_seqlen only supports head_dim=128,256, got {head_dim}");
+        candle_core::bail!(
+            "flash_attn_paged_decode_dyn_seqlen only supports head_dim=128,256, got {head_dim}"
+        );
     }
     if page_block_size == 0 || 128 % page_block_size != 0 {
-        candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires page_block_size to divide 128, got {page_block_size}");
+        candle_core::bail!(
+            "flash_attn_paged_decode_dyn_seqlen requires page_block_size to divide 128, got {page_block_size}"
+        );
     }
     if block_table.dtype() != DType::U32 {
-        candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires block_table dtype=u32, got {:?}", block_table.dtype());
+        candle_core::bail!(
+            "flash_attn_paged_decode_dyn_seqlen requires block_table dtype=u32, got {:?}",
+            block_table.dtype()
+        );
     }
     if seqused_k.dtype() != DType::I32 {
-        candle_core::bail!("flash_attn_paged_decode_dyn_seqlen requires seqused_k dtype=i32, got {:?}", seqused_k.dtype());
+        candle_core::bail!(
+            "flash_attn_paged_decode_dyn_seqlen requires seqused_k dtype=i32, got {:?}",
+            seqused_k.dtype()
+        );
     }
     let (bt_batch, max_blocks_per_seq) = block_table.dims2()?;
     if bt_batch != b {
@@ -895,13 +906,27 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
         let stream = q_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let q_slice = q_cuda.as_cuda_slice::<bf16>()?.slice(q_layout.start_offset()..);
-        let k_slice = k_cuda.as_cuda_slice::<bf16>()?.slice(k_layout.start_offset()..);
-        let v_slice = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
-        let bt_slice = bt_cuda.as_cuda_slice::<u32>()?.slice(bt_layout.start_offset()..);
-        let seq_slice = seq_cuda.as_cuda_slice::<i32>()?.slice(seq_layout.start_offset()..);
-        let out_slice = out_cuda.as_cuda_slice::<bf16>()?.slice(out_layout.start_offset()..);
-        let lse_slice = lse_cuda.as_cuda_slice::<f32>()?.slice(lse_layout.start_offset()..);
+        let q_slice = q_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(q_layout.start_offset()..);
+        let k_slice = k_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(k_layout.start_offset()..);
+        let v_slice = v_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(v_layout.start_offset()..);
+        let bt_slice = bt_cuda
+            .as_cuda_slice::<u32>()?
+            .slice(bt_layout.start_offset()..);
+        let seq_slice = seq_cuda
+            .as_cuda_slice::<i32>()?
+            .slice(seq_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+        let lse_slice = lse_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(lse_layout.start_offset()..);
 
         unsafe {
             let (q_ptr, _g1) = q_slice.device_ptr(&stream);
@@ -931,7 +956,9 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
                 raw_stream,
             );
             if status != 0 {
-                candle_core::bail!("kiln_flash_attn_fwd_paged_decode_dyn_seqlen failed with status {status}");
+                candle_core::bail!(
+                    "kiln_flash_attn_fwd_paged_decode_dyn_seqlen failed with status {status}"
+                );
             }
         }
     }
@@ -952,11 +979,19 @@ pub fn paged_kv_write_token_major_bf16_slot(
     if v_pool.dims3()? != k_pool.dims3()? {
         candle_core::bail!("paged_kv_write_token_major_bf16_slot k/v pool dims mismatch");
     }
-    if k.dtype() != DType::BF16 || v.dtype() != DType::BF16 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
+    if k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+    {
         candle_core::bail!("paged_kv_write_token_major_bf16_slot requires bf16 tensors");
     }
     if slot.dtype() != DType::U32 || slot.dims() != [1] {
-        candle_core::bail!("paged_kv_write_token_major_bf16_slot requires u32 slot shape [1], got {:?} {:?}", slot.dtype(), slot.dims());
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16_slot requires u32 slot shape [1], got {:?} {:?}",
+            slot.dtype(),
+            slot.dims()
+        );
     }
     let k = k.contiguous()?;
     let v = v.contiguous()?;
@@ -982,11 +1017,21 @@ pub fn paged_kv_write_token_major_bf16_slot(
     let slot_cuda = cuda!(slot_storage, "slot");
     let stream = k_cuda.device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
-    let k_slice = k_cuda.as_cuda_slice::<bf16>()?.slice(k_layout.start_offset()..);
-    let v_slice = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
-    let kp_slice = kp_cuda.as_cuda_slice::<bf16>()?.slice(kp_layout.start_offset()..);
-    let vp_slice = vp_cuda.as_cuda_slice::<bf16>()?.slice(vp_layout.start_offset()..);
-    let slot_slice = slot_cuda.as_cuda_slice::<u32>()?.slice(slot_layout.start_offset()..);
+    let k_slice = k_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(k_layout.start_offset()..);
+    let v_slice = v_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(v_layout.start_offset()..);
+    let kp_slice = kp_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(kp_layout.start_offset()..);
+    let vp_slice = vp_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(vp_layout.start_offset()..);
+    let slot_slice = slot_cuda
+        .as_cuda_slice::<u32>()?
+        .slice(slot_layout.start_offset()..);
     unsafe {
         let (k_ptr, _g1) = k_slice.device_ptr(&stream);
         let (v_ptr, _g2) = v_slice.device_ptr(&stream);
@@ -1004,7 +1049,9 @@ pub fn paged_kv_write_token_major_bf16_slot(
             raw_stream,
         );
         if status != 0 {
-            candle_core::bail!("kiln_paged_kv_write_token_major_bf16_slot failed with status {status}");
+            candle_core::bail!(
+                "kiln_paged_kv_write_token_major_bf16_slot failed with status {status}"
+            );
         }
     }
     Ok(())

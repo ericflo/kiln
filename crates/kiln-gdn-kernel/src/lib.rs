@@ -59,7 +59,8 @@
 //! chunkwise recurrence and are *not* covered by this crate.
 
 use candle_core::{
-    CustomOp1, CustomOp3, DType, Layout, Result, Shape, Tensor, backend::BackendStorage,
+    CustomOp1, CustomOp3, DType, Layout, Result, Shape, Tensor,
+    backend::BackendStorage,
     cuda_backend::{CudaStorage, cudarc::driver::DevicePtr},
 };
 use half::bf16;
@@ -577,14 +578,9 @@ thread_local! {
     static DECODE_GATES_RECURRENT_OUTPUTS: RefCell<Option<DecodeGatesRecurrentOutputs>> = const { RefCell::new(None) };
 }
 
-pub fn with_decode_gates_recurrent_outputs<R>(
-    outputs: Vec<Tensor>,
-    f: impl FnOnce() -> R,
-) -> R {
-    let previous = DECODE_GATES_RECURRENT_OUTPUTS.replace(Some(DecodeGatesRecurrentOutputs {
-        outputs,
-        next: 0,
-    }));
+pub fn with_decode_gates_recurrent_outputs<R>(outputs: Vec<Tensor>, f: impl FnOnce() -> R) -> R {
+    let previous = DECODE_GATES_RECURRENT_OUTPUTS
+        .replace(Some(DecodeGatesRecurrentOutputs { outputs, next: 0 }));
     let result = f();
     DECODE_GATES_RECURRENT_OUTPUTS.replace(previous);
     result
@@ -652,8 +648,14 @@ pub fn gdn_decode_gates_recurrent(
     let v = gdn_gates_ctx(v.contiguous(), "gdn_decode_gates_recurrent v contiguous")?;
     let a = gdn_gates_ctx(a.contiguous(), "gdn_decode_gates_recurrent a contiguous")?;
     let b = gdn_gates_ctx(b.contiguous(), "gdn_decode_gates_recurrent b contiguous")?;
-    let a_log = gdn_gates_ctx(a_log.contiguous(), "gdn_decode_gates_recurrent a_log contiguous")?;
-    let dt_bias = gdn_gates_ctx(dt_bias.contiguous(), "gdn_decode_gates_recurrent dt_bias contiguous")?;
+    let a_log = gdn_gates_ctx(
+        a_log.contiguous(),
+        "gdn_decode_gates_recurrent a_log contiguous",
+    )?;
+    let dt_bias = gdn_gates_ctx(
+        dt_bias.contiguous(),
+        "gdn_decode_gates_recurrent dt_bias contiguous",
+    )?;
     let out = match next_decode_gates_recurrent_output((batch, 1, value_heads, dv), device)? {
         Some(out) => out,
         None => gdn_gates_ctx(
@@ -801,7 +803,9 @@ pub fn gdn_decode_gates_recurrent(
                         raw_stream,
                     )
                 }
-                other => candle_core::bail!("kiln-gdn-kernel: unsupported fused decode v dtype {other:?}"),
+                other => candle_core::bail!(
+                    "kiln-gdn-kernel: unsupported fused decode v dtype {other:?}"
+                ),
             };
             if status != 0 {
                 candle_core::bail!(
@@ -911,17 +915,29 @@ unsafe extern "C" {
 struct GdnGateBetaOp;
 
 impl CustomOp1 for GdnGateBetaOp {
-    fn name(&self) -> &'static str { "gdn-gate-beta" }
+    fn name(&self) -> &'static str {
+        "gdn-gate-beta"
+    }
 
-    fn cpu_fwd(&self, _s: &candle_core::CpuStorage, _l: &Layout) -> Result<(candle_core::CpuStorage, Shape)> {
+    fn cpu_fwd(
+        &self,
+        _s: &candle_core::CpuStorage,
+        _l: &Layout,
+    ) -> Result<(candle_core::CpuStorage, Shape)> {
         candle_core::bail!("GdnGateBetaOp CPU fallback is not implemented")
     }
 
     fn cuda_fwd(&self, s_b: &CudaStorage, l_b: &Layout) -> Result<(CudaStorage, Shape)> {
         let dims = l_b.shape().dims().to_vec();
-        let nv = *dims.last().ok_or_else(|| candle_core::Error::Msg("GdnGateBetaOp: b must have rank >= 1".to_string()))?;
-        if nv == 0 || nv > 256 { candle_core::bail!("GdnGateBetaOp: nv {nv} outside 1..=256"); }
-        if !l_b.is_contiguous() { candle_core::bail!("GdnGateBetaOp requires contiguous b"); }
+        let nv = *dims.last().ok_or_else(|| {
+            candle_core::Error::Msg("GdnGateBetaOp: b must have rank >= 1".to_string())
+        })?;
+        if nv == 0 || nv > 256 {
+            candle_core::bail!("GdnGateBetaOp: nv {nv} outside 1..=256");
+        }
+        if !l_b.is_contiguous() {
+            candle_core::bail!("GdnGateBetaOp requires contiguous b");
+        }
         let rows: usize = dims[..dims.len() - 1].iter().product();
         let device = s_b.device();
         let stream = device.cuda_stream();
@@ -932,28 +948,65 @@ impl CustomOp1 for GdnGateBetaOp {
         unsafe {
             let (b_ptr, _g1) = b_slice.device_ptr(&stream);
             let (out_ptr, _g2) = out_slice.device_ptr(&stream);
-            let status = kiln_gdn_gate_beta_bf16(b_ptr as *const _, out_ptr as *mut _, rows as i32, nv as i32, raw_stream);
-            if status != 0 { candle_core::bail!("GdnGateBetaOp: kernel failed with status {status}"); }
+            let status = kiln_gdn_gate_beta_bf16(
+                b_ptr as *const _,
+                out_ptr as *mut _,
+                rows as i32,
+                nv as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("GdnGateBetaOp: kernel failed with status {status}");
+            }
         }
-        Ok((CudaStorage::wrap_cuda_slice(out_slice, device.clone()), Shape::from(dims.as_slice())))
+        Ok((
+            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            Shape::from(dims.as_slice()),
+        ))
     }
 }
 
 struct GdnGateGOp;
 
 impl CustomOp3 for GdnGateGOp {
-    fn name(&self) -> &'static str { "gdn-gate-g" }
+    fn name(&self) -> &'static str {
+        "gdn-gate-g"
+    }
 
-    fn cpu_fwd(&self, _s1: &candle_core::CpuStorage, _l1: &Layout, _s2: &candle_core::CpuStorage, _l2: &Layout, _s3: &candle_core::CpuStorage, _l3: &Layout) -> Result<(candle_core::CpuStorage, Shape)> {
+    fn cpu_fwd(
+        &self,
+        _s1: &candle_core::CpuStorage,
+        _l1: &Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &Layout,
+        _s3: &candle_core::CpuStorage,
+        _l3: &Layout,
+    ) -> Result<(candle_core::CpuStorage, Shape)> {
         candle_core::bail!("GdnGateGOp CPU fallback is not implemented")
     }
 
-    fn cuda_fwd(&self, s_a: &CudaStorage, l_a: &Layout, s_al: &CudaStorage, l_al: &Layout, s_dt: &CudaStorage, l_dt: &Layout) -> Result<(CudaStorage, Shape)> {
+    fn cuda_fwd(
+        &self,
+        s_a: &CudaStorage,
+        l_a: &Layout,
+        s_al: &CudaStorage,
+        l_al: &Layout,
+        s_dt: &CudaStorage,
+        l_dt: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
         let dims = l_a.shape().dims().to_vec();
-        let nv = *dims.last().ok_or_else(|| candle_core::Error::Msg("GdnGateGOp: a must have rank >= 1".to_string()))?;
-        if nv == 0 || nv > 256 { candle_core::bail!("GdnGateGOp: nv {nv} outside 1..=256"); }
-        if l_al.shape().dims() != [nv] || l_dt.shape().dims() != [nv] { candle_core::bail!("GdnGateGOp: params must have shape [nv]"); }
-        if !l_a.is_contiguous() || !l_al.is_contiguous() || !l_dt.is_contiguous() { candle_core::bail!("GdnGateGOp requires contiguous inputs"); }
+        let nv = *dims.last().ok_or_else(|| {
+            candle_core::Error::Msg("GdnGateGOp: a must have rank >= 1".to_string())
+        })?;
+        if nv == 0 || nv > 256 {
+            candle_core::bail!("GdnGateGOp: nv {nv} outside 1..=256");
+        }
+        if l_al.shape().dims() != [nv] || l_dt.shape().dims() != [nv] {
+            candle_core::bail!("GdnGateGOp: params must have shape [nv]");
+        }
+        if !l_a.is_contiguous() || !l_al.is_contiguous() || !l_dt.is_contiguous() {
+            candle_core::bail!("GdnGateGOp requires contiguous inputs");
+        }
         let rows: usize = dims[..dims.len() - 1].iter().product();
         let device = s_a.device();
         let stream = device.cuda_stream();
@@ -968,10 +1021,23 @@ impl CustomOp3 for GdnGateGOp {
             let (al_ptr, _g2) = al_slice.device_ptr(&stream);
             let (dt_ptr, _g3) = dt_slice.device_ptr(&stream);
             let (out_ptr, _g4) = out_slice.device_ptr(&stream);
-            let status = kiln_gdn_gate_g_bf16(a_ptr as *const _, al_ptr as *const _, dt_ptr as *const _, out_ptr as *mut _, rows as i32, nv as i32, raw_stream);
-            if status != 0 { candle_core::bail!("GdnGateGOp: kernel failed with status {status}"); }
+            let status = kiln_gdn_gate_g_bf16(
+                a_ptr as *const _,
+                al_ptr as *const _,
+                dt_ptr as *const _,
+                out_ptr as *mut _,
+                rows as i32,
+                nv as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("GdnGateGOp: kernel failed with status {status}");
+            }
         }
-        Ok((CudaStorage::wrap_cuda_slice(out_slice, device.clone()), Shape::from(dims.as_slice())))
+        Ok((
+            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            Shape::from(dims.as_slice()),
+        ))
     }
 }
 
@@ -1068,8 +1134,14 @@ pub fn gdn_gates(
     let a_log = gdn_gates_ctx(a_log.contiguous(), "gdn_gates a_log contiguous")?;
     let dt_bias = gdn_gates_ctx(dt_bias.contiguous(), "gdn_gates dt_bias contiguous")?;
 
-    let beta = gdn_gates_ctx(Tensor::zeros(shape.clone(), DType::BF16, device), "gdn_gates beta zeros")?;
-    let g = gdn_gates_ctx(Tensor::zeros(shape, DType::BF16, device), "gdn_gates g zeros")?;
+    let beta = gdn_gates_ctx(
+        Tensor::zeros(shape.clone(), DType::BF16, device),
+        "gdn_gates beta zeros",
+    )?;
+    let g = gdn_gates_ctx(
+        Tensor::zeros(shape, DType::BF16, device),
+        "gdn_gates g zeros",
+    )?;
 
     {
         let (a_storage, a_layout) = a.storage_and_layout();
@@ -1134,11 +1206,15 @@ pub fn gdn_gates(
                 (DType::BF16, DType::BF16) => {
                     let al_slice = al_cuda
                         .as_cuda_slice::<bf16>()
-            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
+                        .map_err(|err| {
+                            candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}"))
+                        })?
                         .slice(al_layout.start_offset()..);
                     let dt_slice = dt_cuda
                         .as_cuda_slice::<bf16>()
-            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
+                        .map_err(|err| {
+                            candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}"))
+                        })?
                         .slice(dt_layout.start_offset()..);
                     let (al_ptr, _g3) = al_slice.device_ptr(&stream);
                     let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
@@ -1157,11 +1233,15 @@ pub fn gdn_gates(
                 (DType::F32, DType::F32) => {
                     let al_slice = al_cuda
                         .as_cuda_slice::<f32>()
-                        .map_err(|err| candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}")))?
+                        .map_err(|err| {
+                            candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}"))
+                        })?
                         .slice(al_layout.start_offset()..);
                     let dt_slice = dt_cuda
                         .as_cuda_slice::<f32>()
-                        .map_err(|err| candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}")))?
+                        .map_err(|err| {
+                            candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}"))
+                        })?
                         .slice(dt_layout.start_offset()..);
                     let (al_ptr, _g3) = al_slice.device_ptr(&stream);
                     let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
@@ -1180,11 +1260,15 @@ pub fn gdn_gates(
                 (DType::F32, DType::BF16) => {
                     let al_slice = al_cuda
                         .as_cuda_slice::<f32>()
-                        .map_err(|err| candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}")))?
+                        .map_err(|err| {
+                            candle_core::Error::Msg(format!("gdn_gates f32 as_cuda_slice: {err}"))
+                        })?
                         .slice(al_layout.start_offset()..);
                     let dt_slice = dt_cuda
                         .as_cuda_slice::<bf16>()
-            .map_err(|err| candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}")))?
+                        .map_err(|err| {
+                            candle_core::Error::Msg(format!("gdn_gates bf16 as_cuda_slice: {err}"))
+                        })?
                         .slice(dt_layout.start_offset()..);
                     let (al_ptr, _g3) = al_slice.device_ptr(&stream);
                     let (dt_ptr, _g4) = dt_slice.device_ptr(&stream);
