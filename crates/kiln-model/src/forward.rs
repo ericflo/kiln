@@ -7729,6 +7729,71 @@ pub fn model_forward_head(
     Ok(logits)
 }
 
+const DEFAULT_DECODE_LM_HEAD_BATCH: usize = 4;
+
+fn decode_lm_head_batch_size() -> usize {
+    parse_decode_lm_head_batch(std::env::var("KILN_DECODE_LM_HEAD_BATCH").ok().as_deref())
+}
+
+fn parse_decode_lm_head_batch(value: Option<&str>) -> usize {
+    value
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&batch_size| batch_size > 0)
+        .unwrap_or(DEFAULT_DECODE_LM_HEAD_BATCH)
+}
+
+fn decode_lm_head_microbatch_ranges(
+    row_count: usize,
+    microbatch_size: usize,
+) -> impl Iterator<Item = (usize, usize)> {
+    let bounded = microbatch_size.max(1);
+    (0..row_count)
+        .step_by(bounded)
+        .map(move |start| (start, (row_count - start).min(bounded)))
+}
+
+/// Apply final RMSNorm + LM head to bounded row microbatches and sample each row.
+///
+/// The batched decode actor still performs one model forward per iteration and
+/// receives a batched hidden tensor. Only the vocab projection is chunked here,
+/// which bounds the transient LM-head workspace without reverting decode to a
+/// per-request row loop. Results are appended in the original row order.
+pub fn model_forward_head_sample_microbatches(
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    sampling_params: &[(f32, f32, u32, Option<u64>)],
+) -> Result<Vec<u32>> {
+    if sampling_params.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let row_count = hidden
+        .dims()
+        .first()
+        .copied()
+        .context("batched decode hidden tensor must include a batch dimension")?;
+    anyhow::ensure!(
+        row_count == sampling_params.len(),
+        "batched decode hidden row count {row_count} != sampling params length {}",
+        sampling_params.len()
+    );
+
+    let microbatch_size = decode_lm_head_batch_size().min(row_count).max(1);
+    let mut sampled = Vec::with_capacity(row_count);
+    for (start, len) in decode_lm_head_microbatch_ranges(row_count, microbatch_size) {
+        let chunk_sampled = {
+            let chunk_hidden = hidden.narrow(0, start, len)?;
+            let logits = model_forward_head(&chunk_hidden, weights, config)
+                .with_context(|| format!("batched decode lm head rows {start}..{}", start + len))?;
+            crate::sampling::sample_rows_with_params(&logits, &sampling_params[start..start + len])
+                .with_context(|| format!("batched decode sampling rows {start}..{}", start + len))?
+        };
+        sampled.extend(chunk_sampled);
+    }
+    Ok(sampled)
+}
+
 /// Apply only the final RMSNorm (no LM head projection).
 ///
 /// Used by the FLCE training path to produce the post-final-RMSNorm hidden
@@ -9508,6 +9573,37 @@ mod tests {
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {
         CpuBackend::new(device.clone())
+    }
+
+    #[test]
+    fn test_decode_lm_head_batch_env_parsing() {
+        assert_eq!(parse_decode_lm_head_batch(None), DEFAULT_DECODE_LM_HEAD_BATCH);
+        assert_eq!(parse_decode_lm_head_batch(Some("")), DEFAULT_DECODE_LM_HEAD_BATCH);
+        assert_eq!(parse_decode_lm_head_batch(Some("0")), DEFAULT_DECODE_LM_HEAD_BATCH);
+        assert_eq!(
+            parse_decode_lm_head_batch(Some("not-a-number")),
+            DEFAULT_DECODE_LM_HEAD_BATCH
+        );
+        assert_eq!(parse_decode_lm_head_batch(Some(" 2 ")), 2);
+        assert_eq!(parse_decode_lm_head_batch(Some("8")), 8);
+    }
+
+    #[test]
+    fn test_decode_lm_head_microbatch_ranges_preserve_order() {
+        let empty: Vec<_> = decode_lm_head_microbatch_ranges(0, 4).collect();
+        assert!(empty.is_empty());
+
+        let ranges: Vec<_> = decode_lm_head_microbatch_ranges(9, 4).collect();
+        assert_eq!(ranges, vec![(0, 4), (4, 4), (8, 1)]);
+
+        let covered: Vec<_> = ranges
+            .iter()
+            .flat_map(|&(start, len)| start..start + len)
+            .collect();
+        assert_eq!(covered, (0..9).collect::<Vec<_>>());
+
+        let zero_is_bounded: Vec<_> = decode_lm_head_microbatch_ranges(3, 0).collect();
+        assert_eq!(zero_is_bounded, vec![(0, 1), (1, 1), (2, 1)]);
     }
 
     #[test]
