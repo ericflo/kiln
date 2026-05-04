@@ -128,7 +128,7 @@ You'll see the startup banner:
   VRAM:    49140 MiB total, 48891 MiB free
   Listen:  http://127.0.0.1:8420
 
-  Endpoints: /v1/chat/completions, /v1/train/sft, /health, /metrics
+  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
 ```
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed. If you launched with `--config kiln.toml`, a `Config:` line appears just below `Version:`.
