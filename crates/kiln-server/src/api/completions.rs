@@ -2994,6 +2994,7 @@ async fn generate_real_batched(
                 tool_call_id: None,
             },
             finish_reason: finish_reason.to_string(),
+            completion_tokens,
         }],
         usage: Usage {
             prompt_tokens: prompt_token_count,
@@ -3051,6 +3052,8 @@ async fn generate_real_batched_streaming(
         async move {
             let mut events = events;
             let mut completion_buf = String::new();
+            let mut reasoning_buf = String::new();
+            let mut content_buf = String::new();
             let mut completion_token_count: u32 = 0;
             let mut generated_tokens: Vec<TokenId> = Vec::new();
             let mut decoded_prefix = String::new();
@@ -3133,6 +3136,8 @@ async fn generate_real_batched_streaming(
                                     &model,
                                     chunk,
                                     &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
                                 )
                                 .await
                                 {
@@ -3160,6 +3165,8 @@ async fn generate_real_batched_streaming(
                                     &model,
                                     trailing,
                                     &mut completion_buf,
+                                    &mut reasoning_buf,
+                                    &mut content_buf,
                                 )
                                 .await
                                 {
@@ -3228,7 +3235,17 @@ async fn generate_real_batched_streaming(
                 cancel.cancel();
                 let _ = batching_engine.cancel(request_id).await;
                 let trailing = reasoning_splitter.flush();
-                let _ = emit_reasoning_chunk(&tx, &id, created, &model, trailing, &mut completion_buf).await;
+                let _ = emit_reasoning_chunk(
+                    &tx,
+                    &id,
+                    created,
+                    &model,
+                    trailing,
+                    &mut completion_buf,
+                    &mut reasoning_buf,
+                    &mut content_buf,
+                )
+                .await;
                 let timeout_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk",
