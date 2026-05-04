@@ -644,63 +644,65 @@ fn mlp_decode_batched_matches_cpu_reference() -> Result<()> {
         return Ok(());
     };
 
-    let (batch, hidden, intermediate, out_dim) = (3usize, 6usize, 5usize, 4usize);
-    let x = cpu_f32(
-        (0..batch * hidden)
-            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.047)
-            .collect(),
-        (batch, 1, hidden),
-    )?;
-    let gate_w = cpu_f32(
-        (0..hidden * intermediate)
-            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.029)
-            .collect(),
-        (hidden, intermediate),
-    )?;
-    let up_w = cpu_f32(
-        (0..hidden * intermediate)
-            .map(|i| ((i as f32 % 13.0) - 6.0) * -0.017)
-            .collect(),
-        (hidden, intermediate),
-    )?;
-    let down_w = cpu_f32(
-        (0..intermediate * out_dim)
-            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
-            .collect(),
-        (intermediate, out_dim),
-    )?;
-    let gate_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &gate_w)?;
-    let up_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &up_w)?;
-    let down_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &down_w)?;
+    for batch in [3usize, 9usize] {
+        let (hidden, intermediate, out_dim) = (6usize, 5usize, 4usize);
+        let x = cpu_f32(
+            (0..batch * hidden)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * 0.047)
+                .collect(),
+            (batch, 1, hidden),
+        )?;
+        let gate_w = cpu_f32(
+            (0..hidden * intermediate)
+                .map(|i| ((i as f32 % 11.0) - 5.0) * 0.029)
+                .collect(),
+            (hidden, intermediate),
+        )?;
+        let up_w = cpu_f32(
+            (0..hidden * intermediate)
+                .map(|i| ((i as f32 % 13.0) - 6.0) * -0.017)
+                .collect(),
+            (hidden, intermediate),
+        )?;
+        let down_w = cpu_f32(
+            (0..intermediate * out_dim)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
+                .collect(),
+            (intermediate, out_dim),
+        )?;
+        let gate_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &gate_w)?;
+        let up_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &up_w)?;
+        let down_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &down_w)?;
 
-    let got_gate_up = kiln_vulkan_kernel::kernels::dispatch_mlp_gate_up_decode_cached(
-        &vk,
-        &x,
-        &gate_buf,
-        &up_buf,
-        hidden,
-        intermediate,
-    )
-    .context("dispatch_mlp_gate_up_decode_cached batched")?;
-    let got = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
-        &vk,
-        &x,
-        &gate_buf,
-        &up_buf,
-        &down_buf,
-        hidden,
-        intermediate,
-        out_dim,
-    )
-    .context("dispatch_mlp_decode_cached batched")?;
+        let got_gate_up = kiln_vulkan_kernel::kernels::dispatch_mlp_gate_up_decode_cached(
+            &vk,
+            &x,
+            &gate_buf,
+            &up_buf,
+            hidden,
+            intermediate,
+        )
+        .with_context(|| format!("dispatch_mlp_gate_up_decode_cached batch={batch}"))?;
+        let got = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
+            &vk,
+            &x,
+            &gate_buf,
+            &up_buf,
+            &down_buf,
+            hidden,
+            intermediate,
+            out_dim,
+        )
+        .with_context(|| format!("dispatch_mlp_decode_cached batch={batch}"))?;
 
-    let gate = x.broadcast_matmul(&gate_w)?;
-    let up = x.broadcast_matmul(&up_w)?;
-    let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
-    let hidden_t = ((gate * sigmoid)? * up)?;
-    let expected = hidden_t.broadcast_matmul(&down_w)?;
-    assert_close("mlp gate/up batched", &got_gate_up, &hidden_t, 1e-5)?;
-    assert_close("mlp decode batched", &got, &expected, 1e-5)?;
+        let gate = x.broadcast_matmul(&gate_w)?;
+        let up = x.broadcast_matmul(&up_w)?;
+        let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let hidden_t = ((gate * sigmoid)? * up)?;
+        let expected = hidden_t.broadcast_matmul(&down_w)?;
+        assert_close("mlp gate/up batched", &got_gate_up, &hidden_t, 1e-5)?;
+        assert_close("mlp decode batched", &got, &expected, 1e-5)?;
+    }
     Ok(())
 }
 

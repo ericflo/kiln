@@ -33,6 +33,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("linear_decode", SPIR_V_LINEAR_DECODE),
     ("linear_decode_batched", SPIR_V_LINEAR_DECODE_BATCHED),
     (
+        "linear_decode_batched_rows2",
+        SPIR_V_LINEAR_DECODE_BATCHED_ROWS2,
+    ),
+    (
         "linear_decode_argmax_blocks",
         SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS,
     ),
@@ -52,6 +56,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     (
         "mlp_gate_up_decode_batched",
         SPIR_V_MLP_GATE_UP_DECODE_BATCHED,
+    ),
+    (
+        "mlp_gate_up_decode_batched_rows2",
+        SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2,
     ),
     ("flash_attn", SPIR_V_FLASH_ATTN),
 ];

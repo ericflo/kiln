@@ -1,0 +1,90 @@
+// Batched SwiGLU gate/up projection for larger flattened prefill batches.
+//
+// Computes two input rows per workgroup for the same output-column tile. This
+// follows the llama.cpp Vulkan matvec idea of sharing weight loads across
+// adjacent rows, while leaving the decode-tuned bs=4 shader untouched.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 2, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint intermediate;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer GateWeightBuf { float data_gate_w[]; };
+layout(binding = 2) readonly buffer UpWeightBuf { float data_up_w[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+shared float gate_partial0[128];
+shared float up_partial0[128];
+shared float gate_partial1[128];
+shared float up_partial1[128];
+
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float ex = exp(x);
+    return ex / (1.0 + ex);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (intermediate + 63) / 64;
+    uint row_group = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - row_group * col_groups;
+    uint row0 = row_group * 2;
+    uint row1 = row0 + 1;
+    uint col = col_group * 64 + col_lane;
+    uint partial_idx = col_lane * 2 + red_lane;
+
+    float gate_sum0 = 0.0;
+    float up_sum0 = 0.0;
+    float gate_sum1 = 0.0;
+    float up_sum1 = 0.0;
+    if (col < intermediate) {
+        bool valid0 = row0 < batch;
+        bool valid1 = row1 < batch;
+        uint x_base0 = row0 * hidden;
+        uint x_base1 = row1 * hidden;
+        for (uint h = red_lane; h < hidden; h += 2) {
+            uint off = h * intermediate + col;
+            float gate_w = data_gate_w[off];
+            float up_w = data_up_w[off];
+            if (valid0) {
+                float xv0 = data_x[x_base0 + h];
+                gate_sum0 += xv0 * gate_w;
+                up_sum0 += xv0 * up_w;
+            }
+            if (valid1) {
+                float xv1 = data_x[x_base1 + h];
+                gate_sum1 += xv1 * gate_w;
+                up_sum1 += xv1 * up_w;
+            }
+        }
+    }
+
+    gate_partial0[partial_idx] = gate_sum0;
+    up_partial0[partial_idx] = up_sum0;
+    gate_partial1[partial_idx] = gate_sum1;
+    up_partial1[partial_idx] = up_sum1;
+    barrier();
+
+    if (red_lane == 0 && col < intermediate) {
+        float gate0 = gate_partial0[col_lane * 2] + gate_partial0[col_lane * 2 + 1];
+        float up0 = up_partial0[col_lane * 2] + up_partial0[col_lane * 2 + 1];
+        float gate1 = gate_partial1[col_lane * 2] + gate_partial1[col_lane * 2 + 1];
+        float up1 = up_partial1[col_lane * 2] + up_partial1[col_lane * 2 + 1];
+        if (row0 < batch) {
+            data_out[row0 * intermediate + col] = gate0 * stable_sigmoid(gate0) * up0;
+        }
+        if (row1 < batch) {
+            data_out[row1 * intermediate + col] = gate1 * stable_sigmoid(gate1) * up1;
+        }
+    }
+}

@@ -46,6 +46,15 @@ fn gdn_in_proj_single_submit_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT").is_err())
 }
 
+fn prefill_row_pair_matmul_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
+}
+
+fn use_prefill_row_pair_matmul(batch: usize) -> bool {
+    batch >= 8 && prefill_row_pair_matmul_enabled()
+}
+
 /// Pre-create the validated built-in compute pipelines on this Vulkan device.
 ///
 /// SPIR-V bytecode is embedded at build time when `glslc` is available. This
@@ -66,12 +75,14 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_chunk_scan", 8, 16),
         ("linear_decode", 3, 8),
         ("linear_decode_batched", 3, 12),
+        ("linear_decode_batched_rows2", 3, 12),
         ("linear_decode_argmax_blocks", 4, 12),
         ("linear_decode_argmax_reduce", 3, 4),
         ("linear_decode_argmax_batched_blocks", 4, 12),
         ("linear_decode_argmax_batched_reduce", 3, 4),
         ("mlp_gate_up_decode", 4, 8),
         ("mlp_gate_up_decode_batched", 4, 12),
+        ("mlp_gate_up_decode_batched_rows2", 4, 12),
     ];
 
     for (shader_name, total_bindings, push_bytes) in shaders {
@@ -1953,10 +1964,16 @@ pub fn dispatch_mlp_gate_up_decode_cached(
     )
     .context("failed to create mlp_gate_up_decode output buffer")?;
 
+    let use_rows2 = use_prefill_row_pair_matmul(batch);
     let glsl_path = if batch == 1 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/mlp_gate_up_decode.comp"
+        )
+    } else if use_rows2 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/mlp_gate_up_decode_batched_rows2.comp"
         )
     } else {
         concat!(
@@ -1983,6 +2000,8 @@ pub fn dispatch_mlp_gate_up_decode_cached(
         &push_constants,
         if batch == 1 {
             intermediate.div_ceil(64) as u32
+        } else if use_rows2 {
+            (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
         } else {
             (batch * intermediate.div_ceil(128)) as u32
         },
@@ -2065,10 +2084,16 @@ pub fn dispatch_mlp_decode_cached(
         VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
             .context("failed to create mlp_decode output buffer")?;
 
+    let use_rows2 = use_prefill_row_pair_matmul(batch);
     let gate_up_glsl = if batch == 1 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/mlp_gate_up_decode.comp"
+        )
+    } else if use_rows2 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/mlp_gate_up_decode_batched_rows2.comp"
         )
     } else {
         concat!(
@@ -2095,6 +2120,8 @@ pub fn dispatch_mlp_decode_cached(
         &gate_up_push,
         if batch == 1 {
             intermediate.div_ceil(64) as u32
+        } else if use_rows2 {
+            (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
         } else {
             (batch * intermediate.div_ceil(128)) as u32
         },
@@ -2105,6 +2132,11 @@ pub fn dispatch_mlp_decode_cached(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode.comp"
+        )
+    } else if use_rows2 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_batched_rows2.comp"
         )
     } else {
         concat!(
@@ -2130,6 +2162,8 @@ pub fn dispatch_mlp_decode_cached(
         &linear_push,
         if batch == 1 {
             out_dim.div_ceil(16) as u32
+        } else if use_rows2 {
+            (batch.div_ceil(2) * out_dim.div_ceil(32)) as u32
         } else {
             (batch * out_dim.div_ceil(32)) as u32
         },
