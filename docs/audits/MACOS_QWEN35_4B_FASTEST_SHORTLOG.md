@@ -616,3 +616,10 @@
   clean-source release `kiln-bench` rebuild passed; future low-level work
   should keep targeting GDN projection math/packing instead of small residual
   boundaries.
+- 2026-05-04 E265-E266: Rejected a row-major GDN input-projection Metal
+  kernel. It used the already-loaded `[out, hidden]` weights to avoid
+  transposed column-strided reads and passed focused parity, but same-binary
+  warmed p64/o64 lost to the current transposed fused kernel: row-major was
+  463.7 ms prefill / 202.6 ms mean ITL / 4.94 tok/s, while control was
+  463.8 ms / 188.5 ms / 5.30 tok/s. The candidate was reverted and the
+  clean-source release `kiln-bench` rebuild passed.

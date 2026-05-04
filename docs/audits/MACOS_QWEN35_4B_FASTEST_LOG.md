@@ -7821,3 +7821,55 @@ improve against the same-binary disabled control. The candidate also did not
 address the current largest measured stage, GDN `in_proj`, so it was reverted.
 Keep focusing kernel work on actual projection math and packing rather than
 small residual-boundary fusions unless a broader fused boundary can be proven.
+
+## Experiments E265-E266: Rejected Row-Major GDN Input Projection
+
+Hypothesis:
+
+The GDN input-projection weights are already loaded in both original
+`[out, hidden]` form and transposed `[hidden, out]` form. The current Metal
+decode kernel uses the transposed tensors, so each output thread reads weights
+with a wide `output_dim` stride. A row-major kernel using the existing original
+weights might improve locality without creating an extra packed tensor.
+
+Temporary change:
+
+- Added a row-major Metal GDN input-projection kernel using the existing
+  `in_proj_qkv`, `in_proj_z`, `in_proj_a`, and `in_proj_b` tensors.
+- Routed Metal GDN decode through it by default, with
+  `KILN_DISABLE_METAL_GDN_IN_PROJ_ROWMAJOR=1` falling back to the current
+  transposed fused kernel for same-binary control.
+- Reverted the candidate before commit after the control beat it.
+
+Validation while the candidate was applied:
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  - Passed with both transposed and row-major paths checked.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed with the candidate applied.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E265 | row-major GDN input projection | 463.7 ms | 4.94 | 202.6 ms | 196.9 ms | 257.7 ms | rejected |
+| E266 | current transposed fused-kernel control | 463.8 ms | 5.30 | 188.5 ms | 188.0 ms | 207.5 ms | control |
+
+Artifacts:
+
+- `e265_m1_bs1_p64_o64_warmed_gdn_inproj_rowmajor.log`
+- `e266_m1_bs1_p64_o64_warmed_gdn_inproj_transposed_control.log`
+
+Takeaway:
+
+The row-major access pattern did not beat the existing transposed fused
+kernel. Even though a single output thread reads contiguous weights in the
+row-major layout, the full decode path lost about 14 ms mean ITL in the
+same-binary A/B. Future GDN projection work needs a more substantial algorithm
+change, such as cooperative reduction or packing designed for the target GPU,
+not simply switching to the already-loaded original weight orientation.
