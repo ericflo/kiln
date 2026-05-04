@@ -6,7 +6,7 @@
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
 
 layout(push_constant) uniform Parameters {
     uint hidden;
@@ -33,17 +33,17 @@ float stable_sigmoid(float x) {
 void main() {
     uint col_lane = gl_LocalInvocationID.x;
     uint red_lane = gl_LocalInvocationID.y;
-    uint col_groups = (intermediate + 15) / 16;
+    uint col_groups = (intermediate + 63) / 64;
     uint batch_idx = gl_WorkGroupID.x / col_groups;
     uint col_group = gl_WorkGroupID.x - batch_idx * col_groups;
-    uint col = col_group * 16 + col_lane;
-    uint partial_idx = col_lane * 16 + red_lane;
+    uint col = col_group * 64 + col_lane;
+    uint partial_idx = col_lane * 4 + red_lane;
 
     float gate_sum = 0.0;
     float up_sum = 0.0;
     if (batch_idx < batch && col < intermediate) {
         uint x_base = batch_idx * hidden;
-        for (uint h = red_lane; h < hidden; h += 16) {
+        for (uint h = red_lane; h < hidden; h += 4) {
             uint off = h * intermediate + col;
             float xv = data_x[x_base + h];
             gate_sum += xv * data_gate_w[off];
@@ -58,8 +58,8 @@ void main() {
     if (red_lane == 0 && batch_idx < batch && col < intermediate) {
         float gate = 0.0;
         float up = 0.0;
-        for (uint lane = 0; lane < 16; lane++) {
-            uint idx = col_lane * 16 + lane;
+        for (uint lane = 0; lane < 4; lane++) {
+            uint idx = col_lane * 4 + lane;
             gate += gate_partial[idx];
             up += up_partial[idx];
         }
