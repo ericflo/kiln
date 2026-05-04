@@ -743,3 +743,11 @@
   measured 418.6 ms / 162.6 ms / 6.15 tok/s / 179.7 ms P99. Memory pressure
   was 81% free after E294. The candidate source was reverted and clean-source
   `kiln-bench` rebuild passed.
+- 2026-05-04 E295: Refreshed the current release-server bs=4 distinct baseline
+  after the recent accepted/rejected cache, prewarm, profiling, and low-level
+  work. Four distinct prompts with `max_tokens=2` measured 7.22 s wall /
+  7,202.326 ms handler for 8 generated tokens, with 4 rendered-prompt misses,
+  4 token-cache misses, and no prefix-cache lookup work. Memory pressure was
+  80% free after shutdown. Treat this as target selection for true
+  model-forward/continuous batching and further low-level kernel work, not as a
+  cache optimization.

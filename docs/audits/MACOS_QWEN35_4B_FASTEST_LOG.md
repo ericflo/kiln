@@ -2,7 +2,10 @@
 
 Objective: make Kiln the fastest macOS inference server for Qwen3.5-4B, improving
 both single-user bs=1 latency/throughput and higher-batch throughput/latency.
-Principle for this pass: remove repeated work before tuning kernels.
+Principle for this pass: use measured bottlenecks to remove work anywhere in
+the inference path: server scheduling, batching, cache policy, Metal kernels,
+memory movement, and model-forward mechanics. Cache reuse is only one tool, not
+the objective.
 
 Environment observed on 2026-05-03:
 
@@ -8778,3 +8781,59 @@ Takeaway:
 the decode mean ITL is effectively tied and the candidate weakens arithmetic
 exactness, it is not worth carrying. Future MLP projection work should look for
 larger structural wins rather than swapping the scalar sigmoid approximation.
+
+## Experiment E295: Refreshed Current Real-Server bs=4 Distinct Baseline
+
+Purpose:
+
+Refresh the live-server baseline for four distinct prompts after the recent
+cache, prewarm, profiling, and rejected low-level experiments. This is not an
+optimization. It is a current target measurement before returning to actual
+batching/model-forward work.
+
+Setup:
+
+- Release server:
+  `KILN_MODEL_PATH=/Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a KILN_PORT=8421 ./target/release/kiln serve`
+- Endpoint: `/v1/completions/batch`
+- Shape: four distinct chat prompts, `temperature=0.0`, `max_tokens=2`, seed
+  234.
+- Request artifact reused from E234:
+  `e234_batch4_distinct_max2_request.json`
+- Server startup: model loaded and listened at `02:29:22Z`; background
+  inference prewarm completed in 14,009 ms.
+
+Result:
+
+| Experiment | Shape | Wall time | HTTP handler | Generated tokens | Render/token cache | Prefix cache |
+|---|---|---:|---:|---:|---|---|
+| E295 | 4 distinct prompts, `max_tokens=2` | 7.22 s | 7,202.326 ms | 8 | 4 render misses, 4 token misses | 0 hits, 0 misses |
+
+Metrics:
+
+- `kiln_request_duration_seconds_sum`: 7.201804
+- `kiln_tokens_generated_total`: 8
+- `kiln_rendered_prompt_cache_lookups_total{result="miss"}`: 4
+- `kiln_prompt_token_cache_lookups_total{result="miss"}`: 4
+- `kiln_prefix_cache_lookups_total{result="hit"}`: 0
+- `kiln_prefix_cache_lookups_total{result="miss"}`: 0
+- `kiln_prefix_cache_cached_entries`: 0
+- `kiln_prefix_cache_state_bytes`: 0
+- After shutdown, `memory_pressure` reported 80% system-wide free memory.
+
+Artifacts:
+
+- `e295_server_current_default.log`
+- `e295_batch4_distinct_max2_current_default_response.json`
+- `e295_batch4_distinct_max2_current_default_time.log`
+- `e295_batch4_distinct_max2_current_default_metrics.prom`
+
+Takeaway:
+
+The current distinct bs=4 short-output live path is still slow enough that
+cache-only work is not the main route to the goal. The request produced four
+independent prompt render/token misses, no prefix-cache work because the prompts
+are below the production registration threshold, and eight physical generated
+tokens. The next high-leverage direction should be true model-forward batching
+or scheduler-level continuous batching, while low-level kernel work remains
+important for bs=1 and for the per-token cost that batching would amortize.
