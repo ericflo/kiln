@@ -23,7 +23,7 @@ use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_decode_contiguous_batch, model_forward_paged_last_token,
+    model_forward_paged_decode_contiguous_batch_greedy, model_forward_paged_last_token,
     model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
     model_forward_paged_next_token_greedy, model_forward_paged_streaming,
     model_forward_paged_streaming_last_token_with_last_hidden,
@@ -32,7 +32,7 @@ use crate::forward::{
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
-use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
+use crate::sampling::{greedy_sample, sample_with_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
@@ -202,6 +202,11 @@ enum StreamTokenDisposition {
 }
 
 /// Configuration for the live greedy decode rendezvous worker.
+///
+/// The worker is enabled by default on Metal because its zero-wait path keeps
+/// single-request greedy streaming on the rowwise fast path when no peers are
+/// present, while allowing concurrent requests to coalesce. Set
+/// `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise path.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
@@ -241,7 +246,7 @@ impl DecodeBatcherConfig {
         if !matches!(device, Device::Metal(_)) {
             return false;
         }
-        env_flag_enabled("KILN_DECODE_BATCHER", false)
+        env_flag_enabled("KILN_DECODE_BATCHER", true)
     }
 }
 
@@ -1775,7 +1780,7 @@ impl ModelRunner {
     /// This is the scheduler admission primitive for true decode batching: the
     /// caller still owns request readiness, stop handling, and output routing,
     /// while this method owns the row assembly needed to call
-    /// `model_forward_paged_decode_contiguous_batch`.
+    /// `model_forward_paged_decode_contiguous_batch_greedy`.
     ///
     /// Current constraints intentionally mirror the lower-level helper:
     /// non-empty rows, one token per row, one `BlockTable` per row, common
@@ -1843,9 +1848,9 @@ impl ModelRunner {
             None
         };
 
-        let logits = {
+        let tokens = {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
-            model_forward_paged_decode_contiguous_batch(
+            model_forward_paged_decode_contiguous_batch_greedy(
                 &*self.backend,
                 input_tokens,
                 &self.weights,
@@ -1863,7 +1868,7 @@ impl ModelRunner {
             state.scatter_batch_rows(linear_states)?;
         }
 
-        greedy_sample_rows(&logits).context("batched greedy row sampling failed")
+        Ok(tokens)
     }
 
     fn decode_next_token_paged_interleaved(

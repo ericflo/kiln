@@ -36,6 +36,7 @@ const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const ENABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_ENABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
+const DISABLE_METAL_LM_HEAD_ARGMAX_ROWS: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
     "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
 const DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS: &str =
@@ -156,6 +157,12 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
         metal_lm_head_argmax_pipeline(metal_device)?;
         if !metal_lm_head_argmax_gpu_reduce_disabled() {
             metal_lm_head_argmax_reduce_pipeline(metal_device)?;
+        }
+    }
+    if !metal_lm_head_argmax_rows_disabled() {
+        metal_lm_head_argmax_batch_pipeline(metal_device)?;
+        if !metal_lm_head_argmax_gpu_reduce_disabled() {
+            metal_lm_head_argmax_reduce_batch_pipeline(metal_device)?;
         }
     }
     if !metal_mlp_gate_up_fusion_disabled() {
@@ -843,6 +850,10 @@ pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
     // projection plus argmax is faster than this custom chunk/reduce kernel.
     // Keep the kernel available for tuning, but require explicit opt-in.
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || !env_truthy(ENABLE_METAL_LM_HEAD_ARGMAX)
+}
+
+fn metal_lm_head_argmax_rows_disabled() -> bool {
+    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS)
 }
 
 fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
@@ -2164,6 +2175,98 @@ kernel void kiln_lm_head_argmax_reduce_f32(
         final_index[0] = indices[0];
     }
 }
+
+kernel void kiln_lm_head_argmax_chunks_batch_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device float* partial_scores [[buffer(2)]],
+    device float* partial_indices [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant uint& vocab [[buffer(5)]],
+    constant uint& num_groups [[buffer(6)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group_pos [[threadgroup_position_in_grid]]
+) {
+    threadgroup float scores[256];
+    threadgroup float indices[256];
+
+    const uint group = group_pos.x;
+    const uint row = group_pos.y;
+    const uint col = group * 256 + tid;
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (col < vocab) {
+        float acc = 0.0f;
+        const device bfloat* row_x = x + row * hidden;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(row_x[i]) * static_cast<float>(weight_t[i * vocab + col]);
+        }
+        score = static_cast<float>(static_cast<bfloat>(acc));
+        index = static_cast<float>(col);
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other_score = scores[tid + stride];
+            const float other_index = indices[tid + stride];
+            if (other_score > scores[tid] ||
+                (other_score == scores[tid] && other_index < indices[tid])) {
+                scores[tid] = other_score;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        const uint offset = row * num_groups + group;
+        partial_scores[offset] = scores[0];
+        partial_indices[offset] = indices[0];
+    }
+}
+
+kernel void kiln_lm_head_argmax_reduce_batch_f32(
+    device const float* partial_scores [[buffer(0)]],
+    device const float* partial_indices [[buffer(1)]],
+    device float* final_indices [[buffer(2)]],
+    constant uint& num_groups [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]]
+) {
+    threadgroup float scores[1024];
+    threadgroup float indices[1024];
+
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (tid < num_groups) {
+        const uint offset = row * num_groups + tid;
+        score = partial_scores[offset];
+        index = partial_indices[offset];
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 512; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other_score = scores[tid + stride];
+            const float other_index = indices[tid + stride];
+            if (other_score > scores[tid] ||
+                (other_score == scores[tid] && other_index < indices[tid])) {
+                scores[tid] = other_score;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        final_indices[row] = indices[0];
+    }
+}
 "#;
 
 const METAL_MLP_GATE_UP_KERNEL: &str = r#"
@@ -3354,6 +3457,64 @@ fn metal_lm_head_argmax_reduce_pipeline(
     Ok(pipeline)
 }
 
+fn metal_lm_head_argmax_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head argmax batch pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_argmax_chunks_batch_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head argmax batch function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head argmax batch pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_lm_head_argmax_reduce_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().map_err(|_| {
+        anyhow::anyhow!("metal lm head argmax reduce batch pipeline cache poisoned")
+    })?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_argmax_reduce_batch_f32", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head argmax reduce batch function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head argmax reduce batch pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_mlp_gate_up_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -3752,6 +3913,35 @@ pub(crate) fn metal_lm_head_argmax_supports(x: &Tensor, weight_t: &Tensor) -> bo
     num_groups > 0 && num_groups <= 1024
 }
 
+pub(crate) fn metal_lm_head_argmax_rows_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+    if metal_lm_head_argmax_rows_disabled() {
+        return false;
+    }
+    if !matches!(x.dtype(), DType::BF16) || !matches!(weight_t.dtype(), DType::BF16) {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !x.is_contiguous() || !weight_t.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return false;
+    };
+    let Ok((weight_hidden, vocab)) = weight_t.dims2() else {
+        return false;
+    };
+    let num_groups = vocab.div_ceil(256);
+    batch > 0
+        && seq_len == 1
+        && hidden == weight_hidden
+        && hidden <= u32::MAX as usize
+        && vocab <= u32::MAX as usize
+        && num_groups > 0
+        && num_groups <= 1024
+}
+
 pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
     anyhow::ensure!(
         metal_lm_head_supports(x, weight_t),
@@ -3974,6 +4164,167 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
         }
     }
     Ok(best_idx)
+}
+
+pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Vec<u32>> {
+    anyhow::ensure!(
+        metal_lm_head_argmax_rows_supports(x, weight_t),
+        "metal lm head row argmax supports only BF16 [B,1,H] x [H,V] on Metal with <= 262144 vocab"
+    );
+    let (batch, _, hidden) = x.dims3()?;
+    let (_, vocab) = weight_t.dims2()?;
+
+    let chunk_width = 256usize;
+    let num_groups = vocab.div_ceil(chunk_width);
+    let partial_scores = unsafe { Tensor::empty((batch, num_groups), DType::F32, x.device())? };
+    let partial_indices = unsafe { Tensor::empty((batch, num_groups), DType::F32, x.device())? };
+    let final_indices = if metal_lm_head_argmax_gpu_reduce_disabled() {
+        None
+    } else {
+        Some(unsafe { Tensor::empty((batch,), DType::F32, x.device())? })
+    };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal lm head row argmax requires Metal tensors");
+    };
+    let pipeline = metal_lm_head_argmax_batch_pipeline(device)?;
+    let reduce_pipeline = if final_indices.is_some() {
+        Some(metal_lm_head_argmax_reduce_batch_pipeline(device)?)
+    } else {
+        None
+    };
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_lm_head_argmax_chunks_batch_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight_t.storage_and_layout();
+        let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
+        let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
+        let final_storage_and_layout = final_indices.as_ref().map(Tensor::storage_and_layout);
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax weight must be on Metal"),
+        };
+        let ps_metal = match &*ps_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax partial scores must be on Metal"),
+        };
+        let pi_metal = match &*pi_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax partial indices must be on Metal"),
+        };
+        let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
+            Some((candle_core::Storage::Metal(s), layout)) => Some((s, layout)),
+            Some(_) => anyhow::bail!("metal lm head row argmax final indices must be on Metal"),
+            None => None,
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let ps_buf = candle_core::metal_backend::buffer_o(
+            ps_metal.buffer(),
+            &ps_layout,
+            partial_scores.dtype(),
+        );
+        let pi_buf = candle_core::metal_backend::buffer_o(
+            pi_metal.buffer(),
+            &pi_layout,
+            partial_indices.dtype(),
+        );
+        let final_buf = final_metal.map(|(storage, layout)| {
+            candle_core::metal_backend::buffer_o(storage.buffer(), layout, DType::F32)
+        });
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+
+        let hidden_u32 = hidden as u32;
+        let vocab_u32 = vocab as u32;
+        let num_groups_u32 = num_groups as u32;
+        encoder.set_bytes(4, &hidden_u32);
+        encoder.set_bytes(5, &vocab_u32);
+        encoder.set_bytes(6, &num_groups_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: num_groups,
+            height: batch,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: chunk_width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+
+        if let (Some(reduce_pipeline), Some(final_buf)) = (&reduce_pipeline, final_buf) {
+            encoder.set_label("kiln_lm_head_argmax_reduce_batch_f32");
+            encoder.set_compute_pipeline_state(reduce_pipeline);
+            encoder.set_buffer(0, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+            encoder.set_buffer(1, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+            encoder.set_buffer(2, Some(final_buf.buffer), final_buf.offset_in_bytes);
+            encoder.set_bytes(3, &num_groups_u32);
+
+            let reduce_threadgroups = objc2_metal::MTLSize {
+                width: batch,
+                height: 1,
+                depth: 1,
+            };
+            let reduce_threads = objc2_metal::MTLSize {
+                width: 1024,
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatch_thread_groups(reduce_threadgroups, reduce_threads);
+        }
+    }
+
+    drop(encoder);
+
+    if let Some(final_indices) = final_indices {
+        return Ok(final_indices
+            .to_vec1::<f32>()
+            .context("read metal lm head row argmax final indices")?
+            .into_iter()
+            .map(|idx| idx as u32)
+            .collect());
+    }
+
+    let scores = partial_scores
+        .flatten_all()?
+        .to_vec1::<f32>()
+        .context("read metal lm head row argmax partial scores")?;
+    let indices = partial_indices
+        .flatten_all()?
+        .to_vec1::<f32>()
+        .context("read metal lm head row argmax partial indices")?;
+    let mut out = Vec::with_capacity(batch);
+    for row in 0..batch {
+        let row_start = row * num_groups;
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_idx = 0u32;
+        for group in 0..num_groups {
+            let offset = row_start + group;
+            let score = scores[offset];
+            let idx = indices[offset] as u32;
+            if score > best_score || (score == best_score && idx < best_idx) {
+                best_score = score;
+                best_idx = idx;
+            }
+        }
+        out.push(best_idx);
+    }
+    Ok(out)
 }
 
 pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> bool {
@@ -10354,6 +10705,90 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn bench_lm_head_argmax_rows_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
+        let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        let rows_disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
+        unsafe {
+            std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
+        }
+
+        let result = (|| -> Result<()> {
+            let warmup = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_WARMUP", 1);
+            let iters = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_ITERS", 3);
+            let hidden = 2560usize;
+            let vocab = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_VOCAB", 248_320);
+            let weight_t = Tensor::zeros((hidden, vocab), DType::BF16, &device)?.contiguous()?;
+            device.synchronize()?;
+
+            for batch in [2usize, 4, 8] {
+                let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+                device.synchronize()?;
+                assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                    &x, &weight_t
+                ));
+                assert!(metal_lm_head_argmax_rows_supports(&x, &weight_t));
+
+                let materialized_logits = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+                let reference = crate::sampling::greedy_sample_rows(&materialized_logits)?;
+                let fused = metal_lm_head_argmax_rows_bf16(&x, &weight_t)?;
+                assert_eq!(fused, reference);
+
+                let materialized_us = bench_metal_unit_op(&device, warmup, iters, || {
+                    let logits = metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                        .context("bench materialized batch LM-head logits")?;
+                    let ids = crate::sampling::greedy_sample_rows(&logits)
+                        .context("bench materialized batch LM-head greedy rows")?;
+                    std::hint::black_box(ids);
+                    Ok(())
+                })?;
+                let fused_us = bench_metal_unit_op(&device, warmup, iters, || {
+                    let ids = metal_lm_head_argmax_rows_bf16(&x, &weight_t)
+                        .context("bench fused batch LM-head argmax rows")?;
+                    std::hint::black_box(ids);
+                    Ok(())
+                })?;
+                let physical_tokens = batch;
+
+                eprintln!(
+                    "synthetic Metal Qwen3.5 LM-head argmax rows decode batch BF16: \
+                     batch={batch} physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                     weight_t=[{hidden},{vocab}] warmup={warmup} iters={iters} \
+                     materialized_gemv_argmax={materialized_us:.3} us \
+                     fused_argmax_rows={fused_us:.3} us speedup={:.3}x",
+                    materialized_us / fused_us,
+                );
+            }
+
+            Ok(())
+        })();
+
+        unsafe {
+            match enable_prev {
+                Some(value) => std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(ENABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match rows_disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS),
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    #[ignore]
     fn bench_paged_kv_write_token_major_decode_batch_synthetic() -> Result<()> {
         let Some(device) = try_new_metal() else {
             return Ok(());
@@ -11127,9 +11562,11 @@ mod tests {
 
         let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
         let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        let rows_disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
         unsafe {
             std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
             std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
         }
 
         let result = (|| -> Result<()> {
@@ -11151,6 +11588,68 @@ mod tests {
             let logits = metal_lm_head_bf16(&x, &weight_t)?;
             let reference = crate::sampling::greedy_sample(&logits)?;
             let fused = metal_lm_head_argmax_bf16(&x, &weight_t)?;
+
+            assert_eq!(fused, reference);
+            Ok(())
+        })();
+
+        unsafe {
+            match enable_prev {
+                Some(value) => std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(ENABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match rows_disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS),
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_lm_head_argmax_rows_matches_materialized_logits() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
+        let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        unsafe {
+            std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+        }
+
+        let result = (|| -> Result<()> {
+            let batch = 3usize;
+            let hidden = 128usize;
+            let vocab = 257usize;
+            let x_data: Vec<f32> = (0..(batch * hidden))
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+                .collect();
+            let weight_data: Vec<f32> = (0..(hidden * vocab))
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
+                .collect();
+
+            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+
+            assert!(metal_lm_head_argmax_rows_supports(&x, &weight_t));
+            let logits = if metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t) {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t)?
+            } else {
+                x.broadcast_matmul(&weight_t)?
+            };
+            let reference = crate::sampling::greedy_sample_rows(&logits)?;
+            let fused = metal_lm_head_argmax_rows_bf16(&x, &weight_t)?;
 
             assert_eq!(fused, reference);
             Ok(())

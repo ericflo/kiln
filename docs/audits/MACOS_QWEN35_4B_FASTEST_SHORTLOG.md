@@ -1120,3 +1120,13 @@
   early. The batcher is now opt-in (`KILN_DECODE_BATCHER=1`) until a batched
   greedy-tail/argmax path or better admission policy can beat rowwise
   `model_forward_paged_next_token_greedy`.
+- 2026-05-04 E347: Accepted batched Metal LM-head argmax and enabled zero-wait
+  live greedy batching by default on Metal. The new BF16 batch-row argmax avoids
+  materialized `[B,1,V]` logits in batched greedy decode and won the Qwen-shaped
+  synthetic LM-head bench by `4.382x` at batch 2, `4.305x` at batch 4, and
+  `2.378x` at batch 8. Live four-request streaming improved from disabled
+  `7.127789s` for 32 generated tokens to zero-wait enabled `5.230091s`
+  (`28` jobs, `14` batches, `28` rows, max batch `3`); `500us` wait got max
+  batch `4` but slowed to `5.565906s`. Single streaming also favored enabled
+  zero-wait (`2.269265s` -> `1.619216s`, max batch `1`). `KILN_DECODE_BATCHER=0`
+  and `KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS=1` remain kill switches.

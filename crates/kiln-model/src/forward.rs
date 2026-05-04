@@ -2936,6 +2936,18 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
 }
 
+fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> {
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_lm_head_argmax_rows_supports(x, embed_tokens_t) {
+            return crate::backend::metal::metal_lm_head_argmax_rows_bf16(x, embed_tokens_t)
+                .context("metal batch lm_head argmax kernel failed");
+        }
+    }
+    let logits = lm_head_forward(x, embed_tokens_t)?;
+    crate::sampling::greedy_sample_rows(&logits).context("batched greedy row sampling failed")
+}
+
 fn lm_head_weighted_prep_argmax(
     x: &Tensor,
     norm_weight: &Tensor,
@@ -6657,13 +6669,14 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     Ok(out)
 }
 
-/// Strict batched single-token paged decode for model-forward integration.
+/// Strict batched single-token paged decode up through the final transformer
+/// block.
 ///
 /// This is the model-loop counterpart to
 /// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
 /// per batch row, a block table per row, a common decode position, and an
-/// optional batch-shaped [`LinearAttentionState`]. It returns full logits with
-/// shape `[batch, 1, vocab_size]`.
+/// optional batch-shaped [`LinearAttentionState`]. It returns final hidden
+/// states with shape `[batch, 1, hidden_size]`.
 ///
 /// The helper is deliberately narrower than the general scheduler contract:
 /// every row must share the same `start_pos`, full-attention rows must satisfy
@@ -6671,7 +6684,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
 /// capture paths remain owned by the rowwise entry points until scheduler
 /// integration needs them.
 #[allow(clippy::too_many_arguments)]
-pub fn model_forward_paged_decode_contiguous_batch(
+fn model_forward_paged_decode_contiguous_batch_hidden(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
     weights: &GpuWeights,
@@ -6792,12 +6805,78 @@ pub fn model_forward_paged_decode_contiguous_batch(
         }
     }
 
+    Ok(hidden)
+}
+
+/// Strict batched single-token paged decode for model-forward integration.
+///
+/// This is the model-loop counterpart to
+/// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
+/// per batch row, a block table per row, a common decode position, and an
+/// optional batch-shaped [`LinearAttentionState`]. It returns full logits with
+/// shape `[batch, 1, vocab_size]`.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state,
+        lora,
+    )?;
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head_batch_decode");
         let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
         lm_head_forward(&normed, &weights.embed_tokens_t)?
     };
     Ok(logits)
+}
+
+/// Strict batched single-token paged decode that returns greedy next-token IDs
+/// without materializing full logits when a backend has a fused argmax path.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch_greedy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Vec<u32>> {
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state,
+        lora,
+    )?;
+    let token_ids = {
+        kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode");
+        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        lm_head_argmax_rows(&normed, &weights.embed_tokens_t)?
+    };
+    Ok(token_ids)
 }
 
 /// Full model forward pass: embedding → N transformer blocks → final norm → LM head → logits.

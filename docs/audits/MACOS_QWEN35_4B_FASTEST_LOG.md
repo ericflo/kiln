@@ -11063,3 +11063,86 @@ full-logits greedy sampling and model-forward batching overhead versus the
 single-row `model_forward_paged_next_token_greedy` fast path. Keep the batcher
 opt-in for experiments and prioritize either a batched greedy-tail/argmax path
 or better admission policy before considering default-on serving.
+
+## 2026-05-04 E347 - Added batched Metal LM-head argmax and enabled zero-wait live batching
+
+### Goal
+
+Fix the actual low-level cause behind E346's live batcher regression: the
+batched greedy path materialized `[batch, 1, vocab]` logits and then sampled
+rows, while the rowwise path used the single-row greedy tail. The experiment
+tests whether a fused batch-row LM-head argmax can remove that overhead enough
+to make true live streaming batching useful instead of just correct.
+
+### Change
+
+- Added Metal BF16 batch-row LM-head argmax kernels:
+  `kiln_lm_head_argmax_chunks_batch_bf16` computes each row/chunk argmax, and
+  `kiln_lm_head_argmax_reduce_batch_f32` reduces one row per threadgroup.
+- Added `metal_lm_head_argmax_rows_bf16` and support checks for contiguous
+  `[B, 1, H] x [H, V]` BF16 Metal tensors.
+- Split the batch-row argmax gate from the older single-row argmax gate. The
+  older single-row kernel still requires `KILN_ENABLE_METAL_LM_HEAD_ARGMAX=1`
+  because prior measurements showed it loses, but the batch-row kernel is
+  available by default unless `KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS=1` or the
+  broader `KILN_DISABLE_METAL_LM_HEAD_ARGMAX=1` is set.
+- Refactored batched paged decode to share the transformer loop and added
+  `model_forward_paged_decode_contiguous_batch_greedy`, which returns token IDs
+  directly through `lm_head_argmax_rows` instead of forcing full logits.
+- Changed Metal serving to enable the zero-wait live greedy decode batcher by
+  default. `KILN_DECODE_BATCHER=0` remains the kill switch, and
+  `KILN_DECODE_BATCH_WAIT_US` still defaults to zero.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_lm_head_argmax_rows_matches_materialized_logits --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_next_tokens_paged_contiguous_batch_greedy_matches_rowwise_metal --lib -- --nocapture`
+- `KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_WARMUP=1 KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_ITERS=1 cargo test -p kiln-model --features metal bench_lm_head_argmax_rows_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/backend/metal.rs crates/kiln-model/src/generate.rs`
+
+### Results
+
+- Synthetic Qwen3.5 LM-head batch argmax vs materialized GEMV+argmax:
+  - batch 2: `307327.208us` -> `70131.917us`, `4.382x`.
+  - batch 4: `590959.792us` -> `137259.958us`, `4.305x`.
+  - batch 8: `1165141.125us` -> `490019.583us`, `2.378x`.
+- Four concurrent streaming requests, 32 generated tokens:
+  - disabled control: `7.127789s`, no batcher jobs.
+  - zero-wait enabled: `5.230091s`, `28` submitted jobs, `14` worker batches,
+    `28` rows, max batch `3`.
+  - `500us` wait: `5.565906s`, `28` submitted jobs, `8` worker batches,
+    `28` rows, max batch `4`.
+- Single streaming request, 8 generated tokens:
+  - disabled control: `2.269265s`, no batcher jobs.
+  - zero-wait enabled: `1.619216s`, `7` submitted jobs, `7` worker batches,
+    `7` rows, max batch `1`.
+
+### Artifact
+
+- `e347_lm_head_argmax_rows_bench.log`
+- `e347_disabled_time.log`
+- `e347_disabled_metrics.prom`
+- `e347_disabled_server.log`
+- `e347_wait0_time.log`
+- `e347_wait0_metrics.prom`
+- `e347_wait0_server.log`
+- `e347_wait500_time.log`
+- `e347_wait500_metrics.prom`
+- `e347_wait500_server.log`
+- `e347_single_disabled_time.log`
+- `e347_single_disabled_metrics.prom`
+- `e347_single_disabled_server.log`
+- `e347_single_wait0_time.log`
+- `e347_single_wait0_metrics.prom`
+- `e347_single_wait0_server.log`
+
+### Decision
+
+Accepted. The batcher regression from E346 was real but mostly caused by the
+missing batched greedy-tail kernel. With batch-row argmax active, zero-wait live
+batching is faster on both the concurrent streaming probe and the bs=1 streaming
+probe, while the `500us` wait still loses to zero wait. Metal serving now keeps
+the batcher on by default with zero wait; keep `KILN_DECODE_BATCHER=0` and
+`KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS=1` as production kill switches.
