@@ -7958,3 +7958,74 @@ latency improvement: the live server timing was slower under memory pressure.
 The fastest-inference work should now return to real low-level wins: GDN
 projection math/packing, larger fused decode boundaries, true batched
 model-forward, and scheduler-level continuous batching.
+
+## Experiments E268-E271: Rejected Cooperative GDN Input Projection
+
+Hypothesis:
+
+The current Metal GDN decode input-projection kernel assigns one thread per
+output column and loops serially over the hidden dimension. A fused cooperative
+tile8 SIMDGROUP kernel, shaped like the accepted full-attention QKV projection
+kernel, might reduce the largest measured decode stage by splitting the hidden
+reduction across lanes while still writing the four GDN projection outputs from
+one launch and one backing allocation.
+
+Temporary change:
+
+- Added `kiln_gdn_in_proj_decode_coop8_bf16`, a four-projection cooperative
+  tile8 kernel for `qkv`, `z`, `a`, and `b`.
+- Routed GDN decode input projection through that kernel by default.
+- Added `KILN_DISABLE_METAL_GDN_IN_PROJ_COOP=1` as a same-binary fallback to
+  the current scalar fused kernel.
+- Reverted the candidate before commit after the same-binary A/B lost twice.
+
+Validation while the candidate was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed with the candidate applied.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+All runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+Controls used `KILN_DISABLE_METAL_GDN_IN_PROJ_COOP=1` in the same candidate
+binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E268 | cooperative GDN in-proj tile8 | 455.3 ms | 5.97 | 167.4 ms | 166.7 ms | 177.1 ms | rejected |
+| E269 | scalar fused GDN in-proj control | 419.3 ms | 6.10 | 163.9 ms | 163.4 ms | 180.2 ms | control |
+| E270 | cooperative GDN in-proj tile8 repeat | 449.0 ms | 6.00 | 166.8 ms | 164.8 ms | 202.2 ms | rejected |
+| E271 | scalar fused GDN in-proj control repeat | 425.5 ms | 6.08 | 164.5 ms | 162.9 ms | 189.6 ms | control |
+
+Memory-pressure check:
+
+- Before the repeat pair, `memory_pressure` reported 81% system-wide free
+  memory.
+- After E271, `memory_pressure` reported 80% system-wide free memory.
+
+Artifacts:
+
+- `e268_m1_bs1_p64_o64_warmed_gdn_inproj_coop8.log`
+- `e269_m1_bs1_p64_o64_warmed_gdn_inproj_scalar_control.log`
+- `e270_m1_bs1_p64_o64_warmed_gdn_inproj_coop8_repeat.log`
+- `e271_m1_bs1_p64_o64_warmed_gdn_inproj_scalar_control_repeat.log`
+
+Takeaway:
+
+Splitting the hidden reduction across SIMDGROUP lanes did not beat the current
+scalar fused kernel in full decode, even though it passed parity and targeted
+the largest measured stage. The overhead and/or memory-access shape of this
+cooperative mapping outweighed the reduced per-thread loop. Future GDN
+projection work should avoid simply wrapping the current transposed layout in
+more lanes; the next plausible direction is a real packed layout or a larger
+fusion that consumes the projected values without materializing the same
+intermediate boundaries.

@@ -634,3 +634,12 @@
   Because `memory_pressure` reported only 34% free memory, E267 is logged as a
   semantics-preserving no-work cleanup, not as a latency win. Next work returns
   to low-level/kernel and batching changes.
+- 2026-05-04 E268-E271: Rejected a cooperative tile8 Metal GDN input-projection
+  kernel. The candidate split the hidden reduction across SIMDGROUP lanes for
+  the four GDN projections and passed focused parity, but same-binary warmed
+  p64/o64 A/Bs lost twice: E268 was 455.3 ms prefill / 167.4 ms mean ITL /
+  5.97 tok/s versus E269 scalar control 419.3 ms / 163.9 ms / 6.10 tok/s;
+  repeat E270 was 449.0 ms / 166.8 ms / 6.00 tok/s versus E271 control
+  425.5 ms / 164.5 ms / 6.08 tok/s. Memory pressure was 80-81% free around
+  the repeat. The candidate source was reverted and clean-source release
+  `kiln-bench` rebuild passed.
