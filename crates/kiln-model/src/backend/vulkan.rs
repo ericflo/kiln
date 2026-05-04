@@ -416,10 +416,10 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
 
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        let Ok((_batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if batch != 1 || seq_len != 1 {
+        if seq_len != 1 {
             return Ok(None);
         }
 
@@ -610,10 +610,10 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
 
-        let Ok((_batch, seq_len, hidden)) = x.dims3() else {
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if seq_len != 1 {
+        if batch != 1 || seq_len != 1 {
             return Ok(None);
         }
         let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
@@ -764,10 +764,10 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
 
-        let Ok((_batch, seq_len, hidden)) = x.dims3() else {
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if seq_len != 1 {
+        if batch != 1 || seq_len != 1 {
             return Ok(None);
         }
         let Ok((q_hidden, q_dim)) = q_weight_t.dims2() else {

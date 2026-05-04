@@ -2590,26 +2590,58 @@ Verdict:
 ### E088: Guard Retiled Full-Attention QKV Fusion To Single-Row Decode
 
 Change:
-- Added an explicit `batch == 1` backend gate to `VulkanBackend::full_attn_qkv_decode`.
-- The retiled QKV shader remains default for single-row decode, but native batch/full-attention rows now fall back instead of reaching a helper whose kernel contract is `[1, 1, hidden]`.
+- Intended to add an explicit `batch == 1` backend gate to `VulkanBackend::full_attn_qkv_decode`.
+- The edit actually landed on `VulkanBackend::gdn_in_proj_decode`, changing its gate from `seq_len == 1` to `batch == 1 && seq_len == 1`.
 
 Reasoning:
 - E087 promoted the full-attention QKV path from opt-in to default.
 - The kernel and dispatch helper already assumed one row, but the backend gate only checked `seq_len == 1`.
 - Native batch work must not accidentally route multi-row tensors into a single-row helper.
+- The targeted tests did not include a fresh no-profile batch throughput check, so they missed that batched GDN input projection had fallen back to CPU.
 
 Evidence:
 - `cargo fmt --all --check` passed.
 - `git diff --check` passed.
 - `cargo test -p kiln-model native_batch_greedy -- --nocapture` passed.
 - `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+- Fresh no-profile four-prompt `/v1/completions/batch` check before E089:
+  - `max_tokens=16`, 64 completion tokens.
+  - 46.581s, 1.374 tok/s.
+
+Verdict:
+- Superseded by E089.
+- The intended full-attention QKV safety guard is still needed, but E088's landed code regressed native batch by disabling the existing batched Vulkan GDN input projection path.
+
+### E089: Restore Batched GDN Input Projection And Apply Single-Row Guards
+
+Change:
+- Restored `VulkanBackend::gdn_in_proj_decode` to accept any batch with `seq_len == 1`, so `batch > 1` reaches the existing `gdn_in_proj_decode_batched.comp` Vulkan path again.
+- Added the intended `batch == 1 && seq_len == 1` guard to `VulkanBackend::full_attn_qkv_decode`.
+- Added the same single-row guard to `VulkanBackend::linear_decode_argmax`, whose kernel returns one scalar token id and already requires a single hidden row.
+
+Reasoning:
+- E058/E063 already proved that native batch must keep GDN input projection on Vulkan; falling back to CPU made `gdn.in_proj` a multi-second per-step bucket.
+- The retiled full-attention QKV shader is a single-row helper, so it must not consume native batch tensors.
+- The LM-head argmax helper reads back one token id and validates one hidden row in the kernel dispatcher, so the backend should reject multi-row tensors before dispatch.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed all 17 Vulkan parity tests, including batched GDN input projection, full-attention QKV, and LM-head argmax.
+- `cargo test -p kiln-model native_batch_greedy -- --nocapture` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+- `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+- Fresh release-server no-profile four-prompt `/v1/completions/batch` check after the fix:
+  - Same fixture as the E088 regression check: `temperature=0`, `top_p=1`, `max_tokens=16`, 64 completion tokens.
+  - 25.457s, 2.514 tok/s.
+  - This restores the result to the earlier native-batch performance band and is 1.83x faster than the broken E088 build on the same fixture.
 
 Verdict:
 - Keep.
-- This is a correctness and bs>1 safety guard for E087, not a latency anchor change.
+- This is a correctness and bs>1 regression fix; it does not change the best observed bs=1 source anchor.
 
 ## Next Candidate
 
-With E088, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087/E088 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and explicitly gated to batch=1. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E089, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and is now correctly gated to batch=1. E089 restores native-batch GDN input projection after the E088 misplaced guard; the current four-prompt `max_tokens=16` batch fixture is back to 25.457s / 2.514 tok/s instead of the broken 46.581s / 1.374 tok/s. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
