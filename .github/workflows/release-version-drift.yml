@@ -1,0 +1,35 @@
+name: Release Version Drift
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'desktop/Cargo.toml'
+      - 'README.md'
+      - 'QUICKSTART.md'
+      - 'desktop/README.md'
+      - 'docs/site/**'
+      - 'docs/release-version-policy.md'
+      - 'scripts/check_release_versions.py'
+      - '.github/workflows/release-version-drift.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'desktop/Cargo.toml'
+      - 'README.md'
+      - 'QUICKSTART.md'
+      - 'desktop/README.md'
+      - 'docs/site/**'
+      - 'docs/release-version-policy.md'
+      - 'scripts/check_release_versions.py'
+      - '.github/workflows/release-version-drift.yml'
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check user-facing release examples
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/check_release_versions.py
