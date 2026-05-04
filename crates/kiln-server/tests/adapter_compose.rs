@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use kiln_core::config::ModelConfig;
@@ -166,7 +166,11 @@ async fn test_compose_endpoint_caches_synthesized_adapter() {
         { "name": "src-b", "scale": 0.5 },
     ]);
 
-    let resp = app.clone().oneshot(chat_with_adapters(payload.clone())).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(chat_with_adapters(payload.clone()))
+        .await
+        .unwrap();
     let status = resp.status();
     let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -207,7 +211,11 @@ async fn test_compose_endpoint_caches_synthesized_adapter() {
     // resolution (some filesystems round to seconds).
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
-    let resp2 = app.clone().oneshot(chat_with_adapters(payload)).await.unwrap();
+    let resp2 = app
+        .clone()
+        .oneshot(chat_with_adapters(payload))
+        .await
+        .unwrap();
     let status2 = resp2.status();
     let body_bytes2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
         .await
@@ -364,7 +372,12 @@ async fn test_compose_endpoint_rejects_oversized_list() {
 /// LRU eviction will see it as old. Mirrors the on-disk shape kiln itself
 /// writes (a directory of opaque files); contents are not loaded by the
 /// eviction helper, only sized.
-fn write_fake_cache_entry(composed_root: &std::path::Path, name: &str, size_bytes: usize, age_secs: i64) {
+fn write_fake_cache_entry(
+    composed_root: &std::path::Path,
+    name: &str,
+    size_bytes: usize,
+    age_secs: i64,
+) {
     let dir = composed_root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let payload = vec![0u8; size_bytes];
@@ -522,13 +535,21 @@ async fn test_compose_cache_hit_refreshes_lru() {
     ]);
 
     // Synth A — oldest at end of all this.
-    let resp = app.clone().oneshot(chat_with_adapters(payload_a.clone())).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(chat_with_adapters(payload_a.clone()))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     // Sleep so mtime ordering is unambiguous on coarse-resolution filesystems.
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // Synth B — newer than A. Two entries, no eviction.
-    let resp = app.clone().oneshot(chat_with_adapters(payload_b.clone())).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(chat_with_adapters(payload_b.clone()))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let entries_after_ab: Vec<_> = std::fs::read_dir(&composed_root)
         .unwrap()
@@ -543,14 +564,22 @@ async fn test_compose_cache_hit_refreshes_lru() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // Cache-hit on A — refreshes its mtime. Now A is newer than B for LRU.
-    let resp = app.clone().oneshot(chat_with_adapters(payload_a)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(chat_with_adapters(payload_a))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     // Synth C — three entries, eviction fires. With cap=2 and A refreshed
     // most-recent (after C itself), B should be the oldest and get evicted.
-    let resp = app.clone().oneshot(chat_with_adapters(payload_c)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(chat_with_adapters(payload_c))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Identify which dirs correspond to A, B, C by content hash. Since we
@@ -619,7 +648,11 @@ async fn test_compose_disabled_cap_keeps_all() {
             { "name": "src-c", "scale": 0.5 },
         ]),
     ] {
-        let resp = app.clone().oneshot(chat_with_adapters(payload)).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(chat_with_adapters(payload))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 

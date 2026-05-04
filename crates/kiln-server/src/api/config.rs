@@ -1,4 +1,4 @@
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
 use crate::state::{AppState, ModelBackend};

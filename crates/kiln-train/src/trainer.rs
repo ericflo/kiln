@@ -11,9 +11,9 @@ use candle_core::{DType, Device, Tensor, Var};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy_dispatch};
 #[cfg(test)]
 use kiln_flce_kernel::fused_linear_cross_entropy;
+use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy_dispatch};
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState, model_forward,
@@ -1383,11 +1383,7 @@ fn tile_loss_explicit(
     // hidden never participates in the loss.
     let pad_amount = (l_labels + 1).saturating_sub(l);
     let hidden_padded = if pad_amount > 0 {
-        let zero_pad = Tensor::zeros(
-            (1, pad_amount, hidden_size),
-            tile_hidden.dtype(),
-            device,
-        )?;
+        let zero_pad = Tensor::zeros((1, pad_amount, hidden_size), tile_hidden.dtype(), device)?;
         Tensor::cat(&[tile_hidden, &zero_pad], 1)?
     } else {
         tile_hidden.clone()
@@ -1503,9 +1499,7 @@ fn tiled_segment_recompute_and_backward(
             Some(&lora_weights_for_seg),
         )
         .with_context(|| {
-            format!(
-                "tiled segment {seg_idx} grad-tracked forward, tile [{tile_start}, {tile_end})"
-            )
+            format!("tiled segment {seg_idx} grad-tracked forward, tile [{tile_start}, {tile_end})")
         })?;
 
         // Detached forward through later segments on the tile, threading
@@ -1733,9 +1727,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     };
 
     let tail_loss_val = tail_loss.to_scalar::<f32>()? as f64;
-    let tail_grads = tail_loss
-        .backward()
-        .context("layer-pair tail backward")?;
+    let tail_grads = tail_loss.backward().context("layer-pair tail backward")?;
 
     // We deliberately do NOT call `accumulate_grads(... &all_vars)` here
     // — see the `lora_detached` comment above. The tail backward's only
@@ -1828,9 +1820,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                 let scalar = (&block_output * &grad_at_current_output)?
                     .sum_all()
                     .context("layer-pair FA block scalar (gradient injection)")?;
-                let block_grads = scalar
-                    .backward()
-                    .context("layer-pair FA block backward")?;
+                let block_grads = scalar.backward().context("layer-pair FA block backward")?;
 
                 accumulate_grads(accumulated_grads, &block_grads, &all_vars)?;
 
@@ -1840,7 +1830,8 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                         anyhow::anyhow!(
                             "layer-pair FA block backward missing grad at block_input_var \
                              (block [{}, {}), seg_idx={seg_idx})",
-                            range.start, range.end,
+                            range.start,
+                            range.end,
                         )
                     })?
                     .clone()
@@ -1897,9 +1888,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                     let scalar = (&tile_output * &tile_grad_out)?
                         .sum_all()
                         .context("layer-pair GDN tile scalar (gradient injection)")?;
-                    let tile_grads = scalar
-                        .backward()
-                        .context("layer-pair GDN tile backward")?;
+                    let tile_grads = scalar.backward().context("layer-pair GDN tile backward")?;
 
                     accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
 
@@ -1910,7 +1899,8 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                                 "layer-pair GDN tile backward missing grad at \
                                  block_input_var (tile [{tile_start}, {tile_end}), \
                                  block [{}, {}), seg_idx={seg_idx})",
-                                range.start, range.end,
+                                range.start,
+                                range.end,
                             )
                         })?
                         .clone();
@@ -1929,7 +1919,8 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                             "layer-pair GDN block produced no tiles \
                              (total_tokens={total_tokens}, tile_size={tile_size}, \
                              block [{}, {}), seg_idx={seg_idx})",
-                            range.start, range.end,
+                            range.start,
+                            range.end,
                         )
                     })?
                     .detach()
@@ -2528,18 +2519,10 @@ mod tests {
                 let in_proj_qkv = randn_like_seeded(&mut rng, 0.02, &[qkv_dim, h], device)?;
                 let in_proj_z = randn_like_seeded(&mut rng, 0.02, &[v_dim, h], device)?;
                 let out_proj = randn_like_seeded(&mut rng, 0.02, &[h, v_dim], device)?;
-                let in_proj_a = randn_like_seeded(
-                    &mut rng,
-                    0.02,
-                    &[config.linear_num_value_heads, h],
-                    device,
-                )?;
-                let in_proj_b = randn_like_seeded(
-                    &mut rng,
-                    0.02,
-                    &[config.linear_num_value_heads, h],
-                    device,
-                )?;
+                let in_proj_a =
+                    randn_like_seeded(&mut rng, 0.02, &[config.linear_num_value_heads, h], device)?;
+                let in_proj_b =
+                    randn_like_seeded(&mut rng, 0.02, &[config.linear_num_value_heads, h], device)?;
                 let in_proj_qkv_t = in_proj_qkv.t()?.contiguous()?;
                 let in_proj_z_t = in_proj_z.t()?.contiguous()?;
                 let in_proj_a_t = in_proj_a.t()?.contiguous()?;
@@ -2863,9 +2846,7 @@ mod tests {
         // (`pad_amount = 0`) branch in the same step.
         let seq_len: usize = 192;
         let vocab = config.vocab_size;
-        let input_ids: Vec<u32> = (0..seq_len)
-            .map(|i| ((i * 7 + 3) % vocab) as u32)
-            .collect();
+        let input_ids: Vec<u32> = (0..seq_len).map(|i| ((i * 7 + 3) % vocab) as u32).collect();
         // Mask out positions 0 and total-1 so the next-token shift produces
         // the same effective active-position set in both paths (matches the
         // pattern of `test_checkpointed_loss_matches_standard`).
@@ -3069,9 +3050,7 @@ mod tests {
         // 1 FA block) per segment exercises both block kinds twice.
         let seq_len: usize = 192;
         let vocab = config.vocab_size;
-        let input_ids: Vec<u32> = (0..seq_len)
-            .map(|i| ((i * 7 + 3) % vocab) as u32)
-            .collect();
+        let input_ids: Vec<u32> = (0..seq_len).map(|i| ((i * 7 + 3) % vocab) as u32).collect();
         let mut label_mask = vec![false; seq_len];
         for slot in label_mask.iter_mut().skip(1).take(seq_len - 2) {
             *slot = true;
@@ -3170,15 +3149,14 @@ mod tests {
         // of `or_insert` calls along its predecessors. Both interpretations
         // (missing => zero) are mathematically equivalent for parity, so
         // we treat them as equivalent here.
-        let grad_or_zero = |grads: &HashMap<candle_core::TensorId, Tensor>,
-                            var: &Var|
-         -> Result<Tensor> {
-            let id = var.as_tensor().id();
-            match grads.get(&id) {
-                Some(g) => Ok(g.clone()),
-                None => Ok(var.as_tensor().zeros_like()?),
-            }
-        };
+        let grad_or_zero =
+            |grads: &HashMap<candle_core::TensorId, Tensor>, var: &Var| -> Result<Tensor> {
+                let id = var.as_tensor().id();
+                match grads.get(&id) {
+                    Some(g) => Ok(g.clone()),
+                    None => Ok(var.as_tensor().zeros_like()?),
+                }
+            };
 
         let classified = classify_lora_vars(&params);
         let mut compared_mlp = 0usize;
@@ -3256,8 +3234,7 @@ mod tests {
         gdn_only_config.full_attention_interval = gdn_only_config.num_layers + 1;
         gdn_only_config.num_full_attention_layers = 0;
         let gdn_only_weights = tiny_weights(&gdn_only_config, &device)?;
-        let gdn_only =
-            super::partition_segment_layers_by_attn_type(&gdn_only_weights, 0, 4);
+        let gdn_only = super::partition_segment_layers_by_attn_type(&gdn_only_weights, 0, 4);
         assert_eq!(gdn_only.len(), 1);
         assert_eq!(gdn_only[0].0, super::AttnKind::Gdn);
         assert_eq!(gdn_only[0].1, 0..4);

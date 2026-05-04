@@ -7,7 +7,8 @@ Status: design only, not implemented. Follow-up task will wire this into
 
 The desktop app spawns `kiln` as a subprocess. `desktop/src/installer.rs`
 already downloads, verifies, extracts, and chmods the kiln binary on first
-run (macOS only today — see `current_target()` at installer.rs:64). Once
+run (macOS, Linux, and Windows release targets — see `current_target()`
+in installer.rs). Once
 installed, that binary is frozen forever: the app does not notice new
 `kiln-v*` releases, so users miss kernel and training improvements
 (Phase 6 work, bug fixes, new endpoints) unless they reinstall the whole
@@ -46,15 +47,17 @@ Asset naming convention (extension of the existing
 | --- | --- | --- |
 | macOS aarch64 Metal | `aarch64-apple-darwin-metal` | n/a |
 | Linux x86_64 CUDA 12.4 | `x86_64-unknown-linux-gnu-cuda124` | 12.4 |
+| Linux x86_64 Vulkan | `x86_64-unknown-linux-gnu-vulkan` | n/a |
 | Windows x86_64 CUDA 12.4 | `x86_64-pc-windows-msvc-cuda124` | 12.4 |
 
 Each tarball carries a companion `.sha256`. The installer already refuses
 to install an asset without one (installer.rs:445-452) — keep that
 invariant.
 
-The Linux/Windows assets do not exist today. A separate task adds CUDA
-build jobs to `server-release.yml`. Until then, update is simply a no-op
-on those platforms (same fallback as first-install).
+On Linux, the desktop app chooses the CUDA asset when an NVIDIA GPU is
+present and the Vulkan asset on AMD/Intel-only hosts. `KILN_DESKTOP_GPU_BACKEND`
+or `KILN_DESKTOP_SERVER_TARGET` can override the default when a multi-GPU host
+needs a specific binary.
 
 ### Why GitHub Releases and not a custom channel
 

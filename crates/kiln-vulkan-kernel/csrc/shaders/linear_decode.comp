@@ -1,0 +1,46 @@
+// Single-token transposed linear projection.
+//
+// Computes y[out_dim] = x[hidden] * weight_t[hidden, out_dim].
+// Inputs and outputs are f32 buffers; Rust handles dtype conversion at the
+// tensor boundary.
+//
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_w[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial[256];
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col = gl_WorkGroupID.x * 16 + col_lane;
+    uint partial_idx = col_lane * 16 + red_lane;
+
+    float sum = 0.0;
+    if (col < out_dim) {
+        for (uint h = red_lane; h < hidden; h += 16) {
+            sum += data_x[h] * data_w[h * out_dim + col];
+        }
+    }
+
+    partial[partial_idx] = sum;
+    barrier();
+
+    if (red_lane == 0 && col < out_dim) {
+        float total = 0.0;
+        for (uint lane = 0; lane < 16; lane++) {
+            total += partial[col_lane * 16 + lane];
+        }
+        data_out[col] = total;
+    }
+}

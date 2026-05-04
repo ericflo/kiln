@@ -34,7 +34,6 @@ pub struct ModelConfig {
 
     // --- Linear attention (Gated DeltaNet) dimensions ---
     // These differ from full attention heads/dims in the hybrid architecture.
-
     /// Number of key heads in linear attention layers.
     /// For Qwen3.5-4B: 16.
     pub linear_num_key_heads: usize,
@@ -156,7 +155,11 @@ impl ModelConfig {
     /// Full attention Q projection output dim (includes gate when attn_output_gate is true).
     pub fn full_attn_q_proj_dim(&self) -> usize {
         let base = self.num_attention_heads * self.head_dim;
-        if self.attn_output_gate { base * 2 } else { base }
+        if self.attn_output_gate {
+            base * 2
+        } else {
+            base
+        }
     }
 
     /// Total Q+K dimension for linear attention (Q and K share the same head count/dim).
@@ -218,12 +221,14 @@ mod tests {
         assert!(!config.is_full_attention_layer(0)); // linear
         assert!(!config.is_full_attention_layer(1)); // linear
         assert!(!config.is_full_attention_layer(2)); // linear
-        assert!(config.is_full_attention_layer(3));  // full
+        assert!(config.is_full_attention_layer(3)); // full
         assert!(!config.is_full_attention_layer(4)); // linear
-        assert!(config.is_full_attention_layer(7));  // full
+        assert!(config.is_full_attention_layer(7)); // full
         assert!(config.is_full_attention_layer(31)); // full (last layer)
 
-        let full_count = (0..32).filter(|&i| config.is_full_attention_layer(i)).count();
+        let full_count = (0..32)
+            .filter(|&i| config.is_full_attention_layer(i))
+            .count();
         assert_eq!(full_count, 8);
     }
 
@@ -235,7 +240,10 @@ mod tests {
         let kv_gb = kv_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         // ~32 KB/token * 131072 tokens = ~4 GB
         // This is the magic: 128K context in only ~4 GB of KV cache!
-        assert!(kv_gb > 3.5 && kv_gb < 4.5, "KV at 128K should be ~4 GB, got {kv_gb:.2} GB");
+        assert!(
+            kv_gb > 3.5 && kv_gb < 4.5,
+            "KV at 128K should be ~4 GB, got {kv_gb:.2} GB"
+        );
     }
 
     #[test]
@@ -251,7 +259,10 @@ mod tests {
         let ctx_len = 131072; // 128K tokens
         let fp8_gb = (fp8_bytes * ctx_len) as f64 / (1024.0 * 1024.0 * 1024.0);
         // ~16 KB/token * 131072 tokens = ~2 GB (half of 4 GB with BF16)
-        assert!(fp8_gb > 1.8 && fp8_gb < 2.2, "FP8 KV at 128K should be ~2 GB, got {fp8_gb:.2} GB");
+        assert!(
+            fp8_gb > 1.8 && fp8_gb < 2.2,
+            "FP8 KV at 128K should be ~2 GB, got {fp8_gb:.2} GB"
+        );
     }
 
     #[test]

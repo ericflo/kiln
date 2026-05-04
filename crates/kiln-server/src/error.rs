@@ -11,10 +11,10 @@
 //! }
 //! ```
 
-use axum::http::header::{HeaderValue, RETRY_AFTER};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::http::StatusCode;
+use axum::http::header::{HeaderValue, RETRY_AFTER};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 /// JSON error body shape, matching OpenAI's convention.
@@ -280,7 +280,8 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "mock_mode",
-            message: "Training requires real model weights (not available in mock mode)".to_string(),
+            message: "Training requires real model weights (not available in mock mode)"
+                .to_string(),
             hint: "Start the server with a real model (set model.path in config) to use training.",
             retry_after_seconds: None,
         }
@@ -313,9 +314,7 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "training_tracked_full",
-            message: format!(
-                "Training tracking map is at capacity ({max} tracked jobs)"
-            ),
+            message: format!("Training tracking map is at capacity ({max} tracked jobs)"),
             hint: "Wait for terminal entries to TTL out, or raise training.max_tracked_jobs in the config (env: KILN_TRAINING_MAX_TRACKED_JOBS).",
             retry_after_seconds: Some(30),
         }
@@ -348,7 +347,9 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             code: "training_job_already_started",
-            message: format!("Job '{job_id}' was not found in the queue (it may have already started)"),
+            message: format!(
+                "Job '{job_id}' was not found in the queue (it may have already started)"
+            ),
             hint: "Check job status with GET /v1/train/status/{job_id}.",
             retry_after_seconds: None,
         }

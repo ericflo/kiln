@@ -20,17 +20,18 @@ static ALLOC_CMD_FN: OnceLock<VkAllocCmdFn> = OnceLock::new();
 static _VULKAN_LIB: OnceLock<libloading::os::unix::Library> = OnceLock::new();
 
 fn load_vk_funcs() {
-    _VULKAN_LIB.set(unsafe {
-        libloading::os::unix::Library::open::<&str>(
-            Some("libvulkan.so.1"),
-            libc::RTLD_NOW,
-        ).expect("failed to open libvulkan.so.1")
-    }).ok();
-    
+    _VULKAN_LIB
+        .set(unsafe {
+            libloading::os::unix::Library::open::<&str>(Some("libvulkan.so.1"), libc::RTLD_NOW)
+                .expect("failed to open libvulkan.so.1")
+        })
+        .ok();
+
     unsafe {
         let lib = _VULKAN_LIB.get().expect("library not loaded");
-        let alloc_fn: libloading::os::unix::Symbol<VkAllocCmdFn> =
-            lib.get(b"vkAllocateCommandBuffers\0").expect("vkAllocateCommandBuffers not found");
+        let alloc_fn: libloading::os::unix::Symbol<VkAllocCmdFn> = lib
+            .get(b"vkAllocateCommandBuffers\0")
+            .expect("vkAllocateCommandBuffers not found");
         ALLOC_CMD_FN.set(*alloc_fn).ok();
     }
 }
@@ -48,13 +49,13 @@ pub fn allocate_command_buffers(
     if ALLOC_CMD_FN.get().is_none() {
         load_vk_funcs();
     }
-    let fn_ptr = ALLOC_CMD_FN.get().expect("failed to load vkAllocateCommandBuffers");
-    
+    let fn_ptr = ALLOC_CMD_FN
+        .get()
+        .expect("failed to load vkAllocateCommandBuffers");
+
     let mut cmd_bufs = vec![vk::CommandBuffer::null(); count as usize];
-    let result = unsafe {
-        fn_ptr(device, alloc_info, cmd_bufs.as_mut_ptr())
-    };
-    
+    let result = unsafe { fn_ptr(device, alloc_info, cmd_bufs.as_mut_ptr()) };
+
     if result == vk::Result::SUCCESS {
         Ok(cmd_bufs)
     } else {

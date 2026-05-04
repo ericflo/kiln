@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -168,7 +168,10 @@ async fn test_roundtrip_download_then_upload() {
     let cfg = std::fs::read(dest.join("adapter_config.json")).unwrap();
     assert_eq!(cfg.as_slice(), br#"{"r": 8, "lora_alpha": 16}"#);
     let weights = std::fs::read(dest.join("adapter_model.safetensors")).unwrap();
-    assert_eq!(weights.as_slice(), b"\x00\x01\x02\x03fake-safetensors-bytes");
+    assert_eq!(
+        weights.as_slice(),
+        b"\x00\x01\x02\x03fake-safetensors-bytes"
+    );
 }
 
 #[tokio::test]
@@ -211,11 +214,7 @@ async fn test_upload_rejects_invalid_name() {
     let real_entries: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()
         .flatten()
-        .filter(|e| {
-            !e.file_name()
-                .to_string_lossy()
-                .starts_with(".upload-tmp-")
-        })
+        .filter(|e| !e.file_name().to_string_lossy().starts_with(".upload-tmp-"))
         .collect();
     assert!(
         real_entries.is_empty(),
@@ -263,7 +262,11 @@ async fn test_upload_rejects_when_disk_cap_would_be_exceeded() {
     let existing = write_adapter(tmp.path(), "already-here");
     // Pad existing/adapter_model.safetensors to ~3 KiB so the dir comfortably
     // exceeds the 1 KiB cap we install on the AppState below.
-    std::fs::write(existing.join("adapter_model.safetensors"), vec![0u8; 3 * 1024]).unwrap();
+    std::fs::write(
+        existing.join("adapter_model.safetensors"),
+        vec![0u8; 3 * 1024],
+    )
+    .unwrap();
 
     let mut state = make_state(tmp.path().to_path_buf());
     state.adapter_max_disk_bytes = Some(1024); // 1 KiB
@@ -312,7 +315,11 @@ async fn test_upload_accepts_when_disk_cap_disabled() {
     // (operator opt-out via `max_disk_bytes = None`). Upload must succeed.
     let tmp = tempfile::tempdir().unwrap();
     let existing = write_adapter(tmp.path(), "already-here");
-    std::fs::write(existing.join("adapter_model.safetensors"), vec![0u8; 3 * 1024]).unwrap();
+    std::fs::write(
+        existing.join("adapter_model.safetensors"),
+        vec![0u8; 3 * 1024],
+    )
+    .unwrap();
 
     let mut state = make_state(tmp.path().to_path_buf());
     state.adapter_max_disk_bytes = None;
@@ -357,7 +364,11 @@ async fn test_upload_disk_cap_excludes_upload_tmp_and_composed() {
     // Pre-fill .composed/ with > cap-worth of bytes.
     let composed = tmp.path().join(".composed").join("abc123");
     std::fs::create_dir_all(&composed).unwrap();
-    std::fs::write(composed.join("adapter_model.safetensors"), vec![0u8; 10 * 1024]).unwrap();
+    std::fs::write(
+        composed.join("adapter_model.safetensors"),
+        vec![0u8; 10 * 1024],
+    )
+    .unwrap();
 
     let mut state = make_state(tmp.path().to_path_buf());
     state.adapter_max_disk_bytes = Some(1024); // 1 KiB
@@ -463,15 +474,14 @@ async fn test_upload_rejects_path_escape_in_archive() {
     // No adapter directory should exist with the escaped data, and the
     // adapter dir should be otherwise empty (modulo cleaned-up temp dir).
     let leaked = tmp.path().parent().unwrap().join("etc/passwd");
-    assert!(!leaked.exists(), "path traversal leaked outside adapter_dir");
+    assert!(
+        !leaked.exists(),
+        "path traversal leaked outside adapter_dir"
+    );
     let real_entries: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()
         .flatten()
-        .filter(|e| {
-            !e.file_name()
-                .to_string_lossy()
-                .starts_with(".upload-tmp-")
-        })
+        .filter(|e| !e.file_name().to_string_lossy().starts_with(".upload-tmp-"))
         .collect();
     assert!(
         real_entries.is_empty(),
@@ -482,4 +492,3 @@ async fn test_upload_rejects_path_escape_in_archive() {
             .collect::<Vec<_>>()
     );
 }
-

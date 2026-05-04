@@ -153,10 +153,8 @@ impl Scheduler {
 
         // 1. Remove completed/cancelled requests, free their blocks
         self.running.retain_mut(|req| {
-            let should_remove = matches!(
-                req.state,
-                RequestState::Complete | RequestState::Cancelled
-            );
+            let should_remove =
+                matches!(req.state, RequestState::Complete | RequestState::Cancelled);
             if should_remove {
                 let cached_count = self.cached_block_counts.remove(&req.id).unwrap_or(0);
                 // Free only the non-cached blocks (suffix blocks allocated by us)

@@ -87,6 +87,16 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
+        false
+    }
+
+    fn exit_gdn_recurrent_resident_state_scope(&self) {}
+
+    fn materialize_gdn_recurrent_resident_state(&self, _state: &mut Tensor) -> Result<()> {
+        Ok(())
+    }
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         false
     }
@@ -366,11 +376,34 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    /// Fused GDN decode input projections.
+    /// Fused native-MTP GDN decode gates + recurrent update + gated RMSNorm.
     ///
-    /// Collapses the four single-token `broadcast_matmul` calls in Step 1
-    /// (`qkv`, `z`, `a`, `b`) into one backend launch for decode. Returns
-    /// `(mixed_qkv, z, a, b)` with shapes matching the portable matmul path.
+    /// Narrow decode path for `seq_len == 1`. Returns `[B, 1, value_heads, dv]`
+    /// after gated RMSNorm, mutating `state` in place.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_gates_recurrent_rmsnorm(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _a: &Tensor,
+        _b: &Tensor,
+        _a_log: &Tensor,
+        _dt_bias: &Tensor,
+        _state: &mut Tensor,
+        _z: &Tensor,
+        _weight: &Tensor,
+        _eps: f64,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Fused GDN input projections.
+    ///
+    /// Collapses the four `broadcast_matmul` calls in Step 1 (`qkv`, `z`,
+    /// `a`, `b`) into one backend launch when the backend supports the shape.
+    /// Returns `(mixed_qkv, z, a, b)` with shapes matching the portable matmul
+    /// path.
     #[allow(clippy::too_many_arguments)]
     fn gdn_in_proj_decode(
         &self,
@@ -380,6 +413,97 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _in_proj_a_t: &Tensor,
         _in_proj_b_t: &Tensor,
     ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
+        Ok(None)
+    }
+
+    /// Transposed linear projection.
+    ///
+    /// `x` is `[batch, seq_len, hidden]`, `weight_t` is `[hidden, out_dim]`,
+    /// and the output shape is `[batch, seq_len, out_dim]`. Backends should
+    /// return `Ok(None)` for unsupported shapes, dtypes, LoRA paths, or debug
+    /// modes.
+    fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    fn supports_linear_decode_argmax(&self) -> bool {
+        false
+    }
+
+    /// Single-token transposed linear projection with argmax reduction.
+    ///
+    /// Used by greedy LM-head decode when logits do not need to be materialized
+    /// on the host. `x` is `[1, 1, hidden]`, `weight_t` is `[hidden, out_dim]`.
+    fn linear_decode_argmax(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
+    fn supports_linear_decode_argmax_batch(&self) -> bool {
+        false
+    }
+
+    /// Batched single-token transposed linear projection with argmax reduction.
+    ///
+    /// Used by greedy native-batch LM-head decode when logits do not need to be
+    /// materialized on the host. `x` is `[batch, 1, hidden]`, `weight_t` is
+    /// `[hidden, out_dim]`, and the result contains one token id per batch row.
+    fn linear_decode_argmax_batch(
+        &self,
+        _x: &Tensor,
+        _weight_t: &Tensor,
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
+
+    /// Warm backend-resident decode weights after model load.
+    ///
+    /// CPU/CUDA/Metal either keep model tensors resident through Candle or
+    /// have their own upload path. Vulkan's current Candle-CPU integration
+    /// maintains a side cache of immutable projection buffers, so it can move
+    /// the first-token upload cost out of the measured decode path.
+    fn prewarm_decode_weights(&self, _weights: &crate::forward::GpuWeights) -> Result<()> {
+        Ok(())
+    }
+
+    /// Fused single-token full-attention Q/K/V projections.
+    ///
+    /// `x` is `[1, 1, hidden]`; weights are pre-transposed as
+    /// `[hidden, out_dim]`; returned tensors are `[1, 1, q_dim]`,
+    /// `[1, 1, k_dim]`, and `[1, 1, v_dim]`.
+    fn full_attn_qkv_decode(
+        &self,
+        _x: &Tensor,
+        _q_weight_t: &Tensor,
+        _k_weight_t: &Tensor,
+        _v_weight_t: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
+        Ok(None)
+    }
+
+    /// Fused single-token MLP gate/up projection.
+    ///
+    /// `x` is `[1, 1, hidden]`; both weights are `[hidden, intermediate]`.
+    /// Returns `[1, 1, intermediate]` containing `silu(x @ gate_t) * (x @ up_t)`.
+    fn mlp_gate_up_decode(
+        &self,
+        _x: &Tensor,
+        _gate_weight_t: &Tensor,
+        _up_weight_t: &Tensor,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Fused single-token MLP that keeps the SwiGLU hidden activation on backend device.
+    ///
+    /// `x` is `[1, 1, hidden]`; `gate_weight_t` and `up_weight_t` are
+    /// `[hidden, intermediate]`; `down_weight_t` is `[intermediate, out_dim]`.
+    fn mlp_decode(
+        &self,
+        _x: &Tensor,
+        _gate_weight_t: &Tensor,
+        _up_weight_t: &Tensor,
+        _down_weight_t: &Tensor,
+    ) -> Result<Option<Tensor>> {
         Ok(None)
     }
 

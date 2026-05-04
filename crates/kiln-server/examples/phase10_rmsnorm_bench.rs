@@ -282,7 +282,10 @@ fn run_one(
         Ok(_) => Status::Ok,
         Err(e) => {
             let msg = format!("{e:?}");
-            if msg.contains("out of memory") || msg.contains("OutOfMemory") || msg.contains("CUDA_ERROR_OUT_OF_MEMORY") {
+            if msg.contains("out of memory")
+                || msg.contains("OutOfMemory")
+                || msg.contains("CUDA_ERROR_OUT_OF_MEMORY")
+            {
                 Status::Oom
             } else {
                 eprintln!("  step error: {msg}");
@@ -327,8 +330,12 @@ fn parse_model_path() -> Result<PathBuf> {
 
 fn print_table(rows: &[Row]) {
     println!();
-    println!("| T target | T actual | RMSNorm op | status | peak (MiB) | delta (MiB) | step (s) | final loss |");
-    println!("|---------:|---------:|:----------:|:------:|-----------:|------------:|---------:|-----------:|");
+    println!(
+        "| T target | T actual | RMSNorm op | status | peak (MiB) | delta (MiB) | step (s) | final loss |"
+    );
+    println!(
+        "|---------:|---------:|:----------:|:------:|-----------:|------------:|---------:|-----------:|"
+    );
     for r in rows {
         let loss = match r.final_loss {
             Some(l) => format!("{:.4}", l),
@@ -374,8 +381,8 @@ fn main() -> Result<()> {
     if matches!(device, Device::Cpu) {
         anyhow::bail!("CUDA device required");
     }
-    let gpu_weights =
-        GpuWeights::from_model_weights(&model_weights, &model_config, &device).context("from_model_weights")?;
+    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
+        .context("from_model_weights")?;
     drop(model_weights);
 
     let tokenizer = {
@@ -400,26 +407,56 @@ fn main() -> Result<()> {
 
     // Cells 1-2: T=2048 parity check (same loss expected).
     rows.push(run_one(
-        2048, true, &tokenizer, &model_config, &gpu_weights, baseline_mib,
+        2048,
+        true,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
     )?);
     rows.push(run_one(
-        2048, false, &tokenizer, &model_config, &gpu_weights, baseline_mib,
+        2048,
+        false,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
     )?);
 
     // Cells 3-4: T=4096 saved-tensor delta.
     rows.push(run_one(
-        4096, true, &tokenizer, &model_config, &gpu_weights, baseline_mib,
+        4096,
+        true,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
     )?);
     rows.push(run_one(
-        4096, false, &tokenizer, &model_config, &gpu_weights, baseline_mib,
+        4096,
+        false,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
     )?);
 
     // Cells 5-6: T=8192 OOM check.
     rows.push(run_one(
-        8192, true, &tokenizer, &model_config, &gpu_weights, baseline_mib,
+        8192,
+        true,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
     )?);
     rows.push(run_one(
-        8192, false, &tokenizer, &model_config, &gpu_weights, baseline_mib,
+        8192,
+        false,
+        &tokenizer,
+        &model_config,
+        &gpu_weights,
+        baseline_mib,
     )?);
 
     print_table(&rows);

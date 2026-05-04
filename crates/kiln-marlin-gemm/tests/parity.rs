@@ -23,7 +23,9 @@ fn lcg_seed(state: &mut u64) -> f32 {
     // Simple deterministic PRNG so we can iterate tolerances without
     // chasing nondeterminism. Mirrors the LCG used in
     // kiln-rmsnorm-kernel/tests.
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     let bits = ((*state >> 33) as u32) & 0x7fffffff;
     (bits as f32 / (i32::MAX as f32)) - 0.5
 }
@@ -55,12 +57,15 @@ fn run_case(device: &Device, m: usize, k: usize, n: usize, groupsize: i64, label
 
     let (b_packed, scales_f16, dequant_f32) = pack::quantize_and_pack(&weight, k, n, groupsize);
 
-    let g = if groupsize == -1 { k } else { groupsize as usize };
+    let g = if groupsize == -1 {
+        k
+    } else {
+        groupsize as usize
+    };
     let num_groups = k / g;
 
     // Move tensors to CUDA in the dtypes the kernel expects.
-    let a_cpu = Tensor::from_vec(acts.clone(), (m, k), &Device::Cpu)
-        .expect("a_cpu host tensor");
+    let a_cpu = Tensor::from_vec(acts.clone(), (m, k), &Device::Cpu).expect("a_cpu host tensor");
     let a_bf16 = a_cpu
         .to_dtype(DType::BF16)
         .expect("cast a to bf16")
@@ -87,17 +92,15 @@ fn run_case(device: &Device, m: usize, k: usize, n: usize, groupsize: i64, label
     assert_eq!(kernel_out.dtype(), DType::BF16, "[{label}] output dtype");
 
     // --- candle bf16 baseline: a_bf16 @ dequant_bf16.
-    let dequant_cpu = Tensor::from_vec(dequant_f32, (k, n), &Device::Cpu)
-        .expect("dequant host tensor");
+    let dequant_cpu =
+        Tensor::from_vec(dequant_f32, (k, n), &Device::Cpu).expect("dequant host tensor");
     let dequant_bf16 = dequant_cpu
         .to_dtype(DType::BF16)
         .expect("dequant -> bf16")
         .to_device(device)
         .expect("dequant -> cuda");
 
-    let baseline = a_bf16
-        .matmul(&dequant_bf16)
-        .expect("baseline matmul");
+    let baseline = a_bf16.matmul(&dequant_bf16).expect("baseline matmul");
 
     // --- Compare elementwise within tolerance.
     let kernel_f32 = kernel_out.to_dtype(DType::F32).expect("kernel -> f32");

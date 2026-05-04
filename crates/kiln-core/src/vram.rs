@@ -26,6 +26,8 @@ pub struct GpuMemoryUsedInfo {
 pub enum VramSource {
     /// Detected via nvidia-smi (discrete NVIDIA GPU).
     NvidiaSmi,
+    /// Detected via Linux DRM sysfs memory counters.
+    LinuxDrmSysfs,
     /// Detected via `sysctl hw.memsize` on Apple Silicon (unified memory).
     /// GPU-addressable memory is effectively the full physical pool minus a
     /// headroom for the OS and other apps.
@@ -40,6 +42,7 @@ impl std::fmt::Display for VramSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VramSource::NvidiaSmi => write!(f, "nvidia-smi"),
+            VramSource::LinuxDrmSysfs => write!(f, "linux-drm-sysfs"),
             VramSource::AppleSilicon => write!(f, "apple-silicon-unified"),
             VramSource::EnvOverride => write!(f, "KILN_GPU_MEMORY_GB"),
             VramSource::None => write!(f, "none"),
@@ -52,10 +55,11 @@ impl std::fmt::Display for VramSource {
 /// Priority:
 /// 1. `KILN_GPU_MEMORY_GB` env var (user override, always respected).
 /// 2. `nvidia-smi` query (discrete NVIDIA).
-/// 3. `sysctl hw.memsize` on Apple Silicon (unified memory), with a
+/// 3. Linux DRM sysfs counters (AMD/Intel Vulkan devices).
+/// 4. `sysctl hw.memsize` on Apple Silicon (unified memory), with a
 ///    `system_reserve_gb` headroom subtracted so training doesn't compete
 ///    with the OS for the last few GB.
-/// 4. Returns `GpuVramInfo { total_bytes: 0, source: None }` if no GPU.
+/// 5. Returns `GpuVramInfo { total_bytes: 0, source: None }` if no GPU.
 pub fn detect_vram() -> GpuVramInfo {
     if let Ok(val) = std::env::var("KILN_GPU_MEMORY_GB") {
         if let Ok(gb) = val.parse::<f64>() {
@@ -70,6 +74,14 @@ pub fn detect_vram() -> GpuVramInfo {
         return GpuVramInfo {
             total_bytes: bytes,
             source: VramSource::NvidiaSmi,
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(bytes) = query_linux_drm_total_vram() {
+        return GpuVramInfo {
+            total_bytes: bytes,
+            source: VramSource::LinuxDrmSysfs,
         };
     }
 
@@ -97,6 +109,14 @@ pub fn detect_used_vram() -> GpuMemoryUsedInfo {
         return GpuMemoryUsedInfo {
             used_bytes: bytes,
             source: VramSource::NvidiaSmi,
+        };
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(bytes) = query_linux_drm_used_vram() {
+        return GpuMemoryUsedInfo {
+            used_bytes: bytes,
+            source: VramSource::LinuxDrmSysfs,
         };
     }
 
@@ -141,6 +161,65 @@ fn query_nvidia_smi_field(field: &str) -> Option<u64> {
     Some(mib * 1024 * 1024)
 }
 
+/// Query total GPU memory from Linux DRM sysfs.
+///
+/// AMDGPU exposes byte-valued `mem_info_vram_total` and
+/// `mem_info_vis_vram_total` files under `/sys/class/drm/{cardN,renderDN}/device`.
+/// We use the largest value across render/card nodes so duplicated connector
+/// entries do not add the same GPU multiple times.
+#[cfg(target_os = "linux")]
+fn query_linux_drm_total_vram() -> Option<u64> {
+    query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])
+}
+
+/// Query currently used GPU memory from Linux DRM sysfs.
+#[cfg(target_os = "linux")]
+fn query_linux_drm_used_vram() -> Option<u64> {
+    query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+}
+
+#[cfg(target_os = "linux")]
+fn query_linux_drm_memory_fields(fields: &[&str]) -> Option<u64> {
+    query_linux_drm_memory_fields_at(std::path::Path::new("/sys/class/drm"), fields)
+}
+
+#[cfg(target_os = "linux")]
+fn query_linux_drm_memory_fields_at(base: &std::path::Path, fields: &[&str]) -> Option<u64> {
+    let mut best = 0u64;
+    for entry in std::fs::read_dir(base).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !is_primary_drm_node(&name) {
+            continue;
+        }
+
+        let device_dir = entry.path().join("device");
+        for field in fields {
+            if let Some(bytes) = read_u64_file(&device_dir.join(field)) {
+                best = best.max(bytes);
+            }
+        }
+    }
+
+    (best > 0).then_some(best)
+}
+
+#[cfg(target_os = "linux")]
+fn is_primary_drm_node(name: &str) -> bool {
+    name.strip_prefix("card")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        || name
+            .strip_prefix("renderD")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
+#[cfg(target_os = "linux")]
+fn read_u64_file(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    raw.trim().parse().ok()
+}
+
 /// Query Apple Silicon unified memory size via `sysctl hw.memsize`.
 ///
 /// On Apple Silicon, CPU and GPU share the same memory pool. Metal can
@@ -173,7 +252,11 @@ fn query_apple_unified_memory() -> Option<u64> {
 /// Returns `None` if the user set `KILN_NUM_BLOCKS` (should use that instead).
 /// Otherwise picks a conservative value that leaves room for training.
 pub fn recommended_num_blocks(vram: &GpuVramInfo) -> Option<usize> {
-    if std::env::var("KILN_NUM_BLOCKS").ok().and_then(|v| v.parse::<usize>().ok()).is_some() {
+    if std::env::var("KILN_NUM_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some()
+    {
         return None; // user override — don't second-guess
     }
 
@@ -296,9 +379,63 @@ mod tests {
     #[test]
     fn test_vram_source_display() {
         assert_eq!(VramSource::NvidiaSmi.to_string(), "nvidia-smi");
-        assert_eq!(VramSource::AppleSilicon.to_string(), "apple-silicon-unified");
+        assert_eq!(VramSource::LinuxDrmSysfs.to_string(), "linux-drm-sysfs");
+        assert_eq!(
+            VramSource::AppleSilicon.to_string(),
+            "apple-silicon-unified"
+        );
         assert_eq!(VramSource::EnvOverride.to_string(), "KILN_GPU_MEMORY_GB");
         assert_eq!(VramSource::None.to_string(), "none");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_drm_sysfs_memory_detection() {
+        let root = std::env::temp_dir().join(format!("kiln-drm-vram-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        std::fs::create_dir_all(root.join("card0/device")).unwrap();
+        std::fs::create_dir_all(root.join("card0-DP-1/device")).unwrap();
+        std::fs::create_dir_all(root.join("renderD128/device")).unwrap();
+
+        std::fs::write(
+            root.join("card0/device/mem_info_vram_total"),
+            "17179869184\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("card0/device/mem_info_vram_used"), "536870912\n").unwrap();
+        std::fs::write(
+            root.join("card0-DP-1/device/mem_info_vram_total"),
+            "34359738368\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("renderD128/device/mem_info_vis_vram_total"),
+            "25769803776\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("renderD128/device/mem_info_vis_vram_used"),
+            "1073741824\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            query_linux_drm_memory_fields_at(
+                &root,
+                &["mem_info_vram_total", "mem_info_vis_vram_total"]
+            ),
+            Some(25769803776)
+        );
+        assert_eq!(
+            query_linux_drm_memory_fields_at(
+                &root,
+                &["mem_info_vram_used", "mem_info_vis_vram_used"]
+            ),
+            Some(1073741824)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Exercise `detect_vram` on macOS and confirm it returns a positive

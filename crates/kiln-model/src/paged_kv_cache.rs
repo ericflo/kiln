@@ -154,6 +154,7 @@ impl PagedKvCache {
         fp8: bool,
         pool_init: PoolInit,
     ) -> Result<Self> {
+        let dtype = cpu_compatible_compute_dtype(dtype, device);
         let storage_dtype = if fp8 { DType::U8 } else { dtype };
         let total_slots = num_blocks * block_size;
         let mut layers = Vec::with_capacity(num_full_attn_layers);
@@ -257,8 +258,8 @@ impl PagedKvCache {
                     return Ok(true);
                 }
             }
-            k_pool.slice_set(&k.squeeze(1)?, 0, slot)?;
-            v_pool.slice_set(&v.squeeze(1)?, 0, slot)?;
+            k_pool.slice_set(&k.squeeze(1)?.contiguous()?, 0, slot)?;
+            v_pool.slice_set(&v.squeeze(1)?.contiguous()?, 0, slot)?;
             return Ok(true);
         }
 
@@ -305,8 +306,8 @@ impl PagedKvCache {
                 .ok_or_else(|| {
                     anyhow::anyhow!("no slot for position {start_pos} in block table")
                 })?;
-            k_pool.slice_set(&k.squeeze(2)?, 0, slot)?;
-            v_pool.slice_set(&v.squeeze(2)?, 0, slot)?;
+            k_pool.slice_set(&k.squeeze(2)?.contiguous()?, 0, slot)?;
+            v_pool.slice_set(&v.squeeze(2)?.contiguous()?, 0, slot)?;
             return Ok(());
         }
 
@@ -481,6 +482,14 @@ impl PagedKvCache {
     /// either dequantize first or use a kernel that supports FP8 inputs.
     pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&Tensor, &Tensor)> {
         self.layers.get(layer_idx).map(|(k, v)| (k, v))
+    }
+}
+
+fn cpu_compatible_compute_dtype(dtype: DType, device: &Device) -> DType {
+    if matches!(device, Device::Cpu) && dtype != DType::F32 {
+        DType::F32
+    } else {
+        dtype
     }
 }
 

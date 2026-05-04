@@ -33,7 +33,11 @@ pub fn quantize_to_fp8_direct(tensor: &Tensor) -> Result<Tensor> {
 }
 
 /// Convert FP8 storage back to target dtype without scaling (scale = 1.0).
-pub fn dequantize_from_fp8_direct(quantized: &Tensor, target_dtype: DType, device: &Device) -> Result<Tensor> {
+pub fn dequantize_from_fp8_direct(
+    quantized: &Tensor,
+    target_dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
     dequantize_from_fp8(quantized, 1.0, target_dtype, device)
 }
 
@@ -45,15 +49,9 @@ pub fn dequantize_from_fp8_direct(quantized: &Tensor, target_dtype: DType, devic
 pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
     // Compute absmax scale
     let tensor_f32 = tensor.to_dtype(DType::F32)?;
-    let abs_max = tensor_f32
-        .abs()?
-        .max(0)?
-        .max(0)?;
+    let abs_max = tensor_f32.abs()?.max(0)?.max(0)?;
     // Flatten remaining dims to get scalar
-    let abs_max_val: f32 = abs_max
-        .flatten_all()?
-        .max(0)?
-        .to_scalar::<f32>()?;
+    let abs_max_val: f32 = abs_max.flatten_all()?.max(0)?.to_scalar::<f32>()?;
 
     // Avoid division by zero
     let scale = if abs_max_val < 1e-12 {
@@ -76,13 +74,20 @@ pub fn quantize_to_fp8(tensor: &Tensor) -> Result<(Tensor, f32)> {
 }
 
 /// Convert FP8 storage (U8 tensor + scale) back to the target dtype.
-pub fn dequantize_from_fp8(quantized: &Tensor, scale: f32, target_dtype: DType, device: &Device) -> Result<Tensor> {
+pub fn dequantize_from_fp8(
+    quantized: &Tensor,
+    scale: f32,
+    target_dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
     let data = quantized.flatten_all()?.to_vec1::<u8>()?;
     let f32_vals: Vec<f32> = data.iter().map(|&b| e4m3_to_f32(b) * scale).collect();
 
     let shape = quantized.shape().clone();
     let result = Tensor::from_vec(f32_vals, shape, device)?;
-    result.to_dtype(target_dtype).context("dequantize dtype conversion")
+    result
+        .to_dtype(target_dtype)
+        .context("dequantize dtype conversion")
 }
 
 /// Convert an f32 value to E4M3FN bit pattern.
@@ -192,7 +197,10 @@ mod tests {
     fn test_e4m3_clamps_above_max() {
         let bits = f32_to_e4m3(1000.0);
         let val = e4m3_to_f32(bits);
-        assert!((val - 448.0).abs() < 1.0, "Expected clamped to ~448, got {val}");
+        assert!(
+            (val - 448.0).abs() < 1.0,
+            "Expected clamped to ~448, got {val}"
+        );
     }
 
     #[test]
@@ -272,7 +280,11 @@ mod tests {
         let (fp8_tensor, _) = quantize_to_fp8(&f32_tensor)?;
         let fp8_bytes = fp8_tensor.elem_count() * 1; // 1 byte per U8
 
-        assert_eq!(fp8_bytes * 2, bf16_bytes, "FP8 should be exactly half the size of BF16");
+        assert_eq!(
+            fp8_bytes * 2,
+            bf16_bytes,
+            "FP8 should be exactly half the size of BF16"
+        );
         Ok(())
     }
 }

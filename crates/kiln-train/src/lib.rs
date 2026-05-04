@@ -53,11 +53,21 @@ pub struct SftConfig {
     pub checkpoint_interval: Option<usize>,
 }
 
-fn default_auto_load() -> bool { true }
-fn default_epochs() -> usize { 3 }
-fn default_sft_lr() -> f64 { 1e-4 }
-fn default_rank() -> usize { 16 }
-fn default_alpha() -> f32 { 32.0 }
+fn default_auto_load() -> bool {
+    true
+}
+fn default_epochs() -> usize {
+    3
+}
+fn default_sft_lr() -> f64 {
+    1e-4
+}
+fn default_rank() -> usize {
+    16
+}
+fn default_alpha() -> f32 {
+    32.0
+}
 
 impl Default for SftConfig {
     fn default() -> Self {
@@ -120,9 +130,15 @@ pub struct GrpoConfig {
     pub checkpoint_interval: Option<usize>,
 }
 
-fn default_grpo_lr() -> f64 { 1e-5 }
-fn default_kl_coeff() -> f64 { 0.1 }
-fn default_clip_eps() -> f64 { 0.2 }
+fn default_grpo_lr() -> f64 {
+    1e-5
+}
+fn default_kl_coeff() -> f64 {
+    0.1
+}
+fn default_clip_eps() -> f64 {
+    0.2
+}
 
 impl Default for GrpoConfig {
     fn default() -> Self {

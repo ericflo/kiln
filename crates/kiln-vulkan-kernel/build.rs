@@ -13,14 +13,59 @@ use std::path::PathBuf;
 
 /// Shader files to compile. Format: (base_name, output_module_name).
 const SHADERS: &[(&str, &str)] = &[
+    ("full_attn_qkv_decode", "SPIR_V_FULL_ATTN_QKV_DECODE"),
     ("gdn_gates", "SPIR_V_GDN_GATES"),
+    (
+        "gdn_decode_gates_recurrent_rmsnorm",
+        "SPIR_V_GDN_DECODE_GATES_RECURRENT_RMSNORM",
+    ),
+    ("gdn_in_proj_decode", "SPIR_V_GDN_IN_PROJ_DECODE"),
+    (
+        "gdn_in_proj_decode_batched",
+        "SPIR_V_GDN_IN_PROJ_DECODE_BATCHED",
+    ),
     ("gdn_gated_rms_norm", "SPIR_V_GDN_GATED_RMS_NORM"),
     ("causal_conv1d", "SPIR_V_CAUSAL_CONV1D"),
+    (
+        "causal_conv1d_state_advance",
+        "SPIR_V_CAUSAL_CONV1D_STATE_ADVANCE",
+    ),
     ("solve_tri", "SPIR_V_SOLVE_TRI"),
     ("gdn_recurrent_prefill", "SPIR_V_GDN_RECURRENT_PREFILL"),
     ("gdn_chunk_prep", "SPIR_V_GDN_CHUNK_PREP"),
     ("gdn_full_chunk_forward", "SPIR_V_GDN_FULL_CHUNK_FORWARD"),
     ("gdn_chunk_scan", "SPIR_V_GDN_CHUNK_SCAN"),
+    ("linear_decode", "SPIR_V_LINEAR_DECODE"),
+    ("linear_decode_batched", "SPIR_V_LINEAR_DECODE_BATCHED"),
+    (
+        "linear_decode_batched_rows2",
+        "SPIR_V_LINEAR_DECODE_BATCHED_ROWS2",
+    ),
+    (
+        "linear_decode_argmax_blocks",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS",
+    ),
+    (
+        "linear_decode_argmax_reduce",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_REDUCE",
+    ),
+    (
+        "linear_decode_argmax_batched_blocks",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS",
+    ),
+    (
+        "linear_decode_argmax_batched_reduce",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE",
+    ),
+    ("mlp_gate_up_decode", "SPIR_V_MLP_GATE_UP_DECODE"),
+    (
+        "mlp_gate_up_decode_batched",
+        "SPIR_V_MLP_GATE_UP_DECODE_BATCHED",
+    ),
+    (
+        "mlp_gate_up_decode_batched_rows2",
+        "SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2",
+    ),
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
 ];
 
@@ -38,7 +83,10 @@ fn main() {
         let spv_path = out_dir.join(format!("{}.spv", name));
 
         if !glsl_path.exists() {
-            eprintln!("cargo:warning=GLSL shader not found: {}", glsl_path.display());
+            eprintln!(
+                "cargo:warning=GLSL shader not found: {}",
+                glsl_path.display()
+            );
             continue;
         }
 
@@ -98,10 +146,7 @@ fn main() {
                 "    /// Shader {} not compiled at build time\n",
                 name
             ));
-            out.push_str(&format!(
-                "    pub const {}: &[u8] = &[];\n\n",
-                var_name
-            ));
+            out.push_str(&format!("    pub const {}: &[u8] = &[];\n\n", var_name));
         }
     }
     out.push_str("}\n");

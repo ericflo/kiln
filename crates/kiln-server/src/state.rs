@@ -323,6 +323,18 @@ impl RealPrefixCache {
         }))
     }
 
+    pub fn would_hit(&self, adapter: &Option<String>, prompt_tokens: &[TokenId]) -> bool {
+        if !self.is_enabled() {
+            return false;
+        }
+        self.entries.iter().any(|entry| {
+            &entry.adapter == adapter
+                && prompt_tokens.len() > entry.prompt_tokens.len()
+                && prompt_tokens.starts_with(&entry.prompt_tokens)
+                && entry.prompt_tokens.len() % self.block_size == 0
+        })
+    }
+
     pub fn release_hit(&mut self, entry_id: u64) {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == entry_id) {
             entry.active_uses = entry.active_uses.saturating_sub(1);
@@ -1392,6 +1404,12 @@ mod tests {
         let outcome = cache.register(None, registration);
         assert_eq!(outcome.retained_blocks, vec![9]);
         assert!(outcome.evicted_blocks.is_empty());
+
+        assert!(cache.would_hit(&None, &[1, 2, 3, 4, 5]));
+        assert!(!cache.would_hit(&None, &[7, 8, 9, 10, 11]));
+        let stats_before_lookup = cache.stats();
+        assert_eq!(stats_before_lookup.lookup_hits, 0);
+        assert_eq!(stats_before_lookup.lookup_misses, 0);
 
         assert!(
             cache

@@ -35,6 +35,7 @@ const TOKENIZER_EXACT: &[&str] = &[
     "config.json",
     "generation_config.json",
     "chat_template.jinja",
+    "model.safetensors.index.json",
 ];
 
 /// Per-file IPC throttle: report no more than once every 250ms or once
@@ -155,7 +156,10 @@ fn should_keep(path: &str) -> bool {
     if TOKENIZER_EXACT.iter().any(|t| *t == basename) {
         return true;
     }
-    if WEIGHT_SUFFIXES.iter().any(|suffix| basename.ends_with(suffix)) {
+    if WEIGHT_SUFFIXES
+        .iter()
+        .any(|suffix| basename.ends_with(suffix))
+    {
         return true;
     }
     false
@@ -190,9 +194,7 @@ async fn list_files(
         "{}/api/models/{}/tree/{}?recursive=true",
         HF_API_BASE, repo_id, revision
     );
-    let mut req = client
-        .get(&url)
-        .header("Accept", "application/json");
+    let mut req = client.get(&url).header("Accept", "application/json");
     if let Some(auth) = bearer(token) {
         req = req.header("Authorization", auth);
     }
@@ -352,7 +354,8 @@ async fn download_file(
                     received,
                     total: file_total.max(received),
                     overall_received: overall_received_before.saturating_add(received),
-                    overall_total: overall_total.max(overall_received_before.saturating_add(received)),
+                    overall_total: overall_total
+                        .max(overall_received_before.saturating_add(received)),
                     file_index,
                     file_count,
                 },
@@ -383,10 +386,7 @@ async fn download_file(
 /// Full download pipeline for one HF repo. Emits progress events and
 /// returns the final target directory. Callers wire the result into
 /// `settings.model_path` and surface the `Done` event to the modal.
-pub async fn download_hf_model(
-    app: AppHandle,
-    req: HfDownloadRequest,
-) -> Result<PathBuf, String> {
+pub async fn download_hf_model(app: AppHandle, req: HfDownloadRequest) -> Result<PathBuf, String> {
     let repo_id = req.repo_id.trim().to_string();
     if repo_id.is_empty() {
         return Err("Repo id is required (e.g. Qwen/Qwen3.5-4B).".into());
@@ -466,10 +466,7 @@ mod tests {
     fn sanitize_repo_id_replaces_slash() {
         assert_eq!(sanitize_repo_id("Qwen/Qwen3.5-4B"), "Qwen__Qwen3.5-4B");
         assert_eq!(sanitize_repo_id("no-slash"), "no-slash");
-        assert_eq!(
-            sanitize_repo_id("org/sub/name"),
-            "org__sub__name"
-        );
+        assert_eq!(sanitize_repo_id("org/sub/name"), "org__sub__name");
     }
 
     #[test]
@@ -479,6 +476,7 @@ mod tests {
         assert!(should_keep("config.json"));
         assert!(should_keep("generation_config.json"));
         assert!(should_keep("chat_template.jinja"));
+        assert!(should_keep("model.safetensors.index.json"));
         assert!(should_keep("special_tokens_map.json"));
         assert!(should_keep("subdir/tokenizer.json"));
 

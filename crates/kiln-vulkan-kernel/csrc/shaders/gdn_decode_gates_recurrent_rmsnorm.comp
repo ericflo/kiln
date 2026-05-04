@@ -1,0 +1,104 @@
+// Fused single-token GDN gates + recurrent update + gated RMSNorm.
+//
+// Inputs are f32 CPU tensors uploaded by the Vulkan backend:
+//   q, k:  [batch, 1, nv, dk]
+//   v, z:  [batch, 1, nv, dv]
+//   a, b:  [batch, 1, nv]
+//   state: [batch, nv, dk, dv] in/out
+//   weight:[dv]
+// Output:
+//   out:   [batch, 1, nv, dv]
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint nv;
+    uint dk;
+    uint dv;
+    float eps;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf { float data_v[]; };
+layout(binding = 3) readonly buffer ABuf { float data_a[]; };
+layout(binding = 4) readonly buffer BBuf { float data_b[]; };
+layout(binding = 5) readonly buffer ALogBuf { float data_a_log[]; };
+layout(binding = 6) readonly buffer DtBiasBuf { float data_dt_bias[]; };
+layout(binding = 7) buffer StateBuf { float data_state[]; };
+layout(binding = 8) readonly buffer ZBuf { float data_z[]; };
+layout(binding = 9) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 10) writeonly buffer OutBuf { float data_out[]; };
+
+shared float raw_out[256];
+shared float rms_partial[256];
+
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float ex = exp(x);
+    return ex / (1.0 + ex);
+}
+
+float stable_softplus(float x) {
+    return max(x, 0.0) + log(1.0 + exp(-abs(x)));
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    uint bidx = group / nv;
+    uint h = group - bidx * nv;
+    if (bidx >= batch || h >= nv) return;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint head_base = bidx * nv + h;
+    float beta = stable_sigmoid(data_b[head_base]);
+    float g = -exp(data_a_log[h]) * stable_softplus(data_a[head_base] + data_dt_bias[h]);
+    float decay = exp(g);
+
+    float out_acc = 0.0;
+    if (tid < dv) {
+        uint d = tid;
+        uint q_base = head_base * dk;
+        uint k_base = head_base * dk;
+        uint v_base = head_base * dv;
+        uint state_base = head_base * dk * dv;
+
+        float v_pred = 0.0;
+        for (uint i = 0; i < dk; i++) {
+            float s = data_state[state_base + i * dv + d];
+            v_pred += data_k[k_base + i] * (decay * s);
+        }
+
+        float delta = beta * (data_v[v_base + d] - v_pred);
+        for (uint i = 0; i < dk; i++) {
+            uint state_idx = state_base + i * dv + d;
+            float new_s = decay * data_state[state_idx] + data_k[k_base + i] * delta;
+            data_state[state_idx] = new_s;
+            out_acc += data_q[q_base + i] * new_s;
+        }
+        raw_out[d] = out_acc;
+        rms_partial[tid] = out_acc * out_acc;
+    } else {
+        rms_partial[tid] = 0.0;
+    }
+
+    barrier();
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            rms_partial[tid] += rms_partial[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid < dv) {
+        float rms_inv = inversesqrt(rms_partial[0] / float(dv) + eps);
+        float zv = data_z[head_base * dv + tid];
+        float silu_z = zv * stable_sigmoid(zv);
+        data_out[head_base * dv + tid] = raw_out[tid] * rms_inv * data_weight[tid] * silu_z;
+    }
+}

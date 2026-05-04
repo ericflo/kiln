@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use kiln_core::config::ModelConfig;
@@ -132,13 +132,11 @@ async fn test_merge_ties_endpoint_returns_200_and_writes_adapter() {
     let loaded = PeftLora::load(&merged_dir).unwrap();
     // density=1.0 + matching positive signs => weighted average of values.
     // (0.5*2 + 0.5*6) / (0.5 + 0.5) = 4.0 across every position in A and B.
-    let a = &loaded.tensors
-        ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+    let a = &loaded.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
     for v in &a.data {
         assert!((*v - 4.0).abs() < 1e-6, "expected 4.0 in A, got {v}");
     }
-    let b = &loaded.tensors
-        ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+    let b = &loaded.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
     for v in &b.data {
         assert!((*v - 4.0).abs() < 1e-6, "expected 4.0 in B, got {v}");
     }

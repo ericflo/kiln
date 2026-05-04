@@ -629,25 +629,24 @@ async fn check_for_kiln_update(
         None => false,
     };
 
-    // GPU arch compat gate (slices 6 + 7): `gpu_compat` rejects arches
-    // outside the compiled-in `SUPPORTED_SM_ARCHS`, but slice 7 lets
-    // each release widen that list via a machine-readable
-    // `supported_sm: [...]` line in its notes. Reclassify an
-    // `Unsupported` verdict to `Supported` when the release-specific
-    // list includes the detected arch. Unknown detection (no nvidia-smi,
-    // timeout, etc.) is NOT a block — preserve existing behavior on
-    // systems without nvidia-smi. See
-    // `desktop/docs/binary-update.md` (CUDA / GPU compat).
-    let gpu_unsupported = match installer::gpu_compat().await {
-        installer::GpuCompat::Unsupported(sm) => {
-            if installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
-                None
-            } else {
-                update_available = false;
-                Some(sm)
+    let cuda_target = installer::current_target_uses_cuda();
+
+    // GPU arch compat gate (slices 6 + 7): CUDA release assets are gated by
+    // NVIDIA SM arch. Vulkan and Metal assets skip this CUDA-only check.
+    let gpu_unsupported = if cuda_target {
+        match installer::gpu_compat().await {
+            installer::GpuCompat::Unsupported(sm) => {
+                if installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
+                    None
+                } else {
+                    update_available = false;
+                    Some(sm)
+                }
             }
+            installer::GpuCompat::Supported(_) | installer::GpuCompat::Unknown => None,
         }
-        installer::GpuCompat::Supported(_) | installer::GpuCompat::Unknown => None,
+    } else {
+        None
     };
 
     // CUDA driver compat gate (slice 8): if the release advertises a
@@ -657,7 +656,7 @@ async fn check_for_kiln_update(
     // (no nvidia-smi, timeout) preserves the no-block policy applied to
     // `GpuCompat::Unknown`. See `desktop/docs/binary-update.md` (CUDA /
     // GPU compat).
-    let cuda_driver_too_old = if gpu_unsupported.is_none() && update_available {
+    let cuda_driver_too_old = if cuda_target && gpu_unsupported.is_none() && update_available {
         let local = installer::detect_cuda_driver_version().await;
         if !installer::is_cuda_compatible_for_release(local, release_body.as_deref()) {
             let req = installer::min_cuda_for_release(release_body.as_deref())
@@ -745,18 +744,16 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
         return;
     }
 
-    // GPU arch compat gate (slices 6 + 7): silently skip the banner when
-    // the local GPU's SM arch is outside the supported list for this
-    // release. The list comes from the release-notes `supported_sm:`
-    // line when present, otherwise falls back to
-    // `installer::SUPPORTED_SM_ARCHS`. Unknown detection is treated as
-    // supported — the check_for_kiln_update command path still surfaces
-    // the compat state to the settings UI when the user clicks "Check
-    // for Updates".
-    if let installer::GpuCompat::Unsupported(sm) = installer::gpu_compat().await {
-        if !installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
-            eprintln!("[main] auto_update: skipping — GPU SM {} not supported", sm);
-            return;
+    let cuda_target = installer::current_target_uses_cuda();
+
+    // GPU arch compat gate (slices 6 + 7): CUDA release assets are gated by
+    // NVIDIA SM arch. Vulkan and Metal assets skip this CUDA-only check.
+    if cuda_target {
+        if let installer::GpuCompat::Unsupported(sm) = installer::gpu_compat().await {
+            if !installer::is_supported_sm_for_release(sm, release_body.as_deref()) {
+                eprintln!("[main] auto_update: skipping — GPU SM {} not supported", sm);
+                return;
+            }
         }
     }
 
@@ -764,16 +761,18 @@ async fn check_kiln_update_on_launch(app: AppHandle, settings: SettingsState) {
     // skip the banner when the release advertises a `min_cuda:` newer
     // than the local driver. Missing `min_cuda:` or failed detection
     // does not block, matching the SM-gate policy on unknown state.
-    let local_cuda = installer::detect_cuda_driver_version().await;
-    if !installer::is_cuda_compatible_for_release(local_cuda, release_body.as_deref()) {
-        let req = installer::min_cuda_for_release(release_body.as_deref())
-            .expect("min_cuda must be Some when compat check failed");
-        let local = local_cuda.expect("local driver must be Some when compat check failed");
-        eprintln!(
-            "[main] auto_update: skipping — release requires CUDA >= {}.{}, local {}.{}",
-            req.0, req.1, local.0, local.1
-        );
-        return;
+    if cuda_target {
+        let local_cuda = installer::detect_cuda_driver_version().await;
+        if !installer::is_cuda_compatible_for_release(local_cuda, release_body.as_deref()) {
+            let req = installer::min_cuda_for_release(release_body.as_deref())
+                .expect("min_cuda must be Some when compat check failed");
+            let local = local_cuda.expect("local driver must be Some when compat check failed");
+            eprintln!(
+                "[main] auto_update: skipping — release requires CUDA >= {}.{}, local {}.{}",
+                req.0, req.1, local.0, local.1
+            );
+            return;
+        }
     }
 
     if let Err(e) = app.emit(

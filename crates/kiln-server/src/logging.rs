@@ -16,19 +16,17 @@ use tracing_subscriber::EnvFilter;
 
 /// Build an `EnvFilter` from `RUST_LOG` (if set) or the provided level string.
 pub fn build_filter(level: &str) -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        match level {
-            "trace" | "debug" | "info" | "warn" | "error" => {
-                format!("kiln={level},kiln_server={level},tower_http={level}")
-                    .parse()
-                    .expect("valid filter directive")
-            }
-            other => other.parse().unwrap_or_else(|_| {
-                "kiln=info,kiln_server=info,tower_http=info"
-                    .parse()
-                    .expect("valid filter directive")
-            }),
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| match level {
+        "trace" | "debug" | "info" | "warn" | "error" => {
+            format!("kiln={level},kiln_server={level},tower_http={level}")
+                .parse()
+                .expect("valid filter directive")
         }
+        other => other.parse().unwrap_or_else(|_| {
+            "kiln=info,kiln_server=info,tower_http=info"
+                .parse()
+                .expect("valid filter directive")
+        }),
     })
 }
 
@@ -66,9 +64,7 @@ pub fn init(level: &str, format: &str) -> anyhow::Result<()> {
 
     match resolved {
         "pretty" => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
         _ => {
             tracing_subscriber::fmt()
@@ -98,7 +94,10 @@ mod tests {
         }
         let filter = build_filter("info");
         let s = format!("{filter}");
-        assert!(s.contains("info"), "default filter should contain info: {s}");
+        assert!(
+            s.contains("info"),
+            "default filter should contain info: {s}"
+        );
     }
 
     #[test]
@@ -108,10 +107,7 @@ mod tests {
         }
         let filter = build_filter("debug");
         let s = format!("{filter}");
-        assert!(
-            s.contains("debug"),
-            "filter should contain debug: {s}"
-        );
+        assert!(s.contains("debug"), "filter should contain debug: {s}");
     }
 
     #[test]

@@ -5,7 +5,9 @@ fn main() {
     let cuda_root = match find_cuda_root() {
         Some(p) => p,
         None => {
-            println!("cargo:warning=CUDA not found, kiln-rmsnorm-kernel will not compile CUDA kernels");
+            println!(
+                "cargo:warning=CUDA not found, kiln-rmsnorm-kernel will not compile CUDA kernels"
+            );
             println!("cargo:warning=Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit");
             return;
         }
@@ -14,8 +16,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let csrc_dir = manifest_dir.join("csrc");
 
-    let cuda_archs =
-        env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;86;89;90".to_string());
+    let cuda_archs = env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;86;89;90".to_string());
 
     let mut build = cc::Build::new();
     build.cuda(true);
