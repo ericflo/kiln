@@ -203,7 +203,7 @@ impl VulkanDevice {
         let transient_descriptor_pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::builder()
-                    .max_sets(1)
+                    .max_sets(4)
                     .pool_sizes(&[vk::DescriptorPoolSize::builder()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
                         .descriptor_count(64)

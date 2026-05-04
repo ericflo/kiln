@@ -35,6 +35,12 @@ fn linear_decode_single_submit_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_SINGLE_SUBMIT").is_err())
 }
 
+fn linear_decode_argmax_single_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_SINGLE_SUBMIT").is_err())
+}
+
 /// Pre-create the validated built-in compute pipelines on this Vulkan device.
 ///
 /// SPIR-V bytecode is embedded at build time when `glslc` is available. This
@@ -973,6 +979,11 @@ pub fn dispatch_linear_decode_argmax_cached(
         x_data.len(),
         hidden * 4
     );
+    if linear_decode_argmax_single_submit_enabled() {
+        return dispatch_linear_decode_argmax_cached_single_submit(
+            vk_device, weight_t, hidden, out_dim, &x_data,
+        );
+    }
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create linear argmax x buffer")?;
@@ -1053,6 +1064,253 @@ pub fn dispatch_linear_decode_argmax_cached(
         )
         .context("failed to read back linear argmax output index")?
     };
+    let indices: &[u32] = bytemuck::cast_slice(&out_data);
+    indices
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("linear argmax readback was empty"))
+}
+
+fn dispatch_linear_decode_argmax_cached_single_submit(
+    vk_device: &VulkanDevice,
+    weight_t: &VulkanBuffer,
+    hidden: usize,
+    out_dim: usize,
+    x_data: &[u8],
+) -> Result<u32> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("failed to create linear argmax x buffer")?;
+    let x_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, x_data.len() as u64)
+        .context("failed to create linear argmax x staging buffer")?;
+    VulkanBuffer::write_host_visible(device, &x_stage, x_data)?;
+
+    let block_count = out_dim.div_ceil(16);
+    let block_score_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (block_count * 4) as u64)
+            .context("failed to create linear argmax block score buffer")?;
+    let block_index_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (block_count * 4) as u64)
+            .context("failed to create linear argmax block index buffer")?;
+    let out_index_buf = VulkanBuffer::create_device_local(device, device_local_mt, 4)
+        .context("failed to create linear argmax output index buffer")?;
+    let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, 4)
+        .context("failed to create linear argmax output staging buffer")?;
+
+    let blocks_glsl = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/linear_decode_argmax_blocks.comp"
+    );
+    let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
+    let block_push: [u32; 3] = [hidden as u32, out_dim as u32, block_count as u32];
+    let block_handles = vec![
+        x_buf.handle(),
+        weight_t.handle(),
+        block_score_buf.handle(),
+        block_index_buf.handle(),
+    ];
+    let (block_set_layout, block_layout, block_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            &blocks_spirv,
+            block_handles.len(),
+            (block_push.len() * 4) as u32,
+        )?;
+
+    let reduce_glsl = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/linear_decode_argmax_reduce.comp"
+    );
+    let reduce_spirv = crate::pipeline::ShaderPipeline::compile_shader(reduce_glsl)?;
+    let reduce_push: [u32; 1] = [block_count as u32];
+    let reduce_handles = vec![
+        block_score_buf.handle(),
+        block_index_buf.handle(),
+        out_index_buf.handle(),
+    ];
+    let (reduce_set_layout, reduce_layout, reduce_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            &reduce_spirv,
+            reduce_handles.len(),
+            (reduce_push.len() * 4) as u32,
+        )?;
+
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let block_set_layouts = vec![block_set_layout];
+    let block_descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&block_set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate linear argmax block descriptor set")?[0]
+    };
+    let block_buf_infos: Vec<vk::DescriptorBufferInfo> = block_handles
+        .iter()
+        .map(|&h| {
+            vk::DescriptorBufferInfo::builder()
+                .buffer(h)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build()
+        })
+        .collect();
+    let block_descriptor_writes: Vec<vk::WriteDescriptorSet> = block_buf_infos
+        .iter()
+        .enumerate()
+        .map(|(i, info)| make_write_descriptor_set_buf(block_descriptor_set, i as u32, info))
+        .collect();
+
+    let reduce_set_layouts = vec![reduce_set_layout];
+    let reduce_descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&reduce_set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate linear argmax reduce descriptor set")?[0]
+    };
+    let reduce_buf_infos: Vec<vk::DescriptorBufferInfo> = reduce_handles
+        .iter()
+        .map(|&h| {
+            vk::DescriptorBufferInfo::builder()
+                .buffer(h)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build()
+        })
+        .collect();
+    let reduce_descriptor_writes: Vec<vk::WriteDescriptorSet> = reduce_buf_infos
+        .iter()
+        .enumerate()
+        .map(|(i, info)| make_write_descriptor_set_buf(reduce_descriptor_set, i as u32, info))
+        .collect();
+    unsafe {
+        device.update_descriptor_sets(&block_descriptor_writes, &[]);
+        device.update_descriptor_sets(&reduce_descriptor_writes, &[]);
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin command buffer")?;
+        device.cmd_copy_buffer(
+            cmd,
+            x_stage.handle(),
+            x_buf.handle(),
+            &[vk::BufferCopy::builder().size(x_data.len() as u64).build()],
+        );
+        let upload_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[upload_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, block_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            block_layout,
+            0,
+            &[block_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            block_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(&block_push),
+        );
+        device.cmd_dispatch(cmd, block_count as u32, 1, 1);
+
+        let block_barrier =
+            make_memory_barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[block_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, reduce_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            reduce_layout,
+            0,
+            &[reduce_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            reduce_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(&reduce_push),
+        );
+        device.cmd_dispatch(cmd, 1, 1, 1);
+
+        let output_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[output_barrier],
+            &[],
+            &[],
+        );
+        device.cmd_copy_buffer(
+            cmd,
+            out_index_buf.handle(),
+            out_stage.handle(),
+            &[vk::BufferCopy::builder().size(4).build()],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit linear argmax single-submit dispatch")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for linear argmax single-submit dispatch")?;
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
     let indices: &[u32] = bytemuck::cast_slice(&out_data);
     indices
         .first()

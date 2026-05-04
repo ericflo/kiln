@@ -2363,8 +2363,41 @@ Verdict:
 - Full-attention work needs something deeper than the existing projection-only QKV fusion.
 - Fused GDN decode would need resident-state semantics before it can compete with split resident recurrence.
 
+### E081: Promote Single-Submit Vulkan LM-Head Argmax
+
+Change:
+- Added a single-submit path for `dispatch_linear_decode_argmax_cached`.
+- The new path records x upload, block-argmax dispatch, block-result barrier, reduce dispatch, final-index copy, and scalar readback behind one queue submit.
+- Promoted it to default with rollback guard `KILN_DISABLE_VULKAN_LINEAR_ARGMAX_SINGLE_SUBMIT=1`.
+- Increased the reusable transient descriptor pool to allow multiple descriptor sets in a fused command buffer.
+
+Reasoning:
+- After E078, `lm_head.argmax` is a smaller but still visible bucket at roughly 13-17ms per decode token.
+- The existing argmax path used separate upload, block dispatch, reduce dispatch, and readback submits.
+- Unlike the MLP single-submit attempt, this path has little compute between submit boundaries and only reads back a 4-byte token id, so submit consolidation has a clearer chance to help.
+
+Evidence:
+- Opt-in trial:
+  - `KILN_ENABLE_VULKAN_LINEAR_ARGMAX_SINGLE_SUBMIT=1 cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode_argmax_matches_cpu_reference -- --nocapture` passed.
+  - `cargo build --release --features vulkan --bin kiln-bench` passed.
+  - Profiled opt-in run: prefill 2028.5ms; mean ITL 142.3ms, p50 140.8ms, p99 155.8ms. `lm_head.argmax` remained in the noisy 12.8-17.1ms range.
+  - Same-binary no-profile A/B before promotion:
+    - Opt-in: prefill 1811.3ms; mean ITL 140.7ms, p50 139.1ms, p99 149.2ms.
+    - No-env default: prefill 1818.6ms; mean ITL 142.4ms, p50 142.0ms, p99 149.1ms.
+  - Opt-in confirmation: prefill 1841.4ms; mean ITL 140.4ms, p50 138.9ms, p99 151.6ms.
+- Promoted default:
+  - `cargo fmt --all --check` passed.
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode_argmax_matches_cpu_reference -- --nocapture` passed.
+  - `cargo build --release --features vulkan --bin kiln --bin kiln-bench` passed.
+  - Default no-env: prefill 1863.0ms; mean ITL 140.7ms, p50 139.8ms, p99 146.7ms.
+  - Rollback guard `KILN_DISABLE_VULKAN_LINEAR_ARGMAX_SINGLE_SUBMIT=1`: prefill 1822.9ms; mean ITL 143.1ms, p50 138.6ms, p99 165.4ms.
+
+Verdict:
+- Keep default with rollback guard.
+- This is a small same-binary win, not a new best source anchor; E078's 137.6ms remains the best verified bs=1 anchor.
+
 ## Next Candidate
 
-With E078, the current default bs=1 short-source anchor is 137.6ms mean ITL, and the fresh post-promotion profile measured 136.5ms. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. The next useful single-user experiments should attack GDN input projection and LM-head argmax, or revisit MLP/full-attention only with deeper shader-level or layer-residency changes. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E078, the current default bs=1 short-source anchor is 137.6ms mean ITL, and the fresh post-promotion profile measured 136.5ms. E079 showed that simple MLP workgroup retuning and two-kernel single-submit recording do not improve whole-token latency. E080 confirmed the existing full-attn QKV and fused GDN decode opt-ins are still regressions under the new default. E081 kept a small LM-head argmax submit-count win. The next useful single-user experiments should attack GDN input projection, or revisit MLP/full-attention only with deeper shader-level or layer-residency changes. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
