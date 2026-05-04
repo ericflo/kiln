@@ -727,3 +727,12 @@
   This redirects the next low-level pass toward MLP projection mechanics or
   true model-forward batching, not cache-only reuse and not another narrow
   down-projection residual epilogue.
+- 2026-05-04 E291-E292: Rejected an opt-in MLP gate/up threadgroup-`x` cache.
+  The candidate kept the current one-thread-per-output-column gate/up mapping,
+  cached the `[H]` input vector in threadgroup memory per 256-column group, and
+  passed focused Metal parity plus `cargo check`, but same-binary warmed
+  p64/o64 lost badly: E291 measured 455.0 ms prefill / 202.8 ms mean ITL /
+  4.93 tok/s / 221.6 ms P99, while E292 current gate/up control measured
+  421.5 ms / 162.0 ms / 6.17 tok/s / 173.2 ms P99. Memory pressure was 80%
+  free after E292. The candidate source was reverted and clean-source
+  `kiln-bench` rebuild passed.

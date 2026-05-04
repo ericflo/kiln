@@ -8662,3 +8662,64 @@ projection work directly, or to pursue true model-forward batching that
 amortizes it; E263-E264 already rejects the narrow down-projection + residual
 boundary, so another MLP attempt needs to change the projection mechanics
 rather than only the epilogue.
+
+## Experiment E291-E292: Rejected MLP Gate/Up Threadgroup-X Cache
+
+Purpose:
+
+Test a narrower MLP projection-kernel change after E290 showed decode MLP
+`gate_up_fused` is the largest profiled single-token slice. This did not repeat
+E220's cooperative reduction rewrite. Instead, the temporary opt-in candidate
+kept the current one-thread-per-output-column mapping and cached the `[H]`
+input vector in threadgroup memory once per 256-column group before each thread
+ran its serial gate/up dot products.
+
+Implementation notes:
+
+- Added temporary env gate `KILN_ENABLE_METAL_MLP_GATE_UP_TG_X=1`.
+- Added a separate `kiln_mlp_gate_up_tg_x_bf16` Metal kernel and pipeline.
+- The candidate was restricted to Metal BF16 decode rows=1 with hidden <= 4096.
+- Reverted the temporary source after measurement because the candidate lost.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_tg_x_matches_reference --lib`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_matches_reference --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Post-revert validation:
+
+- `git diff --check`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+E291 used `KILN_ENABLE_METAL_MLP_GATE_UP_TG_X=1` in the same candidate binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E291 | gate/up threadgroup-cached `x` | 455.0 ms | 4.93 | 202.8 ms | 202.4 ms | 221.6 ms | rejected |
+| E292 | current gate/up control | 421.5 ms | 6.17 | 162.0 ms | 161.4 ms | 173.2 ms | control |
+
+Memory-pressure check:
+
+- After E292, `memory_pressure` reported 80% system-wide free memory.
+
+Artifacts:
+
+- `e291_m1_bs1_p64_o64_warmed_mlp_gate_up_tg_x.log`
+- `e292_m1_bs1_p64_o64_warmed_mlp_gate_up_tg_x_control.log`
+
+Takeaway:
+
+Threadgroup-caching the decode MLP input vector hurts badly despite reducing
+repeated `x` loads. The added barrier/threadgroup-memory traffic likely
+outweighs any input-cache benefit, while the existing serial fused path keeps
+very high output-column parallelism and enough cache locality for this shape.
+Future MLP work should not retry a simple `x`-cache variant. The remaining MLP
+direction needs a more structural projection change, a better arithmetic path,
+or true model-forward batching that amortizes the whole MLP across requests.
