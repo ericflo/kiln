@@ -11,7 +11,7 @@
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
 
 layout(push_constant) uniform Parameters {
     uint hidden;
@@ -35,11 +35,11 @@ shared float partial[256];
 void main() {
     uint col_lane = gl_LocalInvocationID.x;
     uint red_lane = gl_LocalInvocationID.y;
-    uint col_groups = (total_out + 15) / 16;
+    uint col_groups = (total_out + 63) / 64;
     uint batch_idx = gl_WorkGroupID.x / col_groups;
     uint col_group = gl_WorkGroupID.x - batch_idx * col_groups;
-    uint out_idx = col_group * 16 + col_lane;
-    uint partial_idx = col_lane * 16 + red_lane;
+    uint out_idx = col_group * 64 + col_lane;
+    uint partial_idx = col_lane * 4 + red_lane;
 
     uint col = out_idx;
     uint width = qkv_dim;
@@ -64,7 +64,7 @@ void main() {
     float sum = 0.0;
     if (batch_idx < batch && out_idx < total_out) {
         uint x_base = batch_idx * hidden;
-        for (uint h = red_lane; h < hidden; h += 16) {
+        for (uint h = red_lane; h < hidden; h += 4) {
             float w = 0.0;
             uint off = h * width + col;
             if (projection == 0) {
@@ -85,8 +85,8 @@ void main() {
 
     if (red_lane == 0 && batch_idx < batch && out_idx < total_out) {
         float total = 0.0;
-        for (uint lane = 0; lane < 16; lane++) {
-            total += partial[col_lane * 16 + lane];
+        for (uint lane = 0; lane < 4; lane++) {
+            total += partial[col_lane * 4 + lane];
         }
 
         uint dst = 0;
