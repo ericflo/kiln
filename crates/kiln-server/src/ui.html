@@ -757,7 +757,8 @@ textarea { resize: vertical; min-height: 80px; }
           <div class="form-row">
             <div class="form-group">
               <label for="sft-output-name">Adapter Name</label>
-              <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" required>
+              <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" aria-describedby=sft-output-name-help required>
+              <div class="form-help" id=sft-output-name-help>Saved adapter name. Keep it short and path-safe.</div>
             </div>
             <div class="form-group">
               <label for="sft-epochs">Epochs</label>
@@ -795,7 +796,8 @@ textarea { resize: vertical; min-height: 80px; }
           <div class="form-row">
             <div class="form-group">
               <label for="grpo-output-name">Adapter Name</label>
-              <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" required>
+              <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" aria-describedby=grpo-output-name-help required>
+              <div class="form-help" id=grpo-output-name-help>Saved adapter name. Keep it short and path-safe.</div>
             </div>
             <div class="form-group">
               <label for="grpo-kl-coeff">KL Coefficient</label>
@@ -1627,6 +1629,15 @@ function validateGrpoGroups(groups) {
   });
 }
 
+function parseAdapterNameField(input) {
+  const adapterName = input.value.trim();
+  if (!adapterName) {
+    input.focus();
+    throw new Error('Adapter name is required. Use a short, path-safe name.');
+  }
+  return adapterName;
+}
+
 // --- SFT Form ---
 document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1637,10 +1648,11 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
     const learningRate = parseFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
     const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
     const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
+    const outputName = parseAdapterNameField(form.output_name);
     const body = {
       examples,
       config: {
-        output_name: form.output_name.value,
+        output_name: outputName,
         auto_load: form.auto_load.checked,
         learning_rate: learningRate,
         epochs,
@@ -1665,10 +1677,11 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
     const learningRate = parseFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
     const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
     const rank = parsePositiveIntegerField(form.rank.value, 'GRPO LoRA rank');
+    const outputName = parseAdapterNameField(form.output_name);
     const body = {
       groups,
       config: {
-        output_name: form.output_name.value,
+        output_name: outputName,
         auto_load: form.auto_load.checked,
         learning_rate: learningRate,
         kl_coeff: klCoeff,
