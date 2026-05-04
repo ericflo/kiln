@@ -134,6 +134,7 @@ cd kiln
 cargo build --release --features cuda     # ~15-30 min first build (CUDA kernels)
 
 # Linux + AMD / Intel
+# Requires Vulkan 1.2+ runtime plus glslc or glslangValidator for shader embedding.
 cargo build --release --features vulkan   # Vulkan compute kernels via ash + SPIR-V
 
 # macOS + Apple Silicon
@@ -152,6 +153,8 @@ Start the source-built server:
 ```bash
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
 ```
+
+Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_DEVICE=0` to pin a zero-based Vulkan device index, or `GGML_VK_VISIBLE_DEVICES=0,1` to reuse llama.cpp-style visibility; invalid values are ignored with a warning and Kiln falls back to automatic selection or CPU if no Vulkan device is usable.
 
 ```
   ┌─────────────────────────────────────┐

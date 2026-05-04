@@ -14,6 +14,9 @@ pub fn select_device() -> Result<Device> {
 }
 
 pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
+    #[cfg(not(feature = "cuda"))]
+    let _ = cuda_graphs;
+
     #[cfg(feature = "cuda")]
     if candle_core::utils::cuda_is_available() {
         if cuda_graphs {
@@ -44,6 +47,10 @@ pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
         return Ok(Device::new_metal(0)?);
     }
 
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "metal"))]
+    tracing::info!("no compiled GPU backend found an available device — using CPU");
+
+    #[cfg(not(any(feature = "cuda", feature = "vulkan", feature = "metal")))]
     tracing::info!("no GPU feature active — using CPU");
     Ok(Device::Cpu)
 }

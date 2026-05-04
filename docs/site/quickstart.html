@@ -202,9 +202,16 @@
         </div>
         <div class="install-card">
           <h3 class="font-semibold mb-2">Linux x86_64 &middot; CUDA 12.4</h3>
-<pre class="text-sm"><code>curl -L -o kiln-linux.tar.gz \
+<pre class="text-sm"><code>curl -L -o kiln-linux-cuda.tar.gz \
   https://github.com/ericflo/kiln/releases/download/kiln-v0.2.13/kiln-0.2.13-x86_64-unknown-linux-gnu-cuda124.tar.gz
-tar -xzf kiln-linux.tar.gz</code></pre>
+tar -xzf kiln-linux-cuda.tar.gz</code></pre>
+        </div>
+        <div class="install-card">
+          <h3 class="font-semibold mb-2">Linux x86_64 &middot; Vulkan 1.2</h3>
+<pre class="text-sm"><code>curl -L -o kiln-linux-vulkan.tar.gz \
+  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.13/kiln-0.2.13-x86_64-unknown-linux-gnu-vulkan.tar.gz
+tar -xzf kiln-linux-vulkan.tar.gz</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">Use this on AMD/Intel Linux systems where <code>vulkaninfo --summary</code> lists the GPU.</p>
         </div>
         <div class="install-card">
           <h3 class="font-semibold mb-2">macOS Apple Silicon &middot; Metal</h3>
@@ -309,7 +316,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         </a>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
-          <p style="color: var(--fg-dim);">Fix model paths, binary downloads, CUDA/Metal setup, Docker, and health checks.</p>
+          <p style="color: var(--fg-dim);">Fix model paths, binary downloads, CUDA/Vulkan/Metal setup, Docker, and health checks.</p>
         </a>
       </div>
     </div>

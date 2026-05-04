@@ -346,6 +346,12 @@ requests.post("http://localhost:8420/v1/train/grpo",
 tar -xzf kiln.tar.gz
 KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
 
+      <h3 class="font-semibold mb-2 mt-6">Linux x86_64 &middot; Vulkan 1.2</h3>
+<pre><code>curl -L -o kiln.tar.gz \
+  https://github.com/ericflo/kiln/releases/download/kiln-v0.2.13/kiln-0.2.13-x86_64-unknown-linux-gnu-vulkan.tar.gz
+tar -xzf kiln.tar.gz
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve</code></pre>
+
       <h3 class="font-semibold mb-2 mt-6">macOS &middot; Apple Silicon (Metal)</h3>
 <pre><code>curl -L -o kiln.tar.gz \
   https://github.com/ericflo/kiln/releases/download/kiln-v0.2.13/kiln-0.2.13-aarch64-apple-darwin-metal.tar.gz

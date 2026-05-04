@@ -72,6 +72,41 @@ impl std::fmt::Debug for VulkanDevice {
 }
 
 impl VulkanDevice {
+    /// Select an explicit Vulkan physical-device index from environment-style
+    /// values without touching Vulkan. `KILN_VULKAN_DEVICE` wins over the
+    /// llama.cpp-compatible `GGML_VK_VISIBLE_DEVICES`; the latter may contain a
+    /// comma-separated list, so pick the first visible index that exists.
+    pub fn explicit_device_index_from_env_values(
+        device_count: usize,
+        kiln_vulkan_device: Option<&str>,
+        ggml_vk_visible_devices: Option<&str>,
+    ) -> Option<(usize, &'static str)> {
+        if device_count == 0 {
+            return None;
+        }
+
+        if let Some(dev_str) = kiln_vulkan_device {
+            if let Ok(idx) = dev_str.trim().parse::<usize>() {
+                if idx < device_count {
+                    return Some((idx, "KILN_VULKAN_DEVICE"));
+                }
+            }
+        }
+
+        if let Some(visible) = ggml_vk_visible_devices {
+            for idx in visible
+                .split(',')
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+            {
+                if idx < device_count {
+                    return Some((idx, "GGML_VK_VISIBLE_DEVICES"));
+                }
+            }
+        }
+
+        None
+    }
+
     /// Cheap probe: check if Vulkan is available without creating a logical device.
     ///
     /// Creates a minimal Vulkan instance and enumerates physical devices.
@@ -248,28 +283,29 @@ impl VulkanDevice {
         instance: &ash::Instance,
         physical_devices: &[vk::PhysicalDevice],
     ) -> Result<vk::PhysicalDevice> {
-        // Respect KILN_VULKAN_DEVICE env var
-        if let Ok(dev_str) = std::env::var("KILN_VULKAN_DEVICE") {
-            if let Ok(idx) = dev_str.parse::<usize>() {
-                if idx < physical_devices.len() {
-                    tracing::info!(device_index = idx, "using KILN_VULKAN_DEVICE");
-                    return Ok(physical_devices[idx]);
-                }
-            }
+        let kiln_vulkan_device = std::env::var("KILN_VULKAN_DEVICE").ok();
+        let ggml_vk_visible_devices = std::env::var("GGML_VK_VISIBLE_DEVICES").ok();
+        if let Some((idx, source)) = Self::explicit_device_index_from_env_values(
+            physical_devices.len(),
+            kiln_vulkan_device.as_deref(),
+            ggml_vk_visible_devices.as_deref(),
+        ) {
+            tracing::info!(device_index = idx, source, "using explicit Vulkan device selection");
+            return Ok(physical_devices[idx]);
         }
 
-        // Respect GGML_VK_VISIBLE_DEVICES (llama.cpp compatibility)
-        if let Ok(visible) = std::env::var("GGML_VK_VISIBLE_DEVICES") {
-            let indices: Vec<usize> = visible
-                .split(',')
-                .filter_map(|s| s.trim().parse().ok())
-                .collect();
-            if let Some(&idx) = indices.first() {
-                if idx < physical_devices.len() {
-                    tracing::info!(device_index = idx, "using GGML_VK_VISIBLE_DEVICES");
-                    return Ok(physical_devices[idx]);
-                }
-            }
+        if let Some(value) = kiln_vulkan_device.as_deref() {
+            tracing::warn!(
+                value,
+                device_count = physical_devices.len(),
+                "ignoring invalid KILN_VULKAN_DEVICE; expected a zero-based Vulkan physical-device index"
+            );
+        } else if let Some(value) = ggml_vk_visible_devices.as_deref() {
+            tracing::warn!(
+                value,
+                device_count = physical_devices.len(),
+                "ignoring GGML_VK_VISIBLE_DEVICES; no listed Vulkan physical-device index is available"
+            );
         }
 
         // Prefer discrete GPU
@@ -512,6 +548,34 @@ impl Drop for VulkanDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_vulkan_device_prefers_kiln_env() {
+        assert_eq!(
+            VulkanDevice::explicit_device_index_from_env_values(4, Some("2"), Some("1,3")),
+            Some((2, "KILN_VULKAN_DEVICE"))
+        );
+    }
+
+    #[test]
+    fn explicit_vulkan_device_uses_first_valid_ggml_visible_device() {
+        assert_eq!(
+            VulkanDevice::explicit_device_index_from_env_values(4, None, Some("99, 3, 1")),
+            Some((3, "GGML_VK_VISIBLE_DEVICES"))
+        );
+    }
+
+    #[test]
+    fn explicit_vulkan_device_ignores_invalid_or_missing_values() {
+        assert_eq!(
+            VulkanDevice::explicit_device_index_from_env_values(2, Some("amd"), Some("4")),
+            None
+        );
+        assert_eq!(
+            VulkanDevice::explicit_device_index_from_env_values(0, Some("0"), Some("0")),
+            None
+        );
+    }
 
     #[test]
     fn test_vulkan_device_init_fails_gracefully_without_gpu() {
