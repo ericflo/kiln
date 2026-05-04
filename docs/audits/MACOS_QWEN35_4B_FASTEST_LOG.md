@@ -10441,3 +10441,62 @@ one `BlockTable` and absolute write position per row.
 Accepted as model-forward batching plumbing. This does not change current
 single-request endpoint behavior, but it removes the `PagedKvCache` API gap
 between the scheduler/model-forward owner and the E327 batched KV-write kernel.
+
+## 2026-05-04 E336 - Exposed batched contiguous paged-attention through BackendRuntime
+
+### Goal
+
+Move the accepted E328 low-level paged-attention batch primitive out of the
+Metal-private layer. Future continuous batching needs a backend-level entry
+point that can consume one contiguous KV window per decode row without forcing
+the model-forward/scheduler owner to know Metal internals.
+
+### Change
+
+- Added `BackendRuntime::flash_attn_paged_decode_contiguous_batch`.
+- Implemented the method for `MetalBackend` by routing supported BF16
+  Qwen3.5 shapes to `metal_paged_attn_decode_contiguous_batch_bf16_d256`.
+- Extended the existing Metal parity test so the backend trait path must match
+  the direct batch kernel.
+- Added `contiguous_slot_run_starts`, a cache helper that returns one physical
+  start slot per batch row when every logical KV window is contiguous.
+- Reused that helper in `PagedKvCache::write_token_major_native_batch` for its
+  one-token slot lookup.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/mod.rs`
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `rustfmt --edition 2024 --check crates/kiln-model/src/paged_kv_cache.rs`
+- `cargo test -p kiln-model --features metal test_paged_attn_decode_contiguous_batch_matches_rowwise --lib`
+- `cargo test -p kiln-model --features metal contiguous_slot_run_starts --lib`
+- `cargo test -p kiln-model --features metal write_token_major_native_batch --lib`
+- `KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_WARMUP=20 KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_ITERS=200 cargo test -p kiln-model --features metal bench_paged_attn_decode_contiguous_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5 contiguous paged decode attention
+`q=[B,16,1,256]`, `pools=[4096,4,256]`, `seq_len=512`:
+
+| Batch | Rowwise launches | Batched launch | Speedup | Max diff | Mean diff |
+|---:|---:|---:|---:|---:|---:|
+| 1 | `118.494 us` | `86.335 us` | `1.372x` | `0.000000e0` | `0.000000e0` |
+| 2 | `214.759 us` | `116.427 us` | `1.845x` | `0.000000e0` | `0.000000e0` |
+| 4 | `387.776 us` | `211.215 us` | `1.836x` | `0.000000e0` | `0.000000e0` |
+| 8 | `752.128 us` | `618.280 us` | `1.216x` | `0.000000e0` | `0.000000e0` |
+
+The Metal trait-path parity test passed against rowwise direct-kernel output.
+
+### Artifact
+
+- `e336_paged_attn_contiguous_batch_backend_synthetic.log`
+
+### Decision
+
+Accepted as low-level batching plumbing. This still does not change current
+single-request endpoint behavior: the production paged model path remains
+single-row, and the batch kernel currently requires a common sequence length
+plus one contiguous KV run per row. It does, however, remove another layer
+boundary so true scheduler/model-forward batching can call the fast path
+through the same backend abstraction as other attention kernels.

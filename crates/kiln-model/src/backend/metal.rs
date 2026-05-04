@@ -244,6 +244,36 @@ impl BackendRuntime for MetalBackend {
         Ok(Some(out))
     }
 
+    fn flash_attn_paged_decode_contiguous_batch(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        start_slots: &Tensor,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
+    ) -> Result<Option<Tensor>> {
+        if !metal_paged_attn_decode_contiguous_batch_supports(
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+        ) {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_batch_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+            softmax_scale,
+        )
+        .context("metal contiguous paged batch decode attention failed")?;
+        Ok(Some(out))
+    }
+
     fn supports_paged_kv_head_major_read(&self) -> bool {
         true
     }
@@ -12091,11 +12121,23 @@ mod tests {
             seq_len,
             scale,
         )?;
+        let backend = MetalBackend::new(device.clone());
+        let via_backend = backend
+            .flash_attn_paged_decode_contiguous_batch(
+                &q,
+                &k_pool,
+                &v_pool,
+                &start_slots,
+                seq_len,
+                scale,
+            )?
+            .context("BackendRuntime declined contiguous paged decode batch")?;
         device.synchronize()?;
 
         assert_eq!(batched.dims(), &[batch, 1usize, q_heads * head_dim]);
         let max = max_abs_diff(&rowwise, &batched)?;
         let mean = mean_abs_diff(&rowwise, &batched)?;
+        let backend_max = max_abs_diff(&batched, &via_backend)?;
         assert!(
             max < 1e-6,
             "contiguous paged decode batch max_abs_diff={max:e}"
@@ -12103,6 +12145,10 @@ mod tests {
         assert!(
             mean < 1e-7,
             "contiguous paged decode batch mean_abs_diff={mean:e}"
+        );
+        assert!(
+            backend_max < 1e-6,
+            "BackendRuntime contiguous paged decode batch max_abs_diff={backend_max:e}"
         );
 
         Ok(())

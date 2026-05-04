@@ -305,15 +305,14 @@ impl PagedKvCache {
             "batched token-major KV write metadata length mismatch"
         );
 
+        let Some(slots) =
+            contiguous_slot_run_starts(block_tables, self.block_size, start_positions, 1)
+        else {
+            anyhow::bail!("batched token-major KV write slot lookup failed");
+        };
         let mut slots_data = Vec::with_capacity(batch);
         let mut slots_fit_u32 = true;
-        for idx in 0..batch {
-            let start_pos = start_positions[idx];
-            let slot = block_tables[idx]
-                .slot_for(start_pos, self.block_size)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no slot for batch row {idx} position {start_pos}")
-                })?;
+        for slot in slots {
             match u32::try_from(slot) {
                 Ok(slot) => slots_data.push(slot),
                 Err(_) => slots_fit_u32 = false,
@@ -599,6 +598,30 @@ pub(crate) fn contiguous_slot_run_start(
     Some(start_slot)
 }
 
+/// Return one physical start slot per batch row when every logical window is a
+/// contiguous run in the shared KV pool.
+pub(crate) fn contiguous_slot_run_starts(
+    block_tables: &[&BlockTable],
+    block_size: usize,
+    start_positions: &[usize],
+    len: usize,
+) -> Option<Vec<usize>> {
+    if len == 0 || block_tables.len() != start_positions.len() {
+        return None;
+    }
+
+    let mut starts = Vec::with_capacity(block_tables.len());
+    for (block_table, &start_pos) in block_tables.iter().zip(start_positions) {
+        starts.push(contiguous_slot_run_start(
+            block_table,
+            block_size,
+            start_pos,
+            len,
+        )?);
+    }
+    Some(starts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +649,40 @@ mod tests {
         );
         assert_eq!(contiguous_slot_run_start(&non_contiguous, 4, 0, 6), None);
         assert_eq!(contiguous_slot_run_start(&non_contiguous, 4, 2, 6), None);
+    }
+
+    #[test]
+    fn test_contiguous_slot_run_starts_detection() {
+        let mut first = BlockTable::new();
+        first.push(5);
+        first.push(6);
+        first.push(7);
+
+        let mut second = BlockTable::new();
+        second.push(11);
+        second.push(12);
+        second.push(13);
+
+        let block_tables = [&first, &second];
+        assert_eq!(
+            contiguous_slot_run_starts(&block_tables, 4, &[0, 2], 6),
+            Some(vec![20, 46])
+        );
+
+        let mut non_contiguous = BlockTable::new();
+        non_contiguous.push(20);
+        non_contiguous.push(22);
+
+        let block_tables = [&first, &non_contiguous];
+        assert_eq!(
+            contiguous_slot_run_starts(&block_tables, 4, &[0, 0], 6),
+            None
+        );
+        assert_eq!(
+            contiguous_slot_run_starts(&block_tables, 4, &[0, 0], 0),
+            None
+        );
+        assert_eq!(contiguous_slot_run_starts(&block_tables, 4, &[0], 6), None);
     }
 
     #[test]

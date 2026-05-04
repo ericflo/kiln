@@ -1016,3 +1016,16 @@
   preserves FP8's `false` fallback contract. CPU and Metal three-row roundtrip
   tests passed. This is not an endpoint win yet; it removes one model-forward
   plumbing gap for continuous batching.
+- 2026-05-04 E336: Accepted backend exposure for batched contiguous
+  paged-attention. Added
+  `BackendRuntime::flash_attn_paged_decode_contiguous_batch`, implemented it
+  for Metal through the E328 custom kernel, extended parity so the trait path
+  matches rowwise direct-kernel output, and added a cache helper for computing
+  one contiguous start slot per batch row. Fresh Qwen3.5 synthetic results for
+  `q=[B,16,1,256]`, `pools=[4096,4,256]`, `seq_len=512` were batch1
+  `118.494 us` -> `86.335 us` (1.372x), batch2 `214.759 us` -> `116.427 us`
+  (1.845x), batch4 `387.776 us` -> `211.215 us` (1.836x), and batch8
+  `752.128 us` -> `618.280 us` (1.216x), all exact. This remains batching
+  plumbing rather than a current endpoint win because production model-forward
+  is still single-row and the kernel currently requires common sequence length
+  plus one contiguous KV run per row.
