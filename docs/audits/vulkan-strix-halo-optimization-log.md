@@ -2587,8 +2587,29 @@ Verdict:
 - This is a same-binary micro-win, not a new best observed source anchor; E084's 129.1ms run remains the best observed no-env bs=1 result.
 - The full-attention QKV fusion is now no longer the catastrophic E080 path because the shader geometry matches the proven generic projection tiling.
 
+### E088: Guard Retiled Full-Attention QKV Fusion To Single-Row Decode
+
+Change:
+- Added an explicit `batch == 1` backend gate to `VulkanBackend::full_attn_qkv_decode`.
+- The retiled QKV shader remains default for single-row decode, but native batch/full-attention rows now fall back instead of reaching a helper whose kernel contract is `[1, 1, hidden]`.
+
+Reasoning:
+- E087 promoted the full-attention QKV path from opt-in to default.
+- The kernel and dispatch helper already assumed one row, but the backend gate only checked `seq_len == 1`.
+- Native batch work must not accidentally route multi-row tensors into a single-row helper.
+
+Evidence:
+- `cargo fmt --all --check` passed.
+- `git diff --check` passed.
+- `cargo test -p kiln-model native_batch_greedy -- --nocapture` passed.
+- `cargo test -p kiln-model generate::tests::test_generate_paged_max_tokens -- --nocapture` passed.
+
+Verdict:
+- Keep.
+- This is a correctness and bs>1 safety guard for E087, not a latency anchor change.
+
 ## Next Candidate
 
-With E087, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
+With E088, the best observed bs=1 short-source anchor remains E084's 129.1ms mean ITL, with a second E084 no-profile run at 130.2ms. The current E087/E088 default measured 130.4ms and 130.7ms while its rollback guard measured 132.3ms and 133.7ms, so the retiled full-attention QKV path is kept as a current-source micro-win and explicitly gated to batch=1. E079 showed that the opposite 8x32 MLP shape and two-kernel single-submit recording do not improve whole-token latency; E083/E084 show that increasing output-column parallelism is the useful direction for the single-token MLP gate/up shader, with 64x4 currently best. E085 confirmed 128x2 goes too far and regresses the MLP bucket. E086 confirmed that applying the same 32x8 direction to generic `linear_decode` regresses MLP down, full-attention, and GDN output projections. The next useful single-user experiments should revisit MLP/full-attention with deeper shader-level or layer-residency changes, or look for removable work in the generation/server path. Speculative decode can consider resident-state scopes later, but only after explicit materialization or state ownership support for rollback.
 
 For bs>1, duplicate deterministic work is eliminated, batched GDN input projection is on Vulkan, E059 promoted native batch with batch-default fused GDN decode, E061 stops decoding rows after EOS, E062 routes single-row tails back to the tuned bs=1 decode path, E069 removes duplicate prefill for long in-batch common prefixes, and E072 reuses those common prefixes across later batches. The remaining throughput work is now true multi-sequence paged attention and scheduling: batched KV write/read and SDPA for full-attention layers, continuous batching beyond the batch endpoint, and eventually keeping the GDN recurrent state resident through the whole lockstep decode loop.
