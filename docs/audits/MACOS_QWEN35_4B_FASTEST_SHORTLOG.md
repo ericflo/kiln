@@ -872,3 +872,15 @@
   with exact row q/k/v/state matches. This is a true-batching building block;
   remaining work is GDN gate/recurrent/state batching plus per-sequence cache
   tables, attention state, scheduler, and model-forward integration.
+- 2026-05-04 E322: Accepted decode-batch GDN gates+recurrent+RMSNorm support.
+  The existing Metal kernels already indexed q/k/v, gates, recurrent state,
+  and output by `batch_idx`, so the support gate now allows nonzero
+  `[B,1,H]` decode batches with checked launch bounds. Batch-4 focused parity
+  passed. Qwen3.5 synthetic results versus split Metal gates + recurrent +
+  gated RMSNorm were batch1 `504.527 us` -> `252.727 us` (1.996x), batch2
+  `778.104 us` -> `172.983 us` (4.498x), batch4 `983.356 us` -> `249.662 us`
+  (3.939x), and batch8 `1237.192 us` -> `504.165 us` (2.454x), with output
+  max diff <= `9.765625e-4` and state max diff `2.441406e-4`. E321+E322 keep
+  most of the GDN decode body fused for future true `[B,1,H]` rows; remaining
+  blockers include batched GDN input projection and model-forward/scheduler
+  state plumbing.

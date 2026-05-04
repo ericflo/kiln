@@ -1432,7 +1432,10 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
     let Ok((b_state, h_state, dk_state, dv_state)) = state.dims4() else {
         return false;
     };
-    batch == 1
+    let Some(batch_heads) = batch.checked_mul(value_heads) else {
+        return false;
+    };
+    batch > 0
         && seq_len == 1
         && (b_k, t_k, h_k, dk_k) == (batch, seq_len, q_heads, dk)
         && (b_v, t_v) == (batch, seq_len)
@@ -1446,6 +1449,9 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
         && value_heads % q_heads == 0
         && dk == 128
         && dv == 128
+        && batch_heads <= u32::MAX as usize
+        && q_heads <= u32::MAX as usize
+        && value_heads <= u32::MAX as usize
         && state.is_contiguous()
 }
 
@@ -9069,6 +9075,25 @@ mod tests {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_gates_recurrent_rmsnorm_split_reference(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+        state: &mut Tensor,
+        z: &Tensor,
+        weight: &Tensor,
+        eps: f32,
+    ) -> Result<Tensor> {
+        let (beta, g) = metal_gdn_gates_bf16(a, b, a_log, dt_bias)?;
+        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, &beta, &g, state)?;
+        metal_gated_rms_norm_bf16(&out, z, weight, eps)
+    }
+
     fn bench_transposed_coop_projection_case(
         device: &Device,
         name: &str,
@@ -9399,6 +9424,212 @@ mod tests {
                  split={split_us:.3} us fused={fused_us:.3} us speedup={:.3}x \
                  row_q_max_abs_diff={q_max:.6e} row_k_max_abs_diff={k_max:.6e} \
                  row_v_max_abs_diff={v_max:.6e} row_state_max_abs_diff={state_max:.6e}",
+                split_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_decode_gates_recurrent_rmsnorm_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize(
+            "KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_WARMUP",
+            5,
+        );
+        let iters = env_usize(
+            "KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_ITERS",
+            20,
+        );
+        let q_heads = 16usize;
+        let value_heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let seq_len = 1usize;
+        let a_log_data: Vec<f32> = (0..value_heads)
+            .map(|idx| ((idx % 11) as f32 - 5.0) * 0.04)
+            .collect();
+        let dt_bias_data: Vec<f32> = (0..value_heads)
+            .map(|idx| ((idx % 13) as f32 - 6.0) * 0.05)
+            .collect();
+        let weight_data: Vec<f32> = (0..dv)
+            .map(|idx| 0.9 + ((idx % 17) as f32) * 0.01)
+            .collect();
+        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?.contiguous()?;
+        let dt_bias = Tensor::from_slice(&dt_bias_data, value_heads, &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight = Tensor::from_slice(&weight_data, dv, &device)?.contiguous()?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let qk_elems = batch * seq_len * q_heads * dk;
+            let v_elems = batch * seq_len * value_heads * dv;
+            let gate_elems = batch * seq_len * value_heads;
+            let state_elems = batch * value_heads * dk * dv;
+            let q_data: Vec<f32> = (0..qk_elems)
+                .map(|idx| ((idx % 31) as f32 - 15.0) * 0.00390625)
+                .collect();
+            let k_data: Vec<f32> = (0..qk_elems)
+                .map(|idx| ((idx % 29) as f32 - 14.0) * 0.00390625)
+                .collect();
+            let v_data: Vec<f32> = (0..v_elems)
+                .map(|idx| ((idx % 37) as f32 - 18.0) * 0.005859375)
+                .collect();
+            let a_data: Vec<f32> = (0..gate_elems)
+                .map(|idx| ((idx % 17) as f32 - 8.0) * 0.08)
+                .collect();
+            let b_data: Vec<f32> = (0..gate_elems)
+                .map(|idx| ((idx % 19) as f32 - 9.0) * 0.07)
+                .collect();
+            let z_data: Vec<f32> = (0..v_elems)
+                .map(|idx| ((idx % 23) as f32 - 11.0) * 0.01)
+                .collect();
+            let state_data: Vec<f32> = (0..state_elems)
+                .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
+                .collect();
+
+            let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let k = Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let v = Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let a = Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let z = Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+
+            let mut state_split =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            assert!(metal_gdn_decode_gates_recurrent_supports(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &state_split
+            ));
+            assert!(metal_gdn_decode_gates_recurrent_rmsnorm_supports(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &state_split,
+                &z,
+                &weight
+            ));
+
+            let out_split = gdn_decode_gates_recurrent_rmsnorm_split_reference(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &mut state_split,
+                &z,
+                &weight,
+                1e-6,
+            )?;
+            let mut state_fused =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            let out_fused = metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &mut state_fused,
+                &z,
+                &weight,
+                1e-6,
+            )?;
+            device.synchronize()?;
+
+            let out_max = max_abs_diff(&out_split, &out_fused)?;
+            let state_max = max_abs_diff(&state_split, &state_fused)?;
+            assert!(
+                out_max < 5e-2,
+                "Qwen3.5 GDN gates+recurrent+rmsnorm batch={batch} out max_abs_diff={out_max:e} exceeds tolerance"
+            );
+            assert!(
+                state_max < 3e-2,
+                "Qwen3.5 GDN gates+recurrent+rmsnorm batch={batch} state max_abs_diff={state_max:e} exceeds tolerance"
+            );
+
+            let mut split_state =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            let split_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                gdn_decode_gates_recurrent_rmsnorm_split_reference(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &a_log,
+                    &dt_bias,
+                    &mut split_state,
+                    &z,
+                    &weight,
+                    1e-6,
+                )
+                .context("bench split GDN gates+recurrent+rmsnorm")
+            })?;
+            let mut fused_state =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &a_log,
+                    &dt_bias,
+                    &mut fused_state,
+                    &z,
+                    &weight,
+                    1e-6,
+                )
+                .context("bench fused GDN gates+recurrent+rmsnorm")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN gates+recurrent+rmsnorm decode batch BF16: \
+                 batch={batch} physical_tokens={physical_tokens} q=[{batch},1,{q_heads},{dk}] \
+                 v=[{batch},1,{value_heads},{dv}] state=[{batch},{value_heads},{dk},{dv}] \
+                 warmup={warmup} iters={iters} split={split_us:.3} us fused={fused_us:.3} us \
+                 speedup={:.3}x out_max_abs_diff={out_max:.6e} state_max_abs_diff={state_max:.6e}",
                 split_us / fused_us,
             );
         }
@@ -10232,7 +10463,7 @@ mod tests {
             return Ok(());
         };
 
-        let batch = 1usize;
+        let batch = 4usize;
         let nk = 2usize;
         let dk = 128usize;
         let nv = 4usize;

@@ -9639,3 +9639,56 @@ now keep fused qkv-conv/norm instead of falling back to split convolution and
 normalization. Remaining blockers are now narrower: batched GDN
 gate/recurrent/state handling, per-sequence paged-cache and block-table
 plumbing, attention-state batching, and scheduler/model-forward integration.
+
+## Experiment E322: Accepted Decode-Batch GDN Gates/Recurrent/RMSNorm Support
+
+Purpose:
+
+Remove the next GDN `[B,1,H]` decode blocker after E321. The existing Metal
+decode gates+recurrent and gates+recurrent+RMSNorm kernels already computed
+`batch_idx` from `batch_heads` and indexed q/k/v, gates, recurrent state, and
+output by batch. The support gate still required `batch == 1`, so future true
+batched decode would fall back to split gates, recurrent update, and gated
+RMSNorm after the qkv-conv/norm stage.
+
+Implementation:
+
+- Relaxed `metal_gdn_decode_gates_recurrent_supports` from `batch == 1` to
+  `batch > 0`.
+- Added checked `batch * value_heads` overflow handling and u32 bounds for the
+  Metal launch parameters.
+- Updated the focused decode gates+recurrent parity test to cover `batch=4`,
+  including the fused RMSNorm variant.
+- Added an ignored Qwen3.5-shaped synthetic bench comparing split Metal
+  gates + recurrent + gated RMSNorm against the fused gates+recurrent+RMSNorm
+  kernel for decode batches 1, 2, 4, and 8.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal 'test_gdn_decode_gates_recurrent' --lib`
+- `KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_WARMUP=5 KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_gdn_decode_gates_recurrent_rmsnorm_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+Synthetic Qwen3.5 GDN results:
+
+| Batch | Physical tokens | Split gates+recur+norm | Fused gates+recur+norm | Speedup | Output max diff | State max diff |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 504.527 us | 252.727 us | 1.996x | 9.155273e-4 | 2.441406e-4 |
+| 2 | 2 | 778.104 us | 172.983 us | 4.498x | 9.155273e-4 | 2.441406e-4 |
+| 4 | 4 | 983.356 us | 249.662 us | 3.939x | 9.765625e-4 | 2.441406e-4 |
+| 8 | 8 | 1237.192 us | 504.165 us | 2.454x | 9.765625e-4 | 2.441406e-4 |
+
+Artifact:
+
+- `e322_gdn_gates_recurrent_rmsnorm_decode_batch_synthetic.log`
+
+Takeaway:
+
+This accepts another low-level true-batch building block. E321 and E322
+together keep the main GDN decode body on fused Metal kernels for future
+`[B,1,H]` rows: qkv-conv/norm, gates, recurrent state update, and gated
+RMSNorm. It still does not implement endpoint/model-forward batching. Remaining
+work includes batched GDN input projection, per-sequence recurrent/conv state
+ownership in model-forward, per-sequence paged cache/block tables, attention
+state, and scheduler integration.
