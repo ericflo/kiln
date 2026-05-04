@@ -11508,3 +11508,85 @@ bs=1 latency penalty.
 Accepted as validation for E352. Keep the `200us` default wait and retain
 `KILN_DECODE_BATCH_WAIT_US=0` as the explicit zero-wait override for workloads
 that prioritize single-request latency above concurrent throughput.
+
+## 2026-05-04 E354 - Reverted default decode batch wait after n8 regression
+
+### Goal
+
+Broaden the E352 default-wait check from four concurrent streaming requests to
+eight concurrent streaming requests. The fastest-inference target is not just a
+small-concurrency cache/coalescing win; a serving default that helps one
+workload but hurts a larger live batch should not be left enabled by default.
+
+### Change
+
+- Changed `DecodeBatcherConfig::default().wait` back from `200us` to zero.
+- Kept `KILN_DECODE_BATCH_WAIT_US` as the opt-in admission-delay experiment
+  knob for workloads that match the E352 four-request profile.
+- Updated the config comment to describe the default as immediate draining of
+  already-available same-position rows.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/generate.rs`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+### Results
+
+Same-binary live endpoint check, eight concurrent streaming requests,
+`max_tokens=8`, greedy, `64` generated tokens each run:
+
+- Default `200us` wait:
+  - wall time `10.884610s`
+  - all `8` requests returned `200`
+  - `56` submitted batcher jobs
+  - `8` worker batches
+  - `56` rows
+  - max batch `8`
+- `KILN_DECODE_BATCH_WAIT_US=0`:
+  - wall time `9.555611s`
+  - all `8` requests returned `200`
+  - `56` submitted batcher jobs
+  - `14` worker batches
+  - `56` rows
+  - max batch `7`
+
+The zero-wait control was `12.2%` faster by wall time despite executing more
+worker batches and reaching a smaller max batch. The extra fullness from the
+`200us` wait did not pay for the rendezvous delay at eight concurrent streams.
+
+### Artifact
+
+- `e354_n8_default200_server.log`
+- `e354_n8_default200_metrics.prom`
+- `e354_n8_default200_time.json`
+- `e354_n8_default200_response_0.sse`
+- `e354_n8_default200_response_1.sse`
+- `e354_n8_default200_response_2.sse`
+- `e354_n8_default200_response_3.sse`
+- `e354_n8_default200_response_4.sse`
+- `e354_n8_default200_response_5.sse`
+- `e354_n8_default200_response_6.sse`
+- `e354_n8_default200_response_7.sse`
+- `e354_n8_wait0_server.log`
+- `e354_n8_wait0_metrics.prom`
+- `e354_n8_wait0_time.json`
+- `e354_n8_wait0_response_0.sse`
+- `e354_n8_wait0_response_1.sse`
+- `e354_n8_wait0_response_2.sse`
+- `e354_n8_wait0_response_3.sse`
+- `e354_n8_wait0_response_4.sse`
+- `e354_n8_wait0_response_5.sse`
+- `e354_n8_wait0_response_6.sse`
+- `e354_n8_wait0_response_7.sse`
+
+### Decision
+
+Rejected `200us` as a universal default and reverted the branch default to
+zero wait. Keep the live decode batcher enabled because immediate draining
+still batches already-arrived peers, but leave admission delay as opt-in until
+an adaptive policy beats zero wait across both the E352 four-request and this
+eight-request serving shape.

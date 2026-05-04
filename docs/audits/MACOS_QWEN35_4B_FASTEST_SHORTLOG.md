@@ -1175,3 +1175,12 @@
   `5.529497s`. Both paths submitted `31` one-row batcher jobs, executed `31`
   batches, and observed max batch `1`. No measurable single-user latency
   regression from the `200us` default in this probe.
+- 2026-05-04 E354: Broadened the E352 decode-batch wait check to eight
+  concurrent streaming requests and rejected `200us` as a universal default.
+  Default `200us` produced fuller batches (`8` worker batches, max batch `8`)
+  but took `10.884610s`; zero wait produced `14` worker batches, max batch `7`,
+  and took `9.555611s`, making zero wait `12.2%` faster by wall time. Reverted
+  `DecodeBatcherConfig::default().wait` back to zero and kept
+  `KILN_DECODE_BATCH_WAIT_US` as the opt-in admission-delay knob until an
+  adaptive policy beats zero wait across both four-way and eight-way serving
+  probes.
