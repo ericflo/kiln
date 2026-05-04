@@ -11361,3 +11361,91 @@ Rejected and reverted. Like E349, the cooperative rewrite is correct but slower
 than the simple per-column fused kernel. The obvious simdgroup rewrite does not
 unlock GDN in-proj. Continue with measured low-level work, but avoid returning
 to this specific kernel shape.
+
+## 2026-05-04 E352 - Set default decode batch wait to 200us
+
+### Goal
+
+Use the E348 live-stage profile insight that zero-wait admission can let one
+request run ahead of peers after prefill. E347 proved `500us` wait was too
+expensive, but it did not test smaller waits between zero and `500us`.
+
+### Change
+
+- Changed `DecodeBatcherConfig::default().wait` from zero to `200us`.
+- Updated the config comments to make `KILN_DECODE_BATCH_WAIT_US=0` the
+  explicit zero-wait latency override and `KILN_DECODE_BATCHER=0` the full
+  kill switch.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/generate.rs`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+### Results
+
+Same-binary live endpoint sweep, four concurrent streaming requests,
+`max_tokens=8`, greedy, `32` generated tokens each run:
+
+- `KILN_DECODE_BATCH_WAIT_US=0`: `5.283006s`, `28` submitted jobs, `14`
+  worker batches, `28` rows, max batch `3`.
+- `KILN_DECODE_BATCH_WAIT_US=50`: `5.144448s`, `28` jobs, `10` batches,
+  `28` rows, max batch `4`.
+- `KILN_DECODE_BATCH_WAIT_US=100`: `5.059628s`, `28` jobs, `8` batches,
+  `28` rows, max batch `4`.
+- `KILN_DECODE_BATCH_WAIT_US=200`: `4.951647s`, `28` jobs, `8` batches,
+  `28` rows, max batch `4`.
+- `KILN_DECODE_BATCH_WAIT_US=300`: `5.060804s`, `28` jobs, `8` batches,
+  `28` rows, max batch `4`.
+
+`200us` was the best point in this sweep, improving the zero-wait control by
+`6.3%` while staying well below the previously rejected `500us` wait.
+
+### Artifact
+
+- `e352_wait0_server.log`
+- `e352_wait0_metrics.prom`
+- `e352_wait0_time.json`
+- `e352_wait0_response_0.sse`
+- `e352_wait0_response_1.sse`
+- `e352_wait0_response_2.sse`
+- `e352_wait0_response_3.sse`
+- `e352_wait50_server.log`
+- `e352_wait50_metrics.prom`
+- `e352_wait50_time.json`
+- `e352_wait50_response_0.sse`
+- `e352_wait50_response_1.sse`
+- `e352_wait50_response_2.sse`
+- `e352_wait50_response_3.sse`
+- `e352_wait100_server.log`
+- `e352_wait100_metrics.prom`
+- `e352_wait100_time.json`
+- `e352_wait100_response_0.sse`
+- `e352_wait100_response_1.sse`
+- `e352_wait100_response_2.sse`
+- `e352_wait100_response_3.sse`
+- `e352_wait200_server.log`
+- `e352_wait200_metrics.prom`
+- `e352_wait200_time.json`
+- `e352_wait200_response_0.sse`
+- `e352_wait200_response_1.sse`
+- `e352_wait200_response_2.sse`
+- `e352_wait200_response_3.sse`
+- `e352_wait300_server.log`
+- `e352_wait300_metrics.prom`
+- `e352_wait300_time.json`
+- `e352_wait300_response_0.sse`
+- `e352_wait300_response_1.sse`
+- `e352_wait300_response_2.sse`
+- `e352_wait300_response_3.sse`
+
+### Decision
+
+Accepted. Default Metal live decode batching now waits `200us` for compatible
+same-position peers. This is an end-to-end serving win on the measured
+four-request streaming workload, and the override remains explicit:
+`KILN_DECODE_BATCH_WAIT_US=0` for zero wait and `KILN_DECODE_BATCHER=0` to
+disable the batcher entirely.

@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" mem"}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" \""}}]}
+
+data: {"id":"chatcmpl-2d41cd24-a757-48a3-8f11-363a30aa2f80","object":"chat.completion.chunk","created":1777885545,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

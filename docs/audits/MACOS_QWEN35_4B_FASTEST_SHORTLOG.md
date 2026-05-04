@@ -1160,3 +1160,12 @@
   `1250.139/2411.611/3767.250/5612.819 us` at batch `1/2/4/8` to
   `1358.014/3554.653/5294.875/10503.195 us`. The simple per-column fused
   kernel remains faster; avoid this cooperative in-proj shape.
+- 2026-05-04 E352: Accepted `200us` as the default Metal live decode-batcher
+  admission wait. E348 showed zero-wait can let one request run ahead after
+  prefill; this same-binary sweep filled the gap between zero and the earlier
+  losing `500us` wait. Four concurrent streaming requests with `max_tokens=8`
+  generated `32` tokens each run: wait `0us` took `5.283006s` with `14`
+  worker batches and max batch `3`; `50us` took `5.144448s`; `100us` took
+  `5.059628s`; `200us` won at `4.951647s` with `8` batches and max batch `4`;
+  `300us` rose to `5.060804s`. `KILN_DECODE_BATCH_WAIT_US=0` remains the
+  zero-wait override and `KILN_DECODE_BATCHER=0` remains the kill switch.

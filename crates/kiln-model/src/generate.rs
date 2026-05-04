@@ -203,17 +203,15 @@ enum StreamTokenDisposition {
 
 /// Configuration for the live greedy decode rendezvous worker.
 ///
-/// The worker is enabled by default on Metal because its zero-wait path keeps
-/// single-request greedy streaming on the rowwise fast path when no peers are
-/// present, while allowing concurrent requests to coalesce. Set
-/// `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise path.
+/// The worker is enabled by default on Metal and uses a short admission wait
+/// to let concurrent same-position decode rows coalesce. Set
+/// `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise path, or
+/// `KILN_DECODE_BATCH_WAIT_US=0` for zero-wait latency experiments.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
     pub max_batch: usize,
-    /// Optional admission delay for collecting peers. The default is zero to
-    /// preserve single-request latency; set `KILN_DECODE_BATCH_WAIT_US` when
-    /// measuring throughput under concurrent load.
+    /// Optional admission delay for collecting peers.
     pub wait: std::time::Duration,
 }
 
@@ -221,7 +219,7 @@ impl Default for DecodeBatcherConfig {
     fn default() -> Self {
         Self {
             max_batch: 8,
-            wait: std::time::Duration::ZERO,
+            wait: std::time::Duration::from_micros(200),
         }
     }
 }

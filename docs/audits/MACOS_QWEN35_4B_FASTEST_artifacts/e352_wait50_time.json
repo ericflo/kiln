@@ -1,0 +1,38 @@
+{
+  "elapsed_secs": 5.144447875092737,
+  "results": [
+    [
+      200,
+      5.143144790898077,
+      2030
+    ],
+    [
+      200,
+      5.143309458042495,
+      2030
+    ],
+    [
+      200,
+      5.142704749945551,
+      2030
+    ],
+    [
+      200,
+      5.14358291705139,
+      2021
+    ]
+  ],
+  "errors": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "max_tokens": 8,
+  "prompts": [
+    "Write one short sentence about topic alpha.",
+    "Write one short sentence about topic beta.",
+    "Write one short sentence about topic gamma.",
+    "Write one short sentence about topic delta."
+  ]
+}
