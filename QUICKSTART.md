@@ -15,7 +15,7 @@ Choose the path that matches how you want to run Kiln.
 **Desktop App path (recommended for most users):**
 
 - **Platform**: Windows, Linux, or macOS on Apple Silicon.
-- **GPU**: NVIDIA GPU or Apple Silicon Mac. NVIDIA systems should have 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.); Apple Silicon systems should have 16GB+ unified memory.
+- **GPU**: NVIDIA GPU, AMD/Intel Vulkan-capable Linux GPU, or Apple Silicon Mac. NVIDIA systems should have 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.); Apple Silicon systems should have 16GB+ unified memory.
 - **Disk**: ~20GB free for the server binary, model weights, and adapters.
 - **Build tooling**: No Rust toolchain, CUDA toolkit, or Xcode install is required for the GUI path. The app downloads the matching prebuilt `kiln` server binary for your platform.
 
@@ -68,7 +68,7 @@ The first build takes 15-30 minutes (CUDA kernel compilation). Subsequent builds
 cargo build --release --features vulkan
 ```
 
-Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. `KILN_VULKAN_DEVICE=0` or `GGML_VK_VISIBLE_DEVICES=0` can pin a specific Vulkan physical device.
+Kiln auto-detects Vulkan at startup and logs `Vulkan available — using Vulkan GPU (AMD/Intel)`. `KILN_VULKAN_DEVICE=0` pins a zero-based Vulkan physical device; `GGML_VK_VISIBLE_DEVICES=0,1` is also honored for llama.cpp compatibility. Invalid values produce a warning and Kiln falls back to automatic discrete-GPU selection, then CPU if Vulkan is not usable.
 
 **macOS + Apple Silicon:**
 

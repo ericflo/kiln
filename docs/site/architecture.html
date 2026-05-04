@@ -4,18 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Kiln Architecture &mdash; Single-process inference and training</title>
-  <meta name="description" content="A docs-site architecture guide for Kiln: single-process serving, request flow, LoRA hot-swap training, and CUDA kernel crates.">
+  <meta name="description" content="A docs-site architecture guide for Kiln: single-process serving, request flow, LoRA hot-swap training, and CUDA, Vulkan, and Metal backend kernels.">
   <link rel="canonical" href="https://ericflo.github.io/kiln/architecture.html">
   <link rel="icon" type="image/png" href="assets/logo.png">
 
   <meta property="og:title" content="Kiln Architecture &mdash; Single-process inference and training">
-  <meta property="og:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and CUDA kernels.">
+  <meta property="og:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and GPU backend kernels.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://ericflo.github.io/kiln/architecture.html">
   <meta property="og:image" content="https://ericflo.github.io/kiln/assets/logo.png">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Kiln Architecture &mdash; Single-process inference and training">
-  <meta name="twitter:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and CUDA kernels.">
+  <meta name="twitter:description" content="A compact architecture guide for Kiln internals: server, scheduler, model engine, live LoRA training, and GPU backend kernels.">
   <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/logo.png">
 
   <script src="https://cdn.tailwindcss.com"></script>
@@ -164,7 +164,7 @@
       </h1>
       <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
         This page is the website-level map of Kiln internals. It explains how the HTTP server,
-        scheduler, model engine, LoRA training queue, and CUDA kernel crates fit together before
+        scheduler, model engine, LoRA training queue, and GPU backend crates fit together before
         you dive into the full GitHub architecture document.
       </p>
       <div class="flex flex-wrap gap-3 mt-8">
@@ -190,7 +190,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#request-path-and-batching">Request path</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gated-deltanet-hybrid">Gated DeltaNet hybrid</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-hot-swap-training-queue">LoRA hot-swap</a>
-          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#cuda-kernel-crates">CUDA kernels</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#gpu-backend-crates">GPU backends</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -286,19 +286,19 @@
 
       <article class="card p-6">
         <div class="label mb-3">GPU path</div>
-        <h2 id="cuda-kernel-crates" class="text-2xl font-semibold mb-4">CUDA kernel crates</h2>
+        <h2 id="gpu-backend-crates" class="text-2xl font-semibold mb-4">GPU backend crates</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           Kiln keeps the Qwen3.5-4B fast path in Rust crates with focused native kernels where the model
-          needs them. The full-attention layers use vendored FlashAttention-style CUDA kernels, decode
-          uses paged GQA paths, and the hybrid architecture includes Gated DeltaNet support for the
-          linear-attention layers. The result is a small codebase that is tuned for one model instead of
-          abstracting over many model families.
+          needs them. CUDA builds use vendored FlashAttention-style kernels and paged GQA decode paths,
+          Vulkan builds use ash plus embedded SPIR-V shaders for AMD/Intel Linux GDN hot paths, and
+          Metal builds use candle-metal plus Kiln's Apple Silicon shader family. The result is a small
+          codebase tuned for one model instead of abstracting over many model families.
         </p>
         <ul class="list-disc pl-5 check-list" style="color: var(--fg-dim);">
           <li><code>kiln-server</code> owns HTTP routing, configuration, metrics, and API surfaces.</li>
           <li><code>kiln-scheduler</code> and <code>kiln-core</code> coordinate batching, requests, and KV blocks.</li>
           <li><code>kiln-model</code> loads Qwen3.5-4B weights, applies adapters, and drives the forward pass.</li>
-          <li><code>kiln-flash-attn</code> and CUDA-backed crates provide the tuned GPU kernels.</li>
+          <li><code>kiln-flash-attn</code>, CUDA-backed crates, <code>kiln-vulkan-kernel</code>, and Metal shaders provide backend-specific GPU kernels.</li>
           <li><code>kiln-training</code> defines the SFT and GRPO training APIs and job state.</li>
         </ul>
       </article>
