@@ -9479,3 +9479,56 @@ longer falls off a cliff in MLP gate/up. The next true-batching work can rely
 on the fused gate/up kernel for batched decode rows and should move on to the
 remaining blockers: per-sequence block tables, batched down-projection/GEMV,
 batched GDN/attention state, and scheduler integration.
+
+## Experiment E319: Accepted Decode-Batch Transposed GEMV Support
+
+Purpose:
+
+Remove the next concrete bs>1 decode blocker after E318. The single-row Metal
+transposed cooperative GEMV path supports `[1,1,K] x [K,N]` and is used for
+decode projections such as MLP `down_proj`. A true batched decode row shape
+`[B,1,K] x [K,N]` would otherwise fall back to `broadcast_matmul`. The
+candidate adds a separate tile8 batch kernel for `B > 1`, leaving the existing
+bs=1 tile4/tile8 kernels untouched.
+
+Implementation:
+
+- Added `kiln_transposed_coop_gemv8_batch_bf16`.
+- Added `metal_transposed_coop_gemv_decode_batch_supports` for BF16
+  `[B,1,K] x [K,N]`, `B > 1`.
+- Routed `linear_with_lora_t_decode` through the batch GEMV support gate when
+  the input is batched.
+- Kept fused QKV projection support single-row only for now; it still uses its
+  existing shared-output single-row kernel.
+- Added `test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul`.
+- Added an ignored Qwen3.5 synthetic bench for decode batches 2, 4, and 8.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal 'test_transposed_coop_gemv' --lib`
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=5 KILN_METAL_BATCH_GEMV_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Synthetic Qwen3.5 down-proj-shaped results:
+
+| Batch | Physical tokens | Fallback GEMV | Fused tile8 batch GEMV | Speedup | Max abs diff | Mean abs diff |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 66577.996 us | 1644.683 us | 40.481x | 0 | 0 |
+| 4 | 4 | 146361.521 us | 3203.308 us | 45.691x | 0 | 0 |
+| 8 | 8 | 320277.131 us | 7039.210 us | 45.499x | 0 | 0 |
+
+Artifact:
+
+- `e319_transposed_coop_gemv_decode_batch_synthetic.log`
+
+Takeaway:
+
+This is still a building block rather than a complete endpoint batch path. It
+removes the catastrophic `broadcast_matmul` fallback for batched decode GEMV
+rows and pairs with E318's batched MLP gate/up support. Remaining true-batch
+work is now more clearly at the model-forward/scheduler boundary: per-sequence
+paged cache/block tables, batched GDN and attention state, and a batched fused
+QKV path if full-attention layers become a bottleneck for `[B,1,H]`.

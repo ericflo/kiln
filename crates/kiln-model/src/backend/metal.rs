@@ -167,6 +167,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     if !metal_transposed_coop_gemv_disabled() {
         let default_tile = metal_transposed_coop_gemv_default_tile();
         metal_transposed_coop_gemv_pipeline(metal_device, default_tile)?;
+        metal_transposed_coop_gemv_batch_pipeline(metal_device)?;
         if default_tile != MetalTransposedCoopGemvTile::Tile4 {
             metal_transposed_coop_gemv_pipeline(metal_device, MetalTransposedCoopGemvTile::Tile4)?;
         }
@@ -2343,6 +2344,111 @@ kernel void kiln_transposed_coop_gemv8_bf16(
         }
     }
 }
+
+kernel void kiln_transposed_coop_gemv8_batch_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& input_dim [[buffer(3)]],
+    constant uint& output_dim [[buffer(4)]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tgroup.y;
+    const uint col_base = (tgroup.x * 4 + simd_group) * 8;
+    if (col_base >= output_dim) {
+        return;
+    }
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    const bool full_tile = col_base + 7 < output_dim;
+    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
+    const uint x_base = batch_idx * input_dim;
+
+    for (uint row = lane; row < input_dim; row += 32) {
+        const float xv = static_cast<float>(x[x_base + row]);
+        const uint weight_base = row * output_dim + col_base;
+        if (vector_load_safe) {
+            device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+            const bfloat4 w0 = w4_ptr[0];
+            const bfloat4 w1 = w4_ptr[1];
+            acc0 += xv * static_cast<float>(w0[0]);
+            acc1 += xv * static_cast<float>(w0[1]);
+            acc2 += xv * static_cast<float>(w0[2]);
+            acc3 += xv * static_cast<float>(w0[3]);
+            acc4 += xv * static_cast<float>(w1[0]);
+            acc5 += xv * static_cast<float>(w1[1]);
+            acc6 += xv * static_cast<float>(w1[2]);
+            acc7 += xv * static_cast<float>(w1[3]);
+        } else {
+            acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
+            if (col_base + 1 < output_dim) {
+                acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
+            }
+            if (col_base + 2 < output_dim) {
+                acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+            }
+            if (col_base + 3 < output_dim) {
+                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
+            }
+            if (col_base + 4 < output_dim) {
+                acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
+            }
+            if (col_base + 5 < output_dim) {
+                acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
+            }
+            if (col_base + 6 < output_dim) {
+                acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
+            }
+            if (col_base + 7 < output_dim) {
+                acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
+            }
+        }
+    }
+
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    acc4 = simd_sum(acc4);
+    acc5 = simd_sum(acc5);
+    acc6 = simd_sum(acc6);
+    acc7 = simd_sum(acc7);
+
+    if (lane == 0) {
+        const uint out_base = batch_idx * output_dim;
+        out[out_base + col_base + 0] = static_cast<bfloat>(acc0);
+        if (col_base + 1 < output_dim) {
+            out[out_base + col_base + 1] = static_cast<bfloat>(acc1);
+        }
+        if (col_base + 2 < output_dim) {
+            out[out_base + col_base + 2] = static_cast<bfloat>(acc2);
+        }
+        if (col_base + 3 < output_dim) {
+            out[out_base + col_base + 3] = static_cast<bfloat>(acc3);
+        }
+        if (col_base + 4 < output_dim) {
+            out[out_base + col_base + 4] = static_cast<bfloat>(acc4);
+        }
+        if (col_base + 5 < output_dim) {
+            out[out_base + col_base + 5] = static_cast<bfloat>(acc5);
+        }
+        if (col_base + 6 < output_dim) {
+            out[out_base + col_base + 6] = static_cast<bfloat>(acc6);
+        }
+        if (col_base + 7 < output_dim) {
+            out[out_base + col_base + 7] = static_cast<bfloat>(acc7);
+        }
+    }
+}
 "#;
 
 const METAL_FUSED_QKV_TRANSPOSED_COOP_GEMV_KERNEL: &str = r#"
@@ -3123,6 +3229,35 @@ fn metal_transposed_coop_gemv_pipeline(
     Ok(pipeline)
 }
 
+fn metal_transposed_coop_gemv_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal batch transposed coop GEMV cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_transposed_coop_gemv8_batch_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal batch transposed coop GEMV function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal batch transposed coop GEMV pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_fused_qkv_transposed_coop_gemv_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -3811,7 +3946,48 @@ pub(crate) fn metal_transposed_coop_gemv_supports(x: &Tensor, weight_t: &Tensor)
         && output_dim <= u32::MAX as usize
 }
 
+pub(crate) fn metal_transposed_coop_gemv_decode_batch_supports(
+    x: &Tensor,
+    weight_t: &Tensor,
+) -> bool {
+    if metal_transposed_coop_gemv_disabled() {
+        return false;
+    }
+    if x.dtype() != DType::BF16 || weight_t.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !x.is_contiguous() || !weight_t.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, input_dim)) = x.dims3() else {
+        return false;
+    };
+    let Ok((weight_input_dim, output_dim)) = weight_t.dims2() else {
+        return false;
+    };
+    let Some(total) = batch.checked_mul(output_dim) else {
+        return false;
+    };
+
+    batch > 1
+        && seq_len == 1
+        && input_dim > 0
+        && output_dim > 0
+        && input_dim == weight_input_dim
+        && input_dim <= u32::MAX as usize
+        && output_dim <= u32::MAX as usize
+        && batch <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
 pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+    if metal_transposed_coop_gemv_decode_batch_supports(x, weight_t) {
+        return metal_transposed_coop_gemv_batch_bf16(x, weight_t);
+    }
+
     metal_transposed_coop_gemv_bf16_with_tile(
         x,
         weight_t,
@@ -3879,6 +4055,76 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: output_dim.div_ceil(cols_per_threadgroup),
             height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: METAL_TRANSPOSED_COOP_GEMV_THREADS,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_transposed_coop_gemv_decode_batch_supports(x, weight_t),
+        "metal batch transposed coop GEMV supports only BF16 [B,1,K] x [K,N] with B > 1 on Metal"
+    );
+    let (batch, _, input_dim) = x.dims3()?;
+    let (_, output_dim) = weight_t.dims2()?;
+
+    // The kernel writes every batch/output channel exactly once.
+    let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, x.device())? };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal batch transposed coop GEMV requires Metal tensors");
+    };
+    let pipeline = metal_transposed_coop_gemv_batch_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_transposed_coop_gemv8_batch_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight_t.storage_and_layout();
+        let (o_storage, o_layout) = out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal batch transposed coop GEMV x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal batch transposed coop GEMV weight_t must be on Metal"),
+        };
+        let out_metal = match &*o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal batch transposed coop GEMV out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let input_dim_u32 = input_dim as u32;
+        let output_dim_u32 = output_dim as u32;
+        encoder.set_bytes(3, &input_dim_u32);
+        encoder.set_bytes(4, &output_dim_u32);
+
+        let cols_per_threadgroup =
+            METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: output_dim.div_ceil(cols_per_threadgroup),
+            height: batch,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
@@ -8831,6 +9077,63 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore]
+    fn bench_transposed_coop_gemv_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_BATCH_GEMV_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_BATCH_GEMV_BENCH_ITERS", 20);
+        let input_dim = 9216usize;
+        let output_dim = 2560usize;
+        let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 37, 0.0009765625)?;
+        device.synchronize()?;
+
+        for batch in [2usize, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+            device.synchronize()?;
+            assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                &x, &weight_t
+            ));
+
+            let reference = x.broadcast_matmul(&weight_t)?;
+            let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 1.5e-1,
+                "Qwen3.5 batch transposed coop GEMV batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2.5e-2,
+                "Qwen3.5 batch transposed coop GEMV batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                x.broadcast_matmul(&weight_t)
+                    .context("bench fallback batch transposed GEMV")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                    .context("bench fused batch transposed coop GEMV")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 transposed GEMV decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x=[{batch},1,{input_dim}] \
+                 weight_t=[{input_dim},{output_dim}] warmup={warmup} iters={iters} \
+                 fallback={fallback_us:.3} us fused_tile8={fused_us:.3} us \
+                 speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
     fn gdn_chunk_prep_reference(
         g: &Tensor,
         v: &Tensor,
@@ -9180,6 +9483,41 @@ mod tests {
         assert!(
             tile8_mean < 3e-3,
             "Metal transposed coop GEMV tile8 mean_abs_diff={tile8_mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let input_dim = 128usize;
+        let output_dim = 133usize;
+        let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+        let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 29, 0.0078125)?;
+
+        assert!(metal_transposed_coop_gemv_decode_batch_supports(
+            &x, &weight_t
+        ));
+        let reference = x.broadcast_matmul(&weight_t)?;
+        let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+
+        assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal batch transposed coop GEMV max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 3e-3,
+            "Metal batch transposed coop GEMV mean_abs_diff={mean:e} exceeds tolerance"
         );
 
         Ok(())

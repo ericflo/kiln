@@ -303,7 +303,10 @@ fn linear_with_lora_t_decode(
         if lora.is_none()
             && !crate::mtp_debug::is_mtp_fp32_head_armed()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
-            && crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
+            && (crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
+                || crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+                    x, weight_t,
+                ))
         {
             return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
                 .context("metal transposed coop GEMV failed");

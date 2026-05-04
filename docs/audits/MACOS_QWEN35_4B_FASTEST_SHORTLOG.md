@@ -842,3 +842,13 @@
   `590190.196 us` -> `7215.167 us` (81.799x), all with max abs diff
   <= `5.960464e-8`. `cargo check` for `kiln`/`kiln-bench` passed. This is a
   bs>1 building block, not full endpoint batching.
+- 2026-05-04 E319: Accepted decode-batch transposed GEMV support. Added a
+  separate tile8 Metal kernel for BF16 `[B,1,K] x [K,N]`, `B > 1`, and routed
+  decode linear projections through it while leaving the existing bs=1 kernels
+  untouched. Focused batch GEMV parity passed. Qwen3.5 down-proj-shaped
+  synthetic results versus broadcast fallback were batch2 `66577.996 us` ->
+  `1644.683 us` (40.481x), batch4 `146361.521 us` -> `3203.308 us`
+  (45.691x), and batch8 `320277.131 us` -> `7039.210 us` (45.499x), with
+  exact output match. `cargo check` for `kiln`/`kiln-bench` and release
+  `kiln-bench` build passed. This pairs with E318 as a true-batching building
+  block; endpoint/model-forward batching still remains.
