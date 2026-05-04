@@ -8444,3 +8444,61 @@ the next low-level pass: GDN `in_proj` remains the largest decode sub-stage,
 with GDN `out_proj` second and fused gates/recurrent/RMSNorm third. The next
 candidate should target projection work or a larger producer/consumer layout
 change; E284-E285 makes the small gate-scalar sharing path a dead end.
+
+## Experiment E287-E288: Rejected GDN Decode Project-Z-In-Recurrent Boundary
+
+Purpose:
+
+Test a larger GDN producer/consumer boundary change instead of another
+intra-kernel scalar tweak. The temporary opt-in candidate skipped materializing
+the decode `z = x @ in_proj_z_t` output in `in_proj`, then projected `z`
+inside the fused decode gates+recurrent+RMSNorm Metal kernel. The goal was to
+reduce the largest measured decode GDN stage (`in_proj`) by moving `z` work to
+the consumer and avoiding one materialized intermediate.
+
+Implementation notes:
+
+- Added temporary env gate `KILN_ENABLE_METAL_GDN_PROJECT_Z_IN_RECURRENT=1`.
+- Added a BF16 decode GDN in-proj kernel that emits only `qkv`, `a`, and `b`.
+- Added a fused decode gates+recurrent+RMSNorm variant that reads `x` and
+  `in_proj_z_t`, computes the per-value `z` projection internally, and applies
+  the existing SiLU-gated RMSNorm epilogue.
+- Wired the path only for Metal BF16 decode shape `[1, 1, H]`, `dk == 128`,
+  and the native recurrent decode path.
+- Reverted the temporary source after measurement because the candidate lost.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs crates/kiln-model/src/forward.rs`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+- `cargo test -p kiln-model --features metal test_gdn_decode_gates_recurrent_matches_split_reference --lib`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+E287 used `KILN_ENABLE_METAL_GDN_PROJECT_Z_IN_RECURRENT=1` in the same
+candidate binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E287 | project `z` inside recurrent/RMSNorm | 448.7 ms | 5.84 | 171.3 ms | 170.6 ms | 189.6 ms | rejected |
+| E288 | materialized-`z` control | 418.1 ms | 6.25 | 159.9 ms | 158.8 ms | 173.2 ms | control |
+
+Memory-pressure check:
+
+- After E288, `memory_pressure` reported 81% system-wide free memory.
+
+Artifacts:
+
+- `e287_m1_bs1_p64_o64_warmed_gdn_project_z_in_recurrent.log`
+- `e288_m1_bs1_p64_o64_warmed_gdn_materialized_z_control.log`
+
+Takeaway:
+
+Avoiding the materialized `z` tensor did not pay for the extra per-token dot
+work inside the consumer kernel. The current materialized-`z` path remains
+faster on p64/o64. This closes off the naive project-z boundary move; future
+low-level GDN work should either remove more than one intermediate at once or
+attack the projection kernels directly with a measured full-path win.

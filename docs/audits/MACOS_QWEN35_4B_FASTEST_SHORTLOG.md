@@ -699,3 +699,12 @@
   ms, `qkv_conv_norm` 6.253 ms. Prefill GDN also still ranks `in_proj` first
   at 83.101 ms. Memory pressure was 81% free. Treat this as target selection,
   not a latency baseline.
+- 2026-05-04 E287-E288: Rejected a GDN decode project-z-in-recurrent boundary
+  move. The temporary opt-in path skipped materializing `z` in decode
+  `in_proj` and instead projected `z` inside the fused
+  gates+recurrent+RMSNorm Metal kernel. Focused Metal parity tests and release
+  `kiln-bench` build passed while applied, but same-binary warmed p64/o64 lost
+  clearly: E287 measured 448.7 ms prefill / 171.3 ms mean ITL / 5.84 tok/s /
+  189.6 ms P99, while E288 materialized-`z` control measured 418.1 ms /
+  159.9 ms / 6.25 tok/s / 173.2 ms P99. Memory pressure was 81% free after
+  E288. The candidate source was reverted.
