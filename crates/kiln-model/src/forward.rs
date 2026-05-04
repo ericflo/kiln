@@ -6331,6 +6331,7 @@ fn transformer_block_paged_batch_decode_rows(
     paged_cache: &mut PagedKvCache,
     block_tables: &[BlockTable],
     row_positions: &[Tensor],
+    row_rope_tables: &[(Tensor, Tensor)],
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
@@ -6362,6 +6363,11 @@ fn transformer_block_paged_batch_decode_rows(
         "row position tensor count {} does not match batch {batch}",
         row_positions.len()
     );
+    anyhow::ensure!(
+        row_rope_tables.len() == batch,
+        "row RoPE table count {} does not match batch {batch}",
+        row_rope_tables.len()
+    );
 
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
@@ -6371,6 +6377,7 @@ fn transformer_block_paged_batch_decode_rows(
     let mut row_outputs = Vec::with_capacity(batch);
     for row in 0..batch {
         let row_normed = normed.narrow(0, row, 1)?;
+        let (cos, sin) = &row_rope_tables[row];
         let out = gqa_attention_paged_with_rope_tables(
             backend,
             &row_normed,
@@ -6382,7 +6389,7 @@ fn transformer_block_paged_batch_decode_rows(
             head_dim,
             rotary_dim,
             inv_freq,
-            None,
+            Some((cos, sin)),
             rms_norm_eps,
             paged_cache,
             &block_tables[row],
@@ -6951,6 +6958,13 @@ pub fn model_forward_paged_next_tokens_greedy_batch(
         let pos_f32 = [pos as f32];
         row_positions.push(Tensor::new(pos_f32.as_slice(), hidden.device())?);
     }
+    let mut row_rope_tables = Vec::with_capacity(batch);
+    for positions in &row_positions {
+        row_rope_tables.push(rotary_tables_from_tensor(
+            positions,
+            &weights.rotary_inv_freq,
+        )?);
+    }
 
     let mut full_attn_idx: usize = 0;
     let mut linear_attn_idx: usize = 0;
@@ -6977,6 +6991,7 @@ pub fn model_forward_paged_next_tokens_greedy_batch(
                     paged_cache,
                     block_tables,
                     &row_positions,
+                    &row_rope_tables,
                     full_attn_idx,
                     layer_lora,
                 )
