@@ -661,3 +661,13 @@
   416.0 ms / 167.8 ms / 5.96 tok/s versus E277 control 422.3 ms / 162.4 ms /
   6.16 tok/s. Memory pressure was 81% free after E277. The candidate source
   was reverted and clean-source release `kiln-bench` rebuild passed.
+- 2026-05-04 E278-E281: Accepted a narrower weighted-hidden prep for Metal
+  BF16 greedy LM-head decode. Instead of pushing the final norm weight multiply
+  into every vocab-column dot product, the accepted path materializes
+  `(hidden * final_norm_weight)` once and then calls the existing LM-head
+  argmax path, skipping the final RMSNorm reduction only for Metal BF16
+  `[1, 1, H]`. Focused CPU/Metal tests passed and same-binary p64/o64 won both
+  A/B pairs: E278 was 410.5 ms prefill / 163.3 ms mean ITL / 6.13 tok/s versus
+  E279 control 424.4 ms / 165.7 ms / 6.04 tok/s; repeat E280 was 422.5 ms /
+  162.8 ms / 6.14 tok/s versus E281 control 419.7 ms / 163.2 ms / 6.13 tok/s.
+  Memory pressure was 81% free after E281.

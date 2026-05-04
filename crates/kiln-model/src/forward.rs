@@ -128,6 +128,11 @@ fn profile_gdn_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
 }
 
+fn weighted_lm_head_prep_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
+}
+
 fn synchronize_for_profile(device: &Device) -> Result<()> {
     if let Device::Metal(device) = device {
         device.synchronize()?;
@@ -2652,6 +2657,30 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     }
     let logits = lm_head_forward(x, embed_tokens_t)?;
     Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
+}
+
+fn lm_head_weighted_prep_argmax(
+    x: &Tensor,
+    norm_weight: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Option<u32>> {
+    if weighted_lm_head_prep_disabled()
+        || x.dtype() != DType::BF16
+        || norm_weight.dtype() != DType::BF16
+        || !matches!(x.device(), Device::Metal(_))
+        || !matches!(norm_weight.device(), Device::Metal(_))
+    {
+        return Ok(None);
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return Ok(None);
+    };
+    if batch != 1 || seq_len != 1 || norm_weight.dims() != [hidden] {
+        return Ok(None);
+    }
+
+    let weighted = x.broadcast_mul(norm_weight)?.contiguous()?;
+    Ok(Some(lm_head_argmax(&weighted, embed_tokens_t)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -7354,6 +7383,13 @@ fn model_forward_paged_inner(
             let token = {
                 kiln_nvtx::range!(c"kiln/lm_head_argmax");
                 let last = hidden.narrow(1, seq_len - 1, 1)?;
+                if let Some(token) = lm_head_weighted_prep_argmax(
+                    &last,
+                    &weights.final_norm,
+                    &weights.embed_tokens_t,
+                )? {
+                    return Ok((None, None, Some(token)));
+                }
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
                 lm_head_argmax(&normed, &weights.embed_tokens_t)?
             };
@@ -11595,6 +11631,50 @@ mod tests {
             "last-token greedy prefill should match greedy_sample(last-token logits)"
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_weighted_lm_head_prep_argmax_matches_final_rmsnorm_argmax_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+
+        unsafe {
+            std::env::remove_var("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP");
+        }
+
+        let hidden = 128usize;
+        let vocab = 257usize;
+        let best = 42usize;
+        let x_data: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+            .collect();
+        let norm_weight_data: Vec<f32> = (0..hidden)
+            .map(|i| 0.75 + (i % 17) as f32 * 0.015625)
+            .collect();
+        let mut weight_data: Vec<f32> = (0..(hidden * vocab))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.0009765625)
+            .collect();
+        for i in 0..hidden {
+            weight_data[i * vocab + best] = x_data[i] * norm_weight_data[i];
+        }
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let norm_weight =
+            Tensor::from_slice(&norm_weight_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+        let weight_t =
+            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+
+        let normed = rms_norm(&x, &norm_weight, 1e-6)?;
+        let reference = lm_head_argmax(&normed, &weight_t)?;
+        let weighted = lm_head_weighted_prep_argmax(&x, &norm_weight, &weight_t)?
+            .context("weighted lm-head prep should support Metal BF16 [1,1,H]")?;
+
+        assert_eq!(reference as usize, best);
+        assert_eq!(weighted, reference);
         Ok(())
     }
 

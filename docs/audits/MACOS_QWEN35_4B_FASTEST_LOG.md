@@ -8165,3 +8165,69 @@ single-row RMSNorm materialization. If this direction is revisited, it needs a
 two-stage shape that cheaply prepares the weighted hidden row once, or a faster
 argmax kernel, rather than adding per-vocab work to the materialized LM-head
 projection.
+
+## Experiments E278-E281: Accepted Weighted Hidden Prep for Greedy LM-Head
+
+Hypothesis:
+
+E274-E277 lost because the final norm weight multiply moved inside the
+hidden-by-vocab LM-head projection, adding one multiply per MAC. A narrower
+version can prepare the single hidden row once as `(hidden * final_norm_weight)`
+and then reuse the existing LM-head projection/argmax path. The omitted
+inverse-RMS factor remains a positive scalar for the row and does not affect
+ideal greedy argmax.
+
+Change:
+
+- Added a Metal BF16 greedy-decode fast path in `LmHeadMode::LastRowArgmaxOnly`
+  that computes a contiguous weighted hidden row with `broadcast_mul` and calls
+  the existing `lm_head_argmax`.
+- The path is limited to Metal BF16 `[1, 1, H]` with BF16 final norm weights.
+  Other devices, dtypes, and shapes fall back to the exact existing
+  `rms_norm + lm_head_argmax` path.
+- Added `KILN_DISABLE_WEIGHTED_LM_HEAD_PREP=1` for same-binary controls.
+
+Validation:
+
+- `cargo test -p kiln-model --features metal test_model_forward_paged_last_token_matches_full_last_row_cpu --lib`
+  - Passed while the candidate was applied.
+- `cargo test -p kiln-model --features metal test_weighted_lm_head_prep_argmax_matches_final_rmsnorm_argmax_metal --lib`
+  - Passed after adding a focused Metal argmax parity test with a stable winning
+    column.
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+  - Passed before the A/B runs.
+- `git diff --check`
+  - Passed.
+
+Full-model warmed p64/o64:
+
+All runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+Controls used `KILN_DISABLE_WEIGHTED_LM_HEAD_PREP=1` in the same candidate
+binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E278 | weighted hidden prep | 410.5 ms | 6.13 | 163.3 ms | 162.3 ms | 194.6 ms | accepted |
+| E279 | disabled control | 424.4 ms | 6.04 | 165.7 ms | 163.7 ms | 194.3 ms | control |
+| E280 | weighted hidden prep repeat | 422.5 ms | 6.14 | 162.8 ms | 162.0 ms | 172.3 ms | accepted |
+| E281 | disabled control repeat | 419.7 ms | 6.13 | 163.2 ms | 162.6 ms | 182.1 ms | control |
+
+Memory-pressure check:
+
+- After E281, `memory_pressure` reported 81% system-wide free memory.
+
+Artifacts:
+
+- `e278_weighted_lm_head_prep_enabled.log`
+- `e279_weighted_lm_head_prep_disabled_control.log`
+- `e280_weighted_lm_head_prep_enabled_repeat.log`
+- `e281_weighted_lm_head_prep_disabled_control_repeat.log`
+
+Takeaway:
+
+This is a small but repeatable decode win from removing the single-row RMSNorm
+reduction while avoiding E274-E277's extra per-vocab multiply. It does not
+address the larger measured hotspots (`GDN in_proj` and `GDN out_proj`), but it
+is a bounded low-level improvement on the greedy decode tail and keeps a
+same-binary fallback for any future output-parity investigation.
