@@ -219,7 +219,7 @@ kiln adapters unload</code></pre>
       <div class="card p-6">
         <p class="label mb-2">Server</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Start serving Qwen3.5-4B</h2>
-        <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at the local model directory, then start the OpenAI-compatible server. Running <code>kiln</code> with no subcommand also serves.</p>
+        <p class="mb-4" style="color: var(--fg-dim);">Point <code>KILN_MODEL_PATH</code> at the local model directory, then start the OpenAI-compatible server. Running <code>kiln</code> with no subcommand starts the server just like <code>kiln serve</code>.</p>
 <pre class="text-sm"><code>export KILN_MODEL_PATH=./Qwen3.5-4B
 kiln serve</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">The default server listens on <code>127.0.0.1:8420</code>; open <code>/ui</code> there for the dashboard.</p>
@@ -227,11 +227,13 @@ kiln serve</code></pre>
       <div class="card p-6">
         <p class="label mb-2">Configuration</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Use config files and model IDs</h2>
-        <p class="mb-4" style="color: var(--fg-dim);"><code>--config</code> loads a TOML config file. <code>--served-model-id</code> changes the model name returned by <code>/v1/models</code> and accepted by OpenAI-compatible clients.</p>
-<pre class="text-sm"><code>kiln serve --config kiln.toml
-kiln serve --served-model-id qwen3.5-4b-local
-kiln config --file kiln.toml</code></pre>
-        <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config --file</code> to validate a config before starting the server.</p>
+        <p class="mb-4" style="color: var(--fg-dim);"><code>--config</code> (or <code>-c</code>) loads a TOML config file. <code>--served-model-id</code> changes the model name returned by <code>/v1/models</code> and accepted by OpenAI-compatible clients.</p>
+<pre class="text-sm"><code>kiln config
+kiln config --file kiln.toml
+kiln serve -c kiln.toml
+kiln serve --config kiln.toml
+kiln serve --served-model-id qwen3.5-4b-local</code></pre>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">Use <code>kiln config</code> to validate built-in defaults plus <code>KILN_*</code> environment overrides, or <code>kiln config --file</code> / <code>kiln config -f</code> to validate a TOML file before starting the server.</p>
       </div>
     </div>
   </section>
