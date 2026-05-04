@@ -9,6 +9,12 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Desktop App (recommended)** | You want the shortest first run on Windows, Linux, or Apple Silicon macOS. | Install the app, choose or download `Qwen/Qwen3.5-4B`, start the server from the GUI, then jump to [Test Inference](#4-test-inference). |
 | **Source / CLI** | You are contributing, scripting, or want direct terminal control. | Build `kiln`, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 1-5. |
 
+## Reader map
+
+- **5-minute path:** sections 1-5 get you to a running server, first inference, and dashboard checkpoint. Stop there if you only need to confirm Kiln is serving.
+- **Optional learning:** sections 6-8 cover live-learning and adapter workflows after the server is working: SFT, training status, and adapter activation.
+- **Advanced API:** section 9 is reference material for direct HTTP usage once the basic path is clear.
+
 After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [advanced API examples](#9-advanced-api-examples), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
