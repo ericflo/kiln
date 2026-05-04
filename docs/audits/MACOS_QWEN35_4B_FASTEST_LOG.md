@@ -9097,3 +9097,75 @@ more than offset the additional input-load reuse, and P99 regressed badly.
 Do not keep pushing the gate/up column grouping past two columns; the next
 low-level target should move to MLP `down_proj` or another broader projection
 boundary.
+
+## Experiment E309-E310: Rejected Qwen3.5 MLP Down-Projection Specialization
+
+Purpose:
+
+Move off the gate/up rabbit hole and test a narrow low-level MLP
+`down_proj` idea. The current decode down-projection uses the generic Metal
+transposed cooperative GEMV tile8 path for `[1,1,9216] x [9216,2560]`. The
+candidate added a temporary opt-in exact-shape kernel that removed dynamic
+dimension buffers, tail checks, and the generic `output_dim` branch from that
+specific Qwen3.5 MLP down-projection shape.
+
+Current-path synthetic refresh:
+
+Command:
+
+`KILN_METAL_TRANSPOSED_COOP_BENCH_WARMUP=10 KILN_METAL_TRANSPOSED_COOP_BENCH_ITERS=50 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_qwen35_synthetic --lib -- --ignored --nocapture`
+
+Current synthetic results:
+
+| Shape | Broadcast | Tile4 | Tile8 | Best |
+|---|---:|---:|---:|---|
+| `mlp_gate_or_up` `[2560,9216]` | 1243.447 us | 1064.082 us | 1036.648 us | tile8 |
+| `down_proj` `[9216,2560]` | 1186.880 us | 966.188 us | 939.508 us | tile8 |
+| `attn_output` `[2560,2560]` | 388.677 us | 291.438 us | 286.902 us | tile8 |
+| `attn_qkv_like` `[2560,4096]` | 676.455 us | 453.350 us | 478.214 us | tile4 |
+
+Temporary candidate:
+
+- Added opt-in `KILN_ENABLE_METAL_QWEN35_MLP_DOWN_PROJ=1`.
+- Added temporary `kiln_qwen35_mlp_down_proj_bf16` Metal kernel for exactly
+  `[1,1,9216] x [9216,2560]`.
+- Kept the same tile8 arithmetic shape, but hard-coded the dimensions and
+  removed all output-tail stores and dynamic dimension reads.
+- Extended the ignored synthetic Metal bench to compare tile8 and the
+  specialized candidate directly.
+
+Validation while the temporary source was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `KILN_METAL_TRANSPOSED_COOP_BENCH_WARMUP=10 KILN_METAL_TRANSPOSED_COOP_BENCH_ITERS=50 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_qwen35_synthetic --lib -- --ignored --nocapture`
+
+Direct candidate result:
+
+| Variant | Time | Relative |
+|---|---:|---:|
+| current tile8 down-proj | 974.933 us | 1.000x |
+| exact-shape specialized down-proj | 1068.878 us | 0.912x |
+
+The specialized kernel matched the current tile8 output exactly
+(`max_abs_diff=0`, `mean_abs_diff=0`) but was slower. The temporary source was
+reverted before full-model p64/o64 testing because the direct projection
+microbench already rejected it.
+
+Post-revert validation:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+Artifacts:
+
+- `e309_transposed_coop_synthetic_current.log`
+- `e310_qwen35_down_proj_specialized_synthetic.log`
+
+Takeaway:
+
+A narrow exact-shape down-projection specialization that only removes generic
+dimension/tail overhead is not enough; it loses to the compiler/runtime shape
+of the existing generic tile8 kernel. The next low-level attempt should change
+real work or data movement, not just erase branches around the same GEMV math.

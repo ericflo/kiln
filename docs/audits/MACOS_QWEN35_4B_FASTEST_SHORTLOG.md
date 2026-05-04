@@ -785,3 +785,13 @@
   157.8 ms / 6.34 tok/s / 167.7 ms P99. Memory pressure was 80% free. The
   candidate source was reverted and clean-source release `kiln-bench` rebuild
   plus `git diff --check` passed.
+- 2026-05-04 E309-E310: Rejected a Qwen3.5-shape-specialized Metal MLP
+  `down_proj` decode kernel before full-model testing. The current synthetic
+  transposed-GEMV refresh measured the down-projection shape at
+  `broadcast_matmul=1186.880 us`, tile4 `966.188 us`, and tile8 `939.508 us`.
+  The temporary exact-shape kernel removed generic dimension/tail branches for
+  `[1,1,9216] x [9216,2560]`, matched tile8 bit-for-bit, but lost in the direct
+  same-binary comparison: tile8 `974.933 us` versus specialized `1068.878 us`.
+  Source was reverted; `rustfmt --check`, `git diff --check`, and release
+  `kiln-bench` rebuild passed. This rules out a narrow down-projection
+  specialization that only erases generic branch overhead.
