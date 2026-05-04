@@ -113,11 +113,16 @@ See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examp
 
 **Path 1 — Desktop App / prebuilt binary, recommended for most users:** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading the model weights. No Rust toolchain, CUDA toolkit, or source build is required for this path.
 
-If you prefer a terminal, pull a prebuilt container instead:
+If you prefer a terminal, run the prebuilt container instead:
 
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
+docker run --gpus all -p 8420:8420 \
+  -v /path/to/Qwen3.5-4B:/models \
+  ghcr.io/ericflo/kiln-server:latest serve
 ```
+
+Replace `/path/to/Qwen3.5-4B` with your local model directory, then open http://127.0.0.1:8420/ui after the container starts.
 
 **Path 2 — Source / CLI, for contributors and direct CLI users:** Install Rust stable, then build the CLI from source for your platform.
 
