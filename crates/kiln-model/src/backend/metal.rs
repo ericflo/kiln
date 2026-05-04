@@ -2627,38 +2627,42 @@ kernel void kiln_gdn_in_proj_decode_bf16(
     constant uint& qkv_dim [[buffer(10)]],
     constant uint& z_dim [[buffer(11)]],
     constant uint& nv [[buffer(12)]],
+    constant uint& batch [[buffer(13)]],
     uint gid [[thread_position_in_grid]]
 ) {
     const uint total = qkv_dim + z_dim + (nv * 2);
-    if (gid >= total) {
+    if (gid >= total * batch) {
         return;
     }
+    const uint batch_idx = gid / total;
+    const uint local_gid = gid - batch_idx * total;
+    const uint x_base = batch_idx * hidden;
 
     float acc = 0.0f;
-    if (gid < qkv_dim) {
-        const uint col = gid;
+    if (local_gid < qkv_dim) {
+        const uint col = local_gid;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
         }
-        qkv_out[col] = static_cast<bfloat>(acc);
-    } else if (gid < qkv_dim + z_dim) {
-        const uint col = gid - qkv_dim;
+        qkv_out[batch_idx * qkv_dim + col] = static_cast<bfloat>(acc);
+    } else if (local_gid < qkv_dim + z_dim) {
+        const uint col = local_gid - qkv_dim;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(z_t[i * z_dim + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(z_t[i * z_dim + col]);
         }
-        z_out[col] = static_cast<bfloat>(acc);
-    } else if (gid < qkv_dim + z_dim + nv) {
-        const uint col = gid - qkv_dim - z_dim;
+        z_out[batch_idx * z_dim + col] = static_cast<bfloat>(acc);
+    } else if (local_gid < qkv_dim + z_dim + nv) {
+        const uint col = local_gid - qkv_dim - z_dim;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(a_t[i * nv + col]);
         }
-        a_out[col] = static_cast<bfloat>(acc);
+        a_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
     } else {
-        const uint col = gid - qkv_dim - z_dim - nv;
+        const uint col = local_gid - qkv_dim - z_dim - nv;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(b_t[i * nv + col]);
         }
-        b_out[col] = static_cast<bfloat>(acc);
+        b_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
     }
 }
 "#;
@@ -4366,8 +4370,11 @@ fn metal_gdn_in_proj_decode_supports(
     else {
         return false;
     };
+    let Some(dispatch_total) = total.checked_mul(batch) else {
+        return false;
+    };
 
-    batch == 1
+    batch > 0
         && seq_len == 1
         && hidden == qkv_hidden
         && hidden == z_hidden
@@ -4379,6 +4386,7 @@ fn metal_gdn_in_proj_decode_supports(
         && z_dim <= u32::MAX as usize
         && nv <= u32::MAX as usize
         && total <= u32::MAX as usize
+        && dispatch_total <= u32::MAX as usize
 }
 
 fn metal_gdn_in_proj_decode_bf16(
@@ -4390,22 +4398,34 @@ fn metal_gdn_in_proj_decode_bf16(
 ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
     anyhow::ensure!(
         metal_gdn_in_proj_decode_supports(x, qkv_t, z_t, a_t, b_t),
-        "metal gdn in-proj supports only BF16 [1,1,H] x [H,*] on Metal"
+        "metal gdn in-proj supports only BF16 [B,1,H] x [H,*] on Metal"
     );
-    let (_, _, hidden) = x.dims3()?;
+    let (batch, _, hidden) = x.dims3()?;
     let (_, qkv_dim) = qkv_t.dims2()?;
     let (_, z_dim) = z_t.dims2()?;
     let (_, nv) = a_t.dims2()?;
     let total = qkv_dim + z_dim + (nv * 2);
+    let dispatch_total = batch * total;
 
-    // The kernel writes every output element exactly once. Keep the four
-    // logical outputs as views over one allocation so decode avoids multiple
-    // small Metal buffer allocations per GDN layer.
-    let proj_out = unsafe { Tensor::empty((1usize, 1usize, total), DType::BF16, x.device())? };
-    let qkv_out = proj_out.narrow(2, 0, qkv_dim)?;
-    let z_out = proj_out.narrow(2, qkv_dim, z_dim)?;
-    let a_out = proj_out.narrow(2, qkv_dim + z_dim, nv)?;
-    let b_out = proj_out.narrow(2, qkv_dim + z_dim + nv, nv)?;
+    // The kernel writes every output element exactly once. Keep bs=1 on one
+    // backing allocation, but use separate batch outputs so each `[B,1,N]`
+    // tensor remains contiguous for the following fused decode kernels.
+    let (qkv_out, z_out, a_out, b_out) = if batch == 1 {
+        let proj_out = unsafe { Tensor::empty((1usize, 1usize, total), DType::BF16, x.device())? };
+        (
+            proj_out.narrow(2, 0, qkv_dim)?,
+            proj_out.narrow(2, qkv_dim, z_dim)?,
+            proj_out.narrow(2, qkv_dim + z_dim, nv)?,
+            proj_out.narrow(2, qkv_dim + z_dim + nv, nv)?,
+        )
+    } else {
+        (
+            unsafe { Tensor::empty((batch, 1usize, qkv_dim), DType::BF16, x.device())? },
+            unsafe { Tensor::empty((batch, 1usize, z_dim), DType::BF16, x.device())? },
+            unsafe { Tensor::empty((batch, 1usize, nv), DType::BF16, x.device())? },
+            unsafe { Tensor::empty((batch, 1usize, nv), DType::BF16, x.device())? },
+        )
+    };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal gdn in-proj requires Metal tensors");
@@ -4495,13 +4515,15 @@ fn metal_gdn_in_proj_decode_bf16(
         let qkv_dim_u32 = qkv_dim as u32;
         let z_dim_u32 = z_dim as u32;
         let nv_u32 = nv as u32;
+        let batch_u32 = batch as u32;
         encoder.set_bytes(9, &hidden_u32);
         encoder.set_bytes(10, &qkv_dim_u32);
         encoder.set_bytes(11, &z_dim_u32);
         encoder.set_bytes(12, &nv_u32);
+        encoder.set_bytes(13, &batch_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
-            width: total,
+            width: dispatch_total,
             height: 1,
             depth: 1,
         };
@@ -8974,6 +8996,52 @@ mod tests {
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
     }
 
+    fn bench_metal_gdn_in_proj_op<F>(
+        device: &Device,
+        warmup: usize,
+        iters: usize,
+        mut op: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> Result<(Tensor, Tensor, Tensor, Tensor)>,
+    {
+        let mut last = None;
+        for _ in 0..warmup {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((qkv, z, a, b)) = &last {
+            std::hint::black_box((qkv.dims(), z.dims(), a.dims(), b.dims()));
+        }
+        drop(last);
+
+        let start = Instant::now();
+        let mut last = None;
+        for _ in 0..iters {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((qkv, z, a, b)) = &last {
+            std::hint::black_box((qkv.dims(), z.dims(), a.dims(), b.dims()));
+        }
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn gdn_in_proj_broadcast_reference(
+        x: &Tensor,
+        qkv_t: &Tensor,
+        z_t: &Tensor,
+        a_t: &Tensor,
+        b_t: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        Ok((
+            x.broadcast_matmul(qkv_t)?,
+            x.broadcast_matmul(z_t)?,
+            x.broadcast_matmul(a_t)?,
+            x.broadcast_matmul(b_t)?,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qkv_conv_norm_split_reference(
         mixed_qkv: &Tensor,
@@ -9425,6 +9493,77 @@ mod tests {
                  row_q_max_abs_diff={q_max:.6e} row_k_max_abs_diff={k_max:.6e} \
                  row_v_max_abs_diff={v_max:.6e} row_state_max_abs_diff={state_max:.6e}",
                 split_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_in_proj_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP", 3);
+        let iters = env_usize("KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS", 10);
+        let hidden = QWEN35_HIDDEN;
+        let qkv_dim = 8192usize;
+        let z_dim = 4096usize;
+        let nv = 32usize;
+        let qkv_t = patterned_bf16_2d(hidden, qkv_dim, &device, 37, 0.0009765625)?;
+        let z_t = patterned_bf16_2d(hidden, z_dim, &device, 43, 0.0009765625)?;
+        let a_t = patterned_bf16_2d(hidden, nv, &device, 29, 0.00390625)?;
+        let b_t = patterned_bf16_2d(hidden, nv, &device, 31, 0.00390625)?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+            assert!(metal_gdn_in_proj_decode_supports(
+                &x, &qkv_t, &z_t, &a_t, &b_t
+            ));
+            let (qkv_ref, z_ref, a_ref, b_ref) =
+                gdn_in_proj_broadcast_reference(&x, &qkv_t, &z_t, &a_t, &b_t)?;
+            let (qkv_fused, z_fused, a_fused, b_fused) =
+                metal_gdn_in_proj_decode_bf16(&x, &qkv_t, &z_t, &a_t, &b_t)?;
+            device.synchronize()?;
+
+            assert_eq!(qkv_fused.dims(), &[batch, 1usize, qkv_dim]);
+            assert_eq!(z_fused.dims(), &[batch, 1usize, z_dim]);
+            assert_eq!(a_fused.dims(), &[batch, 1usize, nv]);
+            assert_eq!(b_fused.dims(), &[batch, 1usize, nv]);
+            assert!(qkv_fused.is_contiguous());
+            assert!(z_fused.is_contiguous());
+            assert!(a_fused.is_contiguous());
+            assert!(b_fused.is_contiguous());
+
+            let qkv_max = max_abs_diff(&qkv_ref, &qkv_fused)?;
+            let z_max = max_abs_diff(&z_ref, &z_fused)?;
+            let a_max = max_abs_diff(&a_ref, &a_fused)?;
+            let b_max = max_abs_diff(&b_ref, &b_fused)?;
+            let max_diff = qkv_max.max(z_max).max(a_max).max(b_max);
+            assert!(
+                max_diff < 2e-2,
+                "Qwen3.5 GDN in-proj batch={batch} max_abs_diff={max_diff:e} exceeds tolerance"
+            );
+
+            let broadcast_us = bench_metal_gdn_in_proj_op(&device, warmup, iters, || {
+                gdn_in_proj_broadcast_reference(&x, &qkv_t, &z_t, &a_t, &b_t)
+                    .context("bench broadcast GDN in-proj")
+            })?;
+            let fused_us = bench_metal_gdn_in_proj_op(&device, warmup, iters, || {
+                metal_gdn_in_proj_decode_bf16(&x, &qkv_t, &z_t, &a_t, &b_t)
+                    .context("bench fused GDN in-proj")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN in-proj decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                 qkv_t=[{hidden},{qkv_dim}] z_t=[{hidden},{z_dim}] a/b_t=[{hidden},{nv}] \
+                 warmup={warmup} iters={iters} broadcast={broadcast_us:.3} us \
+                 fused={fused_us:.3} us speedup={:.3}x max_abs_diff={max_diff:.6e}",
+                broadcast_us / fused_us,
             );
         }
 
@@ -10177,11 +10316,12 @@ mod tests {
             return Ok(());
         };
 
+        let batch = 4usize;
         let hidden = 64usize;
         let qkv_dim = 131usize;
         let z_dim = 97usize;
         let nv = 17usize;
-        let x_data: Vec<f32> = (0..hidden)
+        let x_data: Vec<f32> = (0..(batch * hidden))
             .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
             .collect();
         let qkv_data: Vec<f32> = (0..(hidden * qkv_dim))
@@ -10197,8 +10337,8 @@ mod tests {
             .map(|i| ((i % 19) as f32 - 9.0) * 0.015625)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
+        let x =
+            Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?.to_dtype(DType::BF16)?;
         let qkv_t =
             Tensor::from_slice(&qkv_data, (hidden, qkv_dim), &device)?.to_dtype(DType::BF16)?;
         let z_t = Tensor::from_slice(&z_data, (hidden, z_dim), &device)?.to_dtype(DType::BF16)?;
@@ -10223,6 +10363,10 @@ mod tests {
             ("b", &b_fused, &b_ref),
         ] {
             assert_eq!(got.dtype(), DType::BF16);
+            assert!(
+                got.is_contiguous(),
+                "GDN in-proj {name} output must stay contiguous"
+            );
             let max = max_abs_diff(got, want)?;
             let mean = mean_abs_diff(got, want)?;
             assert!(
@@ -10236,7 +10380,7 @@ mod tests {
         }
 
         let x_prefill =
-            Tensor::zeros((1usize, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
+            Tensor::zeros((batch, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
         assert!(!metal_gdn_in_proj_decode_supports(
             &x_prefill, &qkv_t, &z_t, &a_t, &b_t
         ));

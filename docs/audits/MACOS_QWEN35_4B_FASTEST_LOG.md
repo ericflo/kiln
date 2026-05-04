@@ -9692,3 +9692,63 @@ RMSNorm. It still does not implement endpoint/model-forward batching. Remaining
 work includes batched GDN input projection, per-sequence recurrent/conv state
 ownership in model-forward, per-sequence paged cache/block tables, attention
 state, and scheduler integration.
+
+## Experiment E323: Accepted Decode-Batch GDN Input Projection Support
+
+Purpose:
+
+Remove the remaining per-layer GDN projection blocker for future true
+`[B,1,H]` decode rows. Before this experiment, `kiln_gdn_in_proj_decode_bf16`
+only supported `[1,1,H]`: the shader read `x[i]` and wrote output column
+zero for a single row, and the support gate required `batch == 1`. For batched
+decode, that would fall back to four projection matmuls before the E321/E322
+fused GDN body.
+
+Implementation:
+
+- Extended `kiln_gdn_in_proj_decode_bf16` with `batch_idx` indexing for the
+  input row and qkv/z/a/b outputs.
+- Relaxed `metal_gdn_in_proj_decode_supports` to `batch > 0`, with checked
+  `batch * output_columns` dispatch bounds.
+- Kept bs=1 on the existing shared projection-output allocation.
+- For `batch > 1`, switched to separate qkv/z/a/b output tensors so each
+  returned `[B,1,N]` tensor stays contiguous for the following qkv-conv/norm
+  and gates/recurrent kernels.
+- Updated the focused parity test to cover `batch=4` and assert contiguous
+  outputs.
+- Added an ignored Qwen3.5-shaped synthetic bench comparing four broadcast
+  projection matmuls against the fused scalar input-projection kernel for
+  decode batches 1, 2, 4, and 8.
+
+Validation:
+
+- `rustfmt --edition 2024 --config skip_children=true crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+Synthetic Qwen3.5 GDN results:
+
+`x=[B,1,2560]`, `qkv_t=[2560,8192]`, `z_t=[2560,4096]`,
+`a/b_t=[2560,32]`.
+
+| Batch | Physical tokens | Broadcast projections | Fused in-proj | Speedup | Max abs diff |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 2517.021 us | 1251.346 us | 2.011x | 0 |
+| 2 | 2 | 84133.521 us | 2103.188 us | 40.003x | 0 |
+| 4 | 4 | 185698.783 us | 3394.900 us | 54.699x | 0 |
+| 8 | 8 | 409072.888 us | 5578.967 us | 73.324x | 0 |
+
+Artifact:
+
+- `e323_gdn_in_proj_decode_batch_synthetic.log`
+
+Takeaway:
+
+This completes the current low-level GDN decode-batch kernel chain for
+`[B,1,H]` rows: input projection, qkv-conv/norm, gates, recurrent update, and
+gated RMSNorm all have accepted batch support. The remaining bs>1 work is no
+longer primarily missing GDN kernels; it is model-forward and scheduler
+plumbing: per-sequence conv/recurrent state ownership, per-sequence paged
+cache/block tables, attention state, and request scheduling/continuous
+batching.

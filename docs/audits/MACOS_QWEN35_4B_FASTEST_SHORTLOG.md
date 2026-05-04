@@ -884,3 +884,14 @@
   most of the GDN decode body fused for future true `[B,1,H]` rows; remaining
   blockers include batched GDN input projection and model-forward/scheduler
   state plumbing.
+- 2026-05-04 E323: Accepted decode-batch GDN input-projection support. The
+  scalar fused Metal in-proj kernel now indexes by batch, while `B > 1`
+  returns separate contiguous qkv/z/a/b outputs so the following fused GDN
+  kernels do not pay hidden copies. Batch-4 parity and contiguous-output
+  checks passed. Qwen3.5 synthetic results versus four broadcast projection
+  matmuls were batch1 `2517.021 us` -> `1251.346 us` (2.011x), batch2
+  `84133.521 us` -> `2103.188 us` (40.003x), batch4 `185698.783 us` ->
+  `3394.900 us` (54.699x), and batch8 `409072.888 us` -> `5578.967 us`
+  (73.324x), with exact output match. The GDN decode-batch kernel chain now
+  has accepted support from in-proj through recurrent RMSNorm; the remaining
+  bs>1 work is model-forward state/cache/scheduler plumbing.
