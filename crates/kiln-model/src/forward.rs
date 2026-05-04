@@ -2608,6 +2608,23 @@ fn rotary_tables_from_tensor(
     Ok((freqs.cos()?, freqs.sin()?))
 }
 
+fn rotary_embedding_batched_decode_from_tensor(
+    q: &Tensor,
+    k: &Tensor,
+    positions_tensor: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let pos = positions_tensor.unsqueeze(1)?;
+    let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
+    let cos = freqs.cos()?.unsqueeze(1)?;
+    let sin = freqs.sin()?.unsqueeze(1)?;
+    let rotated_q = apply_rope_with_decode_batch_tables(q, &cos, &sin, head_dim, rotary_dim)?;
+    let rotated_k = apply_rope_with_decode_batch_tables(k, &cos, &sin, head_dim, rotary_dim)?;
+    Ok((rotated_q, rotated_k))
+}
+
 fn rotary_embedding_from_tables(
     q: &Tensor,
     k: &Tensor,
@@ -2638,6 +2655,35 @@ fn rotary_embedding_from_tables(
 /// `head_dim`: total dimension per head
 /// `rotary_dim`: number of dimensions to rotate (must be even). The first `rotary_dim` dims
 ///   are rotated; the remaining `head_dim - rotary_dim` dims pass through unchanged.
+fn apply_rope_with_decode_batch_tables(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<Tensor> {
+    let half_rotary = rotary_dim / 2;
+    let x_dtype = x.dtype();
+    let x = x.to_dtype(DType::F32)?;
+    let x_rot = x.narrow(candle_core::D::Minus1, 0, rotary_dim)?;
+    let x_pass = if rotary_dim < head_dim {
+        Some(x.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?)
+    } else {
+        None
+    };
+    let x1 = x_rot.narrow(candle_core::D::Minus1, 0, half_rotary)?;
+    let x2 = x_rot.narrow(candle_core::D::Minus1, half_rotary, half_rotary)?;
+    let cos = cos.to_dtype(DType::F32)?.unsqueeze(2)?;
+    let sin = sin.to_dtype(DType::F32)?.unsqueeze(2)?;
+    let r1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
+    let r2 = (x1.broadcast_mul(&sin)? + x2.broadcast_mul(&cos)?)?;
+    let out = match x_pass {
+        Some(pass) => Tensor::cat(&[&r1, &r2, &pass], candle_core::D::Minus1)?,
+        None => Tensor::cat(&[&r1, &r2], candle_core::D::Minus1)?,
+    };
+    Ok(out.to_dtype(x_dtype)?)
+}
+
 fn apply_rope(
     x: &Tensor,
     cos: &Tensor,
@@ -5006,9 +5052,9 @@ fn try_flash_attn_paged_decode(
     backend: &dyn BackendRuntime,
     q: &Tensor,
     paged_cache: &PagedKvCache,
-    block_table: &BlockTable,
+    block_tables: &[&BlockTable],
     full_attn_layer_idx: usize,
-    total_seq_len: usize,
+    total_seq_lens: &[usize],
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -5034,9 +5080,11 @@ fn try_flash_attn_paged_decode(
     if q_len != 1 || q_heads != num_heads || q_hd != head_dim {
         return Ok(None);
     }
-    if batch != 1 {
-        // Multi-sequence dispatch needs a per-sequence block_table tensor.
-        // Defer to the slow path until the scheduler exercises it.
+    if block_tables.len() != batch || total_seq_lens.len() != batch {
+        return Ok(None);
+    }
+    let max_total_seq_len = total_seq_lens.iter().copied().max().unwrap_or(0);
+    if max_total_seq_len == 0 {
         return Ok(None);
     }
 
@@ -5050,7 +5098,9 @@ fn try_flash_attn_paged_decode(
     // pool. In that case we can bypass the paged gather path entirely and feed
     // the fused prefill kernel a direct `[1, total_seq_len, kv_heads, head_dim]`
     // narrow of the live K/V window.
-    if !paged_cache.is_fp8() {
+    if batch == 1 && !paged_cache.is_fp8() {
+        let block_table = block_tables[0];
+        let total_seq_len = total_seq_lens[0];
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
@@ -5218,26 +5268,35 @@ fn try_flash_attn_paged_decode(
     // sequentially from a free list, so a single freshly-allocated sequence
     // satisfies this trivially. After eviction or interleaved allocation the
     // condition may not hold, in which case we fall back.
-    let n_chunks = total_seq_len.div_ceil(K_BLOCK_N);
-    let blocks = &block_table.blocks;
-    let allocated = blocks.len();
-    if allocated < n_chunks * pages_per_chunk && allocated < total_seq_len.div_ceil(block_size) {
-        // Block table too short for the requested seqlen.
+    let max_n_chunks = max_total_seq_len.div_ceil(K_BLOCK_N);
+    let max_blocks_per_seq = max_n_chunks * pages_per_chunk;
+    if max_blocks_per_seq == 0 {
         return Ok(None);
     }
-    for c in 0..n_chunks {
-        let base_idx = c * pages_per_chunk;
-        if base_idx >= allocated {
-            break;
+
+    for (&block_table, &total_seq_len) in block_tables.iter().zip(total_seq_lens) {
+        let n_chunks = total_seq_len.div_ceil(K_BLOCK_N);
+        let blocks = &block_table.blocks;
+        let allocated = blocks.len();
+        if allocated < n_chunks * pages_per_chunk
+            && allocated < total_seq_len.div_ceil(block_size)
+        {
+            return Ok(None);
         }
-        let base_phys = blocks[base_idx];
-        for i in 1..pages_per_chunk {
-            let idx = base_idx + i;
-            if idx >= allocated {
+        for c in 0..n_chunks {
+            let base_idx = c * pages_per_chunk;
+            if base_idx >= allocated {
                 break;
             }
-            if blocks[idx] != base_phys + i as u32 {
-                return Ok(None);
+            let base_phys = blocks[base_idx];
+            for i in 1..pages_per_chunk {
+                let idx = base_idx + i;
+                if idx >= allocated {
+                    break;
+                }
+                if blocks[idx] != base_phys + i as u32 {
+                    return Ok(None);
+                }
             }
         }
     }
@@ -5254,16 +5313,18 @@ fn try_flash_attn_paged_decode(
     // so we truncate to max_blocks_per_seq before copying. Without this,
     // `reshape((1, max_blocks_per_seq))` crashes when allocated > max
     // (observed: 40 blocks vs max 32 at block 3 of full-attention layers).
-    let max_blocks_per_seq = n_chunks * pages_per_chunk;
-    let take = max_blocks_per_seq.min(blocks.len());
-    let mut padded: Vec<u32> = Vec::with_capacity(max_blocks_per_seq);
-    padded.extend_from_slice(&blocks[..take]);
-    if padded.is_empty() {
-        return Ok(None);
-    }
-    while padded.len() < max_blocks_per_seq {
-        let next = padded.last().copied().unwrap_or(0).wrapping_add(1);
-        padded.push(next);
+    let mut padded: Vec<u32> = Vec::with_capacity(batch * max_blocks_per_seq);
+    for block_table in block_tables {
+        let row_start = padded.len();
+        let take = max_blocks_per_seq.min(block_table.blocks.len());
+        padded.extend_from_slice(&block_table.blocks[..take]);
+        if padded.len() == row_start {
+            return Ok(None);
+        }
+        while padded.len() < row_start + max_blocks_per_seq {
+            let next = padded.last().copied().unwrap_or(0).wrapping_add(1);
+            padded.push(next);
+        }
     }
 
     let device = q.device();
@@ -5275,14 +5336,14 @@ fn try_flash_attn_paged_decode(
                 inputs.block_table
             } else {
                 bt_tensor_owned = Tensor::new(padded.as_slice(), device)?
-                    .reshape((1usize, max_blocks_per_seq))?;
+                    .reshape((batch, max_blocks_per_seq))?;
                 &bt_tensor_owned
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
             bt_tensor_owned =
-                Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
+                Tensor::new(padded.as_slice(), device)?.reshape((batch, max_blocks_per_seq))?;
             &bt_tensor_owned
         }
     };
@@ -5310,7 +5371,7 @@ let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let attn_out = {
         #[cfg(feature = "cuda")]
         {
-            if let Some(inputs) = graph_inputs {
+            if let Some(inputs) = graph_inputs.filter(|_| batch == 1) {
                 let attn_out = inputs.attn_out.get(full_attn_layer_idx).ok_or_else(|| {
                     anyhow::anyhow!(
                         "missing CUDA graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
@@ -5333,13 +5394,13 @@ let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                     softmax_scale,
                     true,
                 )?
-            } else {
+            } else if total_seq_lens.iter().all(|&len| len == max_total_seq_len) {
                 match backend.flash_attn_paged_decode(
                     &q_fa,
                     k_pool,
                     v_pool,
                     bt_tensor,
-                    total_seq_len,
+                    max_total_seq_len,
                     block_size,
                     softmax_scale,
                     true,
@@ -5347,16 +5408,37 @@ let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                     Some(t) => t,
                     None => return Ok(None),
                 }
+            } else {
+                let seqused: Vec<i32> = total_seq_lens
+                    .iter()
+                    .map(|&len| i32::try_from(len).context("paged decode seqlen exceeds i32"))
+                    .collect::<Result<_>>()?;
+                let seqused = Tensor::from_slice(seqused.as_slice(), batch, device)?.contiguous()?;
+                kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
+                    &q_fa,
+                    k_pool,
+                    v_pool,
+                    bt_tensor,
+                    &seqused,
+                    None,
+                    max_total_seq_len,
+                    block_size,
+                    softmax_scale,
+                    true,
+                )?
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
+            if !total_seq_lens.iter().all(|&len| len == max_total_seq_len) {
+                return Ok(None);
+            }
             match backend.flash_attn_paged_decode(
                 &q_fa,
                 k_pool,
                 v_pool,
                 bt_tensor,
-                total_seq_len,
+                max_total_seq_len,
                 block_size,
                 softmax_scale,
                 true,
@@ -5404,6 +5486,198 @@ let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     finish_full_attn_stage_profile(q.device(), profile_context, "o_proj", q_len, stage_profile)?;
     let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(Some(out))
+}
+
+/// Batched full-attention decode for arbitrary decode rows backed by paged KV.
+///
+/// Projects Q/K/V for `[batch, 1, hidden]`, writes one K/V token per row, builds
+/// one `[batch, max_blocks_per_seq]` block table, and dispatches the paged decode
+/// kernel once for the whole batch. Sequence lengths may differ across rows; the
+/// CUDA path uses the dynamic-seqlen wrapper in that case.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_paged_decode_batch(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &Tensor,
+    start_positions: &[usize],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    full_attn_layer_idx: usize,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    profile_context: Option<(usize, usize)>,
+) -> Result<Tensor> {
+    let (batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
+    anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
+    anyhow::ensure!(
+        seq_len == 1,
+        "batched paged attention requires one decode token per row"
+    );
+    anyhow::ensure!(
+        block_tables.len() == batch && start_positions.len() == batch,
+        "batched paged attention metadata length mismatch"
+    );
+    anyhow::ensure!(
+        positions.elem_count() == batch,
+        "batched paged attention positions length must match batch"
+    );
+    anyhow::ensure!(
+        full_attn_layer_idx < paged_cache.num_layers(),
+        "batched paged attention layer index out of range"
+    );
+
+    let use_metal_decode_gemv = batch == 1
+        && start_positions[0] > 0
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+
+    let (q_raw, k, v) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
+        let out = full_attn_qkv_proj_decode_if(
+            use_metal_decode_gemv,
+            x,
+            attn_weights,
+            lora_layer,
+            lora_scale,
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+
+    let (q, gate) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = if attn_output_gate {
+            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q = q_raw.narrow(3, 0, head_dim)?;
+            let gate = q_raw
+                .narrow(3, head_dim, head_dim)?
+                .contiguous()?
+                .reshape(((), seq_len, num_heads * head_dim))?;
+            (q.contiguous()?, Some(gate))
+        } else {
+            (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+    let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+        let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        (q, k)
+    };
+    let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = rotary_embedding_batched_decode_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "rope_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let q = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let q = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_transpose_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        q
+    };
+
+    {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        if !paged_cache.write_token_major_native_batch(
+            full_attn_layer_idx,
+            block_tables,
+            start_positions,
+            &k,
+            &v,
+        )? {
+            anyhow::bail!("batched paged attention KV write declined");
+        }
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_write_batch",
+            seq_len,
+            stage_profile,
+        )?;
+    }
+
+    let total_seq_lens: Vec<usize> = start_positions.iter().map(|&pos| pos + 1).collect();
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = try_flash_attn_paged_decode(
+            backend,
+            &q,
+            paged_cache,
+            block_tables,
+            full_attn_layer_idx,
+            &total_seq_lens,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            gate.as_ref(),
+            use_metal_decode_gemv,
+            attn_weights,
+            lora_layer,
+            lora_scale,
+            #[cfg(feature = "cuda")]
+            None,
+            profile_context,
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "decode_attn_paged_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out.context("backend declined batched paged attention")?
+    };
+
+    Ok(attn_output)
 }
 
 /// Batched full-attention decode for rows whose live paged-KV windows are
@@ -6157,9 +6431,9 @@ fn gqa_attention_paged_with_rope_tables(
                 backend,
                 &q,
                 paged_cache,
-                block_table,
+                &[block_table],
                 full_attn_layer_idx,
-                total_seq_len,
+                &[total_seq_len],
                 num_heads,
                 num_kv_heads,
                 head_dim,
@@ -7862,45 +8136,50 @@ pub fn model_forward_paged_batched_decode_hidden(
                 };
                 linear_attn_idx += 1;
             }
-            GpuAttentionWeights::Full(_) => {
-                let mut rows = Vec::with_capacity(batch_size);
-                for row_idx in 0..batch_size {
-                    let row_hidden = hidden.narrow(0, row_idx, 1)?;
-                    let pos = Tensor::new(&[sequence_lengths[row_idx] as f32], device)?;
-                    let rope_tables = rotary_tables_from_tensor(&pos, &weights.rotary_inv_freq)?;
-                    rows.push(
-                        transformer_block_paged_with_rope_tables(
-                            backend,
-                            &row_hidden,
-                            layer,
-                            config,
-                            &pos,
-                            sequence_lengths[row_idx],
-                            config.num_attention_heads,
-                            config.num_kv_heads,
-                            config.head_dim,
-                            config.rotary_dim(),
-                            &weights.rotary_inv_freq,
-                            Some((&rope_tables.0, &rope_tables.1)),
-                            config.rms_norm_eps,
-                            paged_cache,
-                            &block_tables[row_idx],
-                            full_attn_idx,
-                            layer_lora,
-                            #[cfg(feature = "cuda")]
-                            None,
-                            None,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "batched decode row {row_idx} transformer block {layer_idx} (full attention, paged)"
-                            )
-                        })?,
-                    );
-                }
-                let row_refs: Vec<&Tensor> = rows.iter().collect();
-                hidden = Tensor::cat(&row_refs, 0)
-                    .with_context(|| format!("cat full-attention rows after layer {layer_idx}"))?;
+            GpuAttentionWeights::Full(attn_weights) => {
+                let positions: Vec<f32> = sequence_lengths.iter().map(|&pos| pos as f32).collect();
+                let positions = Tensor::new(positions.as_slice(), device)?;
+                let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+                let start_positions: Vec<usize> = sequence_lengths.to_vec();
+
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_attn_full");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
+                let attn_out = gqa_attention_paged_decode_batch(
+                    backend,
+                    &normed,
+                    attn_weights,
+                    &positions,
+                    &start_positions,
+                    config.num_attention_heads,
+                    config.num_kv_heads,
+                    config.head_dim,
+                    config.rotary_dim(),
+                    &weights.rotary_inv_freq,
+                    config.rms_norm_eps,
+                    paged_cache,
+                    &block_table_refs,
+                    full_attn_idx,
+                    config.attn_output_gate,
+                    layer_lora,
+                    None,
+                )
+                .with_context(|| format!("batched transformer block {layer_idx} full attention"))?;
+
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/residual/attn_full");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/norm/pre_mlp_full");
+                    rms_norm(&hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
+                };
+                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp_full");
+                    (hidden + ffn_out)?
+                };
                 full_attn_idx += 1;
             }
         }
