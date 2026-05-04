@@ -3,6 +3,7 @@
 //! Uses atomic counters and gauges — no external dependencies.
 //! The `/metrics` endpoint renders all metrics in Prometheus text exposition format.
 
+use kiln_model::DecodeBatcherStats;
 use kiln_scheduler::PrefixCacheStats;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,8 +23,21 @@ const REQUEST_LATENCY_BUCKETS_SECONDS: [f64; 16] = [
 ];
 
 const REQUEST_LATENCY_BUCKETS_US: [u64; REQUEST_LATENCY_BUCKETS_SECONDS.len()] = [
-    100_000, 250_000, 500_000, 1_000_000, 2_500_000, 5_000_000, 10_000_000, 30_000_000,
-    60_000_000, 120_000_000, 180_000_000, 240_000_000, 300_000_000, 420_000_000, 600_000_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    5_000_000,
+    10_000_000,
+    30_000_000,
+    60_000_000,
+    120_000_000,
+    180_000_000,
+    240_000_000,
+    300_000_000,
+    420_000_000,
+    600_000_000,
     900_000_000,
 ];
 
@@ -114,15 +128,21 @@ impl Metrics {
     pub fn observe_duration(&self, secs: f64) {
         self.request_duration_count.fetch_add(1, Ordering::Relaxed);
         let us = (secs * 1_000_000.0) as u64;
-        self.request_duration_sum_us.fetch_add(us, Ordering::Relaxed);
-        observe_bucket(&self.request_duration_buckets, &REQUEST_LATENCY_BUCKETS_US, us);
+        self.request_duration_sum_us
+            .fetch_add(us, Ordering::Relaxed);
+        observe_bucket(
+            &self.request_duration_buckets,
+            &REQUEST_LATENCY_BUCKETS_US,
+            us,
+        );
     }
 
     /// Record model prefill duration in seconds.
     pub fn observe_prefill_duration(&self, secs: f64) {
         self.prefill_duration_count.fetch_add(1, Ordering::Relaxed);
         let us = (secs * 1_000_000.0) as u64;
-        self.prefill_duration_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.prefill_duration_sum_us
+            .fetch_add(us, Ordering::Relaxed);
         observe_bucket(&self.prefill_duration_buckets, &LATENCY_BUCKETS_US, us);
     }
 
@@ -185,10 +205,34 @@ impl Metrics {
         // --- Inference ---
         out.push_str("# HELP kiln_requests_total Total inference requests.\n");
         out.push_str("# TYPE kiln_requests_total counter\n");
-        prom_counter(&mut out, "kiln_requests_total", "status", "ok", self.requests_ok.load(Ordering::Relaxed));
-        prom_counter(&mut out, "kiln_requests_total", "status", "error", self.requests_error.load(Ordering::Relaxed));
-        prom_counter(&mut out, "kiln_requests_total", "status", "timeout", self.requests_timeout.load(Ordering::Relaxed));
-        prom_counter(&mut out, "kiln_requests_total", "status", "rejected", self.requests_rejected.load(Ordering::Relaxed));
+        prom_counter(
+            &mut out,
+            "kiln_requests_total",
+            "status",
+            "ok",
+            self.requests_ok.load(Ordering::Relaxed),
+        );
+        prom_counter(
+            &mut out,
+            "kiln_requests_total",
+            "status",
+            "error",
+            self.requests_error.load(Ordering::Relaxed),
+        );
+        prom_counter(
+            &mut out,
+            "kiln_requests_total",
+            "status",
+            "timeout",
+            self.requests_timeout.load(Ordering::Relaxed),
+        );
+        prom_counter(
+            &mut out,
+            "kiln_requests_total",
+            "status",
+            "rejected",
+            self.requests_rejected.load(Ordering::Relaxed),
+        );
 
         out.push_str("# HELP kiln_request_duration_seconds Request latency.\n");
         out.push_str("# TYPE kiln_request_duration_seconds histogram\n");
@@ -200,10 +244,21 @@ impl Metrics {
             &REQUEST_LATENCY_BUCKETS_SECONDS,
             &self.request_duration_buckets,
         );
-        push_line(&mut out, &format!("kiln_request_duration_seconds_count {count}"));
-        push_line(&mut out, &format!("kiln_request_duration_seconds_sum {:.6}", sum_us as f64 / 1_000_000.0));
+        push_line(
+            &mut out,
+            &format!("kiln_request_duration_seconds_count {count}"),
+        );
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_request_duration_seconds_sum {:.6}",
+                sum_us as f64 / 1_000_000.0
+            ),
+        );
 
-        out.push_str("# HELP kiln_request_prefill_duration_seconds Model prefill latency before decode.\n");
+        out.push_str(
+            "# HELP kiln_request_prefill_duration_seconds Model prefill latency before decode.\n",
+        );
         out.push_str("# TYPE kiln_request_prefill_duration_seconds histogram\n");
         let prefill_count = self.prefill_duration_count.load(Ordering::Relaxed);
         let prefill_sum_us = self.prefill_duration_sum_us.load(Ordering::Relaxed);
@@ -225,7 +280,9 @@ impl Metrics {
             ),
         );
 
-        out.push_str("# HELP kiln_request_decode_duration_seconds Model decode latency after prefill.\n");
+        out.push_str(
+            "# HELP kiln_request_decode_duration_seconds Model decode latency after prefill.\n",
+        );
         out.push_str("# TYPE kiln_request_decode_duration_seconds histogram\n");
         let decode_count = self.decode_duration_count.load(Ordering::Relaxed);
         let decode_sum_us = self.decode_duration_sum_us.load(Ordering::Relaxed);
@@ -249,13 +306,87 @@ impl Metrics {
 
         out.push_str("# HELP kiln_tokens_generated_total Total tokens generated.\n");
         out.push_str("# TYPE kiln_tokens_generated_total counter\n");
-        push_line(&mut out, &format!("kiln_tokens_generated_total {}", self.tokens_generated.load(Ordering::Relaxed)));
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_tokens_generated_total {}",
+                self.tokens_generated.load(Ordering::Relaxed)
+            ),
+        );
+
+        out.push_str(
+            "# HELP kiln_rendered_prompt_cache_lookups_total Rendered prompt cache lookups.\n",
+        );
+        out.push_str("# TYPE kiln_rendered_prompt_cache_lookups_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_rendered_prompt_cache_lookups_total",
+            "result",
+            "hit",
+            gauges.rendered_prompt_cache_hits,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_rendered_prompt_cache_lookups_total",
+            "result",
+            "miss",
+            gauges.rendered_prompt_cache_misses,
+        );
+
+        out.push_str("# HELP kiln_rendered_prompt_cache_entries Rendered prompt cache entries.\n");
+        out.push_str("# TYPE kiln_rendered_prompt_cache_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_rendered_prompt_cache_entries {}",
+                gauges.rendered_prompt_cache_entries
+            ),
+        );
+
+        out.push_str(
+            "# HELP kiln_prompt_token_cache_lookups_total Rendered prompt token cache lookups.\n",
+        );
+        out.push_str("# TYPE kiln_prompt_token_cache_lookups_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_prompt_token_cache_lookups_total",
+            "result",
+            "hit",
+            gauges.prompt_token_cache_hits,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_prompt_token_cache_lookups_total",
+            "result",
+            "miss",
+            gauges.prompt_token_cache_misses,
+        );
+
+        out.push_str(
+            "# HELP kiln_prompt_token_cache_entries Rendered prompt token cache entries.\n",
+        );
+        out.push_str("# TYPE kiln_prompt_token_cache_entries gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_prompt_token_cache_entries {}",
+                gauges.prompt_token_cache_entries
+            ),
+        );
 
         out.push_str("# HELP kiln_active_requests Currently in-flight requests.\n");
         out.push_str("# TYPE kiln_active_requests gauge\n");
-        push_line(&mut out, &format!("kiln_active_requests {}", self.active_requests.load(Ordering::Relaxed)));
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_active_requests {}",
+                self.active_requests.load(Ordering::Relaxed)
+            ),
+        );
 
-        out.push_str("# HELP kiln_active_requests_peak Peak in-flight requests since process start.\n");
+        out.push_str(
+            "# HELP kiln_active_requests_peak Peak in-flight requests since process start.\n",
+        );
         out.push_str("# TYPE kiln_active_requests_peak gauge\n");
         push_line(
             &mut out,
@@ -271,55 +402,169 @@ impl Metrics {
             &mut out,
             &format!(
                 "kiln_request_prefill_tokens_completed {}",
-                self.request_prefill_tokens_completed.load(Ordering::Relaxed)
+                self.request_prefill_tokens_completed
+                    .load(Ordering::Relaxed)
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_enabled Whether the live greedy decode batcher is enabled.\n");
+        out.push_str("# TYPE kiln_decode_batcher_enabled gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_enabled {}",
+                if gauges.decode_batcher_enabled { 1 } else { 0 }
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_jobs_total Live greedy decode batcher jobs.\n");
+        out.push_str("# TYPE kiln_decode_batcher_jobs_total counter\n");
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "submitted",
+            gauges.decode_batcher.submitted_jobs as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "runner_busy",
+            gauges.decode_batcher.runner_busy_jobs as u64,
+        );
+        prom_counter(
+            &mut out,
+            "kiln_decode_batcher_jobs_total",
+            "result",
+            "failed",
+            gauges.decode_batcher.failed_jobs as u64,
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_batches_total Live greedy decode batches executed by the rendezvous worker.\n");
+        out.push_str("# TYPE kiln_decode_batcher_batches_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_batches_total {}",
+                gauges.decode_batcher.executed_batches
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_rows_total Live greedy decode rows executed by the rendezvous worker.\n");
+        out.push_str("# TYPE kiln_decode_batcher_rows_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_rows_total {}",
+                gauges.decode_batcher.executed_rows
+            ),
+        );
+
+        out.push_str("# HELP kiln_decode_batcher_max_observed_batch Largest live greedy decode batch observed since process start.\n");
+        out.push_str("# TYPE kiln_decode_batcher_max_observed_batch gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_decode_batcher_max_observed_batch {}",
+                gauges.decode_batcher.max_observed_batch
             ),
         );
 
         // --- Scheduler ---
         out.push_str("# HELP kiln_scheduler_waiting Requests waiting to be scheduled.\n");
         out.push_str("# TYPE kiln_scheduler_waiting gauge\n");
-        push_line(&mut out, &format!("kiln_scheduler_waiting {}", gauges.scheduler_waiting));
+        push_line(
+            &mut out,
+            &format!("kiln_scheduler_waiting {}", gauges.scheduler_waiting),
+        );
 
         out.push_str("# HELP kiln_scheduler_running Requests currently generating.\n");
         out.push_str("# TYPE kiln_scheduler_running gauge\n");
-        push_line(&mut out, &format!("kiln_scheduler_running {}", gauges.scheduler_running));
+        push_line(
+            &mut out,
+            &format!("kiln_scheduler_running {}", gauges.scheduler_running),
+        );
 
         out.push_str("# HELP kiln_blocks_used KV cache blocks in use.\n");
         out.push_str("# TYPE kiln_blocks_used gauge\n");
-        push_line(&mut out, &format!("kiln_blocks_used {}", gauges.blocks_used));
+        push_line(
+            &mut out,
+            &format!("kiln_blocks_used {}", gauges.blocks_used),
+        );
 
         out.push_str("# HELP kiln_blocks_total Total KV cache blocks.\n");
         out.push_str("# TYPE kiln_blocks_total gauge\n");
-        push_line(&mut out, &format!("kiln_blocks_total {}", gauges.blocks_total));
+        push_line(
+            &mut out,
+            &format!("kiln_blocks_total {}", gauges.blocks_total),
+        );
 
         // --- GPU Memory ---
         out.push_str("# HELP kiln_vram_total_bytes Total GPU VRAM.\n");
         out.push_str("# TYPE kiln_vram_total_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_total_bytes {}", gauges.vram_total));
+        push_line(
+            &mut out,
+            &format!("kiln_vram_total_bytes {}", gauges.vram_total),
+        );
 
-        out.push_str("# HELP kiln_vram_model_bytes Model/device residency used for memory budgeting.\n");
+        out.push_str(
+            "# HELP kiln_vram_model_bytes Model/device residency used for memory budgeting.\n",
+        );
         out.push_str("# TYPE kiln_vram_model_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_model_bytes {}", gauges.vram_model));
+        push_line(
+            &mut out,
+            &format!("kiln_vram_model_bytes {}", gauges.vram_model),
+        );
 
-        out.push_str("# HELP kiln_vram_model_estimated_bytes Static model parameter memory estimate.\n");
+        out.push_str(
+            "# HELP kiln_vram_model_estimated_bytes Static model parameter memory estimate.\n",
+        );
         out.push_str("# TYPE kiln_vram_model_estimated_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_model_estimated_bytes {}", gauges.vram_model_estimated));
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_vram_model_estimated_bytes {}",
+                gauges.vram_model_estimated
+            ),
+        );
 
         out.push_str("# HELP kiln_vram_post_load_used_bytes CUDA memory.used snapshot after model load before KV allocation.\n");
         out.push_str("# TYPE kiln_vram_post_load_used_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_post_load_used_bytes {}", gauges.vram_post_load_used));
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_vram_post_load_used_bytes {}",
+                gauges.vram_post_load_used
+            ),
+        );
 
         out.push_str("# HELP kiln_vram_prefill_peak_used_bytes Highest CUDA memory.used observed immediately after prefill/generation boundaries.\n");
         out.push_str("# TYPE kiln_vram_prefill_peak_used_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_prefill_peak_used_bytes {}", gauges.vram_prefill_peak_used));
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_vram_prefill_peak_used_bytes {}",
+                gauges.vram_prefill_peak_used
+            ),
+        );
 
         out.push_str("# HELP kiln_vram_kv_cache_bytes KV cache memory.\n");
         out.push_str("# TYPE kiln_vram_kv_cache_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_kv_cache_bytes {}", gauges.vram_kv_cache));
+        push_line(
+            &mut out,
+            &format!("kiln_vram_kv_cache_bytes {}", gauges.vram_kv_cache),
+        );
 
         out.push_str("# HELP kiln_vram_training_budget_bytes Training memory budget.\n");
         out.push_str("# TYPE kiln_vram_training_budget_bytes gauge\n");
-        push_line(&mut out, &format!("kiln_vram_training_budget_bytes {}", gauges.vram_training_budget));
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_vram_training_budget_bytes {}",
+                gauges.vram_training_budget
+            ),
+        );
 
         // --- Prefix cache ---
         out.push_str("# HELP kiln_prefix_cache_lookups_total Total prefix cache lookups.\n");
@@ -422,22 +667,76 @@ impl Metrics {
         // --- Training ---
         out.push_str("# HELP kiln_training_jobs_total Total training jobs.\n");
         out.push_str("# TYPE kiln_training_jobs_total counter\n");
-        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "sft", "status", "completed", self.training_sft_completed.load(Ordering::Relaxed));
-        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "sft", "status", "failed", self.training_sft_failed.load(Ordering::Relaxed));
-        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "sft", "status", "cancelled", self.training_sft_cancelled.load(Ordering::Relaxed));
-        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "grpo", "status", "completed", self.training_grpo_completed.load(Ordering::Relaxed));
-        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "grpo", "status", "failed", self.training_grpo_failed.load(Ordering::Relaxed));
-        prom_counter2(&mut out, "kiln_training_jobs_total", "type", "grpo", "status", "cancelled", self.training_grpo_cancelled.load(Ordering::Relaxed));
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "sft",
+            "status",
+            "completed",
+            self.training_sft_completed.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "sft",
+            "status",
+            "failed",
+            self.training_sft_failed.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "sft",
+            "status",
+            "cancelled",
+            self.training_sft_cancelled.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "grpo",
+            "status",
+            "completed",
+            self.training_grpo_completed.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "grpo",
+            "status",
+            "failed",
+            self.training_grpo_failed.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "grpo",
+            "status",
+            "cancelled",
+            self.training_grpo_cancelled.load(Ordering::Relaxed),
+        );
 
         out.push_str("# HELP kiln_training_active Currently running training job.\n");
         out.push_str("# TYPE kiln_training_active gauge\n");
-        push_line(&mut out, &format!("kiln_training_active {}", gauges.training_active));
+        push_line(
+            &mut out,
+            &format!("kiln_training_active {}", gauges.training_active),
+        );
 
         // --- Adapter ---
         out.push_str("# HELP kiln_active_adapter Currently loaded adapter.\n");
         out.push_str("# TYPE kiln_active_adapter gauge\n");
         if let Some(ref name) = gauges.active_adapter {
-            push_line(&mut out, &format!("kiln_active_adapter{{name=\"{name}\"}} 1"));
+            push_line(
+                &mut out,
+                &format!("kiln_active_adapter{{name=\"{name}\"}} 1"),
+            );
         } else {
             push_line(&mut out, "kiln_active_adapter{name=\"base\"} 1");
         }
@@ -460,6 +759,14 @@ pub struct SnapshotGauges {
     pub vram_kv_cache: u64,
     pub vram_training_budget: u64,
     pub prefix_cache: PrefixCacheStats,
+    pub rendered_prompt_cache_hits: u64,
+    pub rendered_prompt_cache_misses: u64,
+    pub rendered_prompt_cache_entries: usize,
+    pub prompt_token_cache_hits: u64,
+    pub prompt_token_cache_misses: u64,
+    pub prompt_token_cache_entries: usize,
+    pub decode_batcher_enabled: bool,
+    pub decode_batcher: DecodeBatcherStats,
     pub training_active: u8,
     pub active_adapter: Option<String>,
 }
@@ -516,7 +823,10 @@ fn render_histogram_buckets(
     let mut cumulative = 0;
     for (idx, bound) in bounds_seconds.iter().enumerate() {
         cumulative += buckets[idx].load(Ordering::Relaxed);
-        push_line(out, &format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}"));
+        push_line(
+            out,
+            &format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}"),
+        );
     }
     cumulative += buckets[bounds_seconds.len()].load(Ordering::Relaxed);
     push_line(out, &format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}"));
@@ -574,6 +884,21 @@ mod tests {
                 cached_state_bytes: 196,
                 max_state_bytes: 392,
             },
+            rendered_prompt_cache_hits: 6,
+            rendered_prompt_cache_misses: 3,
+            rendered_prompt_cache_entries: 5,
+            prompt_token_cache_hits: 5,
+            prompt_token_cache_misses: 2,
+            prompt_token_cache_entries: 4,
+            decode_batcher_enabled: true,
+            decode_batcher: DecodeBatcherStats {
+                submitted_jobs: 4,
+                executed_batches: 2,
+                executed_rows: 4,
+                max_observed_batch: 3,
+                runner_busy_jobs: 1,
+                failed_jobs: 0,
+            },
             training_active: 0,
             active_adapter: Some("my-adapter".to_string()),
         };
@@ -603,6 +928,12 @@ mod tests {
         assert!(output.contains("kiln_prefix_cache_max_entries 8"));
         assert!(output.contains("kiln_prefix_cache_state_bytes 196"));
         assert!(output.contains("kiln_prefix_cache_max_state_bytes 392"));
+        assert!(output.contains("kiln_rendered_prompt_cache_lookups_total{result=\"hit\"} 6"));
+        assert!(output.contains("kiln_rendered_prompt_cache_lookups_total{result=\"miss\"} 3"));
+        assert!(output.contains("kiln_rendered_prompt_cache_entries 5"));
+        assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"hit\"} 5"));
+        assert!(output.contains("kiln_prompt_token_cache_lookups_total{result=\"miss\"} 2"));
+        assert!(output.contains("kiln_prompt_token_cache_entries 4"));
         assert!(output.contains("kiln_active_adapter{name=\"my-adapter\"} 1"));
         assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="0.5"} 1"#));
         assert!(output.contains(r#"kiln_request_duration_seconds_bucket{le="+Inf"} 1"#));
@@ -632,6 +963,14 @@ mod tests {
             vram_kv_cache: 0,
             vram_training_budget: 0,
             prefix_cache: PrefixCacheStats::default(),
+            rendered_prompt_cache_hits: 0,
+            rendered_prompt_cache_misses: 0,
+            rendered_prompt_cache_entries: 0,
+            prompt_token_cache_hits: 0,
+            prompt_token_cache_misses: 0,
+            prompt_token_cache_entries: 0,
+            decode_batcher_enabled: false,
+            decode_batcher: DecodeBatcherStats::default(),
             training_active: 0,
             active_adapter: None,
         };

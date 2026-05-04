@@ -1,0 +1,15 @@
+{
+  "prompts": [
+    [
+      {
+        "role": "user",
+        "content": "Write one short sentence about low-latency inference."
+      }
+    ]
+  ],
+  "n": 4,
+  "temperature": 0.7,
+  "top_p": 0.95,
+  "max_tokens": 2,
+  "seed": 282
+}

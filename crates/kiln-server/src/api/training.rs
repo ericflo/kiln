@@ -5,9 +5,9 @@
 //! concurrent training jobs.
 
 use axum::{
+    Json, Router,
     extract::{DefaultBodyLimit, Path as AxumPath, State},
     routing::{delete, get, post},
-    Json, Router,
 };
 
 use kiln_train::{GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus};
@@ -337,7 +337,9 @@ async fn cancel_queued_job(
                 TrainingJobType::Sft => TrainingMetricType::Sft,
                 TrainingJobType::Grpo => TrainingMetricType::Grpo,
             };
-            state.metrics.inc_training(mt, TrainingMetricStatus::Cancelled);
+            state
+                .metrics
+                .inc_training(mt, TrainingMetricStatus::Cancelled);
         }
         Ok(Json(serde_json::json!({
             "job_id": job_id,

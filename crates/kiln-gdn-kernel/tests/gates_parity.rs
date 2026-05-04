@@ -39,11 +39,7 @@ fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
 fn softplus_f32(x: f32) -> f32 {
     // Match torch.nn.functional.softplus default threshold (20.0), same
     // as the kernel's `stable_softplus` and FLA's reference.
-    if x > 20.0 {
-        x
-    } else {
-        x.exp().ln_1p()
-    }
+    if x > 20.0 { x } else { x.exp().ln_1p() }
 }
 
 fn sigmoid_f32(x: f32) -> f32 {
@@ -143,8 +139,7 @@ fn run_case(device: &Device, b: usize, t: usize, nv: usize, seed: u64, label: &s
         .to_vec1::<f32>()
         .unwrap();
 
-    let (beta_ref, g_ref) =
-        reference_host(&a_host, &b_host, &a_log_host, &dt_bias_host, rows, nv);
+    let (beta_ref, g_ref) = reference_host(&a_host, &b_host, &a_log_host, &dt_bias_host, rows, nv);
 
     let beta_err = max_abs_diff(&beta_host, &beta_ref);
     let g_err = max_abs_diff(&g_host, &g_ref);

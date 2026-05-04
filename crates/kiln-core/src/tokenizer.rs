@@ -226,12 +226,15 @@ impl KilnTokenizer {
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         // `raise_exception("...")` is a Jinja2 idiom HF templates rely on for
         // input validation. Without it Qwen3.5's template aborts immediately.
-        env.add_function("raise_exception", |msg: String| -> Result<(), minijinja::Error> {
-            Err(minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                msg,
-            ))
-        });
+        env.add_function(
+            "raise_exception",
+            |msg: String| -> Result<(), minijinja::Error> {
+                Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    msg,
+                ))
+            },
+        );
         env.add_template("chat", template)
             .map_err(|e| TokenizerError::ChatTemplate(e.to_string()))?;
 
@@ -246,9 +249,7 @@ impl KilnTokenizer {
             .filter(|t| !t.is_empty())
             .map(|t| serde_json::Value::Array(t.to_vec()))
             .unwrap_or(serde_json::Value::Null);
-        let tool_choice_value = tool_choice
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let tool_choice_value = tool_choice.cloned().unwrap_or(serde_json::Value::Null);
 
         // Deserialize tool_call arguments from JSON-string to structured
         // serde_json::Value before handing the messages to the Jinja
@@ -273,21 +274,20 @@ impl KilnTokenizer {
             .iter()
             .map(|m| {
                 let mut v = serde_json::to_value(m).unwrap_or(serde_json::Value::Null);
-                let has_tool_calls = if let Some(tcs) =
-                    v.get_mut("tool_calls").and_then(|t| t.as_array_mut())
-                {
-                    if deserialize_arguments {
-                        for tc in tcs.iter_mut() {
-                            deserialize_arguments_in_place(tc);
-                            if let Some(function) = tc.get_mut("function") {
-                                deserialize_arguments_in_place(function);
+                let has_tool_calls =
+                    if let Some(tcs) = v.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+                        if deserialize_arguments {
+                            for tc in tcs.iter_mut() {
+                                deserialize_arguments_in_place(tc);
+                                if let Some(function) = tc.get_mut("function") {
+                                    deserialize_arguments_in_place(function);
+                                }
                             }
                         }
-                    }
-                    true
-                } else {
-                    false
-                };
+                        true
+                    } else {
+                        false
+                    };
                 // OpenAI Chat Completions spec sends `content: null` for
                 // assistant messages carrying `tool_calls`. ChatMessage uses
                 // `content: String` (with `""` as the empty placeholder) for
@@ -301,9 +301,7 @@ impl KilnTokenizer {
                 // `<｜Assistant｜><｜end▁of▁sentence｜>` stub. Templates that
                 // test `if message.content` are unaffected since both `""`
                 // and `null` are falsy in Jinja.
-                if has_tool_calls
-                    && v.get("content").and_then(|c| c.as_str()) == Some("")
-                {
+                if has_tool_calls && v.get("content").and_then(|c| c.as_str()) == Some("") {
                     v["content"] = serde_json::Value::Null;
                 }
                 v
@@ -733,7 +731,9 @@ ARG:{{ k }}={{ v }};\
             })]),
             ..Default::default()
         }];
-        let prompt = tok.apply_chat_template(&messages_flat).expect("flat-envelope render failed");
+        let prompt = tok
+            .apply_chat_template(&messages_flat)
+            .expect("flat-envelope render failed");
         assert!(
             prompt.contains("ARG:path=/etc/hosts;"),
             "flat-envelope argument missing: {prompt:?}"
@@ -748,8 +748,7 @@ ARG:{{ k }}={{ v }};\
     /// `unknown filter: tojson` or `cannot convert value into pairs`.
     #[test]
     fn test_qwen35_4b_chat_template_renders_tools_and_tool_calls() {
-        let template =
-            include_str!("../test_fixtures/qwen35_4b_chat_template.jinja");
+        let template = include_str!("../test_fixtures/qwen35_4b_chat_template.jinja");
         let tok = tokenizer_with_template(template);
 
         let tools = vec![
@@ -826,7 +825,10 @@ ARG:{{ k }}={{ v }};\
             .expect("Qwen3.5-4B chat template rendered without error");
 
         // Tools block must appear (proves `tools | tojson` worked).
-        assert!(prompt.contains("<tools>"), "tools block missing: prompt was {prompt:?}");
+        assert!(
+            prompt.contains("<tools>"),
+            "tools block missing: prompt was {prompt:?}"
+        );
         assert!(prompt.contains("\"Bash\""), "Bash tool not serialized");
         assert!(prompt.contains("\"Read\""), "Read tool not serialized");
 
@@ -861,9 +863,7 @@ ARG:{{ k }}={{ v }};\
     /// Closes kiln#657.
     #[test]
     fn test_llama31_8b_instruct_chat_template_renders_tools_and_tool_calls() {
-        let template = include_str!(
-            "../test_fixtures/llama31_8b_instruct_chat_template.jinja"
-        );
+        let template = include_str!("../test_fixtures/llama31_8b_instruct_chat_template.jinja");
         let tok = tokenizer_with_template(template);
 
         let tools = vec![serde_json::json!({
@@ -984,9 +984,7 @@ ARG:{{ k }}={{ v }};\
     /// Closes kiln#657.
     #[test]
     fn test_qwen25_7b_instruct_chat_template_renders_tools_and_tool_calls() {
-        let template = include_str!(
-            "../test_fixtures/qwen25_7b_instruct_chat_template.jinja"
-        );
+        let template = include_str!("../test_fixtures/qwen25_7b_instruct_chat_template.jinja");
         let tok = tokenizer_with_template(template);
 
         let tools = vec![
@@ -1126,9 +1124,7 @@ ARG:{{ k }}={{ v }};\
     /// system turn). Closes the Mistral coverage gap deferred from #658.
     #[test]
     fn test_mistral_7b_instruct_v03_chat_template_renders_tools_and_tool_calls() {
-        let template = include_str!(
-            "../test_fixtures/mistral_7b_instruct_v03_chat_template.jinja"
-        );
+        let template = include_str!("../test_fixtures/mistral_7b_instruct_v03_chat_template.jinja");
         let tok = tokenizer_with_template(template);
 
         let tools = vec![
@@ -1332,9 +1328,7 @@ ARG:{{ k }}={{ v }};\
     /// coverage gap on top of #658 / #660.
     #[test]
     fn test_deepseek_v3_chat_template_renders_tools_and_tool_calls() {
-        let template = include_str!(
-            "../test_fixtures/deepseek_v3_chat_template.jinja"
-        );
+        let template = include_str!("../test_fixtures/deepseek_v3_chat_template.jinja");
         let tok = tokenizer_with_template(template);
 
         let tools = vec![
@@ -1385,8 +1379,7 @@ ARG:{{ k }}={{ v }};\
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: "Show me what's in /etc and read /etc/hosts."
-                    .to_string(),
+                content: "Show me what's in /etc and read /etc/hosts.".to_string(),
                 ..Default::default()
             },
             ChatMessage {
@@ -1433,8 +1426,7 @@ ARG:{{ k }}={{ v }};\
             },
             ChatMessage {
                 role: "assistant".to_string(),
-                content: "Found two files; localhost loopback in hosts."
-                    .to_string(),
+                content: "Found two files; localhost loopback in hosts.".to_string(),
                 ..Default::default()
             },
             ChatMessage {
@@ -1606,9 +1598,7 @@ ARG:{{ k }}={{ v }};\
     /// tool-call coverage gap on top of #658 / #660 / #661.
     #[test]
     fn test_hermes3_llama31_chat_template_renders_tools_and_tool_calls() {
-        let template = include_str!(
-            "../test_fixtures/hermes3_llama31_chat_template.jinja"
-        );
+        let template = include_str!("../test_fixtures/hermes3_llama31_chat_template.jinja");
         let tok = tokenizer_with_template(template);
 
         let tools = vec![
@@ -1659,8 +1649,7 @@ ARG:{{ k }}={{ v }};\
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: "Show me what's in /etc and read /etc/hosts."
-                    .to_string(),
+                content: "Show me what's in /etc and read /etc/hosts.".to_string(),
                 ..Default::default()
             },
             ChatMessage {
@@ -1709,8 +1698,7 @@ ARG:{{ k }}={{ v }};\
             },
             ChatMessage {
                 role: "assistant".to_string(),
-                content: "Found two files; localhost loopback in hosts."
-                    .to_string(),
+                content: "Found two files; localhost loopback in hosts.".to_string(),
                 ..Default::default()
             },
             ChatMessage {
@@ -1765,7 +1753,9 @@ ARG:{{ k }}={{ v }};\
             "Hermes-3 user-supplied system turn missing or misframed: {prompt:?}"
         );
         assert!(
-            prompt.contains("<|im_start|>user\nShow me what's in /etc and read /etc/hosts.<|im_end|>"),
+            prompt.contains(
+                "<|im_start|>user\nShow me what's in /etc and read /etc/hosts.<|im_end|>"
+            ),
             "Hermes-3 first user turn missing or misframed: {prompt:?}"
         );
         assert!(
@@ -1840,7 +1830,9 @@ ARG:{{ k }}={{ v }};\
         // (`message.role == "assistant" and message.tool_calls is not
         // defined`) fires when the prior tool turn already closed.
         assert!(
-            prompt.contains("<|im_start|>assistant\nFound two files; localhost loopback in hosts.<|im_end|>"),
+            prompt.contains(
+                "<|im_start|>assistant\nFound two files; localhost loopback in hosts.<|im_end|>"
+            ),
             "Hermes-3 inter-turn assistant text content missing or misframed: {prompt:?}"
         );
 

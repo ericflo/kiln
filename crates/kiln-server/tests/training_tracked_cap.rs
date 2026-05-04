@@ -25,7 +25,9 @@ use kiln_scheduler::{Scheduler, SchedulerConfig};
 use kiln_server::api;
 use kiln_server::state::{AppState, TrainingJobInfo, TrainingJobType};
 use kiln_server::training_queue::gc_tracked_jobs;
-use kiln_train::{ChatMessage, GrpoRequest, ScoredCompletion, SftExample, SftRequest, TrainingState};
+use kiln_train::{
+    ChatMessage, GrpoRequest, ScoredCompletion, SftExample, SftRequest, TrainingState,
+};
 
 fn test_tokenizer() -> KilnTokenizer {
     let mut vocab: HashMap<String, u32> = HashMap::new();
@@ -275,11 +277,20 @@ fn gc_evicts_terminal_entries_past_ttl() {
 
     assert_eq!(state.training_jobs.read().unwrap().len(), 4);
     let removed = gc_tracked_jobs(&state);
-    assert_eq!(removed, 2, "should have evicted both stale terminal entries");
+    assert_eq!(
+        removed, 2,
+        "should have evicted both stale terminal entries"
+    );
     let after = state.training_jobs.read().unwrap();
     assert_eq!(after.len(), 2, "active entries must survive GC");
-    assert!(after.contains_key("live-queued"), "queued entry must survive GC");
-    assert!(after.contains_key("live-running"), "running entry must survive GC");
+    assert!(
+        after.contains_key("live-queued"),
+        "queued entry must survive GC"
+    );
+    assert!(
+        after.contains_key("live-running"),
+        "running entry must survive GC"
+    );
 }
 
 /// Terminal entries WITHIN the TTL window are not evicted, even when a GC

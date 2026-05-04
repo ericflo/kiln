@@ -1,5 +1,5 @@
 mod scheduler;
 
 pub use scheduler::{
-    PrefixCacheStats, Scheduler, SchedulerConfig, SchedulerOutput, ScheduledRequest,
+    PrefixCacheStats, ScheduledRequest, Scheduler, SchedulerConfig, SchedulerOutput,
 };

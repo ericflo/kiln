@@ -1,0 +1,71 @@
+// Single-token transposed linear projection with per-block argmax.
+//
+// Computes logits for 16 output columns per workgroup and writes one
+// (score, index) pair per block. A second reduction shader collapses these
+// block maxima to the final token id.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+    uint block_count;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_w[]; };
+layout(binding = 2) writeonly buffer BlockScoreBuf { float data_block_score[]; };
+layout(binding = 3) writeonly buffer BlockIndexBuf { uint data_block_index[]; };
+
+shared float partial[256];
+shared float scores[16];
+shared uint indices[16];
+
+void main() {
+    const uint block = gl_WorkGroupID.x;
+    const uint col_lane = gl_LocalInvocationID.x;
+    const uint red_lane = gl_LocalInvocationID.y;
+    const uint col = block * 16 + col_lane;
+    const uint partial_idx = col_lane * 16 + red_lane;
+
+    float sum = 0.0;
+    if (col < out_dim) {
+        for (uint h = red_lane; h < hidden; h += 16) {
+            sum += data_x[h] * data_w[h * out_dim + col];
+        }
+    }
+    partial[partial_idx] = sum;
+    barrier();
+
+    if (red_lane == 0) {
+        float score = 0.0;
+        for (uint lane = 0; lane < 16; lane++) {
+            score += partial[col_lane * 16 + lane];
+        }
+        if (col >= out_dim) {
+            score = -3.4028234663852886e38;
+        }
+        scores[col_lane] = score;
+        indices[col_lane] = col;
+    }
+    barrier();
+
+    if (gl_LocalInvocationIndex == 0) {
+        float best_score = scores[0];
+        uint best_index = indices[0];
+        for (uint i = 1; i < 16; i++) {
+            const float candidate_score = scores[i];
+            const uint candidate_index = indices[i];
+            if (candidate_score > best_score ||
+                (candidate_score == best_score && candidate_index < best_index)) {
+                best_score = candidate_score;
+                best_index = candidate_index;
+            }
+        }
+        data_block_score[block] = best_score;
+        data_block_index[block] = best_index;
+    }
+}

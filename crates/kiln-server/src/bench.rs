@@ -1,6 +1,7 @@
 //! Kiln benchmark suite — measures inference throughput, latency, VRAM, and training speed.
 //!
 //! Run with: `cargo run --release --features cuda --bin kiln-bench -- --model-path /path/to/weights`
+//! or `cargo run --release --features vulkan --bin kiln-bench -- --model-path /path/to/weights`.
 //!
 //! Requires a GPU with the Qwen3.5-4B model weights downloaded.
 
@@ -15,7 +16,7 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
-use kiln_core::vram::detect_vram;
+use kiln_core::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
@@ -41,7 +42,7 @@ const PAGED_BLOCK_SIZE: usize = 16;
 #[derive(Debug, Serialize)]
 struct BenchmarkResults {
     /// Which `BackendRuntime` ran the forward pass — one of
-    /// `cuda` / `metal` / `cpu`. Lets downstream comparison scripts split
+    /// `cuda` / `metal` / `vulkan` / `cpu`. Lets downstream comparison scripts split
     /// runs by hardware path without parsing GPU names.
     backend: String,
     gpu_info: GpuInfo,
@@ -100,6 +101,37 @@ struct LatencyResult {
     /// set explicitly.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_subset: Option<String>,
+}
+
+fn runtime_backend_for_bench(
+    device: &candle_core::Device,
+    weights: &GpuWeights,
+) -> Result<std::sync::Arc<dyn kiln_model::BackendRuntime>> {
+    let backend = runtime_backend::for_device(device);
+    backend
+        .prewarm_decode_weights(weights)
+        .context("backend decode weight prewarm failed")?;
+    Ok(backend)
+}
+
+struct BenchGdnRecurrentResidentStateScope<'a> {
+    backend: &'a dyn kiln_model::BackendRuntime,
+    active: bool,
+}
+
+impl<'a> BenchGdnRecurrentResidentStateScope<'a> {
+    fn new(backend: &'a dyn kiln_model::BackendRuntime) -> Self {
+        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        Self { backend, active }
+    }
+}
+
+impl Drop for BenchGdnRecurrentResidentStateScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.backend.exit_gdn_recurrent_resident_state_scope();
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +221,10 @@ struct BenchArgs {
     /// results and no training result. This keeps rapid decode-path iteration
     /// from paying unrelated benchmark costs.
     latency_only: bool,
+    /// Number of throwaway latency runs to execute before the measured run.
+    /// This keeps low-level kernel A/Bs from mixing first-use Metal/Candle
+    /// compilation latency into prefill and decode timing.
+    latency_warmup_runs: usize,
     /// RNG seed threaded through `SamplingParams` and `StdRng` sites so bench
     /// runs are fully reproducible. Phase B3 multi-prompt A/B relies on varying
     /// this across {0..=7} to get independent prompt/sampling trajectories.
@@ -218,6 +254,7 @@ fn parse_args() -> Result<BenchArgs> {
     let mut skip_training = false;
     let mut paged = false;
     let mut latency_only = false;
+    let mut latency_warmup_runs = 0usize;
     let mut seed: u64 = 42;
     let mut chat_template = false;
     let mut prompt_subset = PromptSubset::All;
@@ -250,6 +287,10 @@ fn parse_args() -> Result<BenchArgs> {
             }
             "--latency-only" => {
                 latency_only = true;
+            }
+            "--latency-warmup-runs" => {
+                i += 1;
+                latency_warmup_runs = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0);
             }
             "--seed" => {
                 i += 1;
@@ -292,6 +333,9 @@ fn parse_args() -> Result<BenchArgs> {
                     "  --latency-only            Stop after latency and skip training/throughput"
                 );
                 eprintln!(
+                    "  --latency-warmup-runs <n> Run n throwaway latency passes before measurement"
+                );
+                eprintln!(
                     "  --seed <u64>              RNG seed + prompt selector from 8-prompt pool (default: 42)"
                 );
                 eprintln!(
@@ -331,6 +375,7 @@ fn parse_args() -> Result<BenchArgs> {
         skip_training,
         paged,
         latency_only,
+        latency_warmup_runs,
         seed,
         chat_template,
         prompt_subset,
@@ -338,27 +383,32 @@ fn parse_args() -> Result<BenchArgs> {
     })
 }
 
-/// Get GPU name from nvidia-smi.
+/// Get the selected accelerator name for benchmark output.
 fn gpu_name() -> String {
-    std::process::Command::new("nvidia-smi")
+    if let Some(name) = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=name", "--format=csv,noheader"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().lines().next().unwrap_or("unknown").to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .filter(|s| !s.is_empty() && s != "unknown")
+    {
+        return name;
+    }
+
+    #[cfg(feature = "vulkan")]
+    if let Some(name) = runtime_backend::vulkan::vulkan_device_name() {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+
+    "unknown".to_string()
 }
 
-/// Get current VRAM usage in bytes via nvidia-smi.
+/// Get current VRAM usage in bytes.
 fn current_vram_used_bytes() -> u64 {
-    std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.trim().lines().next()?.trim().parse::<u64>().ok())
-        .map(|mib| mib * 1024 * 1024)
-        .unwrap_or(0)
+    detect_used_vram_bytes().unwrap_or(0)
 }
 
 /// 30 distinct prompt bases spanning three domains, indexed by `seed % 30`.
@@ -587,7 +637,7 @@ fn bench_latency(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let backend = runtime_backend::for_device(device);
+    let backend = runtime_backend_for_bench(device, weights)?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
 
@@ -740,7 +790,7 @@ fn bench_latency_paged(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let backend = runtime_backend::for_device(device);
+    let backend = runtime_backend_for_bench(device, weights)?;
 
     // Build a block table that maps logical block i -> physical block i (sequential).
     let mut block_table = BlockTable::new();
@@ -774,7 +824,9 @@ fn bench_latency_paged(
         )
         .context("paged prefill forward pass (streaming) failed")?;
         greedy_sample(&logits)?
-    } else if matches!(device, candle_core::Device::Metal(_)) {
+    } else if matches!(device, candle_core::Device::Metal(_))
+        || backend.supports_linear_decode_argmax()
+    {
         model_forward_paged_last_token_greedy(
             &*backend,
             &prompt_token_ids,
@@ -818,18 +870,22 @@ fn bench_latency_paged(
     let mut num_tokens = 1usize; // counting the first token from prefill
     let mut current_pos = actual_prompt_tokens;
     let log_tokens = std::env::var("KILN_BENCH_LOG_TOKENS").is_ok();
+    let log_itl = std::env::var("KILN_BENCH_LOG_ITL").is_ok();
     let mut decoded_tokens: Vec<u32> = Vec::new();
     if log_tokens {
         decoded_tokens.push(next_token);
     }
 
-    for _step in 0..max_output_tokens {
+    let _resident_state_scope = BenchGdnRecurrentResidentStateScope::new(backend.as_ref());
+    for step in 0..max_output_tokens {
         if eos_token_ids.contains(&next_token) {
             break;
         }
 
         let step_start = Instant::now();
-        next_token = if matches!(device, candle_core::Device::Metal(_)) {
+        next_token = if matches!(device, candle_core::Device::Metal(_))
+            || backend.supports_linear_decode_argmax()
+        {
             model_forward_paged_next_token_greedy(
                 &*backend,
                 next_token,
@@ -862,7 +918,16 @@ fn bench_latency_paged(
         current_pos += 1;
         let step_time = step_start.elapsed();
 
-        inter_token_ms.push(step_time.as_secs_f64() * 1000.0);
+        let step_ms = step_time.as_secs_f64() * 1000.0;
+        inter_token_ms.push(step_ms);
+        if log_itl {
+            eprintln!(
+                "    Paged decode step {}: {:.1}ms (pos {})",
+                step + 1,
+                step_ms,
+                current_pos - 1
+            );
+        }
         num_tokens += 1;
         if log_tokens {
             decoded_tokens.push(next_token);
@@ -1265,7 +1330,7 @@ fn bench_latency_skiplayer(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let backend = runtime_backend::for_device(device);
+    let backend = runtime_backend_for_bench(device, weights)?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
 
@@ -1474,7 +1539,7 @@ fn bench_latency_paged_skiplayer(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let backend = runtime_backend::for_device(device);
+    let backend = runtime_backend_for_bench(device, weights)?;
 
     let mut block_table = BlockTable::new();
     for i in 0..num_blocks as u32 {
@@ -1750,7 +1815,7 @@ fn bench_latency_paged_mtp(
         device,
     )?;
     let mut linear_state = LinearAttentionState::new(config, device)?;
-    let backend = runtime_backend::for_device(device);
+    let backend = runtime_backend_for_bench(device, weights)?;
 
     let mut base_block_table = BlockTable::new();
     let mut mtp_block_table = BlockTable::new();
@@ -2132,6 +2197,82 @@ fn print_summary(results: &BenchmarkResults) {
     eprintln!();
 }
 
+fn bench_selected_latency(
+    spec_method: SpecMethod,
+    args: &BenchArgs,
+    gpu_weights: &GpuWeights,
+    model_config: &ModelConfig,
+    tokenizer: &KilnTokenizer,
+) -> Result<LatencyResult> {
+    match spec_method {
+        SpecMethod::Mtp => {
+            eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
+            bench_latency_paged_mtp(
+                gpu_weights,
+                model_config,
+                tokenizer,
+                args.prompt_tokens,
+                args.max_output_tokens,
+                args.seed,
+                args.chat_template,
+                args.prompt_subset,
+                args.temperature,
+            )
+            .context("MTP latency benchmark failed")
+        }
+        SpecMethod::SkipLayer => {
+            if args.paged {
+                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, paged) ---");
+                bench_latency_paged_skiplayer(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                    args.seed,
+                    args.temperature,
+                )
+                .context("paged skip-layer latency benchmark failed")
+            } else {
+                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
+                bench_latency_skiplayer(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                    args.seed,
+                    args.temperature,
+                )
+                .context("skip-layer latency benchmark failed")
+            }
+        }
+        SpecMethod::Off => {
+            if args.paged {
+                eprintln!("--- Latency Benchmark (PAGED — production path) ---");
+                bench_latency_paged(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                )
+                .context("paged latency benchmark failed")
+            } else {
+                eprintln!("--- Latency Benchmark ---");
+                bench_latency(
+                    gpu_weights,
+                    model_config,
+                    tokenizer,
+                    args.prompt_tokens,
+                    args.max_output_tokens,
+                )
+                .context("latency benchmark failed")
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // Initialize logging for training progress
     tracing_subscriber::fmt()
@@ -2169,10 +2310,12 @@ fn main() -> Result<()> {
     .context("failed to load model weights")?;
 
     let device = kiln_server::device::select_device()?;
-    if matches!(device, candle_core::Device::Cpu) {
-        anyhow::bail!("No GPU available — benchmarks require CUDA or Metal");
-    }
     let backend_name = runtime_backend::for_device(&device).name();
+    if backend_name == "cpu" {
+        anyhow::bail!(
+            "No accelerated backend available — benchmarks require CUDA, Metal, or Vulkan"
+        );
+    }
 
     let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
         .context("failed to transfer weights to GPU")?;
@@ -2232,73 +2375,19 @@ fn main() -> Result<()> {
     //                                   (flat KV + skip-layer)
     //   * default / off               → bench_latency_paged (paged Off) when
     //                                   --paged, else bench_latency (flat Off).
-    let latency = match spec_method {
-        SpecMethod::Mtp => {
-            eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
-            bench_latency_paged_mtp(
-                &gpu_weights,
-                &model_config,
-                &tokenizer,
-                args.prompt_tokens,
-                args.max_output_tokens,
-                args.seed,
-                args.chat_template,
-                args.prompt_subset,
-                args.temperature,
-            )
-            .context("MTP latency benchmark failed")?
-        }
-        SpecMethod::SkipLayer => {
-            if args.paged {
-                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, paged) ---");
-                bench_latency_paged_skiplayer(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                    args.seed,
-                    args.temperature,
-                )
-                .context("paged skip-layer latency benchmark failed")?
-            } else {
-                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
-                bench_latency_skiplayer(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                    args.seed,
-                    args.temperature,
-                )
-                .context("skip-layer latency benchmark failed")?
-            }
-        }
-        SpecMethod::Off => {
-            if args.paged {
-                eprintln!("--- Latency Benchmark (PAGED — production path) ---");
-                bench_latency_paged(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                )
-                .context("paged latency benchmark failed")?
-            } else {
-                eprintln!("--- Latency Benchmark ---");
-                bench_latency(
-                    &gpu_weights,
-                    &model_config,
-                    &tokenizer,
-                    args.prompt_tokens,
-                    args.max_output_tokens,
-                )
-                .context("latency benchmark failed")?
-            }
-        }
-    };
+    for warmup_idx in 0..args.latency_warmup_runs {
+        eprintln!(
+            "--- Latency Warmup Run {}/{} (not measured) ---",
+            warmup_idx + 1,
+            args.latency_warmup_runs
+        );
+        let _ = bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
+            .with_context(|| format!("latency warmup run {} failed", warmup_idx + 1))?;
+    }
+
+    let latency =
+        bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
+            .context("latency benchmark failed")?;
 
     if args.latency_only {
         let results = BenchmarkResults {

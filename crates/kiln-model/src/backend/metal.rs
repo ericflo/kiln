@@ -36,6 +36,7 @@ const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const ENABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_ENABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
+const DISABLE_METAL_LM_HEAD_ARGMAX_ROWS: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
     "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
 const DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS: &str =
@@ -158,6 +159,12 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
             metal_lm_head_argmax_reduce_pipeline(metal_device)?;
         }
     }
+    if !metal_lm_head_argmax_rows_disabled() {
+        metal_lm_head_argmax_batch_pipeline(metal_device)?;
+        if !metal_lm_head_argmax_gpu_reduce_disabled() {
+            metal_lm_head_argmax_reduce_batch_pipeline(metal_device)?;
+        }
+    }
     if !metal_mlp_gate_up_fusion_disabled() {
         metal_mlp_gate_up_pipeline(metal_device)?;
     }
@@ -167,6 +174,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     if !metal_transposed_coop_gemv_disabled() {
         let default_tile = metal_transposed_coop_gemv_default_tile();
         metal_transposed_coop_gemv_pipeline(metal_device, default_tile)?;
+        metal_transposed_coop_gemv_batch_pipeline(metal_device)?;
         if default_tile != MetalTransposedCoopGemvTile::Tile4 {
             metal_transposed_coop_gemv_pipeline(metal_device, MetalTransposedCoopGemvTile::Tile4)?;
         }
@@ -178,9 +186,11 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
     if !metal_paged_attn_decode_contiguous_disabled() {
         metal_paged_attn_decode_contiguous_pipeline(metal_device)?;
+        metal_paged_attn_decode_contiguous_batch_pipeline(metal_device)?;
     }
     if !metal_paged_kv_write_token_major_disabled() {
         metal_paged_kv_write_token_major_pipeline(metal_device)?;
+        metal_paged_kv_write_token_major_batch_pipeline(metal_device)?;
     }
     Ok(())
 }
@@ -238,6 +248,36 @@ impl BackendRuntime for MetalBackend {
             softmax_scale,
         )
         .context("metal contiguous paged decode attention failed")?;
+        Ok(Some(out))
+    }
+
+    fn flash_attn_paged_decode_contiguous_batch(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        start_slots: &Tensor,
+        total_seqlen_k: usize,
+        softmax_scale: f32,
+    ) -> Result<Option<Tensor>> {
+        if !metal_paged_attn_decode_contiguous_batch_supports(
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+        ) {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_batch_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            start_slots,
+            total_seqlen_k,
+            softmax_scale,
+        )
+        .context("metal contiguous paged batch decode attention failed")?;
         Ok(Some(out))
     }
 
@@ -812,6 +852,10 @@ pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || !env_truthy(ENABLE_METAL_LM_HEAD_ARGMAX)
 }
 
+fn metal_lm_head_argmax_rows_disabled() -> bool {
+    env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX) || env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS)
+}
+
 fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE)
 }
@@ -944,7 +988,7 @@ fn metal_gdn_gates_supports(a: &Tensor, b: &Tensor, a_log: &Tensor, dt_bias: &Te
     }
     if a.dtype() != DType::BF16
         || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::BF16
+        || a_log.dtype() != DType::F32
         || dt_bias.dtype() != DType::BF16
     {
         return false;
@@ -1407,7 +1451,7 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
         || v.dtype() != DType::BF16
         || a.dtype() != DType::BF16
         || b.dtype() != DType::BF16
-        || a_log.dtype() != DType::BF16
+        || a_log.dtype() != DType::F32
         || dt_bias.dtype() != DType::BF16
         || state.dtype() != DType::BF16
     {
@@ -1431,7 +1475,10 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
     let Ok((b_state, h_state, dk_state, dv_state)) = state.dims4() else {
         return false;
     };
-    batch == 1
+    let Some(batch_heads) = batch.checked_mul(value_heads) else {
+        return false;
+    };
+    batch > 0
         && seq_len == 1
         && (b_k, t_k, h_k, dk_k) == (batch, seq_len, q_heads, dk)
         && (b_v, t_v) == (batch, seq_len)
@@ -1445,6 +1492,9 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
         && value_heads % q_heads == 0
         && dk == 128
         && dv == 128
+        && batch_heads <= u32::MAX as usize
+        && q_heads <= u32::MAX as usize
+        && value_heads <= u32::MAX as usize
         && state.is_contiguous()
 }
 
@@ -1477,7 +1527,7 @@ fn metal_gated_rms_norm_supports(x: &Tensor, z: &Tensor, weight: &Tensor) -> boo
     {
         return false;
     }
-    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::BF16 {
+    if x.dtype() != DType::BF16 || z.dtype() != DType::BF16 || weight.dtype() != DType::F32 {
         return false;
     }
     let Ok((batch, seq_len, heads, hidden)) = x.dims4() else {
@@ -1591,7 +1641,14 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
             .is_ok_and(|(c, k)| c == channels && k == kernel_size),
         _ => false,
     };
-    batch == 1
+    let Some(rows) = nk
+        .checked_add(nk)
+        .and_then(|n| n.checked_add(nv))
+        .and_then(|n| n.checked_mul(batch))
+    else {
+        return false;
+    };
+    batch > 0
         && seq_len == 1
         && channels == expected_channels
         && nk > 0
@@ -1604,6 +1661,7 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
         && channels <= u32::MAX as usize
         && nk <= u32::MAX as usize
         && nv <= u32::MAX as usize
+        && rows <= u32::MAX as usize
 }
 
 pub(crate) fn metal_rotary_embedding_supports(
@@ -1638,6 +1696,7 @@ pub(crate) fn metal_rotary_embedding_supports(
         return false;
     };
     let half_rotary = rotary_dim / 2;
+    let table_batch_stride = metal_rotary_table_batch_stride(cos, sin, batch, seq_len, half_rotary);
     let Some(total_q) = batch
         .checked_mul(seq_len)
         .and_then(|n| n.checked_mul(q_heads))
@@ -1659,8 +1718,7 @@ pub(crate) fn metal_rotary_embedding_supports(
         && rotary_dim > 0
         && rotary_dim <= head_dim
         && rotary_dim % 2 == 0
-        && cos.dims() == [seq_len, half_rotary].as_slice()
-        && sin.dims() == [seq_len, half_rotary].as_slice()
+        && table_batch_stride.is_some()
         && batch <= u32::MAX as usize
         && seq_len <= u32::MAX as usize
         && q_heads <= u32::MAX as usize
@@ -1670,6 +1728,23 @@ pub(crate) fn metal_rotary_embedding_supports(
         && total_q <= u32::MAX as usize
         && total_k <= u32::MAX as usize
         && total_q <= (u32::MAX as usize).saturating_sub(total_k)
+}
+
+fn metal_rotary_table_batch_stride(
+    cos: &Tensor,
+    sin: &Tensor,
+    batch: usize,
+    seq_len: usize,
+    half_rotary: usize,
+) -> Option<usize> {
+    if cos.dims() != sin.dims() {
+        return None;
+    }
+    match cos.dims() {
+        [t, r] if (*t, *r) == (seq_len, half_rotary) => Some(0),
+        [b, t, r] if (*b, *t, *r) == (batch, seq_len, half_rotary) => Some(seq_len),
+        _ => None,
+    }
 }
 
 const METAL_RMSNORM_KERNEL: &str = r#"
@@ -1738,6 +1813,7 @@ kernel void kiln_rotary_qk_bf16(
     constant uint& rotary_dim [[buffer(11)]],
     constant uint& total_q [[buffer(12)]],
     constant uint& total [[buffer(13)]],
+    constant uint& table_batch_stride [[buffer(14)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= total) {
@@ -1767,7 +1843,8 @@ kernel void kiln_rotary_qk_bf16(
     const bool first_half = d < half_rotary;
     const uint pair_d = first_half ? d + half_rotary : d - half_rotary;
     const uint pair_idx = ((b * seq_len + t) * heads + h) * head_dim + pair_d;
-    const uint table_idx = t * half_rotary + (first_half ? d : pair_d);
+    const uint table_t = table_batch_stride == 0 ? t : b * table_batch_stride + t;
+    const uint table_idx = table_t * half_rotary + (first_half ? d : pair_d);
     const float x = static_cast<float>(src[local]);
     const float y = static_cast<float>(src[pair_idx]);
     const float c = cos[table_idx];
@@ -1910,16 +1987,16 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
     constant uint& nv [[buffer(7)]],
     constant float& q_scale [[buffer(8)]],
     constant float& eps [[buffer(9)]],
-    uint row [[threadgroup_position_in_grid]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]
 ) {
     constexpr uint D = 128;
     threadgroup float values[D];
     threadgroup float sum_scratch[D];
 
-    const uint rows_per_batch = nk + nk + nv;
-    const uint batch = row / rows_per_batch;
-    const uint local_row = row - batch * rows_per_batch;
+    const uint row = tgroup.x;
+    const uint batch_idx = tgroup.y;
+    const uint local_row = row;
     const uint qk_dim = nk * D;
     const uint channels = qk_dim + qk_dim + nv * D;
 
@@ -1944,8 +2021,8 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
         channel = qk_dim + qk_dim + v_head * D + tid;
     }
 
-    const uint token_idx = batch * channels + channel;
-    const uint state_base = (batch * channels + channel) * 3;
+    const uint token_idx = batch_idx * channels + channel;
+    const uint state_base = (batch_idx * channels + channel) * 3;
     const uint weight_base = channel * 4;
 
     const float s0 = conv_state[state_base + 0];
@@ -1964,7 +2041,7 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
     conv_state[state_base + 2] = x0;
 
     if (is_v) {
-        const uint out_idx = (batch * nv + v_head) * D + tid;
+        const uint out_idx = (batch_idx * nv + v_head) * D + tid;
         v_out[out_idx] = static_cast<bfloat>(y);
         return;
     }
@@ -1982,7 +2059,7 @@ kernel void kiln_gdn_decode_qkv_conv_norm_bf16(
 
     const float inv = rsqrt(sum_scratch[0] + eps);
     const float norm = values[tid] * inv * (is_q ? q_scale : 1.0f);
-    const uint dst_idx = (batch * nk + src_head) * D + tid;
+    const uint dst_idx = (batch_idx * nk + src_head) * D + tid;
     if (is_q) {
         q_out[dst_idx] = static_cast<bfloat>(norm);
     } else if (is_k) {
@@ -2098,6 +2175,98 @@ kernel void kiln_lm_head_argmax_reduce_f32(
         final_index[0] = indices[0];
     }
 }
+
+kernel void kiln_lm_head_argmax_chunks_batch_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device float* partial_scores [[buffer(2)]],
+    device float* partial_indices [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant uint& vocab [[buffer(5)]],
+    constant uint& num_groups [[buffer(6)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint2 group_pos [[threadgroup_position_in_grid]]
+) {
+    threadgroup float scores[256];
+    threadgroup float indices[256];
+
+    const uint group = group_pos.x;
+    const uint row = group_pos.y;
+    const uint col = group * 256 + tid;
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (col < vocab) {
+        float acc = 0.0f;
+        const device bfloat* row_x = x + row * hidden;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(row_x[i]) * static_cast<float>(weight_t[i * vocab + col]);
+        }
+        score = static_cast<float>(static_cast<bfloat>(acc));
+        index = static_cast<float>(col);
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other_score = scores[tid + stride];
+            const float other_index = indices[tid + stride];
+            if (other_score > scores[tid] ||
+                (other_score == scores[tid] && other_index < indices[tid])) {
+                scores[tid] = other_score;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        const uint offset = row * num_groups + group;
+        partial_scores[offset] = scores[0];
+        partial_indices[offset] = indices[0];
+    }
+}
+
+kernel void kiln_lm_head_argmax_reduce_batch_f32(
+    device const float* partial_scores [[buffer(0)]],
+    device const float* partial_indices [[buffer(1)]],
+    device float* final_indices [[buffer(2)]],
+    constant uint& num_groups [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]]
+) {
+    threadgroup float scores[1024];
+    threadgroup float indices[1024];
+
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (tid < num_groups) {
+        const uint offset = row * num_groups + tid;
+        score = partial_scores[offset];
+        index = partial_indices[offset];
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = 512; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other_score = scores[tid + stride];
+            const float other_index = indices[tid + stride];
+            if (other_score > scores[tid] ||
+                (other_score == scores[tid] && other_index < indices[tid])) {
+                scores[tid] = other_score;
+                indices[tid] = other_index;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        final_indices[row] = indices[0];
+    }
+}
 "#;
 
 const METAL_MLP_GATE_UP_KERNEL: &str = r#"
@@ -2114,25 +2283,40 @@ kernel void kiln_mlp_gate_up_bf16(
     constant uint& intermediate [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    const uint total = rows * intermediate;
+    const uint cols2 = (intermediate + 1) >> 1;
+    const uint total = rows * cols2;
     if (gid >= total) {
         return;
     }
 
-    const uint row = gid / intermediate;
-    const uint col = gid - row * intermediate;
+    const uint row = gid / cols2;
+    const uint col0 = (gid - row * cols2) << 1;
+    const uint col1 = col0 + 1;
+    const bool has_col1 = col1 < intermediate;
     const uint x_base = row * hidden;
-    float gate_acc = 0.0f;
-    float up_acc = 0.0f;
+    float gate_acc0 = 0.0f;
+    float up_acc0 = 0.0f;
+    float gate_acc1 = 0.0f;
+    float up_acc1 = 0.0f;
     for (uint i = 0; i < hidden; ++i) {
         const float xv = static_cast<float>(x[x_base + i]);
-        const uint w_idx = i * intermediate + col;
-        gate_acc += xv * static_cast<float>(gate_t[w_idx]);
-        up_acc += xv * static_cast<float>(up_t[w_idx]);
+        const uint w_idx0 = i * intermediate + col0;
+        gate_acc0 += xv * static_cast<float>(gate_t[w_idx0]);
+        up_acc0 += xv * static_cast<float>(up_t[w_idx0]);
+        if (has_col1) {
+            const uint w_idx1 = w_idx0 + 1;
+            gate_acc1 += xv * static_cast<float>(gate_t[w_idx1]);
+            up_acc1 += xv * static_cast<float>(up_t[w_idx1]);
+        }
     }
 
-    const float gate_sigmoid = 1.0f / (1.0f + exp(-gate_acc));
-    out[gid] = static_cast<bfloat>((gate_acc * gate_sigmoid) * up_acc);
+    const uint out_base = row * intermediate;
+    const float gate_sigmoid0 = 1.0f / (1.0f + exp(-gate_acc0));
+    out[out_base + col0] = static_cast<bfloat>((gate_acc0 * gate_sigmoid0) * up_acc0);
+    if (has_col1) {
+        const float gate_sigmoid1 = 1.0f / (1.0f + exp(-gate_acc1));
+        out[out_base + col1] = static_cast<bfloat>((gate_acc1 * gate_sigmoid1) * up_acc1);
+    }
 }
 "#;
 
@@ -2328,6 +2512,111 @@ kernel void kiln_transposed_coop_gemv8_bf16(
         }
     }
 }
+
+kernel void kiln_transposed_coop_gemv8_batch_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& input_dim [[buffer(3)]],
+    constant uint& output_dim [[buffer(4)]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tgroup.y;
+    const uint col_base = (tgroup.x * 4 + simd_group) * 8;
+    if (col_base >= output_dim) {
+        return;
+    }
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    const bool full_tile = col_base + 7 < output_dim;
+    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
+    const uint x_base = batch_idx * input_dim;
+
+    for (uint row = lane; row < input_dim; row += 32) {
+        const float xv = static_cast<float>(x[x_base + row]);
+        const uint weight_base = row * output_dim + col_base;
+        if (vector_load_safe) {
+            device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+            const bfloat4 w0 = w4_ptr[0];
+            const bfloat4 w1 = w4_ptr[1];
+            acc0 += xv * static_cast<float>(w0[0]);
+            acc1 += xv * static_cast<float>(w0[1]);
+            acc2 += xv * static_cast<float>(w0[2]);
+            acc3 += xv * static_cast<float>(w0[3]);
+            acc4 += xv * static_cast<float>(w1[0]);
+            acc5 += xv * static_cast<float>(w1[1]);
+            acc6 += xv * static_cast<float>(w1[2]);
+            acc7 += xv * static_cast<float>(w1[3]);
+        } else {
+            acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
+            if (col_base + 1 < output_dim) {
+                acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
+            }
+            if (col_base + 2 < output_dim) {
+                acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+            }
+            if (col_base + 3 < output_dim) {
+                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
+            }
+            if (col_base + 4 < output_dim) {
+                acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
+            }
+            if (col_base + 5 < output_dim) {
+                acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
+            }
+            if (col_base + 6 < output_dim) {
+                acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
+            }
+            if (col_base + 7 < output_dim) {
+                acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
+            }
+        }
+    }
+
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    acc4 = simd_sum(acc4);
+    acc5 = simd_sum(acc5);
+    acc6 = simd_sum(acc6);
+    acc7 = simd_sum(acc7);
+
+    if (lane == 0) {
+        const uint out_base = batch_idx * output_dim;
+        out[out_base + col_base + 0] = static_cast<bfloat>(acc0);
+        if (col_base + 1 < output_dim) {
+            out[out_base + col_base + 1] = static_cast<bfloat>(acc1);
+        }
+        if (col_base + 2 < output_dim) {
+            out[out_base + col_base + 2] = static_cast<bfloat>(acc2);
+        }
+        if (col_base + 3 < output_dim) {
+            out[out_base + col_base + 3] = static_cast<bfloat>(acc3);
+        }
+        if (col_base + 4 < output_dim) {
+            out[out_base + col_base + 4] = static_cast<bfloat>(acc4);
+        }
+        if (col_base + 5 < output_dim) {
+            out[out_base + col_base + 5] = static_cast<bfloat>(acc5);
+        }
+        if (col_base + 6 < output_dim) {
+            out[out_base + col_base + 6] = static_cast<bfloat>(acc6);
+        }
+        if (col_base + 7 < output_dim) {
+            out[out_base + col_base + 7] = static_cast<bfloat>(acc7);
+        }
+    }
+}
 "#;
 
 const METAL_FUSED_QKV_TRANSPOSED_COOP_GEMV_KERNEL: &str = r#"
@@ -2350,23 +2639,39 @@ kernel void kiln_fused_qkv_transposed_coop_gemv8_bf16(
     uint simd_group [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    const uint proj = tgroup.y;
-    const uint col_base = (tgroup.x * 4 + simd_group) * 8;
+    constexpr uint TILE_COLS = 8;
+    constexpr uint SIMD_GROUPS = 4;
+    constexpr uint COLS_PER_TGROUP = TILE_COLS * SIMD_GROUPS;
+
+    const uint q_groups = (q_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;
+    const uint k_groups = (k_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;
+    const uint v_groups = (v_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;
+    const uint group = tgroup.x;
 
     device const bfloat* weight_t = q_t;
     device bfloat* out = q_out;
     uint output_dim = q_output_dim;
-    if (proj == 1) {
+    uint group_in_proj = group;
+    if (group < q_groups) {
+        weight_t = q_t;
+        out = q_out;
+        output_dim = q_output_dim;
+    } else if (group < q_groups + k_groups) {
         weight_t = k_t;
         out = k_out;
         output_dim = k_output_dim;
-    } else if (proj == 2) {
+        group_in_proj = group - q_groups;
+    } else if (group < q_groups + k_groups + v_groups) {
         weight_t = v_t;
         out = v_out;
         output_dim = v_output_dim;
+        group_in_proj = group - q_groups - k_groups;
+    } else {
+        return;
     }
 
-    if (proj > 2 || col_base >= output_dim) {
+    const uint col_base = group_in_proj * COLS_PER_TGROUP + simd_group * TILE_COLS;
+    if (col_base >= output_dim) {
         return;
     }
 
@@ -2476,38 +2781,42 @@ kernel void kiln_gdn_in_proj_decode_bf16(
     constant uint& qkv_dim [[buffer(10)]],
     constant uint& z_dim [[buffer(11)]],
     constant uint& nv [[buffer(12)]],
+    constant uint& batch [[buffer(13)]],
     uint gid [[thread_position_in_grid]]
 ) {
     const uint total = qkv_dim + z_dim + (nv * 2);
-    if (gid >= total) {
+    if (gid >= total * batch) {
         return;
     }
+    const uint batch_idx = gid / total;
+    const uint local_gid = gid - batch_idx * total;
+    const uint x_base = batch_idx * hidden;
 
     float acc = 0.0f;
-    if (gid < qkv_dim) {
-        const uint col = gid;
+    if (local_gid < qkv_dim) {
+        const uint col = local_gid;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
         }
-        qkv_out[col] = static_cast<bfloat>(acc);
-    } else if (gid < qkv_dim + z_dim) {
-        const uint col = gid - qkv_dim;
+        qkv_out[batch_idx * qkv_dim + col] = static_cast<bfloat>(acc);
+    } else if (local_gid < qkv_dim + z_dim) {
+        const uint col = local_gid - qkv_dim;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(z_t[i * z_dim + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(z_t[i * z_dim + col]);
         }
-        z_out[col] = static_cast<bfloat>(acc);
-    } else if (gid < qkv_dim + z_dim + nv) {
-        const uint col = gid - qkv_dim - z_dim;
+        z_out[batch_idx * z_dim + col] = static_cast<bfloat>(acc);
+    } else if (local_gid < qkv_dim + z_dim + nv) {
+        const uint col = local_gid - qkv_dim - z_dim;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(a_t[i * nv + col]);
         }
-        a_out[col] = static_cast<bfloat>(acc);
+        a_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
     } else {
-        const uint col = gid - qkv_dim - z_dim - nv;
+        const uint col = local_gid - qkv_dim - z_dim - nv;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(b_t[i * nv + col]);
         }
-        b_out[col] = static_cast<bfloat>(acc);
+        b_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
     }
 }
 "#;
@@ -2691,6 +3000,124 @@ kernel void kiln_paged_attn_decode_contiguous_bf16_d256(
         }
     }
 }
+
+kernel void kiln_paged_attn_decode_contiguous_batch_bf16_d256(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k_pool [[buffer(1)]],
+    device const bfloat* v_pool [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    device const uint* start_slots [[buffer(4)]],
+    constant uint& batch [[buffer(5)]],
+    constant uint& seq_len [[buffer(6)]],
+    constant uint& q_heads [[buffer(7)]],
+    constant uint& kv_heads [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
+    constant uint& total_slots [[buffer(10)]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]]
+) {
+    constexpr uint D = 256;
+    constexpr uint BN = 32;
+    constexpr uint BD = 32;
+    constexpr uint EPT = D / BD;
+    constexpr uint QWEN_HEADS_PER_KV = 4;
+
+    const uint batch_idx = tid.x;
+    const uint head_idx = tid.y;
+    if (batch_idx >= batch || head_idx >= q_heads) {
+        return;
+    }
+
+    const uint kv_head_idx = head_idx / QWEN_HEADS_PER_KV;
+    if (kv_head_idx >= kv_heads) {
+        return;
+    }
+
+    device bfloat* out_ptr =
+        out + (batch_idx * q_heads + head_idx) * D + simd_gid * EPT;
+    const uint start_slot = start_slots[batch_idx];
+    if (start_slot >= total_slots || seq_len == 0 || seq_len > total_slots - start_slot) {
+        if (simd_lid == 0) {
+            for (uint i = 0; i < EPT; ++i) {
+                out_ptr[i] = static_cast<bfloat>(0.0f);
+            }
+        }
+        return;
+    }
+
+    thread float q_frag[EPT];
+    thread float k_frag[EPT];
+    thread float o_frag[EPT];
+    threadgroup float outputs[BN * BD];
+    threadgroup float max_scores[BN];
+    threadgroup float sum_exp_scores[BN];
+
+    device const bfloat* q_ptr =
+        q + (batch_idx * q_heads + head_idx) * D + simd_lid * EPT;
+    device const bfloat* k_ptr =
+        k_pool + ((start_slot + simd_gid) * kv_heads + kv_head_idx) * D + simd_lid * EPT;
+    device const bfloat* v_ptr =
+        v_pool + ((start_slot + simd_gid) * kv_heads + kv_head_idx) * D + simd_lid * EPT;
+
+    for (uint i = 0; i < EPT; ++i) {
+        q_frag[i] = scale * static_cast<float>(q_ptr[i]);
+        o_frag[i] = 0.0f;
+    }
+
+    float max_score = -INFINITY;
+    float sum_exp_score = 0.0f;
+
+    for (uint t = simd_gid; t < seq_len; t += BN) {
+        for (uint i = 0; i < EPT; ++i) {
+            k_frag[i] = static_cast<float>(k_ptr[i]);
+        }
+
+        float score = 0.0f;
+        for (uint i = 0; i < EPT; ++i) {
+            score += q_frag[i] * k_frag[i];
+        }
+        score = simd_sum(score);
+
+        const float new_max = max(max_score, score);
+        const float factor = fast::exp(max_score - new_max);
+        const float exp_score = fast::exp(score - new_max);
+
+        max_score = new_max;
+        sum_exp_score = sum_exp_score * factor + exp_score;
+
+        for (uint i = 0; i < EPT; ++i) {
+            o_frag[i] = o_frag[i] * factor + exp_score * static_cast<float>(v_ptr[i]);
+        }
+
+        k_ptr += BN * kv_heads * D;
+        v_ptr += BN * kv_heads * D;
+    }
+
+    if (simd_lid == 0) {
+        max_scores[simd_gid] = max_score;
+        sum_exp_scores[simd_gid] = sum_exp_score;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float partial_max = max_scores[simd_lid];
+    const float global_max = simd_max(partial_max);
+    const float partial_factor = fast::exp(partial_max - global_max);
+    const float denom = simd_sum(sum_exp_scores[simd_lid] * partial_factor);
+
+    for (uint i = 0; i < EPT; ++i) {
+        outputs[simd_lid * BD + simd_gid] = o_frag[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        o_frag[i] = simd_sum(outputs[simd_gid * BD + simd_lid] * partial_factor) / denom;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (simd_lid == 0) {
+        for (uint i = 0; i < EPT; ++i) {
+            out_ptr[i] = static_cast<bfloat>(o_frag[i]);
+        }
+    }
+}
 "#;
 
 const METAL_PAGED_KV_WRITE_TOKEN_MAJOR_KERNEL: &str = r#"
@@ -2713,6 +3140,35 @@ kernel void kiln_paged_kv_write_token_major_bf16(
     }
 
     const uint pool_idx = slot * total + gid;
+    k_pool[pool_idx] = k_src[gid];
+    v_pool[pool_idx] = v_src[gid];
+}
+
+kernel void kiln_paged_kv_write_token_major_batch_bf16(
+    device const bfloat* k_src [[buffer(0)]],
+    device const bfloat* v_src [[buffer(1)]],
+    device bfloat* k_pool [[buffer(2)]],
+    device bfloat* v_pool [[buffer(3)]],
+    device const uint* slots [[buffer(4)]],
+    constant uint& batch [[buffer(5)]],
+    constant uint& heads [[buffer(6)]],
+    constant uint& head_dim [[buffer(7)]],
+    constant uint& total_slots [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint row_stride = heads * head_dim;
+    const uint total = batch * row_stride;
+    if (gid >= total) {
+        return;
+    }
+
+    const uint batch_idx = gid / row_stride;
+    const uint local = gid - batch_idx * row_stride;
+    const uint slot = slots[batch_idx];
+    if (slot >= total_slots) {
+        return;
+    }
+    const uint pool_idx = slot * row_stride + local;
     k_pool[pool_idx] = k_src[gid];
     v_pool[pool_idx] = v_src[gid];
 }
@@ -3001,6 +3457,64 @@ fn metal_lm_head_argmax_reduce_pipeline(
     Ok(pipeline)
 }
 
+fn metal_lm_head_argmax_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head argmax batch pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_argmax_chunks_batch_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head argmax batch function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head argmax batch pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_lm_head_argmax_reduce_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().map_err(|_| {
+        anyhow::anyhow!("metal lm head argmax reduce batch pipeline cache poisoned")
+    })?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_argmax_reduce_batch_f32", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head argmax reduce batch function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head argmax reduce batch pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_mlp_gate_up_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -3089,6 +3603,35 @@ fn metal_transposed_coop_gemv_pipeline(
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal transposed coop GEMV pipeline: {e:?}"))?;
     cache.insert(key, pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_transposed_coop_gemv_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal batch transposed coop GEMV cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_transposed_coop_gemv8_batch_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal batch transposed coop GEMV function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal batch transposed coop GEMV pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
 
@@ -3240,6 +3783,39 @@ fn metal_paged_attn_decode_contiguous_pipeline(
     Ok(pipeline)
 }
 
+fn metal_paged_attn_decode_contiguous_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal contiguous paged batch decode pipeline poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_paged_attn_decode_contiguous_batch_bf16_d256", None)
+        .map_err(|e| {
+            anyhow::anyhow!("load metal contiguous paged batch decode attention: {e:?}")
+        })?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| {
+            anyhow::anyhow!("build metal contiguous paged batch decode attention: {e:?}")
+        })?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_paged_kv_write_token_major_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -3265,6 +3841,35 @@ fn metal_paged_kv_write_token_major_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv write pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_paged_kv_write_token_major_batch_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal paged kv batch write pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_paged_kv_write_token_major_batch_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal paged kv batch write function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal paged kv batch write pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -3306,6 +3911,35 @@ pub(crate) fn metal_lm_head_argmax_supports(x: &Tensor, weight_t: &Tensor) -> bo
     // The final reduction is intentionally bounded to one threadgroup for the
     // Qwen3.5-4B vocab path; larger vocabs fall back to materialized logits.
     num_groups > 0 && num_groups <= 1024
+}
+
+pub(crate) fn metal_lm_head_argmax_rows_supports(x: &Tensor, weight_t: &Tensor) -> bool {
+    if metal_lm_head_argmax_rows_disabled() {
+        return false;
+    }
+    if !matches!(x.dtype(), DType::BF16) || !matches!(weight_t.dtype(), DType::BF16) {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !x.is_contiguous() || !weight_t.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return false;
+    };
+    let Ok((weight_hidden, vocab)) = weight_t.dims2() else {
+        return false;
+    };
+    let num_groups = vocab.div_ceil(256);
+    batch > 0
+        && seq_len == 1
+        && hidden == weight_hidden
+        && hidden <= u32::MAX as usize
+        && vocab <= u32::MAX as usize
+        && num_groups > 0
+        && num_groups <= 1024
 }
 
 pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
@@ -3532,6 +4166,167 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
     Ok(best_idx)
 }
 
+pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Vec<u32>> {
+    anyhow::ensure!(
+        metal_lm_head_argmax_rows_supports(x, weight_t),
+        "metal lm head row argmax supports only BF16 [B,1,H] x [H,V] on Metal with <= 262144 vocab"
+    );
+    let (batch, _, hidden) = x.dims3()?;
+    let (_, vocab) = weight_t.dims2()?;
+
+    let chunk_width = 256usize;
+    let num_groups = vocab.div_ceil(chunk_width);
+    let partial_scores = unsafe { Tensor::empty((batch, num_groups), DType::F32, x.device())? };
+    let partial_indices = unsafe { Tensor::empty((batch, num_groups), DType::F32, x.device())? };
+    let final_indices = if metal_lm_head_argmax_gpu_reduce_disabled() {
+        None
+    } else {
+        Some(unsafe { Tensor::empty((batch,), DType::F32, x.device())? })
+    };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal lm head row argmax requires Metal tensors");
+    };
+    let pipeline = metal_lm_head_argmax_batch_pipeline(device)?;
+    let reduce_pipeline = if final_indices.is_some() {
+        Some(metal_lm_head_argmax_reduce_batch_pipeline(device)?)
+    } else {
+        None
+    };
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_lm_head_argmax_chunks_batch_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight_t.storage_and_layout();
+        let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
+        let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
+        let final_storage_and_layout = final_indices.as_ref().map(Tensor::storage_and_layout);
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax weight must be on Metal"),
+        };
+        let ps_metal = match &*ps_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax partial scores must be on Metal"),
+        };
+        let pi_metal = match &*pi_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal lm head row argmax partial indices must be on Metal"),
+        };
+        let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
+            Some((candle_core::Storage::Metal(s), layout)) => Some((s, layout)),
+            Some(_) => anyhow::bail!("metal lm head row argmax final indices must be on Metal"),
+            None => None,
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let ps_buf = candle_core::metal_backend::buffer_o(
+            ps_metal.buffer(),
+            &ps_layout,
+            partial_scores.dtype(),
+        );
+        let pi_buf = candle_core::metal_backend::buffer_o(
+            pi_metal.buffer(),
+            &pi_layout,
+            partial_indices.dtype(),
+        );
+        let final_buf = final_metal.map(|(storage, layout)| {
+            candle_core::metal_backend::buffer_o(storage.buffer(), layout, DType::F32)
+        });
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+
+        let hidden_u32 = hidden as u32;
+        let vocab_u32 = vocab as u32;
+        let num_groups_u32 = num_groups as u32;
+        encoder.set_bytes(4, &hidden_u32);
+        encoder.set_bytes(5, &vocab_u32);
+        encoder.set_bytes(6, &num_groups_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: num_groups,
+            height: batch,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: chunk_width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+
+        if let (Some(reduce_pipeline), Some(final_buf)) = (&reduce_pipeline, final_buf) {
+            encoder.set_label("kiln_lm_head_argmax_reduce_batch_f32");
+            encoder.set_compute_pipeline_state(reduce_pipeline);
+            encoder.set_buffer(0, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+            encoder.set_buffer(1, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+            encoder.set_buffer(2, Some(final_buf.buffer), final_buf.offset_in_bytes);
+            encoder.set_bytes(3, &num_groups_u32);
+
+            let reduce_threadgroups = objc2_metal::MTLSize {
+                width: batch,
+                height: 1,
+                depth: 1,
+            };
+            let reduce_threads = objc2_metal::MTLSize {
+                width: 1024,
+                height: 1,
+                depth: 1,
+            };
+            encoder.dispatch_thread_groups(reduce_threadgroups, reduce_threads);
+        }
+    }
+
+    drop(encoder);
+
+    if let Some(final_indices) = final_indices {
+        return Ok(final_indices
+            .to_vec1::<f32>()
+            .context("read metal lm head row argmax final indices")?
+            .into_iter()
+            .map(|idx| idx as u32)
+            .collect());
+    }
+
+    let scores = partial_scores
+        .flatten_all()?
+        .to_vec1::<f32>()
+        .context("read metal lm head row argmax partial scores")?;
+    let indices = partial_indices
+        .flatten_all()?
+        .to_vec1::<f32>()
+        .context("read metal lm head row argmax partial indices")?;
+    let mut out = Vec::with_capacity(batch);
+    for row in 0..batch {
+        let row_start = row * num_groups;
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_idx = 0u32;
+        for group in 0..num_groups {
+            let offset = row_start + group;
+            let score = scores[offset];
+            let idx = indices[offset] as u32;
+            if score > best_score || (score == best_score && idx < best_idx) {
+                best_score = score;
+                best_idx = idx;
+            }
+        }
+        out.push(best_idx);
+    }
+    Ok(out)
+}
+
 pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> bool {
     if x.dtype() != DType::BF16 || gate_t.dtype() != DType::BF16 || up_t.dtype() != DType::BF16 {
         return false;
@@ -3561,7 +4356,8 @@ pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Ten
         return false;
     };
 
-    rows == 1
+    rows > 0
+        && seq_len == 1
         && hidden == gate_hidden
         && hidden == up_hidden
         && intermediate == up_intermediate
@@ -3573,12 +4369,12 @@ pub(crate) fn metal_mlp_gate_up_supports(x: &Tensor, gate_t: &Tensor, up_t: &Ten
 pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
     anyhow::ensure!(
         metal_mlp_gate_up_supports(x, gate_t, up_t),
-        "metal mlp gate/up supports only BF16 [1,1,H] x [H,I] on Metal"
+        "metal mlp gate/up supports only BF16 [B,1,H] x [H,I] on Metal"
     );
     let (batch, seq_len, hidden) = x.dims3()?;
     let (_, intermediate) = gate_t.dims2()?;
     let rows = batch * seq_len;
-    let total = rows * intermediate;
+    let total = rows * intermediate.div_ceil(2);
 
     // The kernel writes every row/intermediate element.
     let out = unsafe { Tensor::empty((batch, seq_len, intermediate), DType::BF16, x.device())? };
@@ -3676,7 +4472,7 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &Tensor, gate: &Tensor) ->
         return false;
     };
 
-    batch == 1
+    batch > 0
         && seq_len == 1
         && gate_batch == batch
         && gate_seq_len == seq_len
@@ -3687,7 +4483,7 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &Tensor, gate: &Tensor) ->
 pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
     anyhow::ensure!(
         metal_attn_gate_sigmoid_mul_supports(x, gate),
-        "metal attn gate sigmoid/mul supports only BF16 [1,1,H] tensors on Metal"
+        "metal attn gate sigmoid/mul supports only BF16 [B,1,H] tensors on Metal"
     );
     let (batch, seq_len, hidden) = x.dims3()?;
     let total = batch * seq_len * hidden;
@@ -3779,7 +4575,48 @@ pub(crate) fn metal_transposed_coop_gemv_supports(x: &Tensor, weight_t: &Tensor)
         && output_dim <= u32::MAX as usize
 }
 
+pub(crate) fn metal_transposed_coop_gemv_decode_batch_supports(
+    x: &Tensor,
+    weight_t: &Tensor,
+) -> bool {
+    if metal_transposed_coop_gemv_disabled() {
+        return false;
+    }
+    if x.dtype() != DType::BF16 || weight_t.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) || !matches!(weight_t.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !x.is_contiguous() || !weight_t.is_contiguous() {
+        return false;
+    }
+    let Ok((batch, seq_len, input_dim)) = x.dims3() else {
+        return false;
+    };
+    let Ok((weight_input_dim, output_dim)) = weight_t.dims2() else {
+        return false;
+    };
+    let Some(total) = batch.checked_mul(output_dim) else {
+        return false;
+    };
+
+    batch > 1
+        && seq_len == 1
+        && input_dim > 0
+        && output_dim > 0
+        && input_dim == weight_input_dim
+        && input_dim <= u32::MAX as usize
+        && output_dim <= u32::MAX as usize
+        && batch <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
 pub(crate) fn metal_transposed_coop_gemv_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+    if metal_transposed_coop_gemv_decode_batch_supports(x, weight_t) {
+        return metal_transposed_coop_gemv_batch_bf16(x, weight_t);
+    }
+
     metal_transposed_coop_gemv_bf16_with_tile(
         x,
         weight_t,
@@ -3860,6 +4697,76 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
     Ok(out)
 }
 
+fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_transposed_coop_gemv_decode_batch_supports(x, weight_t),
+        "metal batch transposed coop GEMV supports only BF16 [B,1,K] x [K,N] with B > 1 on Metal"
+    );
+    let (batch, _, input_dim) = x.dims3()?;
+    let (_, output_dim) = weight_t.dims2()?;
+
+    // The kernel writes every batch/output channel exactly once.
+    let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, x.device())? };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal batch transposed coop GEMV requires Metal tensors");
+    };
+    let pipeline = metal_transposed_coop_gemv_batch_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_transposed_coop_gemv8_batch_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (w_storage, w_layout) = weight_t.storage_and_layout();
+        let (o_storage, o_layout) = out.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal batch transposed coop GEMV x must be on Metal"),
+        };
+        let w_metal = match &*w_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal batch transposed coop GEMV weight_t must be on Metal"),
+        };
+        let out_metal = match &*o_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal batch transposed coop GEMV out must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let w_buf =
+            candle_core::metal_backend::buffer_o(w_metal.buffer(), &w_layout, weight_t.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let input_dim_u32 = input_dim as u32;
+        let output_dim_u32 = output_dim as u32;
+        encoder.set_bytes(3, &input_dim_u32);
+        encoder.set_bytes(4, &output_dim_u32);
+
+        let cols_per_threadgroup =
+            METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: output_dim.div_ceil(cols_per_threadgroup),
+            height: batch,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: METAL_TRANSPOSED_COOP_GEMV_THREADS,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
 pub(crate) fn metal_fused_qkv_transposed_coop_gemv_supports(
     x: &Tensor,
     q_t: &Tensor,
@@ -3906,11 +4813,15 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
     let (_, k_output_dim) = k_t.dims2()?;
     let (_, v_output_dim) = v_t.dims2()?;
 
+    let total_output_dim = q_output_dim + k_output_dim + v_output_dim;
     // The kernel writes each projection output independently with the existing
-    // tile8 cooperative GEMV mapping.
-    let q_out = unsafe { Tensor::empty((1usize, 1usize, q_output_dim), DType::BF16, x.device())? };
-    let k_out = unsafe { Tensor::empty((1usize, 1usize, k_output_dim), DType::BF16, x.device())? };
-    let v_out = unsafe { Tensor::empty((1usize, 1usize, v_output_dim), DType::BF16, x.device())? };
+    // tile8 cooperative GEMV mapping. Back the three result views with one
+    // allocation to avoid repeated small Metal buffer allocations in decode.
+    let fused_out =
+        unsafe { Tensor::empty((1usize, 1usize, total_output_dim), DType::BF16, x.device())? };
+    let q_out = fused_out.narrow(2, 0, q_output_dim)?;
+    let k_out = fused_out.narrow(2, q_output_dim, k_output_dim)?;
+    let v_out = fused_out.narrow(2, q_output_dim + k_output_dim, v_output_dim)?;
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal fused QKV projection requires Metal tensors");
@@ -3997,10 +4908,13 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
 
         let cols_per_threadgroup =
             METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
-        let max_output_dim = q_output_dim.max(k_output_dim).max(v_output_dim);
+        let q_groups = q_output_dim.div_ceil(cols_per_threadgroup);
+        let k_groups = k_output_dim.div_ceil(cols_per_threadgroup);
+        let v_groups = v_output_dim.div_ceil(cols_per_threadgroup);
+        let total_groups = q_groups + k_groups + v_groups;
         let threadgroups_per_grid = objc2_metal::MTLSize {
-            width: max_output_dim.div_ceil(cols_per_threadgroup),
-            height: 3,
+            width: total_groups,
+            height: 1,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
@@ -4067,8 +4981,11 @@ fn metal_gdn_in_proj_decode_supports(
     else {
         return false;
     };
+    let Some(dispatch_total) = total.checked_mul(batch) else {
+        return false;
+    };
 
-    batch == 1
+    batch > 0
         && seq_len == 1
         && hidden == qkv_hidden
         && hidden == z_hidden
@@ -4080,6 +4997,7 @@ fn metal_gdn_in_proj_decode_supports(
         && z_dim <= u32::MAX as usize
         && nv <= u32::MAX as usize
         && total <= u32::MAX as usize
+        && dispatch_total <= u32::MAX as usize
 }
 
 fn metal_gdn_in_proj_decode_bf16(
@@ -4091,19 +5009,34 @@ fn metal_gdn_in_proj_decode_bf16(
 ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
     anyhow::ensure!(
         metal_gdn_in_proj_decode_supports(x, qkv_t, z_t, a_t, b_t),
-        "metal gdn in-proj supports only BF16 [1,1,H] x [H,*] on Metal"
+        "metal gdn in-proj supports only BF16 [B,1,H] x [H,*] on Metal"
     );
-    let (_, _, hidden) = x.dims3()?;
+    let (batch, _, hidden) = x.dims3()?;
     let (_, qkv_dim) = qkv_t.dims2()?;
     let (_, z_dim) = z_t.dims2()?;
     let (_, nv) = a_t.dims2()?;
     let total = qkv_dim + z_dim + (nv * 2);
+    let dispatch_total = batch * total;
 
-    // The kernel writes every output element exactly once.
-    let qkv_out = unsafe { Tensor::empty((1usize, 1usize, qkv_dim), DType::BF16, x.device())? };
-    let z_out = unsafe { Tensor::empty((1usize, 1usize, z_dim), DType::BF16, x.device())? };
-    let a_out = unsafe { Tensor::empty((1usize, 1usize, nv), DType::BF16, x.device())? };
-    let b_out = unsafe { Tensor::empty((1usize, 1usize, nv), DType::BF16, x.device())? };
+    // The kernel writes every output element exactly once. Keep bs=1 on one
+    // backing allocation, but use separate batch outputs so each `[B,1,N]`
+    // tensor remains contiguous for the following fused decode kernels.
+    let (qkv_out, z_out, a_out, b_out) = if batch == 1 {
+        let proj_out = unsafe { Tensor::empty((1usize, 1usize, total), DType::BF16, x.device())? };
+        (
+            proj_out.narrow(2, 0, qkv_dim)?,
+            proj_out.narrow(2, qkv_dim, z_dim)?,
+            proj_out.narrow(2, qkv_dim + z_dim, nv)?,
+            proj_out.narrow(2, qkv_dim + z_dim + nv, nv)?,
+        )
+    } else {
+        (
+            unsafe { Tensor::empty((batch, 1usize, qkv_dim), DType::BF16, x.device())? },
+            unsafe { Tensor::empty((batch, 1usize, z_dim), DType::BF16, x.device())? },
+            unsafe { Tensor::empty((batch, 1usize, nv), DType::BF16, x.device())? },
+            unsafe { Tensor::empty((batch, 1usize, nv), DType::BF16, x.device())? },
+        )
+    };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal gdn in-proj requires Metal tensors");
@@ -4193,13 +5126,15 @@ fn metal_gdn_in_proj_decode_bf16(
         let qkv_dim_u32 = qkv_dim as u32;
         let z_dim_u32 = z_dim as u32;
         let nv_u32 = nv as u32;
+        let batch_u32 = batch as u32;
         encoder.set_bytes(9, &hidden_u32);
         encoder.set_bytes(10, &qkv_dim_u32);
         encoder.set_bytes(11, &z_dim_u32);
         encoder.set_bytes(12, &nv_u32);
+        encoder.set_bytes(13, &batch_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
-            width: total,
+            width: dispatch_total,
             height: 1,
             depth: 1,
         };
@@ -4228,6 +5163,9 @@ pub(crate) fn metal_rotary_embedding_bf16(
     );
     let (batch, seq_len, q_heads, _) = q.dims4()?;
     let (_, _, k_heads, _) = k.dims4()?;
+    let table_batch_stride =
+        metal_rotary_table_batch_stride(cos, sin, batch, seq_len, rotary_dim / 2)
+            .context("metal rotary qk unsupported position table shape")?;
     let q_shape = q.dims().to_vec();
     let k_shape = k.dims().to_vec();
     // SAFETY: the kernel dispatch writes every Q output element exactly once.
@@ -4305,6 +5243,7 @@ pub(crate) fn metal_rotary_embedding_bf16(
         let total = total_q + total_k;
         let total_q_u32 = total_q as u32;
         let total_u32 = total as u32;
+        let table_batch_stride_u32 = table_batch_stride as u32;
         encoder.set_bytes(6, &batch_u32);
         encoder.set_bytes(7, &seq_len_u32);
         encoder.set_bytes(8, &q_heads_u32);
@@ -4313,6 +5252,7 @@ pub(crate) fn metal_rotary_embedding_bf16(
         encoder.set_bytes(11, &rotary_dim_u32);
         encoder.set_bytes(12, &total_q_u32);
         encoder.set_bytes(13, &total_u32);
+        encoder.set_bytes(14, &table_batch_stride_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
@@ -4583,6 +5523,167 @@ fn metal_paged_attn_decode_contiguous_bf16_d256(
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: 1,
+            height: q_heads,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+#[allow(dead_code)]
+fn metal_paged_attn_decode_contiguous_batch_supports(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    start_slots: &Tensor,
+    seq_len: usize,
+) -> bool {
+    if metal_paged_attn_decode_contiguous_disabled() {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+        || start_slots.dtype() != DType::U32
+    {
+        return false;
+    }
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k_pool.device(), Device::Metal(_))
+        || !matches!(v_pool.device(), Device::Metal(_))
+        || !matches!(start_slots.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !q.is_contiguous()
+        || !k_pool.is_contiguous()
+        || !v_pool.is_contiguous()
+        || !start_slots.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((batch, q_heads, q_len, head_dim)) = q.dims4() else {
+        return false;
+    };
+    let Ok((total_slots, kv_heads, k_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Ok(v_dims) = v_pool.dims3() else {
+        return false;
+    };
+    let Ok(slot_count) = start_slots.dims1() else {
+        return false;
+    };
+    batch > 0
+        && q_heads == 16
+        && kv_heads == 4
+        && q_len == 1
+        && head_dim == 256
+        && k_head_dim == head_dim
+        && v_dims == (total_slots, kv_heads, head_dim)
+        && slot_count == batch
+        && seq_len > 0
+        && batch <= u32::MAX as usize
+        && seq_len <= u32::MAX as usize
+        && q_heads <= u32::MAX as usize
+        && kv_heads <= u32::MAX as usize
+        && total_slots <= u32::MAX as usize
+}
+
+#[allow(dead_code)]
+fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    start_slots: &Tensor,
+    seq_len: usize,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_paged_attn_decode_contiguous_batch_supports(q, k_pool, v_pool, start_slots, seq_len),
+        "metal contiguous paged batch decode attention unsupported shape"
+    );
+    let (batch, q_heads, _, head_dim) = q.dims4()?;
+    let (total_slots, _, _) = k_pool.dims3()?;
+    let out =
+        unsafe { Tensor::empty((batch, 1usize, q_heads * head_dim), DType::BF16, q.device())? };
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal contiguous paged batch decode attention requires Metal tensors");
+    };
+    let pipeline = metal_paged_attn_decode_contiguous_batch_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_attn_decode_contiguous_batch_bf16_d256");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k_pool.storage_and_layout();
+        let (v_storage, v_layout) = v_pool.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+        let (slot_storage, slot_layout) = start_slots.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged batch attention q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged batch attention k_pool must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged batch attention v_pool must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged batch attention out must be on Metal"),
+        };
+        let slot_metal = match &*slot_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal contiguous paged batch attention slots must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf =
+            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+        let v_buf =
+            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let slot_buf = candle_core::metal_backend::buffer_o(
+            slot_metal.buffer(),
+            &slot_layout,
+            start_slots.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(slot_buf.buffer), slot_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let seq_len_u32 = seq_len as u32;
+        let q_heads_u32 = q_heads as u32;
+        let kv_heads_u32 = 4u32;
+        let total_slots_u32 = total_slots as u32;
+        encoder.set_bytes(5, &batch_u32);
+        encoder.set_bytes(6, &seq_len_u32);
+        encoder.set_bytes(7, &q_heads_u32);
+        encoder.set_bytes(8, &kv_heads_u32);
+        encoder.set_bytes(9, &softmax_scale);
+        encoder.set_bytes(10, &total_slots_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch,
             height: q_heads,
             depth: 1,
         };
@@ -4884,6 +5985,170 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
         encoder.set_bytes(6, &head_dim_u32);
 
         let total = heads * head_dim;
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    slots: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> bool {
+    if metal_paged_kv_write_token_major_disabled() {
+        return false;
+    }
+    if k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+        || slots.dtype() != DType::U32
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+    {
+        return false;
+    }
+    if !matches!(k_pool.device(), Device::Metal(_))
+        || !matches!(v_pool.device(), Device::Metal(_))
+        || !matches!(slots.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !k_pool.is_contiguous()
+        || !v_pool.is_contiguous()
+        || !slots.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((total_slots, pool_heads, pool_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Ok(v_pool_dims) = v_pool.dims3() else {
+        return false;
+    };
+    let Ok((batch, seq_len, heads, head_dim)) = k.dims4() else {
+        return false;
+    };
+    let Ok(v_dims) = v.dims4() else {
+        return false;
+    };
+    let Ok(slot_count) = slots.dims1() else {
+        return false;
+    };
+    let Some(row_stride) = heads.checked_mul(head_dim) else {
+        return false;
+    };
+    let Some(total) = batch.checked_mul(row_stride) else {
+        return false;
+    };
+
+    batch > 0
+        && total_slots > 0
+        && seq_len == 1
+        && slot_count == batch
+        && v_pool_dims == (total_slots, pool_heads, pool_head_dim)
+        && v_dims == (batch, seq_len, heads, head_dim)
+        && heads == pool_heads
+        && head_dim == pool_head_dim
+        && batch <= u32::MAX as usize
+        && heads <= u32::MAX as usize
+        && head_dim <= u32::MAX as usize
+        && total_slots <= u32::MAX as usize
+        && row_stride <= u32::MAX as usize
+        && total <= u32::MAX as usize
+}
+
+#[allow(dead_code)]
+pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
+    k_pool: &mut Tensor,
+    v_pool: &mut Tensor,
+    slots: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> Result<()> {
+    anyhow::ensure!(
+        metal_paged_kv_write_token_major_batch_supports(k_pool, v_pool, slots, k, v),
+        "metal paged kv token-major batch write unsupported shape"
+    );
+    let (total_slots, heads, head_dim) = k_pool.dims3()?;
+    let (batch, _, _, _) = k.dims4()?;
+    let Device::Metal(device) = k_pool.device() else {
+        anyhow::bail!("metal paged kv batch write requires Metal tensors");
+    };
+    let pipeline = metal_paged_kv_write_token_major_batch_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_kv_write_token_major_batch_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (ks_storage, ks_layout) = k.storage_and_layout();
+        let (vs_storage, vs_layout) = v.storage_and_layout();
+        let (kp_storage, kp_layout) = k_pool.storage_and_layout();
+        let (vp_storage, vp_layout) = v_pool.storage_and_layout();
+        let (slot_storage, slot_layout) = slots.storage_and_layout();
+
+        let ks_metal = match &*ks_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write k source must be on Metal"),
+        };
+        let vs_metal = match &*vs_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write v source must be on Metal"),
+        };
+        let kp_metal = match &*kp_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write k pool must be on Metal"),
+        };
+        let vp_metal = match &*vp_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write v pool must be on Metal"),
+        };
+        let slot_metal = match &*slot_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal paged kv batch write slots must be on Metal"),
+        };
+
+        let ks_buf = candle_core::metal_backend::buffer_o(ks_metal.buffer(), &ks_layout, k.dtype());
+        let vs_buf = candle_core::metal_backend::buffer_o(vs_metal.buffer(), &vs_layout, v.dtype());
+        let kp_buf =
+            candle_core::metal_backend::buffer_o(kp_metal.buffer(), &kp_layout, k_pool.dtype());
+        let vp_buf =
+            candle_core::metal_backend::buffer_o(vp_metal.buffer(), &vp_layout, v_pool.dtype());
+        let slot_buf =
+            candle_core::metal_backend::buffer_o(slot_metal.buffer(), &slot_layout, slots.dtype());
+
+        encoder.set_buffer(0, Some(ks_buf.buffer), ks_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(vs_buf.buffer), vs_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(kp_buf.buffer), kp_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(vp_buf.buffer), vp_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(slot_buf.buffer), slot_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let heads_u32 = heads as u32;
+        let head_dim_u32 = head_dim as u32;
+        let total_slots_u32 = total_slots as u32;
+        encoder.set_bytes(5, &batch_u32);
+        encoder.set_bytes(6, &heads_u32);
+        encoder.set_bytes(7, &head_dim_u32);
+        encoder.set_bytes(8, &total_slots_u32);
+
+        let total = batch * heads * head_dim;
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
             height: 1,
@@ -5213,7 +6478,8 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
         "metal gdn decode qkv conv/norm unsupported shape"
     );
     let (batch, _, channels) = mixed_qkv.dims3()?;
-    let rows = batch * (nk + nk + nv);
+    let rows_per_batch = nk + nk + nv;
+    let rows = batch * rows_per_batch;
     anyhow::ensure!(
         rows <= u32::MAX as usize,
         "metal gdn decode qkv conv/norm shape too large"
@@ -5305,8 +6571,8 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
         encoder.set_bytes(9, &eps);
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
-            width: rows,
-            height: 1,
+            width: rows_per_batch,
+            height: batch,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
@@ -5345,7 +6611,7 @@ inline float kiln_stable_softplus(float x) {
 kernel void kiln_gdn_gates_bf16(
     device const bfloat* a [[buffer(0)]],
     device const bfloat* b [[buffer(1)]],
-    device const bfloat* a_log [[buffer(2)]],
+    device const float* a_log [[buffer(2)]],
     device const bfloat* dt_bias [[buffer(3)]],
     device bfloat* beta_out [[buffer(4)]],
     device bfloat* g_out [[buffer(5)]],
@@ -5382,7 +6648,7 @@ kernel void kiln_gdn_decode_gates_recurrent_bf16(
     device const bfloat* v [[buffer(2)]],
     device const bfloat* a [[buffer(3)]],
     device const bfloat* b [[buffer(4)]],
-    device const bfloat* a_log [[buffer(5)]],
+    device const float* a_log [[buffer(5)]],
     device const bfloat* dt_bias [[buffer(6)]],
     device bfloat* state [[buffer(7)]],
     device bfloat* out [[buffer(8)]],
@@ -5467,11 +6733,11 @@ kernel void kiln_gdn_decode_gates_recurrent_rmsnorm_bf16(
     device const bfloat* v [[buffer(2)]],
     device const bfloat* a [[buffer(3)]],
     device const bfloat* b [[buffer(4)]],
-    device const bfloat* a_log [[buffer(5)]],
+    device const float* a_log [[buffer(5)]],
     device const bfloat* dt_bias [[buffer(6)]],
     device bfloat* state [[buffer(7)]],
     device const bfloat* z [[buffer(8)]],
-    device const bfloat* weight [[buffer(9)]],
+    device const float* weight [[buffer(9)]],
     device bfloat* out [[buffer(10)]],
     constant uint& batch_heads [[buffer(11)]],
     constant uint& dk [[buffer(12)]],
@@ -6064,7 +7330,7 @@ using namespace metal;
 kernel void kiln_gated_rmsnorm_bf16(
     device const bfloat* x [[buffer(0)]],
     device const bfloat* z [[buffer(1)]],
-    device const bfloat* weight [[buffer(2)]],
+    device const float* weight [[buffer(2)]],
     device bfloat* out [[buffer(3)]],
     constant uint& rows [[buffer(4)]],
     constant uint& hidden [[buffer(5)]],
@@ -8601,6 +9867,127 @@ mod tests {
             .contiguous()?)
     }
 
+    fn patterned_bf16_decode_batch(batch: usize, hidden: usize, device: &Device) -> Result<Tensor> {
+        let data: Vec<f32> = (0..(batch * hidden))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.001953125)
+            .collect();
+        Ok(Tensor::from_slice(&data, (batch, 1usize, hidden), device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?)
+    }
+
+    fn patterned_bf16_4d(
+        batch: usize,
+        seq_len: usize,
+        heads: usize,
+        head_dim: usize,
+        device: &Device,
+        modulus: usize,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let elems = batch * seq_len * heads * head_dim;
+        let data: Vec<f32> = (0..elems)
+            .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
+            .collect();
+        Ok(
+            Tensor::from_slice(&data, (batch, seq_len, heads, head_dim), device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?,
+        )
+    }
+
+    fn patterned_rotary_tables_3d(
+        batch: usize,
+        seq_len: usize,
+        half_rotary: usize,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor)> {
+        let elems = batch * seq_len * half_rotary;
+        let mut cos_data = Vec::with_capacity(elems);
+        let mut sin_data = Vec::with_capacity(elems);
+        for b in 0..batch {
+            for t in 0..seq_len {
+                for d in 0..half_rotary {
+                    let angle = ((b * 29 + t * 7 + d) as f32 + 0.5) * 0.03125;
+                    cos_data.push(angle.cos());
+                    sin_data.push(angle.sin());
+                }
+            }
+        }
+        Ok((
+            Tensor::from_slice(&cos_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
+            Tensor::from_slice(&sin_data, (batch, seq_len, half_rotary), device)?.contiguous()?,
+        ))
+    }
+
+    fn mlp_gate_up_reference(x: &Tensor, gate_t: &Tensor, up_t: &Tensor) -> Result<Tensor> {
+        let gate = x.broadcast_matmul(gate_t)?;
+        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let gate = (gate * gate_sig)?;
+        let up = x.broadcast_matmul(up_t)?;
+        Ok((gate * up)?)
+    }
+
+    fn attn_gate_reference(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
+        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        Ok((x * gate_sig)?)
+    }
+
+    fn paged_attn_decode_contiguous_rowwise(
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        start_slots: &[usize],
+        seq_len: usize,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let (batch, _, _, _) = q.dims4()?;
+        anyhow::ensure!(
+            start_slots.len() == batch,
+            "rowwise contiguous decode start slot count mismatch"
+        );
+        let mut rows = Vec::with_capacity(batch);
+        for (idx, &start_slot) in start_slots.iter().enumerate() {
+            let q_row = q.narrow(0, idx, 1)?.contiguous()?;
+            rows.push(metal_paged_attn_decode_contiguous_bf16_d256(
+                &q_row, k_pool, v_pool, start_slot, seq_len, scale,
+            )?);
+        }
+        let row_refs: Vec<&Tensor> = rows.iter().collect();
+        Tensor::cat(&row_refs, 0).context("stack rowwise contiguous decode outputs")
+    }
+
+    fn rotary_qk_rowwise(
+        q: &Tensor,
+        k: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        head_dim: usize,
+        rotary_dim: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let (batch, _, _, _) = q.dims4()?;
+        anyhow::ensure!(
+            cos.dims().len() == 3 && sin.dims().len() == 3,
+            "rowwise rotary qk expects 3D per-batch tables"
+        );
+        let mut q_rows = Vec::with_capacity(batch);
+        let mut k_rows = Vec::with_capacity(batch);
+        for idx in 0..batch {
+            let q_row = q.narrow(0, idx, 1)?.contiguous()?;
+            let k_row = k.narrow(0, idx, 1)?.contiguous()?;
+            let cos_row = cos.narrow(0, idx, 1)?.squeeze(0)?.contiguous()?;
+            let sin_row = sin.narrow(0, idx, 1)?.squeeze(0)?.contiguous()?;
+            let (q_rot, k_rot) = metal_rotary_embedding_bf16(
+                &q_row, &k_row, &cos_row, &sin_row, head_dim, rotary_dim,
+            )?;
+            q_rows.push(q_rot);
+            k_rows.push(k_rot);
+        }
+        let q_refs: Vec<&Tensor> = q_rows.iter().collect();
+        let k_refs: Vec<&Tensor> = k_rows.iter().collect();
+        Ok((Tensor::cat(&q_refs, 0)?, Tensor::cat(&k_refs, 0)?))
+    }
+
     fn bench_metal_tensor_op<F>(
         device: &Device,
         warmup: usize,
@@ -8626,6 +10013,251 @@ mod tests {
         device.synchronize()?;
         std::hint::black_box(last.as_ref().map(Tensor::dims));
         Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn bench_metal_unit_op<F>(
+        device: &Device,
+        warmup: usize,
+        iters: usize,
+        mut op: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        for _ in 0..warmup {
+            op()?;
+        }
+        device.synchronize()?;
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            op()?;
+        }
+        device.synchronize()?;
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn bench_metal_pair_op<F>(
+        device: &Device,
+        warmup: usize,
+        iters: usize,
+        mut op: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> Result<(Tensor, Tensor)>,
+    {
+        let mut last = None;
+        for _ in 0..warmup {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((a, b)) = &last {
+            std::hint::black_box((a.dims(), b.dims()));
+        }
+        drop(last);
+
+        let start = Instant::now();
+        let mut last = None;
+        for _ in 0..iters {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((a, b)) = &last {
+            std::hint::black_box((a.dims(), b.dims()));
+        }
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn bench_metal_qkv_op<F>(device: &Device, warmup: usize, iters: usize, mut op: F) -> Result<f64>
+    where
+        F: FnMut() -> Result<(Tensor, Tensor, Tensor)>,
+    {
+        let mut last = None;
+        for _ in 0..warmup {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((q, k, v)) = &last {
+            std::hint::black_box((q.dims(), k.dims(), v.dims()));
+        }
+        drop(last);
+
+        let start = Instant::now();
+        let mut last = None;
+        for _ in 0..iters {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((q, k, v)) = &last {
+            std::hint::black_box((q.dims(), k.dims(), v.dims()));
+        }
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn bench_metal_gdn_in_proj_op<F>(
+        device: &Device,
+        warmup: usize,
+        iters: usize,
+        mut op: F,
+    ) -> Result<f64>
+    where
+        F: FnMut() -> Result<(Tensor, Tensor, Tensor, Tensor)>,
+    {
+        let mut last = None;
+        for _ in 0..warmup {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((qkv, z, a, b)) = &last {
+            std::hint::black_box((qkv.dims(), z.dims(), a.dims(), b.dims()));
+        }
+        drop(last);
+
+        let start = Instant::now();
+        let mut last = None;
+        for _ in 0..iters {
+            last = Some(op()?);
+        }
+        device.synchronize()?;
+        if let Some((qkv, z, a, b)) = &last {
+            std::hint::black_box((qkv.dims(), z.dims(), a.dims(), b.dims()));
+        }
+        Ok(start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64)
+    }
+
+    fn gdn_in_proj_broadcast_reference(
+        x: &Tensor,
+        qkv_t: &Tensor,
+        z_t: &Tensor,
+        a_t: &Tensor,
+        b_t: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        Ok((
+            x.broadcast_matmul(qkv_t)?,
+            x.broadcast_matmul(z_t)?,
+            x.broadcast_matmul(a_t)?,
+            x.broadcast_matmul(b_t)?,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qkv_conv_norm_split_reference(
+        mixed_qkv: &Tensor,
+        weight: &Tensor,
+        conv_state: &mut Tensor,
+        kernel_size: usize,
+        nk: usize,
+        dk: usize,
+        nv: usize,
+        dv: usize,
+        q_scale: f64,
+        eps: f64,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let (batch, seq_len, _) = mixed_qkv.dims3()?;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let conv = metal_causal_conv1d_update_bf16_f32_k4(
+            &mixed_qkv.transpose(1, 2)?.contiguous()?,
+            weight,
+            conv_state,
+            kernel_size,
+        )?
+        .transpose(1, 2)?;
+        let q = conv
+            .narrow(2, 0, qk_dim)?
+            .reshape((batch, seq_len, nk, dk))?;
+        let k = conv
+            .narrow(2, qk_dim, qk_dim)?
+            .reshape((batch, seq_len, nk, dk))?;
+        let v = conv
+            .narrow(2, 2 * qk_dim, v_dim)?
+            .reshape((batch, seq_len, nv, dv))?
+            .to_dtype(DType::BF16)?;
+        let (q, k) = gdn_qk_norm_reference(&q, &k, q_scale, eps)?;
+        Ok((q, k, v))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qkv_conv_norm_row_fused_reference(
+        mixed_qkv: &Tensor,
+        weight: &Tensor,
+        state_data: &[f32],
+        kernel_size: usize,
+        nk: usize,
+        dk: usize,
+        nv: usize,
+        dv: usize,
+        q_scale: f32,
+        eps: f32,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        let (batch, _, channels) = mixed_qkv.dims3()?;
+        let state_width = kernel_size - 1;
+        anyhow::ensure!(
+            state_data.len() == batch * channels * state_width,
+            "row fused reference state data shape mismatch"
+        );
+        let mut q_rows = Vec::with_capacity(batch);
+        let mut k_rows = Vec::with_capacity(batch);
+        let mut v_rows = Vec::with_capacity(batch);
+        let mut state_rows = Vec::with_capacity(batch);
+
+        for b in 0..batch {
+            let row = mixed_qkv.narrow(0, b, 1)?.contiguous()?;
+            let state_start = b * channels * state_width;
+            let state_end = state_start + channels * state_width;
+            let mut state_row = Tensor::from_slice(
+                &state_data[state_start..state_end],
+                (1usize, channels, state_width),
+                mixed_qkv.device(),
+            )?
+            .contiguous()?;
+            let (q, k, v) = metal_gdn_decode_qkv_conv_norm_bf16(
+                &row,
+                weight,
+                &mut state_row,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv,
+                q_scale,
+                eps,
+            )?;
+            q_rows.push(q);
+            k_rows.push(k);
+            v_rows.push(v);
+            state_rows.push(state_row);
+        }
+
+        let q_refs: Vec<&Tensor> = q_rows.iter().collect();
+        let k_refs: Vec<&Tensor> = k_rows.iter().collect();
+        let v_refs: Vec<&Tensor> = v_rows.iter().collect();
+        let state_refs: Vec<&Tensor> = state_rows.iter().collect();
+        Ok((
+            Tensor::cat(&q_refs, 0)?,
+            Tensor::cat(&k_refs, 0)?,
+            Tensor::cat(&v_refs, 0)?,
+            Tensor::cat(&state_refs, 0)?,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_gates_recurrent_rmsnorm_split_reference(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+        state: &mut Tensor,
+        z: &Tensor,
+        weight: &Tensor,
+        eps: f32,
+    ) -> Result<Tensor> {
+        let (beta, g) = metal_gdn_gates_bf16(a, b, a_log, dt_bias)?;
+        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, &beta, &g, state)?;
+        metal_gated_rms_norm_bf16(&out, z, weight, eps)
     }
 
     fn bench_transposed_coop_projection_case(
@@ -8714,6 +10346,1100 @@ mod tests {
             broadcast_us / tile4_us,
             broadcast_us / tile8_us,
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_metal_rotary_embedding_batched_position_tables_match_rowwise() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_rotary_embedding_batched_position_tables_match_rowwise"
+            );
+            return Ok(());
+        };
+
+        let batch = 3usize;
+        let seq_len = 1usize;
+        let q_heads = 4usize;
+        let k_heads = 2usize;
+        let head_dim = 16usize;
+        let rotary_dim = 8usize;
+        let q = patterned_bf16_4d(batch, seq_len, q_heads, head_dim, &device, 37, 0.03125)?;
+        let k = patterned_bf16_4d(batch, seq_len, k_heads, head_dim, &device, 41, 0.03125)?;
+        let (cos, sin) = patterned_rotary_tables_3d(batch, seq_len, rotary_dim / 2, &device)?;
+        device.synchronize()?;
+
+        assert!(metal_rotary_embedding_supports(
+            &q, &k, &cos, &sin, head_dim, rotary_dim
+        ));
+        let (q_batched, k_batched) =
+            metal_rotary_embedding_bf16(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+        let (q_rowwise, k_rowwise) = rotary_qk_rowwise(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+        device.synchronize()?;
+
+        assert_eq!(q_batched.dims(), q.dims());
+        assert_eq!(k_batched.dims(), k.dims());
+        let q_max = max_abs_diff(&q_rowwise, &q_batched)?;
+        let k_max = max_abs_diff(&k_rowwise, &k_batched)?;
+        assert!(
+            q_max < 1e-6 && k_max < 1e-6,
+            "batched rotary position tables differ from rowwise q={q_max:e} k={k_max:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_rotary_embedding_batched_position_tables_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_ROTARY_BATCH_TABLE_BENCH_WARMUP", 20);
+        let iters = env_usize("KILN_METAL_ROTARY_BATCH_TABLE_BENCH_ITERS", 200);
+        let seq_len = 1usize;
+        let q_heads = 16usize;
+        let k_heads = 4usize;
+        let head_dim = 256usize;
+        let rotary_dim = 64usize;
+
+        for batch in [1usize, 2, 4, 8] {
+            let q = patterned_bf16_4d(batch, seq_len, q_heads, head_dim, &device, 97, 0.0005)?;
+            let k = patterned_bf16_4d(batch, seq_len, k_heads, head_dim, &device, 89, 0.0007)?;
+            let (cos, sin) = patterned_rotary_tables_3d(batch, seq_len, rotary_dim / 2, &device)?;
+            device.synchronize()?;
+
+            assert!(metal_rotary_embedding_supports(
+                &q, &k, &cos, &sin, head_dim, rotary_dim
+            ));
+            let (q_rowwise, k_rowwise) =
+                rotary_qk_rowwise(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+            let (q_batched, k_batched) =
+                metal_rotary_embedding_bf16(&q, &k, &cos, &sin, head_dim, rotary_dim)?;
+            device.synchronize()?;
+
+            let q_max = max_abs_diff(&q_rowwise, &q_batched)?;
+            let k_max = max_abs_diff(&k_rowwise, &k_batched)?;
+            assert!(
+                q_max < 1e-6 && k_max < 1e-6,
+                "Qwen3.5 rotary batch={batch} rowwise max_abs_diff q={q_max:e} k={k_max:e}"
+            );
+
+            let rowwise_us = bench_metal_pair_op(&device, warmup, iters, || {
+                rotary_qk_rowwise(&q, &k, &cos, &sin, head_dim, rotary_dim)
+                    .context("bench rowwise rotary qk per-batch tables")
+            })?;
+            let batched_us = bench_metal_pair_op(&device, warmup, iters, || {
+                metal_rotary_embedding_bf16(&q, &k, &cos, &sin, head_dim, rotary_dim)
+                    .context("bench batched rotary qk per-batch tables")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 rotary QK batched position tables decode BF16: \
+                 batch={batch} physical_tokens={physical_tokens} \
+                 q=[{batch},{seq_len},{q_heads},{head_dim}] \
+                 k=[{batch},{seq_len},{k_heads},{head_dim}] \
+                 cos/sin=[{batch},{seq_len},{}] warmup={warmup} iters={iters} \
+                 rowwise={rowwise_us:.3} us batched={batched_us:.3} us speedup={:.3}x \
+                 q_max_abs_diff={q_max:.6e} k_max_abs_diff={k_max:.6e}",
+                rotary_dim / 2,
+                rowwise_us / batched_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_attn_gate_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_ATTN_GATE_BATCH_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_ATTN_GATE_BATCH_BENCH_ITERS", 20);
+        let hidden = 4096usize;
+
+        for batch in [1usize, 2, 4, 8] {
+            let x_data: Vec<f32> = (0..batch * hidden)
+                .map(|i| ((i % 29) as f32 - 14.0) * 0.03125)
+                .collect();
+            let gate_data: Vec<f32> = (0..batch * hidden)
+                .map(|i| ((i % 37) as f32 - 18.0) * 0.0625)
+                .collect();
+            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let gate = Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            device.synchronize()?;
+            assert!(metal_attn_gate_sigmoid_mul_supports(&x, &gate));
+
+            let reference = attn_gate_reference(&x, &gate)?;
+            let fused = metal_attn_gate_sigmoid_mul_bf16(&x, &gate)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Qwen3.5 attention gate batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "Qwen3.5 attention gate batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                attn_gate_reference(&x, &gate).context("bench fallback attention gate")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_attn_gate_sigmoid_mul_bf16(&x, &gate).context("bench fused attention gate")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 attention gate decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x/gate=[{batch},1,{hidden}] \
+                 warmup={warmup} iters={iters} fallback={fallback_us:.3} us \
+                 fused={fused_us:.3} us speedup={:.3}x max_abs_diff={max:.6e} \
+                 mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_mlp_gate_up_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS", 20);
+        let hidden = 2560usize;
+        let intermediate = 9216usize;
+        let gate_t = patterned_bf16_2d(hidden, intermediate, &device, 37, 0.0009765625)?;
+        let up_t = patterned_bf16_2d(hidden, intermediate, &device, 43, 0.0009765625)?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+            device.synchronize()?;
+            assert!(metal_mlp_gate_up_supports(&x, &gate_t, &up_t));
+
+            let reference = mlp_gate_up_reference(&x, &gate_t, &up_t)?;
+            let fused = metal_mlp_gate_up_bf16(&x, &gate_t, &up_t)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Qwen3.5 MLP gate/up batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "Qwen3.5 MLP gate/up batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                mlp_gate_up_reference(&x, &gate_t, &up_t).context("bench fallback MLP gate/up")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_mlp_gate_up_bf16(&x, &gate_t, &up_t).context("bench fused MLP gate/up")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 MLP gate/up decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                 gate_t/up_t=[{hidden},{intermediate}] warmup={warmup} iters={iters} \
+                 fallback={fallback_us:.3} us fused={fused_us:.3} us \
+                 speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_transposed_coop_gemv_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_BATCH_GEMV_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_BATCH_GEMV_BENCH_ITERS", 20);
+        let input_dim = 9216usize;
+        let output_dim = 2560usize;
+        let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 37, 0.0009765625)?;
+        device.synchronize()?;
+
+        for batch in [2usize, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+            device.synchronize()?;
+            assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                &x, &weight_t
+            ));
+
+            let reference = x.broadcast_matmul(&weight_t)?;
+            let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 1.5e-1,
+                "Qwen3.5 batch transposed coop GEMV batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2.5e-2,
+                "Qwen3.5 batch transposed coop GEMV batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                x.broadcast_matmul(&weight_t)
+                    .context("bench fallback batch transposed GEMV")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                    .context("bench fused batch transposed coop GEMV")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 transposed GEMV decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x=[{batch},1,{input_dim}] \
+                 weight_t=[{input_dim},{output_dim}] warmup={warmup} iters={iters} \
+                 fallback={fallback_us:.3} us fused_tile8={fused_us:.3} us \
+                 speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_lm_head_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_WARMUP", 1);
+        let iters = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_ITERS", 3);
+        let hidden = 2560usize;
+        let vocab = env_usize("KILN_METAL_LM_HEAD_BATCH_BENCH_VOCAB", 248_320);
+        let weight_t = Tensor::zeros((hidden, vocab), DType::BF16, &device)?;
+        device.synchronize()?;
+
+        for batch in [2usize, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+            device.synchronize()?;
+            assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                &x, &weight_t
+            ));
+
+            let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+            device.synchronize()?;
+            let reference = x.broadcast_matmul(&weight_t);
+            let fallback_check = match reference {
+                Ok(reference) => {
+                    let max = max_abs_diff(&reference, &fused)?;
+                    let mean = mean_abs_diff(&reference, &fused)?;
+                    assert!(
+                        max < 2e-2,
+                        "Qwen3.5 LM-head batch={batch} max_abs_diff={max:e} exceeds tolerance"
+                    );
+                    assert!(
+                        mean < 2e-3,
+                        "Qwen3.5 LM-head batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+                    );
+                    Some((max, mean))
+                }
+                Err(err) => {
+                    eprintln!(
+                        "synthetic Metal Qwen3.5 LM-head decode batch BF16: batch={batch} \
+                         fallback_reference_failed={err:#}"
+                    );
+                    None
+                }
+            };
+
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t).context("bench batch LM-head GEMV")
+            })?;
+            let physical_tokens = batch;
+            match fallback_check {
+                Some((max, mean)) => {
+                    let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                        x.broadcast_matmul(&weight_t)
+                            .context("bench fallback LM-head broadcast_matmul")
+                    })?;
+                    eprintln!(
+                        "synthetic Metal Qwen3.5 LM-head decode batch BF16: batch={batch} \
+                         physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                         weight_t=[{hidden},{vocab}] warmup={warmup} iters={iters} \
+                         fallback={fallback_us:.3} us fused={fused_us:.3} us \
+                         speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                        fallback_us / fused_us,
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "synthetic Metal Qwen3.5 LM-head decode batch BF16: batch={batch} \
+                         physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                         weight_t=[{hidden},{vocab}] warmup={warmup} iters={iters} \
+                         fallback=failed fused={fused_us:.3} us"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_lm_head_argmax_rows_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
+        let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        let rows_disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
+        unsafe {
+            std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
+        }
+
+        let result = (|| -> Result<()> {
+            let warmup = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_WARMUP", 1);
+            let iters = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_ITERS", 3);
+            let hidden = 2560usize;
+            let vocab = env_usize("KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_VOCAB", 248_320);
+            let weight_t = Tensor::zeros((hidden, vocab), DType::BF16, &device)?.contiguous()?;
+            device.synchronize()?;
+
+            for batch in [2usize, 4, 8] {
+                let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+                device.synchronize()?;
+                assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                    &x, &weight_t
+                ));
+                assert!(metal_lm_head_argmax_rows_supports(&x, &weight_t));
+
+                let materialized_logits = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+                let reference = crate::sampling::greedy_sample_rows(&materialized_logits)?;
+                let fused = metal_lm_head_argmax_rows_bf16(&x, &weight_t)?;
+                assert_eq!(fused, reference);
+
+                let materialized_us = bench_metal_unit_op(&device, warmup, iters, || {
+                    let logits = metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                        .context("bench materialized batch LM-head logits")?;
+                    let ids = crate::sampling::greedy_sample_rows(&logits)
+                        .context("bench materialized batch LM-head greedy rows")?;
+                    std::hint::black_box(ids);
+                    Ok(())
+                })?;
+                let fused_us = bench_metal_unit_op(&device, warmup, iters, || {
+                    let ids = metal_lm_head_argmax_rows_bf16(&x, &weight_t)
+                        .context("bench fused batch LM-head argmax rows")?;
+                    std::hint::black_box(ids);
+                    Ok(())
+                })?;
+                let physical_tokens = batch;
+
+                eprintln!(
+                    "synthetic Metal Qwen3.5 LM-head argmax rows decode batch BF16: \
+                     batch={batch} physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                     weight_t=[{hidden},{vocab}] warmup={warmup} iters={iters} \
+                     materialized_gemv_argmax={materialized_us:.3} us \
+                     fused_argmax_rows={fused_us:.3} us speedup={:.3}x",
+                    materialized_us / fused_us,
+                );
+            }
+
+            Ok(())
+        })();
+
+        unsafe {
+            match enable_prev {
+                Some(value) => std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(ENABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match rows_disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS),
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_paged_kv_write_token_major_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_WARMUP", 20);
+        let iters = env_usize("KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_ITERS", 200);
+        let total_slots = env_usize("KILN_METAL_PAGED_KV_WRITE_BATCH_BENCH_SLOTS", 4096);
+        let heads = 4usize;
+        let head_dim = 256usize;
+        let row_stride = heads * head_dim;
+
+        for batch in [1usize, 2, 4, 8] {
+            let elems = batch * row_stride;
+            let k_data: Vec<f32> = (0..elems)
+                .map(|i| ((i % 37) as f32 - 18.0) * 0.015625)
+                .collect();
+            let v_data: Vec<f32> = (0..elems)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+                .collect();
+            let slots_data: Vec<u32> = (0..batch)
+                .map(|idx| ((idx * 17 + 5) % total_slots) as u32)
+                .collect();
+            let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let v = Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
+            let k_rows: Vec<Tensor> = (0..batch)
+                .map(|idx| k.narrow(0, idx, 1).and_then(|row| row.contiguous()))
+                .collect::<candle_core::Result<Vec<_>>>()?;
+            let v_rows: Vec<Tensor> = (0..batch)
+                .map(|idx| v.narrow(0, idx, 1).and_then(|row| row.contiguous()))
+                .collect::<candle_core::Result<Vec<_>>>()?;
+            let rowwise_slots: Vec<usize> = slots_data.iter().map(|&slot| slot as usize).collect();
+            let mut k_pool_row =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let mut v_pool_row =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let mut k_pool_batch =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let mut v_pool_batch =
+                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            device.synchronize()?;
+
+            assert!(metal_paged_kv_write_token_major_batch_supports(
+                &k_pool_batch,
+                &v_pool_batch,
+                &slots,
+                &k,
+                &v
+            ));
+            for idx in 0..batch {
+                assert!(metal_paged_kv_write_token_major_supports(
+                    &k_pool_row,
+                    &v_pool_row,
+                    rowwise_slots[idx],
+                    &k_rows[idx],
+                    &v_rows[idx],
+                ));
+                metal_paged_kv_write_token_major_bf16(
+                    &mut k_pool_row,
+                    &mut v_pool_row,
+                    rowwise_slots[idx],
+                    &k_rows[idx],
+                    &v_rows[idx],
+                )?;
+            }
+            metal_paged_kv_write_token_major_batch_bf16(
+                &mut k_pool_batch,
+                &mut v_pool_batch,
+                &slots,
+                &k,
+                &v,
+            )?;
+            device.synchronize()?;
+
+            let k_max = max_abs_diff(&k_pool_row, &k_pool_batch)?;
+            let v_max = max_abs_diff(&v_pool_row, &v_pool_batch)?;
+            assert!(
+                k_max < 1e-6 && v_max < 1e-6,
+                "Qwen3.5 paged KV batch write batch={batch} max_abs_diff k={k_max:e} v={v_max:e} exceeds tolerance"
+            );
+
+            let rowwise_us = bench_metal_unit_op(&device, warmup, iters, || {
+                for idx in 0..batch {
+                    metal_paged_kv_write_token_major_bf16(
+                        &mut k_pool_row,
+                        &mut v_pool_row,
+                        rowwise_slots[idx],
+                        &k_rows[idx],
+                        &v_rows[idx],
+                    )?;
+                }
+                Ok(())
+            })?;
+            let batch_us = bench_metal_unit_op(&device, warmup, iters, || {
+                metal_paged_kv_write_token_major_batch_bf16(
+                    &mut k_pool_batch,
+                    &mut v_pool_batch,
+                    &slots,
+                    &k,
+                    &v,
+                )
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 paged KV token-major write decode batch BF16: \
+                 batch={batch} physical_tokens={physical_tokens} \
+                 k/v=[{batch},1,{heads},{head_dim}] pools=[{total_slots},{heads},{head_dim}] \
+                 warmup={warmup} iters={iters} rowwise={rowwise_us:.3} us \
+                 batched={batch_us:.3} us speedup={:.3}x \
+                 k_max_abs_diff={k_max:.6e} v_max_abs_diff={v_max:.6e}",
+                rowwise_us / batch_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_paged_attn_decode_contiguous_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_WARMUP", 3);
+        let iters = env_usize("KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_ITERS", 10);
+        let total_slots = env_usize("KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_SLOTS", 4096);
+        let seq_len = env_usize("KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_SEQ_LEN", 512);
+        let q_heads = 16usize;
+        let kv_heads = 4usize;
+        let head_dim = 256usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let kv_elems = total_slots * kv_heads * head_dim;
+        let k_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 131) as f32 - 65.0) * 0.0004)
+            .collect();
+        let v_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
+            .collect();
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let q_elems = batch * q_heads * head_dim;
+            let q_data: Vec<f32> = (0..q_elems)
+                .map(|i| ((i % 97) as f32 - 48.0) * 0.0005)
+                .collect();
+            let start_slots_data: Vec<u32> =
+                (0..batch).map(|idx| (17 + idx * 384) as u32).collect();
+            let start_slots_usize: Vec<usize> =
+                start_slots_data.iter().map(|&slot| slot as usize).collect();
+            for &start_slot in &start_slots_usize {
+                anyhow::ensure!(
+                    start_slot + seq_len <= total_slots,
+                    "bench start slot out of range"
+                );
+            }
+            let q = Tensor::from_slice(&q_data, (batch, q_heads, 1usize, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let start_slots =
+                Tensor::from_slice(&start_slots_data, batch, &device)?.contiguous()?;
+            device.synchronize()?;
+
+            assert!(metal_paged_attn_decode_contiguous_batch_supports(
+                &q,
+                &k_pool,
+                &v_pool,
+                &start_slots,
+                seq_len
+            ));
+            let rowwise = paged_attn_decode_contiguous_rowwise(
+                &q,
+                &k_pool,
+                &v_pool,
+                &start_slots_usize,
+                seq_len,
+                scale,
+            )?;
+            let batched = metal_paged_attn_decode_contiguous_batch_bf16_d256(
+                &q,
+                &k_pool,
+                &v_pool,
+                &start_slots,
+                seq_len,
+                scale,
+            )?;
+            device.synchronize()?;
+
+            let max = max_abs_diff(&rowwise, &batched)?;
+            let mean = mean_abs_diff(&rowwise, &batched)?;
+            assert!(
+                max < 1e-6,
+                "Qwen3.5 contiguous paged decode batch={batch} max_abs_diff={max:e}"
+            );
+
+            let rowwise_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                paged_attn_decode_contiguous_rowwise(
+                    &q,
+                    &k_pool,
+                    &v_pool,
+                    &start_slots_usize,
+                    seq_len,
+                    scale,
+                )
+                .context("bench rowwise contiguous paged decode attention")
+            })?;
+            let batched_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_paged_attn_decode_contiguous_batch_bf16_d256(
+                    &q,
+                    &k_pool,
+                    &v_pool,
+                    &start_slots,
+                    seq_len,
+                    scale,
+                )
+                .context("bench batched contiguous paged decode attention")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 contiguous paged decode attention batch BF16: \
+                 batch={batch} physical_tokens={physical_tokens} \
+                 q=[{batch},{q_heads},1,{head_dim}] pools=[{total_slots},{kv_heads},{head_dim}] \
+                 seq_len={seq_len} warmup={warmup} iters={iters} \
+                 rowwise={rowwise_us:.3} us batched={batched_us:.3} us speedup={:.3}x \
+                 max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                rowwise_us / batched_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_decode_qkv_conv_norm_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_GDN_QKV_CONV_NORM_BATCH_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_GDN_QKV_CONV_NORM_BATCH_BENCH_ITERS", 20);
+        let nk = 16usize;
+        let dk = 128usize;
+        let nv = 32usize;
+        let dv = 128usize;
+        let kernel_size = 4usize;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let channels = qk_dim * 2 + v_dim;
+        let scale = 1.0f32 / (dk as f32).sqrt();
+        let weight = patterned_bf16_2d(channels, kernel_size, &device, 37, 0.0009765625)?
+            .reshape((channels, 1usize, kernel_size))?
+            .contiguous()?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let mixed_qkv = patterned_bf16_decode_batch(batch, channels, &device)?;
+            let state_data: Vec<f32> = (0..(batch * channels * (kernel_size - 1)))
+                .map(|i| ((i % 43) as f32 - 21.0) * 0.0009765625)
+                .collect();
+            let state_init =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            device.synchronize()?;
+            assert!(metal_gdn_decode_qkv_conv_norm_supports(
+                &mixed_qkv,
+                &weight,
+                &state_init,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv
+            ));
+
+            let (q_ref, k_ref, v_ref, state_ref) = gdn_decode_qkv_conv_norm_row_fused_reference(
+                &mixed_qkv,
+                &weight,
+                &state_data,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv,
+                scale,
+                1e-6,
+            )?;
+            let mut state_fused =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
+                &mixed_qkv,
+                &weight,
+                &mut state_fused,
+                kernel_size,
+                nk,
+                dk,
+                nv,
+                dv,
+                scale,
+                1e-6,
+            )?;
+            device.synchronize()?;
+
+            let q_max = max_abs_diff(&q_ref, &q_fused)?;
+            let k_max = max_abs_diff(&k_ref, &k_fused)?;
+            let v_max = max_abs_diff(&v_ref, &v_fused)?;
+            let state_max = max_abs_diff(&state_ref, &state_fused)?;
+            assert!(
+                q_max < 1e-6 && k_max < 1e-6,
+                "Qwen3.5 GDN qkv-conv/norm batch={batch} q/k row-fused max_abs_diff q={q_max:e} k={k_max:e} exceeds tolerance"
+            );
+            assert!(
+                v_max < 1e-6 && state_max < 1e-6,
+                "Qwen3.5 GDN qkv-conv/norm batch={batch} v/state row-fused max_abs_diff v={v_max:e} state={state_max:e} exceeds tolerance"
+            );
+
+            let mut split_state =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            let split_us = bench_metal_qkv_op(&device, warmup, iters, || {
+                gdn_decode_qkv_conv_norm_split_reference(
+                    &mixed_qkv,
+                    &weight,
+                    &mut split_state,
+                    kernel_size,
+                    nk,
+                    dk,
+                    nv,
+                    dv,
+                    scale as f64,
+                    1e-6,
+                )
+                .context("bench split GDN qkv conv/norm")
+            })?;
+            let mut fused_state =
+                Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                    .contiguous()?;
+            let fused_us = bench_metal_qkv_op(&device, warmup, iters, || {
+                metal_gdn_decode_qkv_conv_norm_bf16(
+                    &mixed_qkv,
+                    &weight,
+                    &mut fused_state,
+                    kernel_size,
+                    nk,
+                    dk,
+                    nv,
+                    dv,
+                    scale,
+                    1e-6,
+                )
+                .context("bench fused GDN qkv conv/norm")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN qkv-conv/norm decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} mixed_qkv=[{batch},1,{channels}] \
+                 weight=[{channels},1,{kernel_size}] warmup={warmup} iters={iters} \
+                 split={split_us:.3} us fused={fused_us:.3} us speedup={:.3}x \
+                 row_q_max_abs_diff={q_max:.6e} row_k_max_abs_diff={k_max:.6e} \
+                 row_v_max_abs_diff={v_max:.6e} row_state_max_abs_diff={state_max:.6e}",
+                split_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_in_proj_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP", 3);
+        let iters = env_usize("KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS", 10);
+        let hidden = QWEN35_HIDDEN;
+        let qkv_dim = 8192usize;
+        let z_dim = 4096usize;
+        let nv = 32usize;
+        let qkv_t = patterned_bf16_2d(hidden, qkv_dim, &device, 37, 0.0009765625)?;
+        let z_t = patterned_bf16_2d(hidden, z_dim, &device, 43, 0.0009765625)?;
+        let a_t = patterned_bf16_2d(hidden, nv, &device, 29, 0.00390625)?;
+        let b_t = patterned_bf16_2d(hidden, nv, &device, 31, 0.00390625)?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+            assert!(metal_gdn_in_proj_decode_supports(
+                &x, &qkv_t, &z_t, &a_t, &b_t
+            ));
+            let (qkv_ref, z_ref, a_ref, b_ref) =
+                gdn_in_proj_broadcast_reference(&x, &qkv_t, &z_t, &a_t, &b_t)?;
+            let (qkv_fused, z_fused, a_fused, b_fused) =
+                metal_gdn_in_proj_decode_bf16(&x, &qkv_t, &z_t, &a_t, &b_t)?;
+            device.synchronize()?;
+
+            assert_eq!(qkv_fused.dims(), &[batch, 1usize, qkv_dim]);
+            assert_eq!(z_fused.dims(), &[batch, 1usize, z_dim]);
+            assert_eq!(a_fused.dims(), &[batch, 1usize, nv]);
+            assert_eq!(b_fused.dims(), &[batch, 1usize, nv]);
+            assert!(qkv_fused.is_contiguous());
+            assert!(z_fused.is_contiguous());
+            assert!(a_fused.is_contiguous());
+            assert!(b_fused.is_contiguous());
+
+            let qkv_max = max_abs_diff(&qkv_ref, &qkv_fused)?;
+            let z_max = max_abs_diff(&z_ref, &z_fused)?;
+            let a_max = max_abs_diff(&a_ref, &a_fused)?;
+            let b_max = max_abs_diff(&b_ref, &b_fused)?;
+            let max_diff = qkv_max.max(z_max).max(a_max).max(b_max);
+            assert!(
+                max_diff < 2e-2,
+                "Qwen3.5 GDN in-proj batch={batch} max_abs_diff={max_diff:e} exceeds tolerance"
+            );
+
+            let broadcast_us = bench_metal_gdn_in_proj_op(&device, warmup, iters, || {
+                gdn_in_proj_broadcast_reference(&x, &qkv_t, &z_t, &a_t, &b_t)
+                    .context("bench broadcast GDN in-proj")
+            })?;
+            let fused_us = bench_metal_gdn_in_proj_op(&device, warmup, iters, || {
+                metal_gdn_in_proj_decode_bf16(&x, &qkv_t, &z_t, &a_t, &b_t)
+                    .context("bench fused GDN in-proj")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN in-proj decode batch BF16: batch={batch} \
+                 physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                 qkv_t=[{hidden},{qkv_dim}] z_t=[{hidden},{z_dim}] a/b_t=[{hidden},{nv}] \
+                 warmup={warmup} iters={iters} broadcast={broadcast_us:.3} us \
+                 fused={fused_us:.3} us speedup={:.3}x max_abs_diff={max_diff:.6e}",
+                broadcast_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_decode_gates_recurrent_rmsnorm_decode_batch_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize(
+            "KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_WARMUP",
+            5,
+        );
+        let iters = env_usize(
+            "KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_ITERS",
+            20,
+        );
+        let q_heads = 16usize;
+        let value_heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let seq_len = 1usize;
+        let a_log_data: Vec<f32> = (0..value_heads)
+            .map(|idx| ((idx % 11) as f32 - 5.0) * 0.04)
+            .collect();
+        let dt_bias_data: Vec<f32> = (0..value_heads)
+            .map(|idx| ((idx % 13) as f32 - 6.0) * 0.05)
+            .collect();
+        let weight_data: Vec<f32> = (0..dv)
+            .map(|idx| 0.9 + ((idx % 17) as f32) * 0.01)
+            .collect();
+        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?.contiguous()?;
+        let dt_bias = Tensor::from_slice(&dt_bias_data, value_heads, &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight = Tensor::from_slice(&weight_data, dv, &device)?.contiguous()?;
+        device.synchronize()?;
+
+        for batch in [1usize, 2, 4, 8] {
+            let qk_elems = batch * seq_len * q_heads * dk;
+            let v_elems = batch * seq_len * value_heads * dv;
+            let gate_elems = batch * seq_len * value_heads;
+            let state_elems = batch * value_heads * dk * dv;
+            let q_data: Vec<f32> = (0..qk_elems)
+                .map(|idx| ((idx % 31) as f32 - 15.0) * 0.00390625)
+                .collect();
+            let k_data: Vec<f32> = (0..qk_elems)
+                .map(|idx| ((idx % 29) as f32 - 14.0) * 0.00390625)
+                .collect();
+            let v_data: Vec<f32> = (0..v_elems)
+                .map(|idx| ((idx % 37) as f32 - 18.0) * 0.005859375)
+                .collect();
+            let a_data: Vec<f32> = (0..gate_elems)
+                .map(|idx| ((idx % 17) as f32 - 8.0) * 0.08)
+                .collect();
+            let b_data: Vec<f32> = (0..gate_elems)
+                .map(|idx| ((idx % 19) as f32 - 9.0) * 0.07)
+                .collect();
+            let z_data: Vec<f32> = (0..v_elems)
+                .map(|idx| ((idx % 23) as f32 - 11.0) * 0.01)
+                .collect();
+            let state_data: Vec<f32> = (0..state_elems)
+                .map(|idx| ((idx % 41) as f32 - 20.0) * 0.003)
+                .collect();
+
+            let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let k = Tensor::from_slice(&k_data, (batch, seq_len, q_heads, dk), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let v = Tensor::from_slice(&v_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let a = Tensor::from_slice(&a_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let z = Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+
+            let mut state_split =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            assert!(metal_gdn_decode_gates_recurrent_supports(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &state_split
+            ));
+            assert!(metal_gdn_decode_gates_recurrent_rmsnorm_supports(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &state_split,
+                &z,
+                &weight
+            ));
+
+            let out_split = gdn_decode_gates_recurrent_rmsnorm_split_reference(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &mut state_split,
+                &z,
+                &weight,
+                1e-6,
+            )?;
+            let mut state_fused =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            let out_fused = metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &a_log,
+                &dt_bias,
+                &mut state_fused,
+                &z,
+                &weight,
+                1e-6,
+            )?;
+            device.synchronize()?;
+
+            let out_max = max_abs_diff(&out_split, &out_fused)?;
+            let state_max = max_abs_diff(&state_split, &state_fused)?;
+            assert!(
+                out_max < 5e-2,
+                "Qwen3.5 GDN gates+recurrent+rmsnorm batch={batch} out max_abs_diff={out_max:e} exceeds tolerance"
+            );
+            assert!(
+                state_max < 3e-2,
+                "Qwen3.5 GDN gates+recurrent+rmsnorm batch={batch} state max_abs_diff={state_max:e} exceeds tolerance"
+            );
+
+            let mut split_state =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            let split_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                gdn_decode_gates_recurrent_rmsnorm_split_reference(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &a_log,
+                    &dt_bias,
+                    &mut split_state,
+                    &z,
+                    &weight,
+                    1e-6,
+                )
+                .context("bench split GDN gates+recurrent+rmsnorm")
+            })?;
+            let mut fused_state =
+                Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
+                    .to_dtype(DType::BF16)?
+                    .contiguous()?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &a_log,
+                    &dt_bias,
+                    &mut fused_state,
+                    &z,
+                    &weight,
+                    1e-6,
+                )
+                .context("bench fused GDN gates+recurrent+rmsnorm")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN gates+recurrent+rmsnorm decode batch BF16: \
+                 batch={batch} physical_tokens={physical_tokens} q=[{batch},1,{q_heads},{dk}] \
+                 v=[{batch},1,{value_heads},{dv}] state=[{batch},{value_heads},{dk},{dv}] \
+                 warmup={warmup} iters={iters} split={split_us:.3} us fused={fused_us:.3} us \
+                 speedup={:.3}x out_max_abs_diff={out_max:.6e} state_max_abs_diff={state_max:.6e}",
+                split_us / fused_us,
+            );
+        }
 
         Ok(())
     }
@@ -8836,9 +11562,11 @@ mod tests {
 
         let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
         let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        let rows_disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
         unsafe {
             std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
             std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS);
         }
 
         let result = (|| -> Result<()> {
@@ -8860,6 +11588,68 @@ mod tests {
             let logits = metal_lm_head_bf16(&x, &weight_t)?;
             let reference = crate::sampling::greedy_sample(&logits)?;
             let fused = metal_lm_head_argmax_bf16(&x, &weight_t)?;
+
+            assert_eq!(fused, reference);
+            Ok(())
+        })();
+
+        unsafe {
+            match enable_prev {
+                Some(value) => std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(ENABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX),
+            }
+            match rows_disable_prev {
+                Some(value) => std::env::set_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS, value),
+                None => std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX_ROWS),
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_lm_head_argmax_rows_matches_materialized_logits() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let enable_prev = std::env::var_os(ENABLE_METAL_LM_HEAD_ARGMAX);
+        let disable_prev = std::env::var_os(DISABLE_METAL_LM_HEAD_ARGMAX);
+        unsafe {
+            std::env::set_var(ENABLE_METAL_LM_HEAD_ARGMAX, "1");
+            std::env::remove_var(DISABLE_METAL_LM_HEAD_ARGMAX);
+        }
+
+        let result = (|| -> Result<()> {
+            let batch = 3usize;
+            let hidden = 128usize;
+            let vocab = 257usize;
+            let x_data: Vec<f32> = (0..(batch * hidden))
+                .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+                .collect();
+            let weight_data: Vec<f32> = (0..(hidden * vocab))
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
+                .collect();
+
+            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+
+            assert!(metal_lm_head_argmax_rows_supports(&x, &weight_t));
+            let logits = if metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t) {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t)?
+            } else {
+                x.broadcast_matmul(&weight_t)?
+            };
+            let reference = crate::sampling::greedy_sample_rows(&logits)?;
+            let fused = metal_lm_head_argmax_rows_bf16(&x, &weight_t)?;
 
             assert_eq!(fused, reference);
             Ok(())
@@ -8931,33 +11721,67 @@ mod tests {
     }
 
     #[test]
+    fn test_mlp_gate_up_decode_batch_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let hidden = 64usize;
+        let intermediate = 97usize;
+        let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
+        let gate_t = patterned_bf16_2d(hidden, intermediate, &device, 23, 0.0078125)?;
+        let up_t = patterned_bf16_2d(hidden, intermediate, &device, 31, 0.0078125)?;
+
+        assert!(metal_mlp_gate_up_supports(&x, &gate_t, &up_t));
+        let fused = metal_mlp_gate_up_bf16(&x, &gate_t, &up_t)?;
+        let reference = mlp_gate_up_reference(&x, &gate_t, &up_t)?;
+
+        assert_eq!(fused.dims(), &[batch, 1usize, intermediate]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal MLP gate/up batch max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal MLP gate/up batch mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_attn_gate_sigmoid_mul_matches_reference() -> Result<()> {
         let Some(device) = try_new_metal() else {
             return Ok(());
         };
 
+        let batch = 4usize;
         let hidden = 257usize;
-        let x_data: Vec<f32> = (0..hidden)
+        let x_data: Vec<f32> = (0..batch * hidden)
             .map(|i| ((i % 29) as f32 - 14.0) * 0.03125)
             .collect();
-        let gate_data: Vec<f32> = (0..hidden)
+        let gate_data: Vec<f32> = (0..batch * hidden)
             .map(|i| ((i % 37) as f32 - 18.0) * 0.0625)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
-        let gate = Tensor::from_slice(&gate_data, (1usize, 1usize, hidden), &device)?
+        let gate = Tensor::from_slice(&gate_data, (batch, 1usize, hidden), &device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
 
         assert!(metal_attn_gate_sigmoid_mul_supports(&x, &gate));
         let fused = metal_attn_gate_sigmoid_mul_bf16(&x, &gate)?;
 
-        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
-        let reference = (x * gate_sig)?;
+        let reference = attn_gate_reference(&x, &gate)?;
 
-        assert_eq!(fused.dims(), &[1usize, 1usize, hidden]);
+        assert_eq!(fused.dims(), &[batch, 1usize, hidden]);
         assert_eq!(fused.dtype(), DType::BF16);
 
         let max = max_abs_diff(&reference, &fused)?;
@@ -9033,6 +11857,41 @@ mod tests {
         assert!(
             tile8_mean < 3e-3,
             "Metal transposed coop GEMV tile8 mean_abs_diff={tile8_mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let input_dim = 128usize;
+        let output_dim = 133usize;
+        let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+        let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 29, 0.0078125)?;
+
+        assert!(metal_transposed_coop_gemv_decode_batch_supports(
+            &x, &weight_t
+        ));
+        let reference = x.broadcast_matmul(&weight_t)?;
+        let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+
+        assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal batch transposed coop GEMV max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 3e-3,
+            "Metal batch transposed coop GEMV mean_abs_diff={mean:e} exceeds tolerance"
         );
 
         Ok(())
@@ -9189,11 +12048,12 @@ mod tests {
             return Ok(());
         };
 
+        let batch = 4usize;
         let hidden = 64usize;
         let qkv_dim = 131usize;
         let z_dim = 97usize;
         let nv = 17usize;
-        let x_data: Vec<f32> = (0..hidden)
+        let x_data: Vec<f32> = (0..(batch * hidden))
             .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
             .collect();
         let qkv_data: Vec<f32> = (0..(hidden * qkv_dim))
@@ -9209,8 +12069,8 @@ mod tests {
             .map(|i| ((i % 19) as f32 - 9.0) * 0.015625)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
-            .to_dtype(DType::BF16)?;
+        let x =
+            Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?.to_dtype(DType::BF16)?;
         let qkv_t =
             Tensor::from_slice(&qkv_data, (hidden, qkv_dim), &device)?.to_dtype(DType::BF16)?;
         let z_t = Tensor::from_slice(&z_data, (hidden, z_dim), &device)?.to_dtype(DType::BF16)?;
@@ -9235,6 +12095,10 @@ mod tests {
             ("b", &b_fused, &b_ref),
         ] {
             assert_eq!(got.dtype(), DType::BF16);
+            assert!(
+                got.is_contiguous(),
+                "GDN in-proj {name} output must stay contiguous"
+            );
             let max = max_abs_diff(got, want)?;
             let mean = mean_abs_diff(got, want)?;
             assert!(
@@ -9248,7 +12112,7 @@ mod tests {
         }
 
         let x_prefill =
-            Tensor::zeros((1usize, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
+            Tensor::zeros((batch, 2usize, hidden), DType::BF16, &device)?.contiguous()?;
         assert!(!metal_gdn_in_proj_decode_supports(
             &x_prefill, &qkv_t, &z_t, &a_t, &b_t
         ));
@@ -9369,12 +12233,113 @@ mod tests {
     }
 
     #[test]
+    fn test_gdn_decode_qkv_conv_norm_decode_batch_matches_row_fused_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let nk = 2usize;
+        let nv = 4usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let kernel_size = 4usize;
+        let qk_dim = nk * dk;
+        let v_dim = nv * dv;
+        let channels = qk_dim * 2 + v_dim;
+        let scale = 1.0f32 / (dk as f32).sqrt();
+
+        let mixed_data: Vec<f32> = (0..(batch * channels))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+            .collect();
+        let weight_data: Vec<f32> = (0..(channels * kernel_size))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.015625)
+            .collect();
+        let state_data: Vec<f32> = (0..(batch * channels * (kernel_size - 1)))
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0078125)
+            .collect();
+
+        let mixed_qkv = Tensor::from_slice(&mixed_data, (batch, 1usize, channels), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight = Tensor::from_slice(&weight_data, (channels, 1usize, kernel_size), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let mut state_fused =
+            Tensor::from_slice(&state_data, (batch, channels, kernel_size - 1), &device)?
+                .contiguous()?;
+
+        assert!(metal_gdn_decode_qkv_conv_norm_supports(
+            &mixed_qkv,
+            &weight,
+            &state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv
+        ));
+
+        let (q_ref, k_ref, v_ref, state_ref) = gdn_decode_qkv_conv_norm_row_fused_reference(
+            &mixed_qkv,
+            &weight,
+            &state_data,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv,
+            scale,
+            1e-6,
+        )?;
+        let (q_fused, k_fused, v_fused) = metal_gdn_decode_qkv_conv_norm_bf16(
+            &mixed_qkv,
+            &weight,
+            &mut state_fused,
+            kernel_size,
+            nk,
+            dk,
+            nv,
+            dv,
+            scale,
+            1e-6,
+        )?;
+
+        assert_eq!(q_fused.dims(), &[batch, 1usize, nk, dk]);
+        assert_eq!(k_fused.dims(), &[batch, 1usize, nk, dk]);
+        assert_eq!(v_fused.dims(), &[batch, 1usize, nv, dv]);
+        assert_eq!(q_fused.dtype(), DType::BF16);
+        assert_eq!(k_fused.dtype(), DType::BF16);
+        assert_eq!(v_fused.dtype(), DType::BF16);
+
+        let q_max = max_abs_diff(&q_ref, &q_fused)?;
+        let k_max = max_abs_diff(&k_ref, &k_fused)?;
+        let v_max = max_abs_diff(&v_ref, &v_fused)?;
+        let state_max = max_abs_diff(&state_ref, &state_fused)?;
+        assert!(
+            q_max < 1e-6,
+            "fused batch q row-fused max_abs_diff={q_max:e}"
+        );
+        assert!(
+            k_max < 1e-6,
+            "fused batch k row-fused max_abs_diff={k_max:e}"
+        );
+        assert!(v_max < 1e-6, "fused batch v max_abs_diff={v_max:e}");
+        assert!(
+            state_max < 1e-6,
+            "fused batch conv state max_abs_diff={state_max:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_gdn_prefill_qkv_conv_split_matches_channel_major_conv() -> Result<()> {
         let Some(device) = try_new_metal() else {
             return Ok(());
         };
 
-        let batch = 1usize;
+        let batch = 4usize;
         let nk = 2usize;
         let dk = 128usize;
         let nv = 4usize;
@@ -9594,6 +12559,101 @@ mod tests {
     }
 
     #[test]
+    fn test_paged_attn_decode_contiguous_batch_matches_rowwise() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let total_slots = 1024usize;
+        let seq_len = 128usize;
+        let q_heads = 16usize;
+        let kv_heads = 4usize;
+        let head_dim = 256usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let start_slots_data = vec![11u32, 181, 353, 577];
+        let start_slots_usize: Vec<usize> =
+            start_slots_data.iter().map(|&slot| slot as usize).collect();
+
+        let q_data: Vec<f32> = (0..batch * q_heads * head_dim)
+            .map(|i| ((i % 97) as f32 - 48.0) * 0.0005)
+            .collect();
+        let kv_elems = total_slots * kv_heads * head_dim;
+        let k_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 131) as f32 - 65.0) * 0.0004)
+            .collect();
+        let v_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
+            .collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, q_heads, 1usize, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let start_slots = Tensor::from_slice(&start_slots_data, batch, &device)?.contiguous()?;
+
+        assert!(metal_paged_attn_decode_contiguous_batch_supports(
+            &q,
+            &k_pool,
+            &v_pool,
+            &start_slots,
+            seq_len
+        ));
+        let rowwise = paged_attn_decode_contiguous_rowwise(
+            &q,
+            &k_pool,
+            &v_pool,
+            &start_slots_usize,
+            seq_len,
+            scale,
+        )?;
+        let batched = metal_paged_attn_decode_contiguous_batch_bf16_d256(
+            &q,
+            &k_pool,
+            &v_pool,
+            &start_slots,
+            seq_len,
+            scale,
+        )?;
+        let backend = MetalBackend::new(device.clone());
+        let via_backend = backend
+            .flash_attn_paged_decode_contiguous_batch(
+                &q,
+                &k_pool,
+                &v_pool,
+                &start_slots,
+                seq_len,
+                scale,
+            )?
+            .context("BackendRuntime declined contiguous paged decode batch")?;
+        device.synchronize()?;
+
+        assert_eq!(batched.dims(), &[batch, 1usize, q_heads * head_dim]);
+        let max = max_abs_diff(&rowwise, &batched)?;
+        let mean = mean_abs_diff(&rowwise, &batched)?;
+        let backend_max = max_abs_diff(&batched, &via_backend)?;
+        assert!(
+            max < 1e-6,
+            "contiguous paged decode batch max_abs_diff={max:e}"
+        );
+        assert!(
+            mean < 1e-7,
+            "contiguous paged decode batch mean_abs_diff={mean:e}"
+        );
+        assert!(
+            backend_max < 1e-6,
+            "BackendRuntime contiguous paged decode batch max_abs_diff={backend_max:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_paged_kv_head_major_read_append_token_major_matches_reference() -> Result<()> {
         let Some(device) = try_new_metal() else {
             return Ok(());
@@ -9719,6 +12779,70 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_paged_kv_write_token_major_batch_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let total_slots = 16usize;
+        let heads = 2usize;
+        let head_dim = 16usize;
+        let batch = 4usize;
+        let elems = batch * heads * head_dim;
+        let slots_data = vec![5u32, 2, 11, 7];
+        let k_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 37) as f32 - 18.0) * 0.015625)
+            .collect();
+        let v_data: Vec<f32> = (0..elems)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.03125)
+            .collect();
+        let k = Tensor::from_slice(&k_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v = Tensor::from_slice(&v_data, (batch, 1usize, heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
+        let mut k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let mut v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+
+        assert!(metal_paged_kv_write_token_major_batch_supports(
+            &k_pool, &v_pool, &slots, &k, &v
+        ));
+        metal_paged_kv_write_token_major_batch_bf16(&mut k_pool, &mut v_pool, &slots, &k, &v)?;
+        device.synchronize()?;
+
+        for (batch_idx, &slot) in slots_data.iter().enumerate() {
+            let slot = slot as usize;
+            let k_written = k_pool.narrow(0, slot, 1)?;
+            let v_written = v_pool.narrow(0, slot, 1)?;
+            let k_ref = k.narrow(0, batch_idx, 1)?.squeeze(0)?.contiguous()?;
+            let v_ref = v.narrow(0, batch_idx, 1)?.squeeze(0)?.contiguous()?;
+
+            assert!(
+                max_abs_diff(&k_written, &k_ref)? < 1e-6,
+                "K batch write slot={slot} diverged from source row={batch_idx}"
+            );
+            assert!(
+                max_abs_diff(&v_written, &v_ref)? < 1e-6,
+                "V batch write slot={slot} diverged from source row={batch_idx}"
+            );
+        }
+
+        let zero_ref = Tensor::zeros((1usize, heads, head_dim), DType::BF16, &device)?;
+        assert!(
+            max_abs_diff(&k_pool.narrow(0, 0, 1)?, &zero_ref)? < 1e-6,
+            "K batch write changed an untouched slot"
+        );
+        assert!(
+            max_abs_diff(&v_pool.narrow(0, 0, 1)?, &zero_ref)? < 1e-6,
+            "V batch write changed an untouched slot"
+        );
+
+        Ok(())
+    }
+
     fn gdn_gates_reference(
         a: &Tensor,
         b: &Tensor,
@@ -9754,7 +12878,7 @@ mod tests {
 
         let a = Tensor::from_slice(&a_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
         let b = Tensor::from_slice(&b_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
-        let a_log = Tensor::from_slice(&a_log_data, nv, device)?.to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&a_log_data, nv, device)?;
         let dt_bias = Tensor::from_slice(&dt_bias_data, nv, device)?.to_dtype(DType::BF16)?;
 
         assert!(metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias));
@@ -10421,12 +13545,12 @@ mod tests {
             .to_dtype(DType::BF16)?;
         let b = Tensor::from_slice(&b_data, (batch, seq_len, value_heads), &device)?
             .to_dtype(DType::BF16)?;
-        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?.to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(&a_log_data, value_heads, &device)?;
         let dt_bias =
             Tensor::from_slice(&dt_bias_data, value_heads, &device)?.to_dtype(DType::BF16)?;
         let z = Tensor::from_slice(&z_data, (batch, seq_len, value_heads, dv), &device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&weight_data, dv, &device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&weight_data, dv, &device)?;
         let mut state_ref = Tensor::from_slice(&state_data, (batch, value_heads, dk, dv), &device)?
             .to_dtype(DType::BF16)?;
         let mut state_fused =

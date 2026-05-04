@@ -1,0 +1,12 @@
+{
+  "model": "qwen3.5-4b-kiln",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Give one concise fact about Earth."
+    }
+  ],
+  "temperature": 0.0,
+  "max_tokens": 2,
+  "seed": 236
+}

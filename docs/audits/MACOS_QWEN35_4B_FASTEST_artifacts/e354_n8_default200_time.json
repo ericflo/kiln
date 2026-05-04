@@ -1,0 +1,66 @@
+{
+  "elapsed_secs": 10.884609917062335,
+  "results": [
+    [
+      200,
+      10.88381616701372,
+      2030
+    ],
+    [
+      200,
+      10.88352587504778,
+      2030
+    ],
+    [
+      200,
+      10.882877791067585,
+      2030
+    ],
+    [
+      200,
+      10.883193042012863,
+      2030
+    ],
+    [
+      200,
+      10.883169790962711,
+      2030
+    ],
+    [
+      200,
+      10.883031165925786,
+      2021
+    ],
+    [
+      200,
+      10.883318083011545,
+      2030
+    ],
+    [
+      200,
+      10.88352258305531,
+      2030
+    ]
+  ],
+  "errors": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "max_tokens": 8,
+  "prompts": [
+    "Write one short sentence about benchmark topic 0.",
+    "Write one short sentence about benchmark topic 1.",
+    "Write one short sentence about benchmark topic 2.",
+    "Write one short sentence about benchmark topic 3.",
+    "Write one short sentence about benchmark topic 4.",
+    "Write one short sentence about benchmark topic 5.",
+    "Write one short sentence about benchmark topic 6.",
+    "Write one short sentence about benchmark topic 7."
+  ]
+}

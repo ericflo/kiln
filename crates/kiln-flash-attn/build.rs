@@ -20,8 +20,7 @@ fn main() {
     let cutlass_include = csrc_dir.join("cutlass");
 
     // Detect GPU architecture
-    let cuda_archs = env::var("KILN_CUDA_ARCHS")
-        .unwrap_or_else(|_| "80;89;90".to_string());
+    let cuda_archs = env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;89;90".to_string());
 
     let mut build = cc::Build::new();
 
@@ -30,9 +29,9 @@ fn main() {
     build.cpp(true);
 
     // Include paths
-    build.include(&flash_attn_dir);        // For "src/flash.h" etc.
-    build.include(&kernel_src_dir);         // For headers included without "src/" prefix
-    build.include(&cutlass_include);        // For <cutlass/...> and <cute/...>
+    build.include(&flash_attn_dir); // For "src/flash.h" etc.
+    build.include(&kernel_src_dir); // For headers included without "src/" prefix
+    build.include(&cutlass_include); // For <cutlass/...> and <cute/...>
     build.include(cuda_root.join("include")); // CUDA headers
 
     // CUDA compilation flags
@@ -46,8 +45,8 @@ fn main() {
     build.flag("-D_USE_MATH_DEFINES");
 
     // Suppress noisy warnings from CUTLASS templates
-    build.flag("-diag-suppress=177");  // variable declared but never referenced
-    build.flag("-diag-suppress=174");  // expression has no effect
+    build.flag("-diag-suppress=177"); // variable declared but never referenced
+    build.flag("-diag-suppress=174"); // expression has no effect
 
     // Architecture flags — only sm80+ (flash-attn requirement)
     for arch in cuda_archs.split(';') {
@@ -72,7 +71,10 @@ fn main() {
     build.compile("kiln_flash_attn");
 
     // Link CUDA runtime
-    println!("cargo:rustc-link-search=native={}", cuda_root.join("lib64").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        cuda_root.join("lib64").display()
+    );
     println!("cargo:rustc-link-lib=cudart");
 
     // Re-run if sources change

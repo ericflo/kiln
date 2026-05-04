@@ -41,7 +41,15 @@ fn reference(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> candle_core::
     Ok((normed * silu(&z_f32)?)?)
 }
 
-fn run_case(device: &Device, batch: usize, seq_len: usize, heads: usize, hidden: usize, seed: u64, label: &str) {
+fn run_case(
+    device: &Device,
+    batch: usize,
+    seq_len: usize,
+    heads: usize,
+    hidden: usize,
+    seed: u64,
+    label: &str,
+) {
     let elems = batch * seq_len * heads * hidden;
     let x_data = fill(seed ^ 0xA11C_E5, elems, 2.0);
     let z_data = fill(seed ^ 0x6A7E, elems, 4.0);
@@ -81,14 +89,35 @@ fn run_case(device: &Device, batch: usize, seq_len: usize, heads: usize, hidden:
     assert_eq!(fused.dtype(), DType::BF16);
 
     let diff = (fused.to_dtype(DType::F32).unwrap()
-        - fallback.to_dtype(DType::BF16).unwrap().to_dtype(DType::F32).unwrap())
+        - fallback
+            .to_dtype(DType::BF16)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap())
     .unwrap();
     let abs = diff.abs().unwrap();
-    let max = abs.flatten_all().unwrap().max(0).unwrap().to_scalar::<f32>().unwrap();
-    let mean = abs.flatten_all().unwrap().mean(0).unwrap().to_scalar::<f32>().unwrap();
-    println!("[{label}] shape=[{batch},{seq_len},{heads},{hidden}] max_abs={max:.3e} mean_abs={mean:.3e}");
+    let max = abs
+        .flatten_all()
+        .unwrap()
+        .max(0)
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let mean = abs
+        .flatten_all()
+        .unwrap()
+        .mean(0)
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    println!(
+        "[{label}] shape=[{batch},{seq_len},{heads},{hidden}] max_abs={max:.3e} mean_abs={mean:.3e}"
+    );
     assert!(max < 5e-3, "{label}: max_abs_diff {max} exceeds tolerance");
-    assert!(mean < 5e-4, "{label}: mean_abs_diff {mean} exceeds tolerance");
+    assert!(
+        mean < 5e-4,
+        "{label}: mean_abs_diff {mean} exceeds tolerance"
+    );
 }
 
 #[test]

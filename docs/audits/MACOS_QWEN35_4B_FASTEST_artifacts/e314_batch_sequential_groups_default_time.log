@@ -1,0 +1,1 @@
+curl -sS -X POST http://127.0.0.1:8420/v1/completions/batch -H  --data-binary  0.00s user 0.01s system 0% cpu 10.231 total

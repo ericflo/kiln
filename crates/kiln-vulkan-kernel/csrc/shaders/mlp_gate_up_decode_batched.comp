@@ -1,0 +1,68 @@
+// Batched single-token SwiGLU gate/up projection.
+//
+// Computes out[batch, intermediate] =
+//   silu(x[batch, hidden] * gate_weight_t[hidden, intermediate]) *
+//        (x[batch, hidden] * up_weight_t[hidden, intermediate]).
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 128, local_size_y = 2, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint intermediate;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer GateWeightBuf { float data_gate_w[]; };
+layout(binding = 2) readonly buffer UpWeightBuf { float data_up_w[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+shared float gate_partial[256];
+shared float up_partial[256];
+
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float ex = exp(x);
+    return ex / (1.0 + ex);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (intermediate + 127) / 128;
+    uint batch_idx = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - batch_idx * col_groups;
+    uint col = col_group * 128 + col_lane;
+    uint partial_idx = col_lane * 2 + red_lane;
+
+    float gate_sum = 0.0;
+    float up_sum = 0.0;
+    if (batch_idx < batch && col < intermediate) {
+        uint x_base = batch_idx * hidden;
+        for (uint h = red_lane; h < hidden; h += 2) {
+            uint off = h * intermediate + col;
+            float xv = data_x[x_base + h];
+            gate_sum += xv * data_gate_w[off];
+            up_sum += xv * data_up_w[off];
+        }
+    }
+
+    gate_partial[partial_idx] = gate_sum;
+    up_partial[partial_idx] = up_sum;
+    barrier();
+
+    if (red_lane == 0 && batch_idx < batch && col < intermediate) {
+        float gate = 0.0;
+        float up = 0.0;
+        for (uint lane = 0; lane < 2; lane++) {
+            uint idx = col_lane * 2 + lane;
+            gate += gate_partial[idx];
+            up += up_partial[idx];
+        }
+        data_out[batch_idx * intermediate + col] = gate * stable_sigmoid(gate) * up;
+    }
+}

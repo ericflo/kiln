@@ -7,9 +7,9 @@
 //! `kiln-v*` GitHub release, verify its SHA256, and install it into the
 //! app's data directory. The supervisor then spawns from that path.
 //!
-//! Platform coverage today is macOS aarch64 + Metal only; see
-//! [`current_target`]. Other platforms fall through to "build from source"
-//! in the UI.
+//! Platform coverage follows the published server release targets; see
+//! [`current_target`]. Unsupported platforms fall through to "build from
+//! source" in the UI.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,14 +61,18 @@ const USER_AGENT: &str = concat!("kiln-desktop/", env!("CARGO_PKG_VERSION"));
 /// wrong asset match or a corrupted release manifest.
 const MAX_ASSET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+#[allow(dead_code)]
+pub const MACOS_METAL_TARGET: &str = "aarch64-apple-darwin-metal";
+pub const LINUX_CUDA_TARGET: &str = "x86_64-unknown-linux-gnu-cuda124";
+pub const LINUX_VULKAN_TARGET: &str = "x86_64-unknown-linux-gnu-vulkan";
+#[allow(dead_code)]
+pub const WINDOWS_CUDA_TARGET: &str = "x86_64-pc-windows-msvc-cuda124";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum InstallProgress {
     FetchingManifest,
-    Downloading {
-        received: u64,
-        total: Option<u64>,
-    },
+    Downloading { received: u64, total: Option<u64> },
     Verifying,
     Extracting,
     Finalizing,
@@ -152,36 +156,107 @@ pub struct InstallStagedUpdateFailed {
     pub error: String,
 }
 
-/// Release-asset suffix for the current OS+arch+features combination, or
+/// Release-asset suffix for the current OS+arch+backend combination, or
 /// `None` when no prebuilt release exists for this platform. The suffix
 /// matches the naming convention in `.github/workflows/server-release.yml`
 /// (e.g. `aarch64-apple-darwin-metal`).
 ///
-/// The CUDA 12.4 suffix on Linux/Windows isn't the Rust target triple —
-/// it's the triple plus a `-cuda124` feature tag that the release
-/// workflow bakes into the archive filename so the desktop app can tell
-/// a CUDA 12.4 build apart from a future CUDA 13 build without a
-/// manifest lookup.
+/// Linux x86_64 has both CUDA and Vulkan server assets. NVIDIA systems keep
+/// the CUDA 12.4 asset; AMD/Intel-only systems get the Vulkan asset. Users
+/// can override the choice with `KILN_DESKTOP_SERVER_TARGET` (exact suffix)
+/// or `KILN_DESKTOP_GPU_BACKEND` (`cuda` / `vulkan`).
 pub fn current_target() -> Option<&'static str> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        return Some("aarch64-apple-darwin-metal");
+        return Some(MACOS_METAL_TARGET);
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        return Some("x86_64-unknown-linux-gnu-cuda124");
+        return Some(current_linux_target());
     }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
-        return Some("x86_64-pc-windows-msvc-cuda124");
+        return Some(WINDOWS_CUDA_TARGET);
     }
     #[allow(unreachable_code)]
     None
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn current_linux_target() -> &'static str {
+    for key in ["KILN_DESKTOP_SERVER_TARGET", "KILN_DESKTOP_GPU_BACKEND"] {
+        if let Ok(value) = std::env::var(key) {
+            if let Some(target) = linux_server_target_from_override(&value) {
+                return target;
+            }
+        }
+    }
+    linux_server_target_for_vendor_ids(linux_drm_vendor_ids())
+}
+
+/// Map a user-provided Linux desktop backend override to a release target.
+pub fn linux_server_target_from_override(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "cuda" | "nvidia" => Some(LINUX_CUDA_TARGET),
+        "vulkan" | "vk" | "amd" | "intel" => Some(LINUX_VULKAN_TARGET),
+        _ if normalized == LINUX_CUDA_TARGET => Some(LINUX_CUDA_TARGET),
+        _ if normalized == LINUX_VULKAN_TARGET => Some(LINUX_VULKAN_TARGET),
+        _ => None,
+    }
+}
+
+/// Pick the Linux server release target from PCI vendor IDs. NVIDIA wins on
+/// mixed-GPU hosts so existing CUDA users keep the CUDA binary by default;
+/// AMD/Intel-only hosts get the Vulkan binary.
+pub fn linux_server_target_for_vendor_ids<I, S>(vendor_ids: I) -> &'static str
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut saw_nvidia = false;
+    let mut saw_vulkan_vendor = false;
+    for vendor in vendor_ids {
+        let id = vendor.as_ref().trim().to_ascii_lowercase();
+        let id = id.strip_prefix("0x").unwrap_or(id.as_str());
+        match id {
+            "10de" => saw_nvidia = true,
+            "1002" | "8086" => saw_vulkan_vendor = true,
+            _ => {}
+        }
+    }
+    if saw_nvidia {
+        LINUX_CUDA_TARGET
+    } else if saw_vulkan_vendor {
+        LINUX_VULKAN_TARGET
+    } else {
+        LINUX_CUDA_TARGET
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn linux_drm_vendor_ids() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("device/vendor")).ok())
+        .map(|vendor| vendor.trim().to_string())
+        .collect()
+}
+
 /// Whether a downloadable prebuilt kiln binary exists for this platform.
 pub fn supports_auto_install() -> bool {
     current_target().is_some()
+}
+
+pub fn target_uses_cuda(target: &str) -> bool {
+    target.contains("cuda")
+}
+
+pub fn current_target_uses_cuda() -> bool {
+    current_target().is_some_and(target_uses_cuda)
 }
 
 /// Resolve the configured `kiln` binary path. A bare name like `"kiln"`
@@ -197,7 +272,10 @@ pub fn resolve_binary(configured: &Path) -> Option<PathBuf> {
         || configured
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
-        || configured.parent().map(|p| !p.as_os_str().is_empty()).unwrap_or(false);
+        || configured
+            .parent()
+            .map(|p| !p.as_os_str().is_empty())
+            .unwrap_or(false);
     if direct {
         return configured.is_file().then(|| configured.to_path_buf());
     }
@@ -263,9 +341,11 @@ pub fn release_download_url(version: &str, target: &str) -> String {
 /// under `<app_data_dir>/kiln-updates/kiln-v<version>.<ext>` so multiple
 /// staged updates can coexist without colliding on filename.
 pub fn staging_tarball_path(app_data_dir: &Path, version: &str, target: &str) -> PathBuf {
-    app_data_dir
-        .join(UPDATE_STAGING_DIR)
-        .join(format!("kiln-v{}.{}", version, release_archive_ext(target)))
+    app_data_dir.join(UPDATE_STAGING_DIR).join(format!(
+        "kiln-v{}.{}",
+        version,
+        release_archive_ext(target)
+    ))
 }
 
 /// Path where slice 3a writes the extracted `kiln` binary before the
@@ -308,8 +388,8 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
     if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("expected sha256 is not 64-char hex: {}", expected));
     }
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -338,18 +418,11 @@ pub fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
 /// tar.gz only today — Windows `.zip` support lands alongside the Windows
 /// release asset build. Detection is purely on the archive filename so
 /// this helper stays testable without platform cfg gates.
-pub fn extract_tarball_to(
-    tarball: &Path,
-    target_binary_path: &Path,
-) -> Result<u64, String> {
-    let fname = tarball
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+pub fn extract_tarball_to(tarball: &Path, target_binary_path: &Path) -> Result<u64, String> {
+    let fname = tarball.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if fname.ends_with(".zip") {
         return Err(
-            "windows .zip extraction lands alongside Windows release asset support"
-                .to_string(),
+            "windows .zip extraction lands alongside Windows release asset support".to_string(),
         );
     }
     if !(fname.ends_with(".tar.gz") || fname.ends_with(".tgz")) {
@@ -364,17 +437,12 @@ pub fn extract_tarball_to(
             .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
     }
     if target_binary_path.exists() {
-        std::fs::remove_file(target_binary_path).map_err(|e| {
-            format!(
-                "remove stale {}: {}",
-                target_binary_path.display(),
-                e
-            )
-        })?;
+        std::fs::remove_file(target_binary_path)
+            .map_err(|e| format!("remove stale {}: {}", target_binary_path.display(), e))?;
     }
 
-    let file = std::fs::File::open(tarball)
-        .map_err(|e| format!("open {}: {}", tarball.display(), e))?;
+    let file =
+        std::fs::File::open(tarball).map_err(|e| format!("open {}: {}", tarball.display(), e))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
@@ -394,10 +462,7 @@ pub fn extract_tarball_to(
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            return Err(format!(
-                "tar entry {} escapes archive root",
-                rel.display()
-            ));
+            return Err(format!("tar entry {} escapes archive root", rel.display()));
         }
         let name = match rel.file_name().and_then(|s| s.to_str()) {
             Some(n) => n,
@@ -406,14 +471,12 @@ pub fn extract_tarball_to(
         if name != "kiln" && name != "kiln.exe" {
             continue;
         }
-        entry.unpack(target_binary_path).map_err(|e| {
-            format!("unpack {}: {}", target_binary_path.display(), e)
-        })?;
+        entry
+            .unpack(target_binary_path)
+            .map_err(|e| format!("unpack {}: {}", target_binary_path.display(), e))?;
         let size = std::fs::metadata(target_binary_path)
             .map(|m| m.len())
-            .map_err(|e| {
-                format!("stat {}: {}", target_binary_path.display(), e)
-            })?;
+            .map_err(|e| format!("stat {}: {}", target_binary_path.display(), e))?;
         return Ok(size);
     }
 
@@ -457,10 +520,7 @@ struct AssetPair {
 
 /// Fetch the newest `kiln-v*` release and find the asset pair matching
 /// the current target.
-async fn discover_asset(
-    client: &reqwest::Client,
-    target: &str,
-) -> Result<AssetPair, String> {
+async fn discover_asset(client: &reqwest::Client, target: &str) -> Result<AssetPair, String> {
     let resp = client
         .get(RELEASES_URL)
         .header("Accept", "application/vnd.github+json")
@@ -478,7 +538,7 @@ async fn discover_asset(
         .json()
         .await
         .map_err(|e| format!("github releases list parse failed: {}", e))?;
-    let want_suffix = format!("-{}.tar.gz", target);
+    let want_suffix = format!("-{}.{}", target, release_archive_ext(target));
     for release in releases {
         if !release.tag_name.starts_with("kiln-v") {
             continue;
@@ -509,8 +569,8 @@ async fn discover_asset(
         });
     }
     Err(format!(
-        "no published kiln-v* release has a `-{}.tar.gz` asset",
-        target
+        "no published kiln-v* release has a `-{}` asset",
+        want_suffix.trim_start_matches('-')
     ))
 }
 
@@ -530,7 +590,12 @@ async fn fetch_expected_sha256(
         .text()
         .await
         .map_err(|e| format!("sha256 body read failed: {}", e))?;
-    let hash = body.trim().split_whitespace().next().unwrap_or("").to_string();
+    let hash = body
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
     if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!(
             "sha256 asset {} did not contain a 64-char hex digest",
@@ -574,13 +639,7 @@ async fn download_with_progress(
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut last_reported: u64 = 0;
-    emit_progress(
-        app,
-        InstallProgress::Downloading {
-            received: 0,
-            total,
-        },
-    );
+    emit_progress(app, InstallProgress::Downloading { received: 0, total });
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err("download cancelled".to_string());
@@ -604,25 +663,11 @@ async fn download_with_progress(
         // Report at most ~20 times per MB to keep IPC cheap.
         if received.saturating_sub(last_reported) >= 64 * 1024 {
             last_reported = received;
-            emit_progress(
-                app,
-                InstallProgress::Downloading {
-                    received,
-                    total,
-                },
-            );
+            emit_progress(app, InstallProgress::Downloading { received, total });
         }
     }
-    file.flush()
-        .await
-        .map_err(|e| format!("flush: {}", e))?;
-    emit_progress(
-        app,
-        InstallProgress::Downloading {
-            received,
-            total,
-        },
-    );
+    file.flush().await.map_err(|e| format!("flush: {}", e))?;
+    emit_progress(app, InstallProgress::Downloading { received, total });
     let digest = hasher.finalize();
     Ok(hex_lower(digest.as_slice()))
 }
@@ -636,8 +681,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 fn extract_tarball(tarball: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
-    let file = std::fs::File::open(tarball)
-        .map_err(|e| format!("open tarball: {}", e))?;
+    let file = std::fs::File::open(tarball).map_err(|e| format!("open tarball: {}", e))?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
     std::fs::create_dir_all(dest_dir)
@@ -659,10 +703,7 @@ fn extract_tarball(tarball: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
         {
-            return Err(format!(
-                "tar entry {} escapes archive root",
-                rel.display()
-            ));
+            return Err(format!("tar entry {} escapes archive root", rel.display()));
         }
         let out_path = dest_dir.join(&rel);
         if let Some(parent) = out_path.parent() {
@@ -692,8 +733,7 @@ fn make_executable(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("stat {}: {}", path.display(), e))?
         .permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)
-        .map_err(|e| format!("chmod {}: {}", path.display(), e))
+    std::fs::set_permissions(path, perms).map_err(|e| format!("chmod {}: {}", path.display(), e))
 }
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<(), String> {
@@ -768,7 +808,9 @@ pub async fn discover_latest_version_and_body(
 /// inequality when either side fails to parse as semver, never suggest a
 /// downgrade, and treat "unknown current version" as "offer latest".
 pub fn is_update_available(current: Option<&str>, latest: &str) -> bool {
-    let Some(current) = current else { return true; };
+    let Some(current) = current else {
+        return true;
+    };
     match (
         semver::Version::parse(current),
         semver::Version::parse(latest),
@@ -1004,10 +1046,7 @@ pub fn min_cuda_for_release(body: Option<&str>) -> Option<(u32, u32)> {
 /// Returns `false` only when the release advertises a `min_cuda:` AND
 /// the local driver was detected AND the local version is strictly
 /// older.
-pub fn is_cuda_compatible_for_release(
-    local: Option<(u32, u32)>,
-    body: Option<&str>,
-) -> bool {
+pub fn is_cuda_compatible_for_release(local: Option<(u32, u32)>, body: Option<&str>) -> bool {
     let Some(required) = min_cuda_for_release(body) else {
         return true;
     };
@@ -1091,11 +1130,8 @@ pub async fn download_release_binary(
     version: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<(PathBuf, u64), String> {
-    let target = current_target().ok_or_else(|| {
-        "No prebuilt kiln release exists for this platform (Windows + Linux \
-         release assets land in a separate build task)."
-            .to_string()
-    })?;
+    let target = current_target()
+        .ok_or_else(|| "No prebuilt kiln release exists for this platform.".to_string())?;
 
     let base = app
         .path()
@@ -1187,9 +1223,7 @@ pub async fn download_release_binary(
             );
         }
     }
-    file.flush()
-        .await
-        .map_err(|e| format!("flush: {}", e))?;
+    file.flush().await.map_err(|e| format!("flush: {}", e))?;
     let _ = app.emit(
         UPDATE_DOWNLOAD_PROGRESS_EVENT,
         UpdateDownloadProgress {
@@ -1212,9 +1246,8 @@ pub async fn download_release_binary(
 /// orchestrator — keeping slice 3a self-contained without forcing slice
 /// 2's download step to persist the digest to disk.
 pub async fn fetch_release_sha256(version: &str) -> Result<String, String> {
-    let target = current_target().ok_or_else(|| {
-        "No prebuilt kiln release exists for this platform.".to_string()
-    })?;
+    let target = current_target()
+        .ok_or_else(|| "No prebuilt kiln release exists for this platform.".to_string())?;
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -1254,9 +1287,8 @@ pub async fn extract_and_verify_update(
     expected_sha256: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<(PathBuf, u64), String> {
-    let target = current_target().ok_or_else(|| {
-        "No prebuilt kiln release exists for this platform.".to_string()
-    })?;
+    let target = current_target()
+        .ok_or_else(|| "No prebuilt kiln release exists for this platform.".to_string())?;
     let base = app
         .path()
         .app_data_dir()
@@ -1346,14 +1378,8 @@ pub async fn install_latest_server(
         .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
     let tarball_path = dir.join(&pair.tarball.name);
 
-    let actual_sha = download_with_progress(
-        &app,
-        &client,
-        &pair.tarball,
-        &tarball_path,
-        &cancel,
-    )
-    .await?;
+    let actual_sha =
+        download_with_progress(&app, &client, &pair.tarball, &tarball_path, &cancel).await?;
 
     emit_progress(&app, InstallProgress::Verifying);
 
@@ -1379,11 +1405,10 @@ pub async fn install_latest_server(
     emit_progress(&app, InstallProgress::Extracting);
     let tarball_path_clone = tarball_path.clone();
     let dir_clone = dir.clone();
-    let installed = tokio::task::spawn_blocking(move || {
-        extract_tarball(&tarball_path_clone, &dir_clone)
-    })
-    .await
-    .map_err(|e| format!("extract task join: {}", e))??;
+    let installed =
+        tokio::task::spawn_blocking(move || extract_tarball(&tarball_path_clone, &dir_clone))
+            .await
+            .map_err(|e| format!("extract task join: {}", e))??;
 
     // Remove the staging tarball; we keep only the extracted binary.
     let _ = fs::remove_file(&tarball_path).await;
@@ -1425,13 +1450,8 @@ pub fn swap_new_binary_into_place(app_data_dir: &Path) -> Result<(), String> {
     let had_prior_install = installed.exists();
     if had_prior_install {
         if backup.exists() {
-            std::fs::remove_file(&backup).map_err(|e| {
-                format!(
-                    "remove stale backup {}: {}",
-                    backup.display(),
-                    e
-                )
-            })?;
+            std::fs::remove_file(&backup)
+                .map_err(|e| format!("remove stale backup {}: {}", backup.display(), e))?;
         }
         std::fs::rename(&installed, &backup).map_err(|e| {
             format!(
@@ -1572,8 +1592,7 @@ pub fn cleanup_bak(app_data_dir: &Path) -> Result<(), String> {
     if !backup.exists() {
         return Ok(());
     }
-    std::fs::remove_file(&backup)
-        .map_err(|e| format!("remove {}: {}", backup.display(), e))
+    std::fs::remove_file(&backup).map_err(|e| format!("remove {}: {}", backup.display(), e))
 }
 
 /// Updater slice 3c Tauri command: stop the supervisor, promote the
@@ -1635,10 +1654,7 @@ pub async fn install_staged_update(
             let _ = app_for_task.emit(
                 INSTALL_STAGED_UPDATE_FAILED_EVENT,
                 InstallStagedUpdateFailed {
-                    error: format!(
-                        "supervisor start after swap failed: {}",
-                        err
-                    ),
+                    error: format!("supervisor start after swap failed: {}", err),
                 },
             );
             return;
@@ -1646,9 +1662,7 @@ pub async fn install_staged_update(
 
         let cfg = supervisor.config_snapshot().await;
         let url = format!("http://{}:{}/v1/health", cfg.host, cfg.port);
-        let healthy =
-            wait_for_health(&client, &url, std::time::Duration::from_secs(30))
-                .await;
+        let healthy = wait_for_health(&client, &url, std::time::Duration::from_secs(30)).await;
 
         if healthy {
             // Best-effort cleanup; a leftover .bak isn't load-bearing
@@ -1698,15 +1712,15 @@ pub async fn install_staged_update(
 mod tests {
     use super::{
         backup_binary_path, cleanup_bak, current_target, extract_tarball_to,
-        extracted_new_binary_path, installed_binary_path,
-        is_cuda_compatible_for_release, is_supported_sm,
-        is_supported_sm_for_release, is_update_available, min_cuda_for_release,
-        parse_compute_cap, parse_cuda_driver_version, parse_kiln_version_output,
-        parse_min_cuda, parse_supported_sm, release_archive_ext,
-        release_asset_name, release_download_url, rollback_to_bak,
-        staging_tarball_path, supports_auto_install, swap_new_binary_into_place,
-        verify_sha256, BACKUP_BINARY_NAME, NEW_BINARY_NAME, SUPPORTED_SM_ARCHS,
-        UPDATE_STAGING_DIR,
+        extracted_new_binary_path, installed_binary_path, is_cuda_compatible_for_release,
+        is_supported_sm, is_supported_sm_for_release, is_update_available,
+        linux_server_target_for_vendor_ids, linux_server_target_from_override,
+        min_cuda_for_release, parse_compute_cap, parse_cuda_driver_version,
+        parse_kiln_version_output, parse_min_cuda, parse_supported_sm, release_archive_ext,
+        release_asset_name, release_download_url, rollback_to_bak, staging_tarball_path,
+        supports_auto_install, swap_new_binary_into_place, target_uses_cuda, verify_sha256,
+        BACKUP_BINARY_NAME, LINUX_CUDA_TARGET, LINUX_VULKAN_TARGET, MACOS_METAL_TARGET,
+        NEW_BINARY_NAME, SUPPORTED_SM_ARCHS, UPDATE_STAGING_DIR, WINDOWS_CUDA_TARGET,
     };
     use std::io::Write;
     use std::path::PathBuf;
@@ -1719,12 +1733,13 @@ mod tests {
 
     #[test]
     fn archive_ext_unix_is_tar_gz() {
+        assert_eq!(release_archive_ext("aarch64-apple-darwin-metal"), "tar.gz");
         assert_eq!(
-            release_archive_ext("aarch64-apple-darwin-metal"),
+            release_archive_ext("x86_64-unknown-linux-gnu-cuda124"),
             "tar.gz"
         );
         assert_eq!(
-            release_archive_ext("x86_64-unknown-linux-gnu-cuda124"),
+            release_archive_ext("x86_64-unknown-linux-gnu-vulkan"),
             "tar.gz"
         );
         assert_eq!(release_archive_ext("x86_64-apple-darwin"), "tar.gz");
@@ -1733,23 +1748,31 @@ mod tests {
     #[test]
     fn asset_name_matches_release_workflow_macos() {
         assert_eq!(
-            release_asset_name("0.2.0", "aarch64-apple-darwin-metal"),
+            release_asset_name("0.2.0", MACOS_METAL_TARGET),
             "kiln-0.2.0-aarch64-apple-darwin-metal.tar.gz"
         );
     }
 
     #[test]
-    fn asset_name_matches_release_workflow_linux() {
+    fn asset_name_matches_release_workflow_linux_cuda() {
         assert_eq!(
-            release_asset_name("0.2.0", "x86_64-unknown-linux-gnu-cuda124"),
+            release_asset_name("0.2.0", LINUX_CUDA_TARGET),
             "kiln-0.2.0-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+        );
+    }
+
+    #[test]
+    fn asset_name_matches_release_workflow_linux_vulkan() {
+        assert_eq!(
+            release_asset_name("0.2.0", LINUX_VULKAN_TARGET),
+            "kiln-0.2.0-x86_64-unknown-linux-gnu-vulkan.tar.gz"
         );
     }
 
     #[test]
     fn asset_name_windows_uses_zip() {
         assert_eq!(
-            release_asset_name("0.2.0", "x86_64-pc-windows-msvc-cuda124"),
+            release_asset_name("0.2.0", WINDOWS_CUDA_TARGET),
             "kiln-0.2.0-x86_64-pc-windows-msvc-cuda124.zip"
         );
     }
@@ -1763,15 +1786,21 @@ mod tests {
                 .replace(' ', "")
         );
         assert_eq!(
-            release_download_url("1.2.3", "x86_64-pc-windows-msvc-cuda124"),
+            release_download_url("1.2.3", WINDOWS_CUDA_TARGET),
             "https://github.com/ericflo/kiln/releases/download/kiln-v1.2.3/\
              kiln-1.2.3-x86_64-pc-windows-msvc-cuda124.zip"
                 .replace(' ', "")
         );
         assert_eq!(
-            release_download_url("1.0.0", "x86_64-unknown-linux-gnu-cuda124"),
+            release_download_url("1.0.0", LINUX_CUDA_TARGET),
             "https://github.com/ericflo/kiln/releases/download/kiln-v1.0.0/\
              kiln-1.0.0-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+                .replace(' ', "")
+        );
+        assert_eq!(
+            release_download_url("1.0.0", LINUX_VULKAN_TARGET),
+            "https://github.com/ericflo/kiln/releases/download/kiln-v1.0.0/\
+             kiln-1.0.0-x86_64-unknown-linux-gnu-vulkan.tar.gz"
                 .replace(' ', "")
         );
     }
@@ -1779,19 +1808,77 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn current_target_on_macos_aarch64_is_metal() {
-        assert_eq!(current_target(), Some("aarch64-apple-darwin-metal"));
+        assert_eq!(current_target(), Some(MACOS_METAL_TARGET));
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn current_target_on_linux_x86_64_is_cuda124() {
-        assert_eq!(current_target(), Some("x86_64-unknown-linux-gnu-cuda124"));
+    fn current_target_on_linux_x86_64_is_supported_target() {
+        let target = current_target().expect("linux x86_64 should be supported");
+        assert!(
+            target == LINUX_CUDA_TARGET || target == LINUX_VULKAN_TARGET,
+            "unexpected linux target: {}",
+            target
+        );
     }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
     fn current_target_on_windows_x86_64_is_cuda124() {
-        assert_eq!(current_target(), Some("x86_64-pc-windows-msvc-cuda124"));
+        assert_eq!(current_target(), Some(WINDOWS_CUDA_TARGET));
+    }
+
+    #[test]
+    fn linux_target_override_accepts_backend_and_target_names() {
+        assert_eq!(
+            linux_server_target_from_override("vulkan"),
+            Some(LINUX_VULKAN_TARGET)
+        );
+        assert_eq!(
+            linux_server_target_from_override("x86_64-unknown-linux-gnu-vulkan"),
+            Some(LINUX_VULKAN_TARGET)
+        );
+        assert_eq!(
+            linux_server_target_from_override("cuda"),
+            Some(LINUX_CUDA_TARGET)
+        );
+        assert_eq!(linux_server_target_from_override("unknown"), None);
+    }
+
+    #[test]
+    fn linux_target_selection_uses_vulkan_for_amd_or_intel_only() {
+        assert_eq!(
+            linux_server_target_for_vendor_ids(["0x1002"]),
+            LINUX_VULKAN_TARGET
+        );
+        assert_eq!(
+            linux_server_target_for_vendor_ids(["8086"]),
+            LINUX_VULKAN_TARGET
+        );
+    }
+
+    #[test]
+    fn linux_target_selection_keeps_cuda_for_nvidia_or_unknown() {
+        assert_eq!(
+            linux_server_target_for_vendor_ids(["0x10de"]),
+            LINUX_CUDA_TARGET
+        );
+        assert_eq!(
+            linux_server_target_for_vendor_ids(["0x8086", "0x10de"]),
+            LINUX_CUDA_TARGET
+        );
+        assert_eq!(
+            linux_server_target_for_vendor_ids(std::iter::empty::<&str>()),
+            LINUX_CUDA_TARGET
+        );
+    }
+
+    #[test]
+    fn target_uses_cuda_matches_release_suffix() {
+        assert!(target_uses_cuda(LINUX_CUDA_TARGET));
+        assert!(target_uses_cuda(WINDOWS_CUDA_TARGET));
+        assert!(!target_uses_cuda(LINUX_VULKAN_TARGET));
+        assert!(!target_uses_cuda(MACOS_METAL_TARGET));
     }
 
     #[cfg(any(
@@ -1973,9 +2060,7 @@ mod tests {
         header.set_size(contents.len() as u64);
         header.set_mode(0o755);
         header.set_cksum();
-        builder
-            .append_data(&mut header, "kiln", contents)
-            .unwrap();
+        builder.append_data(&mut header, "kiln", contents).unwrap();
         builder.into_inner().unwrap().finish().unwrap();
         tar_path
     }
@@ -1985,8 +2070,7 @@ mod tests {
         let dir = tmp_dir("extract-happy");
         let tar_path = write_fake_tarball(&dir, b"fake-kiln-binary-contents");
         let target = dir.join("bin").join("kiln.new");
-        let bytes = extract_tarball_to(&tar_path, &target)
-            .expect("extract should succeed");
+        let bytes = extract_tarball_to(&tar_path, &target).expect("extract should succeed");
         assert!(target.is_file(), "target binary should exist");
         assert_eq!(bytes, std::fs::metadata(&target).unwrap().len());
         let got = std::fs::read(&target).unwrap();
@@ -2001,7 +2085,9 @@ mod tests {
         let target = dir.join("bin").join("kiln.new");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         let mut stale = std::fs::File::create(&target).unwrap();
-        stale.write_all(b"OLD-CONTENTS-that-should-be-replaced").unwrap();
+        stale
+            .write_all(b"OLD-CONTENTS-that-should-be-replaced")
+            .unwrap();
         drop(stale);
 
         extract_tarball_to(&tar_path, &target).expect("extract should succeed");
@@ -2041,7 +2127,9 @@ mod tests {
         header.set_size(body.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        builder.append_data(&mut header, "README", &body[..]).unwrap();
+        builder
+            .append_data(&mut header, "README", &body[..])
+            .unwrap();
         builder.into_inner().unwrap().finish().unwrap();
 
         let target = dir.join("bin").join("kiln.new");
@@ -2120,8 +2208,7 @@ mod tests {
     fn swap_sets_executable_bit_on_unix() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmp_dir("swap-chmod");
-        let (installed, _) =
-            seed_swap_dir(&dir, Some(b"OLD"), b"NEW");
+        let (installed, _) = seed_swap_dir(&dir, Some(b"OLD"), b"NEW");
 
         // Make kiln.new deliberately non-executable to prove the swap
         // restores +x rather than inheriting whatever mode extract
@@ -2146,8 +2233,7 @@ mod tests {
     fn swap_fresh_install_creates_no_bak() {
         let dir = tmp_dir("swap-fresh");
         // No prior binary — simulate first-run install.
-        let (installed, new_path) =
-            seed_swap_dir(&dir, None, b"FRESH-kiln-binary");
+        let (installed, new_path) = seed_swap_dir(&dir, None, b"FRESH-kiln-binary");
         assert!(!installed.exists());
 
         swap_new_binary_into_place(&dir).expect("swap should succeed");
@@ -2228,7 +2314,10 @@ mod tests {
         rollback_to_bak(&dir).expect("rollback should succeed");
 
         // Installed slot now holds the old bytes; .bak is gone.
-        assert!(installed.is_file(), "installed kiln should exist post-rollback");
+        assert!(
+            installed.is_file(),
+            "installed kiln should exist post-rollback"
+        );
         let got = std::fs::read(&installed).unwrap();
         assert_eq!(got, b"OLD-WORKING-BINARY");
         assert!(!backup.exists(), "backup should have been consumed");
@@ -2377,10 +2466,7 @@ mod tests {
         // newlines. Normalization must handle that form too.
         let body =
             "Prebuilt kiln binaries for kiln-v1.0.0. See README for platforms.\\n\\nsupported_sm: [80, 86, 89, 90]";
-        assert_eq!(
-            parse_supported_sm(body),
-            Some(vec![80, 86, 89, 90]),
-        );
+        assert_eq!(parse_supported_sm(body), Some(vec![80, 86, 89, 90]),);
     }
 
     #[test]
@@ -2498,10 +2584,7 @@ mod tests {
     #[test]
     fn is_cuda_compatible_for_release_no_local() {
         // Detection failed → do not block the update.
-        assert!(is_cuda_compatible_for_release(
-            None,
-            Some("min_cuda: 12.4"),
-        ));
+        assert!(is_cuda_compatible_for_release(None, Some("min_cuda: 12.4"),));
     }
 
     #[test]

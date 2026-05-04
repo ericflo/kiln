@@ -5,6 +5,7 @@
 //! `Tensor` objects and are composed into the full transformer forward pass.
 
 use anyhow::{Context, Result};
+use candle_core::backend::BackendDevice;
 use candle_core::{DType, Device, Tensor};
 use std::sync::{Mutex, OnceLock};
 
@@ -43,6 +44,11 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
 fn fused_paged_decode_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
+}
+
+#[allow(dead_code)]
+pub(crate) fn vulkan_skip_gdn_state_readback_active() -> bool {
+    false
 }
 
 /// Threshold above which the fused `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd`
@@ -108,6 +114,159 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     Ok((x * sig)?)
 }
 
+fn env_truthy_for_profile(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(false)
+}
+
+fn profile_paged_layers_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_PAGED_LAYERS"))
+}
+
+fn profile_gdn_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
+}
+
+fn profile_full_attn_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_FULL_ATTN_STAGES"))
+}
+
+fn profile_mlp_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_MLP_STAGES"))
+}
+
+fn weighted_lm_head_prep_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
+}
+
+fn synchronize_for_profile(device: &Device) -> Result<()> {
+    if let Device::Metal(device) = device {
+        device.synchronize()?;
+    }
+    Ok(())
+}
+
+fn log_paged_layer_profile(
+    layer: usize,
+    kind: &str,
+    seq_len: usize,
+    start_pos: usize,
+    elapsed: std::time::Duration,
+) {
+    eprintln!(
+        "kiln_profile_paged_layer layer={layer} kind={kind} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        elapsed.as_secs_f64() * 1000.0
+    );
+}
+
+fn start_gdn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+) -> Result<Option<std::time::Instant>> {
+    if context.is_some() {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_gdn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let Some((layer, start_pos)) = context else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_gdn_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+fn start_full_attn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+) -> Result<Option<std::time::Instant>> {
+    if context.is_some() {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_full_attn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let Some((full_attn_layer, start_pos)) = context else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_full_attn_stage full_attn_layer={full_attn_layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+fn start_mlp_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+) -> Result<Option<std::time::Instant>> {
+    if context.is_some() {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_mlp_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    let Some((layer, start_pos)) = context else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_mlp_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
 #[cfg(feature = "metal")]
 fn try_metal_mlp_gate_up_hidden(
     x: &Tensor,
@@ -149,7 +308,10 @@ fn linear_with_lora_t_decode(
         if lora.is_none()
             && !crate::mtp_debug::is_mtp_fp32_head_armed()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
-            && crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
+            && (crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
+                || crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+                    x, weight_t,
+                ))
         {
             return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
                 .context("metal transposed coop GEMV failed");
@@ -763,6 +925,17 @@ pub struct LinearAttentionState {
 impl LinearAttentionState {
     /// Create fresh zero-initialized state for all linear attention layers.
     pub fn new(config: &kiln_core::config::ModelConfig, device: &Device) -> Result<Self> {
+        Self::new_with_batch(config, 1, device)
+    }
+
+    /// Create fresh zero-initialized state for all linear attention layers and
+    /// `batch` independent decode rows.
+    pub fn new_with_batch(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+    ) -> Result<Self> {
+        anyhow::ensure!(batch > 0, "LinearAttentionState batch must be positive");
         let num_linear_layers = config.num_layers - config.num_full_attention_layers;
         let nv = config.linear_num_value_heads;
         let dk = config.linear_key_head_dim;
@@ -779,14 +952,124 @@ impl LinearAttentionState {
         let mut conv_states = Vec::with_capacity(num_linear_layers);
 
         for _ in 0..num_linear_layers {
-            recurrent_states.push(Tensor::zeros((1, nv, dk, dv), recurrent_dtype, device)?);
-            conv_states.push(Tensor::zeros((1, conv_dim, k_minus_1), DType::F32, device)?);
+            recurrent_states.push(Tensor::zeros((batch, nv, dk, dv), recurrent_dtype, device)?);
+            conv_states.push(Tensor::zeros((batch, conv_dim, k_minus_1), DType::F32, device)?);
         }
 
         Ok(Self {
             recurrent_states,
             conv_states,
         })
+    }
+
+    /// Return the shared batch dimension across all recurrent and conv states.
+    pub fn batch_size(&self) -> Result<usize> {
+        if self.recurrent_states.len() != self.conv_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState batch_size: recurrent/conv layer count mismatch ({} vs {})",
+                self.recurrent_states.len(),
+                self.conv_states.len()
+            );
+        }
+
+        let first = self
+            .recurrent_states
+            .first()
+            .context("LinearAttentionState batch_size: no recurrent states")?;
+        let batch = first.dim(0)?;
+        for (idx, tensor) in self.recurrent_states.iter().enumerate() {
+            anyhow::ensure!(
+                tensor.dim(0)? == batch,
+                "LinearAttentionState batch_size: recurrent state {idx} batch mismatch"
+            );
+        }
+        for (idx, tensor) in self.conv_states.iter().enumerate() {
+            anyhow::ensure!(
+                tensor.dim(0)? == batch,
+                "LinearAttentionState batch_size: conv state {idx} batch mismatch"
+            );
+        }
+        Ok(batch)
+    }
+
+    /// Assemble a batched GDN state from one-row per-request states.
+    pub fn from_batch_rows(rows: &[&Self]) -> Result<Self> {
+        anyhow::ensure!(
+            !rows.is_empty(),
+            "LinearAttentionState::from_batch_rows requires at least one row"
+        );
+        let num_layers = rows[0].recurrent_states.len();
+        anyhow::ensure!(
+            rows[0].conv_states.len() == num_layers,
+            "LinearAttentionState::from_batch_rows row 0 recurrent/conv layer count mismatch"
+        );
+
+        for (idx, row) in rows.iter().enumerate() {
+            anyhow::ensure!(
+                row.recurrent_states.len() == num_layers && row.conv_states.len() == num_layers,
+                "LinearAttentionState::from_batch_rows row {idx} layer count mismatch"
+            );
+            let row_batch = row.batch_size()?;
+            anyhow::ensure!(
+                row_batch == 1,
+                "LinearAttentionState::from_batch_rows row {idx} has batch size {}, expected 1",
+                row_batch
+            );
+        }
+
+        let mut recurrent_states = Vec::with_capacity(num_layers);
+        let mut conv_states = Vec::with_capacity(num_layers);
+        for layer_idx in 0..num_layers {
+            let recurrent_refs: Vec<&Tensor> = rows
+                .iter()
+                .map(|row| &row.recurrent_states[layer_idx])
+                .collect();
+            let conv_refs: Vec<&Tensor> =
+                rows.iter().map(|row| &row.conv_states[layer_idx]).collect();
+            recurrent_states.push(Tensor::cat(&recurrent_refs, 0)?.contiguous()?);
+            conv_states.push(Tensor::cat(&conv_refs, 0)?.contiguous()?);
+        }
+
+        Ok(Self {
+            recurrent_states,
+            conv_states,
+        })
+    }
+
+    /// Split a batched state into one-row states in batch order.
+    pub fn split_batch_rows(&self) -> Result<Vec<Self>> {
+        let batch = self.batch_size()?;
+        let mut rows = Vec::with_capacity(batch);
+        for batch_idx in 0..batch {
+            let mut recurrent_states = Vec::with_capacity(self.recurrent_states.len());
+            let mut conv_states = Vec::with_capacity(self.conv_states.len());
+            for tensor in &self.recurrent_states {
+                recurrent_states.push(tensor.narrow(0, batch_idx, 1)?.contiguous()?);
+            }
+            for tensor in &self.conv_states {
+                conv_states.push(tensor.narrow(0, batch_idx, 1)?.contiguous()?);
+            }
+            rows.push(Self {
+                recurrent_states,
+                conv_states,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Overwrite one-row destination states from the rows of this batched state.
+    pub fn scatter_batch_rows(&self, destinations: &mut [&mut Self]) -> Result<()> {
+        let rows = self.split_batch_rows()?;
+        anyhow::ensure!(
+            destinations.len() == rows.len(),
+            "LinearAttentionState::scatter_batch_rows destination count mismatch ({} vs {})",
+            destinations.len(),
+            rows.len()
+        );
+        for (dst, row) in destinations.iter_mut().zip(rows.iter()) {
+            dst.restore_from(row)?;
+        }
+        Ok(())
     }
 
     /// Capture the current GDN recurrent + conv state into a fresh shadow
@@ -2416,7 +2699,7 @@ pub fn swiglu_ffn(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, false)
+    swiglu_ffn_impl(x, mlp, lora, false, None)
 }
 
 fn swiglu_ffn_metal_decode(
@@ -2424,7 +2707,17 @@ fn swiglu_ffn_metal_decode(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, true)
+    swiglu_ffn_impl(x, mlp, lora, true, None)
+}
+
+fn swiglu_ffn_profiled(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
+) -> Result<Tensor> {
+    swiglu_ffn_impl(x, mlp, lora, use_metal_decode_gemv, profile_context)
 }
 
 fn swiglu_ffn_impl(
@@ -2432,13 +2725,26 @@ fn swiglu_ffn_impl(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
+    let profile_device = x.device();
+    let (_, seq_len, _) = x.dims3()?;
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
     #[cfg(feature = "metal")]
+    let gate_up_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+    #[cfg(feature = "metal")]
     if let Some(hidden) = try_metal_mlp_gate_up_hidden(x, mlp, lora_layer)? {
+        finish_mlp_stage_profile(
+            profile_device,
+            profile_context,
+            "gate_up_fused",
+            seq_len,
+            gate_up_profile,
+        )?;
+        let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
         let out = {
             kiln_nvtx::range!(c"kiln/mlp/down");
             mlp_proj_forward_decode_if(
@@ -2450,10 +2756,18 @@ fn swiglu_ffn_impl(
                 lora_scale,
             )?
         };
+        finish_mlp_stage_profile(
+            profile_device,
+            profile_context,
+            "down_proj",
+            seq_len,
+            stage_profile,
+        )?;
         return Ok(out);
     }
 
     // x @ gate_proj_t -> [batch, seq_len, intermediate_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
         mlp_proj_forward(
@@ -2464,9 +2778,25 @@ fn swiglu_ffn_impl(
             lora_scale,
         )?
     };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "gate_proj",
+        seq_len,
+        stage_profile,
+    )?;
     // SiLU activation: x * sigmoid(x)
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let gate = cuda_silu(&gate)?;
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "gate_silu",
+        seq_len,
+        stage_profile,
+    )?;
     // x @ up_proj_t -> [batch, seq_len, intermediate_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
         mlp_proj_forward(
@@ -2477,9 +2807,25 @@ fn swiglu_ffn_impl(
             lora_scale,
         )?
     };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "up_proj",
+        seq_len,
+        stage_profile,
+    )?;
     // Element-wise multiply
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let hidden = (gate * up)?;
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "hidden_mul",
+        seq_len,
+        stage_profile,
+    )?;
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
+    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
         mlp_proj_forward_decode_if(
@@ -2491,6 +2837,13 @@ fn swiglu_ffn_impl(
             lora_scale,
         )?
     };
+    finish_mlp_stage_profile(
+        profile_device,
+        profile_context,
+        "down_proj",
+        seq_len,
+        stage_profile,
+    )?;
     Ok(out)
 }
 
@@ -2599,6 +2952,13 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
             return crate::backend::metal::metal_lm_head_bf16(x, embed_tokens_t)
                 .context("metal lm_head kernel failed");
         }
+        if crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+            x,
+            embed_tokens_t,
+        ) {
+            return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, embed_tokens_t)
+                .context("metal batch lm_head GEMV failed");
+        }
     }
     Ok(x.broadcast_matmul(embed_tokens_t)?)
 }
@@ -2613,6 +2973,42 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     }
     let logits = lm_head_forward(x, embed_tokens_t)?;
     Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
+}
+
+fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> {
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_lm_head_argmax_rows_supports(x, embed_tokens_t) {
+            return crate::backend::metal::metal_lm_head_argmax_rows_bf16(x, embed_tokens_t)
+                .context("metal batch lm_head argmax kernel failed");
+        }
+    }
+    let logits = lm_head_forward(x, embed_tokens_t)?;
+    crate::sampling::greedy_sample_rows(&logits).context("batched greedy row sampling failed")
+}
+
+fn lm_head_weighted_prep_argmax(
+    x: &Tensor,
+    norm_weight: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Option<u32>> {
+    if weighted_lm_head_prep_disabled()
+        || x.dtype() != DType::BF16
+        || norm_weight.dtype() != DType::BF16
+        || !matches!(x.device(), Device::Metal(_))
+        || !matches!(norm_weight.device(), Device::Metal(_))
+    {
+        return Ok(None);
+    }
+    let Ok((batch, seq_len, hidden)) = x.dims3() else {
+        return Ok(None);
+    };
+    if batch != 1 || seq_len != 1 || norm_weight.dims() != [hidden] {
+        return Ok(None);
+    }
+
+    let weighted = x.broadcast_mul(norm_weight)?.contiguous()?;
+    Ok(Some(lm_head_argmax(&weighted, embed_tokens_t)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -3411,6 +3807,7 @@ pub fn gated_deltanet_forward(
         capture_c41_taps,
         true,
         false,
+        None,
     )
 }
 
@@ -3511,8 +3908,10 @@ fn gated_deltanet_forward_decode_if(
     capture_c41_taps: bool,
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
     let input_dtype = x.dtype();
     let nk = config.linear_num_key_heads;
     let dk = config.linear_key_head_dim;
@@ -3526,6 +3925,7 @@ fn gated_deltanet_forward_decode_if(
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let (mixed_qkv, z, a, b) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
         if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
@@ -3544,6 +3944,13 @@ fn gated_deltanet_forward_decode_if(
             (mixed_qkv, z, a, b)
         }
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "in_proj",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_in_proj`. Matches the HF reference layout
     // `concat([in_proj_qkvz(x), in_proj_ba(x)], dim=-1)` = [q, k, v, z, b, a]
@@ -3585,6 +3992,7 @@ fn gated_deltanet_forward_decode_if(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/qkv_conv_norm");
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let (q, k, v) = crate::backend::metal::metal_gdn_decode_qkv_conv_norm_bf16(
                     &mixed_qkv,
                     &weights.conv1d,
@@ -3599,6 +4007,13 @@ fn gated_deltanet_forward_decode_if(
                 )
                 .context("metal gdn decode qkv conv/norm kernel failed")?;
                 let z = z.reshape((batch, seq_len, nv, dv))?;
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "qkv_conv_norm",
+                    seq_len,
+                    stage_profile,
+                )?;
                 Some((q, k, v, z, false))
             } else {
                 None
@@ -3630,6 +4045,7 @@ fn gated_deltanet_forward_decode_if(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/qkv_conv_split");
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                 let (q, k, v) =
                     crate::backend::metal::metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
                         &mixed_qkv,
@@ -3647,6 +4063,13 @@ fn gated_deltanet_forward_decode_if(
                     gdn_qk_norm(&q, &k, input_dtype, scale)?
                 };
                 let z = z.reshape((batch, seq_len, nv, dv))?;
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "qkv_conv_split_norm",
+                    seq_len,
+                    stage_profile,
+                )?;
                 Some((q, k, v, z, false))
             } else {
                 None
@@ -3672,6 +4095,7 @@ fn gated_deltanet_forward_decode_if(
         // backends, non-bf16, kernel_size != 4, and the `KILN_DISABLE_FUSED_CONV1D`
         // kill switch all route through the portable candle path below — which is the
         // parity oracle.
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
             // Transpose to [B, channels, T] for conv
@@ -3745,6 +4169,13 @@ fn gated_deltanet_forward_decode_if(
             // Transpose back to [B, T, qkv_dim]
             post_silu.transpose(1, 2)?
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "conv",
+            seq_len,
+            stage_profile,
+        )?;
 
         // Phase B11b tap: `gdn_conv`. Output of the causal depthwise conv1d +
         // SiLU, matching HF's `mixed_qkv` after `self.conv1d(...)[:T]` +
@@ -3757,6 +4188,7 @@ fn gated_deltanet_forward_decode_if(
         }
 
         // --- Step 3: Split into Q, K, V and reshape to heads ---
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (q, k, v, z) = {
             kiln_nvtx::range!(c"kiln/gdn/qkv_split");
             let q = mixed_qkv
@@ -3771,6 +4203,13 @@ fn gated_deltanet_forward_decode_if(
             let z = z.reshape((batch, seq_len, nv, dv))?;
             (q, k, v, z)
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split",
+            seq_len,
+            stage_profile,
+        )?;
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
@@ -3784,6 +4223,7 @@ fn gated_deltanet_forward_decode_if(
         // path skips the F32 round-trip through HBM. The candle path is the
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (q, k, qk_expanded) = {
             #[cfg(feature = "metal")]
             {
@@ -3888,6 +4328,13 @@ fn gated_deltanet_forward_decode_if(
                 }
             }
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm",
+            seq_len,
+            stage_profile,
+        )?;
         (q, k, v, z, qk_expanded)
     };
 
@@ -3950,22 +4397,29 @@ fn gated_deltanet_forward_decode_if(
                 )
             {
                 kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
-                Some(
-                    crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
-                        &q,
-                        &k,
-                        &v,
-                        &a,
-                        &b,
-                        &weights.a_log,
-                        &weights.dt_bias,
-                        recurrent_state,
-                        &z,
-                        &weights.norm,
-                        config.rms_norm_eps as f32,
-                    )
-                    .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?,
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+                let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &weights.a_log,
+                    &weights.dt_bias,
+                    recurrent_state,
+                    &z,
+                    &weights.norm,
+                    config.rms_norm_eps as f32,
                 )
+                .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?;
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gates_recur_gated_norm",
+                    seq_len,
+                    stage_profile,
+                )?;
+                Some(out)
             } else {
                 None
             }
@@ -4013,19 +4467,27 @@ fn gated_deltanet_forward_decode_if(
                         )
                     {
                         kiln_nvtx::range!(c"kiln/gdn/gates_recur");
-                        Some(
-                            crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
-                                &q,
-                                &k,
-                                &v,
-                                &a,
-                                &b,
-                                &weights.a_log,
-                                &weights.dt_bias,
-                                recurrent_state,
-                            )
-                            .context("metal gdn decode gates+recurrent kernel failed")?,
+                        let stage_profile =
+                            start_gdn_stage_profile(profile_device, profile_context)?;
+                        let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_bf16(
+                            &q,
+                            &k,
+                            &v,
+                            &a,
+                            &b,
+                            &weights.a_log,
+                            &weights.dt_bias,
+                            recurrent_state,
                         )
+                        .context("metal gdn decode gates+recurrent kernel failed")?;
+                        finish_gdn_stage_profile(
+                            profile_device,
+                            profile_context,
+                            "gates_recur",
+                            seq_len,
+                            stage_profile,
+                        )?;
+                        Some(out)
                     } else {
                         None
                     }
@@ -4057,6 +4519,7 @@ fn gated_deltanet_forward_decode_if(
         // `KILN_DISABLE_METAL_GDN_GATES=1`). The two are algorithmically
         // identical — the reference path is the original Phase-6 implementation
         // and remains the parity oracle.
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
             if use_fused_gdn_gates && backend.supports_gdn_gates() {
@@ -4075,6 +4538,13 @@ fn gated_deltanet_forward_decode_if(
                     .context("gdn decode gates fallback")?
             }
         };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "gates",
+            seq_len,
+            stage_profile,
+        )?;
 
         // Phase B11b taps: `gdn_gate_beta` = sigmoid(b), `gdn_gate_g` =
         // -exp(A_log) * softplus(a + dt_bias) (the log-decay scalar fed into the
@@ -4089,7 +4559,8 @@ fn gated_deltanet_forward_decode_if(
             crate::mtp_debug::capture_c41_layer1_tap("gdn_gate_g", &g)?;
         }
 
-        let native_recurrent_prefill = if recurrent_unexpanded_qk {
+        let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+        let recurrent_result = if let Some(attn_out) = if recurrent_unexpanded_qk {
             let v_recur = v.to_dtype(input_dtype)?;
             gdn_recurrent_prefill_native_head_last(
                 backend,
@@ -4102,9 +4573,7 @@ fn gated_deltanet_forward_decode_if(
             )?
         } else {
             None
-        };
-
-        if let Some(attn_out) = native_recurrent_prefill {
+        } {
             (attn_out, true, false) // [B, T, nv, dv], contiguous
         } else {
             // Cast v back to input_dtype so the recurrence stays in bf16. The
@@ -4157,7 +4626,15 @@ fn gated_deltanet_forward_decode_if(
                     ), // [B, nv, T, dv]
                 }
             }
-        }
+        };
+        finish_gdn_stage_profile(
+            profile_device,
+            profile_context,
+            "recurrent",
+            seq_len,
+            stage_profile,
+        )?;
+        recurrent_result
     };
 
     // Restore state to its original dtype so the caller's F32 invariant holds
@@ -4168,6 +4645,7 @@ fn gated_deltanet_forward_decode_if(
 
     // Transpose to [B, T, nv, dv] unless the Metal full-chunk path already
     // wrote that contiguous layout directly.
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/post_transpose");
         if attn_out_head_last {
@@ -4176,6 +4654,13 @@ fn gated_deltanet_forward_decode_if(
             attn_out.transpose(1, 2)?
         }
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "post_transpose",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_recur_out`. Captured post-transpose (shape
     // [B, T, nv, dv]) so the layout matches the input HF passes to its
@@ -4191,6 +4676,7 @@ fn gated_deltanet_forward_decode_if(
     }
 
     // --- Step 8: Gated RMSNorm — norm(attn_out) * silu(z) ---
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let attn_out = {
         kiln_nvtx::range!(c"kiln/gdn/gated_norm");
         let attn_out = if attn_out_already_gated_norm {
@@ -4203,6 +4689,13 @@ fn gated_deltanet_forward_decode_if(
             .reshape((batch, seq_len, v_dim))?
             .to_dtype(input_dtype)?
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "gated_norm",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_gated_norm`. Output of the GatedRMSNorm /
     // `norm(attn_out) * silu(z)` block, reshaped and cast back to input
@@ -4219,6 +4712,7 @@ fn gated_deltanet_forward_decode_if(
     // NOTE: conv1d bias is not loaded by the weight loader. If the model has one,
     // it should be added to GpuLinearAttentionWeights and applied after conv1d.
     // Pre-transposed cache (see Step 1 note).
+    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
         linear_with_lora_t_decode_if(
@@ -4229,6 +4723,13 @@ fn gated_deltanet_forward_decode_if(
             0.0,
         )?
     };
+    finish_gdn_stage_profile(
+        profile_device,
+        profile_context,
+        "out_proj",
+        seq_len,
+        stage_profile,
+    )?;
 
     // Phase B11b tap: `gdn_out_proj`. Output of the final `out_proj` linear
     // (shape [B, T, hidden]) — this is what the caller adds to the residual
@@ -4517,6 +5018,7 @@ fn try_flash_attn_paged_decode(
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    profile_context: Option<(usize, usize)>,
 ) -> Result<Option<Tensor>> {
     const K_BLOCK_N: usize = 128;
 
@@ -4553,6 +5055,7 @@ fn try_flash_attn_paged_decode(
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+            let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
             let attn_output = {
                 kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
                 backend.flash_attn_paged_decode_contiguous(
@@ -4564,6 +5067,13 @@ fn try_flash_attn_paged_decode(
                     softmax_scale,
                 )?
             };
+            finish_full_attn_stage_profile(
+                q.device(),
+                profile_context,
+                "decode_attn_contiguous",
+                q_len,
+                stage_profile,
+            )?;
             let attn_output = if attn_output.is_some() {
                 attn_output
             } else {
@@ -4571,7 +5081,21 @@ fn try_flash_attn_paged_decode(
                     && backend.supports_paged_kv_head_major_read()
                 {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, total_seq_len)?
+                    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                    let out = backend.paged_kv_head_major_read(
+                        k_pool,
+                        v_pool,
+                        start_slot,
+                        total_seq_len,
+                    )?;
+                    finish_full_attn_stage_profile(
+                        q.device(),
+                        profile_context,
+                        "kv_head_read",
+                        q_len,
+                        stage_profile,
+                    )?;
+                    out
                 } else {
                     None
                 };
@@ -4593,9 +5117,18 @@ fn try_flash_attn_paged_decode(
                             )
                         }
                     };
-                    flash_attention_forward_head_major(
+                    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                    let out = flash_attention_forward_head_major(
                         backend, q, &k_head, &v_head, num_heads, head_dim,
-                    )?
+                    )?;
+                    finish_full_attn_stage_profile(
+                        q.device(),
+                        profile_context,
+                        "decode_attn_head_major",
+                        q_len,
+                        stage_profile,
+                    )?;
+                    out
                 } else {
                     None
                 }
@@ -4608,11 +5141,20 @@ fn try_flash_attn_paged_decode(
                 // returns above and should not pay this transpose/copy.
                 let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
                 let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let q_fa = {
                     kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
                     q.transpose(1, 2)?.contiguous()?
                 };
-                flash_attention_forward(
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "q_fa_transpose",
+                    q_len,
+                    stage_profile,
+                )?;
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                let out = flash_attention_forward(
                     backend,
                     &q_fa,
                     &k_live,
@@ -4620,17 +5162,34 @@ fn try_flash_attn_paged_decode(
                     num_heads,
                     num_kv_heads,
                     head_dim,
-                )?
+                )?;
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "decode_attn_fallback",
+                    q_len,
+                    stage_profile,
+                )?;
+                out
             };
             if let Some(attn_output) = attn_output {
                 // The flash-attention helpers already reshape to
                 // [batch, seq_len, num_heads * head_dim].
                 let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let attn_output =
                     attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "attn_gate",
+                    q_len,
+                    stage_profile,
+                )?;
                 let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
+                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
                     linear_with_lora_t_decode(
@@ -4640,6 +5199,13 @@ fn try_flash_attn_paged_decode(
                         lora_scale,
                     )?
                 };
+                finish_full_attn_stage_profile(
+                    q.device(),
+                    profile_context,
+                    "o_proj",
+                    q_len,
+                    stage_profile,
+                )?;
                 let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
                 return Ok(Some(out));
             }
@@ -4727,10 +5293,20 @@ fn try_flash_attn_paged_decode(
     // -> [batch, 1, num_heads, head_dim]. Build it lazily so the contiguous-KV
     // Metal path above can avoid a dead transpose/copy per full-attention layer.
     let q_fa = {
+        let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
-        q.transpose(1, 2)?.contiguous()?
+        let q_fa = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            q.device(),
+            profile_context,
+            "q_fa_transpose",
+            q_len,
+            stage_profile,
+        )?;
+        q_fa
     };
 
+let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let attn_out = {
         #[cfg(feature = "cuda")]
         {
@@ -4790,6 +5366,13 @@ fn try_flash_attn_paged_decode(
             }
         }
     };
+    finish_full_attn_stage_profile(
+        q.device(),
+        profile_context,
+        "decode_attn_paged",
+        q_len,
+        stage_profile,
+    )?;
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
@@ -4797,9 +5380,18 @@ fn try_flash_attn_paged_decode(
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
     let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
+    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
+    finish_full_attn_stage_profile(
+        q.device(),
+        profile_context,
+        "attn_gate",
+        q_len,
+        stage_profile,
+    )?;
     let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
+    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
         linear_with_lora_t_decode(
@@ -4809,8 +5401,256 @@ fn try_flash_attn_paged_decode(
             lora_scale,
         )?
     };
+    finish_full_attn_stage_profile(q.device(), profile_context, "o_proj", q_len, stage_profile)?;
     let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(Some(out))
+}
+
+/// Batched full-attention decode for rows whose live paged-KV windows are
+/// contiguous and share a common sequence length.
+///
+/// This is the scheduler-facing low-level primitive for true decode batching:
+/// it projects Q/K/V for `[batch, 1, hidden]`, writes one K/V row per request
+/// into the shared paged cache, runs the batched contiguous paged-attention
+/// backend kernel, then applies the attention output gate and `o_proj`.
+///
+/// Current backend constraints are intentionally strict:
+/// - one decode token per row,
+/// - all rows at the same `start_pos`,
+/// - non-FP8 paged cache,
+/// - each row's live `0..start_pos+1` KV window is one contiguous pool run,
+/// - backend accepts `flash_attn_paged_decode_contiguous_batch`.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_paged_decode_contiguous_batch(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &Tensor,
+    start_positions: &[usize],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    full_attn_layer_idx: usize,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    profile_context: Option<(usize, usize)>,
+) -> Result<Tensor> {
+    let (batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
+    anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
+    anyhow::ensure!(
+        seq_len == 1,
+        "batched contiguous paged attention requires one decode token per row"
+    );
+    anyhow::ensure!(
+        block_tables.len() == batch && start_positions.len() == batch,
+        "batched contiguous paged attention metadata length mismatch"
+    );
+    anyhow::ensure!(
+        positions.elem_count() == 1,
+        "batched contiguous paged attention requires one shared decode position"
+    );
+    anyhow::ensure!(
+        !paged_cache.is_fp8(),
+        "batched contiguous paged attention does not support FP8 caches"
+    );
+    anyhow::ensure!(
+        full_attn_layer_idx < paged_cache.num_layers(),
+        "batched contiguous paged attention layer index out of range"
+    );
+
+    let start_pos = start_positions[0];
+    anyhow::ensure!(
+        start_positions.iter().all(|&pos| pos == start_pos),
+        "batched contiguous paged attention requires a common start_pos"
+    );
+    let total_seq_len = start_pos + 1;
+    let live_window_starts = vec![0usize; batch];
+    let start_slots = paged_cache
+        .contiguous_slot_run_starts(block_tables, &live_window_starts, total_seq_len)
+        .context("batched contiguous paged attention requires contiguous live KV windows")?;
+    let start_slots_u32: Vec<u32> = start_slots
+        .iter()
+        .map(|&slot| {
+            u32::try_from(slot)
+                .context("batched contiguous paged attention start slot exceeds u32 range")
+        })
+        .collect::<Result<_>>()?;
+
+    let use_metal_decode_gemv =
+        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let (q_raw, k, v) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
+        let out = full_attn_qkv_proj_decode_if(
+            use_metal_decode_gemv,
+            x,
+            attn_weights,
+            lora_layer,
+            lora_scale,
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+
+    let (q, gate) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = if attn_output_gate {
+            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q = q_raw.narrow(3, 0, head_dim)?;
+            let gate = q_raw.narrow(3, head_dim, head_dim)?;
+            let gate = gate
+                .contiguous()?
+                .reshape(((), seq_len, num_heads * head_dim))?;
+            (q.contiguous()?, Some(gate))
+        } else {
+            (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+    let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+        let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        (q, k)
+    };
+    let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "rope_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let q = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let q = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_transpose_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        q
+    };
+
+    {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        if !paged_cache.write_token_major_native_batch(
+            full_attn_layer_idx,
+            block_tables,
+            start_positions,
+            &k,
+            &v,
+        )? {
+            anyhow::bail!("batched contiguous paged attention KV write declined");
+        }
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_write_batch",
+            seq_len,
+            stage_profile,
+        )?;
+    }
+
+    let (k_pool, v_pool) = paged_cache
+        .pool_tensors(full_attn_layer_idx)
+        .context("batched contiguous paged attention layer index out of range")?;
+    let start_slots =
+        Tensor::from_slice(start_slots_u32.as_slice(), batch, x.device())?.contiguous()?;
+    let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = backend.flash_attn_paged_decode_contiguous_batch(
+            &q,
+            k_pool,
+            v_pool,
+            &start_slots,
+            total_seq_len,
+            softmax_scale,
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "decode_attn_contiguous_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out.context("backend declined batched contiguous paged attention")?
+    };
+
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out =
+            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_gate_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let out = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
+        let out = linear_with_lora_t_decode_if(
+            use_metal_decode_gemv,
+            &attn_output,
+            &attn_weights.o_proj_t,
+            lora_layer.and_then(|l| l.o_proj.as_ref()),
+            lora_scale,
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "o_proj_batch",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    Ok(out)
 }
 
 /// Grouped-query attention using a paged KV cache.
@@ -4883,6 +5723,9 @@ fn gqa_attention_paged_with_rope_tables(
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
+    let profile_context =
+        profile_full_attn_stages_enabled().then_some((full_attn_layer_idx, start_pos));
     let subop_armed = crate::mtp_debug::is_subop_capture_armed();
     let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
     let use_metal_decode_gemv =
@@ -4894,14 +5737,23 @@ fn gqa_attention_paged_with_rope_tables(
         None => (None, 0.0),
     };
     let (q_raw, k, v) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        full_attn_qkv_proj_decode_if(
+        let out = full_attn_qkv_proj_decode_if(
             use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer,
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     // Phase B7b sub-op taps: post-projection (pre-split). `q_raw` may include
     // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
@@ -4926,8 +5778,9 @@ fn gqa_attention_paged_with_rope_tables(
     }
 
     let (q, gate) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv_split");
-        if attn_output_gate {
+        let out = if attn_output_gate {
             let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
             let q = q_raw.narrow(3, 0, head_dim)?;
             let gate = q_raw.narrow(3, head_dim, head_dim)?;
@@ -4938,7 +5791,15 @@ fn gqa_attention_paged_with_rope_tables(
         } else {
             let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
             (q, None)
-        }
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_split",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     // After the gate split, q is the rotation target.
     if subop_armed {
@@ -4967,10 +5828,19 @@ fn gqa_attention_paged_with_rope_tables(
 
     // QK-norm
     let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/qk_norm");
         let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
         let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
-        (q, k)
+        let out = (q, k);
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
@@ -4993,12 +5863,21 @@ fn gqa_attention_paged_with_rope_tables(
     // Use the GPU tensor variant so positions remain at a stable GPU address
     // (critical for CUDA graph replay correctness)
     let (q, k) = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/rope");
-        if let Some((cos, sin)) = rope_tables {
+        let out = if let Some((cos, sin)) = rope_tables {
             rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
         } else {
             rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
-        }
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "rope",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
@@ -5026,8 +5905,16 @@ fn gqa_attention_paged_with_rope_tables(
     // prefill tiles and speculative verifier windows read full head-major K/V
     // back from the paged cache instead.
     let q = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
         let q = q.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_transpose",
+            seq_len,
+            stage_profile,
+        )?;
         q
     };
 
@@ -5045,17 +5932,41 @@ fn gqa_attention_paged_with_rope_tables(
             || backend.supports_flash_attn_prefill())
     {
         kiln_nvtx::range!(c"kiln/attn/full/prefill_initial");
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
         let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_kv_head_layout",
+            seq_len,
+            stage_profile,
+        )?;
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let attn_output = if let Some(attn_output) =
             flash_attention_forward_head_major(backend, &q, &k_head, &v_head, num_heads, head_dim)?
         {
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_head_major",
+                seq_len,
+                stage_profile,
+            )?;
             Some(attn_output)
         } else if backend.supports_flash_attn_prefill() {
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_head_major",
+                seq_len,
+                stage_profile,
+            )?;
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let q_prefill = q.transpose(1, 2)?.contiguous()?; // -> [batch, seq_len, num_heads, head_dim]
             let k_prefill = k_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
             let v_prefill = v_cache_token_major.contiguous()?; // [batch, seq_len, num_kv_heads, head_dim]
-            flash_attention_forward(
+            let out = flash_attention_forward(
                 backend,
                 &q_prefill,
                 &k_prefill,
@@ -5063,12 +5974,28 @@ fn gqa_attention_paged_with_rope_tables(
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            )?
+            )?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_fallback",
+                seq_len,
+                stage_profile,
+            )?;
+            out
         } else {
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_attn_head_major",
+                seq_len,
+                stage_profile,
+            )?;
             None
         };
 
         if let Some(attn_output) = attn_output {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
                 if !paged_cache.write_token_major_native(
@@ -5089,15 +6016,31 @@ fn gqa_attention_paged_with_rope_tables(
                         .context("paged KV cache write failed")?;
                 }
             }
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "kv_write",
+                seq_len,
+                stage_profile,
+            )?;
 
             // Phase B12 layer-31 GQA tap: attn_out. Captured AFTER the gate
             // multiply (if `attn_output_gate`) and BEFORE o_proj, so it
             // matches the HF reference's `attn_output = ... * sigmoid_gate`
             // tap point. Shape: [B, T, num_heads * head_dim].
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "attn_gate",
+                seq_len,
+                stage_profile,
+            )?;
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
             }
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t(
@@ -5107,6 +6050,13 @@ fn gqa_attention_paged_with_rope_tables(
                     lora_scale,
                 )?
             };
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "o_proj",
+                seq_len,
+                stage_profile,
+            )?;
             // Phase B12 layer-31 GQA tap: o_proj output (post-o_proj).
             if b12_layer_31 {
                 crate::mtp_debug::capture_b12_gqa_tap("o_proj", &out)?;
@@ -5126,6 +6076,7 @@ fn gqa_attention_paged_with_rope_tables(
 
     // Write new K/V into paged cache.
     if !single_token_self_attn {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/kv/copy");
         let graph_write_done = {
             #[cfg(feature = "cuda")]
@@ -5165,6 +6116,13 @@ fn gqa_attention_paged_with_rope_tables(
                 )
                 .context("paged KV cache write failed")?;
         }
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_write",
+            seq_len,
+            stage_profile,
+        )?;
     }
 
     // Fast path: fused paged-decode flash-attention kernel.
@@ -5211,6 +6169,7 @@ fn gqa_attention_paged_with_rope_tables(
                 lora_layer,
                 lora_scale,
                 #[cfg(feature = "cuda")] graph_inputs,
+                profile_context,
             )?
         };
         if let Some(out) = out_opt {
@@ -5763,6 +6722,7 @@ pub fn transformer_block_paged(
         full_attn_layer_idx,
         lora,
         #[cfg(feature = "cuda")] None,
+        None,
     )
 }
 
@@ -5786,6 +6746,7 @@ fn transformer_block_paged_with_rope_tables(
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
     #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    profile_mlp_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -5872,9 +6833,9 @@ fn transformer_block_paged_with_rope_tables(
     let ffn_out = if b12_layer_31 {
         swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
     } else if use_metal_decode_ffn {
-        swiglu_ffn_metal_decode(&normed, &layer.mlp, lora)?
+        swiglu_ffn_profiled(&normed, &layer.mlp, lora, true, profile_mlp_context)?
     } else {
-        swiglu_ffn(&normed, &layer.mlp, lora)?
+        swiglu_ffn_profiled(&normed, &layer.mlp, lora, false, profile_mlp_context)?
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
@@ -5888,6 +6849,309 @@ fn transformer_block_paged_with_rope_tables(
     // Note: the final block output (`out`) is dumped as `post_layer` at the
     // outer MTP call site, so we do not re-capture it here.
     Ok(out)
+}
+
+/// Batched decode variant of [`transformer_block_paged`] for full-attention
+/// layers whose paged-KV windows are contiguous and share one decode position.
+///
+/// This wraps [`gqa_attention_paged_decode_contiguous_batch`] with the block's
+/// pre-attention norm, residuals, post-attention norm, and MLP. Linear/GDN
+/// layers are intentionally out of scope; they use `LinearAttentionState`
+/// batching instead.
+#[allow(clippy::too_many_arguments)]
+pub fn transformer_block_paged_decode_contiguous_batch(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &Tensor,
+    start_positions: &[usize],
+    inv_freq: &Tensor,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    full_attn_profile_context: Option<(usize, usize)>,
+    mlp_profile_context: Option<(usize, usize)>,
+) -> Result<Tensor> {
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(w) => w,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!(
+                "batched contiguous paged transformer decode only supports full attention layers"
+            )
+        }
+    };
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    anyhow::ensure!(
+        seq_len == 1,
+        "batched contiguous paged transformer decode requires one token per row"
+    );
+    let start_pos = *start_positions
+        .first()
+        .context("batched contiguous paged transformer decode requires a non-empty batch")?;
+    let use_metal_decode_ffn =
+        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_attn_batch_decode");
+        rms_norm(x, &layer.input_layernorm, config.rms_norm_eps)?
+    };
+    let attn_out = gqa_attention_paged_decode_contiguous_batch(
+        backend,
+        &normed,
+        attn_weights,
+        positions,
+        start_positions,
+        config.num_attention_heads,
+        config.num_kv_heads,
+        config.head_dim,
+        config.rotary_dim(),
+        inv_freq,
+        config.rms_norm_eps,
+        paged_cache,
+        block_tables,
+        full_attn_layer_idx,
+        config.attn_output_gate,
+        lora,
+        full_attn_profile_context,
+    )?;
+    let x = {
+        kiln_nvtx::range!(c"kiln/residual_batch_decode");
+        (x + attn_out)?
+    };
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
+        rms_norm(&x, &layer.post_attention_layernorm, config.rms_norm_eps)?
+    };
+    let ffn_out = swiglu_ffn_profiled(
+        &normed,
+        &layer.mlp,
+        lora,
+        use_metal_decode_ffn,
+        mlp_profile_context,
+    )?;
+    let out = {
+        kiln_nvtx::range!(c"kiln/residual_batch_decode");
+        (x + ffn_out)?
+    };
+    Ok(out)
+}
+
+/// Strict batched single-token paged decode up through the final transformer
+/// block.
+///
+/// This is the model-loop counterpart to
+/// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
+/// per batch row, a block table per row, a common decode position, and an
+/// optional batch-shaped [`LinearAttentionState`]. It returns final hidden
+/// states with shape `[batch, 1, hidden_size]`.
+///
+/// The helper is deliberately narrower than the general scheduler contract:
+/// every row must share the same `start_pos`, full-attention rows must satisfy
+/// the contiguous paged-KV constraints enforced by E340/E341, and LoRA/debug
+/// capture paths remain owned by the rowwise entry points until scheduler
+/// integration needs them.
+#[allow(clippy::too_many_arguments)]
+fn model_forward_paged_decode_contiguous_batch_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let batch = token_ids.len();
+    anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
+    anyhow::ensure!(
+        block_tables.len() == batch && start_positions.len() == batch,
+        "batched paged decode metadata length mismatch"
+    );
+    let start_pos = start_positions[0];
+    anyhow::ensure!(
+        start_positions.iter().all(|&pos| pos == start_pos),
+        "batched paged decode requires a common start_pos"
+    );
+
+    if weights
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)))
+    {
+        let state_batch = linear_state
+            .as_ref()
+            .context("batched paged decode requires LinearAttentionState for GDN layers")?
+            .batch_size()?;
+        anyhow::ensure!(
+            state_batch == batch,
+            "batched paged decode LinearAttentionState batch mismatch ({state_batch} vs {batch})"
+        );
+    }
+
+    let device = weights.embed_tokens.device();
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
+    let positions = Tensor::from_slice(&[start_pos as f32], 1usize, device)?;
+    let use_metal_decode_ffn =
+        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let profile_full_attn_stages = profile_full_attn_stages_enabled();
+    let profile_gdn_stages = profile_gdn_stages_enabled();
+    let profile_mlp_stages = profile_mlp_stages_enabled();
+
+    let mut full_attn_idx = 0usize;
+    let mut linear_attn_idx = 0usize;
+    for (i, layer) in weights.layers.iter().enumerate() {
+        let layer_lora: Option<(&LoraLayerWeights, f32)> =
+            lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                hidden = transformer_block_paged_decode_contiguous_batch(
+                    backend,
+                    &hidden,
+                    layer,
+                    config,
+                    &positions,
+                    start_positions,
+                    &weights.rotary_inv_freq,
+                    paged_cache,
+                    block_tables,
+                    full_attn_idx,
+                    layer_lora,
+                    profile_full_attn_stages.then_some((full_attn_idx, start_pos)),
+                    profile_mlp_stages.then_some((i, start_pos)),
+                )
+                .with_context(|| {
+                    format!("batched transformer block {i} (full attention, paged)")
+                })?;
+                full_attn_idx += 1;
+            }
+            GpuAttentionWeights::Linear(lin_weights) => {
+                let state = linear_state.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("batched linear attention state required for GDN layer {i}")
+                })?;
+                let normed = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_attn_batch_decode");
+                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                };
+                let attn_out = gated_deltanet_forward_decode_if(
+                    backend,
+                    &normed,
+                    lin_weights,
+                    config,
+                    &mut state.recurrent_states[linear_attn_idx],
+                    &mut state.conv_states[linear_attn_idx],
+                    false,
+                    false,
+                    use_metal_decode_ffn,
+                    use_metal_decode_ffn,
+                    profile_gdn_stages.then_some((i, start_pos)),
+                )
+                .with_context(|| {
+                    format!("batched gated deltanet layer {i} (linear attention, paged)")
+                })?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual_batch_decode");
+                    (hidden + attn_out)?
+                };
+                let normed_post = {
+                    kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
+                    rms_norm(
+                        &hidden,
+                        &layer.post_attention_layernorm,
+                        config.rms_norm_eps,
+                    )?
+                };
+                let ffn_out = swiglu_ffn_profiled(
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                    profile_mlp_stages.then_some((i, start_pos)),
+                )?;
+                hidden = {
+                    kiln_nvtx::range!(c"kiln/residual_batch_decode");
+                    (hidden + ffn_out)?
+                };
+                linear_attn_idx += 1;
+            }
+        }
+    }
+
+    Ok(hidden)
+}
+
+/// Strict batched single-token paged decode for model-forward integration.
+///
+/// This is the model-loop counterpart to
+/// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
+/// per batch row, a block table per row, a common decode position, and an
+/// optional batch-shaped [`LinearAttentionState`]. It returns full logits with
+/// shape `[batch, 1, vocab_size]`.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state,
+        lora,
+    )?;
+    let logits = {
+        kiln_nvtx::range!(c"kiln/lm_head_batch_decode");
+        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        lm_head_forward(&normed, &weights.embed_tokens_t)?
+    };
+    Ok(logits)
+}
+
+/// Strict batched single-token paged decode that returns greedy next-token IDs
+/// without materializing full logits when a backend has a fused argmax path.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch_greedy(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &mut PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Vec<u32>> {
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state,
+        lora,
+    )?;
+    let token_ids = {
+        kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode");
+        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        lm_head_argmax_rows(&normed, &weights.embed_tokens_t)?
+    };
+    Ok(token_ids)
 }
 
 /// Full model forward pass: embedding → N transformer blocks → final norm → LM head → logits.
@@ -5983,6 +7247,7 @@ pub fn model_forward(
                     /* capture_c41_taps = */ false,
                     /* use_fused_gdn_gates = */ true,
                     use_metal_decode_ffn,
+                    None,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
@@ -6563,6 +7828,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     false,
                     true,
                     false,
+                    None,
                 )
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
 
@@ -6622,6 +7888,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                             full_attn_idx,
                             layer_lora,
                             #[cfg(feature = "cuda")]
+                            None,
                             None,
                         )
                         .with_context(|| {
@@ -7409,6 +8676,9 @@ fn model_forward_paged_inner(
     // 2. Loop through all transformer layers
     let mut full_attn_idx: usize = 0;
     let mut linear_attn_idx: usize = 0;
+    let profile_paged_layers = profile_paged_layers_enabled();
+    let profile_gdn_stages = profile_gdn_stages_enabled();
+    let profile_mlp_stages = profile_mlp_stages_enabled();
     for (i, layer) in weights.layers.iter().enumerate() {
         // Get LoRA weights for this layer, if available
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
@@ -7416,6 +8686,12 @@ fn model_forward_paged_inner(
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
+                let layer_profile_start = if profile_paged_layers {
+                    synchronize_for_profile(device)?;
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 // Phase B12: tell the capture layer that we are entering the
                 // base-model layer `i`. `capture_b12_gqa_tap` call sites inside
                 // `gqa_attention_paged` / `transformer_block_paged` gate on
@@ -7441,13 +8717,24 @@ fn model_forward_paged_inner(
                     full_attn_idx,
                     layer_lora,
                     #[cfg(feature = "cuda")] graph_inputs,
+                    profile_mlp_stages.then_some((i, start_pos)),
                 );
                 crate::mtp_debug::exit_b12_layer_scope();
                 hidden = block_result
                     .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
+                if let Some(start) = layer_profile_start {
+                    synchronize_for_profile(device)?;
+                    log_paged_layer_profile(i, "full", seq_len, start_pos, start.elapsed());
+                }
             }
             GpuAttentionWeights::Linear(lin_weights) => {
+                let layer_profile_start = if profile_paged_layers {
+                    synchronize_for_profile(device)?;
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
@@ -7521,6 +8808,7 @@ fn model_forward_paged_inner(
                     capture_c41_taps,
                     true,
                     use_metal_decode_ffn,
+                    profile_gdn_stages.then_some((i, start_pos)),
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
@@ -7541,11 +8829,13 @@ fn model_forward_paged_inner(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = if use_metal_decode_ffn {
-                    swiglu_ffn_metal_decode(&normed_post, &layer.mlp, layer_lora)?
-                } else {
-                    swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?
-                };
+                let ffn_out = swiglu_ffn_profiled(
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                    profile_mlp_stages.then_some((i, start_pos)),
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual");
                     (hidden + ffn_out)?
@@ -7554,6 +8844,10 @@ fn model_forward_paged_inner(
                     crate::mtp_debug::capture_c41_layer1_tap("layer_1_output", &hidden)?;
                 }
                 linear_attn_idx += 1;
+                if let Some(start) = layer_profile_start {
+                    synchronize_for_profile(device)?;
+                    log_paged_layer_profile(i, "linear", seq_len, start_pos, start.elapsed());
+                }
             }
         }
 
@@ -7601,6 +8895,13 @@ fn model_forward_paged_inner(
             let token = {
                 kiln_nvtx::range!(c"kiln/lm_head_argmax");
                 let last = hidden.narrow(1, seq_len - 1, 1)?;
+                if let Some(token) = lm_head_weighted_prep_argmax(
+                    &last,
+                    &weights.final_norm,
+                    &weights.embed_tokens_t,
+                )? {
+                    return Ok((None, None, Some(token)));
+                }
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
                 lm_head_argmax(&normed, &weights.embed_tokens_t)?
             };
@@ -8273,6 +9574,57 @@ mod tests {
 
     #[cfg(feature = "metal")]
     #[test]
+    fn test_metal_lm_head_forward_decode_batch_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_lm_head_forward_decode_batch_matches_broadcast_matmul"
+            );
+            return Ok(());
+        };
+
+        let batch = 4usize;
+        let hidden = 128usize;
+        let vocab = 257usize;
+        let x_data: Vec<f32> = (0..batch * hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+            .collect();
+        let weight_data: Vec<f32> = (0..hidden * vocab)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
+            .collect();
+
+        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+
+        assert!(
+            crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t)
+        );
+        let reference = x.broadcast_matmul(&weight_t)?;
+        let fast = lm_head_forward(&x, &weight_t)?;
+
+        assert_eq!(fast.dims(), &[batch, 1usize, vocab]);
+        let diff = (fast.to_dtype(DType::F32)?
+            - reference.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        assert!(
+            max < 2e-2,
+            "Metal batch LM-head max_abs_diff={max:e} exceeds 2e-2"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal batch LM-head mean_abs_diff={mean:e} exceeds 2e-3"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
     fn test_metal_rotary_embedding_matches_fallback() -> Result<()> {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
@@ -8611,6 +9963,831 @@ mod tests {
             o_proj_t,
             q_proj_marlin: None,
         })
+    }
+
+    #[cfg(feature = "metal")]
+    fn patterned_bf16(shape: &[usize], scale: f32, device: &Device) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| (((i * 17 + 13) % 257) as f32 - 128.0) * scale)
+            .collect();
+        Ok(Tensor::new(data, device)?
+            .reshape(shape)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?)
+    }
+
+    #[cfg(feature = "metal")]
+    fn patterned_f32(shape: &[usize], scale: f32, device: &Device) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| (((i * 23 + 19) % 251) as f32 - 125.0) * scale)
+            .collect();
+        Ok(Tensor::new(data, device)?.reshape(shape)?.contiguous()?)
+    }
+
+    #[cfg(feature = "metal")]
+    fn make_bf16_full_attn_weights(
+        hidden: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        device: &Device,
+    ) -> Result<GpuFullAttentionWeights> {
+        let q_proj = patterned_bf16(&[num_heads * head_dim, hidden], 0.00002, device)?;
+        let k_proj = patterned_bf16(&[num_kv_heads * head_dim, hidden], 0.00003, device)?;
+        let v_proj = patterned_bf16(&[num_kv_heads * head_dim, hidden], 0.00004, device)?;
+        let o_proj = patterned_bf16(&[hidden, num_heads * head_dim], 0.00002, device)?;
+        Ok(GpuFullAttentionWeights {
+            q_proj_t: q_proj.t()?.contiguous()?,
+            k_proj_t: k_proj.t()?.contiguous()?,
+            v_proj_t: v_proj.t()?.contiguous()?,
+            o_proj_t: o_proj.t()?.contiguous()?,
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            q_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+            k_norm: Tensor::zeros(head_dim, DType::F32, device)?,
+            q_proj_marlin: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn make_bf16_mlp_weights(
+        hidden: usize,
+        intermediate: usize,
+        device: &Device,
+    ) -> Result<GpuFfnWeights> {
+        let gate_proj = patterned_bf16(&[intermediate, hidden], 0.00003, device)?;
+        let up_proj = patterned_bf16(&[intermediate, hidden], 0.00002, device)?;
+        let down_proj = patterned_bf16(&[hidden, intermediate], 0.00003, device)?;
+        Ok(GpuFfnWeights {
+            gate_proj_t: gate_proj.t()?.contiguous()?,
+            up_proj_t: up_proj.t()?.contiguous()?,
+            down_proj_t: down_proj.t()?.contiguous()?,
+            gate_proj,
+            up_proj,
+            down_proj,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn make_bf16_full_attention_gpu_weights(
+        vocab: usize,
+        hidden: usize,
+        intermediate: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        num_layers: usize,
+        device: &Device,
+    ) -> Result<GpuWeights> {
+        let embed_tokens = patterned_bf16(&[vocab, hidden], 0.01, device)?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
+        let final_norm = Tensor::zeros(hidden, DType::F32, device)?;
+        let mut layers = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
+            layers.push(GpuLayerWeights {
+                input_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+                post_attention_layernorm: Tensor::zeros(hidden, DType::F32, device)?,
+                attention: GpuAttentionWeights::Full(make_bf16_full_attn_weights(
+                    hidden,
+                    num_heads,
+                    num_kv_heads,
+                    head_dim,
+                    device,
+                )?),
+                mlp: make_bf16_mlp_weights(hidden, intermediate, device)?,
+            });
+        }
+        let rotary_inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, device)?;
+        Ok(GpuWeights {
+            embed_tokens,
+            embed_tokens_t,
+            layers,
+            final_norm,
+            rotary_inv_freq,
+            mtp: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn make_bf16_hybrid_gpu_weights(
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+    ) -> Result<GpuWeights> {
+        let hidden = config.hidden_size;
+        let embed_tokens = patterned_bf16(&[config.vocab_size, hidden], 0.01, device)?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
+        let final_norm = Tensor::zeros(hidden, DType::BF16, device)?;
+        let mut layers = Vec::with_capacity(config.num_layers);
+
+        for layer_idx in 0..config.num_layers {
+            let attention = if config.is_full_attention_layer(layer_idx) {
+                let q_dim = config.full_attn_q_proj_dim();
+                let kv_dim = config.num_kv_heads * config.head_dim;
+                let out_dim = config.num_attention_heads * config.head_dim;
+                let q_proj = patterned_bf16(&[q_dim, hidden], 0.00002, device)?;
+                let k_proj = patterned_bf16(&[kv_dim, hidden], 0.00003, device)?;
+                let v_proj = patterned_bf16(&[kv_dim, hidden], 0.00004, device)?;
+                let o_proj = patterned_bf16(&[hidden, out_dim], 0.00002, device)?;
+                GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj_t: q_proj.t()?.contiguous()?,
+                    k_proj_t: k_proj.t()?.contiguous()?,
+                    v_proj_t: v_proj.t()?.contiguous()?,
+                    o_proj_t: o_proj.t()?.contiguous()?,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
+                    q_norm: Tensor::zeros(config.head_dim, DType::BF16, device)?,
+                    k_norm: Tensor::zeros(config.head_dim, DType::BF16, device)?,
+                    q_proj_marlin: None,
+                })
+            } else {
+                let qkv_dim = config.linear_qkv_dim();
+                let v_dim = config.linear_v_dim();
+                let nv = config.linear_num_value_heads;
+                let in_proj_qkv = patterned_bf16(&[qkv_dim, hidden], 0.00002, device)?;
+                let in_proj_z = patterned_bf16(&[v_dim, hidden], 0.00003, device)?;
+                let out_proj = patterned_bf16(&[hidden, v_dim], 0.00002, device)?;
+                let in_proj_a = patterned_bf16(&[nv, hidden], 0.00004, device)?;
+                let in_proj_b = patterned_bf16(&[nv, hidden], 0.00005, device)?;
+                GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                    in_proj_qkv_t: in_proj_qkv.t()?.contiguous()?,
+                    in_proj_z_t: in_proj_z.t()?.contiguous()?,
+                    in_proj_a_t: in_proj_a.t()?.contiguous()?,
+                    in_proj_b_t: in_proj_b.t()?.contiguous()?,
+                    out_proj_t: out_proj.t()?.contiguous()?,
+                    in_proj_qkv,
+                    in_proj_z,
+                    out_proj,
+                    in_proj_a,
+                    in_proj_b,
+                    conv1d: patterned_bf16(
+                        &[qkv_dim, 1usize, config.linear_conv_kernel_dim],
+                        0.00002,
+                        device,
+                    )?,
+                    norm: Tensor::ones(config.linear_value_head_dim, DType::F32, device)?,
+                    a_log: Tensor::zeros(nv, DType::F32, device)?,
+                    a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
+                    dt_bias: Tensor::zeros(nv, DType::BF16, device)?,
+                })
+            };
+
+            layers.push(GpuLayerWeights {
+                input_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+                post_attention_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+                attention,
+                mlp: make_bf16_mlp_weights(hidden, config.intermediate_size, device)?,
+            });
+        }
+
+        let rotary_inv_freq =
+            compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)?;
+        Ok(GpuWeights {
+            embed_tokens,
+            embed_tokens_t,
+            layers,
+            final_norm,
+            rotary_inv_freq,
+            mtp: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn patterned_linear_state(
+        config: &kiln_core::config::ModelConfig,
+        row: usize,
+        device: &Device,
+    ) -> Result<LinearAttentionState> {
+        let mut state = LinearAttentionState::new(config, device)?;
+        for layer_idx in 0..state.recurrent_states.len() {
+            let state_scale = 0.00001 * (row + layer_idx + 1) as f32;
+            let conv_scale = 0.00002 * (row + layer_idx + 1) as f32;
+            state.recurrent_states[layer_idx] = patterned_bf16(
+                &[
+                    1usize,
+                    config.linear_num_value_heads,
+                    config.linear_key_head_dim,
+                    config.linear_value_head_dim,
+                ],
+                state_scale,
+                device,
+            )?;
+            state.conv_states[layer_idx] = patterned_f32(
+                &[
+                    1usize,
+                    config.linear_qkv_dim(),
+                    config.linear_conv_kernel_dim - 1,
+                ],
+                conv_scale,
+                device,
+            )?;
+        }
+        Ok(state)
+    }
+
+    #[cfg(feature = "metal")]
+    fn tensor_abs_diff_stats(left: &Tensor, right: &Tensor) -> Result<(f32, f32)> {
+        let diff = (left.to_dtype(DType::F32)? - right.to_dtype(DType::F32)?)?;
+        let abs = diff.abs()?;
+        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        Ok((max, mean))
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched contiguous decode test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let hidden = 512usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+
+        let attn = make_bf16_full_attn_weights(hidden, num_heads, num_kv_heads, head_dim, &device)?;
+
+        let x = patterned_bf16(&[batch, 1usize, hidden], 0.01, &device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+
+        let prefix_k = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
+        let prefix_v = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let mut batch_cache = PagedKvCache::new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let batched = gqa_attention_paged_decode_contiguous_batch(
+            &*backend,
+            &x,
+            &attn,
+            &positions,
+            &start_positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            head_dim,
+            &inv_freq,
+            1e-6,
+            &mut batch_cache,
+            &block_tables,
+            0,
+            false,
+            None,
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
+
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let row_x = x.narrow(0, row, 1)?.contiguous()?;
+            let rowwise = gqa_attention_paged(
+                &*backend,
+                &row_x,
+                &attn,
+                &positions,
+                start_pos,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                head_dim,
+                &inv_freq,
+                1e-6,
+                &mut row_cache,
+                &row_table,
+                0,
+                false,
+                None,
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "batched contiguous paged decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 2e-2,
+                "row {row} batched contiguous paged decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 2e-3,
+                "row {row} batched contiguous paged decode mean_abs_diff={mean:e}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_transformer_block_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched contiguous transformer test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let hidden = 512usize;
+        let intermediate = 768usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: intermediate,
+            vocab_size: 1024,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let layer = GpuLayerWeights {
+            input_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+            post_attention_layernorm: Tensor::zeros(hidden, DType::F32, &device)?,
+            attention: GpuAttentionWeights::Full(make_bf16_full_attn_weights(
+                hidden,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                &device,
+            )?),
+            mlp: make_bf16_mlp_weights(hidden, intermediate, &device)?,
+        };
+        let x = patterned_bf16(&[batch, 1usize, hidden], 0.01, &device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
+        let prefix_k = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
+        let prefix_v = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let mut batch_cache = PagedKvCache::new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let batched = transformer_block_paged_decode_contiguous_batch(
+            &*backend,
+            &x,
+            &layer,
+            &config,
+            &positions,
+            &start_positions,
+            &inv_freq,
+            &mut batch_cache,
+            &block_tables,
+            0,
+            None,
+            None,
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
+
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let row_x = x.narrow(0, row, 1)?.contiguous()?;
+            let rowwise = transformer_block_paged(
+                &*backend,
+                &row_x,
+                &layer,
+                &config,
+                &positions,
+                start_pos,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                head_dim,
+                &inv_freq,
+                config.rms_norm_eps,
+                &mut row_cache,
+                &row_table,
+                0,
+                None,
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "batched contiguous transformer block row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 3e-2,
+                "row {row} batched contiguous transformer block max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 3e-3,
+                "row {row} batched contiguous transformer block mean_abs_diff={mean:e}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched contiguous model test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let vocab = 64usize;
+        let hidden = 512usize;
+        let intermediate = 768usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let weights = make_bf16_full_attention_gpu_weights(
+            vocab,
+            hidden,
+            intermediate,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            1,
+            &device,
+        )?;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: intermediate,
+            vocab_size: vocab,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let prefix_k = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
+        let prefix_v = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let token_ids = [7u32, 11u32];
+        let mut batch_cache = PagedKvCache::new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let batched = model_forward_paged_decode_contiguous_batch(
+            &*backend,
+            &token_ids,
+            &weights,
+            &config,
+            &mut batch_cache,
+            &block_tables,
+            &start_positions,
+            None,
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, vocab]);
+
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let rowwise = model_forward_paged(
+                &*backend,
+                &token_ids[row..row + 1],
+                &weights,
+                &config,
+                &mut row_cache,
+                &row_table,
+                start_pos,
+                None,
+                None,
+                Some(&positions),
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "batched contiguous model decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 3e-2,
+                "row {row} batched contiguous model decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 3e-3,
+                "row {row} batched contiguous model decode mean_abs_diff={mean:e}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal() -> Result<()>
+    {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping batched hybrid model test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: 256,
+            num_layers: 4,
+            num_attention_heads: 16,
+            num_kv_heads: 4,
+            head_dim: 256,
+            intermediate_size: 512,
+            vocab_size: 64,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: true,
+            linear_num_key_heads: 16,
+            linear_key_head_dim: 128,
+            linear_num_value_heads: 32,
+            linear_value_head_dim: 128,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 0.25,
+        };
+        let weights = make_bf16_hybrid_gpu_weights(&config, &device)?;
+
+        let prefix_k = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.003,
+            &device,
+        )?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let start_positions = [start_pos, start_pos];
+        let token_ids = [7u32, 11u32];
+        let mut batch_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        for (row, block_table) in block_tables.iter().enumerate() {
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+        }
+
+        let mut row_states = Vec::with_capacity(batch);
+        for row in 0..batch {
+            row_states.push(patterned_linear_state(&config, row, &device)?);
+        }
+        let state_refs: Vec<&LinearAttentionState> = row_states.iter().collect();
+        let mut batch_state = LinearAttentionState::from_batch_rows(&state_refs)?;
+        let batched = model_forward_paged_decode_contiguous_batch(
+            &*backend,
+            &token_ids,
+            &weights,
+            &config,
+            &mut batch_cache,
+            &block_tables,
+            &start_positions,
+            Some(&mut batch_state),
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, config.vocab_size]);
+
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        for row in 0..batch {
+            let mut row_cache = PagedKvCache::new(
+                config.num_full_attention_layers,
+                1,
+                block_size,
+                config.num_kv_heads,
+                config.head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+            let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let rowwise = model_forward_paged(
+                &*backend,
+                &token_ids[row..row + 1],
+                &weights,
+                &config,
+                &mut row_cache,
+                &row_table,
+                start_pos,
+                Some(&mut row_states[row]),
+                None,
+                Some(&positions),
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let (max, mean) = tensor_abs_diff_stats(&batch_row, &rowwise)?;
+            eprintln!(
+                "batched hybrid model decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 5e-2,
+                "row {row} batched hybrid model decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 5e-3,
+                "row {row} batched hybrid model decode mean_abs_diff={mean:e}"
+            );
+        }
+
+        let batch_rows = batch_state.split_batch_rows()?;
+        for row in 0..batch {
+            for layer_idx in 0..row_states[row].recurrent_states.len() {
+                let (rec_max, rec_mean) = tensor_abs_diff_stats(
+                    &batch_rows[row].recurrent_states[layer_idx],
+                    &row_states[row].recurrent_states[layer_idx],
+                )?;
+                let (conv_max, conv_mean) = tensor_abs_diff_stats(
+                    &batch_rows[row].conv_states[layer_idx],
+                    &row_states[row].conv_states[layer_idx],
+                )?;
+                eprintln!(
+                    "batched hybrid model state row {row} linear_layer {layer_idx}: recurrent_max={rec_max:e} recurrent_mean={rec_mean:e} conv_max={conv_max:e} conv_mean={conv_mean:e}"
+                );
+                assert!(
+                    rec_max <= 5e-2,
+                    "row {row} layer {layer_idx} recurrent max_abs_diff={rec_max:e}"
+                );
+                assert!(
+                    rec_mean <= 5e-3,
+                    "row {row} layer {layer_idx} recurrent mean_abs_diff={rec_mean:e}"
+                );
+                assert!(
+                    conv_max <= 5e-2,
+                    "row {row} layer {layer_idx} conv max_abs_diff={conv_max:e}"
+                );
+                assert!(
+                    conv_mean <= 5e-3,
+                    "row {row} layer {layer_idx} conv mean_abs_diff={conv_mean:e}"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -10066,6 +12243,110 @@ mod tests {
         assert_eq!(state.conv_states[0].dims(), &[1, qkv_dim, 3]);
         assert_eq!(state.conv_states[0].dtype(), DType::F32);
 
+        let batched = LinearAttentionState::new_with_batch(&config, 3, &device)?;
+        assert_eq!(batched.recurrent_states.len(), 3);
+        assert_eq!(batched.conv_states.len(), 3);
+        assert_eq!(batched.recurrent_states[0].dims(), &[3, 4, 4, 4]);
+        assert_eq!(batched.recurrent_states[0].dtype(), DType::F32);
+        assert_eq!(batched.conv_states[0].dims(), &[3, qkv_dim, 3]);
+        assert_eq!(batched.conv_states[0].dtype(), DType::F32);
+        assert!(LinearAttentionState::new_with_batch(&config, 0, &device).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_attention_state_batch_row_assembly_and_scatter() -> Result<()> {
+        let device = Device::Cpu;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: 16,
+            num_layers: 4,
+            num_attention_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: false,
+            linear_num_key_heads: 2,
+            linear_key_head_dim: 4,
+            linear_num_value_heads: 4,
+            linear_value_head_dim: 4,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let mut row0 = LinearAttentionState::new(&config, &device)?;
+        let mut row1 = LinearAttentionState::new(&config, &device)?;
+        let recurrent_values0: Vec<f32> = (0..64).map(|i| i as f32).collect();
+        let recurrent_values1: Vec<f32> = (0..64).map(|i| 1000.0 + i as f32).collect();
+        let conv_values0: Vec<f32> = (0..96).map(|i| 2000.0 + i as f32).collect();
+        let conv_values1: Vec<f32> = (0..96).map(|i| 3000.0 + i as f32).collect();
+        row0.recurrent_states[0] =
+            Tensor::from_slice(&recurrent_values0, (1usize, 4usize, 4usize, 4usize), &device)?;
+        row1.recurrent_states[0] =
+            Tensor::from_slice(&recurrent_values1, (1usize, 4usize, 4usize, 4usize), &device)?;
+        row0.conv_states[0] =
+            Tensor::from_slice(&conv_values0, (1usize, 32usize, 3usize), &device)?;
+        row1.conv_states[0] =
+            Tensor::from_slice(&conv_values1, (1usize, 32usize, 3usize), &device)?;
+
+        let batched = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
+        assert_eq!(batched.batch_size()?, 2);
+        assert_eq!(batched.recurrent_states[0].dims(), &[2, 4, 4, 4]);
+        assert_eq!(batched.conv_states[0].dims(), &[2, 32, 3]);
+        assert!(LinearAttentionState::from_batch_rows(&[&batched]).is_err());
+
+        let split = batched.split_batch_rows()?;
+        assert_eq!(split.len(), 2);
+        assert_eq!(
+            split[0].recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            split[1].recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            split[0].conv_states[0].to_vec3::<f32>()?,
+            row0.conv_states[0].to_vec3::<f32>()?
+        );
+        assert_eq!(
+            split[1].conv_states[0].to_vec3::<f32>()?,
+            row1.conv_states[0].to_vec3::<f32>()?
+        );
+
+        let mut dst0 = LinearAttentionState::new(&config, &device)?;
+        let mut dst1 = LinearAttentionState::new(&config, &device)?;
+        {
+            let mut destinations = [&mut dst0, &mut dst1];
+            batched.scatter_batch_rows(&mut destinations)?;
+        }
+        assert_eq!(
+            dst0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            dst1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            dst0.conv_states[0].to_vec3::<f32>()?,
+            row0.conv_states[0].to_vec3::<f32>()?
+        );
+        assert_eq!(
+            dst1.conv_states[0].to_vec3::<f32>()?,
+            row1.conv_states[0].to_vec3::<f32>()?
+        );
+
+        let mut one_destination = [&mut dst0];
+        assert!(batched.scatter_batch_rows(&mut one_destination).is_err());
+
         Ok(())
     }
 
@@ -10102,6 +12383,27 @@ mod tests {
         let state = LinearAttentionState::new(&config, &device)?;
         assert_eq!(state.recurrent_states[0].dtype(), DType::BF16);
         assert_eq!(state.conv_states[0].dtype(), DType::F32);
+
+        let batched = LinearAttentionState::new_with_batch(&config, 3, &device)?;
+        assert_eq!(batched.recurrent_states[0].dims(), &[3, 4, 4, 4]);
+        assert_eq!(batched.recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(batched.conv_states[0].dims(), &[3, config.linear_qkv_dim(), 3]);
+        assert_eq!(batched.conv_states[0].dtype(), DType::F32);
+
+        let row0 = LinearAttentionState::new(&config, &device)?;
+        let row1 = LinearAttentionState::new(&config, &device)?;
+        let assembled = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
+        assert_eq!(assembled.batch_size()?, 2);
+        assert_eq!(assembled.recurrent_states[0].dims(), &[2, 4, 4, 4]);
+        assert_eq!(assembled.recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(assembled.conv_states[0].dims(), &[2, config.linear_qkv_dim(), 3]);
+        assert_eq!(assembled.conv_states[0].dtype(), DType::F32);
+        let split = assembled.split_batch_rows()?;
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].recurrent_states[0].dims(), &[1, 4, 4, 4]);
+        assert_eq!(split[0].recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(split[0].conv_states[0].dims(), &[1, config.linear_qkv_dim(), 3]);
+        assert_eq!(split[0].conv_states[0].dtype(), DType::F32);
 
         Ok(())
     }
@@ -11849,6 +14151,50 @@ mod tests {
             "last-token greedy prefill should match greedy_sample(last-token logits)"
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_weighted_lm_head_prep_argmax_matches_final_rmsnorm_argmax_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+
+        unsafe {
+            std::env::remove_var("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP");
+        }
+
+        let hidden = 128usize;
+        let vocab = 257usize;
+        let best = 42usize;
+        let x_data: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.0234375)
+            .collect();
+        let norm_weight_data: Vec<f32> = (0..hidden)
+            .map(|i| 0.75 + (i % 17) as f32 * 0.015625)
+            .collect();
+        let mut weight_data: Vec<f32> = (0..(hidden * vocab))
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.0009765625)
+            .collect();
+        for i in 0..hidden {
+            weight_data[i * vocab + best] = x_data[i] * norm_weight_data[i];
+        }
+
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        let norm_weight =
+            Tensor::from_slice(&norm_weight_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+        let weight_t =
+            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+
+        let normed = rms_norm(&x, &norm_weight, 1e-6)?;
+        let reference = lm_head_argmax(&normed, &weight_t)?;
+        let weighted = lm_head_weighted_prep_argmax(&x, &norm_weight, &weight_t)?
+            .context("weighted lm-head prep should support Metal BF16 [1,1,H]")?;
+
+        assert_eq!(reference as usize, best);
+        assert_eq!(weighted, reference);
         Ok(())
     }
 

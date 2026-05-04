@@ -7,9 +7,7 @@
 //! Only bf16, head_dim=128, causal=true instantiations are compiled to minimize build time.
 
 use candle_core::{
-    backend::BackendStorage,
-    cuda_backend::cudarc::driver::DevicePtr,
-    DType, Result, Tensor,
+    DType, Result, Tensor, backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
 
@@ -246,15 +244,11 @@ pub fn flash_attn_paged_decode(
     let device = q.device();
     let (b, q_len, num_heads, head_dim) = q.dims4()?;
     if q_len != 1 {
-        candle_core::bail!(
-            "flash_attn_paged_decode requires query_len==1, got {q_len}"
-        );
+        candle_core::bail!("flash_attn_paged_decode requires query_len==1, got {q_len}");
     }
     let (_total_slots, num_heads_k, hd_k) = k_pool.dims3()?;
     if hd_k != head_dim {
-        candle_core::bail!(
-            "k_pool head_dim ({hd_k}) does not match q head_dim ({head_dim})"
-        );
+        candle_core::bail!("k_pool head_dim ({hd_k}) does not match q head_dim ({head_dim})");
     }
     if v_pool.dims3()?.2 != head_dim {
         candle_core::bail!("v_pool head_dim mismatch");
@@ -264,10 +258,7 @@ pub fn flash_attn_paged_decode(
             "num_heads ({num_heads}) must be divisible by num_heads_k ({num_heads_k})"
         );
     }
-    if q.dtype() != DType::BF16
-        || k_pool.dtype() != DType::BF16
-        || v_pool.dtype() != DType::BF16
-    {
+    if q.dtype() != DType::BF16 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
         candle_core::bail!("flash_attn_paged_decode requires bf16 q/k/v");
     }
     if head_dim != 128 && head_dim != 256 {
@@ -290,9 +281,7 @@ pub fn flash_attn_paged_decode(
 
     let (bt_batch, max_blocks_per_seq) = block_table.dims2()?;
     if bt_batch != b {
-        candle_core::bail!(
-            "block_table batch dim ({bt_batch}) must match q batch ({b})"
-        );
+        candle_core::bail!("block_table batch dim ({bt_batch}) must match q batch ({b})");
     }
 
     // Ensure contiguous
@@ -383,9 +372,7 @@ pub fn flash_attn_paged_decode(
             );
 
             if status != 0 {
-                candle_core::bail!(
-                    "kiln_flash_attn_fwd_paged_decode failed with status {status}"
-                );
+                candle_core::bail!("kiln_flash_attn_fwd_paged_decode failed with status {status}");
             }
         }
     }
@@ -439,11 +426,7 @@ pub fn flash_attn_bwd(
     let dv = Tensor::zeros((b, seqlen_k, num_heads, head_dim), DType::BF16, device)?;
 
     // Scratch buffers
-    let softmax_d = Tensor::zeros(
-        (b, num_heads, seqlen_q_rounded),
-        DType::F32,
-        device,
-    )?;
+    let softmax_d = Tensor::zeros((b, num_heads, seqlen_q_rounded), DType::F32, device)?;
     let dq_accum = Tensor::zeros(
         (b, seqlen_q_rounded, num_heads, head_dim_rounded),
         DType::F32,
@@ -488,15 +471,27 @@ pub fn flash_attn_bwd(
         let stream = q_cuda.device().cuda_stream();
         let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
-        let dout_sl = dout_cuda.as_cuda_slice::<bf16>()?.slice(dout_l.start_offset()..);
+        let dout_sl = dout_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dout_l.start_offset()..);
         let q_sl = q_cuda.as_cuda_slice::<bf16>()?.slice(q_l.start_offset()..);
         let k_sl = k_cuda.as_cuda_slice::<bf16>()?.slice(k_l.start_offset()..);
         let v_sl = v_cuda.as_cuda_slice::<bf16>()?.slice(v_l.start_offset()..);
-        let out_sl = out_cuda.as_cuda_slice::<bf16>()?.slice(out_l.start_offset()..);
-        let lse_sl = lse_cuda.as_cuda_slice::<f32>()?.slice(lse_l.start_offset()..);
-        let dq_sl = dq_cuda.as_cuda_slice::<bf16>()?.slice(dq_l.start_offset()..);
-        let dk_sl = dk_cuda.as_cuda_slice::<bf16>()?.slice(dk_l.start_offset()..);
-        let dv_sl = dv_cuda.as_cuda_slice::<bf16>()?.slice(dv_l.start_offset()..);
+        let out_sl = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_l.start_offset()..);
+        let lse_sl = lse_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(lse_l.start_offset()..);
+        let dq_sl = dq_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dq_l.start_offset()..);
+        let dk_sl = dk_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dk_l.start_offset()..);
+        let dv_sl = dv_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dv_l.start_offset()..);
         let sd_sl = sd_cuda.as_cuda_slice::<f32>()?.slice(sd_l.start_offset()..);
         let da_sl = da_cuda.as_cuda_slice::<f32>()?.slice(da_l.start_offset()..);
 
@@ -561,7 +556,13 @@ pub fn flash_attn_bwd(
 
 /// Convenience wrapper matching candle-flash-attn's `flash_attn` API.
 /// Returns only the attention output (discards softmax_lse).
-pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, softmax_scale: f32, causal: bool) -> Result<Tensor> {
+pub fn flash_attn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
     let (out, _lse) = flash_attn_fwd(q, k, v, softmax_scale, causal)?;
     Ok(out)
 }
@@ -569,7 +570,7 @@ pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, softmax_scale: f32, causal
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, DType, Tensor};
+    use candle_core::{DType, Device, Tensor};
 
     #[test]
     fn test_flash_attn_forward_basic() {
@@ -604,20 +605,31 @@ mod tests {
         // Check output is finite and non-zero
         let out_f32 = out.to_dtype(DType::F32).unwrap().flatten_all().unwrap();
         let out_data: Vec<f32> = out_f32.to_vec1().unwrap();
-        assert!(out_data.iter().all(|x| x.is_finite()), "output contains non-finite values");
+        assert!(
+            out_data.iter().all(|x| x.is_finite()),
+            "output contains non-finite values"
+        );
         let abs_sum: f32 = out_data.iter().map(|x| x.abs()).sum();
         assert!(abs_sum > 0.0, "output is all zeros");
         let mean_abs = abs_sum / out_data.len() as f32;
         let max_abs = out_data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        eprintln!("fwd output: mean_abs={mean_abs:.6}, max_abs={max_abs:.6}, numel={}", out_data.len());
+        eprintln!(
+            "fwd output: mean_abs={mean_abs:.6}, max_abs={max_abs:.6}, numel={}",
+            out_data.len()
+        );
 
         // Check LSE is finite
         let lse_f32 = lse.flatten_all().unwrap();
         let lse_data: Vec<f32> = lse_f32.to_vec1().unwrap();
-        assert!(lse_data.iter().all(|x| x.is_finite()), "softmax_lse contains non-finite values");
-        eprintln!("fwd softmax_lse: min={:.4}, max={:.4}",
+        assert!(
+            lse_data.iter().all(|x| x.is_finite()),
+            "softmax_lse contains non-finite values"
+        );
+        eprintln!(
+            "fwd softmax_lse: min={:.4}, max={:.4}",
             lse_data.iter().cloned().fold(f32::INFINITY, f32::min),
-            lse_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+            lse_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+        );
     }
 
     #[test]
@@ -651,7 +663,8 @@ mod tests {
         let dout = Tensor::ones((b, seqlen, num_heads, head_dim), DType::BF16, &device).unwrap();
 
         // Backward pass
-        let (dq, dk, dv) = flash_attn_bwd(&dout, &q, &k, &v, &out, &softmax_lse, softmax_scale, true).unwrap();
+        let (dq, dk, dv) =
+            flash_attn_bwd(&dout, &q, &k, &v, &out, &softmax_lse, softmax_scale, true).unwrap();
 
         // Check shapes
         assert_eq!(dq.dims(), &[b, seqlen, num_heads, head_dim]);
@@ -675,8 +688,14 @@ mod tests {
             assert!(abs_sum > 0.0, "{name} is all zeros");
             let mean_abs = abs_sum / data.len() as f32;
             let max_abs = data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-            eprintln!("{name}: mean_abs={mean_abs:.6}, max_abs={max_abs:.6}, numel={}", data.len());
-            assert!(max_abs < 100.0, "{name} has unreasonably large gradient: max_abs={max_abs}");
+            eprintln!(
+                "{name}: mean_abs={mean_abs:.6}, max_abs={max_abs:.6}, numel={}",
+                data.len()
+            );
+            assert!(
+                max_abs < 100.0,
+                "{name} has unreasonably large gradient: max_abs={max_abs}"
+            );
         }
     }
 
@@ -725,17 +744,24 @@ mod tests {
             .contiguous()
             .unwrap();
 
-        let (out, softmax_lse) =
-            flash_attn_fwd(&q, &k_exp, &v_exp, softmax_scale, true).unwrap();
+        let (out, softmax_lse) = flash_attn_fwd(&q, &k_exp, &v_exp, softmax_scale, true).unwrap();
 
         let dout = Tensor::ones((b, seqlen, num_heads, head_dim), DType::BF16, &device).unwrap();
 
         // Backward with expanded K/V (same as how model code calls it)
         // Since k_exp/v_exp have num_heads heads, bwd sees num_heads_k == num_heads
         // and outputs dk/dv with num_heads (caller is responsible for summing to GQA groups)
-        let (dq, dk, dv) =
-            flash_attn_bwd(&dout, &q, &k_exp, &v_exp, &out, &softmax_lse, softmax_scale, true)
-                .unwrap();
+        let (dq, dk, dv) = flash_attn_bwd(
+            &dout,
+            &q,
+            &k_exp,
+            &v_exp,
+            &out,
+            &softmax_lse,
+            softmax_scale,
+            true,
+        )
+        .unwrap();
 
         assert_eq!(dq.dims(), &[b, seqlen, num_heads, head_dim]);
         assert_eq!(dk.dims(), &[b, seqlen, num_heads, head_dim]);

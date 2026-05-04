@@ -7,7 +7,7 @@
 //! reduction).
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor, D};
+use candle_core::{D, DType, Device, Tensor};
 
 use super::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy};
 
@@ -98,7 +98,11 @@ fn cpu_parity_small() -> Result<()> {
     let naive_v = naive.to_scalar::<f32>()?;
 
     let abs_err = (fused_v - naive_v).abs();
-    let rel_err = if naive_v.abs() > 1e-6 { abs_err / naive_v.abs() } else { abs_err };
+    let rel_err = if naive_v.abs() > 1e-6 {
+        abs_err / naive_v.abs()
+    } else {
+        abs_err
+    };
     assert!(
         abs_err < 1e-5 || rel_err < 1e-5,
         "FLCE parity failed: fused={fused_v:.6} naive={naive_v:.6} abs_err={abs_err:.2e} rel_err={rel_err:.2e}",
@@ -116,7 +120,10 @@ fn cpu_parity_uneven_vocab_chunks() -> Result<()> {
     let naive = naive_loss(&hidden, &head_t, &ids, &mask, &device)?;
 
     let abs_err = (fused.to_scalar::<f32>()? - naive.to_scalar::<f32>()?).abs();
-    assert!(abs_err < 1e-5, "uneven chunks parity failed: abs_err={abs_err:.2e}");
+    assert!(
+        abs_err < 1e-5,
+        "uneven chunks parity failed: abs_err={abs_err:.2e}"
+    );
     Ok(())
 }
 
@@ -130,7 +137,10 @@ fn cpu_parity_single_chunk() -> Result<()> {
     let naive = naive_loss(&hidden, &head_t, &ids, &mask, &device)?;
 
     let abs_err = (fused.to_scalar::<f32>()? - naive.to_scalar::<f32>()?).abs();
-    assert!(abs_err < 1e-6, "single-chunk parity failed: abs_err={abs_err:.2e}");
+    assert!(
+        abs_err < 1e-6,
+        "single-chunk parity failed: abs_err={abs_err:.2e}"
+    );
     Ok(())
 }
 

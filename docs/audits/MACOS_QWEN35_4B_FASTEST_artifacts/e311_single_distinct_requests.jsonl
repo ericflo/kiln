@@ -1,0 +1,4 @@
+{"model":"qwen3.5-4b-kiln","messages":[{"role":"user","content":"Write one short sentence about decode latency."}],"temperature":0.0,"max_tokens":2,"seed":311}
+{"model":"qwen3.5-4b-kiln","messages":[{"role":"user","content":"Write one short sentence about prompt prefill."}],"temperature":0.0,"max_tokens":2,"seed":312}
+{"model":"qwen3.5-4b-kiln","messages":[{"role":"user","content":"Write one short sentence about scheduler queues."}],"temperature":0.0,"max_tokens":2,"seed":313}
+{"model":"qwen3.5-4b-kiln","messages":[{"role":"user","content":"Write one short sentence about GPU memory traffic."}],"temperature":0.0,"max_tokens":2,"seed":314}

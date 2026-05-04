@@ -50,7 +50,7 @@ use anyhow::{Context, Result, anyhow};
 use candle_core::backend::BackendStorage;
 use candle_core::op::BackpropOp;
 use candle_core::{
-    CpuStorage, CudaStorage, CustomOp1, DType, Device, Layout, Shape, Storage, Tensor, D,
+    CpuStorage, CudaStorage, CustomOp1, D, DType, Device, Layout, Shape, Storage, Tensor,
 };
 
 use crate::DEFAULT_CHUNK_SIZE;
@@ -100,10 +100,7 @@ pub fn fused_linear_cross_entropy_phase_b(
         ));
     }
     if hidden_dims[0] != 1 {
-        return Err(anyhow!(
-            "hidden batch dim must be 1; got {:?}",
-            hidden_dims
-        ));
+        return Err(anyhow!("hidden batch dim must be 1; got {:?}", hidden_dims));
     }
     if hidden_dims[2] != head_dims[0] {
         return Err(anyhow!(
@@ -130,7 +127,9 @@ pub fn fused_linear_cross_entropy_phase_b(
     // holds even if a caller passes a strided tensor. In production, FLCE is
     // always called on `model_forward_final_norm` output which is contiguous,
     // so this is a safety guard, not a hot path.
-    let hidden_contig = hidden.contiguous().context("contiguous hidden for FLCE phase B")?;
+    let hidden_contig = hidden
+        .contiguous()
+        .context("contiguous hidden for FLCE phase B")?;
     let op = FlceCustomOp {
         head_t: head_t.clone(),
         input_ids: input_ids.to_vec(),
@@ -172,8 +171,7 @@ impl CustomOp1 for FlceCustomOp {
         // cost it eliminates.
         let storage = Storage::Cpu(s_hidden.clone());
         let hidden_shape = Shape::from(l_hidden.shape().dims());
-        let hidden_leaf =
-            Tensor::from_storage(storage, hidden_shape, BackpropOp::none(), false);
+        let hidden_leaf = Tensor::from_storage(storage, hidden_shape, BackpropOp::none(), false);
 
         let loss = forward_loss(
             &hidden_leaf,
@@ -327,8 +325,7 @@ fn forward_loss(
 
         let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
             (None, None) => {
-                let shifted = (&logits_chunk
-                    - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
                 let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
                 (chunk_max.detach(), chunk_sumexp.detach())
             }
@@ -336,8 +333,7 @@ fn forward_loss(
                 let new_max = prev_max.maximum(&chunk_max)?;
                 let prev_scale = (prev_max - &new_max)?.exp()?;
                 let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                let shifted =
-                    (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
                 let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
                 let new_sumexp = (scaled_prev + chunk_sumexp)?;
                 (new_max.detach(), new_sumexp.detach())
@@ -376,12 +372,11 @@ fn forward_loss(
 
     let running_max = running_max.ok_or_else(|| anyhow!("vocab_size was 0"))?;
     let running_sumexp = running_sumexp.ok_or_else(|| anyhow!("vocab_size was 0"))?;
-    let correct_logit = correct_logit.ok_or_else(|| {
-        anyhow!("no labels fell inside any vocab chunk — label >= vocab_size?")
-    })?;
+    let correct_logit = correct_logit
+        .ok_or_else(|| anyhow!("no labels fell inside any vocab chunk — label >= vocab_size?"))?;
 
-    let log_sum_exp = (running_max.squeeze(D::Minus1)?
-        + running_sumexp.squeeze(D::Minus1)?.log()?)?;
+    let log_sum_exp =
+        (running_max.squeeze(D::Minus1)? + running_sumexp.squeeze(D::Minus1)?.log()?)?;
     let per_token_loss = (log_sum_exp - correct_logit)?;
     let loss = per_token_loss.mean_all()?;
     Ok(loss.to_scalar::<f32>()?)
@@ -454,15 +449,12 @@ fn backward_dhidden(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32
-            .narrow(1, chunk_start, chunk_len)?
-            .contiguous()?;
+        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
         let logits_chunk = active_hidden_f32.matmul(&head_chunk)?;
         let chunk_max = logits_chunk.max_keepdim(D::Minus1)?;
         let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
             (None, None) => {
-                let shifted =
-                    (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
                 let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
                 (chunk_max.detach(), chunk_sumexp.detach())
             }
@@ -470,8 +462,7 @@ fn backward_dhidden(
                 let new_max = prev_max.maximum(&chunk_max)?;
                 let prev_scale = (prev_max - &new_max)?.exp()?;
                 let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                let shifted =
-                    (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
                 let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
                 let new_sumexp = (scaled_prev + chunk_sumexp)?;
                 (new_max.detach(), new_sumexp.detach())
@@ -493,9 +484,7 @@ fn backward_dhidden(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32
-            .narrow(1, chunk_start, chunk_len)?
-            .contiguous()?;
+        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
         let logits_chunk = active_hidden_f32.matmul(&head_chunk)?;
         let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
         let exp_chunk = shifted.exp()?;
@@ -673,12 +662,10 @@ mod tests {
         let hidden_bf = hidden.to_dtype(DType::BF16)?;
         let head_bf = head_t.to_dtype(DType::BF16)?;
 
-        let phase_a = crate::fused_linear_cross_entropy(
-            &hidden_bf, &head_bf, &ids, &mask, &device, 16,
-        )?;
-        let phase_b = fused_linear_cross_entropy_phase_b(
-            &hidden_bf, &head_bf, &ids, &mask, &device, 16,
-        )?;
+        let phase_a =
+            crate::fused_linear_cross_entropy(&hidden_bf, &head_bf, &ids, &mask, &device, 16)?;
+        let phase_b =
+            fused_linear_cross_entropy_phase_b(&hidden_bf, &head_bf, &ids, &mask, &device, 16)?;
 
         let a = phase_a.to_scalar::<f32>()?;
         let b = phase_b.to_scalar::<f32>()?;
@@ -691,9 +678,8 @@ mod tests {
         let device = Device::Cpu;
         let (hidden, head_t, ids, _) = random_case(8, 4, 16, &device)?;
         let all_false = vec![false; ids.len()];
-        let loss = fused_linear_cross_entropy_phase_b(
-            &hidden, &head_t, &ids, &all_false, &device, 4,
-        )?;
+        let loss =
+            fused_linear_cross_entropy_phase_b(&hidden, &head_t, &ids, &all_false, &device, 4)?;
         assert_eq!(loss.to_scalar::<f32>()?, 0.0);
         Ok(())
     }
@@ -708,8 +694,7 @@ mod tests {
 
         // Naive backward: full logits, candle autograd.
         let hidden_var_a = Var::from_tensor(&hidden_init)?;
-        let loss_naive =
-            naive_softmax_ce(hidden_var_a.as_tensor(), &head_t, &ids, &mask, &device)?;
+        let loss_naive = naive_softmax_ce(hidden_var_a.as_tensor(), &head_t, &ids, &mask, &device)?;
         let grads_naive = loss_naive.backward()?;
         let grad_hidden_naive = grads_naive
             .get(hidden_var_a.as_tensor())

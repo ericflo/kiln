@@ -2071,8 +2071,7 @@ mod tests {
         (0..len)
             .map(|i| {
                 let x = i as f32;
-                ((x * 0.013 + phase).sin() * 0.7 + (x * 0.007 + phase * 0.5).cos() * 0.3)
-                    * scale
+                ((x * 0.013 + phase).sin() * 0.7 + (x * 0.007 + phase * 0.5).cos() * 0.3) * scale
             })
             .collect()
     }

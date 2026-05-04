@@ -19,8 +19,7 @@ fn main() {
     // Marlin requires sm_80+ (cp.async, mma.m16n8k16, ldmatrix). We default to
     // the same arch list as the other kiln CUDA crates; users can still
     // override via KILN_CUDA_ARCHS if they need to drop a target.
-    let cuda_archs =
-        env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;86;89;90".to_string());
+    let cuda_archs = env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;86;89;90".to_string());
 
     let mut build = cc::Build::new();
     build.cuda(true);

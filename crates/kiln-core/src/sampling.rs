@@ -66,4 +66,16 @@ impl SamplingParams {
             ..Default::default()
         }
     }
+
+    pub fn values_are_effectively_greedy(temperature: f32, top_k: u32) -> bool {
+        temperature == 0.0 || (top_k == 1 && temperature.is_finite() && temperature > 0.0)
+    }
+
+    pub fn is_effectively_greedy(&self) -> bool {
+        Self::values_are_effectively_greedy(self.temperature, self.top_k)
+    }
+
+    pub fn top_p_disables_nucleus_filter(top_p: f32) -> bool {
+        top_p <= 0.0 || top_p >= 1.0
+    }
 }

@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "choices batch rehydrate request prompt 0"
+    }
+  ],
+  "n": 4,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "max_tokens": 0,
+  "seed": 196
+}

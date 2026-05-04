@@ -239,6 +239,7 @@ impl DecodeForward for RealDecodeForward {
             cached_tokens: hit.cached_tokens,
             block_ids: hit.block_ids,
             linear_state: hit.linear_state,
+            next_token: hit.next_token,
         });
 
         let prepared = self

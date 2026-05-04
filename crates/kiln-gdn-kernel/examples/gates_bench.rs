@@ -27,7 +27,9 @@ fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut s = seed;
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let bits = ((s >> 33) as u32) & 0x7fff_ffff;
             ((bits as f32 / (i32::MAX as f32)) - 0.5) * scale
         })
@@ -148,9 +150,7 @@ fn run_shape(device: &Device, b: usize, t: usize, nv: usize, label: &str) -> any
 
     let speedup = candle_us / fused_us;
     let saved = candle_us - fused_us;
-    println!(
-        "  -> speedup fused vs candle: {speedup:.2}x  (saved {saved:.2} µs/iter)"
-    );
+    println!("  -> speedup fused vs candle: {speedup:.2}x  (saved {saved:.2} µs/iter)");
     Ok(())
 }
 

@@ -1,0 +1,69 @@
+warning: /Users/ericflo/Development/kiln/crates/kiln-vulkan-kernel/Cargo.toml: version requirement `0.37.3+1.3.269` for dependency `ash` includes semver metadata which will be ignored, removing the metadata is recommended to avoid confusion
+warning: unused variable: `v_out`
+    --> crates/kiln-model/src/paged_kv_cache.rs:1056:21
+     |
+1056 |         let (k_out, v_out) = cache.read(0, &bt, 3)?;
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_out`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `in_features`
+   --> crates/kiln-model/src/quantized.rs:377:13
+    |
+377 |         let in_features = 8;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_features`
+
+warning: unused variable: `out_features`
+   --> crates/kiln-model/src/quantized.rs:378:13
+    |
+378 |         let out_features = 1;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_features`
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3125:4
+     |
+3125 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `create_safetensors_with_data` is never used
+    --> crates/kiln-model/src/loader.rs:1893:8
+     |
+1893 |     fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pack_int4` is never used
+    --> crates/kiln-model/src/loader.rs:1913:8
+     |
+1913 |     fn pack_int4(values: &[u8]) -> Vec<u8> {
+     |        ^^^^^^^^^
+
+warning: function `gptq_linear_tensors` is never used
+    --> crates/kiln-model/src/loader.rs:1927:8
+     |
+1927 |     fn gptq_linear_tensors(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:35:5
+   |
+23 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+35 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib test) generated 8 warnings (run `cargo fix --lib -p kiln-model --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/kiln_model-8ab5b66e9ef10c0c)
+
+running 1 test
+synthetic Metal Qwen3.5 GDN gates+recurrent+rmsnorm decode batch BF16: batch=1 physical_tokens=1 q=[1,1,16,128] v=[1,1,32,128] state=[1,32,128,128] warmup=5 iters=20 split=504.527 us fused=252.727 us speedup=1.996x out_max_abs_diff=9.155273e-4 state_max_abs_diff=2.441406e-4
+synthetic Metal Qwen3.5 GDN gates+recurrent+rmsnorm decode batch BF16: batch=2 physical_tokens=2 q=[2,1,16,128] v=[2,1,32,128] state=[2,32,128,128] warmup=5 iters=20 split=778.104 us fused=172.983 us speedup=4.498x out_max_abs_diff=9.155273e-4 state_max_abs_diff=2.441406e-4
+synthetic Metal Qwen3.5 GDN gates+recurrent+rmsnorm decode batch BF16: batch=4 physical_tokens=4 q=[4,1,16,128] v=[4,1,32,128] state=[4,32,128,128] warmup=5 iters=20 split=983.356 us fused=249.662 us speedup=3.939x out_max_abs_diff=9.765625e-4 state_max_abs_diff=2.441406e-4
+synthetic Metal Qwen3.5 GDN gates+recurrent+rmsnorm decode batch BF16: batch=8 physical_tokens=8 q=[8,1,16,128] v=[8,1,32,128] state=[8,32,128,128] warmup=5 iters=20 split=1237.192 us fused=504.165 us speedup=2.454x out_max_abs_diff=9.765625e-4 state_max_abs_diff=2.441406e-4
+test backend::metal::tests::bench_gdn_decode_gates_recurrent_rmsnorm_decode_batch_synthetic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 315 filtered out; finished in 1.53s
+

@@ -14,8 +14,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let csrc_dir = manifest_dir.join("csrc");
 
-    let cuda_archs =
-        env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;86;89;90".to_string());
+    let cuda_archs = env::var("KILN_CUDA_ARCHS").unwrap_or_else(|_| "80;86;89;90".to_string());
 
     let mut build = cc::Build::new();
     build.cuda(true);

@@ -1,0 +1,1 @@
+{"id":"chatcmpl-4f7707d7-0819-44ea-a870-2f47781043cb","object":"chat.completion","created":1777836546,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"Okay,"},"finish_reason":"length"}],"usage":{"prompt_tokens":15,"completion_tokens":2,"total_tokens":17}}

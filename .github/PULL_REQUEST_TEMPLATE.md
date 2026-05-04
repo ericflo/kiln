@@ -6,7 +6,7 @@ What changed and why, in 2-4 lines.
 
 - [ ] Bug fix
 - [ ] Performance improvement
-- [ ] Kernel change (CUDA / Metal / MLX)
+- [ ] Kernel change (CUDA / Metal / Vulkan)
 - [ ] Feature
 - [ ] Docs / DX
 - [ ] Infra / CI

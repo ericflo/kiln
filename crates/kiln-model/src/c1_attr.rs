@@ -234,10 +234,8 @@ mod tests {
     #[test]
     fn csv_round_trip_multi_row_via_file() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!(
-            "kiln_c1_round_trip_{}.csv",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("kiln_c1_round_trip_{}.csv", std::process::id()));
         let path = tmp.to_str().unwrap().to_string();
         // SAFETY: ENV_LOCK serializes tests that mutate this process-wide
         // environment variable; the env var toggle is the documented way to

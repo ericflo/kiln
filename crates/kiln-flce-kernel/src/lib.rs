@@ -39,7 +39,7 @@
 //! FLCE is the prerequisite, not an optimization.
 
 use anyhow::{Context, Result, anyhow};
-use candle_core::{DType, Device, Tensor, D};
+use candle_core::{D, DType, Device, Tensor};
 
 mod phase_b;
 pub use phase_b::fused_linear_cross_entropy_phase_b;
@@ -136,8 +136,7 @@ pub fn fused_linear_cross_entropy(
 ) -> Result<Tensor> {
     let seq_len = input_ids.len();
     if seq_len < 2 {
-        return Tensor::new(0.0f32, device)
-            .context("allocate zero loss scalar for seq_len < 2");
+        return Tensor::new(0.0f32, device).context("allocate zero loss scalar for seq_len < 2");
     }
     if label_mask.len() != seq_len {
         return Err(anyhow!(
@@ -311,7 +310,8 @@ pub fn fused_linear_cross_entropy(
         .ok_or_else(|| anyhow!("no labels fell inside any vocab chunk — label >= vocab_size?"))?;
 
     // log_sum_exp = running_max + log(running_sumexp). Squeeze the vocab dim.
-    let log_sum_exp = (running_max.squeeze(D::Minus1)? + running_sumexp.squeeze(D::Minus1)?.log()?)?;
+    let log_sum_exp =
+        (running_max.squeeze(D::Minus1)? + running_sumexp.squeeze(D::Minus1)?.log()?)?;
 
     // Per-token loss = log_sum_exp - correct_logit. Mean over active rows.
     let per_token_loss = (log_sum_exp - correct_logit)?;

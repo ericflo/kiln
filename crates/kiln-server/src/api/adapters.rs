@@ -2,19 +2,19 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Multipart, State, Path as AxumPath};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, State};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use kiln_model::adapter_merge::{merge_concat, merge_linear, merge_ties, PeftLora};
+use kiln_model::adapter_merge::{PeftLora, merge_concat, merge_linear, merge_ties};
 use kiln_model::lora_loader::LoraWeights;
 
 use crate::error::ApiError;
@@ -108,7 +108,10 @@ async fn load_adapter(
     // weights outside any lock so inference is not blocked during I/O.
     let (device, num_layers) = {
         let guard = runner.read().unwrap();
-        (guard.weights.embed_tokens.device().clone(), guard.config.num_layers)
+        (
+            guard.weights.embed_tokens.device().clone(),
+            guard.config.num_layers,
+        )
     };
 
     let runner = runner.clone();
@@ -117,8 +120,7 @@ async fn load_adapter(
 
     tokio::task::spawn_blocking(move || {
         // Load weights outside any lock (I/O + tensor allocation).
-        let lora = LoraWeights::load(&path, num_layers, &device)
-            .map_err(|e| format!("{e}"))?;
+        let lora = LoraWeights::load(&path, num_layers, &device).map_err(|e| format!("{e}"))?;
         // Brief write lock to swap the adapter in.
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
@@ -163,11 +165,12 @@ async fn unload_adapter(
     *state.active_adapter_name.write().unwrap() = None;
     state.clear_real_prefix_cache();
 
-    tracing::info!(operation = "unload", "unloaded LoRA adapter — reverted to base model");
+    tracing::info!(
+        operation = "unload",
+        "unloaded LoRA adapter — reverted to base model"
+    );
 
-    Ok(Json(UnloadAdapterResponse {
-        status: "unloaded",
-    }))
+    Ok(Json(UnloadAdapterResponse { status: "unloaded" }))
 }
 
 /// Delete an adapter from disk.
@@ -436,30 +439,31 @@ async fn merge_adapters(
         // Load each source adapter from disk.
         let mut loaded: Vec<(PeftLora, f32)> = Vec::with_capacity(source_paths.len());
         for (name, weight, path) in source_paths {
-            let adapter = PeftLora::load(&path).map_err(|e| MergeError::Failed(format!(
-                "loading source adapter '{name}' from {}: {e}",
-                path.display()
-            )))?;
+            let adapter = PeftLora::load(&path).map_err(|e| {
+                MergeError::Failed(format!(
+                    "loading source adapter '{name}' from {}: {e}",
+                    path.display()
+                ))
+            })?;
             loaded.push((adapter, weight));
         }
 
-        let refs: Vec<(&PeftLora, f32)> =
-            loaded.iter().map(|(a, w)| (a, *w)).collect();
+        let refs: Vec<(&PeftLora, f32)> = loaded.iter().map(|(a, w)| (a, *w)).collect();
 
         let merged = match mode_for_task {
-            "ties" => merge_ties(&refs, ties_density)
-                .map_err(|e| MergeError::Invalid(format!("{e}")))?,
-            "concat" => merge_concat(&refs)
-                .map_err(|e| MergeError::Invalid(format!("{e}")))?,
+            "ties" => {
+                merge_ties(&refs, ties_density).map_err(|e| MergeError::Invalid(format!("{e}")))?
+            }
+            "concat" => merge_concat(&refs).map_err(|e| MergeError::Invalid(format!("{e}")))?,
             _ => merge_linear(&refs).map_err(|e| MergeError::Invalid(format!("{e}")))?,
         };
         let num_tensors = merged.tensors.len();
-        merged
-            .save(&output_path_for_task)
-            .map_err(|e| MergeError::Failed(format!(
+        merged.save(&output_path_for_task).map_err(|e| {
+            MergeError::Failed(format!(
                 "saving merged adapter to {}: {e}",
                 output_path_for_task.display()
-            )))?;
+            ))
+        })?;
         let _ = output_name_for_task;
         Ok(num_tensors)
     })
@@ -591,14 +595,9 @@ async fn download_adapter(
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 let chunk = buf.to_vec();
                 let len = chunk.len();
-                self.tx
-                    .blocking_send(Ok(chunk))
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "client disconnected",
-                        )
-                    })?;
+                self.tx.blocking_send(Ok(chunk)).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
+                })?;
                 Ok(len)
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -642,7 +641,10 @@ async fn download_adapter(
     Ok((
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, HeaderValue::from_static("application/gzip")),
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/gzip"),
+            ),
             (header::CONTENT_DISPOSITION, disposition_value),
         ],
         body,
@@ -857,20 +859,20 @@ async fn upload_adapter(
 
     // Extract on a blocking thread — tar/flate2 are sync, and decompression of
     // a real adapter pegs a CPU for ~hundreds of ms.
-    let tmp_root_owned = tmp_root.clone().expect("tmp_root set when archive_path is set");
+    let tmp_root_owned = tmp_root
+        .clone()
+        .expect("tmp_root set when archive_path is set");
     let archive_path_owned = archive_path.clone();
     let target_dir_owned = target_dir.clone();
     let adapter_dir_owned = state.adapter_dir.clone();
     let max_disk_bytes = state.adapter_max_disk_bytes;
     let extract_result = tokio::task::spawn_blocking(move || -> Result<(u64, u32), ImportError> {
         let staging = tmp_root_owned.join("staging");
-        std::fs::create_dir_all(&staging).map_err(|e| ImportError::Failed(format!(
-            "creating staging dir: {e}"
-        )))?;
+        std::fs::create_dir_all(&staging)
+            .map_err(|e| ImportError::Failed(format!("creating staging dir: {e}")))?;
 
-        let file = std::fs::File::open(&archive_path_owned).map_err(|e| ImportError::Failed(format!(
-            "opening archive: {e}"
-        )))?;
+        let file = std::fs::File::open(&archive_path_owned)
+            .map_err(|e| ImportError::Failed(format!("opening archive: {e}")))?;
         let gz = GzDecoder::new(file);
         let mut tar = tar::Archive::new(gz);
 
@@ -882,14 +884,13 @@ async fn upload_adapter(
         let mut files_written: u32 = 0;
         let mut strip_prefix: Option<Option<String>> = None;
 
-        let staging_canon = staging.canonicalize().map_err(|e| ImportError::Failed(format!(
-            "canonicalizing staging: {e}"
-        )))?;
+        let staging_canon = staging
+            .canonicalize()
+            .map_err(|e| ImportError::Failed(format!("canonicalizing staging: {e}")))?;
 
         for entry in entries {
-            let mut entry = entry.map_err(|e| ImportError::Invalid(format!(
-                "reading tar entry: {e}"
-            )))?;
+            let mut entry =
+                entry.map_err(|e| ImportError::Invalid(format!("reading tar entry: {e}")))?;
 
             files_written = files_written.saturating_add(1);
             if files_written > ADAPTER_EXTRACT_ENTRIES_LIMIT {
@@ -955,7 +956,7 @@ async fn upload_adapter(
                         return Err(ImportError::Invalid(format!(
                             "archive entry has unsafe path: {}",
                             stripped.display()
-                        )))
+                        )));
                     }
                 }
             }
@@ -967,14 +968,12 @@ async fn upload_adapter(
             let dest = staging.join(&stripped);
             // Ensure dest stays under the staging dir even after canonicalization.
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| ImportError::Failed(format!(
-                    "creating dir {}: {e}",
-                    parent.display()
-                )))?;
-                let parent_canon = parent.canonicalize().map_err(|e| ImportError::Failed(format!(
-                    "canonicalizing {}: {e}",
-                    parent.display()
-                )))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ImportError::Failed(format!("creating dir {}: {e}", parent.display()))
+                })?;
+                let parent_canon = parent.canonicalize().map_err(|e| {
+                    ImportError::Failed(format!("canonicalizing {}: {e}", parent.display()))
+                })?;
                 if !parent_canon.starts_with(&staging_canon) {
                     return Err(ImportError::Invalid(format!(
                         "archive entry escapes staging dir: {}",
@@ -992,14 +991,10 @@ async fn upload_adapter(
                 )));
             }
 
-            let mut out = std::fs::File::create(&dest).map_err(|e| ImportError::Failed(format!(
-                "creating {}: {e}",
-                dest.display()
-            )))?;
-            std::io::copy(&mut entry, &mut out).map_err(|e| ImportError::Failed(format!(
-                "writing {}: {e}",
-                dest.display()
-            )))?;
+            let mut out = std::fs::File::create(&dest)
+                .map_err(|e| ImportError::Failed(format!("creating {}: {e}", dest.display())))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| ImportError::Failed(format!("writing {}: {e}", dest.display())))?;
         }
 
         if files_written == 0 {
@@ -1026,10 +1021,12 @@ async fn upload_adapter(
 
         // Atomic rename of staging → target_dir. On the same filesystem this is
         // a single inode move; if it fails (e.g. EXDEV) fall back to a copy.
-        std::fs::rename(&staging, &target_dir_owned).map_err(|e| ImportError::Failed(format!(
-            "renaming staging to {}: {e}",
-            target_dir_owned.display()
-        )))?;
+        std::fs::rename(&staging, &target_dir_owned).map_err(|e| {
+            ImportError::Failed(format!(
+                "renaming staging to {}: {e}",
+                target_dir_owned.display()
+            ))
+        })?;
 
         Ok((bytes_written, files_written))
     })

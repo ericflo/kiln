@@ -5,7 +5,9 @@ fn main() {
     let cuda_root = match find_cuda_root() {
         Some(p) => p,
         None => {
-            println!("cargo:warning=CUDA not found, kiln-conv1d-kernel will not compile CUDA kernels");
+            println!(
+                "cargo:warning=CUDA not found, kiln-conv1d-kernel will not compile CUDA kernels"
+            );
             println!("cargo:warning=Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit");
             return;
         }

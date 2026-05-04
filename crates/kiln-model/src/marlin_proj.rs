@@ -19,9 +19,9 @@
 //! `[.., n]`. This matches the contract of the existing BF16 `broadcast_matmul`
 //! against a pre-transposed weight.
 
-use anyhow::Result;
 #[cfg(feature = "cuda")]
 use anyhow::Context;
+use anyhow::Result;
 #[cfg(feature = "cuda")]
 use candle_core::DType;
 #[cfg(feature = "cuda")]
@@ -155,11 +155,19 @@ pub fn upload_packed(packed: PackedHost, device: &Device) -> Result<MarlinPacked
         n,
         groupsize,
     } = packed;
-    let num_groups = if groupsize == -1 { 1 } else { k / groupsize as usize };
-    let b_packed = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &candle_core::Device::Cpu)
-        .context("marlin_proj: build host b_packed tensor")?
-        .to_device(device)
-        .context("marlin_proj: upload b_packed to device")?;
+    let num_groups = if groupsize == -1 {
+        1
+    } else {
+        k / groupsize as usize
+    };
+    let b_packed = Tensor::from_vec(
+        b_packed_vec,
+        (k / 16, n * 16 / 8),
+        &candle_core::Device::Cpu,
+    )
+    .context("marlin_proj: build host b_packed tensor")?
+    .to_device(device)
+    .context("marlin_proj: upload b_packed to device")?;
     let scales = Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
         .context("marlin_proj: build host scales tensor")?
         .to_device(device)
@@ -218,9 +226,7 @@ pub fn pack_from_bf16(weight_t: &Tensor, groupsize: i32) -> Result<Option<Marlin
 /// sequentially, reproducing the pre-change wall-clock (useful for A/B
 /// measurements or rollback).
 #[cfg(feature = "cuda")]
-pub fn pack_from_bf16_batch(
-    inputs: &[(Tensor, i32)],
-) -> Result<Vec<Option<MarlinPackedProj>>> {
+pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -238,14 +244,10 @@ pub fn pack_from_bf16_batch(
     // Phase 2: parallel CPU pack. Rayon `par_iter` over `Option` skips
     // None entries cheaply and preserves input order in the output.
     let packed: Vec<Option<PackedHost>> = if parallel_pack_disabled() {
-        jobs.iter()
-            .map(|j| j.as_ref().map(pack_host))
-            .collect()
+        jobs.iter().map(|j| j.as_ref().map(pack_host)).collect()
     } else {
         use rayon::prelude::*;
-        jobs.par_iter()
-            .map(|j| j.as_ref().map(pack_host))
-            .collect()
+        jobs.par_iter().map(|j| j.as_ref().map(pack_host)).collect()
     };
 
     // Phase 3: serial CPU→GPU upload.
@@ -270,9 +272,7 @@ pub fn pack_from_bf16(_weight_t: &Tensor, _groupsize: i32) -> Result<Option<Marl
 /// Non-CUDA stub for [`pack_from_bf16_batch`]: the kernel is CUDA-only, so
 /// every entry is skipped.
 #[cfg(not(feature = "cuda"))]
-pub fn pack_from_bf16_batch(
-    inputs: &[(Tensor, i32)],
-) -> Result<Vec<Option<MarlinPackedProj>>> {
+pub fn pack_from_bf16_batch(inputs: &[(Tensor, i32)]) -> Result<Vec<Option<MarlinPackedProj>>> {
     Ok((0..inputs.len()).map(|_| None).collect())
 }
 
@@ -288,10 +288,7 @@ pub fn matmul_bf16(x: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
         2 => {
             let (m, k) = x.dims2().context("marlin_proj: x must be [m, k] when 2D")?;
             if k != w.k {
-                anyhow::bail!(
-                    "marlin_proj: x last-dim {k} != packed weight k {}",
-                    w.k
-                );
+                anyhow::bail!("marlin_proj: x last-dim {k} != packed weight k {}", w.k);
             }
             let x = x.contiguous().context("marlin_proj: x contiguous")?;
             let y = kiln_marlin_gemm::marlin_w4a16_gemm(&x, &w.b_packed, &w.scales, w.groupsize)
@@ -304,19 +301,15 @@ pub fn matmul_bf16(x: &Tensor, w: &MarlinPackedProj) -> Result<Tensor> {
                 .dims3()
                 .context("marlin_proj: x must be [batch, seq, k] when 3D")?;
             if k != w.k {
-                anyhow::bail!(
-                    "marlin_proj: x last-dim {k} != packed weight k {}",
-                    w.k
-                );
+                anyhow::bail!("marlin_proj: x last-dim {k} != packed weight k {}", w.k);
             }
             let x2 = x
                 .reshape((batch * seq, k))
                 .context("marlin_proj: reshape x [batch*seq, k]")?
                 .contiguous()
                 .context("marlin_proj: x2 contiguous")?;
-            let y2 =
-                kiln_marlin_gemm::marlin_w4a16_gemm(&x2, &w.b_packed, &w.scales, w.groupsize)
-                    .context("marlin_proj: kernel call (3D flat)")?;
+            let y2 = kiln_marlin_gemm::marlin_w4a16_gemm(&x2, &w.b_packed, &w.scales, w.groupsize)
+                .context("marlin_proj: kernel call (3D flat)")?;
             y2.reshape((batch, seq, w.n))
                 .context("marlin_proj: reshape output [batch, seq, n]")?
         }

@@ -12,6 +12,6 @@ anyhow = { workspace = true }
 half = "2"
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 tracing = { workspace = true }
-ash = "0.37.3+1.3.269"
+ash = "0.37.3"
 libc = "0.2"
 libloading = "0.8"

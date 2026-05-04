@@ -148,8 +148,8 @@ impl PeftLora {
             .map(|(name, view)| (name.as_str(), view.clone()))
             .collect();
 
-        let serialized = safetensors::tensor::serialize(refs, None)
-            .context("serializing merged safetensors")?;
+        let serialized =
+            safetensors::tensor::serialize(refs, None).context("serializing merged safetensors")?;
         let st_path = adapter_dir.join("adapter_model.safetensors");
         std::fs::write(&st_path, serialized)
             .with_context(|| format!("writing {}", st_path.display()))?;
@@ -263,7 +263,10 @@ pub fn merge_linear(adapters: &[(&PeftLora, f32)]) -> Result<PeftLora> {
         for key in &keys {
             let a = &first.tensors[key.as_str()];
             let b = adapter.tensors.get(key.as_str()).ok_or_else(|| {
-                anyhow!("adapter tensor key mismatch: source[{idx}] missing tensor {:?}", key)
+                anyhow!(
+                    "adapter tensor key mismatch: source[{idx}] missing tensor {:?}",
+                    key
+                )
             })?;
             if a.shape != b.shape {
                 bail!(
@@ -339,9 +342,7 @@ pub fn merge_ties(adapters: &[(&PeftLora, f32)], density: f32) -> Result<PeftLor
         bail!("merge_ties requires at least one source adapter");
     }
     if !(density.is_finite() && density > 0.0 && density <= 1.0) {
-        bail!(
-            "merge_ties density must be in (0.0, 1.0]; got {density}"
-        );
+        bail!("merge_ties density must be in (0.0, 1.0]; got {density}");
     }
 
     let (first, _) = adapters[0];
@@ -398,7 +399,10 @@ pub fn merge_ties(adapters: &[(&PeftLora, f32)], density: f32) -> Result<PeftLor
         for key in &keys {
             let a = &first.tensors[key.as_str()];
             let b = adapter.tensors.get(key.as_str()).ok_or_else(|| {
-                anyhow!("adapter tensor key mismatch: source[{idx}] missing tensor {:?}", key)
+                anyhow!(
+                    "adapter tensor key mismatch: source[{idx}] missing tensor {:?}",
+                    key
+                )
             })?;
             if a.shape != b.shape {
                 bail!(
@@ -796,8 +800,7 @@ fn trim_top_density(values: &[f32], density: f32) -> Vec<f32> {
         return values.to_vec();
     }
     let mut abs_vals: Vec<f32> = values.iter().map(|v| v.abs()).collect();
-    abs_vals
-        .sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    abs_vals.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let threshold = abs_vals[keep_count - 1];
     values
         .iter()
@@ -820,7 +823,10 @@ fn decode_tensor_to_f32(dtype: Dtype, bytes: &[u8]) -> Result<Vec<f32>> {
     match dtype {
         Dtype::F32 => {
             if bytes.len() % 4 != 0 {
-                bail!("F32 tensor byte length {} is not a multiple of 4", bytes.len());
+                bail!(
+                    "F32 tensor byte length {} is not a multiple of 4",
+                    bytes.len()
+                );
             }
             let mut out = Vec::with_capacity(bytes.len() / 4);
             for chunk in bytes.chunks_exact(4) {
@@ -831,7 +837,10 @@ fn decode_tensor_to_f32(dtype: Dtype, bytes: &[u8]) -> Result<Vec<f32>> {
         }
         Dtype::F16 => {
             if bytes.len() % 2 != 0 {
-                bail!("F16 tensor byte length {} is not a multiple of 2", bytes.len());
+                bail!(
+                    "F16 tensor byte length {} is not a multiple of 2",
+                    bytes.len()
+                );
             }
             let mut out = Vec::with_capacity(bytes.len() / 2);
             for chunk in bytes.chunks_exact(2) {
@@ -842,7 +851,10 @@ fn decode_tensor_to_f32(dtype: Dtype, bytes: &[u8]) -> Result<Vec<f32>> {
         }
         Dtype::BF16 => {
             if bytes.len() % 2 != 0 {
-                bail!("BF16 tensor byte length {} is not a multiple of 2", bytes.len());
+                bail!(
+                    "BF16 tensor byte length {} is not a multiple of 2",
+                    bytes.len()
+                );
             }
             let mut out = Vec::with_capacity(bytes.len() / 2);
             for chunk in bytes.chunks_exact(2) {
@@ -897,11 +909,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    fn make_adapter(
-        rank: usize,
-        a_data: Vec<f32>,
-        b_data: Vec<f32>,
-    ) -> PeftLora {
+    fn make_adapter(rank: usize, a_data: Vec<f32>, b_data: Vec<f32>) -> PeftLora {
         // Single layer, single target module (q_proj), in_features=4, out_features=3.
         // A: [rank, 4], B: [3, rank]
         let mut tensors = BTreeMap::new();
@@ -950,10 +958,10 @@ mod tests {
         assert_eq!(merged.rank(), Some(2));
         assert_eq!(merged.target_modules(), vec!["q_proj".to_string()]);
 
-        let merged_a = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
-        let merged_b = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+        let merged_a =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+        let merged_b =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
 
         // 0.5*1 + 0.5*3 = 2 for A
         for v in &merged_a.data {
@@ -985,10 +993,10 @@ mod tests {
         // 0.25 * b1 + 0.75 * b2 = 2.5 + 15.0 = 17.5
         let merged = merge_linear(&[(&adapter1, 0.25), (&adapter2, 0.75)])?;
 
-        let merged_a = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
-        let merged_b = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+        let merged_a =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+        let merged_b =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
 
         for v in &merged_a.data {
             assert!((*v - 4.0).abs() < 1e-6, "expected 4.0, got {v}");
@@ -1007,20 +1015,16 @@ mod tests {
         let adapter3 = make_adapter(2, vec![9.0_f32; 8], vec![12.0_f32; 6]);
 
         let third = 1.0 / 3.0;
-        let merged = merge_linear(&[
-            (&adapter1, third),
-            (&adapter2, third),
-            (&adapter3, third),
-        ])?;
+        let merged = merge_linear(&[(&adapter1, third), (&adapter2, third), (&adapter3, third)])?;
 
-        let merged_a = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+        let merged_a =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
         // (3+6+9)/3 = 6
         for v in &merged_a.data {
             assert!((*v - 6.0).abs() < 1e-5, "expected 6.0, got {v}");
         }
-        let merged_b = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+        let merged_b =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
         // (6+9+12)/3 = 9
         for v in &merged_b.data {
             assert!((*v - 9.0).abs() < 1e-5, "expected 9.0, got {v}");
@@ -1086,13 +1090,13 @@ mod tests {
     fn test_merge_linear_single_source_passthrough() -> Result<()> {
         let adapter = make_adapter(2, vec![7.0_f32; 8], vec![11.0_f32; 6]);
         let merged = merge_linear(&[(&adapter, 1.0)])?;
-        let merged_a = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+        let merged_a =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
         for v in &merged_a.data {
             assert!((*v - 7.0).abs() < 1e-6);
         }
-        let merged_b = &merged.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+        let merged_b =
+            &merged.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
         for v in &merged_b.data {
             assert!((*v - 11.0).abs() < 1e-6);
         }
@@ -1104,7 +1108,11 @@ mod tests {
         let dir = tempdir()?;
         let adapter_dir = dir.path();
 
-        let adapter = make_adapter(2, (0..8).map(|i| i as f32 * 0.5).collect(), vec![3.0_f32; 6]);
+        let adapter = make_adapter(
+            2,
+            (0..8).map(|i| i as f32 * 0.5).collect(),
+            vec![3.0_f32; 6],
+        );
         adapter.save(adapter_dir)?;
 
         // Files written.
@@ -1118,14 +1126,12 @@ mod tests {
         assert_eq!(loaded.base_model().as_deref(), Some("Qwen/Qwen3.5-4B"));
         assert_eq!(loaded.tensors.len(), 2);
 
-        let a = &loaded.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+        let a = &loaded.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
         assert_eq!(a.shape, vec![2, 4]);
         for (i, v) in a.data.iter().enumerate() {
             assert!((*v - (i as f32 * 0.5)).abs() < 1e-6);
         }
-        let b = &loaded.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+        let b = &loaded.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
         assert_eq!(b.shape, vec![3, 2]);
         for v in &b.data {
             assert!((*v - 3.0).abs() < 1e-6);
@@ -1146,13 +1152,11 @@ mod tests {
         merged.save(&merged_dir)?;
 
         let loaded = PeftLora::load(&merged_dir)?;
-        let a = &loaded.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
+        let a = &loaded.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"];
         for v in &a.data {
             assert!((*v - 2.0).abs() < 1e-6);
         }
-        let b = &loaded.tensors
-            ["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
+        let b = &loaded.tensors["base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"];
         for v in &b.data {
             assert!((*v - 3.0).abs() < 1e-6);
         }
@@ -1188,10 +1192,7 @@ mod tests {
             assert_eq!(t.shape, l.shape, "shape mismatch for {key}");
             assert_eq!(t.data.len(), l.data.len(), "len mismatch for {key}");
             for (i, (a, b)) in t.data.iter().zip(l.data.iter()).enumerate() {
-                assert!(
-                    (a - b).abs() < 1e-6,
-                    "ties[{key}][{i}]={a} vs linear={b}"
-                );
+                assert!((a - b).abs() < 1e-6, "ties[{key}][{i}]={a} vs linear={b}");
             }
         }
 
@@ -1414,10 +1415,16 @@ mod tests {
         assert_eq!(merged_b.shape, vec![3, 4]);
         // A is row-concat of A_1 (rows 0..2) and A_2 (rows 2..4).
         for v in &merged_a.data[0..8] {
-            assert!((*v - 1.0).abs() < 1e-6, "expected 1.0 in A row block 0, got {v}");
+            assert!(
+                (*v - 1.0).abs() < 1e-6,
+                "expected 1.0 in A row block 0, got {v}"
+            );
         }
         for v in &merged_a.data[8..16] {
-            assert!((*v - 3.0).abs() < 1e-6, "expected 3.0 in A row block 1, got {v}");
+            assert!(
+                (*v - 3.0).abs() < 1e-6,
+                "expected 3.0 in A row block 1, got {v}"
+            );
         }
         // B is column-concat of 0.5*B_1 then 0.5*B_2. Each row [j, 0..4]
         // should be [1.0, 1.0, 2.0, 2.0] given B_1=2 with w=0.5 and
@@ -1440,7 +1447,9 @@ mod tests {
         // collisions can't accidentally satisfy the identity.
         let mut rng_seed = 1u64;
         let mut next = || {
-            rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_seed = rng_seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((rng_seed >> 33) as f32) / (u32::MAX as f32) - 0.5
         };
         let a1_data: Vec<f32> = (0..8).map(|_| next()).collect();
@@ -1454,10 +1463,7 @@ mod tests {
         let weights = (0.7_f32, 0.3_f32);
         let merged = merge_concat(&[(&a1, weights.0), (&a2, weights.1)])?;
 
-        let got = matmul_ba(
-            &merged.tensors[lora_b_key()],
-            &merged.tensors[lora_a_key()],
-        );
+        let got = matmul_ba(&merged.tensors[lora_b_key()], &merged.tensors[lora_a_key()]);
 
         let part1 = matmul_ba(&a1.tensors[lora_b_key()], &a1.tensors[lora_a_key()]);
         let part2 = matmul_ba(&a2.tensors[lora_b_key()], &a2.tensors[lora_a_key()]);
@@ -1623,7 +1629,8 @@ mod tests {
                 },
             );
             tensors.insert(
-                "base_model.model.model.layers.0.self_attn.q_proj.lora_magnitude_vector".to_string(),
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_magnitude_vector"
+                    .to_string(),
                 MergeTensor {
                     shape: vec![3],
                     data: vec![1.0_f32; 3],

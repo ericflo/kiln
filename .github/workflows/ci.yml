@@ -80,6 +80,32 @@ jobs:
       - name: Test (default features)
         run: cargo test --locked -- --skip test_health_with_real_backend
 
+  linux-vulkan:
+    name: Linux / Vulkan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Vulkan shader tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools mesa-vulkan-drivers vulkan-tools
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Build (Vulkan)
+        run: cargo check --locked -p kiln-server --features vulkan
+
+      - name: Test Vulkan kernel crate
+        run: cargo test --locked -p kiln-vulkan-kernel --test gdn_parity -- --nocapture
+
   cargo-deny:
     name: cargo-deny (license / source / bans policy)
     runs-on: ubuntu-22.04

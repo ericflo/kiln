@@ -5,14 +5,14 @@ use tracing::Span;
 
 use crate::state::AppState;
 
+mod adapters;
+mod completions;
+mod config;
 mod health;
 mod metrics;
 mod models;
-mod completions;
-mod adapters;
-mod training;
-mod config;
 mod stats;
+mod training;
 mod ui;
 
 #[cfg(test)]
@@ -40,9 +40,7 @@ pub fn router(state: AppState) -> Router {
             )
         })
         .on_response(
-            |response: &axum::http::Response<_>,
-             latency: std::time::Duration,
-             span: &Span| {
+            |response: &axum::http::Response<_>, latency: std::time::Duration, span: &Span| {
                 span.record("status", response.status().as_u16());
                 span.record("duration_ms", latency.as_secs_f64() * 1000.0);
                 tracing::info!(

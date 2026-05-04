@@ -3,19 +3,90 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn compile_shader_command(glsl_path: &str, spv_path: &std::path::Path) -> std::io::Result<std::process::Output> {
+    let glslc = std::process::Command::new("glslc")
+        .arg(glsl_path)
+        .arg("-o")
+        .arg(spv_path)
+        .arg("-DFLOAT_TYPE=float")
+        .arg("-DUSE_BFLOAT16=1")
+        .arg("-DUSE_SUBGROUP_ADD=1")
+        .arg("-DUSE_SUBGROUP_CLUSTERED=1")
+        .output();
+    if glslc.is_ok() {
+        return glslc;
+    }
+
+    std::process::Command::new("glslangValidator")
+        .arg("-V")
+        .arg(glsl_path)
+        .arg("-o")
+        .arg(spv_path)
+        .arg("-DFLOAT_TYPE=float")
+        .arg("-DUSE_BFLOAT16=1")
+        .arg("-DUSE_SUBGROUP_ADD=1")
+        .arg("-DUSE_SUBGROUP_CLUSTERED=1")
+        .output()
+}
+
 // Include the build-time generated SPIR-V modules
 include!(concat!(env!("OUT_DIR"), "/vulkan_spirv.rs"));
 
 /// Map shader base names to their embedded SPIR-V module constants.
 const SHADER_SPIRVS: &[(&str, &[u8])] = &[
+    ("full_attn_qkv_decode", SPIR_V_FULL_ATTN_QKV_DECODE),
     ("gdn_gates", SPIR_V_GDN_GATES),
+    (
+        "gdn_decode_gates_recurrent_rmsnorm",
+        SPIR_V_GDN_DECODE_GATES_RECURRENT_RMSNORM,
+    ),
+    ("gdn_in_proj_decode", SPIR_V_GDN_IN_PROJ_DECODE),
+    (
+        "gdn_in_proj_decode_batched",
+        SPIR_V_GDN_IN_PROJ_DECODE_BATCHED,
+    ),
     ("gdn_gated_rms_norm", SPIR_V_GDN_GATED_RMS_NORM),
     ("causal_conv1d", SPIR_V_CAUSAL_CONV1D),
+    (
+        "causal_conv1d_state_advance",
+        SPIR_V_CAUSAL_CONV1D_STATE_ADVANCE,
+    ),
     ("solve_tri", SPIR_V_SOLVE_TRI),
     ("gdn_recurrent_prefill", SPIR_V_GDN_RECURRENT_PREFILL),
     ("gdn_chunk_prep", SPIR_V_GDN_CHUNK_PREP),
     ("gdn_full_chunk_forward", SPIR_V_GDN_FULL_CHUNK_FORWARD),
     ("gdn_chunk_scan", SPIR_V_GDN_CHUNK_SCAN),
+    ("linear_decode", SPIR_V_LINEAR_DECODE),
+    ("linear_decode_batched", SPIR_V_LINEAR_DECODE_BATCHED),
+    (
+        "linear_decode_batched_rows2",
+        SPIR_V_LINEAR_DECODE_BATCHED_ROWS2,
+    ),
+    (
+        "linear_decode_argmax_blocks",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS,
+    ),
+    (
+        "linear_decode_argmax_reduce",
+        SPIR_V_LINEAR_DECODE_ARGMAX_REDUCE,
+    ),
+    (
+        "linear_decode_argmax_batched_blocks",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS,
+    ),
+    (
+        "linear_decode_argmax_batched_reduce",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE,
+    ),
+    ("mlp_gate_up_decode", SPIR_V_MLP_GATE_UP_DECODE),
+    (
+        "mlp_gate_up_decode_batched",
+        SPIR_V_MLP_GATE_UP_DECODE_BATCHED,
+    ),
+    (
+        "mlp_gate_up_decode_batched_rows2",
+        SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2,
+    ),
     ("flash_attn", SPIR_V_FLASH_ATTN),
 ];
 
@@ -79,44 +150,27 @@ impl ShaderPipeline {
 
         // Try to load a pre-compiled .spv from temp dir (cached from a prior run)
         if spv_path.exists() {
-            return std::fs::read(&spv_path)
-                .context(format!("failed to read cached SPIR-V: {}", spv_path.display()));
+            return std::fs::read(&spv_path).context(format!(
+                "failed to read cached SPIR-V: {}",
+                spv_path.display()
+            ));
         }
 
-        // Check that glslc is available
-        let glslc_status = std::process::Command::new("glslc")
-            .arg("--help")
-            .output();
-        if glslc_status.is_err() {
-            anyhow::bail!(
-                "Vulkan SPIR-V '{}' was not compiled at build time and glslc is not on PATH. \
-                 Install glslc (part of the SPIR-V Tools package) and rebuild kiln-vulkan-kernel.",
-                glsl_path
-            );
-        }
-
-        // Compile with glslc into temp dir
-        let output = std::process::Command::new("glslc")
-            .arg(glsl_path)
-            .arg("-o")
-            .arg(&spv_path)
-            .arg("-DFLOAT_TYPE=float")
-            .arg("-DUSE_BFLOAT16=1")
-            .arg("-DUSE_SUBGROUP_ADD=1")
-            .arg("-DUSE_SUBGROUP_CLUSTERED=1")
-            .output()
-            .context("failed to run glslc")?;
+        let output = compile_shader_command(glsl_path, &spv_path)
+            .context("failed to run glslc or glslangValidator")?;
 
         if !output.status.success() {
             anyhow::bail!(
-                "glslc failed to compile '{}': {}",
+                "shader compiler failed to compile '{}': {}",
                 glsl_path,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
 
-        std::fs::read(&spv_path)
-            .context(format!("failed to read compiled SPIR-V: {}", spv_path.display()))
+        std::fs::read(&spv_path).context(format!(
+            "failed to read compiled SPIR-V: {}",
+            spv_path.display()
+        ))
     }
 
     /// Create or retrieve a cached compute pipeline.
@@ -137,7 +191,8 @@ impl ShaderPipeline {
             .build();
 
         let shader_module = unsafe {
-            self.device.create_shader_module(&shader_module_info, None)
+            self.device
+                .create_shader_module(&shader_module_info, None)
                 .context(format!("failed to create shader module: {}", name))?
         };
 
@@ -153,7 +208,8 @@ impl ShaderPipeline {
             .build();
 
         let layout = unsafe {
-            self.device.create_pipeline_layout(&layout_info, None)
+            self.device
+                .create_pipeline_layout(&layout_info, None)
                 .context(format!("failed to create pipeline layout: {}", name))?
         };
 
@@ -171,17 +227,15 @@ impl ShaderPipeline {
             .build();
 
         let pipelines = unsafe {
-            self.device.create_compute_pipelines(
-                vk::PipelineCache::null(),
-                &[pipeline_info],
-                None,
-            ).map_err(|(errs, _)| {
-                if !errs.is_empty() {
-                    anyhow::anyhow!("failed to create compute pipeline {}: {:?}", name, errs[0])
-                } else {
-                    anyhow::anyhow!("failed to create compute pipeline {}", name)
-                }
-            })?
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(errs, _)| {
+                    if !errs.is_empty() {
+                        anyhow::anyhow!("failed to create compute pipeline {}: {:?}", name, errs[0])
+                    } else {
+                        anyhow::anyhow!("failed to create compute pipeline {}", name)
+                    }
+                })?
         };
         let pipeline = pipelines[0];
 

@@ -1,0 +1,68 @@
+warning: /Users/ericflo/Development/kiln/crates/kiln-vulkan-kernel/Cargo.toml: version requirement `0.37.3+1.3.269` for dependency `ash` includes semver metadata which will be ignored, removing the metadata is recommended to avoid confusion
+warning: unused variable: `v_out`
+    --> crates/kiln-model/src/paged_kv_cache.rs:1056:21
+     |
+1056 |         let (k_out, v_out) = cache.read(0, &bt, 3)?;
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_out`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `in_features`
+   --> crates/kiln-model/src/quantized.rs:377:13
+    |
+377 |         let in_features = 8;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_features`
+
+warning: unused variable: `out_features`
+   --> crates/kiln-model/src/quantized.rs:378:13
+    |
+378 |         let out_features = 1;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_features`
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:2947:4
+     |
+2947 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `create_safetensors_with_data` is never used
+    --> crates/kiln-model/src/loader.rs:1893:8
+     |
+1893 |     fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pack_int4` is never used
+    --> crates/kiln-model/src/loader.rs:1913:8
+     |
+1913 |     fn pack_int4(values: &[u8]) -> Vec<u8> {
+     |        ^^^^^^^^^
+
+warning: function `gptq_linear_tensors` is never used
+    --> crates/kiln-model/src/loader.rs:1927:8
+     |
+1927 |     fn gptq_linear_tensors(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:35:5
+   |
+23 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+35 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib test) generated 8 warnings (run `cargo fix --lib -p kiln-model --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/kiln_model-8ab5b66e9ef10c0c)
+
+running 1 test
+synthetic Metal Qwen3.5 mlp_gate_or_up BF16 transposed GEMV: x=[1,1,2560] weight_t=[2560,9216] simdgroups=4 warmup=5 iters=30 broadcast_matmul=1395.657 us tile4=1264.696 us tile8=1135.542 us tile16=1098.242 us tile8_vs_tile4=1.114x tile16_vs_tile8=1.034x tile4_speedup=1.104x tile8_speedup=1.229x tile16_speedup=1.271x tile4_max_abs_diff=0.000000e0 tile4_mean_abs_diff=0.000000e0 tile8_max_abs_diff=0.000000e0 tile8_mean_abs_diff=0.000000e0 tile16_max_abs_diff=0.000000e0 tile16_mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 down_proj BF16 transposed GEMV: x=[1,1,9216] weight_t=[9216,2560] simdgroups=4 warmup=5 iters=30 broadcast_matmul=1378.706 us tile4=1127.879 us tile8=1046.778 us tile16=1004.169 us tile8_vs_tile4=1.077x tile16_vs_tile8=1.042x tile4_speedup=1.222x tile8_speedup=1.317x tile16_speedup=1.373x tile4_max_abs_diff=0.000000e0 tile4_mean_abs_diff=0.000000e0 tile8_max_abs_diff=0.000000e0 tile8_mean_abs_diff=0.000000e0 tile16_max_abs_diff=0.000000e0 tile16_mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 attn_output BF16 transposed GEMV: x=[1,1,2560] weight_t=[2560,2560] simdgroups=4 warmup=5 iters=30 broadcast_matmul=645.926 us tile4=345.721 us tile8=322.608 us tile16=319.751 us tile8_vs_tile4=1.072x tile16_vs_tile8=1.009x tile4_speedup=1.868x tile8_speedup=2.002x tile16_speedup=2.020x tile4_max_abs_diff=0.000000e0 tile4_mean_abs_diff=0.000000e0 tile8_max_abs_diff=0.000000e0 tile8_mean_abs_diff=0.000000e0 tile16_max_abs_diff=0.000000e0 tile16_mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 attn_qkv_like BF16 transposed GEMV: x=[1,1,2560] weight_t=[2560,4096] simdgroups=4 warmup=5 iters=30 broadcast_matmul=927.054 us tile4=508.450 us tile8=535.490 us tile16=498.661 us tile8_vs_tile4=0.950x tile16_vs_tile8=1.074x tile4_speedup=1.823x tile8_speedup=1.731x tile16_speedup=1.859x tile4_max_abs_diff=0.000000e0 tile4_mean_abs_diff=0.000000e0 tile8_max_abs_diff=0.000000e0 tile8_mean_abs_diff=0.000000e0 tile16_max_abs_diff=0.000000e0 tile16_mean_abs_diff=0.000000e0
+test backend::metal::tests::bench_transposed_coop_gemv_qwen35_synthetic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 307 filtered out; finished in 2.56s

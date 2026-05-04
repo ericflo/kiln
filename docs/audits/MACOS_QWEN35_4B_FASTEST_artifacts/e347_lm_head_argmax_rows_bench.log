@@ -1,0 +1,5 @@
+KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_WARMUP=1 KILN_METAL_LM_HEAD_ARGMAX_BATCH_BENCH_ITERS=1 cargo test -p kiln-model --features metal bench_lm_head_argmax_rows_decode_batch_synthetic --lib -- --ignored --nocapture
+
+synthetic Metal Qwen3.5 LM-head argmax rows decode batch BF16: batch=2 physical_tokens=2 x=[2,1,2560] weight_t=[2560,248320] warmup=1 iters=1 materialized_gemv_argmax=307327.208 us fused_argmax_rows=70131.917 us speedup=4.382x
+synthetic Metal Qwen3.5 LM-head argmax rows decode batch BF16: batch=4 physical_tokens=4 x=[4,1,2560] weight_t=[2560,248320] warmup=1 iters=1 materialized_gemv_argmax=590959.792 us fused_argmax_rows=137259.958 us speedup=4.305x
+synthetic Metal Qwen3.5 LM-head argmax rows decode batch BF16: batch=8 physical_tokens=8 x=[8,1,2560] weight_t=[2560,248320] warmup=1 iters=1 materialized_gemv_argmax=1165141.125 us fused_argmax_rows=490019.583 us speedup=2.378x

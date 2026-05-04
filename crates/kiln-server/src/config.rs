@@ -1122,10 +1122,7 @@ port = 3000
             std::env::set_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES", "536870912");
         }
         config.apply_env_overrides();
-        assert_eq!(
-            config.adapters.composed_cache_max_bytes,
-            Some(536_870_912)
-        );
+        assert_eq!(config.adapters.composed_cache_max_bytes, Some(536_870_912));
 
         unsafe {
             std::env::remove_var("KILN_ADAPTERS_COMPOSED_CACHE_MAX_BYTES");

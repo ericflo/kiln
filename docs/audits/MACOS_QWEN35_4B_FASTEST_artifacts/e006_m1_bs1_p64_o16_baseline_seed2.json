@@ -1,0 +1,26 @@
+{
+  "backend": "metal",
+  "gpu_info": {
+    "name": "unknown",
+    "total_vram_mb": 10240,
+    "vram_source": "apple-silicon-unified"
+  },
+  "model_load": {
+    "load_time_secs": 17.680560375,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 8962.970125,
+    "prefill_tokens_per_sec": 7.140490162015351,
+    "time_to_first_token_ms": 8962.970125,
+    "mean_inter_token_ms": 184.58180725,
+    "p50_inter_token_ms": 170.76370799999998,
+    "p99_inter_token_ms": 325.11395799999997,
+    "num_tokens_generated": 17,
+    "decode_tokens_per_sec": 5.417652015106706,
+    "spec_method": "off"
+  },
+  "training": null
+}
