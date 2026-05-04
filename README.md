@@ -193,7 +193,7 @@ See [QUICKSTART.md](QUICKSTART.md) for the full walkthrough including Desktop Ap
 
 ## See it in action
 
-A 60-second asciicast captured on a single A6000 against `Qwen3.5-4B` walks the full live-LoRA online-learning loop: cold start → first chat (base model) → `POST /v1/train/sft` correction → hot-swap → second chat (improved). Watch it in the embedded player at **[ericflo.github.io/kiln/demo/](https://ericflo.github.io/kiln/demo/)** or browse the recording script and reference shell driver under [`docs/site/demo/`](docs/site/demo/).
+Six short asciicasts captured on a single A6000 against `Qwen3.5-4B` show the main developer flows: first token from cold start, benchmark output, LoRA hot-swap, an OpenAI-compatible client, GRPO with a custom reward, and the full SFT online-learning loop. Watch them in the embedded player at **[ericflo.github.io/kiln/demo/](https://ericflo.github.io/kiln/demo/)** or browse the recording scripts and reference shell drivers under [`docs/site/demo/`](docs/site/demo/).
 
 The kiln server also ships an embedded web dashboard at `http://localhost:8420/ui` with live decode tok/s, p50/p99 ITL, VRAM breakdown, adapter management, training monitoring, and a chat playground — no extra service to run.
 
