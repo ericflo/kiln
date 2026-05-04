@@ -1,20 +1,23 @@
 # Quickstart: Zero to Running in 5 Minutes
 
-This guide gets you from a fresh machine to running Kiln with real GPU inference and live training.
+This guide gets you from a fresh machine to your first Kiln inference. Stop after the checkpoint if all you want is “server running + one chat + dashboard”; SFT and GRPO are next steps after that.
 
 ## Choose your path
 
-- **Desktop App (recommended)**: install the app, choose or download the Qwen3.5-4B model, start the server from the GUI, then jump to [section 4](#4-test-inference) to verify inference.
-- **Source / CLI**: build `kiln` from source, download the Qwen3.5-4B model, start the server from your terminal, then continue linearly through sections 1-4.
-- **After first run**: open the dashboard in [section 5](#5-open-the-browser-dashboard), try training with [SFT](#6-submit-sft-training) or [GRPO](docs/GRPO_GUIDE.md), watch the [demo](https://ericflo.github.io/kiln/demo/), or use [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) if setup gets stuck.
+| Path | Pick this if | What you do first |
+|------|--------------|-------------------|
+| **Desktop App (recommended)** | You want the shortest first run on Windows, Linux, or Apple Silicon macOS. | Install the app, choose or download `Qwen/Qwen3.5-4B`, start the server from the GUI, then jump to [Test Inference](#4-test-inference). |
+| **Source / CLI** | You are contributing, scripting, or want direct terminal control. | Build `kiln`, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 1-5. |
+
+After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [advanced API examples](#9-advanced-api-examples), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
 
-Choose the path that matches how you want to run Kiln.
+Choose the path that matches how you want to run Kiln. The Desktop App avoids source builds; the Source / CLI path is for users who want the binary in their terminal.
 
 **Desktop App path (recommended for most users):**
 
-- **Platform**: Windows, Linux, or macOS on Apple Silicon.
+- **Platform**: Windows, Linux, or macOS on Apple Silicon. Intel Macs are not supported.
 - **GPU**: NVIDIA GPU, AMD/Intel Vulkan-capable Linux GPU, or Apple Silicon Mac. NVIDIA systems should have 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.); Apple Silicon systems should have 16GB+ unified memory.
 - **Disk**: ~20GB free for the server binary, model weights, and adapters.
 - **Build tooling**: No Rust toolchain, CUDA toolkit, or Xcode install is required for the GUI path. The app downloads the matching prebuilt `kiln` server binary for your platform.
@@ -22,16 +25,16 @@ Choose the path that matches how you want to run Kiln.
 **Source / CLI path (for contributors and direct CLI users):**
 
 - **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
-- **NVIDIA builds**: GPU with 24GB+ VRAM and CUDA 12.0+ (`nvcc --version` to check).
-- **AMD / Intel Linux builds**: Vulkan 1.2+ driver and tools (`vulkaninfo --summary` should list your GPU). Install `glslc` to embed shaders at build time.
-- **Apple Silicon builds**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
+- **Linux / Windows + NVIDIA builds**: GPU with 24GB+ VRAM and CUDA 12.4+ (`nvcc --version` to check).
+- **Linux + AMD / Intel builds**: Vulkan 1.2+ runtime plus `glslc` or `glslangValidator` for shader embedding. `vulkaninfo --summary` should list your GPU.
+- **macOS + Apple Silicon builds**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
 - **Disk**: ~20GB free for model weights and build artifacts.
 
-If setup stalls on binary downloads, CUDA/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
+If setup stalls on binary downloads, CUDA/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
 
 ## Quick path: Desktop App (recommended for most users)
 
-Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. Linux chooses CUDA for NVIDIA systems and Vulkan for AMD/Intel systems. **No Rust toolchain or CUDA build required for the GUI itself.**
+Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS on Apple Silicon. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. Linux chooses CUDA for NVIDIA systems and Vulkan for AMD/Intel systems; macOS uses the Apple Silicon Metal backend. **No Rust toolchain, CUDA toolkit, or source build is required for this path.**
 
 **Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
 
@@ -45,7 +48,7 @@ Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS. The instal
 | Linux | [Kiln.Desktop_0.2.2_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb) | 8.8 MB |
 | Linux | [Kiln.Desktop_0.2.2_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage) | 85.7 MB |
 
-Continue with section 1 (Build Kiln) only if you want to build from source, contribute, or use the CLI directly. Otherwise, install the desktop app, choose or download the Qwen3.5-4B model weights, start the server from the app, then skip ahead to section 4 (Test Inference).
+Install the desktop app, choose or download the Qwen3.5-4B model weights, start the server from the app, then skip ahead to [Test Inference](#4-test-inference). Continue with section 1 only if you want to build from source, contribute, or use the CLI directly.
 
 ## 1. Build Kiln
 
@@ -174,7 +177,102 @@ curl -N http://localhost:8420/v1/chat/completions \
   }'
 ```
 
-### 4.1 Tool / Function Calling
+## 5. Open the Browser Dashboard
+
+Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
+
+- **Server Status** — live GPU VRAM breakdown (model / KV cache / training / free) plus scheduler queue depth
+- **Adapters** — list available LoRA adapters and switch the active one
+- **Training** — submit SFT or GRPO jobs from a form, watch the queue, and review recently completed runs
+- **Quick Inference** — chat with the model directly (per-request adapter and temperature pickers) without writing curl
+
+It's a single HTML page served by the `kiln` binary itself — no extra process, no build step, no JS bundle to deploy.
+
+
+## First Inference Checkpoint
+
+If you only wanted to get Kiln running, you can stop here: the server is up, `POST /v1/chat/completions` works, and the dashboard is available at [http://127.0.0.1:8420/ui](http://127.0.0.1:8420/ui).
+
+Next steps are optional:
+
+- Train a small adapter with [SFT](#6-submit-sft-training).
+- Run generate→score→train loops with [GRPO](docs/GRPO_GUIDE.md).
+- Use [advanced API examples](#9-advanced-api-examples) for tools, batch generation, adapter import/export, TIES merge, composition, webhooks, and troubleshooting notes.
+- Open the website [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html) page if setup is not clean yet.
+
+## 6. Submit SFT Training
+
+Create a training file `examples.jsonl` with chat-format examples:
+
+```jsonl
+{"messages": [{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}]}
+{"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}]}
+{"messages": [{"role": "user", "content": "Translate 'hello' to Spanish"}, {"role": "assistant", "content": "Hola"}]}
+```
+
+Submit training via the CLI:
+
+```bash
+./target/release/kiln train sft --file examples.jsonl
+```
+
+Or via curl:
+
+```bash
+curl -s http://localhost:8420/v1/train/sft \
+  -H "Content-Type: application/json" \
+  -d '{
+    "examples": [
+      {"messages": [{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}]},
+      {"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}]}
+    ],
+    "config": {
+      "output_name": "default",
+      "learning_rate": 1e-4,
+      "epochs": 3
+    }
+  }' | python3 -m json.tool
+```
+
+Training runs in the background. The model continues serving requests during training. When training completes, the new LoRA adapter is hot-swapped — all subsequent requests use the updated weights.
+
+## 7. Check Training Status
+
+Via CLI:
+
+```bash
+./target/release/kiln train status
+```
+
+`kiln health` is still useful for server/model diagnostics; `kiln train status` shows the training queue and recent jobs.
+
+Via curl:
+
+```bash
+curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
+```
+
+## 8. Manage Adapters
+
+```bash
+# List loaded adapters
+./target/release/kiln adapters list
+
+# Unload an adapter (revert to base model)
+./target/release/kiln adapters unload default
+
+# Reload it
+./target/release/kiln adapters load default
+
+# Delete an adapter permanently
+./target/release/kiln adapters delete default
+```
+
+## 9. Advanced API Examples
+
+These optional reference sections are for after the first-run path. Use them once you have completed the first inference checkpoint and want tools, GRPO rollout helpers, adapter lifecycle workflows, or operational troubleshooting.
+
+### 9.1 Tool / Function Calling
 
 Kiln speaks the OpenAI `tools` schema on the request side. The server forwards
 `tools` and `tool_choice` into the chat-template Jinja context, which means
@@ -289,7 +387,9 @@ Francisco.").
 > on Hugging Face. If a tool call format ever looks ambiguous, that file is
 > the source of truth.
 
-### 4.2 Troubleshooting: older-release long-prefill timeouts
+<a id="42-troubleshooting-older-release-long-prefill-timeouts"></a>
+
+### 9.2 Troubleshooting: older-release long-prefill timeouts
 
 If long tools-bearing prompts or long-prefill requests time out, first upgrade
 to the latest `kiln-v*` release. Current releases include the long-prefill
@@ -301,7 +401,7 @@ Pinned older-release users should see the
 `workers=1` client-side serialization and `request_timeout_secs >= 600`
 details.
 
-### 4.3 Troubleshooting: KV cache OOM auto-recovery
+### 9.3 Troubleshooting: KV cache OOM auto-recovery
 
 At startup, kiln's auto-sizer computes the paged KV cache budget as
 `available_for_kv = (total_vram - model_bytes) * inference_memory_fraction`
@@ -348,91 +448,8 @@ concrete remediations:
 
 Use (a) on first-run failures and you are unlikely to see this codepath again.
 
-## 5. Open the Browser Dashboard
 
-Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http://localhost:8420/ui) in any browser:
-
-- **Server Status** — live GPU VRAM breakdown (model / KV cache / training / free) plus scheduler queue depth
-- **Adapters** — list available LoRA adapters and switch the active one
-- **Training** — submit SFT or GRPO jobs from a form, watch the queue, and review recently completed runs
-- **Quick Inference** — chat with the model directly (per-request adapter and temperature pickers) without writing curl
-
-It's a single HTML page served by the `kiln` binary itself — no extra process, no build step, no JS bundle to deploy.
-
-## 6. Submit SFT Training
-
-Create a training file `examples.jsonl` with chat-format examples:
-
-```jsonl
-{"messages": [{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}]}
-{"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}]}
-{"messages": [{"role": "user", "content": "Translate 'hello' to Spanish"}, {"role": "assistant", "content": "Hola"}]}
-```
-
-Submit training via the CLI:
-
-```bash
-./target/release/kiln train sft --file examples.jsonl
-```
-
-Or via curl:
-
-```bash
-curl -s http://localhost:8420/v1/train/sft \
-  -H "Content-Type: application/json" \
-  -d '{
-    "examples": [
-      {"messages": [{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}]},
-      {"messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}]}
-    ],
-    "config": {
-      "output_name": "default",
-      "learning_rate": 1e-4,
-      "epochs": 3
-    }
-  }' | python3 -m json.tool
-```
-
-Training runs in the background. The model continues serving requests during training. When training completes, the new LoRA adapter is hot-swapped — all subsequent requests use the updated weights.
-
-## 7. Check Training Status
-
-Via CLI:
-
-```bash
-./target/release/kiln train status
-```
-
-`kiln health` is still useful for server/model diagnostics; `kiln train status` shows the training queue and recent jobs.
-
-Via curl:
-
-```bash
-curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
-```
-
-## 8. Manage Adapters
-
-```bash
-# List loaded adapters
-./target/release/kiln adapters list
-
-# Unload an adapter (revert to base model)
-./target/release/kiln adapters unload default
-
-# Reload it
-./target/release/kiln adapters load default
-
-# Delete an adapter permanently
-./target/release/kiln adapters delete default
-```
-
-## 9. Advanced API Examples
-
-These optional next steps are useful after your first chat and training runs:
-batch generation for GRPO rollouts, adapter import/export/merge/compose, and training-completion webhooks.
-
-### 9.1 Batch generation (efficient for GRPO rollouts)
+### 9.4 Batch generation (efficient for GRPO rollouts)
 
 `/v1/completions/batch` returns one HTTP response covering many prompts × `n` completions per prompt. The iteration-level scheduler batches the underlying prefill/decode steps, so this is far cheaper than N parallel calls. Hard cap: `prompts.len() * n <= 64`. `stream` is not supported on this endpoint. `seed` is per-batch — each completion uses `seed.wrapping_add(prompt_idx * n + completion_idx)` so identical prompts produce distinct outputs.
 
@@ -453,7 +470,7 @@ curl -s http://localhost:8420/v1/completions/batch \
   }' | python3 -m json.tool
 ```
 
-### 9.2 Export an adapter (download tar.gz)
+### 9.5 Export an adapter (download tar.gz)
 
 ```bash
 curl -s -OJ http://localhost:8420/v1/adapters/default/download
@@ -462,7 +479,7 @@ curl -s -OJ http://localhost:8420/v1/adapters/default/download
 
 The body is a streamed `application/gzip` tar archive containing the adapter directory.
 
-### 9.3 Import an adapter (upload tar.gz)
+### 9.6 Import an adapter (upload tar.gz)
 
 Multipart fields: `name` (target adapter directory name) and `archive` (the tar.gz body).
 
@@ -475,7 +492,7 @@ curl -s http://localhost:8420/v1/adapters/upload \
 
 Body limit is 2 GB gzipped / 4 GB extracted. Uploads fail with 409 if the target name already exists.
 
-### 9.4 Merge adapters (TIES)
+### 9.7 Merge adapters (TIES)
 
 Combine multiple adapters into a new on-disk adapter. Modes: `weighted_average` (default), `ties`, `concat`. `weighted_average` and `ties` require identical rank, target_modules, and shapes; `concat` produces a higher-rank adapter (`r_total = Σᵢ rᵢ`) and accepts mismatched ranks.
 
@@ -493,7 +510,7 @@ curl -s http://localhost:8420/v1/adapters/merge \
   }' | python3 -m json.tool
 ```
 
-### 9.5 Compose adapters per-request
+### 9.8 Compose adapters per-request
 
 The standard `/v1/chat/completions` endpoint accepts a request-body `adapters` array as a Kiln extension (mutually exclusive with `adapter`). Each entry is `{"name", "scale"}`. The server merges the composed adapter once via `merge_concat`, caches it on disk under `adapter_dir/.composed/` keyed by `(name, scale)` hash, and reuses the cache on subsequent requests with the same composition. `/v1/completions/batch` accepts the same `adapters` field for the whole batch.
 
@@ -510,7 +527,7 @@ curl -s http://localhost:8420/v1/chat/completions \
   }' | python3 -m json.tool
 ```
 
-### 9.6 Training completion webhooks
+### 9.9 Training completion webhooks
 
 Kiln POSTs a JSON event to a configured URL when an SFT or GRPO job reaches a terminal state. Configured via `[training] webhook_url` in `kiln.toml` or the `KILN_TRAINING_WEBHOOK_URL` environment variable (set to the empty string to clear a TOML-set value). Delivery is fire-and-forget with a 5-second timeout — webhook failures are logged but never affect job state.
 
@@ -579,22 +596,22 @@ Global options:
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
-| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extension: per-request `adapter` (single name) or `adapters: [{name, scale}, …]` for adapter composition (see [9.5](#95-compose-adapters-per-request)). |
-| POST | `/v1/completions/batch` | Multi-prompt batch generation — efficient for GRPO rollouts (see [9.1](#91-batch-generation-efficient-for-grpo-rollouts)). |
+| POST | `/v1/chat/completions` | Chat completion (OpenAI-compatible). Kiln extension: per-request `adapter` (single name) or `adapters: [{name, scale}, …]` for adapter composition (see [9.8](#98-compose-adapters-per-request)). |
+| POST | `/v1/completions/batch` | Multi-prompt batch generation — efficient for GRPO rollouts (see [9.4](#94-batch-generation-efficient-for-grpo-rollouts)). |
 | GET | `/v1/adapters` | List LoRA adapters |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |
-| GET | `/v1/adapters/{name}/download` | Stream adapter as `application/gzip` tar.gz (see [9.2](#92-export-an-adapter-download-targz)). |
-| POST | `/v1/adapters/upload` | Import adapter from a multipart `archive` tar.gz (see [9.3](#93-import-an-adapter-upload-targz)). |
-| POST | `/v1/adapters/merge` | Combine adapters via `weighted_average`, `ties`, or `concat` mode (see [9.4](#94-merge-adapters-ties)). |
+| GET | `/v1/adapters/{name}/download` | Stream adapter as `application/gzip` tar.gz (see [9.5](#95-export-an-adapter-download-targz)). |
+| POST | `/v1/adapters/upload` | Import adapter from a multipart `archive` tar.gz (see [9.6](#96-import-an-adapter-upload-targz)). |
+| POST | `/v1/adapters/merge` | Combine adapters via `weighted_average`, `ties`, or `concat` mode (see [9.7](#97-merge-adapters-ties)). |
 | POST | `/v1/train/sft` | Submit SFT training examples |
 | POST | `/v1/train/grpo` | Submit GRPO training batch |
 | GET | `/v1/train/status` | Training queue status |
 | GET | `/v1/train/status/{job_id}` | Individual job status |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
-| (config) | `[training].webhook_url` | Fire-and-forget POST on training completion — set in `kiln.toml` or via `KILN_TRAINING_WEBHOOK_URL` (see [9.6](#96-training-completion-webhooks)). |
+| (config) | `[training].webhook_url` | Fire-and-forget POST on training completion — set in `kiln.toml` or via `KILN_TRAINING_WEBHOOK_URL` (see [9.9](#99-training-completion-webhooks)). |
 | GET | `/v1/config` | Current server configuration |
 
 ## Configuration
