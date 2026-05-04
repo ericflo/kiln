@@ -1821,6 +1821,7 @@ impl ModelRunner {
             &block_table,
             &linear_state,
             block_size,
+            None,
         )?;
 
         Ok(PagedBatchedDecodeState {

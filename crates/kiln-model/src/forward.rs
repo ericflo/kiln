@@ -7041,6 +7041,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     false,
                     false,
                     use_metal_decode_ffn,
+                    use_metal_decode_ffn,
                     profile_gdn_stages.then_some((i, start_pos)),
                 )
                 .with_context(|| {
@@ -7822,6 +7823,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     false,
                     true,
                     false,
+                    None,
                 )
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
 
@@ -7881,6 +7883,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                             full_attn_idx,
                             layer_lora,
                             #[cfg(feature = "cuda")]
+                            None,
                             None,
                         )
                         .with_context(|| {
