@@ -1044,3 +1044,11 @@
   existing Metal BF16 recurrent/F32 conv dtype policy. This is true-batching
   plumbing, not a current endpoint win; it removes the hard-coded batch-1 GDN
   state allocation blocker.
+- 2026-05-04 E339: Accepted `LinearAttentionState` row assembly/scatter APIs.
+  Added `batch_size`, `from_batch_rows`, `split_batch_rows`, and
+  `scatter_batch_rows` so one-row per-request GDN states can be concatenated
+  into `[B,...]` state for batched decode and split back afterward. CPU tests
+  verify exact nonzero recurrent/conv state roundtrips and error handling;
+  Metal BF16 tests verify assemble/split dimensions and dtype policy. This
+  removes the explicit per-sequence GDN state row assembly/scatter blocker,
+  but still needs scheduler/model-forward integration for endpoint wins.

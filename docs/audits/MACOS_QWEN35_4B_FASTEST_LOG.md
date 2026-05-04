@@ -10587,3 +10587,50 @@ Accepted as true-batching plumbing. This does not change current endpoint
 latency or throughput by itself, but it removes the hard-coded batch-1 GDN
 state allocation that would block a scheduler/model-forward path feeding
 `[B,1,H]` rows through the already batched GDN kernels.
+
+## 2026-05-04 E339 - Added LinearAttentionState row assembly and scatter
+
+### Goal
+
+Remove the next GDN state ownership blocker for true continuous batching.
+E338 made batch-sized GDN state allocation possible, but the scheduler/model
+forward boundary still needed a way to assemble per-request single-row states
+into one `[B,...]` state object before batched decode and scatter the updated
+rows back afterward.
+
+### Change
+
+- Added `LinearAttentionState::batch_size` to validate and return the shared
+  recurrent/conv batch dimension.
+- Added `LinearAttentionState::from_batch_rows(&[&LinearAttentionState])` for
+  concatenating one-row per-request states into one batched state.
+- Added `LinearAttentionState::split_batch_rows` to split a batched state back
+  into one-row states.
+- Added `LinearAttentionState::scatter_batch_rows` to overwrite mutable
+  one-row destinations from the rows of a batched state.
+- Added CPU tests with nonzero recurrent and conv state data to verify exact
+  assemble/split/scatter roundtrips and error handling.
+- Extended the Metal BF16 state test to verify assemble/split shapes and dtype
+  policy on-device.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_linear_attention_state_batch_row_assembly_and_scatter --lib`
+- `cargo test -p kiln-model --features metal test_linear_attention_state_uses_bf16_on_metal_for_bf16_models --lib`
+- `cargo test -p kiln-model --features metal test_linear_attention_state_new --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+
+### Results
+
+- CPU batch row assembly preserves recurrent and conv state data exactly.
+- CPU split and scatter return the exact original per-row tensors.
+- Metal BF16 assemble/split preserves the expected batch dimensions and keeps
+  recurrent state BF16 and conv state F32.
+
+### Decision
+
+Accepted as true-batching plumbing. This is still not an endpoint win by
+itself, but it removes the explicit per-sequence GDN state row assembly/scatter
+gap identified after E338. Remaining work is to thread these batch state APIs
+through model-forward/scheduler execution alongside batched paged KV and
+attention metadata.

@@ -956,6 +956,116 @@ impl LinearAttentionState {
         })
     }
 
+    /// Return the shared batch dimension across all recurrent and conv states.
+    pub fn batch_size(&self) -> Result<usize> {
+        if self.recurrent_states.len() != self.conv_states.len() {
+            anyhow::bail!(
+                "LinearAttentionState batch_size: recurrent/conv layer count mismatch ({} vs {})",
+                self.recurrent_states.len(),
+                self.conv_states.len()
+            );
+        }
+
+        let first = self
+            .recurrent_states
+            .first()
+            .context("LinearAttentionState batch_size: no recurrent states")?;
+        let batch = first.dim(0)?;
+        for (idx, tensor) in self.recurrent_states.iter().enumerate() {
+            anyhow::ensure!(
+                tensor.dim(0)? == batch,
+                "LinearAttentionState batch_size: recurrent state {idx} batch mismatch"
+            );
+        }
+        for (idx, tensor) in self.conv_states.iter().enumerate() {
+            anyhow::ensure!(
+                tensor.dim(0)? == batch,
+                "LinearAttentionState batch_size: conv state {idx} batch mismatch"
+            );
+        }
+        Ok(batch)
+    }
+
+    /// Assemble a batched GDN state from one-row per-request states.
+    pub fn from_batch_rows(rows: &[&Self]) -> Result<Self> {
+        anyhow::ensure!(
+            !rows.is_empty(),
+            "LinearAttentionState::from_batch_rows requires at least one row"
+        );
+        let num_layers = rows[0].recurrent_states.len();
+        anyhow::ensure!(
+            rows[0].conv_states.len() == num_layers,
+            "LinearAttentionState::from_batch_rows row 0 recurrent/conv layer count mismatch"
+        );
+
+        for (idx, row) in rows.iter().enumerate() {
+            anyhow::ensure!(
+                row.recurrent_states.len() == num_layers && row.conv_states.len() == num_layers,
+                "LinearAttentionState::from_batch_rows row {idx} layer count mismatch"
+            );
+            let row_batch = row.batch_size()?;
+            anyhow::ensure!(
+                row_batch == 1,
+                "LinearAttentionState::from_batch_rows row {idx} has batch size {}, expected 1",
+                row_batch
+            );
+        }
+
+        let mut recurrent_states = Vec::with_capacity(num_layers);
+        let mut conv_states = Vec::with_capacity(num_layers);
+        for layer_idx in 0..num_layers {
+            let recurrent_refs: Vec<&Tensor> = rows
+                .iter()
+                .map(|row| &row.recurrent_states[layer_idx])
+                .collect();
+            let conv_refs: Vec<&Tensor> =
+                rows.iter().map(|row| &row.conv_states[layer_idx]).collect();
+            recurrent_states.push(Tensor::cat(&recurrent_refs, 0)?.contiguous()?);
+            conv_states.push(Tensor::cat(&conv_refs, 0)?.contiguous()?);
+        }
+
+        Ok(Self {
+            recurrent_states,
+            conv_states,
+        })
+    }
+
+    /// Split a batched state into one-row states in batch order.
+    pub fn split_batch_rows(&self) -> Result<Vec<Self>> {
+        let batch = self.batch_size()?;
+        let mut rows = Vec::with_capacity(batch);
+        for batch_idx in 0..batch {
+            let mut recurrent_states = Vec::with_capacity(self.recurrent_states.len());
+            let mut conv_states = Vec::with_capacity(self.conv_states.len());
+            for tensor in &self.recurrent_states {
+                recurrent_states.push(tensor.narrow(0, batch_idx, 1)?.contiguous()?);
+            }
+            for tensor in &self.conv_states {
+                conv_states.push(tensor.narrow(0, batch_idx, 1)?.contiguous()?);
+            }
+            rows.push(Self {
+                recurrent_states,
+                conv_states,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Overwrite one-row destination states from the rows of this batched state.
+    pub fn scatter_batch_rows(&self, destinations: &mut [&mut Self]) -> Result<()> {
+        let rows = self.split_batch_rows()?;
+        anyhow::ensure!(
+            destinations.len() == rows.len(),
+            "LinearAttentionState::scatter_batch_rows destination count mismatch ({} vs {})",
+            destinations.len(),
+            rows.len()
+        );
+        for (dst, row) in destinations.iter_mut().zip(rows.iter()) {
+            dst.restore_from(row)?;
+        }
+        Ok(())
+    }
+
     /// Capture the current GDN recurrent + conv state into a fresh shadow
     /// `LinearAttentionState`. Used by speculative decoding to preserve the
     /// base model's O(1) GDN state before advancing into a draft: if any
@@ -10295,6 +10405,101 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_linear_attention_state_batch_row_assembly_and_scatter() -> Result<()> {
+        let device = Device::Cpu;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: 16,
+            num_layers: 4,
+            num_attention_heads: 4,
+            num_kv_heads: 2,
+            head_dim: 4,
+            intermediate_size: 32,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 4,
+            attn_output_gate: false,
+            linear_num_key_heads: 2,
+            linear_key_head_dim: 4,
+            linear_num_value_heads: 4,
+            linear_value_head_dim: 4,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        let mut row0 = LinearAttentionState::new(&config, &device)?;
+        let mut row1 = LinearAttentionState::new(&config, &device)?;
+        let recurrent_values0: Vec<f32> = (0..64).map(|i| i as f32).collect();
+        let recurrent_values1: Vec<f32> = (0..64).map(|i| 1000.0 + i as f32).collect();
+        let conv_values0: Vec<f32> = (0..96).map(|i| 2000.0 + i as f32).collect();
+        let conv_values1: Vec<f32> = (0..96).map(|i| 3000.0 + i as f32).collect();
+        row0.recurrent_states[0] =
+            Tensor::from_slice(&recurrent_values0, (1usize, 4usize, 4usize, 4usize), &device)?;
+        row1.recurrent_states[0] =
+            Tensor::from_slice(&recurrent_values1, (1usize, 4usize, 4usize, 4usize), &device)?;
+        row0.conv_states[0] =
+            Tensor::from_slice(&conv_values0, (1usize, 32usize, 3usize), &device)?;
+        row1.conv_states[0] =
+            Tensor::from_slice(&conv_values1, (1usize, 32usize, 3usize), &device)?;
+
+        let batched = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
+        assert_eq!(batched.batch_size()?, 2);
+        assert_eq!(batched.recurrent_states[0].dims(), &[2, 4, 4, 4]);
+        assert_eq!(batched.conv_states[0].dims(), &[2, 32, 3]);
+        assert!(LinearAttentionState::from_batch_rows(&[&batched]).is_err());
+
+        let split = batched.split_batch_rows()?;
+        assert_eq!(split.len(), 2);
+        assert_eq!(
+            split[0].recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            split[1].recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            split[0].conv_states[0].to_vec3::<f32>()?,
+            row0.conv_states[0].to_vec3::<f32>()?
+        );
+        assert_eq!(
+            split[1].conv_states[0].to_vec3::<f32>()?,
+            row1.conv_states[0].to_vec3::<f32>()?
+        );
+
+        let mut dst0 = LinearAttentionState::new(&config, &device)?;
+        let mut dst1 = LinearAttentionState::new(&config, &device)?;
+        {
+            let mut destinations = [&mut dst0, &mut dst1];
+            batched.scatter_batch_rows(&mut destinations)?;
+        }
+        assert_eq!(
+            dst0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            dst1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?,
+            row1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            dst0.conv_states[0].to_vec3::<f32>()?,
+            row0.conv_states[0].to_vec3::<f32>()?
+        );
+        assert_eq!(
+            dst1.conv_states[0].to_vec3::<f32>()?,
+            row1.conv_states[0].to_vec3::<f32>()?
+        );
+
+        let mut one_destination = [&mut dst0];
+        assert!(batched.scatter_batch_rows(&mut one_destination).is_err());
+
+        Ok(())
+    }
+
     #[cfg(feature = "metal")]
     #[test]
     fn test_linear_attention_state_uses_bf16_on_metal_for_bf16_models() -> Result<()> {
@@ -10334,6 +10539,21 @@ mod tests {
         assert_eq!(batched.recurrent_states[0].dtype(), DType::BF16);
         assert_eq!(batched.conv_states[0].dims(), &[3, config.linear_qkv_dim(), 3]);
         assert_eq!(batched.conv_states[0].dtype(), DType::F32);
+
+        let row0 = LinearAttentionState::new(&config, &device)?;
+        let row1 = LinearAttentionState::new(&config, &device)?;
+        let assembled = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
+        assert_eq!(assembled.batch_size()?, 2);
+        assert_eq!(assembled.recurrent_states[0].dims(), &[2, 4, 4, 4]);
+        assert_eq!(assembled.recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(assembled.conv_states[0].dims(), &[2, config.linear_qkv_dim(), 3]);
+        assert_eq!(assembled.conv_states[0].dtype(), DType::F32);
+        let split = assembled.split_batch_rows()?;
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].recurrent_states[0].dims(), &[1, 4, 4, 4]);
+        assert_eq!(split[0].recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(split[0].conv_states[0].dims(), &[1, config.linear_qkv_dim(), 3]);
+        assert_eq!(split[0].conv_states[0].dtype(), DType::F32);
 
         Ok(())
     }
