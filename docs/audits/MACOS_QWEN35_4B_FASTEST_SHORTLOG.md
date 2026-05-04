@@ -936,3 +936,14 @@
   (6.905x), with exact pool matches. This is low-level launch-count work, not
   cache-reuse tuning; endpoint speed still requires model-forward
   scheduler/cache plumbing to provide B per-sequence slots.
+- 2026-05-04 E328: Accepted a batched contiguous paged-decode attention
+  primitive. This follows E324's rejection with a purpose-built custom kernel
+  instead of one batched Candle SDPA over gathered rows. The new Metal kernel
+  handles BF16 `q=[B,16,1,256]`, token-major K/V pools `[total_slots,4,256]`,
+  and `u32 start_slots=[B]`. Batch-4 parity against rowwise custom-kernel
+  launches passed. Same-binary synthetic results with `seq_len=512` were
+  batch1 `217.892 us` vs `222.863 us` (0.978x, so bs=1 stays on the current
+  path), batch2 `565.992 us` -> `555.942 us` (1.018x), batch4 `806.212 us` ->
+  `514.329 us` (1.568x), and batch8 `1259.971 us` -> `777.429 us` (1.621x),
+  all with exact output matches. Endpoint use still needs model-forward
+  scheduler/cache plumbing to provide B contiguous cache runs.

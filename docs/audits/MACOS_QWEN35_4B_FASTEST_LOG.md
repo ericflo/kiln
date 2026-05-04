@@ -9965,3 +9965,62 @@ the extra slot-vector indirection is slower. This removes another low-level
 launch-count cliff for future true decode batching, but endpoint speed still
 depends on the model-forward scheduler/cache plumbing that can actually call
 the batch writer with per-sequence slots.
+
+## 2026-05-04 E328 - Accepted batched contiguous paged-decode attention primitive
+
+### Goal
+
+Follow E324's rejection with the right attention-side shape. E324 proved that
+flattening per-row block tables and calling one batched Candle Metal SDPA is
+slower than rowwise gather+SDPA. The useful next low-level test is not another
+cache tweak; it is a purpose-built decode attention kernel that keeps the
+existing contiguous-pool fast path but processes B decode rows in one launch.
+
+### Change
+
+- Added `kiln_paged_attn_decode_contiguous_batch_bf16_d256`, a batch variant
+  of the existing Qwen3.5-shaped contiguous paged-decode attention kernel.
+- The kernel accepts BF16 `q=[B,16,1,256]`, BF16 token-major K/V pools
+  `[total_slots,4,256]`, and `u32 start_slots=[B]`.
+- Added support checks for the fixed Qwen3.5 full-attention head shape,
+  contiguous Metal tensors, checked launch bounds, and a kernel-side invalid
+  start-range guard that writes zeros rather than reading out of bounds.
+- Precompiled the batch kernel with the existing contiguous decode kernel.
+- Kept bs=1 on the existing single-row path; this batch primitive is for
+  future true decode batches once model-forward cache/state plumbing can supply
+  per-sequence contiguous start slots.
+- Added parity coverage against B rowwise launches of the current custom
+  contiguous kernel and an ignored Qwen3.5-shaped synthetic bench.
+
+### Validation
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+- `cargo test -p kiln-model --features metal test_paged_attn_decode_contiguous_batch_matches_rowwise --lib`
+- `KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_WARMUP=3 KILN_METAL_PAGED_ATTN_CONTIG_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_paged_attn_decode_contiguous_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+
+### Results
+
+Same-binary synthetic results, Qwen3.5 contiguous full-attention decode shape
+`q=[B,16,1,256]`, K/V pools `[4096,4,256]`, `seq_len=512`:
+
+| Batch | Rowwise custom kernel | Batched custom kernel | Speedup | Max abs diff |
+|---:|---:|---:|---:|---:|
+| 1 | `217.892 us` | `222.863 us` | `0.978x` | `0.000000e0` |
+| 2 | `565.992 us` | `555.942 us` | `1.018x` | `0.000000e0` |
+| 4 | `806.212 us` | `514.329 us` | `1.568x` | `0.000000e0` |
+| 8 | `1259.971 us` | `777.429 us` | `1.621x` | `0.000000e0` |
+
+### Artifacts
+
+- `e328_paged_attn_contiguous_batch_synthetic.log`
+
+### Decision
+
+Accepted as a B>1 attention primitive. Do not route bs=1 through it. This is
+the purpose-built attention-side batching direction that E324 pointed toward:
+it avoids the losing batched SDPA gather shape and reduces rowwise custom-kernel
+launch overhead for future true decode batches. Endpoint speed still depends on
+model-forward and scheduler plumbing that can present B contiguous cache runs.
