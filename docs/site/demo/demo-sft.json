@@ -10,10 +10,10 @@
     ]}
   ],
   "config": {
-    "epochs": 100,
+    "epochs": 30,
     "learning_rate": 2e-3,
     "lora_rank": 32,
     "lora_alpha": 64.0,
-    "output_name": "demo"
+    "output_name": "demo-live"
   }
 }

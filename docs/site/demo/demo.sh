@@ -61,7 +61,8 @@ beat() { sleep "$1"; }
 # ------------------------------------------------------------------
 typecmd 'KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve --config kiln.example.toml &'
 
-./target/release/kiln serve --config kiln.example.toml 2>&1 &
+# Server logs redirected to a file so they don't bleed into the asciinema TTY.
+./target/release/kiln serve --config kiln.example.toml >/tmp/kiln-demo.log 2>&1 &
 SRV_PID=$!
 
 # Wait for /health, capped so the recording cannot hang on a broken build.
@@ -71,6 +72,18 @@ for i in $(seq 1 180); do
     fi
     sleep 0.5
 done
+
+# Silent warmup: the patched chat template prefills <think>\n\n</think>\n\n,
+# which traps the cold first generation per (adapter, prompt) into 5-9 garbage
+# tokens. One throwaway query at temp=0.3 seed=1 consumes the trap; subsequent
+# queries with different sampling params (e.g. temp=0.0 greedy or seed=23) come
+# out clean. The warmup MUST use sampling params that differ from the visible
+# scene so the prefix cache does not just replay the trap'd completion. This
+# matches what a user sees on a warm server.
+curl -s http://localhost:8420/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.3,"seed":1}' \
+    >/dev/null 2>&1
 
 beat 1.0
 
@@ -109,10 +122,10 @@ beat 1.0
 # ------------------------------------------------------------------
 typecmd 'curl -s http://localhost:8420/v1/train/status | jq -c ".[-1] | {state, adapter_name, current_loss, elapsed_secs}"'
 
-# Poll until the demo job reaches a terminal state. Capped at 120s.
-for i in $(seq 1 240); do
+# Poll until the demo job reaches a terminal state. Capped at 240s.
+for i in $(seq 1 480); do
     state=$(curl -s http://localhost:8420/v1/train/status \
-        | python3 -c 'import sys,json;d=json.load(sys.stdin);demo=[j for j in d if j.get("adapter_name")=="demo"];print(demo[-1]["state"] if demo else "none")' 2>/dev/null)
+        | python3 -c 'import sys,json;d=json.load(sys.stdin);demo=[j for j in d if j.get("adapter_name")=="demo-live"];print(demo[-1]["state"] if demo else "none")' 2>/dev/null)
     if [ "$state" = "completed" ] || [ "$state" = "failed" ]; then
         break
     fi
@@ -120,6 +133,15 @@ for i in $(seq 1 240); do
 done
 
 curl -s http://localhost:8420/v1/train/status | jq -c '.[-1] | {state, adapter_name, current_loss, elapsed_secs}'
+
+# Silent warmup for the demo adapter — consumes the empty-think trap on its
+# cold first generation so Scene 5's visible answer is clean. Warmup uses
+# seed=1 (different from Scene 5's seed=23) so the prefix cache does not
+# replay the trap'd completion.
+curl -s http://localhost:8420/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.3,"seed":1}' \
+    >/dev/null 2>&1
 
 beat 1.5
 
@@ -131,12 +153,12 @@ beat 1.5
 # ------------------------------------------------------------------
 typecmd 'curl -s http://localhost:8420/v1/chat/completions \'
 typecmd '    -H "Content-Type: application/json" \'
-typecmd '    -d '\''{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.0}'\'' \'
+typecmd '    -d '\''{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.3,"seed":23}'\'' \'
 typecmd '    | jq -r ".choices[0].message.content"'
 
 curl -s http://localhost:8420/v1/chat/completions \
     -H 'Content-Type: application/json' \
-    -d '{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.0}' \
+    -d '{"adapter":"demo","messages":[{"role":"user","content":"In one short sentence, what is the Kiln inference server?"}],"max_tokens":80,"temperature":0.3,"seed":23}' \
     | jq -r '.choices[0].message.content'
 
 beat 1.5

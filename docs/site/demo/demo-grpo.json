@@ -1,0 +1,34 @@
+{
+  "groups": [
+    {
+      "messages": [
+        {"role": "user", "content": "In one short sentence, what is the Kiln inference server?"}
+      ],
+      "completions": [
+        {"text": "Kiln is a single-GPU LLM inference server with live LoRA training over HTTP.", "reward": 1.0},
+        {"text": "Kiln is a pure-Rust inference and online-training stack for Qwen3.5-4B.", "reward": 1.0},
+        {"text": "Kiln is a tool for managing kiln operations in pottery and ceramics.", "reward": -1.0},
+        {"text": "Kiln helps you fire pottery at the correct temperature schedule.", "reward": -1.0}
+      ]
+    },
+    {
+      "messages": [
+        {"role": "user", "content": "What model does Kiln run?"}
+      ],
+      "completions": [
+        {"text": "Kiln targets Qwen3.5-4B specifically and tunes its kernels for that one architecture.", "reward": 1.0},
+        {"text": "Kiln runs Qwen3.5-4B with hand-tuned hybrid GDN plus GQA forward-pass kernels.", "reward": 1.0},
+        {"text": "Kiln runs many different LLMs across different sizes.", "reward": -1.0},
+        {"text": "Kiln supports any HuggingFace model out of the box.", "reward": -1.0}
+      ]
+    }
+  ],
+  "config": {
+    "learning_rate": 5e-5,
+    "kl_coeff": 0.05,
+    "lora_rank": 32,
+    "lora_alpha": 64.0,
+    "output_name": "grpo-live",
+    "auto_load": true
+  }
+}
