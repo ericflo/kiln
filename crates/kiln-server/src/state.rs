@@ -926,7 +926,7 @@ impl AppState {
             Ok("1") | Ok("true") | Ok("TRUE")
         )
         .then(|| {
-            tracing::info!("KILN_BATCHING_ENGINE enabled — routing non-streaming real completions through batching actor");
+            tracing::info!("KILN_BATCHING_ENGINE enabled — routing streaming and non-streaming real completions through batching actor");
             crate::batching_engine::BatchingEngineHandle::start(Arc::new(
                 crate::batching_engine::RealDecodeForward::new(
                     runner.clone(),

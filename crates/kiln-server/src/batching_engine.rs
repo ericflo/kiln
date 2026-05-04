@@ -684,7 +684,7 @@ impl BatchingEngineActor {
             }
             Err(err) => {
                 self.snapshot.total_errors += batch_len as u64;
-                self.finish_batch_with_error(batch_len, err.to_string());
+                self.finish_batch_with_error(batch_len, format!("{err:#}"));
                 self.refresh_snapshot();
                 return;
             }

@@ -733,21 +733,34 @@ async fn chat_completions_inner(
                 block_manager,
                 paged_cache,
                 prefix_cache,
-                ..
+                batching_engine,
             } => {
-                generate_real_streaming(
-                    state,
-                    runner,
-                    block_manager,
-                    paged_cache,
-                    prefix_cache,
-                    &prompt_text,
-                    &prompt_tokens,
-                    &sampling,
-                    &req,
-                    request_start,
-                )
-                .await
+                if let Some(batching_engine) = batching_engine {
+                    generate_real_batched_streaming(
+                        state,
+                        batching_engine,
+                        &prompt_text,
+                        &prompt_tokens,
+                        &sampling,
+                        &req,
+                        request_start,
+                    )
+                    .await
+                } else {
+                    generate_real_streaming(
+                        state,
+                        runner,
+                        block_manager,
+                        paged_cache,
+                        prefix_cache,
+                        &prompt_text,
+                        &prompt_tokens,
+                        &sampling,
+                        &req,
+                        request_start,
+                    )
+                    .await
+                }
             }
             ModelBackend::Mock { .. } => Err(ApiError::streaming_not_supported_mock()),
         }
@@ -1304,6 +1317,267 @@ async fn generate_real_batched(
             total_tokens: prompt_token_count + completion_tokens,
         },
     })
+}
+
+
+async fn generate_real_batched_streaming(
+    state: &AppState,
+    batching_engine: &crate::batching_engine::BatchingEngineHandle,
+    prompt_text: &str,
+    prompt_tokens: &[TokenId],
+    sampling: &SamplingParams,
+    req: &ChatCompletionRequest,
+    request_start: std::time::Instant,
+) -> Result<Response, ApiError> {
+    let prompt_token_count = prompt_tokens.len();
+    let request_id = Uuid::new_v4();
+    let cancel = CancelHandle::with_prefill_progress_gauge(
+        state.metrics.request_prefill_tokens_completed.clone(),
+    );
+    let adapter = state.active_adapter_name.read().unwrap().clone();
+    let events = batching_engine
+        .enqueue(EngineRequest {
+            request_id,
+            prompt_tokens: prompt_tokens.to_vec(),
+            sampling: sampling.clone(),
+            adapter,
+            cancel: cancel.clone(),
+        })
+        .await
+        .map_err(ApiError::generation_failed)?;
+
+    let model = req
+        .model
+        .clone()
+        .unwrap_or_else(|| state.served_model_id.clone());
+    let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let created = now_epoch();
+    let timeout = state.request_timeout;
+    let tokenizer = state.tokenizer.clone();
+    let metrics = state.metrics.clone();
+    let recent_requests = state.recent_requests.clone();
+    let prompt_preview = truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS);
+    let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
+    let batching_engine = batching_engine.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+
+    tokio::task::spawn({
+        let id = completion_id.clone();
+        let model = model.clone();
+        async move {
+            let mut events = events;
+            let mut completion_buf = String::new();
+            let mut completion_token_count: u32 = 0;
+            let mut generated_tokens: Vec<TokenId> = Vec::new();
+            let mut decoded_prefix = String::new();
+
+            let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
+                let record = RequestRecord {
+                    id: id.clone(),
+                    timestamp_unix_ms: now_unix_ms(),
+                    model: model.clone(),
+                    prompt_preview: prompt_preview.clone(),
+                    completion_preview: truncate_chars(completion, COMPLETION_PREVIEW_MAX_CHARS),
+                    prompt_tokens: prompt_token_count as u32,
+                    completion_tokens,
+                    duration_ms: request_start.elapsed().as_millis() as u64,
+                    streamed: true,
+                    finish_reason,
+                };
+                match recent_requests.lock() {
+                    Ok(mut ring) => ring.record(record),
+                    Err(poisoned) => poisoned.into_inner().record(record),
+                }
+            };
+
+            let role_chunk = ChatCompletionChunk {
+                id: id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: Delta {
+                        role: Some("assistant".to_string()),
+                        content: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                }],
+            };
+            if tx
+                .send(Event::default().data(serde_json::to_string(&role_chunk).unwrap()))
+                .await
+                .is_err()
+            {
+                cancel.cancel();
+                let _ = batching_engine.cancel(request_id).await;
+                record(
+                    "client_disconnect".to_string(),
+                    &completion_buf,
+                    completion_token_count,
+                );
+                return;
+            }
+
+            let mut reasoning_splitter = ReasoningSplitter::new(prompt_starts_in_reasoning);
+            let deadline = tokio::time::Instant::now() + timeout;
+            let mut timed_out = false;
+
+            loop {
+                tokio::select! {
+                    event = events.recv() => {
+                        match event {
+                            Some(EngineEvent::Token(token)) => {
+                                generated_tokens.push(token);
+                                completion_token_count = completion_token_count.saturating_add(1);
+                                metrics.add_tokens(1);
+
+                                let decoded = tokenizer
+                                    .decode(&generated_tokens)
+                                    .unwrap_or_else(|_| decoded_prefix.clone());
+                                let delta = decoded
+                                    .strip_prefix(&decoded_prefix)
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| tokenizer.decode(&[token]).unwrap_or_default());
+                                decoded_prefix = decoded;
+                                let chunk = reasoning_splitter.push(&delta);
+                                if !emit_reasoning_chunk(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    chunk,
+                                    &mut completion_buf,
+                                )
+                                .await
+                                {
+                                    cancel.cancel();
+                                    let _ = batching_engine.cancel(request_id).await;
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
+                            }
+                            Some(EngineEvent::Done { output }) => {
+                                let finish = match output.finish_reason {
+                                    kiln_model::FinishReason::Eos => "stop",
+                                    kiln_model::FinishReason::MaxTokens => "length",
+                                    kiln_model::FinishReason::StopSequence(_) => "stop",
+                                };
+                                let trailing = reasoning_splitter.flush();
+                                if !emit_reasoning_chunk(
+                                    &tx,
+                                    &id,
+                                    created,
+                                    &model,
+                                    trailing,
+                                    &mut completion_buf,
+                                )
+                                .await
+                                {
+                                    record(
+                                        "client_disconnect".to_string(),
+                                        &completion_buf,
+                                        completion_token_count,
+                                    );
+                                    return;
+                                }
+                                let chunk = ChatCompletionChunk {
+                                    id: id.clone(),
+                                    object: "chat.completion.chunk",
+                                    created,
+                                    model: model.clone(),
+                                    choices: vec![ChunkChoice {
+                                        index: 0,
+                                        delta: Delta {
+                                            role: None,
+                                            content: None,
+                                            reasoning_content: None,
+                                        },
+                                        finish_reason: Some(finish.to_string()),
+                                    }],
+                                };
+                                let _ = tx
+                                    .send(Event::default().data(serde_json::to_string(&chunk).unwrap()))
+                                    .await;
+                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                record(
+                                    finish.to_string(),
+                                    &completion_buf,
+                                    output.completion_tokens as u32,
+                                );
+                                return;
+                            }
+                            Some(EngineEvent::Error(err)) => {
+                                tracing::error!(error = %err, "batched streaming generation failed");
+                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                record(
+                                    "error".to_string(),
+                                    &completion_buf,
+                                    completion_token_count,
+                                );
+                                return;
+                            }
+                            None => {
+                                let _ = tx.send(Event::default().data("[DONE]")).await;
+                                record(
+                                    "error".to_string(),
+                                    &completion_buf,
+                                    completion_token_count,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        timed_out = true;
+                        break;
+                    }
+                }
+            }
+
+            if timed_out {
+                cancel.cancel();
+                let _ = batching_engine.cancel(request_id).await;
+                let trailing = reasoning_splitter.flush();
+                let _ = emit_reasoning_chunk(&tx, &id, created, &model, trailing, &mut completion_buf).await;
+                let timeout_chunk = ChatCompletionChunk {
+                    id: id.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta {
+                            role: None,
+                            content: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: Some("timeout".to_string()),
+                    }],
+                };
+                let _ = tx
+                    .send(Event::default().data(serde_json::to_string(&timeout_chunk).unwrap()))
+                    .await;
+                let _ = tx.send(Event::default().data("[DONE]")).await;
+                record(
+                    "timeout".to_string(),
+                    &completion_buf,
+                    completion_token_count,
+                );
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 async fn generate_real(
