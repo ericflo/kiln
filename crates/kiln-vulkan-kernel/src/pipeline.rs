@@ -40,6 +40,14 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "linear_decode_argmax_reduce",
         SPIR_V_LINEAR_DECODE_ARGMAX_REDUCE,
     ),
+    (
+        "linear_decode_argmax_batched_blocks",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS,
+    ),
+    (
+        "linear_decode_argmax_batched_reduce",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE,
+    ),
     ("mlp_gate_up_decode", SPIR_V_MLP_GATE_UP_DECODE),
     (
         "mlp_gate_up_decode_batched",

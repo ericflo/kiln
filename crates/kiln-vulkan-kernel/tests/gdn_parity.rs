@@ -342,6 +342,60 @@ fn linear_decode_argmax_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn linear_decode_argmax_batched_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, out_dim) = (4usize, 13usize, 71usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * 0.047)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let weight = cpu_f32(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * -0.017)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached(
+        &vk,
+        &x,
+        &weight_buf,
+        batch,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_argmax_batched_cached")?;
+
+    let logits = tensor_data_f32(&x.broadcast_matmul(&weight)?)?;
+    let expected: Vec<u32> = (0..batch)
+        .map(|row| {
+            let start = row * out_dim;
+            let row_logits = &logits[start..start + out_dim];
+            let (token, _) = row_logits.iter().enumerate().fold(
+                (0usize, f32::NEG_INFINITY),
+                |best, (idx, &score)| {
+                    if score > best.1 { (idx, score) } else { best }
+                },
+            );
+            token as u32
+        })
+        .collect();
+    anyhow::ensure!(
+        got == expected,
+        "batched linear argmax mismatch got {:?} expected {:?}",
+        got,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
 fn causal_conv1d_update_matches_stateful_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

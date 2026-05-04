@@ -3113,6 +3113,19 @@ fn lm_head_argmax_backend_decode_if(
     Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
 }
 
+fn lm_head_argmax_batch_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Option<Vec<u32>>> {
+    if let Some(backend) = backend {
+        if backend.supports_linear_decode_argmax_batch() {
+            return backend.linear_decode_argmax_batch(x, embed_tokens_t);
+        }
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------------------------
 // Gated DeltaNet (GDN) linear attention primitives
 // ---------------------------------------------------------------------------
@@ -7117,15 +7130,27 @@ pub fn model_forward_paged_next_tokens_greedy_batch(
         "final_norm",
         profile_start,
     );
-    let profile_start = profile.then(Instant::now);
-    let logits = {
-        kiln_nvtx::range!(c"kiln/lm_head");
-        lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
-    }?;
-    push_batch_greedy_profile(&mut profile_rows, profile, None, "lm_head", profile_start);
-    let profile_start = profile.then(Instant::now);
-    let tokens = greedy_sample_batched(&logits)?;
-    push_batch_greedy_profile(&mut profile_rows, profile, None, "sample", profile_start);
+    let tokens = {
+        let profile_start = profile.then(Instant::now);
+        let maybe_tokens = {
+            kiln_nvtx::range!(c"kiln/lm_head_argmax_batch");
+            lm_head_argmax_batch_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+        }?;
+        if let Some(tokens) = maybe_tokens {
+            push_batch_greedy_profile(&mut profile_rows, profile, None, "lm_head", profile_start);
+            tokens
+        } else {
+            let logits = {
+                kiln_nvtx::range!(c"kiln/lm_head");
+                lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+            }?;
+            push_batch_greedy_profile(&mut profile_rows, profile, None, "lm_head", profile_start);
+            let profile_start = profile.then(Instant::now);
+            let tokens = greedy_sample_batched(&logits)?;
+            push_batch_greedy_profile(&mut profile_rows, profile, None, "sample", profile_start);
+            tokens
+        }
+    };
     if profile {
         let subprofile_rows = subprofile.finish();
         emit_vulkan_batch_greedy_profile(batch, start_positions, profile_rows);

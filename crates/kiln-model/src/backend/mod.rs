@@ -436,6 +436,23 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    fn supports_linear_decode_argmax_batch(&self) -> bool {
+        false
+    }
+
+    /// Batched single-token transposed linear projection with argmax reduction.
+    ///
+    /// Used by greedy native-batch LM-head decode when logits do not need to be
+    /// materialized on the host. `x` is `[batch, 1, hidden]`, `weight_t` is
+    /// `[hidden, out_dim]`, and the result contains one token id per batch row.
+    fn linear_decode_argmax_batch(
+        &self,
+        _x: &Tensor,
+        _weight_t: &Tensor,
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
+
     /// Warm backend-resident decode weights after model load.
     ///
     /// CPU/CUDA/Metal either keep model tensors resident through Candle or

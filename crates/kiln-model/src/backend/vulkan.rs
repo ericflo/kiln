@@ -35,6 +35,7 @@ pub struct VulkanBackend {
     gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
     linear_decode_enabled: bool,
+    linear_argmax_batch_enabled: bool,
     full_attn_qkv_enabled: bool,
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
@@ -113,6 +114,8 @@ impl VulkanBackend {
         let gdn_decode_fused_enabled =
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_DECODE_FUSED").is_ok();
         let linear_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE").is_err();
+        let linear_argmax_batch_enabled =
+            std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH").is_err();
         let full_attn_qkv_enabled = std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV").is_err();
         // Full fused MLP decode is validated for single-token no-LoRA decode.
         // After descriptor-pool reuse and tiled projection kernels it is now
@@ -161,6 +164,7 @@ impl VulkanBackend {
             gdn_forward_sub_enabled,
             gdn_decode_fused_enabled,
             linear_decode_enabled,
+            linear_argmax_batch_enabled,
             full_attn_qkv_enabled,
             mlp_decode_enabled,
             mlp_gate_up_enabled,
@@ -704,6 +708,56 @@ impl BackendRuntime for VulkanBackend {
         )
         .context("linear_decode_argmax kernel failed")?;
         Ok(Some(token))
+    }
+
+    fn supports_linear_decode_argmax_batch(&self) -> bool {
+        self.has_vulkan() && self.linear_decode_enabled && self.linear_argmax_batch_enabled
+    }
+
+    fn linear_decode_argmax_batch(
+        &self,
+        x: &Tensor,
+        weight_t: &Tensor,
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.has_vulkan()
+            || !self.linear_decode_enabled
+            || !self.linear_argmax_batch_enabled
+            || x.dtype() != DType::F32
+        {
+            return Ok(None);
+        }
+        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+            return Ok(None);
+        }
+
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        if batch == 0 || seq_len != 1 {
+            return Ok(None);
+        }
+        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
+            return Ok(None);
+        };
+        if weight_hidden != hidden {
+            return Ok(None);
+        }
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+        let tokens = kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached(
+            vk_device,
+            x,
+            &weight_buf,
+            batch,
+            hidden,
+            out_dim,
+        )
+        .context("linear_decode_argmax_batch kernel failed")?;
+        Ok(Some(tokens))
     }
 
     fn prewarm_decode_weights(&self, weights: &GpuWeights) -> Result<()> {
