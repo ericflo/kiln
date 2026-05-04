@@ -5,10 +5,13 @@
 //!
 //! Requires a GPU with the Qwen3.5-4B model weights downloaded.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 
 use kiln_core::block::BlockTable;
@@ -243,6 +246,11 @@ struct BenchArgs {
     /// bench numbers). Phase C40b — tests greedy-is-uniquely-harmful hypothesis
     /// on code MTP α (HumanEval).
     temperature: f32,
+    /// `-v` / `-vv`: bump tracing filter (info → debug → trace). Default keeps
+    /// the bench output clean by suppressing per-site tracing chatter.
+    verbose: u8,
+    /// `--quiet` / `-q`: drop tracing to `warn` only. Wins over `--verbose`.
+    quiet: bool,
 }
 
 fn parse_args() -> Result<BenchArgs> {
@@ -259,6 +267,8 @@ fn parse_args() -> Result<BenchArgs> {
     let mut chat_template = false;
     let mut prompt_subset = PromptSubset::All;
     let mut temperature: f32 = 0.0;
+    let mut verbose: u8 = 0;
+    let mut quiet = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -312,6 +322,15 @@ fn parse_args() -> Result<BenchArgs> {
                 i += 1;
                 temperature = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             }
+            "--verbose" | "-v" => {
+                verbose = verbose.saturating_add(1);
+            }
+            "-vv" => {
+                verbose = verbose.saturating_add(2);
+            }
+            "--quiet" | "-q" => {
+                quiet = true;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: kiln-bench --model-path <path> [options]");
                 eprintln!("  --model-path <path>       Path to Qwen3.5-4B weights directory");
@@ -356,6 +375,8 @@ fn parse_args() -> Result<BenchArgs> {
                 eprintln!(
                     "                            (Phase C40b — tests greedy-is-uniquely-harmful hypothesis on code MTP α)"
                 );
+                eprintln!("  -v, --verbose             Show per-site tracing logs (repeat for trace)");
+                eprintln!("  -q, --quiet               Drop tracing to warnings and errors only");
                 std::process::exit(0);
             }
             _ => {}
@@ -380,7 +401,59 @@ fn parse_args() -> Result<BenchArgs> {
         chat_template,
         prompt_subset,
         temperature,
+        verbose,
+        quiet,
     })
+}
+
+/// Resolve the tracing filter directive from `-v` / `-q` flags. Default is
+/// `kiln=warn` so the bench output stays clean — internal tracing chatter only
+/// appears when the user opts in. `-v` lifts to `info`, `-vv` to `trace`,
+/// `--quiet` clamps to `warn` regardless of `-v`. `RUST_LOG` (handled by
+/// `EnvFilter::try_from_default_env`) still wins if set.
+fn bench_filter(verbose: u8, quiet: bool) -> &'static str {
+    if quiet {
+        "kiln=warn,kiln_train=warn"
+    } else {
+        match verbose {
+            0 => "kiln=warn,kiln_train=warn",
+            1 => "kiln=info,kiln_train=info",
+            _ => "kiln=trace,kiln_train=trace",
+        }
+    }
+}
+
+/// Cyan-bold `▌ heading` for major bench sections. Matches the kiln demo
+/// aesthetic in `crates/kiln-server/src/cli.rs::print_banner`.
+fn section_header(title: &str) {
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(stderr);
+    let _ = writeln!(
+        stderr,
+        "  {} {}",
+        style("▌").cyan().bold(),
+        style(title).cyan().bold()
+    );
+}
+
+/// Build a TTY-only progress bar over the N sequential runs in a throughput
+/// arm. Returns `None` for non-attended stderr (CI, log pipelines) so the
+/// JSON-on-stdout path stays clean. Caller is responsible for `inc(1)` per
+/// completed run and `finish_and_clear` at the end.
+fn make_run_progress(total: u64, label: &str) -> Option<ProgressBar> {
+    if !console::Term::stderr().features().is_attended() {
+        return None;
+    }
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {prefix:.dim} [{bar:24.cyan/blue}] {pos}/{len} {msg:.dim}",
+        )
+        .expect("static progress template is valid")
+        .progress_chars("=>-"),
+    );
+    pb.set_prefix(label.to_string());
+    Some(pb)
 }
 
 /// Get the selected accelerator name for benchmark output.
@@ -560,15 +633,14 @@ fn bench_inference(
     };
 
     // Warmup
-    eprintln!("  Warmup...");
     let warmup_params = SamplingParams {
         max_tokens: 4,
         ..params.clone()
     };
     let _ = runner.generate(&prompt, &warmup_params);
 
-    // Timed runs
-    eprintln!("  Running {num_runs} sequential generations...");
+    // Timed runs — TTY users see a progress bar; CI gets one INFO log per run.
+    let pb = make_run_progress(num_runs as u64, &format!("{num_runs} runs"));
     let mut total_output_tokens = 0usize;
     let overall_start = Instant::now();
 
@@ -581,14 +653,28 @@ fn bench_inference(
         let gen_tokens = output.token_ids.len();
         total_output_tokens += gen_tokens;
 
-        eprintln!(
-            "    Run {}/{}: {} tokens in {:.1}ms ({:.1} tok/s)",
-            i + 1,
-            num_runs,
-            gen_tokens,
-            run_time.as_secs_f64() * 1000.0,
-            gen_tokens as f64 / run_time.as_secs_f64()
-        );
+        let run_tps = gen_tokens as f64 / run_time.as_secs_f64();
+        if let Some(pb) = pb.as_ref() {
+            pb.set_message(format!(
+                "{} tok @ {:.0} tok/s",
+                gen_tokens, run_tps
+            ));
+            pb.inc(1);
+        } else {
+            tracing::info!(
+                target: "kiln_bench",
+                run = i + 1,
+                total = num_runs,
+                tokens = gen_tokens,
+                ms = run_time.as_secs_f64() * 1000.0,
+                tok_per_sec = run_tps,
+                "throughput run"
+            );
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
     let total_time = overall_start.elapsed();
@@ -1267,6 +1353,27 @@ mod tests {
             ),
             SpecMethod::SkipLayer
         );
+    }
+
+    #[test]
+    fn bench_filter_default_is_warn() {
+        assert_eq!(bench_filter(0, false), "kiln=warn,kiln_train=warn");
+    }
+
+    #[test]
+    fn bench_filter_v_lifts_to_info() {
+        assert_eq!(bench_filter(1, false), "kiln=info,kiln_train=info");
+    }
+
+    #[test]
+    fn bench_filter_vv_lifts_to_trace() {
+        assert_eq!(bench_filter(2, false), "kiln=trace,kiln_train=trace");
+        assert_eq!(bench_filter(3, false), "kiln=trace,kiln_train=trace");
+    }
+
+    #[test]
+    fn bench_filter_quiet_wins_over_verbose() {
+        assert_eq!(bench_filter(2, true), "kiln=warn,kiln_train=warn");
     }
 }
 
@@ -2049,7 +2156,14 @@ fn bench_training(
 ) -> Result<TrainingResult> {
     use kiln_train::{ChatMessage, SftConfig, SftExample};
 
-    eprintln!("  Running {num_steps} SFT training steps...");
+    {
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(
+            stderr,
+            "  {} running {num_steps} SFT training steps",
+            style("→").cyan()
+        );
+    }
 
     // Create synthetic training examples
     let examples: Vec<SftExample> = (0..num_steps)
@@ -2129,72 +2243,130 @@ fn bench_training(
     }
 }
 
+/// Render one `key  value [unit]` line at the indent used by the summary.
+fn metric(label: &str, value: impl std::fmt::Display, unit: Option<&str>) {
+    let mut stderr = std::io::stderr();
+    let label_w = 22;
+    match unit {
+        Some(u) => {
+            let _ = writeln!(
+                stderr,
+                "  {:label_w$} {} {}",
+                style(label).dim(),
+                style(value).white().bold(),
+                style(u).dim(),
+                label_w = label_w
+            );
+        }
+        None => {
+            let _ = writeln!(
+                stderr,
+                "  {:label_w$} {}",
+                style(label).dim(),
+                style(value).white().bold(),
+                label_w = label_w
+            );
+        }
+    }
+}
+
 fn print_summary(results: &BenchmarkResults) {
-    eprintln!("\n{}", "=".repeat(60));
-    eprintln!("  KILN BENCHMARK RESULTS");
-    eprintln!("{}\n", "=".repeat(60));
-
-    eprintln!(
-        "GPU: {} ({} MB VRAM, source: {})",
-        results.gpu_info.name, results.gpu_info.total_vram_mb, results.gpu_info.vram_source
-    );
-    eprintln!(
-        "Model load time: {:.2}s (VRAM: {} MB)\n",
-        results.model_load.load_time_secs, results.model_load.model_vram_mb
+    let mut stderr = std::io::stderr();
+    let _ = writeln!(stderr);
+    let _ = writeln!(
+        stderr,
+        "  {} {}",
+        style("▌").cyan().bold(),
+        style("Benchmark results").cyan().bold()
     );
 
-    eprintln!("--- Inference Throughput ---");
-    eprintln!(
-        "{:<8} {:>10} {:>10} {:>12} {:>10}",
-        "Runs", "Prompt", "Output", "tok/s", "VRAM MB"
+    metric(
+        "GPU",
+        format!(
+            "{} ({} MB VRAM, source: {})",
+            results.gpu_info.name, results.gpu_info.total_vram_mb, results.gpu_info.vram_source
+        ),
+        None,
+    );
+    metric(
+        "Model load",
+        format!(
+            "{:.2}s ({} MB VRAM)",
+            results.model_load.load_time_secs, results.model_load.model_vram_mb
+        ),
+        None,
+    );
+
+    section_header("Inference throughput");
+    let _ = writeln!(
+        stderr,
+        "  {}",
+        style(format!(
+            "{:<8} {:>10} {:>10} {:>12} {:>10}",
+            "Runs", "Prompt", "Output", "tok/s", "VRAM MB"
+        ))
+        .dim()
     );
     for r in &results.inference {
-        eprintln!(
-            "{:<8} {:>10} {:>10} {:>12.1} {:>10}",
-            r.batch_size, r.prompt_tokens, r.output_tokens, r.tokens_per_sec, r.peak_vram_mb
+        let _ = writeln!(
+            stderr,
+            "  {:<8} {:>10} {:>10} {:>12} {:>10}",
+            r.batch_size,
+            r.prompt_tokens,
+            r.output_tokens,
+            style(format!("{:.1}", r.tokens_per_sec)).white().bold(),
+            r.peak_vram_mb
         );
     }
 
-    eprintln!("\n--- Latency (single request) ---");
-    eprintln!("Prompt tokens:         {}", results.latency.prompt_tokens);
-    eprintln!(
-        "Prefill time:          {:.1} ms ({:.0} tok/s)",
-        results.latency.prefill_time_ms, results.latency.prefill_tokens_per_sec
+    section_header("Latency (single request)");
+    metric("Prompt tokens", results.latency.prompt_tokens, None);
+    metric(
+        "Prefill",
+        format!(
+            "{:.1} ms ({:.0} tok/s)",
+            results.latency.prefill_time_ms, results.latency.prefill_tokens_per_sec
+        ),
+        None,
     );
-    eprintln!(
-        "Time to first token:   {:.1} ms",
-        results.latency.time_to_first_token_ms
+    metric(
+        "Time to first token",
+        format!("{:.1}", results.latency.time_to_first_token_ms),
+        Some("ms"),
     );
-    eprintln!(
-        "Mean inter-token:      {:.1} ms ({:.1} tok/s)",
-        results.latency.mean_inter_token_ms, results.latency.decode_tokens_per_sec
+    metric(
+        "Mean inter-token",
+        format!(
+            "{:.1} ms ({:.1} tok/s)",
+            results.latency.mean_inter_token_ms, results.latency.decode_tokens_per_sec
+        ),
+        None,
     );
-    eprintln!(
-        "P50 inter-token:       {:.1} ms",
-        results.latency.p50_inter_token_ms
+    metric(
+        "P50 inter-token",
+        format!("{:.1}", results.latency.p50_inter_token_ms),
+        Some("ms"),
     );
-    eprintln!(
-        "P99 inter-token:       {:.1} ms",
-        results.latency.p99_inter_token_ms
+    metric(
+        "P99 inter-token",
+        format!("{:.1}", results.latency.p99_inter_token_ms),
+        Some("ms"),
     );
-    eprintln!(
-        "Tokens generated:      {}",
-        results.latency.num_tokens_generated
-    );
-    eprintln!("Spec method:           {}", results.latency.spec_method);
+    metric("Tokens generated", results.latency.num_tokens_generated, None);
+    metric("Spec method", &results.latency.spec_method, None);
     if let Some(alpha) = results.latency.acceptance_rate {
-        eprintln!("Draft acceptance α:    {:.3}", alpha);
+        metric("Draft acceptance α", format!("{alpha:.3}"), None);
     }
 
     if let Some(t) = &results.training {
-        eprintln!("\n--- SFT Training ---");
-        eprintln!("Steps:          {}", t.num_steps);
-        eprintln!("Total time:     {:.2} s", t.total_time_secs);
-        eprintln!("Time per step:  {:.2} s", t.secs_per_step);
-        eprintln!("Peak VRAM:      {} MB", t.peak_vram_mb);
+        section_header("SFT training");
+        metric("Steps", t.num_steps, None);
+        metric("Total time", format!("{:.2}", t.total_time_secs), Some("s"));
+        metric("Time per step", format!("{:.2}", t.secs_per_step), Some("s"));
+        metric("Peak VRAM", t.peak_vram_mb, Some("MB"));
     }
 
-    eprintln!();
+    let _ = writeln!(stderr);
 }
 
 fn bench_selected_latency(
@@ -2206,7 +2378,7 @@ fn bench_selected_latency(
 ) -> Result<LatencyResult> {
     match spec_method {
         SpecMethod::Mtp => {
-            eprintln!("--- Latency Benchmark (MTP — native speculative, paged) ---");
+            section_header("Latency benchmark (MTP — native speculative, paged)");
             bench_latency_paged_mtp(
                 gpu_weights,
                 model_config,
@@ -2222,7 +2394,7 @@ fn bench_selected_latency(
         }
         SpecMethod::SkipLayer => {
             if args.paged {
-                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, paged) ---");
+                section_header("Latency benchmark (SKIP-LAYER — self-speculative, paged)");
                 bench_latency_paged_skiplayer(
                     gpu_weights,
                     model_config,
@@ -2234,7 +2406,7 @@ fn bench_selected_latency(
                 )
                 .context("paged skip-layer latency benchmark failed")
             } else {
-                eprintln!("--- Latency Benchmark (SKIP-LAYER — self-speculative, flat KV) ---");
+                section_header("Latency benchmark (SKIP-LAYER — self-speculative, flat KV)");
                 bench_latency_skiplayer(
                     gpu_weights,
                     model_config,
@@ -2249,7 +2421,7 @@ fn bench_selected_latency(
         }
         SpecMethod::Off => {
             if args.paged {
-                eprintln!("--- Latency Benchmark (PAGED — production path) ---");
+                section_header("Latency benchmark (PAGED — production path)");
                 bench_latency_paged(
                     gpu_weights,
                     model_config,
@@ -2259,7 +2431,7 @@ fn bench_selected_latency(
                 )
                 .context("paged latency benchmark failed")
             } else {
-                eprintln!("--- Latency Benchmark ---");
+                section_header("Latency benchmark");
                 bench_latency(
                     gpu_weights,
                     model_config,
@@ -2274,16 +2446,32 @@ fn bench_selected_latency(
 }
 
 fn main() -> Result<()> {
-    // Initialize logging for training progress
+    let args = parse_args()?;
+
+    // Tracing filter is flag-driven so default bench output stays clean.
+    // RUST_LOG still wins via try_from_default_env.
+    let directive = bench_filter(args.verbose, args.quiet);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(directive));
     tracing_subscriber::fmt()
-        .with_env_filter("kiln=info")
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 
-    let args = parse_args()?;
     let model_path = Path::new(&args.model_path);
 
-    eprintln!("=== Kiln Benchmark Suite ===\n");
+    // Compact banner — the rich box+GPU panel lives in `kiln serve`. Bench is
+    // a tool, not a daemon; one cyan tagline is enough.
+    {
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr);
+        let _ = writeln!(
+            stderr,
+            "  {} {}",
+            style("kiln-bench").cyan().bold(),
+            style(format!("v{}", env!("CARGO_PKG_VERSION"))).dim()
+        );
+    }
 
     // GPU info
     let vram = detect_vram();
@@ -2292,11 +2480,15 @@ fn main() -> Result<()> {
         total_vram_mb: vram.total_bytes / (1024 * 1024),
         vram_source: vram.source.to_string(),
     };
-    eprintln!("GPU: {} ({} MB)", gpu_info.name, gpu_info.total_vram_mb);
+    metric(
+        "GPU",
+        format!("{} ({} MB)", gpu_info.name, gpu_info.total_vram_mb),
+        None,
+    );
 
     // Load model
     let model_config = ModelConfig::qwen3_5_4b();
-    eprintln!("Loading model from {}...", model_path.display());
+    metric("Model path", model_path.display(), None);
 
     let vram_before = current_vram_used_bytes();
     let load_start = Instant::now();
@@ -2325,11 +2517,15 @@ fn main() -> Result<()> {
     let vram_after = current_vram_used_bytes();
     let model_vram = (vram_after.saturating_sub(vram_before)) / (1024 * 1024);
 
-    eprintln!(
-        "Model loaded in {:.2}s (backend: {}, VRAM: {} MB)\n",
-        load_time.as_secs_f64(),
-        backend_name,
-        model_vram
+    metric(
+        "Model loaded",
+        format!(
+            "{:.2}s (backend: {}, {} MB VRAM)",
+            load_time.as_secs_f64(),
+            backend_name,
+            model_vram
+        ),
+        None,
     );
 
     let model_load = ModelLoadResult {
@@ -2343,7 +2539,10 @@ fn main() -> Result<()> {
         if tok_file.exists() {
             KilnTokenizer::from_file(tok_file.to_str().unwrap())?
         } else {
-            eprintln!("Loading tokenizer from HuggingFace Hub...");
+            tracing::info!(
+                target: "kiln_bench",
+                "tokenizer.json missing locally — fetching from HuggingFace Hub"
+            );
             KilnTokenizer::from_pretrained("Qwen/Qwen3.5-4B")?
         }
     };
@@ -2358,10 +2557,16 @@ fn main() -> Result<()> {
         backend_name,
     );
     if spec_method != requested_spec_method {
-        eprintln!(
-            "  Resolved KILN_SPEC_METHOD={requested_spec_method:?} to {spec_method:?} \
-             for bench request shape (prompt={}, max_output={}, temperature={})",
-            args.prompt_tokens, args.max_output_tokens, args.temperature
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(
+            stderr,
+            "  {} resolved KILN_SPEC_METHOD={:?} → {:?} for shape (prompt={}, max_output={}, temperature={})",
+            style("→").yellow().bold(),
+            requested_spec_method,
+            spec_method,
+            args.prompt_tokens,
+            args.max_output_tokens,
+            args.temperature
         );
     }
 
@@ -2376,11 +2581,11 @@ fn main() -> Result<()> {
     //   * default / off               → bench_latency_paged (paged Off) when
     //                                   --paged, else bench_latency (flat Off).
     for warmup_idx in 0..args.latency_warmup_runs {
-        eprintln!(
-            "--- Latency Warmup Run {}/{} (not measured) ---",
+        section_header(&format!(
+            "Latency warmup run {}/{} (not measured)",
             warmup_idx + 1,
             args.latency_warmup_runs
-        );
+        ));
         let _ = bench_selected_latency(spec_method, &args, &gpu_weights, &model_config, &tokenizer)
             .with_context(|| format!("latency warmup run {} failed", warmup_idx + 1))?;
     }
@@ -2409,20 +2614,29 @@ fn main() -> Result<()> {
 
     // Training benchmark (borrows gpu_weights — must run before runner takes ownership)
     let training = if args.skip_training {
-        eprintln!("\n--- Training Benchmark (skipped) ---");
+        section_header("Training benchmark (skipped)");
         None
     } else {
-        eprintln!("\n--- Training Benchmark ---");
+        section_header("Training benchmark");
         match bench_training(&model_config, &gpu_weights, &tokenizer, args.training_steps) {
             Ok(result) => {
-                eprintln!(
-                    "  => {:.2}s/step, peak VRAM {} MB",
-                    result.secs_per_step, result.peak_vram_mb
+                let mut stderr = std::io::stderr();
+                let _ = writeln!(
+                    stderr,
+                    "  {} {:.2}s/step, peak VRAM {} MB",
+                    style("✓").green().bold(),
+                    result.secs_per_step,
+                    result.peak_vram_mb
                 );
                 Some(result)
             }
             Err(e) => {
-                eprintln!("  Training benchmark failed: {e}");
+                let mut stderr = std::io::stderr();
+                let _ = writeln!(
+                    stderr,
+                    "  {} training benchmark failed: {e}",
+                    style("✗").red().bold()
+                );
                 None
             }
         }
@@ -2442,12 +2656,18 @@ fn main() -> Result<()> {
     let runner = ModelRunner::new(gpu_weights, runner_tokenizer, model_config.clone());
 
     // Inference throughput at different run counts
-    eprintln!("\n--- Inference Throughput Benchmarks ---");
+    section_header("Inference throughput");
     let run_counts = [1, 4, 8, 16];
     let mut inference_results = Vec::new();
 
     for &n in &run_counts {
-        eprintln!("\n{n} sequential runs:");
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(
+            stderr,
+            "  {} {}",
+            style("→").cyan(),
+            style(format!("{n} sequential run{}", if n == 1 { "" } else { "s" })).white()
+        );
         match bench_inference(
             &runner,
             &tokenizer,
@@ -2458,11 +2678,20 @@ fn main() -> Result<()> {
             args.temperature,
         ) {
             Ok(result) => {
-                eprintln!("  => {:.1} tok/s aggregate", result.tokens_per_sec);
+                let _ = writeln!(
+                    stderr,
+                    "    {} {} tok/s aggregate",
+                    style("✓").green().bold(),
+                    style(format!("{:.1}", result.tokens_per_sec)).white().bold()
+                );
                 inference_results.push(result);
             }
             Err(e) => {
-                eprintln!("  => FAILED: {e}");
+                let _ = writeln!(
+                    stderr,
+                    "    {} {e}",
+                    style("✗ FAILED:").red().bold()
+                );
             }
         }
     }
