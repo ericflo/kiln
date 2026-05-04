@@ -681,3 +681,12 @@
   wall / 7,063.568 ms handler versus E283 same-binary disabled control at
   25.31 s / 25,303.646 ms. This is a server no-work cleanup for the current
   fan-out architecture, not true model-forward batching.
+- 2026-05-04 E284-E285: Rejected a threadgroup-scalar variant of the fused
+  Metal GDN decode `gates_recur_gated_norm` kernel. The candidate computed
+  per-head `beta`/`decay` once in `tid == 0` and shared them through
+  threadgroup memory instead of recomputing sigmoid/softplus/exp in every
+  value lane. Focused Metal parity and release `kiln-bench` build passed, but
+  the same-binary p64/o64 A/B lost clearly: E284 measured 444.7 ms prefill /
+  168.3 ms mean ITL / 5.94 tok/s / 225.6 ms P99, while E285 scalar-gate
+  control measured 420.5 ms / 162.9 ms / 6.14 tok/s / 183.5 ms P99. Memory
+  pressure was 81% free after E285. The candidate source was reverted.

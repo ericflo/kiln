@@ -8314,3 +8314,64 @@ architecture, and it is covered by a focused counter test plus a same-binary
 control. The real larger win remains a scheduler/model-runner path that batches
 prefill/decode work across distinct requests instead of serializing forwards
 behind the shared paged-cache/model execution path.
+
+## Experiments E284-E285: Rejected Threadgroup GDN Gate Scalars
+
+Hypothesis:
+
+The fused Metal decode `gates_recur_gated_norm` kernel computes the same
+per-head gate scalars (`beta`, `g`, and `decay`) independently in all 128
+value-dimension lanes. Computing those scalars once per head in threadgroup
+memory could remove redundant sigmoid/softplus/exp work without changing the
+state update, recurrent output, or gated RMSNorm math.
+
+Temporary change:
+
+- Added a `kiln_gdn_decode_gates_recurrent_rmsnorm_tg_gate_bf16` Metal kernel.
+- The candidate computed `beta` and `decay` once in `tid == 0`, shared them
+  through threadgroup memory, and left the rest of the recurrence/RMSNorm
+  logic unchanged.
+- Added `KILN_DISABLE_METAL_GDN_DECODE_GATE_SCALAR_TG=1` for same-binary
+  fallback to the existing scalar-gate kernel.
+- Reverted the candidate source after same-binary measurement.
+
+Validation while the candidate was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_gdn_decode_gates_recurrent_matches_split_reference --lib`
+  - Passed.
+- `cargo build --release -p kiln-server --bin kiln-bench --features metal`
+  - Passed.
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+E285 used `KILN_DISABLE_METAL_GDN_DECODE_GATE_SCALAR_TG=1` in the same
+candidate binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E284 | threadgroup gate scalars | 444.7 ms | 5.94 | 168.3 ms | 163.2 ms | 225.6 ms | rejected |
+| E285 | scalar-gate control | 420.5 ms | 6.14 | 162.9 ms | 161.2 ms | 183.5 ms | control |
+
+Memory-pressure check:
+
+- After E285, `memory_pressure` reported 81% system-wide free memory.
+
+Artifacts:
+
+- `e284_m1_bs1_p64_o64_warmed_gdn_tg_gate_scalars.log`
+- `e285_m1_bs1_p64_o64_warmed_gdn_scalar_gate_control.log`
+
+Takeaway:
+
+The repeated special-function work looked wasteful, but moving gate scalars
+through threadgroup memory made the full decode path slower and worsened P99.
+The current scalar-gate fused kernel remains the faster implementation. Future
+work should stay focused on the larger measured projection stages and on
+layout/fusion boundaries that remove materialized intermediates or batched
+forward serialization, not on this small intra-kernel scalar sharing path.
