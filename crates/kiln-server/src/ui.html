@@ -871,7 +871,7 @@ async function pollHealth() {
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
-    if (statusPanel) statusPanel.innerHTML = apiFailureHtml('Server status', e);
+    if (statusPanel) statusPanel.innerHTML = apiFailureHtml('Server status', e, 'pollHealth');
   } finally {
     setPanelBusy('server-status', false);
   }
@@ -976,7 +976,7 @@ async function pollDecodePerf() {
       </div>
       <div style="margin-top:8px;font-size:12px;color:var(--text2)">Mean inter-token latency: ${mean} ms</div>`;
   } catch (e) {
-    el.innerHTML = apiFailureHtml('Decode performance', e);
+    el.innerHTML = apiFailureHtml('Decode performance', e, 'pollDecodePerf');
   } finally {
     setPanelBusy('decode-perf-panel', false);
   }
@@ -1000,10 +1000,12 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function apiFailureHtml(action, e) {
+function apiFailureHtml(action, e, retryFn) {
+  const retryButton = retryFn ? `<div style="margin-top:12px;"><button type="button" class="btn btn-primary" onclick="${retryFn}()" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
   return `<div class="empty">
     <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
-    <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then refresh this panel.</div>
+    <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then retry this panel.</div>
+    ${retryButton}
     <div style="margin-top:8px;">If it keeps failing, check the server logs for startup, model-path, or GPU initialization errors.</div>
     <div style="margin-top:8px;">Need setup help? See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a> or <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
     <div style="margin-top:8px;font-family:var(--mono);font-size:12px;">Details: ${escapeHtml(e.message)}</div>
@@ -1070,7 +1072,7 @@ async function pollRecentRequests() {
     recentRequestsCache = Array.isArray(data) ? data : [];
     renderRecentRequests(recentRequestsCache);
   } catch (e) {
-    el.innerHTML = apiFailureHtml('Recent requests', e);
+    el.innerHTML = apiFailureHtml('Recent requests', e, 'pollRecentRequests');
   } finally {
     setPanelBusy('recent-requests-panel', false);
   }
@@ -1089,7 +1091,7 @@ async function pollAdapters() {
     updateAdapterSelect(data);
     renderMergeSources();
   } catch (e) {
-    adaptersPanel.innerHTML = apiFailureHtml('Adapters', e);
+    adaptersPanel.innerHTML = apiFailureHtml('Adapters', e, 'pollAdapters');
   } finally {
     setPanelBusy('adapters-panel', false);
   }
@@ -1343,7 +1345,7 @@ async function pollTraining() {
     const data = await api('/v1/train/queue');
     renderTrainingQueue(data);
   } catch (e) {
-    queuePanel.innerHTML = apiFailureHtml('Training queue', e);
+    queuePanel.innerHTML = apiFailureHtml('Training queue', e, 'pollTraining');
   } finally {
     setPanelBusy('tab-queue', false);
   }
